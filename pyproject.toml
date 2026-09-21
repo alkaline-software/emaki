@@ -21,4 +21,4 @@ build-backend = "hatchling.build"
 packages = ["scribe"]
 
 [tool.hatch.build.targets.sdist]
-include = ["scribe", "bin", "tests", "README.md", "CLAUDE.md", "LICENSE", "pyproject.toml"]
+include = ["scribe", "bin", "tests", "README.md", "AGENTS.md", "LICENSE", "pyproject.toml"]
