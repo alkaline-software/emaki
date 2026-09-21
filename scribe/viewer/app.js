@@ -42,6 +42,7 @@
     folded: false,
     es: null,
     reconnect: 0,
+    lastY: 0,           // the last scroll position, to tell up from down
     view: "session",    // session | board | new
     doneOpen: false,    // the board's done column, expanded or a strip
     boardTick: null,
@@ -717,33 +718,33 @@
     window.scrollTo({ top: Math.max(0, top - offset), behavior: reduceMotion ? "auto" : "smooth" });
   }
 
-  // "Latest" means the last thing anyone wrote, not the bottom of the
-  // document: the column ends with Claude's mark and the stage's own pad, so
-  // the target is the last node's edge rather than `scrollHeight`.
-  function contentBottom() {
-    var column = $("column");
-    var last = column.lastElementChild;
-    if (!last) return 0;
-    var box = last.getBoundingClientRect();
-    return box.bottom + window.scrollY;
-  }
-
+  // "Latest" is the bottom of the document. The column ends with Claude's
+  // mark and a short pad, and the dock is sticky over the foot of the
+  // viewport, so anything short of the very bottom leaves the last lines
+  // under the composer.
   function bottomTarget() {
-    var target = contentBottom() - window.innerHeight + 24;
-    return Math.max(0, Math.min(target, document.body.scrollHeight - window.innerHeight));
+    return Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
   }
 
-  function scrollToBottom() {
-    window.scrollTo({ top: bottomTarget(), behavior: reduceMotion ? "auto" : "smooth" });
+  // `instant` for a jump across a whole session (opening one): a smooth
+  // scroll over a long document is slow, and the page is still growing under
+  // it as pictures and notes settle.
+  function scrollToBottom(instant) {
+    window.scrollTo({ top: bottomTarget(), behavior: instant || reduceMotion ? "auto" : "smooth" });
   }
 
   function nearBottom() {
     return window.scrollY >= bottomTarget() - 120;
   }
 
+  // Following ends only when you scroll up and away. A smooth scroll on its
+  // way down, or the page growing underneath, is not you leaving.
   function onScroll() {
     var was = state.following;
-    state.following = nearBottom();
+    var y = window.scrollY;
+    if (nearBottom()) state.following = true;
+    else if (y < state.lastY) state.following = false;
+    state.lastY = y;
     if (was !== state.following) updateFollowPill();
     var max = document.body.scrollHeight - window.innerHeight;
     $("progress").style.width = max > 0 ? (window.scrollY / max) * 100 + "%" : "0";
@@ -1431,7 +1432,7 @@
       (data.pending || []).forEach(function (p) { state.pending.set(p.call_id, p); });
       applyRounds(data.rounds || [], []);
       requestAnimationFrame(function () {
-        if (!jumpToFocus()) scrollToBottom();
+        if (!jumpToFocus()) scrollToBottom(true);
         scheduleRail(true);
       });
       openStream(id);
@@ -2219,7 +2220,10 @@
     window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", function () { scheduleRail(); });
 
-    new ResizeObserver(function () { scheduleRail(); }).observe($("column"));
+    new ResizeObserver(function () {
+      if (state.following && state.view === "session") scrollToBottom(true);
+      scheduleRail();
+    }).observe($("column"));
 
     $("follow-pill").addEventListener("click", function () {
       state.following = true;

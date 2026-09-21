@@ -24,7 +24,9 @@
   --mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
 
-  --measure: 34rem; /* the reading column: ~68 characters at 18px Charter */
+  /* The conversation column at its widest. The grid track is
+     `minmax(0, var(--measure))`, so it gives way as the window narrows. */
+  --measure: 44rem;
   --sidebar-w: 15rem;
   --rail-w: 19rem;
   --rail-gap: 0.75rem;
@@ -607,7 +609,7 @@ pre.code,
 }
 
 /* Two voices, two sides. What you wrote sits on the right in a bubble; what
-   Claude wrote runs on the left as prose, full measure. The sides say who is
+   Claude wrote runs on the left as prose. The sides say who is
    speaking, so neither needs a label to be read. */
 .ask {
   display: flex;
@@ -618,7 +620,7 @@ pre.code,
 }
 .ask:empty { display: none; }
 .prompt {
-  max-width: 88%;
+  max-width: 85%;
   padding: 0.55rem 0.95rem;
   background: var(--paper-2);
   border: 1px solid var(--rule-soft);
@@ -631,7 +633,10 @@ pre.code,
 .ask .attached { justify-content: flex-end; margin: 0; }
 .ask .notice { text-align: right; }
 
-.reply { margin-left: 0; }
+/* Each voice keeps clear of the other's edge: the bubble stops short of the
+   left, the reply stops short of the right. */
+.reply { margin: 0 2.25rem 0 0; }
+@media (max-width: 40rem) { .reply { margin-right: 1rem; } }
 
 /* Claude's mark at the foot of the column, where the reply appears: still
    when the conversation rests, turning while a turn is in progress. */
