@@ -11,6 +11,23 @@ scribe
 Python 3 standard library only. Nothing here writes to a transcript, and
 recording adds nothing to the session's context window.
 
+## The native app
+
+scribe is also a desktop app, written in Rust on [GPUI](https://www.gpui.rs)
+(the Zed editor's UI framework), with the same archive, the same on-disk
+layout and the same conversation model. It reads Claude Code and Codex
+sessions, keeps every one of them past the agents' own expiry, searches all of
+them, and lets you talk to a Claude Code session from the window.
+
+```
+cargo build --release -p scribe-app      # needs a Rust toolchain: https://rustup.rs
+./target/release/Scribe
+scripts/make-app.sh                      # dist/Scribe.app
+```
+
+The Python CLI and daemon below keep working alongside it; both read and write
+`~/.scribe`.
+
 ---
 
 ## Why this exists
