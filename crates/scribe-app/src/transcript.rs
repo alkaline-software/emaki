@@ -11,11 +11,15 @@ use scribe_core::model::*;
 use scribe_core::render_md::{clip, code_block, command_text, human_duration, human_tokens, patch_stat, pretty_args, render_patch};
 
 use crate::format::clock;
-use crate::workbench::{badge, Workbench};
+use std::path::PathBuf;
+
+use std::collections::HashSet;
+
+use crate::workbench::{agent_color, agent_glyph, badge, file_icon, file_kind, human_size, Workbench, CONTENT_W};
 
 const MAX_BODY: usize = 6000;
 
-fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
+pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     let dark = theme.mode.is_dark();
     let code_bg = theme.muted;
@@ -24,12 +28,12 @@ fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
         .selectable(true)
         .style(
             TextViewStyle {
-                heading_base_font_size: px(14.),
+                heading_base_font_size: px(15.),
                 paragraph_gap: rems(0.6),
                 highlight_theme: if dark { HighlightTheme::default_dark() } else { HighlightTheme::default_light() },
                 ..Default::default()
             }
-            .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(6.)).px(px(10.)).py(px(8.))),
+            .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.))),
         )
 }
 
@@ -42,6 +46,23 @@ fn mono_block(id: String, text: &str, lang: &str, cx: &App) -> impl IntoElement 
     md_view(id, md, cx)
 }
 
+fn tool_kind_label(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Bash => "run",
+        ToolKind::Edit => "edit",
+        ToolKind::Write => "write",
+        ToolKind::Read => "read",
+        ToolKind::Search => "search",
+        ToolKind::Web => "web",
+        ToolKind::Task => "agent",
+        ToolKind::Todo => "todo",
+        ToolKind::Ask => "ask",
+        ToolKind::Plan => "plan",
+        ToolKind::Mcp => "mcp",
+        ToolKind::Other => "tool",
+    }
+}
+
 impl Workbench {
     pub fn render_round(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(detail) = &self.detail else { return div().into_any_element() };
@@ -50,6 +71,7 @@ impl Workbench {
         let open_tools = detail.open_tools.clone();
         let open_thoughts = detail.open_thoughts.clone();
         let open_subagents = detail.open_subagents.clone();
+        let open_runs = detail.open_runs.clone();
         let speaker = session.agent.speaker();
         let theme = cx.theme().clone();
         let is_last = ix + 1 == session.rounds.len();
@@ -72,57 +94,246 @@ impl Workbench {
             meta.push(format!("{} tokens", human_tokens(rnd.usage.total())));
         }
 
-        let mut column = v_flex().w_full().max_w(px(760.)).mx_auto().px(px(24.)).pt(px(18.)).pb(if is_last { px(28.) } else { px(6.) }).gap(px(10.));
+        let mut column = v_flex().w_full().max_w(CONTENT_W).mx_auto().px(px(24.)).pt(px(20.)).pb(if is_last { px(28.) } else { px(6.) }).gap(px(12.));
 
         // The prompt, as a bubble on the right.
         if !rnd.prompt.is_empty() || rnd.images > 0 || !rnd.attachments.is_empty() {
-            let mut bubble = v_flex().max_w(px(560.)).px(px(14.)).py(px(9.)).gap(px(4.)).rounded(px(12.)).bg(theme.muted);
+            let mut bubble = v_flex().max_w(px(600.)).px(px(16.)).py(px(11.)).gap(px(4.)).rounded(px(18.)).bg(theme.muted).text_size(px(14.)).line_height(relative(1.55));
             if !rnd.prompt.is_empty() {
                 bubble = bubble.child(md_view(format!("p-{ix}"), rnd.prompt.clone(), cx));
             }
-            if rnd.images > 0 {
-                bubble = bubble.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("+ {} pasted image{}", rnd.images, if rnd.images == 1 { "" } else { "s" })));
-            }
-            for a in &rnd.attachments {
-                if !a.path.is_empty() {
-                    bubble = bubble.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("attached: {}", a.name)));
+            if !rnd.attachments.is_empty() {
+                let (pics, files): (Vec<&Attachment>, Vec<&Attachment>) = rnd.attachments.iter().partition(|a| a.kind == "image");
+                if !pics.is_empty() {
+                    let mut row = h_flex().flex_wrap().gap(px(8.)).pt(px(6.));
+                    for a in pics {
+                        row = row.child(self.render_attachment(ix, a, cx));
+                    }
+                    bubble = bubble.child(row);
                 }
+                if !files.is_empty() {
+                    let mut row = h_flex().flex_wrap().gap(px(8.)).pt(px(4.));
+                    for a in files {
+                        row = row.child(self.render_attachment(ix, a, cx));
+                    }
+                    bubble = bubble.child(row);
+                }
+            } else if rnd.images > 0 {
+                bubble = bubble.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("+ {} pasted image{}", rnd.images, if rnd.images == 1 { "" } else { "s" })));
             }
             column = column.child(
                 v_flex()
                     .w_full()
                     .items_end()
                     .gap(px(3.))
-                    .child(h_flex().gap(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).child(div().child(who)).child(div().child(meta.join(" · "))))
-                    .child(bubble),
+                    .child(bubble)
+                    .child(h_flex().gap(px(8.)).pr(px(6.)).text_size(px(11.)).text_color(theme.muted_foreground).child(div().child(who)).child(div().child(meta.join(" · ")))),
             );
         } else {
             column = column.child(h_flex().gap(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).child(div().child(who)).child(div().child(meta.join(" · "))));
         }
 
-        // The agent's items, on the left.
+        // The agent's items, on the left. Consecutive tool calls (thoughts
+        // between them included) fold into one row when there are three or
+        // more: the trace is kept, the page is not buried in it.
         let mut body = v_flex().w_full().gap(px(8.));
         let mut any = false;
-        for (jx, item) in rnd.items.iter().enumerate() {
+        let mut jx = 0;
+        let n = rnd.items.len();
+        while jx < n {
             any = true;
-            let el = match item {
-                Item::Text { md, .. } => div().w_full().text_size(px(13.5)).line_height(relative(1.6)).child(md_view(format!("t-{ix}-{jx}"), md.clone(), cx)).into_any_element(),
-                Item::Thinking { md, seconds, .. } => self.render_thought(ix, jx, md, *seconds, open_thoughts.contains(&(ix, jx)), cx),
-                Item::Notice { text, variant, .. } => self.render_notice(text, *variant, cx),
-                Item::Tool(call) => self.render_tool(ix, jx, call, open_tools.contains(&(ix, jx)), open_subagents.contains(&(ix, jx)), &session.cwd, cx),
-            };
+            let is_run_item = |it: &Item| matches!(it, Item::Tool(_) | Item::Thinking { .. });
+            if is_run_item(&rnd.items[jx]) {
+                let mut end = jx;
+                while end < n && is_run_item(&rnd.items[end]) {
+                    end += 1;
+                }
+                let tools = rnd.items[jx..end].iter().filter(|it| matches!(it, Item::Tool(_))).count();
+                if tools >= 3 {
+                    body = body.child(self.render_run(ix, jx, end, open_runs.contains(&(ix, jx)), &open_tools, &open_thoughts, &open_subagents, &session, cx));
+                    jx = end;
+                    continue;
+                }
+            }
+            let el = self.render_item(ix, jx, &rnd.items[jx], &open_tools, &open_thoughts, &open_subagents, &session, cx);
             body = body.child(el);
+            jx += 1;
         }
         if any {
+            let mark_color = if session.agent == scribe_core::model::AgentId::ClaudeCode { theme.primary } else { theme.muted_foreground };
+            let working = is_last && self.selected_ref().map(|r| self.is_working(r)).unwrap_or(false);
             column = column.child(
                 v_flex()
                     .w_full()
-                    .gap(px(4.))
-                    .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(speaker))
-                    .child(body),
+                    .gap(px(8.))
+                    .child(h_flex().gap(px(7.)).items_center().child(agent_glyph(session.agent, px(15.), mark_color, working, SharedString::from(format!("round-glyph-{ix}")))).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
+                    .child(div().w_full().pl(px(22.)).child(body)),
             );
         }
         column.into_any_element()
+    }
+
+    fn render_item(&mut self, ix: usize, jx: usize, item: &Item, open_tools: &HashSet<(usize, usize)>, open_thoughts: &HashSet<(usize, usize)>, open_subagents: &HashSet<(usize, usize)>, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+        match item {
+            Item::Text { md, .. } => div().w_full().text_size(px(14.5)).line_height(relative(1.65)).child(md_view(format!("t-{ix}-{jx}"), md.clone(), cx)).into_any_element(),
+            Item::Thinking { md, seconds, .. } => self.render_thought(ix, jx, md, *seconds, open_thoughts.contains(&(ix, jx)), cx),
+            Item::Notice { text, variant, .. } => self.render_notice(text, *variant, cx),
+            Item::Tool(call) => self.render_tool(ix, jx, call, open_tools.contains(&(ix, jx)), open_subagents.contains(&(ix, jx)), &session.cwd, cx),
+        }
+    }
+
+    /// A run of tool calls as one row: how many, of what kinds, the last
+    /// subject, the time they took, and a turning mark while one is still
+    /// running. Opening it shows every call, each folding on its own.
+    fn render_run(&mut self, ix: usize, start: usize, end: usize, open: bool, open_tools: &HashSet<(usize, usize)>, open_thoughts: &HashSet<(usize, usize)>, open_subagents: &HashSet<(usize, usize)>, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let rnd = &session.rounds[ix];
+        let items = &rnd.items[start..end];
+        let mut kinds: Vec<(&'static str, usize)> = Vec::new();
+        let mut total_ms = 0u64;
+        let mut last_subject = String::new();
+        let mut running = false;
+        let mut errors = 0;
+        let mut count = 0;
+        for it in items {
+            if let Item::Tool(c) = it {
+                count += 1;
+                total_ms += c.duration_ms;
+                let k = tool_kind_label(c.tool_kind);
+                match kinds.iter_mut().find(|(n, _)| *n == k) {
+                    Some(e) => e.1 += 1,
+                    None => kinds.push((k, 1)),
+                }
+                if c.status == CallStatus::Pending {
+                    running = true;
+                    last_subject = format!("{} {}", c.name, c.subject);
+                } else if !running {
+                    last_subject = format!("{} {}", c.name, c.subject);
+                }
+                if c.status == CallStatus::Error {
+                    errors += 1;
+                }
+            }
+        }
+        kinds.sort_by(|a, b| b.1.cmp(&a.1));
+        let tally = kinds.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(" · ");
+        let head = h_flex()
+            .id(SharedString::from(format!("run-{ix}-{start}")))
+            .w_full()
+            .px(px(10.))
+            .py(px(7.))
+            .gap(px(8.))
+            .items_center()
+            .rounded(px(10.))
+            .bg(theme.muted)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.list_active))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(d) = this.detail.as_mut() {
+                    if !d.open_runs.remove(&(ix, start)) {
+                        d.open_runs.insert((ix, start));
+                    }
+                }
+                cx.notify();
+            }))
+            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground))
+            .child(if running {
+                agent_glyph(session.agent, px(13.), agent_color(session.agent, &theme), true, SharedString::from(format!("run-glyph-{ix}-{start}")))
+            } else {
+                Icon::new(IconName::SquareTerminal).with_size(px(13.)).text_color(theme.muted_foreground).into_any_element()
+            })
+            .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).flex_shrink_0().child(format!("{count} tool calls")))
+            .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).flex_shrink_0().child(tally))
+            .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(last_subject))
+            .when(errors > 0, |d| d.child(div().text_size(px(11.5)).text_color(theme.danger).flex_shrink_0().child(format!("{errors} failed"))))
+            .when(running, |d| d.child(div().text_size(px(11.5)).text_color(agent_color(session.agent, &theme)).flex_shrink_0().child("running…")))
+            .when(!running && total_ms > 1500, |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).flex_shrink_0().child(human_duration(total_ms))));
+        let mut v = v_flex().w_full().gap(px(6.)).child(head);
+        if open {
+            let mut inner = v_flex().w_full().gap(px(6.)).pl(px(12.)).border_l_2().border_color(theme.border);
+            let session_rc = session.clone();
+            for jx in start..end {
+                let item = session_rc.rounds[ix].items[jx].clone();
+                inner = inner.child(self.render_item(ix, jx, &item, open_tools, open_thoughts, open_subagents, session, cx));
+            }
+            v = v.child(inner);
+        }
+        v.into_any_element()
+    }
+
+    /// A pasted or attached file inside a prompt: a thumbnail for a picture
+    /// (from the file it was kept as, or read back out of the transcript), a
+    /// typed icon with name and size for anything else.
+    fn render_attachment(&mut self, ix: usize, a: &Attachment, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let title = if a.name.is_empty() { "image".to_string() } else { a.name.clone() };
+        let path = (!a.path.is_empty()).then(|| PathBuf::from(&a.path));
+        let thumb_key = format!("{}:{}", a.uuid, a.index);
+        let is_image = a.kind == "image";
+        let (t2, p2, k2) = (title.clone(), path.clone(), thumb_key.clone());
+        // Resolve the picture before the click listener borrows `cx`.
+        let source: Option<ImageSource> = if !is_image {
+            None
+        } else if let Some(p) = path.as_ref().filter(|p| p.is_file()) {
+            Some(ImageSource::from(p.clone()))
+        } else if !a.uuid.is_empty() {
+            self.thumb(ix, &a.uuid, a.index, cx).map(ImageSource::from)
+        } else {
+            None
+        };
+        let frame = |el: AnyElement| {
+            div()
+                .id(SharedString::from(format!("att-{ix}-{}-{}", a.index, a.name)))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .overflow_hidden()
+                .cursor_pointer()
+                .hover(|s| s.border_color(theme.primary))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    let image = if !is_image {
+                        None
+                    } else if let Some(p) = p2.as_ref().filter(|p| p.is_file()) {
+                        Some(ImageSource::from(p.clone()))
+                    } else {
+                        this.detail.as_ref().and_then(|d| d.thumbs.get(&k2).cloned().flatten()).map(ImageSource::from)
+                    };
+                    if is_image && image.is_none() {
+                        return;
+                    }
+                    this.preview_attachment(t2.clone(), p2.clone(), image, window, cx);
+                }))
+                .child(el)
+        };
+        if a.kind == "image" {
+            return match source {
+                Some(src) => frame(img(src).w(px(176.)).h(px(118.)).object_fit(ObjectFit::Cover).into_any_element()).into_any_element(),
+                None => frame(
+                    h_flex().h(px(48.)).px(px(12.)).gap(px(8.)).items_center().text_size(px(12.)).text_color(theme.muted_foreground).child(file_icon("x.png", px(18.), theme.muted_foreground)).child(if a.name.is_empty() { "image".to_string() } else { a.name.clone() }).into_any_element(),
+                )
+                .into_any_element(),
+            };
+        }
+        frame(
+            h_flex()
+                .h(px(48.))
+                .pl(px(8.))
+                .pr(px(12.))
+                .gap(px(8.))
+                .items_center()
+                .child(div().size(px(32.)).rounded(px(8.)).bg(theme.muted).flex().items_center().justify_center().child(file_icon(&a.name, px(18.), theme.muted_foreground)))
+                .child(
+                    v_flex()
+                        .gap(px(1.))
+                        .text_size(px(12.))
+                        .child(div().max_w(px(220.)).truncate().font_weight(FontWeight::MEDIUM).child(a.name.clone()))
+                        .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(format!("{} · {}", file_kind(&a.name), human_size(a.size)))),
+                )
+                .into_any_element(),
+        )
+        .into_any_element()
     }
 
     fn render_notice(&self, text: &str, variant: NoticeVariant, cx: &Context<Self>) -> AnyElement {
@@ -157,7 +368,6 @@ impl Workbench {
                             if !d.open_thoughts.remove(&(ix, jx)) {
                                 d.open_thoughts.insert((ix, jx));
                             }
-                            d.list.splice(ix..ix + 1, 1);
                         }
                         cx.notify();
                     }))
@@ -188,27 +398,14 @@ impl Workbench {
             CallStatus::NoResult => ("not run", theme.muted_foreground),
             CallStatus::Pending => ("running…", theme.primary),
         };
-        let kind_label = match call.tool_kind {
-            ToolKind::Bash => "run",
-            ToolKind::Edit => "edit",
-            ToolKind::Write => "write",
-            ToolKind::Read => "read",
-            ToolKind::Search => "search",
-            ToolKind::Web => "web",
-            ToolKind::Task => "agent",
-            ToolKind::Todo => "todo",
-            ToolKind::Ask => "ask",
-            ToolKind::Plan => "plan",
-            ToolKind::Mcp => "mcp",
-            ToolKind::Other => "tool",
-        };
+        let kind_label = tool_kind_label(call.tool_kind);
         let stat = if call.tool_kind == ToolKind::Edit { patch_stat(&call.patch) } else { String::new() };
         let duration = if call.duration_ms > 1500 { human_duration(call.duration_ms) } else { String::new() };
         let has_body = self.tool_has_body(call);
         let subject = call.subject.clone();
         let name = call.name.clone();
 
-        let mut card = v_flex().w_full().rounded(px(8.)).border_1().border_color(theme.border).bg(theme.popover).overflow_hidden();
+        let mut card = v_flex().w_full().rounded(px(10.)).border_1().border_color(theme.border).bg(theme.popover).overflow_hidden();
         card = card.child(
             h_flex()
                 .id(SharedString::from(format!("tool-{ix}-{jx}")))
@@ -226,7 +423,6 @@ impl Workbench {
                         if !d.open_tools.remove(&(ix, jx)) {
                             d.open_tools.insert((ix, jx));
                         }
-                        d.list.splice(ix..ix + 1, 1);
                     }
                     cx.notify();
                 }))
@@ -314,7 +510,6 @@ impl Workbench {
                                     if !d.open_subagents.remove(&(ix, jx)) {
                                         d.open_subagents.insert((ix, jx));
                                     }
-                                    d.list.splice(ix..ix + 1, 1);
                                 }
                                 cx.notify();
                             }))

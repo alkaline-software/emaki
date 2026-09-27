@@ -432,3 +432,26 @@ pub fn index_claude(projects_root: &Path, min_size: u64) -> Vec<SessionRef> {
     }
     refs
 }
+
+/// The bytes of an image block a user row carries, for a thumbnail. Rows are
+/// found by their `uuid`; the block is the `index`-th entry of the message's
+/// content. This reads the file, so call it off the main thread.
+pub fn image_block_bytes(path: &Path, uuid: &str, index: usize) -> Option<(String, Vec<u8>)> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        if !line.contains(uuid) {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<Value>(&line) else { continue };
+        if row.get("uuid").and_then(|v| v.as_str()) != Some(uuid) {
+            continue;
+        }
+        let block = row.get("message")?.get("content")?.as_array()?.get(index)?;
+        let src = block.get("source")?;
+        let media = src.get("media_type").and_then(|v| v.as_str()).unwrap_or("image/png").to_string();
+        let data = src.get("data")?.as_str()?;
+        return Some((media, crate::driver::base64_decode(data)?));
+    }
+    None
+}

@@ -13,6 +13,7 @@ pub mod driver;
 pub mod json;
 pub mod model;
 pub mod paths;
+pub mod peer;
 pub mod redact;
 pub mod render_md;
 pub mod search;

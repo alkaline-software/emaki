@@ -163,6 +163,39 @@ pub fn image_block(path: &Path, media_type: &str) -> Option<Value> {
     Some(json!({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": base64_encode(&data)}}))
 }
 
+/// The inverse of `base64_encode`, for image blocks read back out of a
+/// transcript. Whitespace is skipped; anything else invalid yields `None`.
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' | b'-' => Some(62),
+            b'/' | b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for &c in text.as_bytes() {
+        if c == b'=' {
+            break;
+        }
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        acc = (acc << 6) | val(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);

@@ -24,3 +24,8 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 futures = "0.3"
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSResponder"] }
+raw-window-handle = "0.6"
