@@ -36,3 +36,7 @@ scribe-export-*.html
 .vscode/
 *.swp
 *~
+
+# Rust
+/target
+/dist

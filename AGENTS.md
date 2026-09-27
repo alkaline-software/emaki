@@ -51,6 +51,93 @@ instead, and its README conceded the result was "not a full audit trail". Do not
 reintroduce that. If you need something the model lacks, get it from the
 transcript.
 
+## The native app (Rust + GPUI)
+
+`crates/` is scribe as a desktop app, the successor to the Python daemon and
+web viewer below. Same ideas, same on-disk layout, no browser:
+
+```
+Cargo.toml                 workspace; the zed revision is pinned in Cargo.lock
+crates/scribe-core/        everything without a window
+  src/model.rs               Session / Round / Item / ToolCall, plus AgentId
+  src/adapters/              one per agent: claude.rs, codex.rs; index_all()
+  src/transcript.rs          JSONL tail-by-offset, peek(), the cheap index
+  src/build.rs               Claude rows -> model, turn_state()
+  src/archive.rs             copy-first mirror; runs before anything renders
+  src/render_md.rs store.rs  model -> CommonMark on disk
+  src/search.rs              FTS5 over every item, ~/.scribe/search.db
+  src/driver.rs              a headless `claude -p` child on stream-json
+  src/watcher.rs             notify over every agent's data roots
+  src/bin/scribe-core.rs     list | render | build | archive | sync | search | drive
+  tests/core.rs
+crates/scribe-app/         the window
+  src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
+  src/workbench.rs           sidebar, session list, board, search, composer
+  src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
+  src/main.rs                menus, key bindings, the window
+scripts/make-app.sh        Scribe.app bundle, ad-hoc signed
+```
+
+```
+cargo build -p scribe-app && ./target/debug/Scribe
+cargo test -p scribe-core
+SCRIBE_OPEN=<session-id prefix> ./target/debug/Scribe    # open a session on launch
+```
+
+**The board is the web viewer's board.** Same four columns (needs you,
+planning, working, your turn) with the same empty-state lines, the same card
+(project, branch, title, a status chip with a clock, "since", the one or two
+actions that make sense), and done as a strip with a count until opened. The
+rest of the window is the plain three-column layout: sidebar with agents,
+kept and projects; a session list; the conversation. Every card names its
+agent, because the board mixes them.
+
+**What carried over unchanged.** `~/.scribe` is read and written in the same
+layout: `archive/<project>/<session>.jsonl` plus sidecars, `logs/`, the
+project registry in `state/projects.json`, `config.json`. An archive made by
+the Python scribe is picked up as-is. The markdown a session renders to is
+byte-identical to the Python renderer's except JSON key order inside tool
+arguments and the `You (web)` label, now `You (scribe)`.
+
+**Adapters.** This is the shape borrowed from Wake (`iAmCorey/Wake`): an
+`Adapter` knows an agent's data roots, lists sessions cheaply, peeks one, and
+parses one into the shared model. Claude Code and Codex exist; a new agent is
+a new file under `adapters/` and a variant of `AgentId`. Everything above the
+adapters (archive, search, the window) never branches on the agent except to
+label it.
+
+**Other agents archive under a leading underscore.** Claude Code keeps the flat
+`archive/<project>/` layout for compatibility; Codex lives in
+`archive/_codex/<project>/`. A project slug is `[a-z0-9-]`, so an underscore
+can never collide with one, and `iter_archived(ClaudeCode)` skips those
+directories.
+
+**No hooks.** The app has no daemon and installs nothing into Claude Code's
+settings. Presence is the watcher plus a ten-minute mtime grace, and a driver
+of our own when we started the process. A fresh file with no driver is treated
+as a terminal session: the composer waits rather than fork it with a second
+writer.
+
+**Codex has no stop reason.** Its phase is derived from the built model's tail
+(`adapters::turn_state_from_session`), not from the rows.
+
+**One copy of gpui.** gpui-component depends on the unpinned zed git source. A
+`rev` on our own gpui dependency produces a second copy that gpui-component
+does not build against. The pin lives in `Cargo.lock` instead:
+`cargo update -p gpui --precise <rev>` moves it.
+
+**The search database is separate.** `search.db`, not the Python daemon's
+`index.db`; the two schemas differ and each would rebuild on the other's
+version number.
+
+**The driver is the conversation.** Messages typed in the window go to a
+`claude -p --input-format stream-json` child kept alive between turns and
+closed after `driver.idle_min`. `--resume <id>` appends to the same transcript,
+so the page shows the reply the same way it shows a terminal turn: by reading
+the file. Permission prompts arrive as `can_use_tool` and are answered from a
+card; silence for ten minutes is a deny. Everything in the Python driver's
+docstring about the wire still holds.
+
 ## Layout
 
 ```
