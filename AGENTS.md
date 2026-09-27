@@ -82,15 +82,37 @@ scripts/make-app.sh        Scribe.app bundle, ad-hoc signed
 cargo build -p scribe-app && ./target/debug/Scribe
 cargo test -p scribe-core
 SCRIBE_OPEN=<session-id prefix> ./target/debug/Scribe    # open a session on launch
+SCRIBE_PAGE=new|sessions|board ./target/debug/Scribe     # land on a page
 ```
 
 **The board is the web viewer's board.** Same four columns (needs you,
 planning, working, your turn) with the same empty-state lines, the same card
 (project, branch, title, a status chip with a clock, "since", the one or two
-actions that make sense), and done as a strip with a count until opened. The
-rest of the window is the plain three-column layout: sidebar with agents,
-kept and projects; a session list; the conversation. Every card names its
-agent, because the board mixes them.
+actions that make sense), and done as a strip with a count until opened.
+Every card names its agent, because the board mixes them.
+
+**The rest of the window is laid out like the Claude desktop app.** One
+collapsible sidebar (⌘⇧S): the wordmark, an accent "New session" entry,
+Board, Sessions and Search, then Agents (one row per agent with its count
+and a live dot, plus Kept only), Projects and Recents, and an account-style
+footer that carries the status line. The content pane has a 48px top strip
+with the title centred and actions on the right; when the sidebar is hidden
+the strip makes room for the traffic lights. Everything readable sits in one
+column of `CONTENT_W` (768px): the conversation, the sessions page (a serif
+title, filter pills, rows), and the home page, which is a serif greeting over
+the composer with recent folders as pills beneath. The composer is a floating
+card with a round accent send button, mode/model pills (driver channels
+only), a "+" that opens the file picker, and a row of attachment chips; it
+also takes drops and image pastes. The textarea grows with its content from
+three to twelve rows, which also keeps the caret laid out, so the caret
+rectangle macOS asks for (dictation, the input-source badge) is real. The hint line under it says which channel
+a message would take. Prompts are rounded
+surface boxes on the right, replies are plain prose under the agent's mark.
+The palette is `crates/scribe-app/themes/scribe.json`, one config per
+appearance, loaded by `install_theme` in `main.rs`: cream and charcoal with a
+terracotta accent (`primary`), blue for working, green for your turn. Our
+mark (`assets/icons/mark.svg`) is served by `assets.rs`, which wraps the
+gpui-component icon set.
 
 **What carried over unchanged.** `~/.scribe` is read and written in the same
 layout: `archive/<project>/<session>.jsonl` plus sidecars, `logs/`, the
@@ -113,10 +135,10 @@ can never collide with one, and `iter_archived(ClaudeCode)` skips those
 directories.
 
 **No hooks.** The app has no daemon and installs nothing into Claude Code's
-settings. Presence is the watcher plus a ten-minute mtime grace, and a driver
-of our own when we started the process. A fresh file with no driver is treated
-as a terminal session: the composer waits rather than fork it with a second
-writer.
+settings. Presence is the registry, a driver of our own when we started the
+process, and a ten-minute mtime grace for anything else. A fresh file with
+neither is a session that just ended (an interactive Claude Code always has
+an inbox), so the composer offers to resume it.
 
 **Codex has no stop reason.** Its phase is derived from the built model's tail
 (`adapters::turn_state_from_session`), not from the rows.
@@ -129,6 +151,98 @@ does not build against. The pin lives in `Cargo.lock` instead:
 **The search database is separate.** `search.db`, not the Python daemon's
 `index.db`; the two schemas differ and each would rebuild on the other's
 version number.
+
+**Two channels, checked in this order.** `Workbench::reply_via_for` answers
+`driver` when a headless child of ours is behind the session, `inbox` when
+Claude Code's registry (`~/.claude/sessions/<pid>.json`, read by
+`scribe_core::peer`) shows a terminal session with an inbox, `spawn` when
+neither exists and the folder is still there. The driver is checked first
+because its child registers an inbox of its own. `hub.is_live` trusts the
+driver and the registry before the mtime grace. A message on the inbox
+channel goes down the same wire the Python `peer.py` used, one connection
+per message, wrapped in Claude Code's `<cross-session-message>` envelope with
+no permission mode asserted; `scribe-core peers` lists what the registry
+sees and `scribe-core inbox <id> <text>` delivers by hand.
+
+**Never splice a list item the reader may be inside.** gpui's `ListState`
+moves the scroll anchor to the start of any spliced range that contains it.
+A live session's last round is one tall item, so re-splicing it on every
+reload sent the reader from wherever they had scrolled to the top of that
+round, the middle of the conversation. Items render from the current
+session on every frame and are re-measured as they render, so `set_detail`
+only tells the list about a change in count (append new rounds, reset on a
+rewrite), and toggling a tool, thought, run or thumbnail just notifies.
+
+**Runs of tool calls fold.** Three or more consecutive tool calls (thoughts
+between them included) draw as one row in `render_run`: the count, a tally
+by kind, the last subject, the total time, and the agent's turning mark with
+"running…" while one is still going. Opening the row shows every call, each
+folding on its own. Fewer than three stay inline.
+
+**The agent's mark moves while it works.** `agent_glyph` turns Claude's mark
+and breathes Codex's whenever `is_working` (board column working or
+planning) holds, in the round header, the status row under the transcript,
+the top bar, recents, the sessions page and board cards. Each place passes
+its own animation id.
+
+**The focused text field must be visible to assistive apps.** Two gaps
+stood between the composer and a dictation app, both found with the AX
+probe in the session scratchpad (`AXFocusedUIElement` of the app answered
+`AXWindow`). First, gpui-component's input frame tracks a focus handle of
+its own and only asks whether it *contains* the focus, so gpui never marks
+the editor as the focused accessibility node; the composer wrapper in
+`render_composer` tracks the editor's real handle with a
+`MultilineTextInput` role and the typed value. Second, AppKit resolves the
+application's focused element through the key window, and gpui's window
+class never forwards `accessibilityFocusedUIElement` to its content view
+(the same gap gpui-component patches for `accessibilityHitTest:`);
+`a11y.rs` adds that forwarder to the window class at open. `SCRIBE_A11Y=1`
+prints gpui's own view of the tree on every draw. With both, the focused
+element is an `AXTextArea` carrying the text.
+
+**Attachments show as what they are.** In the composer a picture is a
+thumbnail from its file; anything else gets a typed icon
+(`assets/icons/file-*.svg`, chosen by `assets::file_icon_path`) with name
+and size. In a transcript, `render_attachment` draws a pasted image from the
+kept file when the prompt names one, or reads the block back out of the
+JSONL (`transcript::image_block_bytes`, cached per session in
+`Detail::thumbs`, loaded off the main thread) when it does not.
+
+**The composer is plain text, on purpose.** It is a growing `TextareaState`
+(three to twelve rows) with no markdown rendering of its own; markdown in a
+message renders once sent, like any prompt. Live rendering was tried three
+ways (a preview block beside the text, a highlighted editor mode, a
+block-by-block editor, then MiniNotes' CodeMirror editor in a webview) and
+dropped: the toolkit has no editable rich-text view, and a native webview
+draws above every gpui overlay. Do not bring it back without a real
+in-toolkit rich editor. What the composer does keep: attachments by paste
+(`paste_attachments` captures the input's own `Paste`), by drop and by the
+"+" picker, thumbnails and typed icons on the chips, and the accessibility
+wrapper below.
+
+**Own inputs get a focus wrapper.** The toolkit's input frame tracks a
+focus handle of its own, so focusing an `InputState` from code (⌘K) lands
+on a handle with no dispatch node: no key bindings above it, nothing for
+assistive apps. Every input the window owns (the composer, the search field) sits in a
+`div` that `track_focus`es the state's handle and carries the text role. Probing note: when driving the
+window from a script, send real key codes (System Events `key code` or a
+`CGEvent` with the right virtual key); a unicode string on virtual key 0
+reaches the composer but not a single-line input.
+
+**Attachments open on click.** A picture opens in the lightbox over the
+window (Escape or a click outside closes it, with Open and Reveal in Finder
+for a file); any other file opens with the app the system keeps for it. Both
+the transcript tiles and the composer chips go through
+`preview_attachment`.
+
+**Attachments are files first.** A pasted image is written under
+`~/.scribe/uploads/<session>/` before anything else happens; dropped or
+picked files stay where they are. `fold_attachments` turns them into content
+blocks for a driver (images only) and into `Attached file: <path>` lines for
+everything else, so the inbox channel, which the TUI reads as prose, still
+gets the path. The paste hook is a `capture_action` for the input's own
+`Paste` on the composer wrapper: it takes images and file lists off the
+clipboard and lets text through to the textarea.
 
 **The driver is the conversation.** Messages typed in the window go to a
 `claude -p --input-format stream-json` child kept alive between turns and

@@ -1,8 +1,13 @@
-//! The window: sidebar, session list, board, search, transcript and composer.
+//! The window: sidebar, sessions, board, search, transcript and composer.
 //!
 //! State lives here; everything shown comes from the transcript through the
 //! core, and everything typed goes out through the hub. The board is the home
 //! page: the question the window answers on arrival is "what needs me".
+//!
+//! The layout follows the Claude desktop app: one collapsible sidebar with a
+//! "new" entry, a few destinations and a list of recents; one content column
+//! centred in the rest of the window; a floating composer card at the foot
+//! of a conversation and in the middle of the home page.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -10,18 +15,18 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Timelike;
 use futures::StreamExt;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::Disableable as _;
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 use scribe_core::adapters;
 use scribe_core::build::Phase;
 use scribe_core::config::Config;
-use scribe_core::driver::{self, PermissionRequest, MODELS, MODES};
+use scribe_core::driver::{self, image_block, PermissionRequest, IMAGE_TYPES, MODELS, MODES};
 use scribe_core::model::{AgentId, Session};
 use scribe_core::search::Results;
 use scribe_core::transcript::SessionRef;
@@ -29,17 +34,25 @@ use scribe_core::transcript::SessionRef;
 use crate::format::{clock, day, elapsed_since, now_secs, plural, relative, short_id};
 use crate::hub::{Hub, HubEvent};
 
-actions!(scribe, [ToggleSearch, Refresh, NewSession, GoBoard, Escape, Send]);
+actions!(scribe, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Escape, Send]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
 pub const SEARCH_CONTEXT: &str = "SearchPalette";
 
-pub const SIDEBAR_W: Pixels = px(224.);
-pub const LIST_W: Pixels = px(336.);
-pub const TITLEBAR_H: Pixels = px(44.);
+pub const SIDEBAR_W: Pixels = px(268.);
+pub const TITLEBAR_H: Pixels = px(48.);
+/// Room for the traffic lights on a transparent title bar.
+pub const TRAFFIC_W: Pixels = px(80.);
+/// The reading column: conversation, composer, the sessions list, the home page.
+pub const CONTENT_W: Pixels = px(768.);
 /// A board column never gets narrower than this; past that the board scrolls.
 pub const COL_MIN_W: Pixels = px(210.);
+/// The serif used for greetings and page titles.
+pub const SERIF: &str = "Georgia";
+/// The composer grows with its text between these row counts.
+pub const COMPOSER_MIN_ROWS: usize = 3;
+pub const COMPOSER_MAX_ROWS: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -53,6 +66,7 @@ pub enum Scope {
 pub enum Page {
     Board,
     Sessions,
+    Session,
     New,
 }
 
@@ -102,9 +116,48 @@ pub struct Detail {
     pub path: PathBuf,
     pub session: Rc<Session>,
     pub list: ListState,
+    /// Thumbnails of images pasted into prompts, read back out of the
+    /// transcript on demand. `None` while a load is in flight.
+    pub thumbs: HashMap<String, Option<Arc<gpui::Image>>>,
     pub open_tools: HashSet<(usize, usize)>,
     pub open_thoughts: HashSet<(usize, usize)>,
     pub open_subagents: HashSet<(usize, usize)>,
+    /// Runs of tool calls unfolded by hand, keyed by (round, first item).
+    pub open_runs: HashSet<(usize, usize)>,
+}
+
+/// A file waiting in the composer. Images go to a driver as content blocks
+/// so the model sees the picture; everything else, and everything on the
+/// inbox channel, is named by path so Claude can read it with its own tools.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub path: PathBuf,
+    pub name: String,
+    pub mime: String,
+    pub image: bool,
+}
+
+fn mime_of(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("md") | Some("txt") => "text/plain",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+/// A picture shown large over the window, with the file it came from when
+/// there is one.
+#[derive(Clone)]
+pub struct Lightbox {
+    pub title: String,
+    pub source: ImageSource,
+    pub path: Option<PathBuf>,
 }
 
 /// One session as the board sees it.
@@ -124,12 +177,18 @@ pub struct Workbench {
     pub refs: Vec<SessionRef>,
     pub scope: Scope,
     pub page: Page,
+    pub sidebar_open: bool,
     pub selected: Option<String>,
     pending_select: Option<String>,
     pub detail: Option<Detail>,
     loading: Option<String>,
     load_task: Option<Task<()>>,
+    /// The message being written: plain text, on purpose. Markdown in it
+    /// renders once sent, like any prompt.
     pub composer: Entity<TextareaState>,
+    pub attachments: Vec<Attachment>,
+    /// An attachment opened large over the window.
+    pub lightbox: Option<Lightbox>,
     pub search_input: Entity<InputState>,
     pub search_open: bool,
     pub search_results: Option<Results>,
@@ -143,6 +202,8 @@ pub struct Workbench {
     pub next_model: String,
     pub status: String,
     pub now: f64,
+    /// Who to greet on the home page.
+    pub user_name: String,
     startup_open: Option<String>,
     focus_handle: FocusHandle,
     _tasks: Vec<Task<()>>,
@@ -152,12 +213,52 @@ pub fn key_of(r: &SessionRef) -> String {
     format!("{}:{}", r.agent.as_str(), r.session_id)
 }
 
+/// The account's first name on macOS, else the login name.
+fn user_first_name() -> String {
+    let full = std::process::Command::new("id").arg("-F").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let name = full.split_whitespace().next().map(str::to_string).or_else(|| std::env::var("USER").ok()).unwrap_or_default();
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn greeting(name: &str) -> String {
+    let hour = chrono::Local::now().hour();
+    let part = if hour < 5 { "Still up" } else if hour < 12 { "Good morning" } else if hour < 18 { "Good afternoon" } else { "Good evening" };
+    if name.is_empty() { part.to_string() } else { format!("{part}, {name}") }
+}
+
+fn mode_label(mode: &str) -> &'static str {
+    match mode {
+        "acceptEdits" => "Accept edits",
+        "plan" => "Plan mode",
+        "bypassPermissions" => "Bypass permissions",
+        "dontAsk" => "Don't ask",
+        _ => "Default permissions",
+    }
+}
+
+fn model_label(model: &str) -> String {
+    match model {
+        "" | "default" => "Default model".into(),
+        m => {
+            let mut c = m.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cfg = Config::load();
         let (hub, mut rx) = Hub::start(cfg.clone());
 
-        let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder("Message this session…  (⌘↩ to send)"));
+        let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder("Reply…  (⌘↩ to send)").auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search every conversation, live and kept"));
 
         // Every headless child is ours to close: a driver left running after
@@ -213,20 +314,29 @@ impl Workbench {
 
         let next_mode = cfg.driver.default_mode.clone();
         let next_model = cfg.driver.default_model.clone();
-        // `SCRIBE_OPEN=<session-id prefix>` opens a session on launch.
+        // `SCRIBE_OPEN=<session-id prefix>` opens a session on launch;
+        // `SCRIBE_PAGE=new|sessions|board` picks the page.
         let startup_open = std::env::var("SCRIBE_OPEN").ok().filter(|s| !s.is_empty());
+        let page = match std::env::var("SCRIBE_PAGE").as_deref() {
+            Ok("new") => Page::New,
+            Ok("sessions") => Page::Sessions,
+            _ => Page::Board,
+        };
         Self {
             hub,
             cfg,
             refs: Vec::new(),
             scope: Scope::All,
-            page: Page::Board,
+            page,
+            sidebar_open: true,
             selected: None,
             pending_select: None,
             detail: None,
             loading: None,
             load_task: None,
             composer,
+            attachments: Vec::new(),
+            lightbox: None,
             search_input,
             search_open: false,
             search_results: None,
@@ -240,6 +350,7 @@ impl Workbench {
             next_model,
             status: "scanning…".into(),
             now: now_secs(),
+            user_name: user_first_name(),
             startup_open,
             focus_handle: cx.focus_handle(),
             _tasks: tasks,
@@ -258,6 +369,9 @@ impl Workbench {
                 self.refs = refs;
                 if self.status == "scanning…" {
                     self.status = format!("{} sessions", self.refs.len());
+                }
+                if self.page == Page::New && self.new_cwd.is_empty() {
+                    self.new_cwd = self.recent_cwds().first().cloned().unwrap_or_default();
                 }
                 if let Some(prefix) = self.startup_open.take() {
                     if let Some(r) = self.refs.iter().find(|r| r.session_id.starts_with(&prefix)) {
@@ -319,9 +433,14 @@ impl Workbench {
                 self.status = format!("could not start claude: {error}");
                 cx.notify();
             }
-            HubEvent::Sent { session_id, queued, error } => {
+            HubEvent::Sent { session_id, via, queued, error } => {
+                let held = via == "inbox" && self.refs.iter().any(|r| r.session_id == session_id && scribe_core::peer::HELD_MODES.contains(&r.state.mode.as_str()));
                 if !error.is_empty() {
                     self.status = format!("not sent: {error}");
+                } else if held {
+                    self.status = "delivered; the terminal will ask before reading it (permissions are bypassed there)".into();
+                } else if via == "inbox" {
+                    self.status = "delivered to the terminal session".into();
                 } else if queued {
                     self.status = "queued behind the running turn".into();
                 } else {
@@ -376,10 +495,10 @@ impl Workbench {
         cx.notify();
     }
 
-    // -- selection ----------------------------------------------------------
+    // -- navigation ----------------------------------------------------------
 
     pub fn open_session(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.page = Page::Sessions;
+        self.page = Page::Session;
         self.selected = Some(key.to_string());
         if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).cloned() {
             if self.detail.as_ref().map(|d| d.key != key).unwrap_or(true) {
@@ -389,6 +508,23 @@ impl Workbench {
         } else {
             self.pending_select = Some(key.to_string());
         }
+        cx.notify();
+    }
+
+    /// Open a session and put the caret in the composer, as a click on a
+    /// recent does.
+    pub fn open_and_focus(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_session(key, cx);
+        self.focus_composer(window, cx);
+    }
+
+    pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    fn show_sessions(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        self.scope = scope;
+        self.page = Page::Sessions;
         cx.notify();
     }
 
@@ -418,9 +554,16 @@ impl Workbench {
                 let old = d.session.rounds.len();
                 d.session = Rc::new(session);
                 d.path = path;
-                if n >= old && old > 0 {
-                    d.list.splice(old - 1..old, n - old + 1);
-                } else {
+                // A splice that covers the item the reader is scrolled into
+                // moves the scroll anchor to that item's top: for a live
+                // session whose last round is one tall item, that is a jump
+                // to the middle of the conversation on every reload. Items
+                // re-render from the new session anyway, so only the count
+                // is told to the list: new rounds are appended, a rewrite
+                // (fewer rounds) resets.
+                if n > old {
+                    d.list.splice(old..old, n - old);
+                } else if n < old {
                     d.list.reset(n);
                 }
             }
@@ -431,9 +574,11 @@ impl Workbench {
                     path,
                     session: Rc::new(session),
                     list,
+                    thumbs: HashMap::new(),
                     open_tools: HashSet::new(),
                     open_thoughts: HashSet::new(),
                     open_subagents: HashSet::new(),
+                    open_runs: HashSet::new(),
                 });
             }
         }
@@ -444,7 +589,7 @@ impl Workbench {
         self.refs.iter().find(|r| key_of(r) == key)
     }
 
-    fn show_new(&mut self, cwd: Option<String>, cx: &mut Context<Self>) {
+    fn show_new(&mut self, cwd: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.page = Page::New;
         self.selected = None;
         if let Some(c) = cwd {
@@ -452,6 +597,7 @@ impl Workbench {
         } else if self.new_cwd.is_empty() {
             self.new_cwd = self.recent_cwds().first().cloned().unwrap_or_default();
         }
+        self.focus_composer(window, cx);
         cx.notify();
     }
 
@@ -511,6 +657,11 @@ impl Workbench {
                 return ("driver", String::new());
             }
         }
+        // A terminal session with an inbox takes the message directly; the
+        // driver is checked first because its child registers an inbox too.
+        if self.hub.peer_for(&r.session_id).is_some() {
+            return ("inbox", String::new());
+        }
         if r.archived {
             return ("", "kept only: Claude Code no longer has this transcript, so it cannot be resumed".into());
         }
@@ -520,24 +671,28 @@ impl Workbench {
         if r.cwd.is_empty() || !std::path::Path::new(&r.cwd).is_dir() {
             return ("", "the session's folder is gone".into());
         }
-        if self.hub.is_live(r, self.now) && !self.hub.has_ended(&r.session_id) {
-            // A fresh file with no driver: most likely a terminal session that
-            // just wrote. Sending would fork it, so the composer waits.
-            return ("wait", "this session is running in a terminal; when it finishes, messages here resume it".into());
-        }
+        // A fresh file with neither a driver nor an inbox: an interactive
+        // Claude Code always registers an inbox, so this is a session that
+        // just ended, or a headless one we cannot reach. Sending resumes it.
         ("spawn", String::new())
     }
 
     pub fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().to_string();
-        if text.trim().is_empty() {
+        let typed = self.composer.read(cx).value().to_string();
+        if typed.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
         let (via, why) = self.reply_via();
+        let (text, images) = self.fold_attachments(&typed, via == "driver" || via == "spawn");
         match via {
+            "inbox" => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                self.hub.send_to_inbox(&sid, text);
+                self.status = "delivering to the terminal…".into();
+            }
             "driver" => {
                 let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
-                if !self.hub.send_to_driver(&sid, text.clone(), Vec::new()) {
+                if !self.hub.send_to_driver(&sid, text.clone(), images) {
                     self.status = "the driver is gone; try again".into();
                     cx.notify();
                     return;
@@ -557,13 +712,13 @@ impl Workbench {
                     (r.session_id.clone(), r.cwd.clone(), true)
                 };
                 self.drivers.insert(sid.clone(), DriverView { starting: true, state: "starting".into(), mode: self.next_mode.clone(), model: self.next_model.clone(), ..Default::default() });
-                self.hub.spawn_driver_and_send(sid.clone(), cwd, resume, self.next_mode.clone(), self.next_model.clone(), Some((text.clone(), Vec::new())));
+                self.hub.spawn_driver_and_send(sid.clone(), cwd, resume, self.next_mode.clone(), self.next_model.clone(), Some((text.clone(), images)));
                 if self.page == Page::New {
                     let key = format!("claude-code:{sid}");
                     self.pending_select = Some(key.clone());
                     self.selected = Some(key);
                     self.new_id = String::new();
-                    self.page = Page::Sessions;
+                    self.page = Page::Session;
                 }
                 self.status = "starting claude…".into();
             }
@@ -574,7 +729,183 @@ impl Workbench {
             }
         }
         self.composer.update(cx, |s, cx| s.set_value("", window, cx));
+        self.attachments.clear();
         cx.notify();
+    }
+
+    /// What Escape closes, nearest first: the lightbox, then the search.
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.lightbox.is_some() {
+            self.lightbox = None;
+            cx.notify();
+        } else if self.search_open {
+            self.close_search(window, cx);
+        }
+    }
+
+    fn open_lightbox(&mut self, lb: Lightbox, window: &mut Window, cx: &mut Context<Self>) {
+        self.lightbox = Some(lb);
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// What a click on an attachment does: a picture opens large here, any
+    /// other file opens in the app the system keeps for it.
+    pub fn preview_attachment(&mut self, title: String, path: Option<PathBuf>, image: Option<ImageSource>, window: &mut Window, cx: &mut Context<Self>) {
+        match image {
+            Some(source) => self.open_lightbox(Lightbox { title, source, path }, window, cx),
+            None => {
+                if let Some(p) = path {
+                    let _ = std::process::Command::new("open").arg(&p).spawn();
+                }
+            }
+        }
+    }
+
+    // -- attachments ----------------------------------------------------------
+
+    /// Where a pasted image lands: under the session's upload folder, or the
+    /// folder of the session about to be started.
+    fn upload_dir(&mut self) -> PathBuf {
+        let sid = if self.page == Page::New {
+            if self.new_id.is_empty() {
+                self.new_id = uuid::Uuid::new_v4().to_string();
+            }
+            self.new_id.clone()
+        } else {
+            self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_else(|| "new".into())
+        };
+        scribe_core::paths::uploads_dir(&sid)
+    }
+
+    pub fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        for p in paths {
+            if !p.is_file() || self.attachments.iter().any(|a| &a.path == p) {
+                continue;
+            }
+            let mime = mime_of(p);
+            self.attachments.push(Attachment { path: p.clone(), name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), mime: mime.into(), image: IMAGE_TYPES.contains(&mime) });
+        }
+        cx.notify();
+    }
+
+    /// Keep a pasted image as a file first, like an upload; the message then
+    /// carries it as a block or a path depending on the channel.
+    pub fn attach_image_bytes(&mut self, mime: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        let dir = self.upload_dir();
+        if std::fs::create_dir_all(&dir).is_err() {
+            self.status = "could not create the uploads folder".into();
+            cx.notify();
+            return;
+        }
+        let ext = match mime {
+            "image/png" => "png",
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/svg+xml" => "svg",
+            "image/tiff" => "tiff",
+            "image/bmp" => "bmp",
+            _ => "img",
+        };
+        let name = format!("{}-pasted.{ext}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let path = dir.join(&name);
+        if let Err(e) = scribe_core::paths::write_atomic(&path, &bytes) {
+            self.status = format!("could not keep the pasted image: {e}");
+            cx.notify();
+            return;
+        }
+        self.attachments.push(Attachment { path, name, mime: mime.into(), image: IMAGE_TYPES.contains(&mime) });
+        cx.notify();
+    }
+
+    /// Images and files on the clipboard become attachments; text is left
+    /// for the textarea. Returns whether anything was taken.
+    fn paste_attachments(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else { return false };
+        let mut took = false;
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::Image(img) => {
+                    self.attach_image_bytes(img.format.mime_type(), img.bytes.clone(), cx);
+                    took = true;
+                }
+                ClipboardEntry::ExternalPaths(paths) => {
+                    self.attach_paths(paths.paths(), cx);
+                    took = true;
+                }
+                ClipboardEntry::String(_) => {}
+            }
+        }
+        took
+    }
+
+    fn pick_files(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Attach".into()) });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                this.update(cx, |this, cx| this.attach_paths(&paths, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    fn fold_attachments(&self, text: &str, as_blocks: bool) -> (String, Vec<serde_json::Value>) {
+        let mut images = Vec::new();
+        let mut lines = Vec::new();
+        for a in &self.attachments {
+            let block = if as_blocks && a.image { image_block(&a.path, &a.mime) } else { None };
+            match block {
+                Some(b) => images.push(b),
+                None => lines.push(format!("Attached file: {}", a.path.display())),
+            }
+        }
+        let mut out = text.trim_end().to_string();
+        if !lines.is_empty() {
+            if !out.trim().is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(&lines.join("\n"));
+        }
+        (out, images)
+    }
+
+    /// The thumbnail of the `index`-th image block of row `uuid`, if it has
+    /// been read yet; the first call starts the read and redraws round `ix`
+    /// when it lands.
+    pub fn thumb(&mut self, ix: usize, uuid: &str, index: usize, cx: &mut Context<Self>) -> Option<Arc<gpui::Image>> {
+        let key = format!("{uuid}:{index}");
+        let d = self.detail.as_mut()?;
+        if let Some(t) = d.thumbs.get(&key) {
+            return t.clone();
+        }
+        d.thumbs.insert(key.clone(), None);
+        let path = d.path.clone();
+        let dkey = d.key.clone();
+        let uuid = uuid.to_string();
+        let task = cx.background_spawn(async move { scribe_core::transcript::image_block_bytes(&path, &uuid, index) });
+        cx.spawn(async move |this, cx| {
+            let loaded = task.await.and_then(|(mime, bytes)| Some(Arc::new(gpui::Image::from_bytes(image_format(&mime)?, bytes))));
+            this.update(cx, |this, cx| {
+                if let Some(d) = this.detail.as_mut() {
+                    if d.key == dkey {
+                        match loaded {
+                            Some(img) => {
+                                d.thumbs.insert(key, Some(img));
+                            }
+                            None => {
+                                d.thumbs.remove(&key);
+                            }
+                        }
+                        let _ = ix;
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+        None
     }
 
     fn cycle_mode(&mut self, cx: &mut Context<Self>) {
@@ -638,7 +969,7 @@ impl Workbench {
 
     fn reply_from_board(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open_session(key, cx);
-        self.composer.update(cx, |s, cx| s.focus(window, cx));
+        self.focus_composer(window, cx);
     }
 
     // -- derived ------------------------------------------------------------
@@ -729,8 +1060,9 @@ impl Workbench {
     fn recent_cwds(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
+        let own = scribe_core::paths::root().to_string_lossy().to_string();
         for r in &self.refs {
-            if r.cwd.is_empty() || !std::path::Path::new(&r.cwd).is_dir() {
+            if r.cwd.is_empty() || !std::path::Path::new(&r.cwd).is_dir() || r.cwd.starts_with(&own) {
                 continue;
             }
             if seen.insert(r.cwd.clone()) {
@@ -743,10 +1075,87 @@ impl Workbench {
         out
     }
 
+    /// Whether an agent is busy on this session right now.
+    pub fn is_working(&self, r: &SessionRef) -> bool {
+        matches!(self.card_for(r).column, Column::Working | Column::Planning)
+    }
+
+    /// The colour a live session's dot takes, or none when nothing is behind it.
+    fn live_color(&self, r: &SessionRef, cx: &App) -> Option<Hsla> {
+        if !self.hub.is_live(r, self.now) {
+            return None;
+        }
+        let col = self.card_for(r).column;
+        (col != Column::Done).then(|| self.column_color(col, cx))
+    }
+
     // -- sidebar --------------------------------------------------------------
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let projects = self.projects();
+        let page = self.page;
+        let scope = self.scope.clone();
+
+        let header = h_flex()
+            .h(TITLEBAR_H)
+            .flex_shrink_0()
+            .pl(if cfg!(target_os = "macos") { TRAFFIC_W } else { px(16.) })
+            .pr(px(10.))
+            .items_center()
+            .gap(px(8.))
+            .child(mark_icon(px(16.), theme.primary))
+            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).font_family(SERIF).child("Scribe"))
+            .child(div().flex_1())
+            .child(icon_button("sidebar-close", IconName::PanelLeftClose, "Hide sidebar (⌘⇧S)", cx, |this, _, cx| {
+                this.sidebar_open = false;
+                cx.notify();
+            }));
+
+        let new_row = h_flex()
+            .id("nav-new")
+            .h(px(36.))
+            .px(px(10.))
+            .gap(px(10.))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .when(page == Page::New, |d| d.bg(theme.sidebar_accent))
+            .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+            .on_click(cx.listener(|this, _, window, cx| this.show_new(None, window, cx)))
+            .child(div().size(px(22.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.primary_foreground)))
+            .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child("New session"))
+            .child(kbd_hint("⌘N", &theme));
+
+        let nav = |id: &'static str, icon: IconName, label: &'static str, hint: &'static str, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
+            let theme = cx.theme().clone();
+            h_flex()
+                .id(id)
+                .h(px(32.))
+                .px(px(10.))
+                .gap(px(10.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(active, |d| d.bg(theme.sidebar_accent))
+                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
+                .child(div().w(px(22.)).flex().justify_center().child(Icon::new(icon).with_size(px(16.)).text_color(if active { theme.foreground } else { theme.muted_foreground })))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(13.5)).child(label))
+                .when(!hint.is_empty(), |d| d.child(kbd_hint(hint, &theme)))
+        };
+
+        let sessions_active = page == Page::Sessions;
+        let top = v_flex()
+            .px(px(10.))
+            .pt(px(2.))
+            .gap(px(2.))
+            .child(new_row)
+            .child(nav("nav-board", IconName::LayoutDashboard, "Board", "⌘B", page == Page::Board, cx, Box::new(|this, _, cx| {
+                this.page = Page::Board;
+                cx.notify();
+            })))
+            .child(nav("nav-sessions", IconName::Inbox, "Sessions", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
+            .child(nav("nav-search", IconName::Search, "Search", "⌘K", false, cx, Box::new(|this, window, cx| this.open_search(window, cx))));
+
         let mut agents: Vec<(AgentId, usize)> = Vec::new();
         for a in AgentId::ALL {
             let n = self.refs.iter().filter(|r| r.agent == a).count();
@@ -754,174 +1163,269 @@ impl Workbench {
                 agents.push((a, n));
             }
         }
-        let kept = self.refs.iter().filter(|r| r.archived).count();
-        let projects = self.projects();
-        let is_board = self.page == Page::Board;
-        let is_new = self.page == Page::New;
-
-        let nav = |id: &'static str, icon: IconName, label: String, count: Option<usize>, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
+        let shown_projects = projects.iter().take(8).cloned().collect::<Vec<_>>();
+        let more_projects = projects.len().saturating_sub(shown_projects.len());
+        let mut scroll = v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().px(px(10.)).pb(px(8.));
+        scroll = scroll.child(self.group_label("Agents", cx));
+        scroll = scroll.children(agents.into_iter().map(|(a, n)| {
+            let active = sessions_active && scope == Scope::Agent(a);
             let theme = cx.theme().clone();
+            let live = self.refs.iter().filter(|r| r.agent == a && self.live_color(r, cx).is_some()).count();
             h_flex()
-                .id(id)
-                .h(px(28.))
+                .id(SharedString::from(format!("agent-{}", a.as_str())))
+                .h(px(30.))
                 .px(px(10.))
-                .mx(px(8.))
-                .gap(px(8.))
-                .rounded(px(6.))
+                .gap(px(10.))
+                .rounded(px(8.))
                 .cursor_pointer()
-                .when(active, |d| d.bg(theme.list_active))
-                .hover(|s| s.bg(theme.list_hover))
-                .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
-                .child(Icon::new(icon).with_size(px(15.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(label))
-                .when_some(count, |d, n| d.child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(n.to_string())))
-        };
-
-        v_flex()
-            .w(SIDEBAR_W)
-            .h_full()
-            .flex_shrink_0()
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.border)
-            .child(div().h(TITLEBAR_H).w_full().flex_shrink_0())
-            .child(nav("nav-board", IconName::LayoutDashboard, "Board".into(), None, is_board, cx, Box::new(|this, _, cx| {
-                this.page = Page::Board;
-                cx.notify();
-            })))
-            .child(nav("nav-new", IconName::Plus, "New session".into(), None, is_new, cx, Box::new(|this, _, cx| this.show_new(None, cx))))
-            .child(nav("nav-search", IconName::Search, "Search".into(), None, false, cx, Box::new(|this, window, cx| this.open_search(window, cx))))
-            .child(self.group_label("Sessions", cx))
-            .child(nav("nav-all", IconName::Inbox, "All".into(), Some(self.refs.len()), !is_board && !is_new && self.scope == Scope::All, cx, Box::new(|this, _, cx| {
-                this.scope = Scope::All;
-                this.page = Page::Sessions;
-                cx.notify();
-            })))
-            .children(agents.into_iter().map(|(a, n)| {
-                let active = !is_board && !is_new && self.scope == Scope::Agent(a);
-                let icon = match a {
-                    AgentId::ClaudeCode => IconName::Bot,
-                    AgentId::Codex => IconName::SquareTerminal,
-                };
-                nav(if a == AgentId::ClaudeCode { "nav-claude" } else { "nav-codex" }, icon, a.display_name().into(), Some(n), active, cx, Box::new(move |this, _, cx| {
-                    this.scope = Scope::Agent(a);
-                    this.page = Page::Sessions;
-                    cx.notify();
-                }))
-            }))
-            .child(nav("nav-kept", IconName::HardDrive, "Kept only".into(), Some(kept), !is_board && !is_new && self.scope == Scope::Kept, cx, Box::new(|this, _, cx| {
-                this.scope = Scope::Kept;
-                this.page = Page::Sessions;
-                cx.notify();
-            })))
-            .child(self.group_label("Projects", cx))
-            .child(
-                v_flex().id("projects").flex_1().min_h_0().overflow_y_scroll().children(projects.into_iter().map(|(p, n)| {
-                    let active = !is_board && !is_new && self.scope == Scope::Project(p.clone());
-                    let theme = cx.theme().clone();
-                    let label = p.clone();
+                .when(active, |d| d.bg(theme.sidebar_accent))
+                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                .on_click(cx.listener(move |this, _, _, cx| this.show_sessions(Scope::Agent(a), cx)))
+                .child(div().w(px(22.)).flex().justify_center().child(agent_icon(a, px(15.), agent_color(a, &theme))))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(a.display_name()))
+                .when(live > 0, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.green).flex_shrink_0()))
+                .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(n.to_string()))
+        }));
+        let kept = self.refs.iter().filter(|r| r.archived).count();
+        if kept > 0 {
+            let active = sessions_active && scope == Scope::Kept;
+            scroll = scroll.child(
+                h_flex()
+                    .id("agent-kept")
+                    .h(px(30.))
+                    .px(px(10.))
+                    .gap(px(10.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.sidebar_accent))
+                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_sessions(Scope::Kept, cx)))
+                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(IconName::HardDrive).with_size(px(15.)).text_color(theme.muted_foreground)))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child("Kept only"))
+                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(kept.to_string())),
+            );
+        }
+        if !shown_projects.is_empty() {
+            scroll = scroll.child(self.group_label("Projects", cx));
+            scroll = scroll.children(shown_projects.into_iter().map(|(p, _n)| {
+                let active = sessions_active && scope == Scope::Project(p.clone());
+                let theme = cx.theme().clone();
+                let label = p.clone();
+                h_flex()
+                    .id(SharedString::from(format!("proj-{p}")))
+                    .h(px(30.))
+                    .px(px(10.))
+                    .gap(px(10.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.sidebar_accent))
+                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_sessions(Scope::Project(p.clone()), cx)))
+                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(IconName::Folder).with_size(px(15.)).text_color(theme.muted_foreground)))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(label))
+            }));
+            if more_projects > 0 {
+                scroll = scroll.child(
                     h_flex()
-                        .id(SharedString::from(format!("proj-{p}")))
-                        .h(px(26.))
+                        .id("proj-more")
+                        .h(px(28.))
                         .px(px(10.))
-                        .mx(px(8.))
-                        .gap(px(8.))
-                        .rounded(px(6.))
+                        .pl(px(42.))
+                        .rounded(px(8.))
                         .cursor_pointer()
-                        .when(active, |d| d.bg(theme.list_active))
-                        .hover(|s| s.bg(theme.list_hover))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.scope = Scope::Project(p.clone());
-                            this.page = Page::Sessions;
-                            cx.notify();
-                        }))
-                        .child(Icon::new(IconName::Folder).with_size(px(14.)).text_color(theme.muted_foreground))
-                        .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).child(label))
-                        .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(n.to_string()))
-                })),
-            )
-            .child(div().px(px(16.)).py(px(10.)).text_size(px(11.)).text_color(theme.muted_foreground).truncate().child(self.status.clone()))
+                        .text_size(px(12.5))
+                        .text_color(theme.muted_foreground)
+                        .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                        .on_click(cx.listener(|this, _, _, cx| this.show_sessions(Scope::All, cx)))
+                        .child(format!("{more_projects} more")),
+                );
+            }
+        }
+        scroll = scroll.child(self.group_label("Recents", cx));
+        let recents: Vec<SessionRef> = self.refs.iter().take(40).cloned().collect();
+        scroll = scroll.children(recents.into_iter().map(|r| {
+            let key = key_of(&r);
+            let active = page == Page::Session && self.selected.as_deref() == Some(key.as_str());
+            let theme = cx.theme().clone();
+            let dot = self.live_color(&r, cx);
+            let working = self.is_working(&r);
+            let glyph_id = SharedString::from(format!("recent-glyph-{key}"));
+            h_flex()
+                .id(SharedString::from(format!("recent-{key}")))
+                .h(px(30.))
+                .px(px(10.))
+                .gap(px(10.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(active, |d| d.bg(theme.sidebar_accent))
+                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
+                .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), working, glyph_id)))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(r.title.clone()))
+                .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground)))
+                .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
+                .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground)))
+        }));
+
+        let initial = self.user_name.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "S".into());
+        let footer = h_flex()
+            .flex_shrink_0()
+            .px(px(14.))
+            .py(px(10.))
+            .gap(px(10.))
+            .items_center()
+            .border_t_1()
+            .border_color(theme.sidebar_border)
+            .child(div().size(px(28.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.primary_foreground).child(initial))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if self.user_name.is_empty() { "Scribe".to_string() } else { self.user_name.clone() }))
+                    .child(div().truncate().text_size(px(11.)).text_color(theme.muted_foreground).child(self.status.clone())),
+            );
+
+        v_flex().w(SIDEBAR_W).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(scroll).child(footer)
     }
 
     fn group_label(&self, text: &'static str, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        div().pt(px(14.)).pb(px(4.)).px(px(18.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(text)
+        div().pt(px(16.)).pb(px(4.)).px(px(10.)).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(text)
     }
 
-    // -- session list --------------------------------------------------------
+    /// The strip along the top of the content pane: room for the traffic
+    /// lights when the sidebar is hidden, a title in the middle, actions on
+    /// the right.
+    fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let mac = cfg!(target_os = "macos");
+        let mut left = h_flex().w(px(120.)).flex_shrink_0().items_center().gap(px(4.));
+        if !self.sidebar_open {
+            left = left
+                .when(mac, |d| d.pl(TRAFFIC_W - px(12.)))
+                .child(icon_button("sidebar-open", IconName::PanelLeftOpen, "Show sidebar (⌘⇧S)", cx, |this, _, cx| {
+                    this.sidebar_open = true;
+                    cx.notify();
+                }));
+        }
+        h_flex()
+            .h(TITLEBAR_H)
+            .flex_shrink_0()
+            .px(px(12.))
+            .items_center()
+            .child(left)
+            .child(div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title))
+            .child(h_flex().w(px(120.)).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
+    }
 
-    fn render_session_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    // -- the sessions page ----------------------------------------------------
+
+    fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let refs: Vec<SessionRef> = self.scoped_refs().into_iter().cloned().collect();
-        let selected = self.selected.clone();
         let now = self.now;
-        let title = match &self.scope {
-            Scope::All => "All sessions".to_string(),
-            Scope::Agent(a) => a.display_name().to_string(),
-            Scope::Project(p) => p.clone(),
-            Scope::Kept => "Kept only".to_string(),
+        let scope = self.scope.clone();
+        let kept = self.refs.iter().filter(|r| r.archived).count();
+        let claude = self.refs.iter().filter(|r| r.agent == AgentId::ClaudeCode).count();
+        let codex = self.refs.iter().filter(|r| r.agent == AgentId::Codex).count();
+
+        let filter = |id: &'static str, label: String, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Context<Self>)>| {
+            let theme = cx.theme().clone();
+            div()
+                .id(id)
+                .h(px(28.))
+                .px(px(12.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .border_1()
+                .border_color(if active { theme.foreground } else { theme.border })
+                .when(active, |d| d.bg(theme.foreground).text_color(theme.background))
+                .when(!active, |d| d.hover(|s| s.bg(theme.muted)))
+                .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
+                .child(label)
         };
-        v_flex()
-            .w(LIST_W)
-            .h_full()
-            .flex_shrink_0()
-            .bg(theme.colors.list)
-            .border_r_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .h(TITLEBAR_H)
-                    .px(px(16.))
-                    .items_end()
-                    .pb(px(10.))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(title))
-                    .child(div().flex_1())
-                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(plural(refs.len(), "session", "sessions"))),
-            )
-            .child(v_flex().id("session-list").flex_1().min_h_0().overflow_y_scroll().children(refs.into_iter().map(|r| {
-                let key = key_of(&r);
-                let active = selected.as_deref() == Some(key.as_str());
-                let card = self.card_for(&r);
-                let theme = cx.theme().clone();
-                let live = self.hub.is_live(&r, now);
-                let dot = match card.column {
-                    Column::NeedsYou => Some(theme.warning),
-                    Column::Working | Column::Planning => Some(theme.primary),
-                    Column::YourTurn if live => Some(theme.success),
-                    _ => None,
-                };
+        let mut filters = h_flex()
+            .gap(px(6.))
+            .flex_wrap()
+            .child(filter("f-all", format!("All · {}", self.refs.len()), scope == Scope::All, cx, Box::new(|this, cx| this.show_sessions(Scope::All, cx))))
+            .child(filter("f-claude", format!("Claude Code · {claude}"), scope == Scope::Agent(AgentId::ClaudeCode), cx, Box::new(|this, cx| this.show_sessions(Scope::Agent(AgentId::ClaudeCode), cx))));
+        if codex > 0 {
+            filters = filters.child(filter("f-codex", format!("Codex · {codex}"), scope == Scope::Agent(AgentId::Codex), cx, Box::new(|this, cx| this.show_sessions(Scope::Agent(AgentId::Codex), cx))));
+        }
+        filters = filters.child(filter("f-kept", format!("Kept only · {kept}"), scope == Scope::Kept, cx, Box::new(|this, cx| this.show_sessions(Scope::Kept, cx))));
+        if let Scope::Project(p) = &scope {
+            filters = filters.child(filter("f-project", format!("{p}  ×"), true, cx, Box::new(|this, cx| this.show_sessions(Scope::All, cx))));
+        }
+
+        let rows: Vec<AnyElement> = refs.into_iter().map(|r| {
+            let key = key_of(&r);
+            let theme = cx.theme().clone();
+            let card = self.card_for(&r);
+            let dot = self.live_color(&r, cx);
+            let working = self.is_working(&r);
+            let glyph_id = SharedString::from(format!("row-glyph-{key}"));
+            let mut sub = vec![r.project()];
+            if !r.git_branch.is_empty() {
+                sub.push(format!("⎇ {}", r.git_branch));
+            }
+            sub.push(relative(r.mtime, now));
+            h_flex()
+                .id(SharedString::from(format!("row-{key}")))
+                .w_full()
+                .px(px(12.))
+                .py(px(11.))
+                .gap(px(12.))
+                .items_center()
+                .rounded(px(10.))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.muted))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
+                .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(16.), agent_color(r.agent, &theme), working, glyph_id)))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .items_center()
+                                .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
+                                .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
+                                .when(r.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground)))
+                                .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
+                        )
+                        .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
+                )
+                .when(dot.is_some() && !card.text.is_empty(), |d| d.child(div().max_w(px(220.)).truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(card.text.clone())))
+                .into_any_element()
+        }).collect();
+
+        let title = match &scope {
+            Scope::All => "Your sessions".to_string(),
+            Scope::Agent(a) => format!("{} sessions", a.display_name()),
+            Scope::Project(p) => p.clone(),
+            Scope::Kept => "Kept sessions".to_string(),
+        };
+        let count = self.scoped_refs().len();
+
+        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
+            v_flex().id("sessions").flex_1().min_h_0().overflow_y_scroll().px(px(24.)).items_center().child(
                 v_flex()
-                    .id(SharedString::from(format!("row-{key}")))
-                    .px(px(14.))
-                    .py(px(9.))
-                    .mx(px(8.))
-                    .my(px(1.))
-                    .gap(px(3.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .when(active, |d| d.bg(theme.list_active))
-                    .hover(|s| s.bg(theme.list_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_session(&key, cx)))
-                    .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .items_center()
-                            .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
-                            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
-                            .when(r.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground))),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .text_size(px(11.5))
-                            .text_color(theme.muted_foreground)
-                            .child(div().truncate().child(r.project()))
-                            .when(r.agent != AgentId::ClaudeCode, |d| d.child(div().child(r.agent.display_name())))
-                            .child(div().child("·"))
-                            .child(div().child(relative(r.mtime, now))),
-                    )
-                    .when(live && !card.text.is_empty(), |d| d.child(div().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(card.text.clone())))
-            })))
+                    .w_full()
+                    .max_w(CONTENT_W)
+                    .pt(px(16.))
+                    .pb(px(40.))
+                    .gap(px(14.))
+                    .child(div().text_size(px(28.)).font_family(SERIF).child(title))
+                    .child(filters)
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(format!("{} on this machine, every one of them kept.", plural(count, "session", "sessions"))))
+                    .child(v_flex().w_full().gap(px(2.)).children(rows)),
+            ),
+        )
     }
 
     // -- one conversation ----------------------------------------------------
@@ -929,49 +1433,49 @@ impl Workbench {
     fn render_detail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(r) = self.selected_ref().cloned() else {
-            return v_flex().flex_1().h_full().items_center().justify_center().text_color(theme.muted_foreground).child("Pick a session, or press ⌘K to search everything.").into_any_element();
+            return v_flex()
+                .flex_1()
+                .h_full()
+                .child(self.render_topbar(String::new(), Vec::new(), cx))
+                .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child("Pick a session, or press ⌘K to search everything."))
+                .into_any_element();
         };
         let Some(detail) = &self.detail else {
-            return v_flex().flex_1().h_full().items_center().justify_center().text_color(theme.muted_foreground).child("loading…").into_any_element();
+            return v_flex().flex_1().h_full().child(self.render_topbar(r.title.clone(), Vec::new(), cx)).child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child("loading…")).into_any_element();
         };
         let session = detail.session.clone();
         let list = detail.list.clone();
         let entity = cx.entity().downgrade();
         let tokens = scribe_core::render_md::human_tokens(session.usage.total());
-        let header = v_flex()
-            .px(px(24.))
-            .pt(px(12.))
-            .pb(px(10.))
-            .gap(px(4.))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(div().h(TITLEBAR_H - px(24.)))
-            .child(
-                h_flex()
-                    .gap(px(8.))
-                    .items_center()
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(session.title.clone()))
-                    .when(r.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground)))
-                    .child(
-                        Button::new("reveal").ghost().small().icon(Icon::new(IconName::Folder)).tooltip("Reveal transcript in Finder").on_click({
-                            let p = r.path.clone();
-                            move |_, _, _| {
-                                let _ = std::process::Command::new("open").arg("-R").arg(&p).spawn();
-                            }
-                        }),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap(px(10.))
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
-                    .child(div().child(scribe_core::paths::tilde(&session.cwd)))
-                    .when(!session.git_branch.is_empty(), |d| d.child(div().child(format!("⎇ {}", session.git_branch))))
-                    .child(div().child(format!("{} · {} · {} tokens", plural(session.rounds.len(), "round", "rounds"), plural(session.tool_count(), "tool call", "tool calls"), tokens)))
-                    .when(!session.models.is_empty(), |d| d.child(div().child(session.models.last().cloned().unwrap_or_default())))
-                    .child(div().child(short_id(&session.id))),
-            );
+
+        let mut right: Vec<AnyElement> = Vec::new();
+        if r.archived {
+            right.push(badge("kept", theme.muted, theme.muted_foreground).into_any_element());
+        }
+        right.push(agent_badge(r.agent, &theme, self.is_working(&r), "top-glyph").into_any_element());
+        right.push(
+            icon_button("reveal", IconName::FolderOpen, "Reveal transcript in Finder", cx, {
+                let p = r.path.clone();
+                move |_, _, _| {
+                    let _ = std::process::Command::new("open").arg("-R").arg(&p).spawn();
+                }
+            })
+            .into_any_element(),
+        );
+        let topbar = self.render_topbar(session.title.clone(), right, cx);
+
+        let mut meta = vec![scribe_core::paths::tilde(&session.cwd)];
+        if !session.git_branch.is_empty() {
+            meta.push(format!("⎇ {}", session.git_branch));
+        }
+        meta.push(plural(session.rounds.len(), "round", "rounds"));
+        meta.push(plural(session.tool_count(), "tool call", "tool calls"));
+        meta.push(format!("{tokens} tokens"));
+        if let Some(m) = session.models.last() {
+            meta.push(m.clone());
+        }
+        meta.push(short_id(&session.id));
+        let meta_line = div().w_full().px(px(24.)).pb(px(4.)).text_center().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(meta.join("  ·  "));
 
         let transcript = div()
             .flex_1()
@@ -985,15 +1489,37 @@ impl Workbench {
             )
             .vertical_scrollbar(&list);
 
+        // The agent at work, said under the transcript so it is seen without
+        // scrolling: the mark turns while a turn is running.
+        let working = self.is_working(&r);
+        let status = working.then(|| {
+            let st = &r.state;
+            let from = if !st.turn_started.is_empty() { &st.turn_started } else if !st.since.is_empty() { &st.since } else { &r.updated };
+            let card = self.card_for(&r);
+            let what = if card.text.is_empty() { "working".to_string() } else { card.text.clone() };
+            h_flex()
+                .w_full()
+                .max_w(CONTENT_W)
+                .px(px(6.))
+                .gap(px(8.))
+                .items_center()
+                .text_size(px(12.))
+                .text_color(theme.muted_foreground)
+                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), true, "status-glyph"))
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} is working", r.agent.speaker())))
+                .child(div().flex_1().min_w_0().truncate().child(what))
+                .child(div().child(elapsed_since(from, self.now)))
+        });
+
         v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(theme.background)
-            .child(header)
+            .child(topbar)
+            .child(meta_line)
             .child(transcript)
-            .child(self.render_permissions(cx))
-            .child(self.render_composer(cx))
+            .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).child(self.render_composer(cx)))
             .into_any_element()
     }
 
@@ -1002,7 +1528,7 @@ impl Workbench {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         let cwd = self.selected_ref().map(|r| r.cwd.clone()).unwrap_or_default();
         let cards: Vec<PermissionRequest> = self.permissions.iter().filter(|(s, _)| *s == sid).map(|(_, p)| p.clone()).collect();
-        v_flex().w_full().px(px(24.)).gap(px(8.)).when(!cards.is_empty(), |d| d.pt(px(8.))).children(cards.into_iter().map(|p| {
+        v_flex().w_full().max_w(CONTENT_W).gap(px(8.)).children(cards.into_iter().map(|p| {
             let subject = scribe_core::build::tool_subject(&p.tool_name, &p.input, &cwd);
             let detail = match p.tool_name.as_str() {
                 "Bash" => p.input.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -1011,21 +1537,22 @@ impl Workbench {
             let id_allow = p.request_id.clone();
             let id_deny = p.request_id.clone();
             v_flex()
-                .p(px(12.))
+                .p(px(14.))
                 .gap(px(8.))
-                .rounded(px(10.))
+                .rounded(px(14.))
                 .border_1()
-                .border_color(theme.warning)
+                .border_color(theme.primary)
                 .bg(theme.popover)
+                .shadow_sm()
                 .child(
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(Icon::new(IconName::TriangleAlert).with_size(px(14.)).text_color(theme.warning))
+                        .child(Icon::new(IconName::TriangleAlert).with_size(px(14.)).text_color(theme.primary))
                         .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(format!("Claude wants to run {}", p.tool_name)))
                         .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(subject)),
                 )
-                .when(!detail.is_empty(), |d| d.child(div().p(px(8.)).rounded(px(6.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_size(px(12.)).whitespace_normal().child(detail)))
+                .when(!detail.is_empty(), |d| d.child(div().p(px(8.)).rounded(px(8.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_size(px(12.)).whitespace_normal().child(detail)))
                 .child(
                     h_flex()
                         .gap(px(8.))
@@ -1035,6 +1562,9 @@ impl Workbench {
         }))
     }
 
+    /// The composer card: a textarea, the mode and model chips, and a round
+    /// send button. It floats at the foot of a conversation and in the middle
+    /// of the home page.
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let (via, why) = self.reply_via();
@@ -1043,54 +1573,188 @@ impl Workbench {
         let mode = drv.as_ref().map(|v| v.mode.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| if self.next_mode.is_empty() { "default".into() } else { self.next_mode.clone() });
         let model = drv.as_ref().map(|v| v.model.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| if self.next_model.is_empty() { "default".into() } else { self.next_model.clone() });
         let running = drv.as_ref().map(|v| v.state == "running" || v.starting).unwrap_or(false);
-        let can_send = via == "driver" || via == "spawn";
-        let channel = match via {
+        let can_send = via == "driver" || via == "spawn" || via == "inbox";
+        let settable = via == "driver" || via == "spawn";
+        let hint = match via {
             "driver" => match drv.as_ref().map(|v| v.state.as_str()) {
-                Some("running") => "claude is working".to_string(),
-                Some("starting") => "starting claude…".to_string(),
-                _ => "claude is listening".to_string(),
+                Some("running") => "Claude is working. ⌘↩ queues a message behind this turn.".to_string(),
+                Some("starting") => "Starting Claude…".to_string(),
+                _ => "Claude is listening.".to_string(),
             },
-            "spawn" => "sending starts claude here and resumes this session".to_string(),
-            _ => why.clone(),
+            "inbox" => {
+                let mode = self.selected_ref().map(|r| r.state.mode.clone()).unwrap_or_default();
+                if scribe_core::peer::HELD_MODES.contains(&mode.as_str()) {
+                    "Goes straight into the terminal session. Permissions are bypassed there, so the terminal asks before reading it.".to_string()
+                } else {
+                    "Goes straight into the terminal session, as if typed there.".to_string()
+                }
+            }
+            "spawn" => {
+                if self.page == Page::New {
+                    format!("Starts Claude Code in {}.", scribe_core::paths::tilde(&self.new_cwd))
+                } else {
+                    "Sending starts Claude here and resumes this session.".to_string()
+                }
+            }
+            _ => {
+                let mut w = why.clone();
+                if let Some(f) = w.get(..1) {
+                    w = f.to_uppercase() + &w[1..];
+                }
+                w
+            }
         };
-        v_flex()
+        let send = div()
+            .id("send")
+            .size(px(32.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
+            .map(|d| {
+                if running {
+                    d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))).child(Icon::new(IconName::Pause).with_size(px(15.)).text_color(theme.primary_foreground))
+                } else if can_send {
+                    d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx))).child(Icon::new(IconName::ArrowUp).with_size(px(16.)).text_color(theme.primary_foreground))
+                } else {
+                    d.bg(theme.muted).child(Icon::new(IconName::ArrowUp).with_size(px(16.)).text_color(theme.muted_foreground))
+                }
+            });
+
+        let attachments = self.attachments.clone();
+        // The toolkit's frame tracks a focus handle of its own and only asks
+        // whether it *contains* the focus, so gpui never marks the editor as
+        // the focused accessibility node and assistive apps are handed the
+        // window instead. This wrapper tracks the editor's real handle and
+        // carries the text-area role, so the focused element is a text area
+        // with the typed value.
+        let field_focus = self.composer.read(cx).focus_handle(cx);
+        let field_value = self.composer.read(cx).value().to_string();
+        let card = v_flex()
+            .id("composer-card")
             .w_full()
-            .px(px(24.))
-            .pt(px(8.))
-            .pb(px(14.))
+            .max_w(CONTENT_W)
+            .rounded(px(18.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_md()
+            .px(px(14.))
+            .pt(px(10.))
+            .pb(px(10.))
             .gap(px(6.))
+            .drag_over::<ExternalPaths>({
+                let accent = theme.primary;
+                move |s, _, _, _| s.border_color(accent)
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach_paths(paths.paths(), cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.focus_composer(window, cx)))
+            .when(!attachments.is_empty(), |d| {
+                d.child(h_flex().flex_wrap().gap(px(6.)).pb(px(2.)).children(attachments.into_iter().enumerate().map(|(i, a)| {
+                    let theme = cx.theme().clone();
+                    let size = std::fs::metadata(&a.path).map(|m| m.len()).unwrap_or(0);
+                    let (a_title, a_path, a_image) = (a.name.clone(), a.path.clone(), a.image);
+                    h_flex()
+                        .id(SharedString::from(format!("att-{i}")))
+                        .h(px(48.))
+                        .pl(px(4.))
+                        .pr(px(6.))
+                        .gap(px(8.))
+                        .items_center()
+                        .rounded(px(12.))
+                        .bg(theme.muted)
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(theme.primary))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            let image = a_image.then(|| ImageSource::from(a_path.clone()));
+                            this.preview_attachment(a_title.clone(), Some(a_path.clone()), image, window, cx);
+                        }))
+                        .child(if a.image {
+                            img(a.path.clone()).size(px(40.)).rounded(px(8.)).object_fit(ObjectFit::Cover).bg(theme.border).into_any_element()
+                        } else {
+                            div().size(px(40.)).rounded(px(8.)).bg(theme.popover).flex().items_center().justify_center().child(file_icon(&a.name, px(20.), theme.muted_foreground)).into_any_element()
+                        })
+                        .child(
+                            v_flex()
+                                .gap(px(1.))
+                                .child(div().max_w(px(200.)).truncate().font_weight(FontWeight::MEDIUM).child(a.name.clone()))
+                                .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(format!("{} · {}", file_kind(&a.name), human_size(size)))),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("att-x-{i}")))
+                                .size(px(18.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.border))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if i < this.attachments.len() {
+                                        this.attachments.remove(i);
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(Icon::new(IconName::Close).with_size(px(11.)).text_color(theme.muted_foreground)),
+                        )
+                })))
+            })
             .child(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .text_size(px(11.5))
-                    .text_color(theme.muted_foreground)
-                    .child(div().flex_1().min_w_0().truncate().child(channel))
-                    .when(can_send, |d| {
-                        d.child(chip_button("mode", format!("mode: {mode}"), cx, |this, cx| this.cycle_mode(cx)))
-                            .child(chip_button("model", format!("model: {model}"), cx, |this, cx| this.cycle_model(cx)))
-                    })
-                    .when(running, |d| d.child(Button::new("stop").danger().small().icon(Icon::new(IconName::Pause)).label("Stop").on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))))),
+                div()
+                    .id("composer")
+                    .key_context(COMPOSER_CONTEXT)
+                    .on_action(cx.listener(|this, _: &Send, window, cx| this.send_message(window, cx)))
+                    .capture_action(cx.listener(|this, _: &gpui_component::input::Paste, _, cx| {
+                        if this.paste_attachments(cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .role(Role::MultilineTextInput)
+                    .track_focus(&field_focus)
+                    .aria_label("Message")
+                    .aria_placeholder("Reply")
+                    .aria_value(field_value)
+                    .w_full()
+                    .text_size(px(14.))
+                    .child(Textarea::new(&self.composer).appearance(false).bordered(false)),
             )
             .child(
                 h_flex()
-                    .gap(px(8.))
-                    .items_end()
+                    .items_center()
+                    .gap(px(4.))
                     .child(
                         div()
-                            .id("composer")
-                            .key_context(COMPOSER_CONTEXT)
-                            .on_action(cx.listener(|this, _: &Send, window, cx| this.send_message(window, cx)))
-                            .flex_1()
-                            .min_w_0()
-                            .rounded(px(10.))
+                            .id("attach")
+                            .size(px(30.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .border_1()
                             .border_color(theme.border)
-                            .bg(theme.popover)
-                            .child(Textarea::new(&self.composer).h(px(84.)).appearance(false).bordered(false)),
+                            .text_color(theme.muted_foreground)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.pick_files(cx)
+                            }))
+                            .child(Icon::new(IconName::Plus).with_size(px(15.))),
                     )
-                    .child(Button::new("send").primary().icon(Icon::new(IconName::ArrowUp)).disabled(!can_send).tooltip("Send (⌘↩)").on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))),
-            )
+                    .when(settable, |d| d.child(chip_button("mode", mode_label(&mode).to_string(), cx, |this, cx| this.cycle_mode(cx))))
+                    .child(div().flex_1())
+                    .when(settable, |d| d.child(chip_button("model", model_label(&model), cx, |this, cx| this.cycle_model(cx))))
+                    .child(send),
+            );
+
+        v_flex().w_full().items_center().gap(px(8.)).child(card).child(div().text_size(px(11.5)).text_color(theme.muted_foreground).text_center().child(hint))
     }
 
     // -- the board -----------------------------------------------------------
@@ -1117,48 +1781,33 @@ impl Workbench {
         let live: usize = cols.values().map(Vec::len).sum();
         let projects: HashSet<String> = cols.values().flatten().map(|c| c.r.project()).collect();
 
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .bg(theme.background)
-            .child(
-                h_flex()
-                    .h(TITLEBAR_H)
-                    .px(px(24.))
-                    .items_end()
-                    .pb(px(10.))
-                    .gap(px(12.))
-                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Board"))
-                    .child(
-                        h_flex().gap(px(10.)).text_size(px(12.)).text_color(theme.muted_foreground).child(div().child(format!("{live} live"))).child(div().child(format!("{needs} need you"))).child(div().child(plural(projects.len(), "project", "projects"))),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .id("board")
-                    .flex_1()
-                    .min_h_0()
-                    .px(px(16.))
-                    .pt(px(6.))
-                    .pb(px(16.))
-                    .gap(px(12.))
-                    .items_stretch()
-                    .overflow_x_scroll()
-                    .children(Column::LIVE.into_iter().map(|c| {
-                        let cards = cols.remove(&c).unwrap_or_default();
-                        self.render_column(c, cards, cx)
-                    }))
-                    .child(self.render_done(done, cx)),
-            )
+        let stats = div().text_size(px(12.)).text_color(theme.muted_foreground).whitespace_nowrap().child(format!("{live} live · {needs} need you · {}", plural(projects.len(), "project", "projects"))).into_any_element();
+
+        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar("Board".into(), vec![stats], cx)).child(
+            h_flex()
+                .id("board")
+                .flex_1()
+                .min_h_0()
+                .px(px(16.))
+                .pt(px(4.))
+                .pb(px(16.))
+                .gap(px(12.))
+                .items_stretch()
+                .overflow_x_scroll()
+                .children(Column::LIVE.into_iter().map(|c| {
+                    let cards = cols.remove(&c).unwrap_or_default();
+                    self.render_column(c, cards, cx)
+                }))
+                .child(self.render_done(done, cx)),
+        )
     }
 
     fn column_color(&self, c: Column, cx: &App) -> Hsla {
         let theme = cx.theme();
         match c {
-            Column::NeedsYou => theme.warning,
-            Column::Planning | Column::Working => theme.primary,
-            Column::YourTurn => theme.success,
+            Column::NeedsYou => theme.primary,
+            Column::Planning | Column::Working => theme.blue,
+            Column::YourTurn => theme.green,
             Column::Done => theme.muted_foreground,
         }
     }
@@ -1184,24 +1833,22 @@ impl Workbench {
             .bg(theme.sidebar)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(10.))
+            .rounded(px(14.))
             .child(
                 h_flex()
-                    .px(px(12.))
-                    .pt(px(10.))
+                    .px(px(14.))
+                    .pt(px(12.))
                     .pb(px(8.))
                     .gap(px(8.))
                     .items_center()
                     .child(self.dot(c, cx))
-                    .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(c.title()))
-                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(count.to_string()))
+                    .child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(c.title()))
+                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(count.to_string()))
                     .when(c == Column::Done, |d| {
-                        d.child(div().flex_1()).child(
-                            Button::new("done-fold").ghost().small().icon(Icon::new(IconName::PanelRightClose)).tooltip("Collapse").on_click(cx.listener(|this, _, _, cx| {
-                                this.done_open = false;
-                                cx.notify();
-                            })),
-                        )
+                        d.child(div().flex_1()).child(icon_button("done-fold", IconName::PanelRightClose, "Collapse", cx, |this, _, cx| {
+                            this.done_open = false;
+                            cx.notify();
+                        }))
                     }),
             );
         if cards.is_empty() {
@@ -1239,13 +1886,13 @@ impl Workbench {
             .flex_shrink_0()
             .h_full()
             .items_center()
-            .pt(px(11.))
+            .pt(px(13.))
             .pb(px(12.))
             .gap(px(6.))
             .bg(theme.sidebar)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(10.))
+            .rounded(px(14.))
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_hover))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -1280,7 +1927,7 @@ impl Workbench {
             .bg(theme.popover)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(8.))
+            .rounded(px(10.))
             .when(!done, |d| d.shadow_sm())
             .cursor_pointer()
             .hover(|s| s.border_color(accent))
@@ -1295,16 +1942,16 @@ impl Workbench {
                     .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(r.project()))
                     .when(!r.git_branch.is_empty(), |d| d.child(div().min_w_0().truncate().child(format!("· {}", r.git_branch))))
                     .child(div().flex_1())
-                    .child(agent_badge(r.agent, &theme)),
+                    .child(agent_badge(r.agent, &theme, matches!(card.column, Column::Working | Column::Planning), SharedString::from(format!("card-glyph-{key}")))),
             )
             .child(div().text_size(if done { px(12.5) } else { px(13.5) }).font_weight(FontWeight::MEDIUM).line_height(gpui::relative(1.3)).line_clamp(2).child(r.title.clone()));
 
         if !done {
             let (chip_bg, chip_fg) = match card.chip_kind {
-                "bash" | "task" | "web" | "mcp" | "plan" | "search" | "read" => (theme.primary.opacity(0.12), theme.primary),
-                "edit" | "write" | "approve" | "terminal" | "ask" => (theme.warning.opacity(0.15), theme.warning),
-                "reply" => (theme.success.opacity(0.15), theme.success),
-                "stop" => (theme.danger.opacity(0.15), theme.danger),
+                "bash" | "task" | "web" | "mcp" | "plan" | "search" | "read" => (theme.blue.opacity(0.14), theme.blue),
+                "edit" | "write" | "approve" | "terminal" | "ask" => (theme.primary.opacity(0.14), theme.primary),
+                "reply" => (theme.green.opacity(0.16), theme.green),
+                "stop" => (theme.red.opacity(0.16), theme.red),
                 _ => (theme.muted, theme.muted_foreground),
             };
             let working = matches!(card.column, Column::Working | Column::Planning);
@@ -1319,7 +1966,7 @@ impl Workbench {
                     .gap(px(6.))
                     .items_center()
                     .text_size(px(11.5))
-                    .child(div().flex_shrink_0().px(px(5.)).py(px(1.)).rounded(px(4.)).bg(chip_bg).text_color(chip_fg).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(card.chip.clone()))
+                    .child(div().flex_shrink_0().px(px(6.)).py(px(1.)).rounded(px(5.)).bg(chip_bg).text_color(chip_fg).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(card.chip.clone()))
                     .child(div().flex_1().min_w_0().truncate().child(card.text.clone()))
                     .child(div().flex_shrink_0().text_size(px(11.)).text_color(theme.muted_foreground).child(clock_text)),
             );
@@ -1328,7 +1975,7 @@ impl Workbench {
         let mut foot = h_flex().gap(px(6.)).items_center().pt(px(2.)).text_size(px(10.5)).text_color(theme.muted_foreground);
         foot = foot.child(div().child(if done { format!("{} {}", day(&r.updated), clock(&r.updated)) } else { format!("since {}", clock(if r.started.is_empty() { &r.updated } else { &r.started })) }));
         if card.queued > 0 {
-            foot = foot.child(badge_str(format!("{} queued", card.queued), theme.primary.opacity(0.12), theme.primary));
+            foot = foot.child(badge_str(format!("{} queued", card.queued), theme.blue.opacity(0.14), theme.blue));
         }
         if r.archived {
             foot = foot.child(badge("kept", theme.muted, theme.muted_foreground));
@@ -1376,48 +2023,102 @@ impl Workbench {
         el.child(foot).into_any_element()
     }
 
-    // -- new session ---------------------------------------------------------
+    // -- new session: the home page -------------------------------------------
 
     fn render_new(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let cwds = self.recent_cwds();
         let chosen = self.new_cwd.clone();
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .bg(theme.background)
-            .child(h_flex().h(TITLEBAR_H).px(px(24.)).items_end().pb(px(10.)).child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("New session")))
-            .child(
+        let folders = h_flex().w_full().max_w(CONTENT_W).flex_wrap().gap(px(6.)).justify_center().children(cwds.into_iter().map(|c| {
+            let active = c == chosen;
+            let theme = cx.theme().clone();
+            let label = scribe_core::paths::tilde(&c);
+            h_flex()
+                .id(SharedString::from(format!("cwd-{c}")))
+                .h(px(30.))
+                .px(px(12.))
+                .gap(px(6.))
+                .items_center()
+                .rounded_full()
+                .border_1()
+                .border_color(if active { theme.primary } else { theme.border })
+                .when(active, |d| d.bg(theme.primary.opacity(0.10)))
+                .when(!active, |d| d.hover(|s| s.bg(theme.muted)))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.new_cwd = c.clone();
+                    cx.notify();
+                }))
+                .child(Icon::new(IconName::Folder).with_size(px(13.)).text_color(if active { theme.primary } else { theme.muted_foreground }))
+                .child(div().text_size(px(12.5)).child(label))
+        }));
+
+        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
+            v_flex().id("home").flex_1().min_h_0().overflow_y_scroll().px(px(24.)).child(
                 v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .px(px(24.))
+                    .w_full()
+                    .min_h_full()
+                    .items_center()
+                    .justify_center()
+                    .pb(px(48.))
+                    .gap(px(22.))
+                    .child(h_flex().gap(px(14.)).items_center().child(mark_icon(px(30.), theme.primary)).child(div().text_size(px(34.)).font_family(SERIF).child(greeting(&self.user_name))))
+                    .child(self.render_composer(cx))
+                    .child(v_flex().w_full().items_center().gap(px(8.)).pt(px(6.)).child(div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("START IN")).child(folders)),
+            ),
+        )
+    }
+
+    // -- lightbox --------------------------------------------------------------
+
+    fn render_lightbox(&self, lb: Lightbox, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let path_open = lb.path.clone();
+        let path_reveal = lb.path.clone();
+        div()
+            .id("lightbox")
+            .absolute()
+            .inset_0()
+            .bg(gpui::black().opacity(0.72))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.lightbox = None;
+                cx.notify();
+            }))
+            .child(div().id("lightbox-img").on_click(|_, _, cx| cx.stop_propagation()).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain)))
+            .child(
+                h_flex()
+                    .id("lightbox-bar")
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .gap(px(10.))
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("Where should Claude work? Recent folders:"))
-                    .child(v_flex().id("cwds").gap(px(4.)).overflow_y_scroll().children(cwds.into_iter().map(|c| {
-                        let active = c == chosen;
-                        let theme = cx.theme().clone();
-                        let label = scribe_core::paths::tilde(&c);
-                        h_flex()
-                            .id(SharedString::from(format!("cwd-{c}")))
-                            .px(px(10.))
-                            .py(px(6.))
-                            .gap(px(8.))
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .when(active, |d| d.bg(theme.list_active))
-                            .hover(|s| s.bg(theme.list_hover))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.new_cwd = c.clone();
-                                cx.notify();
-                            }))
-                            .child(Icon::new(IconName::Folder).with_size(px(14.)).text_color(theme.muted_foreground))
-                            .child(div().text_size(px(13.)).child(label))
-                    })))
-                    .when(!chosen.is_empty(), |d| d.child(div().pt(px(6.)).text_size(px(12.)).text_color(theme.muted_foreground).child(format!("The first message starts Claude Code in {}.", scribe_core::paths::tilde(&chosen))))),
+                    .items_center()
+                    .px(px(14.))
+                    .py(px(8.))
+                    .rounded_full()
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_md()
+                    .child(div().max_w(px(360.)).truncate().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(lb.title.clone()))
+                    .when_some(path_open, |d, p| {
+                        d.child(Button::new("lb-open").ghost().small().label("Open").on_click(move |_, _, _| {
+                            let _ = std::process::Command::new("open").arg(&p).spawn();
+                        }))
+                    })
+                    .when_some(path_reveal, |d, p| {
+                        d.child(Button::new("lb-reveal").ghost().small().label("Reveal in Finder").on_click(move |_, _, _| {
+                            let _ = std::process::Command::new("open").arg("-R").arg(&p).spawn();
+                        }))
+                    })
+                    .child(Button::new("lb-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| {
+                        this.lightbox = None;
+                        cx.notify();
+                    }))),
             )
-            .child(self.render_composer(cx))
     }
 
     // -- search palette -------------------------------------------------------
@@ -1425,11 +2126,13 @@ impl Workbench {
     fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let results = self.search_results.clone();
+        let search_focus = self.search_input.read(cx).focus_handle(cx);
+        let search_value = self.search_input.read(cx).value().to_string();
         div()
             .id("search-overlay")
             .absolute()
             .inset_0()
-            .bg(theme.background.opacity(0.55))
+            .bg(theme.overlay)
             .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx)))
             .child(
                 v_flex()
@@ -1444,21 +2147,35 @@ impl Workbench {
                     .mx_auto()
                     .w(px(680.))
                     .max_h(px(520.))
-                    .rounded(px(12.))
+                    .rounded(px(16.))
                     .bg(theme.popover)
                     .border_1()
                     .border_color(theme.border)
                     .shadow_lg()
                     .child(
                         h_flex()
-                            .px(px(14.))
-                            .h(px(46.))
+                            .px(px(16.))
+                            .h(px(50.))
                             .gap(px(10.))
                             .items_center()
                             .border_b_1()
                             .border_color(theme.border)
-                            .child(Icon::new(IconName::Search).with_size(px(15.)).text_color(theme.muted_foreground))
-                            .child(div().flex_1().min_w_0().child(Input::new(&self.search_input).appearance(false).bordered(false))),
+                            .child(Icon::new(IconName::Search).with_size(px(16.)).text_color(theme.muted_foreground))
+                            // Tracks the editor's own focus handle, as the composer
+                            // does, so keyboard focus set from code lands on a node
+                            // the key bindings and assistive apps can see.
+                            .child(
+                                div()
+                                    .id("search-field")
+                                    .track_focus(&search_focus)
+                                    .role(Role::TextInput)
+                                    .aria_label("Search")
+                                    .aria_value(search_value)
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .child(Input::new(&self.search_input).appearance(false).bordered(false)),
+                            ),
                     )
                     .child(v_flex().id("search-results").flex_1().min_h_0().overflow_y_scroll().p(px(8.)).map(|d| match results {
                         None => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Type to search prompts, replies, thoughts and tool calls across every session.")),
@@ -1469,15 +2186,15 @@ impl Workbench {
                             let theme = cx.theme().clone();
                             v_flex()
                                 .id(SharedString::from(format!("hit-{key}")))
-                                .px(px(10.))
+                                .px(px(12.))
                                 .py(px(8.))
                                 .gap(px(3.))
-                                .rounded(px(8.))
+                                .rounded(px(10.))
                                 .cursor_pointer()
                                 .hover(|st| st.bg(theme.list_hover))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.close_search(window, cx);
-                                    this.open_session(&key, cx);
+                                    this.open_and_focus(&key, window, cx);
                                 }))
                                 .child(
                                     h_flex()
@@ -1537,42 +2254,144 @@ fn ago(ts: &str, now: f64) -> String {
 }
 
 pub fn badge(text: &'static str, bg: Hsla, fg: Hsla) -> impl IntoElement {
-    div().px(px(6.)).py(px(1.)).rounded(px(4.)).bg(bg).text_color(fg).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(text)
+    div().px(px(6.)).py(px(1.)).rounded(px(5.)).bg(bg).text_color(fg).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(text)
 }
 
 pub fn badge_str(text: String, bg: Hsla, fg: Hsla) -> impl IntoElement {
-    div().px(px(6.)).py(px(1.)).rounded(px(4.)).bg(bg).text_color(fg).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(text)
+    div().px(px(6.)).py(px(1.)).rounded(px(5.)).bg(bg).text_color(fg).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(text)
+}
+
+/// The image format gpui should decode `mime` as, when it can.
+pub fn image_format(mime: &str) -> Option<ImageFormat> {
+    match mime {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/webp" => Some(ImageFormat::Webp),
+        "image/svg+xml" => Some(ImageFormat::Svg),
+        "image/bmp" => Some(ImageFormat::Bmp),
+        "image/tiff" => Some(ImageFormat::Tiff),
+        _ => None,
+    }
+}
+
+/// An icon for a file with no picture to show.
+pub fn file_icon(name: &str, size: Pixels, color: Hsla) -> Icon {
+    Icon::default().path(crate::assets::file_icon_path(name)).with_size(size).text_color(color)
+}
+
+/// What to call a file in a chip: its extension, upper case, or "file".
+pub fn file_kind(name: &str) -> String {
+    match std::path::Path::new(name).extension().and_then(|e| e.to_str()) {
+        Some(e) if !e.is_empty() => e.to_ascii_uppercase(),
+        _ => "file".into(),
+    }
+}
+
+pub fn human_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Our mark: the four-armed burst that stands for Claude in this window.
+pub fn mark_icon(size: Pixels, color: Hsla) -> Icon {
+    Icon::default().path("icons/mark.svg").with_size(size).text_color(color)
+}
+
+/// The glyph that says which agent a session belongs to.
+pub fn agent_icon(agent: AgentId, size: Pixels, color: Hsla) -> Icon {
+    match agent {
+        AgentId::ClaudeCode => mark_icon(size, color),
+        AgentId::Codex => Icon::new(IconName::SquareTerminal).with_size(size).text_color(color),
+    }
+}
+
+/// Claude wears the accent; every other agent is drawn in the muted ink, so
+/// a glance down the recents tells them apart.
+pub fn agent_color(agent: AgentId, theme: &gpui_component::Theme) -> Hsla {
+    match agent {
+        AgentId::ClaudeCode => theme.primary,
+        AgentId::Codex => theme.muted_foreground,
+    }
 }
 
 /// Which agent a card belongs to, said on every card so the board never
 /// needs a legend.
-fn agent_badge(agent: AgentId, theme: &gpui_component::Theme) -> impl IntoElement {
-    let (icon, label) = match agent {
-        AgentId::ClaudeCode => (IconName::Bot, "Claude"),
-        AgentId::Codex => (IconName::SquareTerminal, "Codex"),
+fn agent_badge(agent: AgentId, theme: &gpui_component::Theme, working: bool, id: impl Into<SharedString>) -> impl IntoElement {
+    let label = match agent {
+        AgentId::ClaudeCode => "Claude",
+        AgentId::Codex => "Codex",
     };
-    h_flex().gap(px(3.)).items_center().flex_shrink_0().child(Icon::new(icon).with_size(px(11.)).text_color(theme.muted_foreground)).child(div().text_size(px(10.5)).text_color(theme.muted_foreground).child(label))
+    let color = if working { agent_color(agent, theme) } else { theme.muted_foreground };
+    h_flex().gap(px(4.)).items_center().flex_shrink_0().child(agent_glyph(agent, px(11.), color, working, id)).child(div().text_size(px(10.5)).text_color(theme.muted_foreground).child(label))
 }
 
+/// The agent's glyph, turning (Claude) or breathing (Codex) while the agent
+/// is at work, still otherwise. The animation needs a stable id per place.
+pub fn agent_glyph(agent: AgentId, size: Pixels, color: Hsla, working: bool, id: impl Into<SharedString>) -> AnyElement {
+    if !working {
+        return agent_icon(agent, size, color).into_any_element();
+    }
+    let id: SharedString = id.into();
+    match agent {
+        AgentId::ClaudeCode => agent_icon(agent, size, color)
+            .with_animation(ElementId::Name(id), Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::FRAC_PI_2)))
+            .into_any_element(),
+        AgentId::Codex => div()
+            .child(agent_icon(agent, size, color))
+            .with_animation(ElementId::Name(id), Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.3, 1.0)), |d, t| d.opacity(t))
+            .into_any_element(),
+    }
+}
+
+fn kbd_hint(text: &'static str, theme: &gpui_component::Theme) -> impl IntoElement {
+    div().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(text)
+}
+
+/// A round ghost button holding one icon.
+fn icon_button(id: &'static str, icon: IconName, tip: &'static str, cx: &mut Context<Workbench>, on: impl Fn(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static) -> impl IntoElement {
+    let theme = cx.theme().clone();
+    Button::new(id).ghost().small().icon(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground)).tooltip(tip).on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
+}
+
+/// A pill that cycles a setting: the mode and model pickers under the composer.
 fn chip_button(id: &'static str, label: String, cx: &mut Context<Workbench>, on: impl Fn(&mut Workbench, &mut Context<Workbench>) + 'static) -> impl IntoElement {
     let theme = cx.theme().clone();
-    div()
+    h_flex()
         .id(id)
-        .px(px(8.))
-        .py(px(2.))
-        .rounded(px(6.))
-        .bg(theme.muted)
-        .text_color(theme.foreground)
+        .h(px(28.))
+        .px(px(10.))
+        .gap(px(4.))
+        .items_center()
+        .rounded_full()
+        .text_size(px(12.5))
+        .text_color(theme.muted_foreground)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.list_hover))
+        .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
         .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
-        .child(label)
+        .child(div().child(label))
+        .child(Icon::new(IconName::ChevronDown).with_size(px(12.)))
 }
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let search_open = self.search_open;
+        let sidebar_open = self.sidebar_open;
+        // `SCRIBE_A11Y=1` prints gpui's own view of the accessibility tree on
+        // every draw, for checking what assistive apps are handed.
+        if std::env::var("SCRIBE_A11Y").is_ok() {
+            if let Some(json) = window.debug_a11y_tree_json() {
+                eprintln!("--- a11y {}\n{json}", chrono::Local::now().format("%H:%M:%S"));
+            } else {
+                eprintln!("--- a11y inactive");
+            }
+        }
         div()
             .id("workbench")
             .key_context(KEY_CONTEXT)
@@ -1589,28 +2408,31 @@ impl Render for Workbench {
                 this.status = "refreshing…".into();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &NewSession, _, cx| this.show_new(None, cx)))
+            .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
             .on_action(cx.listener(|this, _: &GoBoard, _, cx| {
                 this.page = Page::Board;
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Escape, window, cx| {
-                if this.search_open {
-                    this.close_search(window, cx);
-                }
+            .on_action(cx.listener(|this, _: &GoSessions, _, cx| this.show_sessions(Scope::All, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.sidebar_open = !this.sidebar_open;
+                cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
             .size_full()
             .relative()
             .bg(theme.background)
             .text_color(theme.foreground)
             .text_size(px(13.))
             .child(
-                h_flex().size_full().child(self.render_sidebar(cx)).map(|this| match self.page {
+                h_flex().size_full().when(sidebar_open, |d| d.child(self.render_sidebar(cx))).map(|this| match self.page {
                     Page::Board => this.child(self.render_board(cx)),
                     Page::New => this.child(self.render_new(cx)),
-                    Page::Sessions => this.child(self.render_session_list(cx)).child(self.render_detail(window, cx)),
+                    Page::Sessions => this.child(self.render_sessions(cx)),
+                    Page::Session => this.child(self.render_detail(window, cx)),
                 }),
             )
             .when(search_open, |d| d.child(self.render_search(cx)))
+            .when_some(self.lightbox.clone(), |d, lb| d.child(self.render_lightbox(lb, cx)))
     }
 }

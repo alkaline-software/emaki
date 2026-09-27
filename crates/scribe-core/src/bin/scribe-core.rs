@@ -72,6 +72,28 @@ fn main() {
             }
             eprintln!("{} hits in {} sessions", res.total, res.sessions.len());
         }
+        "peers" => {
+            // Every session with an inbox right now, and whether a message
+            // could be delivered to it.
+            let mut peers: Vec<_> = scribe_core::peer::registry().into_values().collect();
+            peers.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+            for p in &peers {
+                println!("{:<38} pid {:<7} {:<10} {:<8} {}", p.session_id, p.pid, p.kind, p.status, p.cwd);
+            }
+            eprintln!("{} sessions with an inbox", peers.len());
+        }
+        "inbox" => {
+            // scribe-core inbox <session-id> <message...>: deliver into a
+            // running terminal session.
+            let sid = args.get(1).expect("inbox <session-id> <message>").clone();
+            let text = args[2..].join(" ");
+            let peers = scribe_core::peer::registry();
+            let p = peers.get(&sid).expect("no inbox for that session");
+            match scribe_core::peer::send(p, &text) {
+                Ok(d) => println!("delivered {} status={} receipts={}", d.msg_id, d.status, d.receipts.len()),
+                Err(e) => println!("refused: {e}"),
+            }
+        }
         "drive" => {
             // scribe-core drive <cwd> <message...>: start a fresh headless
             // session, send one message, print events until the turn ends.

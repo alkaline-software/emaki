@@ -18,6 +18,7 @@ use scribe_core::adapters;
 use scribe_core::archive;
 use scribe_core::config::Config;
 use scribe_core::driver::{self, Driver};
+use scribe_core::peer::{self, Peer};
 use scribe_core::search::{self, SearchIndex};
 use scribe_core::transcript::SessionRef;
 use scribe_core::watcher::Watcher;
@@ -34,7 +35,8 @@ pub enum HubEvent {
     DriverStarted { session_id: String },
     DriverFailed { session_id: String, error: String },
     Driver { session_id: String, event: driver::Event },
-    Sent { session_id: String, queued: bool, error: String },
+    /// A message left through `via` ("driver" or "inbox").
+    Sent { session_id: String, via: &'static str, queued: bool, error: String },
 }
 
 pub struct Hub {
@@ -45,6 +47,9 @@ pub struct Hub {
     /// Sessions whose driver exited; a fresh mtime alone must not count as a
     /// process for them.
     ended: Mutex<HashMap<String, Instant>>,
+    /// Claude Code's own session registry: every terminal session with an
+    /// inbox, refreshed on each scan.
+    peers: Mutex<HashMap<String, Peer>>,
     pub cfg: RwLock<Config>,
 }
 
@@ -59,6 +64,7 @@ impl Hub {
             search_tx: Mutex::new(search_tx),
             drivers: Mutex::new(HashMap::new()),
             ended: Mutex::new(HashMap::new()),
+            peers: Mutex::new(HashMap::new()),
             cfg: RwLock::new(cfg),
         });
         let _ = scribe_core::paths::ensure_dirs();
@@ -90,6 +96,7 @@ impl Hub {
                         (cfg.scan_interval_ms, cfg.agents.clone())
                     };
                     let refs = adapters::index_all(200, &agents);
+                    hub.refresh_peers();
                     let sig: Vec<(String, u64, f64)> =
                         refs.iter().map(|r| (format!("{}:{}", r.agent.as_str(), r.session_id), r.size, r.mtime)).collect();
                     let changed = sig != last_sig;
@@ -168,10 +175,21 @@ impl Hub {
         self.ended.lock().unwrap().contains_key(session_id)
     }
 
-    /// Whether something is behind this session: our driver, or a transcript
-    /// written recently enough that a process is the likely explanation.
+    pub fn refresh_peers(&self) {
+        let fresh = peer::registry();
+        *self.peers.lock().unwrap() = fresh;
+    }
+
+    /// The inbox of a terminal session, if Claude Code has one registered.
+    pub fn peer_for(&self, session_id: &str) -> Option<Peer> {
+        self.peers.lock().unwrap().get(session_id).cloned()
+    }
+
+    /// Whether something is behind this session: our driver, a registered
+    /// inbox, or a transcript written recently enough that a process is the
+    /// likely explanation.
     pub fn is_live(&self, r: &SessionRef, now: f64) -> bool {
-        if self.driver_for(&r.session_id).is_some() {
+        if self.driver_for(&r.session_id).is_some() || self.peer_for(&r.session_id).is_some() {
             return true;
         }
         if self.has_ended(&r.session_id) {
@@ -219,6 +237,7 @@ impl Hub {
                         let r = d.send(&text, images);
                         hub.send(HubEvent::Sent {
                             session_id: session_id.clone(),
+                            via: "driver",
                             queued: r.as_ref().map(|q| *q).unwrap_or(false),
                             error: r.err().map(|e| e.0).unwrap_or_default(),
                         });
@@ -238,11 +257,28 @@ impl Hub {
             let r = d.send(&text, images);
             hub.send(HubEvent::Sent {
                 session_id: sid,
+                via: "driver",
                 queued: r.as_ref().map(|q| *q).unwrap_or(false),
                 error: r.err().map(|e| e.0).unwrap_or_default(),
             });
         });
         true
+    }
+
+    /// Deliver into a terminal session's inbox on a thread. The registry is
+    /// re-read first so a session that just ended is refused, not forked.
+    pub fn send_to_inbox(self: &Arc<Self>, session_id: &str, text: String) {
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        thread::spawn(move || {
+            hub.refresh_peers();
+            let error = match hub.peer_for(&sid) {
+                None => "this session has no inbox any more".to_string(),
+                Some(p) => peer::send(&p, &text).err().unwrap_or_default(),
+            };
+            hub.send(HubEvent::Sent { session_id: sid, via: "inbox", queued: false, error });
+            hub.refresh();
+        });
     }
 
     pub fn stop_driver(&self, session_id: &str) {

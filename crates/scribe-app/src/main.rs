@@ -1,6 +1,8 @@
 //! Scribe: every coding-agent session on this machine, kept for good, in one
 //! window you can also talk to.
 
+mod a11y;
+mod assets;
 mod format;
 mod hub;
 mod transcript;
@@ -12,7 +14,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, KEY_CONTEXT, SEARCH_CONTEXT};
 
 actions!(scribe_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{Escape, GoBoard, NewSession, Refresh, Send, ToggleSearch};
+pub use workbench::{Escape, GoBoard, GoSessions, NewSession, Refresh, Send, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -20,6 +22,8 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-r", Refresh, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-n", NewSession, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-b", GoBoard, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-l", GoSessions, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-s", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(SEARCH_CONTEXT)),
         KeyBinding::new("secondary-enter", Send, Some(COMPOSER_CONTEXT)),
@@ -80,7 +84,7 @@ fn app_menus() -> Vec<Menu> {
     menus.push(Menu {
         name: "View".into(),
         disabled: false,
-        items: vec![MenuItem::action("Board", GoBoard), MenuItem::action("Search", ToggleSearch)],
+        items: vec![MenuItem::action("Board", GoBoard), MenuItem::action("Sessions", GoSessions), MenuItem::action("Search", ToggleSearch), MenuItem::separator(), MenuItem::action("Toggle Sidebar", ToggleSidebar)],
     });
     menus.push(Menu {
         name: "Window".into(),
@@ -88,6 +92,29 @@ fn app_menus() -> Vec<Menu> {
         items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom), MenuItem::action("Toggle Full Screen", ToggleFullScreen)],
     });
     menus
+}
+
+/// The window's palette: cream and charcoal with a terracotta accent, one
+/// config per appearance. `Theme::change` re-applies whichever the system
+/// appearance asks for.
+fn install_theme(cx: &mut App) {
+    use gpui_component::theme::{Theme, ThemeSet};
+    let set: ThemeSet = match serde_json::from_str(include_str!("../themes/scribe.json")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("scribe: theme file is invalid, using the default look: {e}");
+            return;
+        }
+    };
+    let theme = Theme::global_mut(cx);
+    for cfg in set.themes {
+        let cfg = std::rc::Rc::new(cfg);
+        if cfg.mode.is_dark() {
+            theme.dark_theme = cfg;
+        } else {
+            theme.light_theme = cfg;
+        }
+    }
 }
 
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
@@ -119,6 +146,7 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
                 })
                 .detach();
             gpui_component::Theme::sync_system_appearance(Some(window), cx);
+            a11y::install_window_focus_forwarder(window);
             let workbench = cx.new(|cx| Workbench::new(window, cx));
             window.focus(&workbench.read(cx).focus_handle(cx), cx);
             cx.new(|cx| Root::new(workbench, window, cx))
@@ -127,9 +155,10 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
 }
 
 fn main() {
-    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+    let app = gpui_platform::application().with_assets(assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        install_theme(cx);
         gpui_component::Theme::sync_system_appearance(None, cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());

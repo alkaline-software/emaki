@@ -124,7 +124,7 @@ impl Adapter for CodexAdapter {
 
 static RE_WRAPPERS: LazyLock<Regex> = LazyLock::new(|| {
     // No backreferences in Rust's regex: one alternative per wrapper tag.
-    Regex::new(r"(?s)<environment_context>.*?</environment_context>\s*|<user_instructions>.*?</user_instructions>\s*|<INSTRUCTIONS>.*?</INSTRUCTIONS>\s*|<permissions instructions>.*?</permissions instructions>\s*|<collaboration_mode>.*?</collaboration_mode>\s*|<turn_aborted>.*?</turn_aborted>\s*|<app_context>.*?</app_context>\s*|<system_reminder>.*?</system_reminder>\s*|<developer_instructions>.*?</developer_instructions>\s*").unwrap()
+    Regex::new(r"(?s)<environment_context>.*?</environment_context>\s*|<user_instructions>.*?</user_instructions>\s*|<INSTRUCTIONS>.*?</INSTRUCTIONS>\s*|<permissions instructions>.*?</permissions instructions>\s*|<collaboration_mode>.*?</collaboration_mode>\s*|<turn_aborted>.*?</turn_aborted>\s*|<app_context>.*?</app_context>\s*|<system_reminder>.*?</system_reminder>\s*|<developer_instructions>.*?</developer_instructions>\s*|<command-name>.*?</command-name>\s*|<command-message>.*?</command-message>\s*|<command-args>.*?</command-args>\s*|<local-command-stdout>.*?</local-command-stdout>\s*|# AGENTS\.md instructions[^\n]*\s*").unwrap()
 });
 
 fn clean_user_text(text: &str) -> String {
