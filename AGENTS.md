@@ -77,9 +77,9 @@ crates/emaki-app/         the window
   src/main.rs                menus, key bindings, the window
   src/sys.rs                 open, reveal, the person's name: per OS
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers
-  assets/icon/               the icon in every size, from scripts/icon/draw.js
+  assets/icon/               the icon in every size, cut from scripts/icon/logo.png
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
-scripts/make-icon.sh       redraws assets/icon from scripts/icon/draw.js
+scripts/make-icon.sh       remakes assets/icon from scripts/icon/logo.png
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
 .github/workflows/release.yml  installers on a v* tag, via cargo-packager
 ```
@@ -377,17 +377,20 @@ the checkout folder itself are the person's to rename.
 startup; a bundle has it from `Emaki.icns`; on Windows `build.rs` compiles
 `icon.ico` into the executable.
 
-**The icon is drawn, not painted.** `scripts/icon/draw.js` draws it on a
-canvas (`@napi-rs/canvas`, prebuilt, no native build) after the logo JP
-had generated: a terracotta plate, a cream scroll whose sheet curls toward
-the viewer at the top-left and bottom-left and is still rolled on the
-right, and a dark terminal panel on the open sheet with a `>_` prompt and
-grey, blue and green lines, in the window's own palette. The panel sits in
-a sheared frame so the lines follow its slant. Every size is drawn at that
-size, not resampled, and the script also writes the `.ico`;
-`scripts/make-icon.sh` runs it and makes the `.icns` with `iconutil`.
-Change the drawing, run the script, rebuild (the Dock icon is
-`include_bytes!`), commit the assets.
+**The icon is JP's logo, cut out.** `scripts/icon/logo.png` is the picture
+JP generated: a terracotta plate on a white ground, a cream scroll curling
+toward the viewer at the top-left and bottom-left and still rolled on the
+right, a dark terminal panel on the open sheet with a `>_` prompt and grey,
+blue and green lines. A drawn copy of it was tried twice
+(`@napi-rs/canvas`) and never matched the original's curls, so the picture
+itself is the source now. `scripts/icon/cut.js` finds the plate as
+everything that is not white, makes the rest transparent, un-blends the
+anti-aliased edge from the white it was drawn on, fits the plate to 824 of
+a 1024 canvas (the rounded square on Apple's icon grid, so the Dock shows
+it at every other icon's size) and shrinks that by area averaging to every
+smaller size, writing the `.ico` too; `scripts/make-icon.sh` runs it and
+makes the `.icns` with `iconutil`. Replace the logo, run the script,
+rebuild (the Dock icon is `include_bytes!`), commit the assets.
 
 **The window remembers itself.** `ui_state.rs` keeps
 `~/.emaki/state/ui.json`: bounds, sidebar, page, the open tabs, the active
