@@ -225,6 +225,12 @@ pub struct ToolCall {
     pub old_string: String,
     pub new_string: String,
     pub result_images: u32,
+    /// The row and block the result came in, so a picture it returned can
+    /// be read back out of the transcript (`transcript::image_block_bytes`).
+    #[serde(default)]
+    pub result_uuid: String,
+    #[serde(default)]
+    pub result_index: usize,
     pub duration_ms: u64,
     pub explanation: String,
     pub needs_approval: bool,

@@ -23,6 +23,8 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
+
+use crate::ui_state::{Rect, Scroll, UiState};
 use scribe_core::adapters;
 use scribe_core::build::Phase;
 use scribe_core::config::Config;
@@ -34,7 +36,7 @@ use scribe_core::transcript::SessionRef;
 use crate::format::{clock, day, elapsed_since, now_secs, plural, relative, short_id};
 use crate::hub::{Hub, HubEvent};
 
-actions!(scribe, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Escape, Send]);
+actions!(scribe, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Escape, Send, CloseTab, OpenSettings]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -118,7 +120,9 @@ pub struct Detail {
     pub list: ListState,
     /// Thumbnails of images pasted into prompts, read back out of the
     /// transcript on demand. `None` while a load is in flight.
-    pub thumbs: HashMap<String, Option<Arc<gpui::Image>>>,
+    pub thumbs: HashMap<String, Option<Thumb>>,
+    /// Pixel sizes of kept picture files, read from their headers once.
+    pub sizes: HashMap<String, Option<(u32, u32)>>,
     pub open_tools: HashSet<(usize, usize)>,
     pub open_thoughts: HashSet<(usize, usize)>,
     pub open_subagents: HashSet<(usize, usize)>,
@@ -135,6 +139,88 @@ pub struct Attachment {
     pub name: String,
     pub mime: String,
     pub image: bool,
+    /// Pixel size of a picture, from its header, so the chip can keep its
+    /// shape. `None` when unknown.
+    pub size: Option<(u32, u32)>,
+}
+
+/// A picture read back out of a transcript, with its size when the header
+/// gave one.
+#[derive(Clone)]
+pub struct Thumb {
+    pub image: Arc<gpui::Image>,
+    pub size: Option<(u32, u32)>,
+}
+
+/// Width and height from the first bytes of a PNG, JPEG, GIF or WebP.
+/// A thumbnail is sized from this so the whole picture shows, never a crop.
+pub fn image_dims(b: &[u8]) -> Option<(u32, u32)> {
+    let be32 = |i: usize| -> Option<u32> { b.get(i..i + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]])) };
+    let be16 = |i: usize| -> Option<u32> { b.get(i..i + 2).map(|s| u16::from_be_bytes([s[0], s[1]]) as u32) };
+    let le16 = |i: usize| -> Option<u32> { b.get(i..i + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as u32) };
+    let le24 = |i: usize| -> Option<u32> { b.get(i..i + 3).map(|s| s[0] as u32 | (s[1] as u32) << 8 | (s[2] as u32) << 16) };
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some((be32(16)?, be32(20)?));
+    }
+    if b.starts_with(b"GIF8") {
+        return Some((le16(6)?, le16(8)?));
+    }
+    if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
+        return match b.get(12..16)? {
+            b"VP8 " => Some((le16(26)? & 0x3fff, le16(28)? & 0x3fff)),
+            b"VP8L" => {
+                let (b1, b2, b3, b4) = (*b.get(21)? as u32, *b.get(22)? as u32, *b.get(23)? as u32, *b.get(24)? as u32);
+                Some((1 + ((b1 | b2 << 8) & 0x3fff), 1 + ((b2 >> 6 | b3 << 2 | (b4 & 0xf) << 10) & 0x3fff)))
+            }
+            b"VP8X" => Some((1 + le24(24)?, 1 + le24(27)?)),
+            _ => None,
+        };
+    }
+    if b.starts_with(b"\xff\xd8") {
+        // Walk the segments to the first start-of-frame.
+        let mut i = 2;
+        while i + 9 < b.len() {
+            if b[i] != 0xff {
+                i += 1;
+                continue;
+            }
+            let marker = b[i + 1];
+            if marker == 0xff {
+                i += 1;
+                continue;
+            }
+            if matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+                return Some((be16(i + 7)?, be16(i + 5)?));
+            }
+            if matches!(marker, 0xd0..=0xd9) || marker == 0x01 {
+                i += 2;
+                continue;
+            }
+            i += 2 + be16(i + 2)? as usize;
+        }
+    }
+    None
+}
+
+/// `image_dims` over the head of a file: enough for any header, including a
+/// JPEG behind a large EXIF block.
+pub fn file_image_dims(path: &std::path::Path) -> Option<(u32, u32)> {
+    use std::io::Read as _;
+    let mut head = Vec::with_capacity(1 << 18);
+    std::fs::File::open(path).ok()?.take(1 << 18).read_to_end(&mut head).ok()?;
+    image_dims(&head)
+}
+
+/// The box a thumbnail gets: the picture's own shape scaled to fit
+/// `max_w` by `max_h`, or `fallback` when its size is unknown.
+pub fn fit_thumb(size: Option<(u32, u32)>, max_w: f32, max_h: f32, fallback: (f32, f32)) -> (f32, f32) {
+    match size {
+        Some((w, h)) if w > 0 && h > 0 => {
+            let scale = (max_w / w as f32).min(max_h / h as f32).min(1.0);
+            ((w as f32 * scale).max(24.), (h as f32 * scale).max(24.))
+        }
+        _ => fallback,
+    }
 }
 
 fn mime_of(path: &std::path::Path) -> &'static str {
@@ -191,6 +277,7 @@ pub struct Workbench {
     pub lightbox: Option<Lightbox>,
     pub search_input: Entity<InputState>,
     pub search_open: bool,
+    pub settings_open: bool,
     pub search_results: Option<Results>,
     search_task: Option<Task<()>>,
     pub done_open: bool,
@@ -204,6 +291,17 @@ pub struct Workbench {
     pub now: f64,
     /// Who to greet on the home page.
     pub user_name: String,
+    /// Sessions with a tab, in tab order. `selected` is the one showing.
+    pub tabs: Vec<String>,
+    /// Where each tab was scrolled when the reader left it, restored when
+    /// the tab is opened again, here or on the next launch.
+    scroll_memory: HashMap<String, Scroll>,
+    window_rect: Option<Rect>,
+    last_ui_save: std::time::Instant,
+    /// The window is too narrow for the sidebar beside the content; it is
+    /// hidden and only shows over the content, on request (`sidebar_peek`).
+    narrow: bool,
+    sidebar_peek: bool,
     startup_open: Option<String>,
     focus_handle: FocusHandle,
     _tasks: Vec<Task<()>>,
@@ -213,16 +311,62 @@ pub fn key_of(r: &SessionRef) -> String {
     format!("{}:{}", r.agent.as_str(), r.session_id)
 }
 
-/// The account's first name on macOS, else the login name.
-fn user_first_name() -> String {
-    let full = std::process::Command::new("id").arg("-F").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-    let name = full.split_whitespace().next().map(str::to_string).or_else(|| std::env::var("USER").ok()).unwrap_or_default();
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
+/// Swallow a click without leaving the toolkit's text selection mid-drag.
+/// gpui-component's window selection layer begins a drag on every left
+/// mouse-down and ends it on the bubble-phase mouse-up; a click handler that
+/// only stops propagation eats that mouse-up, and every later mouse move
+/// then extends a selection nobody is making.
+pub fn swallow_click(window: &mut Window, cx: &mut App) {
+    gpui_base::TextSelection::end(window, cx);
+    cx.stop_propagation();
+}
+
+/// Narrower than this, the sidebar no longer sits beside the content.
+const NARROW_W: Pixels = px(880.);
+
+impl Workbench {
+    /// Show the sidebar: beside the content when there is room, over it
+    /// when the window is narrow.
+    fn show_sidebar(&mut self) {
+        if self.narrow {
+            self.sidebar_peek = true;
+        } else {
+            self.sidebar_open = true;
+            self.save_ui(true);
+        }
+    }
+
+    fn hide_sidebar(&mut self) {
+        if self.narrow {
+            self.sidebar_peek = false;
+        } else {
+            self.sidebar_open = false;
+            self.save_ui(true);
+        }
+    }
+
+    /// The sidebar over the content, for a narrow window: a scrim that any
+    /// click closes, so choosing a session in it also puts it away.
+    fn render_sidebar_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("sidebar-scrim")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(gpui::black().opacity(0.25))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.sidebar_peek = false;
+                cx.notify();
+            }))
+            .child(div().absolute().left_0().top_0().h_full().w(SIDEBAR_W).shadow_lg().child(self.render_sidebar(cx)))
     }
 }
+
+fn rect_of(b: Bounds<Pixels>) -> Rect {
+    Rect { x: f32::from(b.origin.x), y: f32::from(b.origin.y), w: f32::from(b.size.width), h: f32::from(b.size.height) }
+}
+
+
 
 fn greeting(name: &str) -> String {
     let hour = chrono::Local::now().hour();
@@ -267,6 +411,17 @@ impl Workbench {
         cx.on_app_quit(move |_, _| {
             hub_for_quit.stop_all();
             async {}
+        })
+        .detach();
+        // The window's state outlives it: tabs, page, sidebar, bounds.
+        cx.on_app_quit(|this, _| {
+            this.save_ui(true);
+            async {}
+        })
+        .detach();
+        cx.observe_window_bounds(window, |this, window, _| {
+            this.window_rect = Some(rect_of(window.bounds()));
+            this.save_ui(false);
         })
         .detach();
 
@@ -314,23 +469,33 @@ impl Workbench {
 
         let next_mode = cfg.driver.default_mode.clone();
         let next_model = cfg.driver.default_model.clone();
-        // `SCRIBE_OPEN=<session-id prefix>` opens a session on launch;
-        // `SCRIBE_PAGE=new|sessions|board` picks the page.
+        // Last time's tabs, page and sidebar come back; `SCRIBE_OPEN=<session-id
+        // prefix>` opens a session on launch and `SCRIBE_PAGE=new|sessions|board`
+        // picks the page over what was saved.
+        let ui = UiState::load();
         let startup_open = std::env::var("SCRIBE_OPEN").ok().filter(|s| !s.is_empty());
+        let saved_page = match ui.page.as_str() {
+            "sessions" => Page::Sessions,
+            "new" => Page::New,
+            "session" if ui.active.is_some() => Page::Session,
+            _ => Page::Board,
+        };
         let page = match std::env::var("SCRIBE_PAGE").as_deref() {
             Ok("new") => Page::New,
             Ok("sessions") => Page::Sessions,
-            _ => Page::Board,
+            Ok("board") => Page::Board,
+            _ => saved_page,
         };
+        let pending_select = if page == Page::Session { ui.active.clone() } else { None };
         Self {
             hub,
             cfg,
             refs: Vec::new(),
             scope: Scope::All,
             page,
-            sidebar_open: true,
+            sidebar_open: ui.sidebar_open.unwrap_or(true),
             selected: None,
-            pending_select: None,
+            pending_select,
             detail: None,
             loading: None,
             load_task: None,
@@ -339,6 +504,7 @@ impl Workbench {
             lightbox: None,
             search_input,
             search_open: false,
+            settings_open: false,
             search_results: None,
             search_task: None,
             done_open: false,
@@ -350,7 +516,13 @@ impl Workbench {
             next_model,
             status: "scanning…".into(),
             now: now_secs(),
-            user_name: user_first_name(),
+            user_name: crate::sys::user_first_name(),
+            tabs: ui.tabs.clone(),
+            scroll_memory: ui.scroll.clone(),
+            window_rect: Some(rect_of(window.bounds())),
+            last_ui_save: std::time::Instant::now(),
+            narrow: false,
+            sidebar_peek: false,
             startup_open,
             focus_handle: cx.focus_handle(),
             _tasks: tasks,
@@ -498,8 +670,16 @@ impl Workbench {
     // -- navigation ----------------------------------------------------------
 
     pub fn open_session(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.selected.as_deref() != Some(key) {
+            self.remember_scroll();
+        }
+        if !self.tabs.iter().any(|t| t == key) {
+            self.tabs.push(key.to_string());
+        }
         self.page = Page::Session;
         self.selected = Some(key.to_string());
+        self.sidebar_peek = false;
+        self.save_ui(true);
         if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).cloned() {
             if self.detail.as_ref().map(|d| d.key != key).unwrap_or(true) {
                 self.detail = None;
@@ -509,6 +689,66 @@ impl Workbench {
             self.pending_select = Some(key.to_string());
         }
         cx.notify();
+    }
+
+    /// Note where the reader is in the session showing, so the same spot
+    /// comes back when its tab is opened again.
+    fn remember_scroll(&mut self) {
+        if let Some(d) = &self.detail {
+            let top = d.list.logical_scroll_top();
+            self.scroll_memory.insert(d.key.clone(), Scroll { item: top.item_ix, offset: f32::from(top.offset_in_item) });
+        }
+    }
+
+    /// Close a tab. The session goes on without it: a driver behind it
+    /// keeps running until its idle timeout, and the transcript is on disk.
+    /// Closing the showing tab moves to its neighbour, or to the board when
+    /// it was the last one.
+    pub fn close_tab(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self.tabs.iter().position(|t| t == key) else { return };
+        if self.selected.as_deref() == Some(key) {
+            self.remember_scroll();
+        }
+        self.tabs.remove(ix);
+        if self.selected.as_deref() == Some(key) {
+            self.selected = None;
+            self.detail = None;
+            self.loading = None;
+            self.load_task = None;
+            match self.tabs.get(ix.min(self.tabs.len().saturating_sub(1))).cloned() {
+                Some(next) if !self.tabs.is_empty() => self.open_session(&next, cx),
+                _ => self.page = Page::Board,
+            }
+        }
+        self.save_ui(true);
+        cx.notify();
+    }
+
+    /// Write the window's state to `state/ui.json`. `now` forces it; otherwise
+    /// writes are spaced two seconds apart, which is enough for a window being
+    /// dragged.
+    fn save_ui(&mut self, now: bool) {
+        if !now && self.last_ui_save.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.remember_scroll();
+        let page = match self.page {
+            Page::Board => "board",
+            Page::Sessions => "sessions",
+            Page::Session => "session",
+            Page::New => "new",
+        };
+        let scroll = self.scroll_memory.iter().filter(|(k, _)| self.tabs.contains(k)).map(|(k, v)| (k.clone(), *v)).collect();
+        UiState {
+            window: self.window_rect,
+            sidebar_open: Some(self.sidebar_open),
+            page: page.into(),
+            tabs: self.tabs.clone(),
+            active: self.selected.clone().filter(|_| self.page == Page::Session),
+            scroll,
+        }
+        .save();
+        self.last_ui_save = std::time::Instant::now();
     }
 
     /// Open a session and put the caret in the composer, as a click on a
@@ -525,6 +765,8 @@ impl Workbench {
     fn show_sessions(&mut self, scope: Scope, cx: &mut Context<Self>) {
         self.scope = scope;
         self.page = Page::Sessions;
+        self.sidebar_peek = false;
+        self.save_ui(true);
         cx.notify();
     }
 
@@ -532,15 +774,25 @@ impl Workbench {
         let key = key_of(&r);
         self.loading = Some(key.clone());
         let path = r.path.clone();
+        // SCRIBE_TIMING=1 prints how long the load and the hand-over to the
+        // list took, per open, so a slow session can be measured, not guessed.
+        let timing = std::env::var_os("SCRIBE_TIMING").is_some();
+        let started = std::time::Instant::now();
         let task = cx.background_spawn(async move { adapters::for_agent(r.agent).load(&r) });
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let session = task.await;
+            let loaded = started.elapsed();
             this.update(cx, |this, cx| {
                 this.loading = None;
                 if this.selected.as_deref() != Some(key.as_str()) {
                     return;
                 }
-                this.set_detail(key, path, session);
+                let rounds = session.rounds.len();
+                let t = std::time::Instant::now();
+                this.set_detail(key.clone(), path, session);
+                if timing {
+                    eprintln!("scribe: open {} — load {}ms, set_detail {}ms, {} rounds", &key, loaded.as_millis(), t.elapsed().as_millis(), rounds);
+                }
                 cx.notify();
             })
             .ok();
@@ -569,12 +821,18 @@ impl Workbench {
             }
             _ => {
                 let list = ListState::new(n, ListAlignment::Bottom, px(512.));
+                if let Some(s) = self.scroll_memory.get(&key) {
+                    if s.item < n {
+                        list.scroll_to(ListOffset { item_ix: s.item, offset_in_item: px(s.offset) });
+                    }
+                }
                 self.detail = Some(Detail {
                     key,
                     path,
                     session: Rc::new(session),
                     list,
                     thumbs: HashMap::new(),
+                    sizes: HashMap::new(),
                     open_tools: HashSet::new(),
                     open_thoughts: HashSet::new(),
                     open_subagents: HashSet::new(),
@@ -590,8 +848,11 @@ impl Workbench {
     }
 
     fn show_new(&mut self, cwd: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_scroll();
         self.page = Page::New;
         self.selected = None;
+        self.sidebar_peek = false;
+        self.save_ui(true);
         if let Some(c) = cwd {
             self.new_cwd = c;
         } else if self.new_cwd.is_empty() {
@@ -599,6 +860,106 @@ impl Workbench {
         }
         self.focus_composer(window, cx);
         cx.notify();
+    }
+
+    // -- settings ----------------------------------------------------------
+
+    /// Remember a chat font choice: in memory for this window, and in
+    /// `config.json` for the next launch.
+    fn set_chat_font(&mut self, choice: &str, cx: &mut Context<Self>) {
+        self.cfg.app.chat_font = choice.to_string();
+        let choice = choice.to_string();
+        if let Err(e) = Config::edit(move |c| c.app.chat_font = choice) {
+            self.status = format!("could not save settings: {e}");
+        }
+        cx.notify();
+    }
+
+    /// The settings panel (⌘,): what the window looks like. One section so
+    /// far, the conversation's typeface.
+    fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let fonts = cx.global::<crate::fonts::ChatFonts>().clone();
+        let current = self.cfg.app.chat_font.clone();
+        let choice = |key: &'static str, label: &'static str, family: Option<String>, cx: &mut Context<Self>| {
+            let theme = cx.theme().clone();
+            let active = current == key;
+            h_flex()
+                .id(SharedString::from(format!("font-{key}")))
+                .h(px(30.))
+                .px(px(12.))
+                .gap(px(6.))
+                .items_center()
+                .rounded_full()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .border_1()
+                .border_color(if active { theme.foreground } else { theme.border })
+                .when(active, |d| d.bg(theme.foreground).text_color(theme.background))
+                .when(!active, |d| d.hover(|s| s.bg(theme.muted)))
+                .when_some(family, |d, f| d.font_family(f))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_chat_font(key, cx)))
+                .child(label)
+        };
+        let serif_family = Some(fonts.serif.clone().unwrap_or_else(|| crate::fonts::SERIF_FALLBACK.into()));
+        let sans_family = fonts.sans.clone();
+        let note = match &fonts.source {
+            Some(dir) => format!("Anthropic Serif and Anthropic Sans are loaded from the Claude app at {}.", scribe_core::paths::tilde(&dir.to_string_lossy())),
+            None => "Anthropic Serif and Anthropic Sans are the Claude desktop app's fonts and are loaded from it when it is installed. It was not found here, so Georgia stands in for the serif and the window's own face for the sans.".to_string(),
+        };
+        div()
+            .id("settings-overlay")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(theme.overlay)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings_open = false;
+                cx.notify();
+            }))
+            .child(
+                v_flex()
+                    .id("settings-panel")
+                    .on_click(|_, window, cx| swallow_click(window, cx))
+                    .absolute()
+                    .top(px(80.))
+                    .left_0()
+                    .right_0()
+                    .mx_auto()
+                    .w(px(560.))
+                    .rounded(px(16.))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .child(
+                        h_flex()
+                            .px(px(18.))
+                            .h(px(50.))
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(div().flex_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Settings"))
+                            .child(Button::new("settings-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_open = false;
+                                cx.notify();
+                            }))),
+                    )
+                    .child(
+                        v_flex()
+                            .p(px(18.))
+                            .gap(px(14.))
+                            .child(div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("APPEARANCE"))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child("Chat font")).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("The face the conversation is set in.")))
+                                    .child(h_flex().gap(px(6.)).child(choice("serif", "Anthropic Serif", serif_family, cx)).child(choice("sans", "Anthropic Sans", sans_family, cx))),
+                            )
+                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(note)),
+                    ),
+            )
     }
 
     // -- search ------------------------------------------------------------
@@ -735,7 +1096,10 @@ impl Workbench {
 
     /// What Escape closes, nearest first: the lightbox, then the search.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.lightbox.is_some() {
+        if self.settings_open {
+            self.settings_open = false;
+            cx.notify();
+        } else if self.lightbox.is_some() {
             self.lightbox = None;
             cx.notify();
         } else if self.search_open {
@@ -756,7 +1120,7 @@ impl Workbench {
             Some(source) => self.open_lightbox(Lightbox { title, source, path }, window, cx),
             None => {
                 if let Some(p) = path {
-                    let _ = std::process::Command::new("open").arg(&p).spawn();
+                    crate::sys::open_path(&p);
                 }
             }
         }
@@ -784,7 +1148,9 @@ impl Workbench {
                 continue;
             }
             let mime = mime_of(p);
-            self.attachments.push(Attachment { path: p.clone(), name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), mime: mime.into(), image: IMAGE_TYPES.contains(&mime) });
+            let image = IMAGE_TYPES.contains(&mime);
+            let size = if image { file_image_dims(p) } else { None };
+            self.attachments.push(Attachment { path: p.clone(), name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), mime: mime.into(), image, size });
         }
         cx.notify();
     }
@@ -815,7 +1181,7 @@ impl Workbench {
             cx.notify();
             return;
         }
-        self.attachments.push(Attachment { path, name, mime: mime.into(), image: IMAGE_TYPES.contains(&mime) });
+        self.attachments.push(Attachment { path, name, mime: mime.into(), image: IMAGE_TYPES.contains(&mime), size: image_dims(&bytes) });
         cx.notify();
     }
 
@@ -873,7 +1239,7 @@ impl Workbench {
     /// The thumbnail of the `index`-th image block of row `uuid`, if it has
     /// been read yet; the first call starts the read and redraws round `ix`
     /// when it lands.
-    pub fn thumb(&mut self, ix: usize, uuid: &str, index: usize, cx: &mut Context<Self>) -> Option<Arc<gpui::Image>> {
+    pub fn thumb(&mut self, ix: usize, uuid: &str, index: usize, cx: &mut Context<Self>) -> Option<Thumb> {
         let key = format!("{uuid}:{index}");
         let d = self.detail.as_mut()?;
         if let Some(t) = d.thumbs.get(&key) {
@@ -885,7 +1251,10 @@ impl Workbench {
         let uuid = uuid.to_string();
         let task = cx.background_spawn(async move { scribe_core::transcript::image_block_bytes(&path, &uuid, index) });
         cx.spawn(async move |this, cx| {
-            let loaded = task.await.and_then(|(mime, bytes)| Some(Arc::new(gpui::Image::from_bytes(image_format(&mime)?, bytes))));
+            let loaded = task.await.and_then(|(mime, bytes)| {
+                let size = image_dims(&bytes);
+                Some(Thumb { image: Arc::new(gpui::Image::from_bytes(image_format(&mime)?, bytes)), size })
+            });
             this.update(cx, |this, cx| {
                 if let Some(d) = this.detail.as_mut() {
                     if d.key == dkey {
@@ -906,6 +1275,19 @@ impl Workbench {
         })
         .detach();
         None
+    }
+
+    /// The pixel size of a kept picture file, read from its header the first
+    /// time and remembered for as long as the session is open.
+    pub fn kept_image_size(&mut self, path: &std::path::Path) -> Option<(u32, u32)> {
+        let d = self.detail.as_mut()?;
+        let key = path.to_string_lossy().to_string();
+        if let Some(s) = d.sizes.get(&key) {
+            return *s;
+        }
+        let s = file_image_dims(path);
+        d.sizes.insert(key, s);
+        s
     }
 
     fn cycle_mode(&mut self, cx: &mut Context<Self>) {
@@ -1105,10 +1487,10 @@ impl Workbench {
             .items_center()
             .gap(px(8.))
             .child(mark_icon(px(16.), theme.primary))
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).font_family(SERIF).child("Scribe"))
+            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).font_family(SERIF).child("Emaki"))
             .child(div().flex_1())
             .child(icon_button("sidebar-close", IconName::PanelLeftClose, "Hide sidebar (⌘⇧S)", cx, |this, _, cx| {
-                this.sidebar_open = false;
+                this.hide_sidebar();
                 cx.notify();
             }));
 
@@ -1281,7 +1663,7 @@ impl Workbench {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if self.user_name.is_empty() { "Scribe".to_string() } else { self.user_name.clone() }))
+                    .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if self.user_name.is_empty() { "Emaki".to_string() } else { self.user_name.clone() }))
                     .child(div().truncate().text_size(px(11.)).text_color(theme.muted_foreground).child(self.status.clone())),
             );
 
@@ -1298,13 +1680,81 @@ impl Workbench {
     /// the right.
     fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let centre = div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title).into_any_element();
+        self.render_topbar_with(centre, right, cx)
+    }
+
+    /// One tab per open session in the top strip: the agent's mark (turning
+    /// while it works), the title, and a close button. Clicking a tab shows
+    /// that session; ⌘W closes the one showing.
+    fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let mut row = h_flex().flex_1().min_w_0().justify_center().items_center().gap(px(4.)).overflow_hidden();
+        for (ix, key) in self.tabs.clone().into_iter().enumerate() {
+            let r = self.refs.iter().find(|r| key_of(r) == key).cloned();
+            let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "untitled".into());
+            let agent = r.as_ref().map(|r| r.agent).unwrap_or(AgentId::ClaudeCode);
+            let working = r.as_ref().map(|r| self.is_working(r)).unwrap_or(false);
+            let active = self.selected.as_deref() == Some(key.as_str());
+            let open_key = key.clone();
+            let close_key = key.clone();
+            let hover_bg = theme.muted.opacity(0.6);
+            let close_bg = theme.border;
+            row = row.child(
+                h_flex()
+                    .id(("tab", ix))
+                    .h(px(30.))
+                    .pl(px(10.))
+                    .pr(px(6.))
+                    .gap(px(6.))
+                    .items_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .min_w_0()
+                    .max_w(px(220.))
+                    .flex_shrink(1.)
+                    .when(active, |d| d.bg(theme.muted))
+                    .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_session(&open_key, cx)))
+                    .child(agent_glyph(agent, px(14.), agent_color(agent, &theme), working, format!("tab-glyph-{ix}")))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_weight(if active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                            .text_color(if active { theme.foreground } else { theme.muted_foreground })
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id(("tab-close", ix))
+                            .size(px(18.))
+                            .rounded(px(4.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(close_bg))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.close_tab(&close_key, cx);
+                            }))
+                            .child(Icon::new(IconName::Close).xsmall().text_color(theme.muted_foreground)),
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    fn render_topbar_with(&self, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
         let mut left = h_flex().w(px(120.)).flex_shrink_0().items_center().gap(px(4.));
-        if !self.sidebar_open {
+        if !self.sidebar_open || self.narrow {
             left = left
                 .when(mac, |d| d.pl(TRAFFIC_W - px(12.)))
                 .child(icon_button("sidebar-open", IconName::PanelLeftOpen, "Show sidebar (⌘⇧S)", cx, |this, _, cx| {
-                    this.sidebar_open = true;
+                    this.show_sidebar();
                     cx.notify();
                 }));
         }
@@ -1314,7 +1764,7 @@ impl Workbench {
             .px(px(12.))
             .items_center()
             .child(left)
-            .child(div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title))
+            .child(centre)
             .child(h_flex().w(px(120.)).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
     }
 
@@ -1454,15 +1904,14 @@ impl Workbench {
         }
         right.push(agent_badge(r.agent, &theme, self.is_working(&r), "top-glyph").into_any_element());
         right.push(
-            icon_button("reveal", IconName::FolderOpen, "Reveal transcript in Finder", cx, {
+            icon_button("reveal", IconName::FolderOpen, crate::sys::REVEAL_LABEL, cx, {
                 let p = r.path.clone();
-                move |_, _, _| {
-                    let _ = std::process::Command::new("open").arg("-R").arg(&p).spawn();
-                }
+                move |_, _, _| crate::sys::reveal_path(&p)
             })
             .into_any_element(),
         );
-        let topbar = self.render_topbar(session.title.clone(), right, cx);
+        let tabs = self.render_tabs(cx);
+        let topbar = self.render_topbar_with(tabs, right, cx);
 
         let mut meta = vec![scribe_core::paths::tilde(&session.cwd)];
         if !session.git_branch.is_empty() {
@@ -1477,10 +1926,12 @@ impl Workbench {
         meta.push(short_id(&session.id));
         let meta_line = div().w_full().px(px(24.)).pb(px(4.)).text_center().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(meta.join("  ·  "));
 
+        let chat_font = crate::fonts::chat_family(&self.cfg.app.chat_font, cx);
         let transcript = div()
             .flex_1()
             .min_h_0()
             .relative()
+            .when_some(chat_font, |d, f| d.font_family(f))
             .child(
                 gpui::list(list.clone(), move |ix, window, cx| {
                     entity.upgrade().map(|e| e.update(cx, |this, cx| this.render_round(ix, window, cx))).unwrap_or_else(|| div().into_any_element())
@@ -1670,12 +2121,13 @@ impl Workbench {
                         .cursor_pointer()
                         .hover(|s| s.border_color(theme.primary))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
                             let image = a_image.then(|| ImageSource::from(a_path.clone()));
                             this.preview_attachment(a_title.clone(), Some(a_path.clone()), image, window, cx);
                         }))
                         .child(if a.image {
-                            img(a.path.clone()).size(px(40.)).rounded(px(8.)).object_fit(ObjectFit::Cover).bg(theme.border).into_any_element()
+                            // The whole picture, at its own shape, 40px tall.
+                            let (w, h) = fit_thumb(a.size, 96., 40., (40., 40.));
+                            img(a.path.clone()).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(ObjectFit::Contain).bg(theme.border).into_any_element()
                         } else {
                             div().size(px(40.)).rounded(px(8.)).bg(theme.popover).flex().items_center().justify_center().child(file_icon(&a.name, px(20.), theme.muted_foreground)).into_any_element()
                         })
@@ -1695,8 +2147,8 @@ impl Workbench {
                                 .justify_center()
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme.border))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    swallow_click(window, cx);
                                     if i < this.attachments.len() {
                                         this.attachments.remove(i);
                                     }
@@ -1742,8 +2194,8 @@ impl Workbench {
                             .text_color(theme.muted_foreground)
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.stop_propagation();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                swallow_click(window, cx);
                                 this.pick_files(cx)
                             }))
                             .child(Icon::new(IconName::Plus).with_size(px(15.))),
@@ -1984,7 +2436,7 @@ impl Workbench {
         let (via, _) = self.reply_via_for(&r);
         let small = |id: String, label: &'static str, primary: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
             let b = Button::new(SharedString::from(id)).small().compact().label(label).on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
+                swallow_click(window, cx);
                 on(this, window, cx)
             }));
             if primary { b.primary() } else { b.outline() }
@@ -2079,6 +2531,10 @@ impl Workbench {
             .id("lightbox")
             .absolute()
             .inset_0()
+            // Nothing under the lightbox hears the mouse while it is up:
+            // without this, moving over the backdrop reached the selectable
+            // text beneath and dragged a selection across it.
+            .occlude()
             .bg(gpui::black().opacity(0.72))
             .flex()
             .flex_col()
@@ -2089,11 +2545,11 @@ impl Workbench {
                 this.lightbox = None;
                 cx.notify();
             }))
-            .child(div().id("lightbox-img").on_click(|_, _, cx| cx.stop_propagation()).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain)))
+            .child(div().id("lightbox-img").on_click(|_, window, cx| swallow_click(window, cx)).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain)))
             .child(
                 h_flex()
                     .id("lightbox-bar")
-                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .on_click(|_, window, cx| swallow_click(window, cx))
                     .gap(px(10.))
                     .items_center()
                     .px(px(14.))
@@ -2105,14 +2561,10 @@ impl Workbench {
                     .shadow_md()
                     .child(div().max_w(px(360.)).truncate().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(lb.title.clone()))
                     .when_some(path_open, |d, p| {
-                        d.child(Button::new("lb-open").ghost().small().label("Open").on_click(move |_, _, _| {
-                            let _ = std::process::Command::new("open").arg(&p).spawn();
-                        }))
+                        d.child(Button::new("lb-open").ghost().small().label("Open").on_click(move |_, _, _| crate::sys::open_path(&p)))
                     })
                     .when_some(path_reveal, |d, p| {
-                        d.child(Button::new("lb-reveal").ghost().small().label("Reveal in Finder").on_click(move |_, _, _| {
-                            let _ = std::process::Command::new("open").arg("-R").arg(&p).spawn();
-                        }))
+                        d.child(Button::new("lb-reveal").ghost().small().label(crate::sys::REVEAL_LABEL).on_click(move |_, _, _| crate::sys::reveal_path(&p)))
                     })
                     .child(Button::new("lb-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| {
                         this.lightbox = None;
@@ -2139,7 +2591,7 @@ impl Workbench {
                     .id("search-panel")
                     .key_context(SEARCH_CONTEXT)
                     .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_search(window, cx)))
-                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .on_click(|_, window, cx| swallow_click(window, cx))
                     .absolute()
                     .top(px(80.))
                     .left_0()
@@ -2382,7 +2834,16 @@ impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let search_open = self.search_open;
-        let sidebar_open = self.sidebar_open;
+        // Below `NARROW_W` the sidebar leaves the row and comes back only as
+        // an overlay, the way the Claude app folds its sidebar away when the
+        // window gets narrow. `sidebar_open` keeps the person's preference
+        // for when the window is wide again.
+        self.narrow = window.viewport_size().width < NARROW_W;
+        if !self.narrow {
+            self.sidebar_peek = false;
+        }
+        let sidebar_open = self.sidebar_open && !self.narrow;
+        let sidebar_peek = self.narrow && self.sidebar_peek;
         // `SCRIBE_A11Y=1` prints gpui's own view of the accessibility tree on
         // every draw, for checking what assistive apps are handed.
         if std::env::var("SCRIBE_A11Y").is_ok() {
@@ -2410,15 +2871,40 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
             .on_action(cx.listener(|this, _: &GoBoard, _, cx| {
+                this.remember_scroll();
                 this.page = Page::Board;
+                this.save_ui(true);
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {
+                Some(key) if this.page == Page::Session && this.tabs.contains(&key) => this.close_tab(&key, cx),
+                _ => window.remove_window(),
             }))
             .on_action(cx.listener(|this, _: &GoSessions, _, cx| this.show_sessions(Scope::All, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.sidebar_open = !this.sidebar_open;
+                if this.narrow {
+                    this.sidebar_peek = !this.sidebar_peek;
+                } else {
+                    this.sidebar_open = !this.sidebar_open;
+                    this.save_ui(true);
+                }
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.settings_open = !this.settings_open;
+                if this.settings_open {
+                    window.focus(&this.focus_handle, cx);
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                if this.narrow && this.sidebar_peek {
+                    this.sidebar_peek = false;
+                    cx.notify();
+                } else {
+                    this.escape(window, cx)
+                }
+            }))
             .size_full()
             .relative()
             .bg(theme.background)
@@ -2432,7 +2918,9 @@ impl Render for Workbench {
                     Page::Session => this.child(self.render_detail(window, cx)),
                 }),
             )
+            .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
             .when(search_open, |d| d.child(self.render_search(cx)))
+            .when(self.settings_open, |d| d.child(self.render_settings(cx)))
             .when_some(self.lightbox.clone(), |d, lb| d.child(self.render_lightbox(lb, cx)))
     }
 }

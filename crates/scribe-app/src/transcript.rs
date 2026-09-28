@@ -15,9 +15,11 @@ use std::path::PathBuf;
 
 use std::collections::HashSet;
 
-use crate::workbench::{agent_color, agent_glyph, badge, file_icon, file_kind, human_size, Workbench, CONTENT_W};
+use crate::workbench::{agent_color, agent_glyph, badge, file_icon, file_kind, fit_thumb, human_size, Workbench, CONTENT_W};
 
 const MAX_BODY: usize = 6000;
+/// How far a reply's right edge stays inside the prompts' right edge.
+const REPLY_INSET: Pixels = px(40.);
 
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
@@ -94,25 +96,25 @@ impl Workbench {
             meta.push(format!("{} tokens", human_tokens(rnd.usage.total())));
         }
 
-        let mut column = v_flex().w_full().max_w(CONTENT_W).mx_auto().px(px(24.)).pt(px(20.)).pb(if is_last { px(28.) } else { px(6.) }).gap(px(12.));
+        let mut column = v_flex().w_full().max_w(CONTENT_W).px(px(24.)).pt(px(20.)).pb(if is_last { px(28.) } else { px(6.) }).gap(px(12.));
 
-        // The prompt, as a bubble on the right.
+        // The prompt, as a bubble on the right: what was attached first
+        // (pictures, then files), the words under them, the way a message
+        // with a picture reads in the Claude app.
         if !rnd.prompt.is_empty() || rnd.images > 0 || !rnd.attachments.is_empty() {
             let mut bubble = v_flex().max_w(px(600.)).px(px(16.)).py(px(11.)).gap(px(4.)).rounded(px(18.)).bg(theme.muted).text_size(px(14.)).line_height(relative(1.55));
-            if !rnd.prompt.is_empty() {
-                bubble = bubble.child(md_view(format!("p-{ix}"), rnd.prompt.clone(), cx));
-            }
+            let has_text = !rnd.prompt.is_empty();
             if !rnd.attachments.is_empty() {
                 let (pics, files): (Vec<&Attachment>, Vec<&Attachment>) = rnd.attachments.iter().partition(|a| a.kind == "image");
                 if !pics.is_empty() {
-                    let mut row = h_flex().flex_wrap().gap(px(8.)).pt(px(6.));
+                    let mut row = h_flex().flex_wrap().gap(px(8.)).pt(px(2.)).when(has_text || !files.is_empty(), |d| d.pb(px(4.)));
                     for a in pics {
                         row = row.child(self.render_attachment(ix, a, cx));
                     }
                     bubble = bubble.child(row);
                 }
                 if !files.is_empty() {
-                    let mut row = h_flex().flex_wrap().gap(px(8.)).pt(px(4.));
+                    let mut row = h_flex().flex_wrap().gap(px(8.)).when(has_text, |d| d.pb(px(4.)));
                     for a in files {
                         row = row.child(self.render_attachment(ix, a, cx));
                     }
@@ -120,6 +122,9 @@ impl Workbench {
                 }
             } else if rnd.images > 0 {
                 bubble = bubble.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("+ {} pasted image{}", rnd.images, if rnd.images == 1 { "" } else { "s" })));
+            }
+            if has_text {
+                bubble = bubble.child(md_view(format!("p-{ix}"), rnd.prompt.clone(), cx));
             }
             column = column.child(
                 v_flex()
@@ -167,10 +172,16 @@ impl Workbench {
                     .w_full()
                     .gap(px(8.))
                     .child(h_flex().gap(px(7.)).items_center().child(agent_glyph(session.agent, px(15.), mark_color, working, SharedString::from(format!("round-glyph-{ix}")))).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
-                    .child(div().w_full().pl(px(22.)).child(body)),
+                    // The reply stops short of the column's right edge, where
+                    // the prompt bubbles end: the two voices sit at different
+                    // widths, as in the Claude app, and read apart at a glance.
+                    .child(div().w_full().pl(px(22.)).pr(REPLY_INSET).child(body)),
             );
         }
-        column.into_any_element()
+        // The list lays each item out on its own, so an auto margin has
+        // nothing to push against; an explicit centring parent keeps the
+        // column in the middle of a wide pane.
+        h_flex().w_full().justify_center().child(column).into_any_element()
     }
 
     fn render_item(&mut self, ix: usize, jx: usize, item: &Item, open_tools: &HashSet<(usize, usize)>, open_thoughts: &HashSet<(usize, usize)>, open_subagents: &HashSet<(usize, usize)>, session: &Session, cx: &mut Context<Self>) -> AnyElement {
@@ -271,13 +282,19 @@ impl Workbench {
         let thumb_key = format!("{}:{}", a.uuid, a.index);
         let is_image = a.kind == "image";
         let (t2, p2, k2) = (title.clone(), path.clone(), thumb_key.clone());
-        // Resolve the picture before the click listener borrows `cx`.
+        // Resolve the picture, and its size, before the click listener
+        // borrows `cx`. The size shapes the tile so the whole picture shows.
+        let mut size: Option<(u32, u32)> = None;
         let source: Option<ImageSource> = if !is_image {
             None
         } else if let Some(p) = path.as_ref().filter(|p| p.is_file()) {
+            size = self.kept_image_size(p);
             Some(ImageSource::from(p.clone()))
         } else if !a.uuid.is_empty() {
-            self.thumb(ix, &a.uuid, a.index, cx).map(ImageSource::from)
+            self.thumb(ix, &a.uuid, a.index, cx).map(|t| {
+                size = t.size;
+                ImageSource::from(t.image)
+            })
         } else {
             None
         };
@@ -292,13 +309,12 @@ impl Workbench {
                 .cursor_pointer()
                 .hover(|s| s.border_color(theme.primary))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
                     let image = if !is_image {
                         None
                     } else if let Some(p) = p2.as_ref().filter(|p| p.is_file()) {
                         Some(ImageSource::from(p.clone()))
                     } else {
-                        this.detail.as_ref().and_then(|d| d.thumbs.get(&k2).cloned().flatten()).map(ImageSource::from)
+                        this.detail.as_ref().and_then(|d| d.thumbs.get(&k2).cloned().flatten()).map(|t| ImageSource::from(t.image))
                     };
                     if is_image && image.is_none() {
                         return;
@@ -309,7 +325,13 @@ impl Workbench {
         };
         if a.kind == "image" {
             return match source {
-                Some(src) => frame(img(src).w(px(176.)).h(px(118.)).object_fit(ObjectFit::Cover).into_any_element()).into_any_element(),
+                Some(src) => {
+                    // The tile takes the picture's own shape, up to 240 by
+                    // 180, so nothing is cropped away; a picture whose size
+                    // the header did not give gets the old box, letterboxed.
+                    let (w, h) = fit_thumb(size, 240., 180., (176., 118.));
+                    frame(img(src).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain).into_any_element()).into_any_element()
+                }
                 None => frame(
                     h_flex().h(px(48.)).px(px(12.)).gap(px(8.)).items_center().text_size(px(12.)).text_color(theme.muted_foreground).child(file_icon("x.png", px(18.), theme.muted_foreground)).child(if a.name.is_empty() { "image".to_string() } else { a.name.clone() }).into_any_element(),
                 )
@@ -389,7 +411,7 @@ impl Workbench {
             .into_any_element()
     }
 
-    fn render_tool(&self, ix: usize, jx: usize, call: &ToolCall, open: bool, sub_open: bool, cwd: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tool(&mut self, ix: usize, jx: usize, call: &ToolCall, open: bool, sub_open: bool, cwd: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let (status_text, status_color) = match call.status {
             CallStatus::Ok => ("", theme.muted_foreground),
@@ -442,13 +464,14 @@ impl Workbench {
 
     fn tool_has_body(&self, call: &ToolCall) -> bool {
         match call.tool_kind {
-            ToolKind::Read => call.status == CallStatus::Error && !call.result_text.is_empty(),
+            // A Read opens on what came back: the text, or the picture.
+            ToolKind::Read => call.result_images > 0 || !call.result_text.trim().is_empty(),
             ToolKind::Task => !call.subagent.is_empty() || !call.result_text.is_empty() || call.input.get("prompt").is_some(),
             _ => true,
         }
     }
 
-    fn render_tool_body(&self, ix: usize, jx: usize, call: &ToolCall, sub_open: bool, _cwd: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tool_body(&mut self, ix: usize, jx: usize, call: &ToolCall, sub_open: bool, _cwd: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let data = &call.input;
         let mut parts = v_flex().w_full().gap(px(8.)).text_size(px(12.5));
@@ -456,6 +479,36 @@ impl Workbench {
             parts = parts.child(div().text_color(theme.muted_foreground).child(call.explanation.clone()));
         }
         match call.tool_kind {
+            ToolKind::Read => {
+                if call.result_images > 0 {
+                    // The picture the Read returned, read back out of the
+                    // transcript like a pasted one; a click opens it large.
+                    match self.thumb(ix, &call.result_uuid, call.result_index, cx) {
+                        Some(t) => {
+                            let (w, h) = fit_thumb(t.size, 320., 240., (176., 118.));
+                            let title = call.subject.clone();
+                            let image = ImageSource::from(t.image.clone());
+                            parts = parts.child(
+                                div()
+                                    .id(SharedString::from(format!("read-img-{ix}-{jx}")))
+                                    .w(px(w))
+                                    .rounded(px(10.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .hover(|s| s.border_color(theme.primary))
+                                    .on_click(cx.listener(move |this, _, window, cx| this.preview_attachment(title.clone(), None, Some(image.clone()), window, cx)))
+                                    .child(img(ImageSource::from(t.image)).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain)),
+                            );
+                        }
+                        None => parts = parts.child(div().text_color(theme.muted_foreground).italic().child("loading the picture…")),
+                    }
+                } else if !call.result_text.trim().is_empty() {
+                    let lang = scribe_core::render_md::lang_for_path(data.get("file_path").and_then(|v| v.as_str()).unwrap_or(""));
+                    parts = parts.child(mono_block(format!("res-{ix}-{jx}"), &call.result_text, lang, cx));
+                }
+            }
             ToolKind::Bash => {
                 let command = command_text(data);
                 if !command.is_empty() {
