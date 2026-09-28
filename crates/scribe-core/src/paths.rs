@@ -169,7 +169,16 @@ pub fn safe_component(text: &str) -> String {
 }
 
 /// Best-effort inverse of Claude Code's cwd mangling (lossy; display only).
+///
+/// Claude Code replaces every character outside `[A-Za-z0-9]` with `-`, so
+/// `/Users/jp/proj` becomes `-Users-jp-proj` and `C:\Users\jp\proj`
+/// becomes `C--Users-jp-proj`. A drive letter followed by two dashes is the
+/// Windows shape.
 pub fn decode_project_dir(name: &str) -> String {
+    let b = name.as_bytes();
+    if b.len() > 3 && b[0].is_ascii_alphabetic() && &b[1..3] == b"--" {
+        return format!("{}:\\{}", &name[..1], name[3..].replace('-', "\\"));
+    }
     if let Some(rest) = name.strip_prefix('-') {
         format!("/{}", rest.replace('-', "/"))
     } else {
@@ -308,4 +317,31 @@ pub fn is_explainer_cwd(cwd: &str, own_root: &str) -> bool {
         return true;
     }
     s.ends_with("/run/explain")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_dirs_decode_on_both_path_shapes() {
+        assert_eq!(decode_project_dir("-Users-jp-proj"), "/Users/jp/proj");
+        assert_eq!(decode_project_dir("C--Users-jp-proj"), "C:\\Users\\jp\\proj");
+        assert_eq!(decode_project_dir("D--"), "D--");
+        assert_eq!(decode_project_dir("plain"), "plain");
+    }
+
+    #[test]
+    fn slugs_and_components_are_portable() {
+        assert_eq!(slugify("My Project (v2)", 48), "my-project-v2");
+        assert_eq!(slugify("", 48), "untitled");
+        assert_eq!(safe_component("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(safe_component("C:\\Users\\jp"), "C_Users_jp");
+    }
+
+    #[test]
+    fn normalise_drops_dot_and_dotdot_on_any_separator() {
+        let p = normalise(Path::new("/a/b/../c/./d"));
+        assert_eq!(p, PathBuf::from("/a/c/d"));
+    }
 }

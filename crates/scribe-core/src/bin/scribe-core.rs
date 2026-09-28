@@ -72,6 +72,46 @@ fn main() {
             }
             eprintln!("{} hits in {} sessions", res.total, res.sessions.len());
         }
+        "bench" => {
+            // scribe-core bench [<session-id|path> ...]: where the time goes
+            // when a session opens. With no argument, the five largest
+            // transcripts on this machine. Each stage is timed on its own,
+            // so a slow open can be blamed on parsing, building or rendering
+            // instead of guessed at.
+            let mut targets: Vec<PathBuf> = args[1..].iter().map(|t| resolve(t, &cfg)).collect();
+            if targets.is_empty() {
+                let mut refs = adapters::index_all(0, &cfg.agents);
+                refs.sort_by(|a, b| b.size.cmp(&a.size));
+                targets = refs.into_iter().take(5).map(|r| r.path).collect();
+            }
+            let redactor = Redactor::from_config(&cfg);
+            println!("{:>9}  {:>7}  {:>7}  {:>7}  {:>7}  {:>6}  {}", "bytes", "read", "build", "render", "total", "rounds", "session");
+            for path in targets {
+                let t0 = std::time::Instant::now();
+                let rows = scribe_core::transcript::read_all(&path);
+                let t_read = t0.elapsed();
+                let t1 = std::time::Instant::now();
+                let mut session = adapters::load_path(&path);
+                store::annotate(&mut session);
+                let t_build = t1.elapsed();
+                let t2 = std::time::Instant::now();
+                let md = render_md::render(&session, &cfg, &redactor);
+                let t_render = t2.elapsed();
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                println!(
+                    "{:>9}  {:>6}ms  {:>6}ms  {:>6}ms  {:>6}ms  {:>6}  {} ({} rows, {} KB md)",
+                    size,
+                    t_read.as_millis(),
+                    t_build.as_millis(),
+                    t_render.as_millis(),
+                    t0.elapsed().as_millis(),
+                    session.rounds.len(),
+                    path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                    rows.len(),
+                    md.len() / 1024
+                );
+            }
+        }
         "peers" => {
             // Every session with an inbox right now, and whether a message
             // could be delivered to it.
@@ -138,7 +178,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: scribe-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words>");
+            eprintln!("usage: scribe-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | drive <cwd> <text>");
         }
     }
 }

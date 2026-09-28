@@ -25,6 +25,11 @@
 //!   `permissionMode` instead.
 //! - Never `--bare`: it reads auth only from `ANTHROPIC_API_KEY`, never the
 //!   keychain, which breaks subscription users.
+//!
+//! None of this is a public API. `TESTED_CLAUDE_VERSION` is the release the
+//! wire was last checked against; a newer Claude Code is noted on stderr at
+//! start, not refused, and `frames_from_the_recorded_wire` below keeps the
+//! parser honest against frames recorded from that release.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -43,6 +48,9 @@ use crate::json::*;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a permission card may sit unanswered before the child is told no.
 pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The Claude Code release this wire was last checked against.
+pub const TESTED_CLAUDE_VERSION: &str = "2.1.283";
 
 pub const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "bypassPermissions"];
 pub const MODELS: &[&str] = &["default", "fable", "opus", "sonnet", "haiku"];
@@ -67,6 +75,8 @@ pub struct CommandInfo {
 /// What the child said it can do, from `initialize` and `system/init`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Caps {
+    /// `claude --version`, for the record and for the newer-than-tested note.
+    pub version: String,
     pub model: String,
     pub mode: String,
     pub commands: Vec<CommandInfo>,
@@ -118,31 +128,81 @@ impl std::fmt::Display for DriverError {
 }
 impl std::error::Error for DriverError {}
 
-/// The Claude Code binary, or None. `SCRIBE_CLAUDE` wins, for tests.
+/// What the Claude Code executable is called. The native installer ships
+/// `claude.exe` on Windows; npm's global install leaves a `claude.cmd` shim,
+/// which `Command` runs through `cmd.exe` on its own.
+fn binary_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["claude.exe", "claude.cmd", "claude"]
+    } else {
+        &["claude"]
+    }
+}
+
+/// The Claude Code binary, or None. `SCRIBE_CLAUDE` wins, for tests; then
+/// `PATH`, then where the installers put it when `PATH` does not say.
 pub fn claude_binary() -> Option<PathBuf> {
     if let Ok(o) = std::env::var("SCRIBE_CLAUDE") {
         if !o.is_empty() {
             return Some(PathBuf::from(o));
         }
     }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            let p = Path::new(dir).join("claude");
+    let configured = crate::config::Config::load().driver.claude_path;
+    if !configured.is_empty() {
+        let p = crate::paths::expand_tilde(&configured);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let home = crate::paths::home();
+    dirs.push(home.join(".local").join("bin"));
+    dirs.push(home.join(".claude").join("local"));
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+    } else {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+    }
+    for dir in dirs {
+        for name in binary_names() {
+            let p = dir.join(name);
             if p.is_file() {
                 return Some(p);
             }
         }
     }
-    for candidate in [
-        crate::paths::home().join(".claude/local/claude"),
-        PathBuf::from("/opt/homebrew/bin/claude"),
-        PathBuf::from("/usr/local/bin/claude"),
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
+    None
+}
+
+/// `claude --version` as a dotted number, asked once per process. Empty when
+/// there is no binary or it did not answer.
+pub fn claude_version() -> String {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            claude_binary()
+                .and_then(|b| Command::new(b).arg("--version").output().ok())
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("").to_string())
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// Dotted version numbers compared part by part; anything unparsable is 0.
+pub fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |s: &str| -> Vec<u64> { s.split('.').map(|p| p.trim().parse().unwrap_or(0)).collect() };
+    let (a, b) = (parts(a), parts(b));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x.cmp(&y);
         }
     }
-    None
+    std::cmp::Ordering::Equal
 }
 
 /// The environment for a Claude Code child that must be its own session. The
@@ -233,6 +293,28 @@ struct Inner {
     exited: bool,
 }
 
+impl Inner {
+    fn new(session_id: &str, mode: &str, model: &str, version: String) -> Self {
+        Inner {
+            session_id: session_id.into(),
+            state: State::Starting,
+            caps: Caps { version, mode: mode.into(), model: model.into(), ..Default::default() },
+            mode: mode.into(),
+            model: model.into(),
+            idle_since: Instant::now(),
+            turn_started: None,
+            turns: 0,
+            queue: VecDeque::new(),
+            waiting: HashMap::new(),
+            pending_permissions: HashMap::new(),
+            stderr_tail: VecDeque::new(),
+            error: String::new(),
+            exit_code: None,
+            exited: false,
+        }
+    }
+}
+
 pub struct Driver {
     pub session_id: String,
     pub cwd: String,
@@ -266,6 +348,10 @@ impl Driver {
             return Err(DriverError(format!("the session's directory is gone: {cwd}")));
         }
         let binary = claude_binary().ok_or_else(|| DriverError("claude is not on PATH".into()))?;
+        let version = claude_version();
+        if !version.is_empty() && version_cmp(&version, TESTED_CLAUDE_VERSION) == std::cmp::Ordering::Greater {
+            eprintln!("scribe: Claude Code {version} is newer than {TESTED_CLAUDE_VERSION}, the release this driver was checked against; if turns stop arriving, that is the first suspect");
+        }
         let mut cmd = Command::new(binary);
         cmd.args(["-p", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--permission-prompt-tool", "stdio"]);
         if resume {
@@ -297,23 +383,7 @@ impl Driver {
             cwd: cwd.into(),
             child: Mutex::new(Some(child)),
             stdin: Mutex::new(stdin),
-            inner: Arc::new(Mutex::new(Inner {
-                session_id: session_id.into(),
-                state: State::Starting,
-                caps: Caps { mode: mode.into(), model: model.into(), ..Default::default() },
-                mode: mode.into(),
-                model: model.into(),
-                idle_since: Instant::now(),
-                turn_started: None,
-                turns: 0,
-                queue: VecDeque::new(),
-                waiting: HashMap::new(),
-                pending_permissions: HashMap::new(),
-                stderr_tail: VecDeque::new(),
-                error: String::new(),
-                exit_code: None,
-                exited: false,
-            })),
+            inner: Arc::new(Mutex::new(Inner::new(session_id, mode, model, version))),
             events,
         });
 
@@ -761,5 +831,92 @@ impl Drop for Driver {
                 let _ = child.wait();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A driver with no child behind it: frames go in through `on_frame`,
+    /// events come out of the channel, writes fail as "exited".
+    fn detached() -> (Arc<Driver>, mpsc::Receiver<Event>) {
+        let (tx, rx) = mpsc::channel();
+        let d = Arc::new(Driver {
+            session_id: "sid-1".into(),
+            cwd: String::new(),
+            child: Mutex::new(None),
+            stdin: Mutex::new(None),
+            inner: Arc::new(Mutex::new(Inner::new("sid-1", "", "", String::new()))),
+            events: tx,
+        });
+        (d, rx)
+    }
+
+    /// Frames as Claude Code 2.1.283 writes them (`--verbose`, stream-json).
+    /// If a release changes a key we read, this is the test that goes red.
+    #[test]
+    fn frames_from_the_recorded_wire() {
+        let (d, rx) = detached();
+        d.on_frame(json!({
+            "type": "system", "subtype": "init", "cwd": "/tmp/p", "session_id": "sid-1",
+            "tools": ["Bash", "Read", "Edit"], "mcp_servers": [], "model": "claude-fable-5-1",
+            "permissionMode": "acceptEdits", "slash_commands": ["compact", "review"],
+            "skills": ["ph-app"], "agents": ["Explore"], "apiKeySource": "none",
+            "output_style": "default", "uuid": "u-1"
+        }));
+        match rx.recv().unwrap() {
+            Event::Init(caps) => {
+                assert_eq!(caps.model, "claude-fable-5-1");
+                assert_eq!(caps.mode, "acceptEdits");
+                assert_eq!(caps.slash_commands, vec!["compact", "review"]);
+                assert_eq!(caps.tools, vec!["Bash", "Read", "Edit"]);
+            }
+            other => panic!("expected Init, got {other:?}"),
+        }
+
+        d.on_frame(json!({
+            "type": "control_request", "request_id": "req-7",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash", "tool_use_id": "toolu_1",
+                        "input": {"command": "ls"}, "description": "List files"}
+        }));
+        match rx.recv().unwrap() {
+            Event::Permission(p) => {
+                assert_eq!(p.request_id, "req-7");
+                assert_eq!(p.tool_name, "Bash");
+                assert_eq!(p.input.get("command").and_then(Value::as_str), Some("ls"));
+            }
+            other => panic!("expected Permission, got {other:?}"),
+        }
+        assert!(d.inner.lock().unwrap().pending_permissions.contains_key("req-7"));
+
+        d.on_frame(json!({"type": "system", "subtype": "status", "permissionMode": "plan"}));
+        assert!(matches!(rx.recv().unwrap(), Event::Mode(m) if m == "plan"));
+
+        d.on_frame(json!({
+            "type": "result", "subtype": "success", "is_error": false, "duration_ms": 1234,
+            "duration_api_ms": 1000, "num_turns": 1, "result": "done", "session_id": "sid-1",
+            "total_cost_usd": 0.0123, "usage": {"input_tokens": 1, "output_tokens": 2}, "uuid": "u-2"
+        }));
+        let result = loop {
+            match rx.recv().unwrap() {
+                Event::Result(r) => break r,
+                _ => continue,
+            }
+        };
+        assert_eq!(result.subtype, "success");
+        assert!(!result.is_error);
+        assert_eq!(result.duration_ms, 1234);
+        assert!((result.cost_usd - 0.0123).abs() < 1e-9);
+    }
+
+    #[test]
+    fn versions_compare_by_part() {
+        use std::cmp::Ordering::*;
+        assert_eq!(version_cmp("2.1.283", "2.1.283"), Equal);
+        assert_eq!(version_cmp("2.1.290", "2.1.283"), Greater);
+        assert_eq!(version_cmp("2.2", "2.1.283"), Greater);
+        assert_eq!(version_cmp("1.9.9", "2.1.283"), Less);
+        assert_eq!(version_cmp("", "2.1.283"), Less);
     }
 }

@@ -26,21 +26,37 @@
 //! switch is `"crossSessionInbound": "accept"` in their settings.
 //!
 //! The token is read at send time and never stored or logged.
+//!
+//! The socket is a Unix socket, so the channel exists only on Unix. Elsewhere
+//! `registry` is empty and `send` refuses, and the window falls through to
+//! the driver: how Claude Code exposes an inbox on Windows is not known yet.
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+#[cfg(unix)]
+use serde_json::json;
+use serde_json::Value;
 
 use crate::paths;
 
+#[cfg(unix)]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long to listen for a receipt after the message is written. The inbox
 /// usually answers within milliseconds; silence is not failure.
+#[cfg(unix)]
 const REPLY_WAIT: Duration = Duration::from_millis(1500);
+
+/// Whether this build can talk to an inbox at all.
+pub fn available() -> bool {
+    cfg!(unix)
+}
 
 /// The name the envelope carries. The builder keys on it (`origin.name`).
 pub const SENDER_NAME: &str = "scribe";
@@ -85,6 +101,7 @@ pub fn sessions_dir() -> PathBuf {
     paths::claude_home().join("sessions")
 }
 
+#[cfg(unix)]
 fn alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -92,6 +109,11 @@ fn alive(pid: i32) -> bool {
     // Signal 0 probes without delivering. EPERM still means a process exists.
     let rc = unsafe { libc::kill(pid, 0) };
     rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+/// No inbox can be reached from here, so no record counts as live.
+#[cfg(not(unix))]
+fn alive(_pid: i32) -> bool {
+    false
 }
 
 /// Every session on this machine that currently has an inbox, by id.
@@ -135,6 +157,7 @@ pub fn registry() -> HashMap<String, Peer> {
     peers
 }
 
+#[cfg(unix)]
 fn token(peer: &Peer) -> String {
     if peer.key_path.is_empty() {
         return String::new();
@@ -150,6 +173,12 @@ fn token(peer: &Peer) -> String {
 /// Put `text` in front of the session. `Ok` means the inbox accepted the
 /// connection and read the message; a refusal carries the reason the inbox
 /// gave, or ours if it never got that far.
+#[cfg(not(unix))]
+pub fn send(_peer: &Peer, _text: &str) -> Result<Delivery, String> {
+    Err("the inbox channel needs a Unix socket, which this platform does not have yet".into())
+}
+
+#[cfg(unix)]
 pub fn send(peer: &Peer, text: &str) -> Result<Delivery, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -209,6 +238,7 @@ pub fn send(peer: &Peer, text: &str) -> Result<Delivery, String> {
     Ok(delivery)
 }
 
+#[cfg(unix)]
 fn uuid_hex() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let mut h = sha1_smol::Sha1::new();
@@ -223,6 +253,7 @@ mod tests {
 
     /// A stand-in inbox: checks the auth frame and the envelope, answers
     /// with a receipt, so the wire is tested without Claude Code.
+    #[cfg(unix)]
     #[test]
     fn send_speaks_the_inbox_wire() {
         use std::io::{BufRead, BufReader};

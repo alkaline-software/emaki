@@ -1,11 +1,15 @@
-//! Scribe: every coding-agent session on this machine, kept for good, in one
-//! window you can also talk to.
+//! Emaki: every coding-agent session on this machine, kept for good, in one
+//! window you can also talk to. (The crates and `~/.scribe` keep the old
+//! name until the repository moves.)
 
 mod a11y;
 mod assets;
+mod fonts;
 mod format;
 mod hub;
+mod sys;
 mod transcript;
+mod ui_state;
 mod workbench;
 
 use gpui::*;
@@ -14,7 +18,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, KEY_CONTEXT, SEARCH_CONTEXT};
 
 actions!(scribe_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{Escape, GoBoard, GoSessions, NewSession, Refresh, Send, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -28,8 +32,17 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", Escape, Some(SEARCH_CONTEXT)),
         KeyBinding::new("secondary-enter", Send, Some(COMPOSER_CONTEXT)),
         KeyBinding::new("secondary-q", Quit, None),
-        KeyBinding::new("secondary-w", CloseWindow, None),
+        // ⌘, on macOS, Ctrl+, elsewhere; Win+, as well where there is a
+        // Win key, though Windows itself may take it first (desktop peek).
+        KeyBinding::new("secondary-,", OpenSettings, None),
+        // Closes the session tab when one is showing, otherwise the window.
+        // One global binding: a context-bound one loses to a global one
+        // whenever the focus sits deeper than the workbench, in the composer.
+        KeyBinding::new("secondary-w", CloseTab, None),
     ];
+    if !cfg!(target_os = "macos") {
+        keys.push(KeyBinding::new("win-,", OpenSettings, None));
+    }
     if cfg!(target_os = "macos") {
         keys.extend([
             KeyBinding::new("secondary-h", Hide, None),
@@ -43,18 +56,18 @@ fn key_bindings() -> Vec<KeyBinding> {
 
 fn app_menus() -> Vec<Menu> {
     let mac = cfg!(target_os = "macos");
-    let mut app_items = vec![MenuItem::separator()];
+    let mut app_items = vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator()];
     if mac {
         app_items.extend([
-            MenuItem::action("Hide Scribe", Hide),
+            MenuItem::action("Hide Emaki", Hide),
             MenuItem::action("Hide Others", HideOthers),
             MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
         ]);
     }
-    app_items.push(MenuItem::action("Quit Scribe", Quit));
+    app_items.push(MenuItem::action("Quit Emaki", Quit));
     let mut menus = vec![
-        Menu { name: "Scribe".into(), items: app_items, disabled: false },
+        Menu { name: "Emaki".into(), items: app_items, disabled: false },
         Menu {
             name: "File".into(),
             disabled: false,
@@ -124,19 +137,29 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
     });
 }
 
+/// Where the window was last time, if that spot is still on a screen.
+fn remembered_bounds(cx: &App) -> Option<Bounds<Pixels>> {
+    let r = ui_state::UiState::load().window?;
+    let b = Bounds { origin: point(px(r.x), px(r.y)), size: size(px(r.w.max(560.)), px(r.h.max(480.))) };
+    let centre = point(b.origin.x + b.size.width / 2., b.origin.y + b.size.height / 2.);
+    cx.displays().iter().any(|d| d.bounds().contains(&centre)).then_some(b)
+}
+
 fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
-    let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+    let bounds = remembered_bounds(cx).unwrap_or_else(|| Bounds::centered(None, size(px(1180.), px(760.)), cx));
     let titlebar = if cfg!(target_os = "macos") {
         TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(12.), px(13.))) }
     } else {
-        TitlebarOptions { title: Some("Scribe".into()), appears_transparent: false, traffic_light_position: None }
+        TitlebarOptions { title: Some("Emaki".into()), appears_transparent: false, traffic_light_position: None }
     };
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(titlebar),
-            window_min_size: Some(size(px(900.), px(600.))),
-            app_id: Some("scribe".into()),
+            // Narrow enough for the sidebar to fold away (see NARROW_W) and
+            // the conversation to run edge to edge, like the Claude app.
+            window_min_size: Some(size(px(560.), px(480.))),
+            app_id: Some("emaki".into()),
             ..Default::default()
         },
         |window, cx| {
@@ -158,6 +181,8 @@ fn main() {
     let app = gpui_platform::application().with_assets(assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        sys::install_dock_icon();
+        fonts::install(cx);
         install_theme(cx);
         gpui_component::Theme::sync_system_appearance(None, cx);
 

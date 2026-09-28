@@ -1,0 +1,144 @@
+name: release
+
+# Installers, built only when a version tag is pushed (`git tag v0.2.0 &&
+# git push --tags`). Each OS packages its own build with cargo-packager and
+# the files are attached to a GitHub Release under stable names, so the
+# docs can link `releases/latest/download/<name>` and never go stale.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            formats: dmg
+            asset: Emaki-mac-arm64.dmg
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            formats: dmg
+            asset: Emaki-mac-x64.dmg
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            formats: nsis
+            asset: Emaki-windows-x64-setup.exe
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            formats: appimage,deb
+            asset: Emaki-linux-x64.AppImage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$v" != "${GITHUB_REF_NAME}" ]; then
+            echo "Cargo.toml says $v but the tag is ${GITHUB_REF_NAME}"; exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libssl-dev libzstd-dev \
+            libfontconfig-dev libfreetype-dev libwayland-dev libx11-xcb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libvulkan-dev libvulkan1 mesa-vulkan-drivers libasound2-dev \
+            libfuse2 file
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: cargo-packager
+        run: cargo install cargo-packager --locked
+
+      - name: Build
+        run: cargo build --release --locked -p scribe-app --target ${{ matrix.target }}
+
+      - name: Package
+        if: runner.os != 'macOS'
+        run: cargo packager --release -p scribe-app --target ${{ matrix.target }} --formats ${{ matrix.formats }}
+        env:
+          # linuxdeploy is an AppImage itself; runners have no FUSE for it.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+
+      # With the certificate in the repository's secrets the bundle gets a
+      # Developer ID signature, the hardened runtime, and, with the Apple ID
+      # secrets too, notarization and a staple: a plain double-click install.
+      # Without them (a fork, a contributor) the build is ad-hoc signed and
+      # the docs' "Open Anyway" steps apply. scripts/release-mac.sh is the
+      # same script a laptop release uses.
+      - name: Signing identity (when the secrets are set)
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE_P12 != ''
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "EMAKI_SIGNED=1" >> "$GITHUB_ENV"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "${EMAKI_SIGNED:-}" = "1" ]; then
+            NOTARIZE=""; [ -n "$APPLE_ID" ] && NOTARIZE="--notarize"
+            scripts/release-mac.sh --target ${{ matrix.target }} --no-build $NOTARIZE --out dist/${{ matrix.asset }}
+          else
+            scripts/release-mac.sh --target ${{ matrix.target }} --no-build --identity - --out dist/${{ matrix.asset }}
+          fi
+
+      - name: Stable file names
+        shell: bash
+        run: |
+          mkdir -p upload
+          case "${{ matrix.formats }}" in
+            dmg)   mv dist/*.dmg "upload/${{ matrix.asset }}" ;;
+            nsis)  mv dist/*-setup.exe "upload/${{ matrix.asset }}" ;;
+            appimage,deb)
+                   mv dist/*.AppImage "upload/${{ matrix.asset }}"
+                   mv dist/*.deb upload/Emaki-linux-x64.deb ;;
+          esac
+          ls -la upload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: upload/*
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: upload/*
+          generate_release_notes: true

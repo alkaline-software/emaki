@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::AgentId;
 use crate::paths;
-use crate::transcript::{inode_of, mtime_secs, SessionRef};
+use crate::transcript::{file_id, mtime_secs, SessionRef};
 
 pub const SIDECAR_DIRS: &[&str] = &["subagents", "tool-results"];
 pub const MAX_COPY_BYTES: u64 = 512 * 1024 * 1024;
@@ -121,7 +121,7 @@ pub fn mirror_file(src: &Path, dst: &Path, state: &mut State, stats: &mut Stats)
     let key = src.to_string_lossy().to_string();
     let prev = state.get(&key).cloned().unwrap_or_default();
     let have = dst.exists();
-    let ino = inode_of(&st);
+    let ino = file_id(src, &st);
     let same_file = have && prev.inode == ino && state.contains_key(&key);
 
     let result: std::io::Result<u64> = (|| {

@@ -688,13 +688,15 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
     let bl = blocks(row);
     let uuid = str_of(row, "uuid");
 
-    let results: Vec<&Value> = bl.iter().filter(|x| block_type(x) == "tool_result").collect();
+    let results: Vec<(usize, &Value)> = bl.iter().enumerate().filter(|(_, x)| block_type(x) == "tool_result").collect();
     if !results.is_empty() {
         let sidecar = row.get("toolUseResult");
-        for block in results {
+        for (index, block) in results {
             let id = str_of(block, "tool_use_id");
             if let Some(call) = b.call_mut(id) {
                 apply_result(call, block, sidecar, ts);
+                call.result_uuid = uuid.into();
+                call.result_index = index;
             }
         }
         return;

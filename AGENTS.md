@@ -68,21 +68,27 @@ crates/scribe-core/        everything without a window
   src/search.rs              FTS5 over every item, ~/.scribe/search.db
   src/driver.rs              a headless `claude -p` child on stream-json
   src/watcher.rs             notify over every agent's data roots
-  src/bin/scribe-core.rs     list | render | build | archive | sync | search | drive
+  src/bin/scribe-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | drive
   tests/core.rs
 crates/scribe-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
   src/workbench.rs           sidebar, session list, board, search, composer
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/main.rs                menus, key bindings, the window
-scripts/make-app.sh        Scribe.app bundle, ad-hoc signed
+  src/sys.rs                 open, reveal, the person's name: per OS
+  src/ui_state.rs            ~/.scribe/state/ui.json, what the window remembers
+  assets/icon/               the icon in every size, from scripts/icon/draw.js
+scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
+scripts/make-icon.sh       redraws assets/icon from scripts/icon/draw.js
+.github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
+.github/workflows/release.yml  installers on a v* tag, via cargo-packager
 ```
 
 ```
-cargo build -p scribe-app && ./target/debug/Scribe
+cargo build -p scribe-app && ./target/debug/Emaki
 cargo test -p scribe-core
-SCRIBE_OPEN=<session-id prefix> ./target/debug/Scribe    # open a session on launch
-SCRIBE_PAGE=new|sessions|board ./target/debug/Scribe     # land on a page
+SCRIBE_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launch
+SCRIBE_PAGE=new|sessions|board ./target/debug/Emaki     # land on a page
 ```
 
 **The board is the web viewer's board.** Same four columns (needs you,
@@ -98,16 +104,27 @@ and a live dot, plus Kept only), Projects and Recents, and an account-style
 footer that carries the status line. The content pane has a 48px top strip
 with the title centred and actions on the right; when the sidebar is hidden
 the strip makes room for the traffic lights. Everything readable sits in one
-column of `CONTENT_W` (768px): the conversation, the sessions page (a serif
-title, filter pills, rows), and the home page, which is a serif greeting over
-the composer with recent folders as pills beneath. The composer is a floating
+column of `CONTENT_W` (768px), centred in whatever is left of the window:
+the conversation, the sessions page (a serif title, filter pills, rows),
+and the home page, which is a serif greeting over the composer with recent
+folders as pills beneath. A round in the list is wrapped in an explicit
+centring parent, because the list lays each item out on its own and an
+auto margin has nothing to push against there. Narrower than `NARROW_W`
+(880px) the sidebar leaves the row and comes back only as an overlay over
+a scrim (the top-strip button, ⌘⇧S), which any click or Escape puts away;
+`sidebar_open` keeps the preference for when the window is wide again. The
+window goes down to 560 by 480, where the column runs edge to edge with
+its 24px gutters, as the Claude app does. The composer is a floating
 card with a round accent send button, mode/model pills (driver channels
 only), a "+" that opens the file picker, and a row of attachment chips; it
 also takes drops and image pastes. The textarea grows with its content from
 three to twelve rows, which also keeps the caret laid out, so the caret
 rectangle macOS asks for (dictation, the input-source badge) is real. The hint line under it says which channel
 a message would take. Prompts are rounded
-surface boxes on the right, replies are plain prose under the agent's mark.
+surface boxes on the right, attachments above the words (pictures as
+tiles, then file chips), replies are plain prose under the agent's mark,
+stopping `REPLY_INSET` (40px) short of the prompts' right edge so the two
+voices sit at different widths, as in the Claude app.
 The palette is `crates/scribe-app/themes/scribe.json`, one config per
 appearance, loaded by `install_theme` in `main.rs`: cream and charcoal with a
 terracotta accent (`primary`), blue for working, green for your turn. Our
@@ -173,6 +190,16 @@ session on every frame and are re-measured as they render, so `set_detail`
 only tells the list about a change in count (append new rounds, reset on a
 rewrite), and toggling a tool, thought, run or thumbnail just notifies.
 
+**A Read opens on what came back.** Its subject names the file, and for a
+long time that was all a successful Read showed: the contents live on
+disk. That left a Read of a picture with a dimmed chevron and nothing to
+unfold. Now `tool_has_body` says yes whenever a result came back: text
+shows clipped like any output, in the file's language; a picture is read
+back out of the transcript the way a pasted one is (`ToolCall::result_uuid`
+and `result_index` name the result row and block, and
+`transcript::image_block_bytes` looks inside a `tool_result` block for its
+first image) and drawn as a tile that opens the lightbox.
+
 **Runs of tool calls fold.** Three or more consecutive tool calls (thoughts
 between them included) draw as one row in `render_run`: the count, a tally
 by kind, the last subject, the total time, and the agent's turning mark with
@@ -200,13 +227,35 @@ class never forwards `accessibilityFocusedUIElement` to its content view
 prints gpui's own view of the tree on every draw. With both, the focused
 element is an `AXTextArea` carrying the text.
 
-**Attachments show as what they are.** In the composer a picture is a
-thumbnail from its file; anything else gets a typed icon
+**Attachments show as what they are, whole.** In the composer a picture is
+a thumbnail from its file; anything else gets a typed icon
 (`assets/icons/file-*.svg`, chosen by `assets::file_icon_path`) with name
-and size. In a transcript, `render_attachment` draws a pasted image from the
+and size. A thumbnail is never a crop: `image_dims` reads the pixel size
+out of the PNG, JPEG, GIF or WebP header (`file_image_dims` for a file,
+kept per session in `Detail::sizes`; for a pasted block, alongside the
+bytes in `Thumb`; for a composer chip, in `Attachment::size` at attach
+time), and `fit_thumb` gives the tile the picture's own shape inside a
+maximum box, drawn with `ObjectFit::Contain`. Only a picture whose header
+says nothing gets a fixed box, letterboxed. In a transcript, `render_attachment` draws a pasted image from the
 kept file when the prompt names one, or reads the block back out of the
 JSONL (`transcript::image_block_bytes`, cached per session in
 `Detail::thumbs`, loaded off the main thread) when it does not.
+
+**The conversation is set in Anthropic Serif, or Anthropic Sans.** Those
+are the Claude desktop app's own fonts and not ours to ship, so `fonts.rs`
+loads them at start from a Claude app installed on this machine (its
+`Resources/fonts` on macOS, the Squirrel install under `LOCALAPPDATA` on
+Windows) through `text_system().add_fonts`, and resolves the family names
+the text system reports. Without a Claude app the serif falls back to
+Georgia and the sans to the window's face, and the settings panel says so.
+The face is applied to the transcript container only (`render_detail`),
+which the markdown view inherits; code stays in the mono face, the chrome
+and the composer stay in the UI face. The choice is `app.chat_font` in
+`config.json` (`serif`, the default, or `sans`), changed from the settings
+panel (⌘, on macOS, Ctrl+, and Win+, elsewhere, or the app menu) through
+`Config::edit`, which rewrites the file without the environment overrides
+`Config::load` applies. `driver.claude_path` in the same file names the
+`claude` binary when `PATH` does not.
 
 **The composer is plain text, on purpose.** It is a growing `TextareaState`
 (three to twelve rows) with no markdown rendering of its own; markdown in a
@@ -229,6 +278,17 @@ window from a script, send real key codes (System Events `key code` or a
 `CGEvent` with the right virtual key); a unicode string on virtual key 0
 reaches the composer but not a single-line input.
 
+**A swallowed click must end the text drag.** gpui-component's window
+selection layer begins a drag on every left mouse-down, anywhere, and ends
+it on the bubble-phase mouse-up. A click handler that calls
+`stop_propagation` eats that mouse-up, the layer stays in its drag, and
+every later mouse move extends a selection nobody is making (that was
+"moving the cursor highlights text after opening a preview"). Every click
+the window swallows goes through `swallow_click`, which calls
+`gpui_base::TextSelection::end` before stopping propagation; `gpui-base` is
+a direct dependency for that one call. The lightbox backdrop is also
+`occlude`d so nothing beneath it hears the mouse.
+
 **Attachments open on click.** A picture opens in the lightbox over the
 window (Escape or a click outside closes it, with Open and Reveal in Finder
 for a file); any other file opens with the app the system keeps for it. Both
@@ -243,6 +303,98 @@ everything else, so the inbox channel, which the TUI reads as prose, still
 gets the path. The paste hook is a `capture_action` for the input's own
 `Paste` on the composer wrapper: it takes images and file lists off the
 clipboard and lets text through to the textarea.
+
+**Windows and Linux are build targets, not afterthoughts.** Everything
+Unix-only is gated, with a stated fallback: `peer` (the inbox is a Unix
+socket, so `registry` is empty and `send` refuses elsewhere, and the
+composer falls through to the driver); `transcript::file_id` (the inode on
+Unix, the NTFS file index through `winapi-util` on Windows, because the
+archive must tell a rewritten transcript from an appended one); the
+`claude` lookup (`std::env::split_paths`, `claude.exe` and the npm
+`claude.cmd` shim on Windows, the installers' directories after `PATH`);
+and `sys.rs` for opening a file, revealing it and the person's name, so no
+macOS command is shelled out from the window. `paths::decode_project_dir`
+knows the `C--Users-...` shape. Without a Windows machine, the closest
+check is a MinGW type check, which catches every `cfg` mistake but not a
+linker one:
+
+```
+brew install mingw-w64 && rustup target add x86_64-pc-windows-gnu
+CARGO_TARGET_DIR=target/xwingnu CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
+  cargo check -p scribe-app -p scribe-core --target x86_64-pc-windows-gnu
+```
+
+The MSVC target cannot be checked from a Mac (bundled SQLite wants the
+Windows headers) and neither can Linux (fontconfig wants a pkg-config
+sysroot); `rust.yml` is the real test for both.
+
+**Tests on every push, installers on tags.** `rust.yml` runs the core
+tests, builds the app and runs the CLI on all three OSes, with
+`Swatinem/rust-cache` because a cold GPUI build is long. `release.yml`
+runs on a `v*` tag: it refuses a tag that disagrees with the workspace
+version, builds per target (both Mac architectures from the Apple Silicon
+runner), packages with `cargo-packager` (config under
+`[package.metadata.packager]` in `crates/scribe-app/Cargo.toml`), ad-hoc
+signs the Mac bundle and makes its disk image with `hdiutil` so the signed
+bundle is what ships, and attaches everything under stable names
+(`Emaki-mac-arm64.dmg`, `Emaki-mac-x64.dmg`,
+`Emaki-windows-x64-setup.exe`, `Emaki-linux-x64.AppImage`,
+`Emaki-linux-x64.deb`) so links to `releases/latest/download/<name>` never
+go stale. The Mac build is signed the way Pingfan's other apps are, by
+`scripts/release-mac.sh`: a Developer ID signature with the hardened
+runtime and a secure timestamp, a disk image with an Applications link,
+and with `--notarize` notarization, stapling and validation (the keychain
+profile `notarytool-profile` on a laptop; `APPLE_ID`, `APPLE_APP_PASSWORD`
+and `APPLE_TEAM_ID` in CI). In CI the identity comes from the
+`MACOS_CERTIFICATE_P12` and `MACOS_CERTIFICATE_PASSWORD` secrets; without
+them the bundle is ad-hoc signed and the docs' "Open Anyway" steps apply,
+so a fork still builds. Windows is unsigned until SignPath. The packager
+does not run the build (its `beforePackagingCommand` cannot see
+`--target`), so build first: `cargo build --release -p scribe-app`, then
+`scripts/release-mac.sh --no-build [--notarize]`, or on other platforms
+`cargo packager --release -p scribe-app --formats <fmt>`.
+
+**The app is Emaki; the code is still scribe.** The visible name (the
+binary `Emaki`, the app menu, the wordmark, the bundle, the installer
+names) changed on 2026-09-28; the crates, the `scribe` CLI, `~/.scribe`,
+the bundle identifier and the repository wait for the organisation
+decision. `sys::install_dock_icon` gives a bare `target/debug/Emaki` the
+Dock icon at startup; a bundle has it from `Emaki.icns`; on Windows
+`build.rs` compiles `icon.ico` into the executable.
+
+**The icon is drawn, not painted.** `scripts/icon/draw.js` draws it on a
+canvas (`@napi-rs/canvas`, prebuilt, no native build): an emaki, a
+handscroll unrolled from right to left, the open stretch showing a
+conversation as coloured blocks on the window's own palette, earlier rounds
+running off the left edge, the roll on the right still holding more. Two
+angled versions with both rolls inside the tile were drawn and turned
+down; the flat one is the one Pingfan wants. Every size is drawn at that
+size, not resampled, and the script also writes the `.ico`;
+`scripts/make-icon.sh` runs it and makes the `.icns` with `iconutil`.
+Change the drawing, run the script, rebuild (the Dock icon is
+`include_bytes!`), commit the assets.
+
+**The window remembers itself.** `ui_state.rs` keeps
+`~/.scribe/state/ui.json`: bounds, sidebar, page, the open tabs, the active
+one and where each was scrolled (`ListState::logical_scroll_top`, put back
+with `scroll_to` when the tab is opened again). It is written when any of
+that changes, bounds changes at most every two seconds, and again at quit;
+the bounds are reused only when their centre is still on a screen.
+`SCRIBE_PAGE` and `SCRIBE_OPEN` still win over it. Tabs are keys in
+`Workbench::tabs`; there is one `Detail` at a time and switching tabs
+reloads from disk, which the numbers below say costs nothing a person can
+see. ⌘W is one global `CloseTab` binding that closes the showing tab, then
+the last tab, then the window: a context-bound binding would lose to a
+global one whenever the focus sits in the composer.
+
+**Opening is measured, not guessed.** `scribe-core bench [<id>...]` times
+read, build and render for a transcript (the five largest by default) and
+`SCRIBE_TIMING=1` makes the app print load and hand-over time per open.
+The largest transcript on the machine this was built on (137 MB) reads in
+about 80 ms and builds in about 80 ms more; the app opens a 66 MB session
+in under 100 ms end to end. A tail-first reader was planned and dropped on
+those numbers; bring it back only if bench shows a session over about half
+a second.
 
 **The driver is the conversation.** Messages typed in the window go to a
 `claude -p --input-format stream-json` child kept alive between turns and

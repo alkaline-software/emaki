@@ -1,0 +1,8 @@
+{
+  "name": "scribe-icon",
+  "private": true,
+  "description": "Draws the app icon on a canvas. `npm install && node draw.js <out>`; scripts/make-icon.sh does the rest.",
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1"
+  }
+}

@@ -85,7 +85,7 @@ impl TranscriptTail {
         let Ok(st) = fs::metadata(&self.path) else {
             return Vec::new();
         };
-        let ino = inode_of(&st);
+        let ino = file_id(&self.path, &st);
         if let Some(prev) = self.inode {
             if prev != ino || st.len() < self.offset {
                 self.reset();
@@ -119,13 +119,26 @@ impl TranscriptTail {
     }
 }
 
+/// What identifies a file across rewrites: the inode on Unix, the NTFS
+/// file index on Windows. `--resume` and compaction put a new file where the
+/// old one was, and this is how the tail reader and the archive tell that
+/// from an append. Zero means "unknown", which reads as "a different file"
+/// and costs a full copy, never a missed rewrite.
 #[cfg(unix)]
-pub fn inode_of(st: &fs::Metadata) -> u64 {
+pub fn file_id(_path: &Path, st: &fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     st.ino()
 }
-#[cfg(not(unix))]
-pub fn inode_of(_st: &fs::Metadata) -> u64 {
+#[cfg(windows)]
+pub fn file_id(path: &Path, _st: &fs::Metadata) -> u64 {
+    fs::File::open(path)
+        .ok()
+        .and_then(|f| winapi_util::file::information(&f).ok())
+        .map(|i| i.file_index() ^ i.volume_serial_number().rotate_left(48))
+        .unwrap_or(0)
+}
+#[cfg(not(any(unix, windows)))]
+pub fn file_id(_path: &Path, _st: &fs::Metadata) -> u64 {
     0
 }
 
@@ -435,7 +448,9 @@ pub fn index_claude(projects_root: &Path, min_size: u64) -> Vec<SessionRef> {
 
 /// The bytes of an image block a user row carries, for a thumbnail. Rows are
 /// found by their `uuid`; the block is the `index`-th entry of the message's
-/// content. This reads the file, so call it off the main thread.
+/// content. When that block is a `tool_result` (a Read of a picture), the
+/// picture is the first image inside it. This reads the file, so call it
+/// off the main thread.
 pub fn image_block_bytes(path: &Path, uuid: &str, index: usize) -> Option<(String, Vec<u8>)> {
     use std::io::BufRead;
     let file = std::fs::File::open(path).ok()?;
@@ -448,6 +463,11 @@ pub fn image_block_bytes(path: &Path, uuid: &str, index: usize) -> Option<(Strin
             continue;
         }
         let block = row.get("message")?.get("content")?.as_array()?.get(index)?;
+        let block = if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
+            block.get("content")?.as_array()?.iter().find(|b| b.get("type").and_then(|v| v.as_str()) == Some("image"))?
+        } else {
+            block
+        };
         let src = block.get("source")?;
         let media = src.get("media_type").and_then(|v| v.as_str()).unwrap_or("image/png").to_string();
         let data = src.get("data")?.as_str()?;
