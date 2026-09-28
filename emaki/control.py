@@ -218,7 +218,7 @@ class ControlState:
 
 
 WEB_MESSAGE_PREFIX = (
-    "[Message from the user, sent from the emaki web console rather than the "
+    "[Message from the user, sent from the Emaki web console rather than the "
     "terminal. Treat it exactly as you would a typed message.]"
 )
 

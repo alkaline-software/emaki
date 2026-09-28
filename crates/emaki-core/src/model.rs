@@ -46,7 +46,7 @@ impl AgentId {
 
     /// Where this agent's sessions live inside `~/.emaki/archive`. Claude Code
     /// keeps the original flat layout (`archive/<project>/`) so an archive made
-    /// by the Python emaki is read unchanged; every other agent gets a
+    /// by the Python Emaki is read unchanged; every other agent gets a
     /// leading-underscore directory, which no project slug can ever be.
     pub fn archive_subdir(self) -> &'static str {
         match self {
@@ -288,7 +288,7 @@ impl Item {
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     User,
-    /// Typed in emaki (the web page before; this app now).
+    /// Typed in Emaki (the web page before; this app now).
     Web,
     /// Another agent session, through the inbox.
     Peer,

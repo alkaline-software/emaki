@@ -1,6 +1,6 @@
 """The archive: a permanent, byte-for-byte copy of every transcript.
 
-This is the reason emaki exists.
+This is the reason Emaki exists.
 
 Claude Code deletes transcripts older than ``cleanupPeriodDays`` — 30 by
 default — and it does so silently. On the machine this was written, the sweep

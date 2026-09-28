@@ -22,7 +22,7 @@
 //! mode: Claude Code holds a message that asserts none when the recipient
 //! runs with permissions bypassed and asks in the terminal first. That check
 //! stops a less trusted process from steering a more trusted session, and
-//! emaki is such a process as far as Claude Code can tell. The user's own
+//! Emaki is such a process as far as Claude Code can tell. The user's own
 //! switch is `"crossSessionInbound": "accept"` in their settings.
 //!
 //! The token is read at send time and never stored or logged.

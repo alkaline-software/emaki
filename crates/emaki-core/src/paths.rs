@@ -1,7 +1,7 @@
 //! Filesystem layout for emaki.
 //!
-//! Everything emaki owns lives under `~/.emaki` (mode 0700), deliberately
-//! outside every repository. The layout is the one the Python emaki used, so
+//! Everything Emaki owns lives under `~/.emaki` (mode 0700), deliberately
+//! outside every repository. The layout is the one the Python Emaki used, so
 //! an existing archive, log tree and project registry are picked up as-is:
 //!
 //! ```text
@@ -47,7 +47,7 @@ pub fn expand_tilde(s: &str) -> PathBuf {
     }
 }
 
-/// The emaki data directory. `EMAKI_HOME` overrides (tests use it).
+/// The Emaki data directory. `EMAKI_HOME` overrides (tests use it).
 ///
 /// The first time this runs after the rename, `~/.scribe` is moved to
 /// `~/.emaki` whole: the archive, logs, state and uploads come along and
@@ -343,7 +343,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// A process-wide "this is the explainer's scratch cwd" check. Sessions that
-/// ran there are emaki's own helper children and are dropped from the index.
+/// ran there are Emaki's own helper children and are dropped from the index.
 pub fn is_explainer_cwd(cwd: &str, own_root: &str) -> bool {
     let path = absolute(cwd);
     let s = path.to_string_lossy();

@@ -1,4 +1,4 @@
-"""Registering emaki's hooks with Claude Code.
+"""Registering Emaki's hooks with Claude Code.
 
 Editing someone's `settings.json` is the most intrusive thing this program does,
 so it is careful about it: it backs the file up first, writes through symlinks

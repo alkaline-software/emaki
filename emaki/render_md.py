@@ -198,7 +198,7 @@ class MarkdownRenderer:
             bits.append(f"Claude Code {session.version}")
         if session.models:
             bits.append(session.models[-1])
-        return "\n---\n\n<sub>" + _escape_summary(" · ".join(bits)) + " · logged by emaki</sub>\n"
+        return "\n---\n\n<sub>" + _escape_summary(" · ".join(bits)) + " · logged by Emaki</sub>\n"
 
     def _gap(self, previous_end: str, next_start: str) -> str:
         a, b = _dt(previous_end), _dt(next_start)

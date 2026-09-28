@@ -79,7 +79,7 @@ impl Workbench {
         let is_last = ix + 1 == session.rounds.len();
 
         let who = match rnd.source {
-            Source::Web => "You · emaki",
+            Source::Web => "You · Emaki",
             Source::Peer => "Another session",
             Source::System => "Session",
             _ => "You",

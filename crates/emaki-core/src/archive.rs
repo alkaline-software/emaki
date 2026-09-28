@@ -1,6 +1,6 @@
 //! The archive: a permanent, byte-for-byte copy of every transcript.
 //!
-//! This is the reason emaki exists. Claude Code deletes transcripts older
+//! This is the reason Emaki exists. Claude Code deletes transcripts older
 //! than `cleanupPeriodDays` (30 by default) and does so silently. Every other
 //! tool in this space reads `~/.claude/projects` and stops there, so they all
 //! inherit that expiry. The archive is not a backup you hope never to need: it

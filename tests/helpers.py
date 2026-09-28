@@ -1,4 +1,4 @@
-"""Shared test scaffolding: an isolated emaki home and synthetic transcripts."""
+"""Shared test scaffolding: an isolated Emaki home and synthetic transcripts."""
 
 from __future__ import annotations
 

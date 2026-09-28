@@ -158,7 +158,7 @@ class TestReplyQueue(Isolated):
 
     def test_injection_is_labelled_as_coming_from_the_web(self):
         text = control.format_injection("do the thing")
-        self.assertIn("emaki web console", text)
+        self.assertIn("Emaki web console", text)
         self.assertTrue(text.endswith("do the thing"))
 
 

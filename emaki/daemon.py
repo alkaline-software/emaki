@@ -1988,7 +1988,7 @@ def run(port: int | None = None, background: bool = False, open_browser: bool = 
     existing = running_record()
     if existing:
         url = base_url(existing)
-        sys.stdout.write(f"emaki already running at {url}\n")
+        sys.stdout.write(f"Emaki already running at {url}\n")
         if open_browser:
             webbrowser.open(url)
         return 0
@@ -2003,7 +2003,7 @@ def run(port: int | None = None, background: bool = False, open_browser: bool = 
     url = f"http://127.0.0.1:{port}"
 
     if background:
-        sys.stdout.write(f"emaki serving {url}\n")
+        sys.stdout.write(f"Emaki serving {url}\n")
         sys.stdout.flush()
         if not _daemonize():
             return 0
@@ -2040,7 +2040,7 @@ def run(port: int | None = None, background: bool = False, open_browser: bool = 
     try:
         http.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
-        sys.stdout.write("\nemaki stopped\n")
+        sys.stdout.write("\nEmaki stopped\n")
     finally:
         stop_flag.set()
         hub.stop_all_drivers()

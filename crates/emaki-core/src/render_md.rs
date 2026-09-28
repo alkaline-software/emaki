@@ -230,7 +230,7 @@ impl<'a> MarkdownRenderer<'a> {
         if let Some(m) = s.models.last() {
             bits.push(m.clone());
         }
-        format!("\n---\n\n<sub>{} · logged by emaki</sub>\n", esc(&bits.join(" · ")))
+        format!("\n---\n\n<sub>{} · logged by Emaki</sub>\n", esc(&bits.join(" · ")))
     }
 
     fn gap(&self, previous_end: &str, next_start: &str) -> String {
@@ -247,7 +247,7 @@ impl<'a> MarkdownRenderer<'a> {
     fn round(&self, rnd: &Round, session: &Session, level: usize) -> String {
         let hashes = "#".repeat(level);
         let who = match rnd.source {
-            Source::Web => "You (emaki)",
+            Source::Web => "You (Emaki)",
             Source::Peer => "Another session",
             Source::System => "Session",
             _ => "You",
