@@ -98,7 +98,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", help="target file (default: alongside the markdown)")
     p.set_defaults(handler=cmd_export)
 
-    p = sub.add_parser("install", help="register emaki's hooks with Claude Code")
+    p = sub.add_parser("install", help="register Emaki's hooks with Claude Code")
     p.add_argument("--project", action="store_true", help="write .claude/settings.json here")
     p.add_argument("--uninstall", action="store_true")
     p.add_argument("--dry-run", action="store_true")

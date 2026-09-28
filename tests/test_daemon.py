@@ -345,7 +345,7 @@ class TestReplyInjection(DaemonHarness):
         reply, _ = self.run_hook({"hook_event_name": "Stop", "session_id": "sess-1"})
         self.assertEqual(reply["decision"], "block")
         self.assertIn("also update the README", reply["reason"])
-        self.assertIn("emaki web console", reply["reason"])
+        self.assertIn("Emaki web console", reply["reason"])
 
     def test_nothing_queued_means_no_interference(self):
         reply, _ = self.run_hook({"hook_event_name": "Stop", "session_id": "sess-1"})

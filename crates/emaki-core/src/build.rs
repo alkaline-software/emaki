@@ -57,7 +57,7 @@ re!(RE_ATTACHED, r"(?m)^Attached file: (\S.*?)\s*$");
 re!(RE_UPLOAD_ID, r"^[0-9a-f]{12}-");
 re!(RE_ANSI, r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b\x0c\x0e-\x1f]");
 
-/// `origin.name` on a message emaki sent.
+/// `origin.name` on a message Emaki sent.
 pub const PAGE_SENDER: &str = "emaki";
 /// What the envelope said before the rename; rows from then are still ours.
 pub const PAGE_SENDER_LEGACY: &str = "scribe";

@@ -18,13 +18,13 @@ The protocol is newline-delimited JSON, one connection per message::
 The content is wrapped in Claude Code's own ``<cross-session-message>``
 envelope. That is what makes the transcript row carry ``origin.name`` and a
 clean ``origin.body``, which is how the builder tells a message typed on the
-emaki page from one sent by another Claude session, without parsing prose.
+Emaki page from one sent by another Claude session, without parsing prose.
 
 The envelope deliberately asserts no permission mode. Claude Code's parity
 check holds a message from a sender that asserts none when the recipient runs
 with permissions bypassed (``bypassPermissions`` or auto mode), and asks in the
 terminal before delivering it. That check is what stops a less trusted process
-from steering a more trusted session, and emaki is exactly such a process as
+from steering a more trusted session, and Emaki is exactly such a process as
 far as Claude Code can tell, so it does not claim otherwise. A user who wants
 page messages to land in bypass-mode sessions without the prompt has Claude
 Code's own switch for it: ``"crossSessionInbound": "accept"`` in settings.

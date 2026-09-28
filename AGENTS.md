@@ -2,7 +2,7 @@
 
 ## What this is
 
-**emaki** — a CLI that mirrors every Claude Code session into markdown and
+**Emaki** — a CLI that mirrors every Claude Code session into markdown and
 serves a live web view of it. Python 3 standard library only; the viewer is
 vanilla JS with no build step. Nothing here enters a session's context window,
 and nothing ever writes to a transcript.
@@ -21,7 +21,7 @@ dropped 460k tokens from context and kept all 440 pre-boundary rows.
 
 **The JSONL transcript is the source of truth.** Claude Code writes a complete
 record of every session to `~/.claude/projects/<mangled-cwd>/<session>.jsonl`,
-and every hook payload carries `transcript_path`. emaki parses that; hooks
+and every hook payload carries `transcript_path`. Emaki parses that; hooks
 only say *when* to look.
 
 **A session is four files, not one.** Missing any of them makes "fully
@@ -53,7 +53,7 @@ transcript.
 
 ## The native app (Rust + GPUI)
 
-`crates/` is emaki as a desktop app, the successor to the Python daemon and
+`crates/` is Emaki as a desktop app, the successor to the Python daemon and
 web viewer below. Same ideas, same on-disk layout, no browser:
 
 ```
@@ -134,7 +134,7 @@ gpui-component icon set.
 **What carried over unchanged.** `~/.emaki` is read and written in the same
 layout: `archive/<project>/<session>.jsonl` plus sidecars, `logs/`, the
 project registry in `state/projects.json`, `config.json`. An archive made by
-the Python emaki is picked up as-is. The markdown a session renders to is
+the Python Emaki is picked up as-is. The markdown a session renders to is
 byte-identical to the Python renderer's except JSON key order inside tool
 arguments and the `You (web)` label, now `You (emaki)`.
 
@@ -378,12 +378,12 @@ startup; a bundle has it from `Emaki.icns`; on Windows `build.rs` compiles
 `icon.ico` into the executable.
 
 **The icon is drawn, not painted.** `scripts/icon/draw.js` draws it on a
-canvas (`@napi-rs/canvas`, prebuilt, no native build): an emaki, a
-handscroll unrolled from right to left, the open stretch showing a
-conversation as coloured blocks on the window's own palette, earlier rounds
-running off the left edge, the roll on the right still holding more. Two
-angled versions with both rolls inside the tile were drawn and turned
-down; the flat one is the one Pingfan wants. Every size is drawn at that
+canvas (`@napi-rs/canvas`, prebuilt, no native build) after the logo JP
+had generated: a terracotta plate, a cream scroll whose sheet curls toward
+the viewer at the top-left and bottom-left and is still rolled on the
+right, and a dark terminal panel on the open sheet with a `>_` prompt and
+grey, blue and green lines, in the window's own palette. The panel sits in
+a sheared frame so the lines follow its slant. Every size is drawn at that
 size, not resampled, and the script also writes the `.ico`;
 `scripts/make-icon.sh` runs it and makes the `.icns` with `iconutil`.
 Change the drawing, run the script, rebuild (the Dock icon is
@@ -546,7 +546,7 @@ set, whether there is something to interrupt); the page never guesses.
 **Do not assert `from-mode`.** Claude Code holds a message that asserts no
 permission mode when the recipient runs with permissions bypassed, and asks in
 the terminal. That check is what stops a less trusted process steering a more
-trusted session. emaki is such a process as far as Claude Code can tell; the
+trusted session. Emaki is such a process as far as Claude Code can tell; the
 user's remedy is `crossSessionInbound: accept` in their own settings.
 
 **`claude --bg --resume` forks.** It starts a copy under a new id. Only

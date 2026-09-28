@@ -1,6 +1,6 @@
 """Filesystem layout for emaki.
 
-Everything emaki owns lives under ``~/.emaki`` (mode 0700), deliberately
+Everything Emaki owns lives under ``~/.emaki`` (mode 0700), deliberately
 outside every repository: the logs now contain full tool output, so keeping them
 off a working tree is the difference between a private archive and an accidental
 ``git add -A``.
@@ -38,7 +38,7 @@ def home() -> Path:
 
 
 def root() -> Path:
-    """The emaki data directory. ``EMAKI_HOME`` overrides (tests use it).
+    """The Emaki data directory. ``EMAKI_HOME`` overrides (tests use it).
 
     The first time this runs after the rename, ``~/.scribe`` is moved to
     ``~/.emaki`` whole: the archive, logs, state and uploads come along and

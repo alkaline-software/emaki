@@ -1,4 +1,4 @@
-# emaki
+# Emaki
 
 **A permanent archive of every Claude Code conversation, and a live web view to
 read it in.**
@@ -13,7 +13,7 @@ recording adds nothing to the session's context window.
 
 ## The native app
 
-emaki is also a desktop app, written in Rust on [GPUI](https://www.gpui.rs)
+Emaki is also a desktop app, written in Rust on [GPUI](https://www.gpui.rs)
 (the Zed editor's UI framework), with the same archive, the same on-disk
 layout and the same conversation model. It reads Claude Code and Codex
 sessions, keeps every one of them past the agents' own expiry, searches all of
@@ -43,7 +43,7 @@ There are already several good Claude Code session viewers — [claude-code-view
 [claude-code-trace](https://github.com/delexw/claude-code-trace),
 [claude-code-log](https://github.com/daaain/claude-code-log) among them. Every
 one of them reads `~/.claude/projects` and stops there, so every one of them
-inherits that expiry. emaki's reason to exist is that it copies first.
+inherits that expiry. Emaki's reason to exist is that it copies first.
 
 **Compaction is not the threat.** `/compact` appends a boundary marker and keeps
 writing to the same file; the earlier rows stay. In a real session that dropped
@@ -129,7 +129,7 @@ emaki
 ```
 
 That is the whole setup, and the everyday command. The first run registers
-emaki's hooks in `~/.claude/settings.json` and says so; every run starts the
+Emaki's hooks in `~/.claude/settings.json` and says so; every run starts the
 daemon in the background if it is not up and opens the board in your browser.
 The daemon copies every transcript it can see into the archive as it starts,
 so nothing you still have is at risk from that moment on. `emaki stop` stops
@@ -193,7 +193,7 @@ emaki replay <session> [--speed N]
 ```
 
 A session argument can be a full id, a unique prefix, or a path. Leave it out
-and emaki uses the newest session for the current directory.
+and Emaki uses the newest session for the current directory.
 
 ---
 
@@ -203,7 +203,7 @@ Incremental: an unchanged session costs one `stat`. A growing one copies only
 the new bytes. Backing up 107 sessions and 134 MB took 0.2s cold, and 0.0s warm.
 
 The one case that could destroy data is a source file being rewritten or
-truncated underneath us. Rather than overwrite, emaki rotates the existing
+truncated underneath us. Rather than overwrite, Emaki rotates the existing
 archive to `<session>.gen1.jsonl` and starts fresh — so both incarnations
 survive. Sessions that outlive their originals are never fed back into the
 archive as sources.
@@ -244,7 +244,7 @@ is behind the session, and the placeholder text says which:
 
 **A running session.** Claude Code 2.1 gives every session an inbox: a Unix
 socket registered in `~/.claude/sessions/`, the same channel one Claude
-session uses to message another. emaki writes your message there and it lands
+session uses to message another. Emaki writes your message there and it lands
 exactly as a prompt typed in the terminal would: it starts a turn if Claude is
 waiting for you, and waits its turn if Claude is busy. No hooks needed. The
 message is recorded in the transcript as an ordinary row, so the log shows it
@@ -252,23 +252,23 @@ as *you · web* with Claude's reply underneath.
 
 One thing Claude Code enforces: a session running with permissions bypassed
 (`--dangerously-skip-permissions`, or auto mode) holds a message from any other
-process and asks in the terminal before delivering it. emaki does not claim
+process and asks in the terminal before delivering it. Emaki does not claim
 otherwise on your behalf. To let page messages through without the prompt, set
 `"crossSessionInbound": "accept"` in your Claude Code settings.
 
 **A finished session.** With no process behind it, sending starts a headless
-Claude Code child of emaki's own, `claude -p --resume <id>` speaking Claude
+Claude Code child of Emaki's own, `claude -p --resume <id>` speaking Claude
 Code's stream-json protocol, in the session's own directory. It appends to the
 same transcript under the same id, so the page updates as the turn runs and
 `claude --resume` in a terminal later picks up from there. The child stays
 between turns (follow-ups go straight in, a message sent mid-turn is queued)
-and closes after `driver.idle_min` of silence. Because emaki is the host of
+and closes after `driver.idle_min` of silence. Because Emaki is the host of
 that process, the page gets what a terminal has: pictures in the message, the
 permission mode and model to pick, a stop button, and the session's skills and
 commands, and a tool that needs permission is approved in the margin rail
 rather than refused. The board's *done* strip offers *continue* for these.
 
-If you open the same session in a terminal, emaki retires its child after the
+If you open the same session in a terminal, Emaki retires its child after the
 current turn so two processes never write one transcript.
 
 **Attachments.** The `+` button, a paste, or a drop onto the compose box

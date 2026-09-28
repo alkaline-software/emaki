@@ -60,7 +60,7 @@ RE_PEER_FOOTER = re.compile(
     r"\n\n(?:This came from another Claude session|That \"other Claude session\")[^\n]*\Z"
 )
 RE_PEER_ENVELOPE = re.compile(r"\A<cross-session-message(?: [^>]*)?>\n(.*)\n</cross-session-message>\Z", re.S)
-#: ``origin.name`` on a message the emaki page sent (see ``peer.SENDER_NAME``).
+#: ``origin.name`` on a message the Emaki page sent (see ``peer.SENDER_NAME``).
 PAGE_SENDER = "emaki"
 #: What the envelope said before the rename; rows from then are still ours.
 PAGE_SENDER_LEGACY = "scribe"
@@ -151,7 +151,7 @@ def user_prompt_text(row: dict) -> str:
 def peer_message(row: dict) -> tuple[str, str] | None:
     """``(text, source)`` for a user row delivered through the session inbox.
 
-    ``source`` is ``web`` when the emaki page sent it and ``peer`` for any
+    ``source`` is ``web`` when the Emaki page sent it and ``peer`` for any
     other sender. ``None`` for every other kind of user row.
     """
     origin = row.get("origin")
