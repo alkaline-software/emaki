@@ -1,0 +1,28 @@
+[package]
+name = "emaki-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+dirs.workspace = true
+notify.workspace = true
+chrono.workspace = true
+sha1_smol.workspace = true
+regex.workspace = true
+unicode-normalization.workspace = true
+
+# Probing a pid (the inbox registry) is a Unix signal; a file's identity on
+# Windows needs the NTFS file index, which std does not expose on stable.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

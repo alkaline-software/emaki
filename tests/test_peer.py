@@ -11,7 +11,7 @@ import unittest
 
 from helpers import Isolated
 
-from scribe import paths, peer
+from emaki import paths, peer
 
 
 class FakeInbox:
@@ -28,7 +28,7 @@ class FakeInbox:
         self.pid = pid or os.getpid()
         self.token = token
         # AF_UNIX paths are capped at ~104 bytes; the test tmp dir is too deep.
-        self.path = os.path.join(tempfile.gettempdir(), f"scribe-inbox-{os.getpid()}-{id(self)}.sock")
+        self.path = os.path.join(tempfile.gettempdir(), f"emaki-inbox-{os.getpid()}-{id(self)}.sock")
         self.lines: list[dict] = []
         self.got = threading.Event()
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -96,7 +96,7 @@ class TestEnvelope(unittest.TestCase):
     def test_shape_matches_claude_codes_own(self):
         self.assertEqual(
             peer.envelope("hello"),
-            '<cross-session-message from-name="scribe">\nhello\n</cross-session-message>',
+            '<cross-session-message from-name="emaki">\nhello\n</cross-session-message>',
         )
 
     def test_a_closing_tag_in_the_body_cannot_end_the_envelope(self):
@@ -185,7 +185,7 @@ class TestChildEnv(unittest.TestCase):
             os.environ["CLAUDE_CODE_SESSION_ID"] = "parent"
             os.environ["CLAUDE_CODE_MESSAGING_TOKEN"] = "secret"
             os.environ["CLAUDE_CONFIG_DIR"] = "/tmp/cfg"
-            os.environ["SCRIBE_DISABLE"] = "1"
+            os.environ["EMAKI_DISABLE"] = "1"
             env = peer.child_env()
         finally:
             os.environ.clear()
@@ -193,7 +193,7 @@ class TestChildEnv(unittest.TestCase):
         self.assertNotIn("CLAUDECODE", env)
         self.assertNotIn("CLAUDE_CODE_SESSION_ID", env)
         self.assertNotIn("CLAUDE_CODE_MESSAGING_TOKEN", env)
-        self.assertNotIn("SCRIBE_DISABLE", env)
+        self.assertNotIn("EMAKI_DISABLE", env)
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/tmp/cfg")
 
 

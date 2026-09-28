@@ -1,0 +1,66 @@
+[package]
+name = "emaki-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The binary name is what macOS shows in the menu bar and the Dock for a bare binary.
+[[bin]]
+name = "Emaki"
+path = "src/main.rs"
+
+[dependencies]
+emaki-core = { path = "../emaki-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+# The zed revision is pinned in Cargo.lock (cargo update -p gpui --precise <rev>).
+# gpui-component depends on the unpinned zed source, so a `rev` here would
+# produce a second copy of gpui that it does not build against.
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
+futures = "0.3"
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
+# The window selection layer, for ending a drag a swallowed click would leave open.
+gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
+uuid = { version = "1", features = ["v4"] }
+# Open-with and the person's name, without shelling out to macOS commands.
+opener = "0.7"
+whoami = "1"
+
+# The .exe carries the icon as a resource; nothing to do elsewhere.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSResponder", "NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", features = ["NSData"] }
+raw-window-handle = "0.6"
+
+# Installers: `cargo packager --release` (cargo-packager) builds the app and
+# wraps it per platform. release.yml passes `--formats` per OS and renames
+# the results to the stable names the docs link to. No signing identity is
+# set: the macOS bundle is ad-hoc signed afterwards, and the docs explain
+# the "Open Anyway" and SmartScreen steps.
+[package.metadata.packager]
+productName = "Emaki"
+identifier = "com.pingfanhu.emaki"
+description = "Every coding-agent session on this machine, kept for good, in one window you can also talk to."
+homepage = "https://github.com/jhelvy/emaki"
+licenseFile = "../../LICENSE"
+category = "DeveloperTool"
+icons = ["assets/icon/icon.icns", "assets/icon/icon.ico", "assets/icon/icon-*.png"]
+outDir = "../../dist"
+binaries = [{ path = "Emaki", main = true }]
+
+[package.metadata.packager.macos]
+minimumSystemVersion = "14.0"
+
+[package.metadata.packager.nsis]
+installMode = "currentUser"
+
+[package.metadata.packager.deb]
+depends = ["libxkbcommon0", "libxkbcommon-x11-0", "libwayland-client0", "libvulkan1", "libfontconfig1", "libfreetype6", "libx11-xcb1", "libxcb1"]

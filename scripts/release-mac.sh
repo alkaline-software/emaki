@@ -40,10 +40,10 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 TARGET_FLAG=(); [[ -n "$TARGET" ]] && TARGET_FLAG=(--target "$TARGET")
 
 if (( BUILD )); then
-  cargo build --release --locked -p scribe-app "${TARGET_FLAG[@]}"
+  cargo build --release --locked -p emaki-app "${TARGET_FLAG[@]}"
 fi
 rm -rf dist/Emaki.app
-cargo packager --release -p scribe-app "${TARGET_FLAG[@]}" --formats app
+cargo packager --release -p emaki-app "${TARGET_FLAG[@]}" --formats app
 APP=dist/Emaki.app
 [[ -d "$APP" ]] || { echo "packager left no $APP" >&2; exit 1; }
 

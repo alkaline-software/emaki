@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const Compose = require("../scribe/viewer/compose.js");
+const Compose = require("../emaki/viewer/compose.js");
 
 let passed = 0;
 let failed = 0;
@@ -100,8 +100,8 @@ test("completing before existing text keeps it", () => {
   assert.equal(out.caret, 11);
 });
 test("completing a mention mid-sentence", () => {
-  const out = Compose.complete("see @sc now", { start: 4, end: 7 }, "@scribe/app.js");
-  assert.equal(out.text, "see @scribe/app.js now");
+  const out = Compose.complete("see @sc now", { start: 4, end: 7 }, "@emaki/app.js");
+  assert.equal(out.text, "see @emaki/app.js now");
 });
 test("step wraps both ways", () => {
   assert.equal(Compose.step(0, -1, 3), 2);

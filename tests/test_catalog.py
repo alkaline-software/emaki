@@ -9,7 +9,7 @@ from pathlib import Path
 
 from helpers import Isolated
 
-from scribe import catalog, paths
+from emaki import catalog, paths
 
 
 def write(path: Path, text: str) -> None:

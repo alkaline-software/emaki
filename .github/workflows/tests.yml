@@ -40,14 +40,14 @@ jobs:
 
       - name: Viewer parses
         run: |
-          for f in scribe/viewer/*.js; do node --check "$f"; done
+          for f in emaki/viewer/*.js; do node --check "$f"; done
 
       - name: CLI smoke test
         run: |
-          ./bin/scribe --version
-          ./bin/scribe status
-          ./bin/scribe list --all
+          ./bin/emaki --version
+          ./bin/emaki status
+          ./bin/emaki list --all
         env:
-          # Never let a CI run touch a real ~/.scribe or ~/.claude.
-          SCRIBE_HOME: ${{ runner.temp }}/scribe-home
+          # Never let a CI run touch a real ~/.emaki or ~/.claude.
+          EMAKI_HOME: ${{ runner.temp }}/emaki-home
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude

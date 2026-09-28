@@ -11,7 +11,7 @@ import unittest
 
 from helpers import Isolated
 
-from scribe import config, explain, paths
+from emaki import config, explain, paths
 
 
 class TestClassification(Isolated):
@@ -164,8 +164,8 @@ class TestChildIsolation(Isolated):
 
     def test_the_scratch_workdir_is_inside_our_own_root(self):
         # The child is a real Claude Code session and gets a transcript. Running
-        # it under ~/.scribe is what lets the indexer recognise and skip them.
-        from scribe import transcript
+        # it under ~/.emaki is what lets the indexer recognise and skip them.
+        from emaki import transcript
 
         workdir = paths.run_dir() / "explain"
         workdir.mkdir(parents=True, exist_ok=True)

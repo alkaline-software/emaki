@@ -1,6 +1,6 @@
 """The daemon: HTTP API, SSE, the watcher, and the hook protocol end to end.
 
-The hook tests run the real `bin/scribe-hook` executable against a real
+The hook tests run the real `bin/emaki-hook` executable against a real
 control socket, because the thing worth verifying is the contract Claude Code
 actually sees: what lands on stdout, and how long it takes to get there.
 """
@@ -22,10 +22,10 @@ from pathlib import Path
 
 from helpers import Isolated, simple_session
 
-from scribe import config, daemon, paths
+from emaki import config, daemon, paths
 
 ROOT = Path(__file__).resolve().parent.parent
-HOOK = ROOT / "bin" / "scribe-hook"
+HOOK = ROOT / "bin" / "emaki-hook"
 
 
 class DaemonHarness(Isolated):
@@ -139,7 +139,7 @@ class TestHttpApi(DaemonHarness):
         conn.close()
 
     def test_static_traversal_is_blocked(self):
-        request = urllib.request.Request(f"http://127.0.0.1:{self.port}/static/../scribe/cli.py")
+        request = urllib.request.Request(f"http://127.0.0.1:{self.port}/static/../emaki/cli.py")
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(request, timeout=5)
         self.assertEqual(caught.exception.code, 404)
@@ -241,7 +241,7 @@ class TestHookProtocol(DaemonHarness):
         self.assertEqual(proc.stdout.strip(), "")
 
     def test_disable_env_makes_the_hook_a_no_op(self):
-        env = dict(os.environ, SCRIBE_DISABLE="1")
+        env = dict(os.environ, EMAKI_DISABLE="1")
         proc = subprocess.run(
             [sys.executable, str(HOOK)],
             input=json.dumps({"hook_event_name": "Stop", "session_id": "s"}),
@@ -345,7 +345,7 @@ class TestReplyInjection(DaemonHarness):
         reply, _ = self.run_hook({"hook_event_name": "Stop", "session_id": "sess-1"})
         self.assertEqual(reply["decision"], "block")
         self.assertIn("also update the README", reply["reason"])
-        self.assertIn("scribe web console", reply["reason"])
+        self.assertIn("emaki web console", reply["reason"])
 
     def test_nothing_queued_means_no_interference(self):
         reply, _ = self.run_hook({"hook_event_name": "Stop", "session_id": "sess-1"})
@@ -386,7 +386,7 @@ class TestReplyInjection(DaemonHarness):
 
 class TestConfigReload(DaemonHarness):
     def test_config_set_takes_effect_without_a_restart(self):
-        from scribe import config as config_module
+        from emaki import config as config_module
 
         self.assertFalse((self.hub.cfg.get("reply_queue") or {}).get("enabled"))
 
@@ -457,7 +457,7 @@ class TestBoard(DaemonHarness):
         self.assertEqual(self.card()["phase"], "your_turn")
 
     def test_a_held_approval_needs_you_with_the_call_attached(self):
-        from scribe import control
+        from emaki import control
 
         call = control.PendingCall(call_id="toolu_Z", session_id="sess-1", tool_name="Bash",
                                    tool_input={"command": "rm -rf build"})
@@ -583,8 +583,8 @@ class TestDriverDelivery(DaemonHarness):
         from test_driver import make_fake_binary
 
         self.binary = make_fake_binary(self.tmp)
-        os.environ["SCRIBE_CLAUDE"] = str(self.binary)
-        self.addCleanup(os.environ.pop, "SCRIBE_CLAUDE", None)
+        os.environ["EMAKI_CLAUDE"] = str(self.binary)
+        self.addCleanup(os.environ.pop, "EMAKI_CLAUDE", None)
         self.fake_log = self.tmp / "fake.log"
         os.environ["FAKE_CLAUDE_LOG"] = str(self.fake_log)
         self.addCleanup(os.environ.pop, "FAKE_CLAUDE_LOG", None)

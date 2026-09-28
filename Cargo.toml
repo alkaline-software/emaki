@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/scribe-core", "crates/scribe-app"]
+members = ["crates/emaki-core", "crates/emaki-app"]
 
 [workspace.package]
 version = "0.1.0"

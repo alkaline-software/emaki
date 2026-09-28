@@ -1,4 +1,4 @@
-"""Shared test scaffolding: an isolated scribe home and synthetic transcripts."""
+"""Shared test scaffolding: an isolated emaki home and synthetic transcripts."""
 
 from __future__ import annotations
 
@@ -15,23 +15,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 class Isolated(unittest.TestCase):
-    """Points SCRIBE_HOME and CLAUDE_CONFIG_DIR at throwaway directories.
+    """Points EMAKI_HOME and CLAUDE_CONFIG_DIR at throwaway directories.
 
     Every test that touches disk inherits from this, so a test run can never
     read or write the developer's real logs, transcripts, or settings.
     """
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="scribe-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="emaki-test-"))
         self._env = {}
         for key, value in {
-            "SCRIBE_HOME": str(self.tmp / "home"),
+            "EMAKI_HOME": str(self.tmp / "home"),
             "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"),
         }.items():
             self._env[key] = os.environ.get(key)
             os.environ[key] = value
         (self.tmp / "claude" / "projects").mkdir(parents=True, exist_ok=True)
-        from scribe import paths
+        from emaki import paths
 
         paths.ensure_dirs()
 
@@ -46,7 +46,7 @@ class Isolated(unittest.TestCase):
     # -- transcript authoring -------------------------------------------
 
     def transcript_path(self, cwd: str = "/tmp/proj", session_id: str | None = None) -> Path:
-        from scribe import paths
+        from emaki import paths
 
         session_id = session_id or str(uuid.uuid4())
         folder = paths.projects_dir() / cwd.replace("/", "-")

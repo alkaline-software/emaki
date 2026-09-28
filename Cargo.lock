@@ -1559,6 +1559,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
+name = "emaki-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "emaki-core",
+ "futures",
+ "gpui",
+ "gpui-base",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui_platform",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "opener",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "uuid",
+ "whoami",
+ "winresource",
+]
+
+[[package]]
+name = "emaki-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs 5.0.1",
+ "libc",
+ "notify",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1_smol",
+ "tempfile",
+ "unicode-normalization",
+ "winapi-util",
+]
+
+[[package]]
 name = "embed-resource"
 version = "3.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5847,50 +5891,6 @@ dependencies = [
  "objc-foundation",
  "objc_id",
  "once_cell",
-]
-
-[[package]]
-name = "scribe-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "futures",
- "gpui",
- "gpui-base",
- "gpui-component",
- "gpui-component-assets",
- "gpui_platform",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "opener",
- "raw-window-handle",
- "scribe-core",
- "serde",
- "serde_json",
- "uuid",
- "whoami",
- "winresource",
-]
-
-[[package]]
-name = "scribe-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "dirs 5.0.1",
- "libc",
- "notify",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
- "sha1_smol",
- "tempfile",
- "unicode-normalization",
- "winapi-util",
 ]
 
 [[package]]

@@ -13,7 +13,7 @@ from helpers import (
     user_row,
 )
 
-from scribe import build, config, redact, render_json, render_md
+from emaki import build, config, redact, render_json, render_md
 
 
 def render(rows, cfg=None):
@@ -132,7 +132,7 @@ class TestMarkdown(Isolated):
 
 class TestJson(Isolated):
     def test_items_carry_stable_keys_after_the_daemon_stamps_them(self):
-        from scribe.daemon import _key_round
+        from emaki.daemon import _key_round
 
         session = build.build(simple_session())
         payload = _key_round(render_json.JsonRenderer().round(session.rounds[0]))

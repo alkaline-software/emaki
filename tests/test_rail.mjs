@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const Rail = require("../scribe/viewer/rail.js");
+const Rail = require("../emaki/viewer/rail.js");
 
 let passed = 0;
 let failed = 0;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A stand-in for `claude -p --input-format stream-json --output-format stream-json`.
 
-Speaks just enough of the wire that `scribe.driver` cannot tell the
+Speaks just enough of the wire that `emaki.driver` cannot tell the
 difference, and writes the transcript rows a real child would, so the daemon's
 watcher sees the turn land. Everything it is told is recorded in the file
 named by ``FAKE_CLAUDE_LOG`` (one JSON object per line) so a test can assert
@@ -47,7 +47,7 @@ if MODE == "manual":
 MODEL = arg("--model", "claude-fake-1")
 CWD = os.getcwd()
 
-log(event="start", argv=sys.argv[1:], cwd=CWD, env={k: v for k, v in os.environ.items() if k.startswith(("CLAUDE", "SCRIBE"))})
+log(event="start", argv=sys.argv[1:], cwd=CWD, env={k: v for k, v in os.environ.items() if k.startswith(("CLAUDE", "EMAKI"))})
 
 state = {"mode": MODE, "model": MODEL, "interrupted": False, "turn": 0}
 pending_answers = {}
