@@ -4,7 +4,7 @@
 read it in.**
 
 ```
-uv tool install git+https://github.com/jhelvy/emaki
+uv tool install git+https://github.com/alkaline-software/emaki
 emaki
 ```
 
@@ -117,10 +117,10 @@ Requires `python3` (3.9+) and Claude Code. No dependencies. macOS and Linux;
 on Windows see [Things worth knowing](#things-worth-knowing).
 
 ```bash
-uv tool install git+https://github.com/jhelvy/emaki
+uv tool install git+https://github.com/alkaline-software/emaki
 ```
 
-No `uv`? `pipx install git+https://github.com/jhelvy/emaki` does the same.
+No `uv`? `pipx install git+https://github.com/alkaline-software/emaki` does the same.
 Either puts a `emaki` command on your PATH. Append `@<branch>` to the URL to
 install a branch other than `main`. Then:
 

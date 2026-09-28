@@ -48,7 +48,7 @@ Phases 1 and 2 go together in one pull request: Windows CI is how we confirm the
 - [x] Add `.github/workflows/release.yml`, triggered by tags like `v0.2.0`: build on each OS and attach installers to a GitHub Release. *It also refuses a tag that disagrees with the workspace version. Not yet exercised: it needs a tag.*
 - [x] Build macOS for both Apple Silicon and Intel. *Both from the Apple Silicon runner with `--target`; signed and notarized when the secrets are set, ad-hoc otherwise (see Decisions).*
 - [ ] Later: auto-updates via `cargo-packager`'s updater.
-- [ ] A first tagged release, so Phase 6 has something to link to.
+- [x] A first tagged release, so Phase 6 has something to link to. *`v0.1.0`, tagged 2026-09-28 on `alkaline-software/emaki`.*
 
 ## Phase 4: Fast loading of long conversations
 
