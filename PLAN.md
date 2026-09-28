@@ -1,8 +1,8 @@
-# Scribe native app: plan of action
+# Emaki native app: plan of action
 
 Plan for the `gpui-app` branch (Rust + GPUI desktop app). Written by JP after a review of the branch as of 2026-09-27; checkmarks and the notes in italics record what landed on the branch on 2026-09-28.
 
-**Status:** Phases 1, 2, 3 and 5 are implemented and verified on macOS; Windows and Linux are type-checked locally (MinGW target) and wait for the first CI run. Phase 4 was measured and needs no work. Phase 6 has not started. The app is called Emaki now (binary, menu, wordmark, bundle, installer names); the crates, the `scribe` CLI, `~/.scribe` and the repository keep the old name until the organisation decision.
+**Status:** Phases 1, 2, 3 and 5 are implemented and verified on macOS; Windows and Linux are type-checked locally (MinGW target) and wait for the first CI run. Phase 4 was measured and needs no work. Phase 6 has not started. The app is called Emaki now (binary, menu, wordmark, bundle, installer names); the crates, the `emaki` CLI, `~/.emaki` and the repository keep the old name until the organisation decision.
 
 ## Goals
 
@@ -16,7 +16,7 @@ Plan for the `gpui-app` branch (Rust + GPUI desktop app). Written by JP after a 
 ## Decisions so far
 
 - **Keep Rust + GPUI.** Speed on long conversations is the top priority, and GPUI's GPU rendering (the approach Zed and Sublime Text take) serves that best. GPUI supports macOS (Metal), Windows (DirectX) and Linux (wgpu). We accept that GPUI is pre-1.0 and will handle upstream breaking changes as they come.
-- **Keep the `scribe-core` / `scribe-app` split.** The core (archive, index, search, watcher, adapters, driver) has no UI dependency and stays the foundation.
+- **Keep the `emaki-core` / `emaki-app` split.** The core (archive, index, search, watcher, adapters, driver) has no UI dependency and stays the foundation.
 - **Mac signed and notarized; Windows unsigned for now.** *Changed 2026-09-28:* Pingfan already holds a Developer ID (`Developer ID Application: Pingfan Hu (XC2WL5WN7J)`) and a `notarytool` keychain profile from his other apps, so `scripts/release-mac.sh` signs with the hardened runtime, makes the disk image and notarizes, on a laptop or in CI. For CI the repository needs five secrets: `MACOS_CERTIFICATE_P12` (the certificate exported from Keychain Access as a .p12, then `base64 -i cert.p12 | pbcopy`), `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_APP_PASSWORD` (an app-specific password) and `APPLE_TEAM_ID` (`XC2WL5WN7J`). Without them the workflow falls back to an ad-hoc signature, so a fork still builds. Windows waits for SignPath (free for open source); the docs explain SmartScreen until then.
 - **Installers are built only on tagged releases**, not on every commit.
 - **Load the tail of long conversations first.** *Measured and dropped, see Phase 4.*
@@ -43,7 +43,7 @@ Phases 1 and 2 go together in one pull request: Windows CI is how we confirm the
 
 ## Phase 3: Release installers on tags
 
-- [x] Configure `cargo-packager`: `.dmg` (macOS), NSIS `.exe` installer (Windows), AppImage and `.deb` (Linux). *Config under `[package.metadata.packager]` in `crates/scribe-app/Cargo.toml`; verified locally on macOS. The packager does not run the build, so `cargo build --release` comes first.*
+- [x] Configure `cargo-packager`: `.dmg` (macOS), NSIS `.exe` installer (Windows), AppImage and `.deb` (Linux). *Config under `[package.metadata.packager]` in `crates/emaki-app/Cargo.toml`; verified locally on macOS. The packager does not run the build, so `cargo build --release` comes first.*
 - [x] Use **stable installer file names** so download links never change. *`Emaki-mac-arm64.dmg`, `Emaki-mac-x64.dmg`, `Emaki-windows-x64-setup.exe`, `Emaki-linux-x64.AppImage`, `Emaki-linux-x64.deb`.*
 - [x] Add `.github/workflows/release.yml`, triggered by tags like `v0.2.0`: build on each OS and attach installers to a GitHub Release. *It also refuses a tag that disagrees with the workspace version. Not yet exercised: it needs a tag.*
 - [x] Build macOS for both Apple Silicon and Intel. *Both from the Apple Silicon runner with `--target`; signed and notarized when the secrets are set, ad-hoc otherwise (see Decisions).*
@@ -54,7 +54,7 @@ Phases 1 and 2 go together in one pull request: Windows CI is how we confirm the
 
 The conversation view already uses GPUI's virtualized `list`, so only visible messages are drawn. The remaining cost is parsing on open.
 
-- [x] **Measure first.** Add a timing benchmark that loads the largest transcripts in the archive. *`scribe-core bench [<id>...]` times read, build and render per transcript, and `SCRIBE_TIMING=1` makes the app print load and hand-over time per open. On the five largest transcripts on Pingfan's machine (debug CLI; release is lower):*
+- [x] **Measure first.** Add a timing benchmark that loads the largest transcripts in the archive. *`emaki-core bench [<id>...]` times read, build and render per transcript, and `EMAKI_TIMING=1` makes the app print load and hand-over time per open. On the five largest transcripts on Pingfan's machine (debug CLI; release is lower):*
 
   | bytes | read | build | render | rounds |
   |---|---|---|---|---|
@@ -67,7 +67,7 @@ The conversation view already uses GPUI's virtualized `list`, so only visible me
 
 ## Phase 5: Multiple sessions and restore on reopen
 
-- [x] **Save window state** to `~/.scribe/state/ui.json`: open sessions, the active one, scroll positions, sidebar state, window size and position. Restore it on launch. *`ui_state.rs`; written on change and at quit; the bounds are reused only when their centre is still on a screen. Verified: move, quit, relaunch brought back position, tabs, the active tab and its scroll position.*
+- [x] **Save window state** to `~/.emaki/state/ui.json`: open sessions, the active one, scroll positions, sidebar state, window size and position. Restore it on launch. *`ui_state.rs`; written on change and at quit; the bounds are reused only when their centre is still on a screen. Verified: move, quit, relaunch brought back position, tabs, the active tab and its scroll position.*
 - [x] **Tabs for open sessions.** The backend already runs one `claude -p` child per session; this is UI work. *One tab per open session in the top strip, with the agent's mark turning while it works; ⌘W closes the showing tab, then the last tab, then the window.*
 - [x] **Clean shutdown and lazy resume.** Close driver processes cleanly on quit; on reopen, restart each with `--resume` only when the user sends it a message.
 
@@ -79,7 +79,7 @@ Build after Phase 3, once there are real installers and screenshots.
 - [ ] **Landing page:** short description, screenshot, download buttons per OS using `releases/latest/download/<stable name>` links.
 - [ ] **Install page:** step-by-step instructions with screenshots for opening the unsigned Mac app ("Open Anyway") and getting past the Windows SmartScreen warning; Linux AppImage/`.deb` steps.
 - [ ] **Features page.**
-- [ ] **"How Scribe keeps your conversations"** page explaining the copy-first archive and why Claude Code's 30-day cleanup matters.
+- [ ] **"How Emaki keeps your conversations"** page explaining the copy-first archive and why Claude Code's 30-day cleanup matters.
 
 ## Known risk to watch
 

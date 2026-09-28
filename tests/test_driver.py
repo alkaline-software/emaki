@@ -1,7 +1,7 @@
 """The driver: a headless Claude Code child spoken to over stream-json.
 
 Runs against `tests/fake_claude.py`, a stand-in that speaks the wire the way
-2.1.272 does (see the docstring of `scribe/driver.py` for what was checked
+2.1.272 does (see the docstring of `emaki/driver.py` for what was checked
 against the real thing). The contract under test is what the driver writes,
 what it makes of the frames coming back, and how it behaves when the child
 is slow, asks for permission, or dies.
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from helpers import Isolated
 
-from scribe import driver
+from emaki import driver
 
 ROOT = Path(__file__).resolve().parent.parent
 FAKE = ROOT / "tests" / "fake_claude.py"
@@ -157,7 +157,7 @@ class TestLifecycle(DriverHarness):
         os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = "/tmp/x"
         self.addCleanup(os.environ.pop, "CLAUDE_CODE_SESSION_ID", None)
         self.addCleanup(os.environ.pop, "CLAUDE_CODE_MESSAGING_SOCKET", None)
-        from scribe import peer
+        from emaki import peer
 
         drv = driver.Driver("sess-1", str(self.cwd), resume=True, claude=str(self.binary),
                             env=dict(peer.child_env(), FAKE_CLAUDE_LOG=str(self.log_path)))
@@ -182,7 +182,7 @@ class TestLifecycle(DriverHarness):
         self.assertEqual(drv.caps.mode, "default")
         self.assertEqual(drv.caps.skills, ["fake-skill"])
         self.assertEqual(drv.caps.terminal_commands, ["doctor"])
-        from scribe import transcript
+        from emaki import transcript
 
         path = transcript.find_transcript("sess-1")
         self.assertIsNotNone(path)
@@ -317,11 +317,11 @@ class TestPermission(DriverHarness):
 
 class TestBinary(unittest.TestCase):
     def test_the_override_wins(self):
-        os.environ["SCRIBE_CLAUDE"] = "/nowhere/claude"
+        os.environ["EMAKI_CLAUDE"] = "/nowhere/claude"
         try:
             self.assertEqual(driver.claude_binary(), "/nowhere/claude")
         finally:
-            os.environ.pop("SCRIBE_CLAUDE", None)
+            os.environ.pop("EMAKI_CLAUDE", None)
 
 
 if __name__ == "__main__":

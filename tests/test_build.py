@@ -15,8 +15,8 @@ from helpers import (
     user_row,
 )
 
-from scribe import build
-from scribe.model import Notice, Text, Thinking, ToolCall
+from emaki import build
+from emaki.model import Notice, Text, Thinking, ToolCall
 
 
 class TestRounds(Isolated):
@@ -395,9 +395,9 @@ class TestInboxMessages(Isolated):
     def test_origin_body_becomes_the_prompt_and_the_page_is_the_source(self):
         rows = [
             self.peer_row(
-                'Another Claude session sent a message:\n<cross-session-message from-name="scribe">\nrun it\n'
+                'Another Claude session sent a message:\n<cross-session-message from-name="emaki">\nrun it\n'
                 "</cross-session-message>" + self.FOOTER,
-                {"kind": "peer", "from": "unknown", "name": "scribe", "body": "run it"},
+                {"kind": "peer", "from": "unknown", "name": "emaki", "body": "run it"},
             ),
             assistant_row("sess-1", [{"type": "text", "text": "Running."}], "2026-07-28T10:00:05.000Z"),
         ]
@@ -431,9 +431,9 @@ class TestInboxMessages(Isolated):
     def test_an_envelope_without_origin_body_is_unwrapped(self):
         rows = [
             self.peer_row(
-                'Another Claude session sent a message:\n<cross-session-message from-name="scribe">\nhi there\n'
+                'Another Claude session sent a message:\n<cross-session-message from-name="emaki">\nhi there\n'
                 "</cross-session-message>" + self.FOOTER,
-                {"kind": "peer", "from": "unknown", "name": "scribe"},
+                {"kind": "peer", "from": "unknown", "name": "emaki"},
             ),
         ]
         session = build.build(rows)
@@ -449,7 +449,7 @@ class TestInboxMessages(Isolated):
             assistant_row("sess-1", [{"type": "text", "text": "Done."}], "2026-07-28T09:59:00.000Z"),
             self.peer_row(
                 "Another Claude session sent a message:\nnext" + self.FOOTER,
-                {"kind": "peer", "from": "unknown", "name": "scribe", "body": "next"},
+                {"kind": "peer", "from": "unknown", "name": "emaki", "body": "next"},
             ),
         ]
         state = build.turn_state(rows)
@@ -480,7 +480,7 @@ class TestAttachments(unittest.TestCase):
 
     def test_a_peer_message_keeps_its_attachments(self):
         row = user_row("s", "", "2026-07-28T10:00:00Z", "u8", isMeta=True,
-                       origin={"kind": "peer", "name": "scribe", "body": "see\n\nAttached file: /tmp/up/x-a.pdf"})
+                       origin={"kind": "peer", "name": "emaki", "body": "see\n\nAttached file: /tmp/up/x-a.pdf"})
         rnd = build.build([row]).rounds[0]
         self.assertEqual(rnd.source, "web")
         self.assertEqual(rnd.prompt, "see")

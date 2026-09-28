@@ -6,9 +6,9 @@ name: rust
 on:
   push:
     branches: [main, gpui-app]
-    paths-ignore: ["docs/**", "scribe/**", "bin/**", "tests/**", "*.md"]
+    paths-ignore: ["docs/**", "emaki/**", "bin/**", "tests/**", "*.md"]
   pull_request:
-    paths-ignore: ["docs/**", "scribe/**", "bin/**", "tests/**", "*.md"]
+    paths-ignore: ["docs/**", "emaki/**", "bin/**", "tests/**", "*.md"]
   workflow_dispatch:
 
 env:
@@ -45,19 +45,19 @@ jobs:
           shared-key: rust-${{ matrix.os }}
 
       - name: Tests
-        run: cargo test -p scribe-core --locked
+        run: cargo test -p emaki-core --locked
         env:
-          # Never let a CI run touch a real ~/.scribe or ~/.claude.
-          SCRIBE_HOME: ${{ runner.temp }}/scribe-home
+          # Never let a CI run touch a real ~/.emaki or ~/.claude.
+          EMAKI_HOME: ${{ runner.temp }}/emaki-home
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude
           CODEX_HOME: ${{ runner.temp }}/codex
 
       - name: Build the app
-        run: cargo build -p scribe-app -p scribe-core --locked
+        run: cargo build -p emaki-app -p emaki-core --locked
 
       - name: The CLI runs
-        run: cargo run -p scribe-core --locked -- list
+        run: cargo run -p emaki-core --locked -- list
         env:
-          SCRIBE_HOME: ${{ runner.temp }}/scribe-home
+          EMAKI_HOME: ${{ runner.temp }}/emaki-home
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude
           CODEX_HOME: ${{ runner.temp }}/codex

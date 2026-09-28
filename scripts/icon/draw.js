@@ -1,7 +1,7 @@
 // The app icon, drawn on a canvas: an emaki, a handscroll unrolled from
 // right to left. The open stretch shows a conversation as coloured blocks,
 // earlier rounds run off the left edge, and the roll on the right still
-// holds more. Same palette as the window (themes/scribe.json).
+// holds more. Same palette as the window (themes/emaki.json).
 //
 //   node draw.js <out-dir>   writes icon-1024.png, the smaller PNGs, icon.ico
 //                            and an icon.iconset/ for iconutil.

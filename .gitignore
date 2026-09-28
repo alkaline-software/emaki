@@ -20,16 +20,16 @@ venv/
 .coverage
 htmlcov/
 
-# scribe's own data, in case SCRIBE_HOME ever points at the checkout.
+# emaki's own data, in case EMAKI_HOME ever points at the checkout.
 # These hold real conversation transcripts — never commit them.
-.scribe/
+.emaki/
 archive/
 logs/
 index.db
 index.db-wal
 index.db-shm
 *.jsonl
-scribe-export-*.html
+emaki-export-*.html
 
 # Editors
 .idea/

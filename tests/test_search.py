@@ -6,7 +6,7 @@ import unittest
 
 from helpers import Isolated, assistant_row, simple_session, tool_use, user_row
 
-from scribe import archive, search, transcript
+from emaki import archive, search, transcript
 
 
 class SearchCase(Isolated):

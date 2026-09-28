@@ -1,11 +1,11 @@
-# scribe
+# emaki
 
 **A permanent archive of every Claude Code conversation, and a live web view to
 read it in.**
 
 ```
-uv tool install git+https://github.com/jhelvy/scribe
-scribe
+uv tool install git+https://github.com/jhelvy/emaki
+emaki
 ```
 
 Python 3 standard library only. Nothing here writes to a transcript, and
@@ -13,20 +13,20 @@ recording adds nothing to the session's context window.
 
 ## The native app
 
-scribe is also a desktop app, written in Rust on [GPUI](https://www.gpui.rs)
+emaki is also a desktop app, written in Rust on [GPUI](https://www.gpui.rs)
 (the Zed editor's UI framework), with the same archive, the same on-disk
 layout and the same conversation model. It reads Claude Code and Codex
 sessions, keeps every one of them past the agents' own expiry, searches all of
 them, and lets you talk to a Claude Code session from the window.
 
 ```
-cargo build --release -p scribe-app      # needs a Rust toolchain: https://rustup.rs
-./target/release/Scribe
-scripts/make-app.sh                      # dist/Scribe.app
+cargo build --release -p emaki-app      # needs a Rust toolchain: https://rustup.rs
+./target/release/Emaki
+scripts/make-app.sh                      # dist/Emaki.app
 ```
 
 The Python CLI and daemon below keep working alongside it; both read and write
-`~/.scribe`.
+`~/.emaki`.
 
 ---
 
@@ -43,7 +43,7 @@ There are already several good Claude Code session viewers — [claude-code-view
 [claude-code-trace](https://github.com/delexw/claude-code-trace),
 [claude-code-log](https://github.com/daaain/claude-code-log) among them. Every
 one of them reads `~/.claude/projects` and stops there, so every one of them
-inherits that expiry. scribe's reason to exist is that it copies first.
+inherits that expiry. emaki's reason to exist is that it copies first.
 
 **Compaction is not the threat.** `/compact` appends a boundary marker and keeps
 writing to the same file; the earlier rows stay. In a real session that dropped
@@ -55,7 +55,7 @@ What loses conversations is the 30-day sweep.
 ## What it does
 
 **Archives every session, permanently.** A byte-for-byte copy into
-`~/.scribe/archive/`, incremental and append-only. A session is four things on
+`~/.emaki/archive/`, incremental and append-only. A session is four things on
 disk, and all four are captured:
 
 ```
@@ -73,7 +73,7 @@ archived — grouped by conversation, ranked, with highlighted context. Indexing
 107 sessions takes under a second and the index is 12 MB.
 
 ```
-$ scribe search "reveal.js fragment"
+$ emaki search "reveal.js fragment"
 15 matches in 4 conversations
 
 ba25902e  Improve scroll responsiveness and restore reveal state
@@ -84,7 +84,7 @@ ba25902e  Improve scroll responsiveness and restore reveal state
 In the browser, the sidebar box searches everything; clicking a result opens
 that conversation centred on the round that matched.
 
-**Renders readable markdown.** One file per session under `~/.scribe/logs/`,
+**Renders readable markdown.** One file per session under `~/.emaki/logs/`,
 regenerated from the archive at any time. Greppable, diffable, and readable in
 ten years when this program no longer exists.
 
@@ -117,28 +117,28 @@ Requires `python3` (3.9+) and Claude Code. No dependencies. macOS and Linux;
 on Windows see [Things worth knowing](#things-worth-knowing).
 
 ```bash
-uv tool install git+https://github.com/jhelvy/scribe
+uv tool install git+https://github.com/jhelvy/emaki
 ```
 
-No `uv`? `pipx install git+https://github.com/jhelvy/scribe` does the same.
-Either puts a `scribe` command on your PATH. Append `@<branch>` to the URL to
+No `uv`? `pipx install git+https://github.com/jhelvy/emaki` does the same.
+Either puts a `emaki` command on your PATH. Append `@<branch>` to the URL to
 install a branch other than `main`. Then:
 
 ```bash
-scribe
+emaki
 ```
 
 That is the whole setup, and the everyday command. The first run registers
-scribe's hooks in `~/.claude/settings.json` and says so; every run starts the
+emaki's hooks in `~/.claude/settings.json` and says so; every run starts the
 daemon in the background if it is not up and opens the board in your browser.
 The daemon copies every transcript it can see into the archive as it starts,
-so nothing you still have is at risk from that moment on. `scribe stop` stops
-the daemon; `scribe install --uninstall` removes the hooks and restores the
+so nothing you still have is at risk from that moment on. `emaki stop` stops
+the daemon; `emaki install --uninstall` removes the hooks and restores the
 settings file exactly as it was, leaving the archive intact.
 
 Registering the hooks backs `settings.json` up first, writes *through* a
 symlink rather than replacing it (dotfiles setups keep working), and only
-touches entries it recognises as its own. `scribe install --dry-run` shows the
+touches entries it recognises as its own. `emaki install --dry-run` shows the
 diff without writing.
 
 To update, run the install line again.
@@ -151,49 +151,49 @@ From the repo root, once:
 uv tool install --editable .
 ```
 
-`scribe` then runs the checkout as it is: switch branches or pull and the
-command follows, with no reinstall. `./bin/scribe` does the same without
+`emaki` then runs the checkout as it is: switch branches or pull and the
+command follows, with no reinstall. `./bin/emaki` does the same without
 installing anything. Both the hooks and the editable install record the
 checkout's absolute path, so moving or deleting the clone breaks them until
 you run those commands again.
 
 ### Where it puts things
 
-Everything lives in `~/.scribe`, mode `0700`, outside every repository:
+Everything lives in `~/.emaki`, mode `0700`, outside every repository:
 
 ```
-~/.scribe/archive/     the permanent byte-for-byte copies — the irreplaceable part
-~/.scribe/logs/        rendered markdown, one file per session (regenerable)
-~/.scribe/index.db     the search index (regenerable)
-~/.scribe/config.json  settings
+~/.emaki/archive/     the permanent byte-for-byte copies — the irreplaceable part
+~/.emaki/logs/        rendered markdown, one file per session (regenerable)
+~/.emaki/index.db     the search index (regenerable)
+~/.emaki/config.json  settings
 ```
 
 Only `archive/` holds anything that cannot be rebuilt. Back up that directory
-and you have kept everything; `scribe build --all` regenerates the rest.
-`SCRIBE_HOME` moves the whole tree elsewhere.
+and you have kept everything; `emaki build --all` regenerates the rest.
+`EMAKI_HOME` moves the whole tree elsewhere.
 
 ---
 
 ## Commands
 
 ```
-scribe                               # start the daemon if needed, open the board
-scribe search <query>                # full-text across every conversation
-scribe archive [session]             # copy transcripts into the archive
-scribe serve [--port N] [--background] [--no-browser]
-scribe open [session]                # browser, at this project's latest session
-scribe list [-n N] [--all] [--json]  # sessions, newest first
-scribe build <session|--all>         # (re)generate markdown
-scribe path|show <session>           # the markdown path, or its contents
-scribe export <session> -o f.html    # one self-contained HTML file
-scribe status | stop
-scribe config list|get|set <key> <value>
-scribe install [--uninstall] [--project] [--dry-run]
-scribe replay <session> [--speed N]
+emaki                               # start the daemon if needed, open the board
+emaki search <query>                # full-text across every conversation
+emaki archive [session]             # copy transcripts into the archive
+emaki serve [--port N] [--background] [--no-browser]
+emaki open [session]                # browser, at this project's latest session
+emaki list [-n N] [--all] [--json]  # sessions, newest first
+emaki build <session|--all>         # (re)generate markdown
+emaki path|show <session>           # the markdown path, or its contents
+emaki export <session> -o f.html    # one self-contained HTML file
+emaki status | stop
+emaki config list|get|set <key> <value>
+emaki install [--uninstall] [--project] [--dry-run]
+emaki replay <session> [--speed N]
 ```
 
 A session argument can be a full id, a unique prefix, or a path. Leave it out
-and scribe uses the newest session for the current directory.
+and emaki uses the newest session for the current directory.
 
 ---
 
@@ -203,12 +203,12 @@ Incremental: an unchanged session costs one `stat`. A growing one copies only
 the new bytes. Backing up 107 sessions and 134 MB took 0.2s cold, and 0.0s warm.
 
 The one case that could destroy data is a source file being rewritten or
-truncated underneath us. Rather than overwrite, scribe rotates the existing
+truncated underneath us. Rather than overwrite, emaki rotates the existing
 archive to `<session>.gen1.jsonl` and starts fresh — so both incarnations
 survive. Sessions that outlive their originals are never fed back into the
 archive as sources.
 
-`scribe status` reports how much is held and how many sessions exist only
+`emaki status` reports how much is held and how many sessions exist only
 because they were archived.
 
 ---
@@ -224,7 +224,7 @@ because they were archived.
   *around* its anchors instead of ratcheting downward, and clicking a note (or
   its tool call) snaps them into exact alignment while neighbours move aside. A
   dashed tether shows the pairing. The layout is an exact solve — see
-  `scribe/viewer/rail.js`.
+  `emaki/viewer/rail.js`.
 - **Tool calls** show command, stdout, stderr and status; edits render as
   red/green diffs; subagent conversations nest inside the call that spawned
   them, matched by `toolUseId` rather than guessed.
@@ -244,7 +244,7 @@ is behind the session, and the placeholder text says which:
 
 **A running session.** Claude Code 2.1 gives every session an inbox: a Unix
 socket registered in `~/.claude/sessions/`, the same channel one Claude
-session uses to message another. scribe writes your message there and it lands
+session uses to message another. emaki writes your message there and it lands
 exactly as a prompt typed in the terminal would: it starts a turn if Claude is
 waiting for you, and waits its turn if Claude is busy. No hooks needed. The
 message is recorded in the transcript as an ordinary row, so the log shows it
@@ -252,27 +252,27 @@ as *you · web* with Claude's reply underneath.
 
 One thing Claude Code enforces: a session running with permissions bypassed
 (`--dangerously-skip-permissions`, or auto mode) holds a message from any other
-process and asks in the terminal before delivering it. scribe does not claim
+process and asks in the terminal before delivering it. emaki does not claim
 otherwise on your behalf. To let page messages through without the prompt, set
 `"crossSessionInbound": "accept"` in your Claude Code settings.
 
 **A finished session.** With no process behind it, sending starts a headless
-Claude Code child of scribe's own, `claude -p --resume <id>` speaking Claude
+Claude Code child of emaki's own, `claude -p --resume <id>` speaking Claude
 Code's stream-json protocol, in the session's own directory. It appends to the
 same transcript under the same id, so the page updates as the turn runs and
 `claude --resume` in a terminal later picks up from there. The child stays
 between turns (follow-ups go straight in, a message sent mid-turn is queued)
-and closes after `driver.idle_min` of silence. Because scribe is the host of
+and closes after `driver.idle_min` of silence. Because emaki is the host of
 that process, the page gets what a terminal has: pictures in the message, the
 permission mode and model to pick, a stop button, and the session's skills and
 commands, and a tool that needs permission is approved in the margin rail
 rather than refused. The board's *done* strip offers *continue* for these.
 
-If you open the same session in a terminal, scribe retires its child after the
+If you open the same session in a terminal, emaki retires its child after the
 current turn so two processes never write one transcript.
 
 **Attachments.** The `+` button, a paste, or a drop onto the compose box
-attaches files; they are kept under `~/.scribe/uploads/<session>/` and never
+attaches files; they are kept under `~/.emaki/uploads/<session>/` and never
 enter a repository. On a page-driven session an image goes to Claude as an
 image (it sees the picture); anything else, and everything on a terminal
 session, is named by path so Claude reads it with its own tools. `uploads.max_mb`
@@ -309,11 +309,11 @@ at the terminal. `Esc` while Claude is working stops the turn.
 turned off there) falls back to the Stop-hook queue below when that is enabled.
 
 ```bash
-scribe config set messaging.enabled false   # hide the compose box entirely
-scribe config set driver.enabled false      # never start a process
-scribe config set driver.idle_min 10        # close an idle child sooner
-scribe config set driver.default_mode plan  # mode a started session begins in
-scribe config set driver.allow_bypass true  # offer bypassPermissions on the page
+emaki config set messaging.enabled false   # hide the compose box entirely
+emaki config set driver.enabled false      # never start a process
+emaki config set driver.idle_min 10        # close an idle child sooner
+emaki config set driver.default_mode plan  # mode a started session begins in
+emaki config set driver.allow_bypass true  # offer bypassPermissions on the page
 ```
 
 ## Two-way control through hooks
@@ -321,8 +321,8 @@ scribe config set driver.allow_bypass true  # offer bypassPermissions on the pag
 Off by default. Turn on deliberately.
 
 ```bash
-scribe config set remote_approval.enabled true
-scribe config set reply_queue.enabled true
+emaki config set remote_approval.enabled true
+emaki config set reply_queue.enabled true
 ```
 
 **Approvals.** Press *approvals* to arm a session. The next permission request
@@ -354,7 +354,7 @@ it is why the blanket claim at the top of this file is about recording.
 
 ## Configuration
 
-`scribe config list` shows everything; `~/.scribe/config.json` holds it.
+`emaki config list` shows everything; `~/.emaki/config.json` holds it.
 
 | Key | Default | |
 |---|---|---|
@@ -378,7 +378,7 @@ it is why the blanket claim at the top of this file is about recording.
 ## Privacy
 
 The archive holds complete transcripts, which means whatever the agent read.
-Everything lives in `~/.scribe` at mode `0700`, outside every repository — an
+Everything lives in `~/.emaki` at mode `0700`, outside every repository — an
 in-project log is one `git add -A` away from being published.
 
 `redact.enabled` scrubs the shapes that leak most often: provider key prefixes
@@ -404,7 +404,7 @@ cached so nothing is sent twice, and `explain.enabled false` turns it off.
 - **Token counts exclude cache reads.** Every message re-reads the cached prefix,
   so summing that field reports tens of millions for a session that produced a
   few hundred thousand.
-- **`scribe serve` binds loopback only**, checks `Host` against DNS rebinding, and
+- **`emaki serve` binds loopback only**, checks `Host` against DNS rebinding, and
   serves a CSP forbidding inline script and every external origin. Transcript
   content is escaped, never rendered as HTML.
 - **`--background` is POSIX-only** (it forks) and hooks need `AF_UNIX`. On Windows
@@ -420,7 +420,7 @@ node tests/test_rail.mjs                          # the rail's layout solver
 node tests/test_compose.mjs                       # the composer's key and token rules
 ```
 
-`SCRIBE_HOME` and `CLAUDE_CONFIG_DIR` redirect everything, which is how the tests
+`EMAKI_HOME` and `CLAUDE_CONFIG_DIR` redirect everything, which is how the tests
 stay off your real data.
 
 MIT.

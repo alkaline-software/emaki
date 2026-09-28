@@ -13,7 +13,7 @@ import unittest
 
 from helpers import Isolated
 
-from scribe import control
+from emaki import control
 
 
 class TestApprovalHold(Isolated):
@@ -158,7 +158,7 @@ class TestReplyQueue(Isolated):
 
     def test_injection_is_labelled_as_coming_from_the_web(self):
         text = control.format_injection("do the thing")
-        self.assertIn("scribe web console", text)
+        self.assertIn("emaki web console", text)
         self.assertTrue(text.endswith("do the thing"))
 
 

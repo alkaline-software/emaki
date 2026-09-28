@@ -73,11 +73,11 @@ jobs:
         run: cargo install cargo-packager --locked
 
       - name: Build
-        run: cargo build --release --locked -p scribe-app --target ${{ matrix.target }}
+        run: cargo build --release --locked -p emaki-app --target ${{ matrix.target }}
 
       - name: Package
         if: runner.os != 'macOS'
-        run: cargo packager --release -p scribe-app --target ${{ matrix.target }} --formats ${{ matrix.formats }}
+        run: cargo packager --release -p emaki-app --target ${{ matrix.target }} --formats ${{ matrix.formats }}
         env:
           # linuxdeploy is an AppImage itself; runners have no FUSE for it.
           APPIMAGE_EXTRACT_AND_RUN: 1

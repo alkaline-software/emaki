@@ -13,7 +13,7 @@ import unittest
 
 from helpers import Isolated, simple_session, user_row
 
-from scribe import archive, paths, transcript
+from emaki import archive, paths, transcript
 
 
 class ArchiveCase(Isolated):
@@ -171,7 +171,7 @@ class TestArchiveAsASource(ArchiveCase):
         self.assertEqual(ref.title, "Check the build")
 
     def test_an_archived_session_still_renders(self):
-        from scribe import store
+        from emaki import store
 
         src = self.make_session()
         archive.sweep()

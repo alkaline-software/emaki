@@ -11,7 +11,7 @@ from pathlib import Path
 
 from helpers import Isolated
 
-from scribe import install, paths
+from emaki import install, paths
 
 
 class TestInstall(Isolated):
@@ -63,7 +63,7 @@ class TestInstall(Isolated):
             for h in group["hooks"]
         ]
         self.assertIn("/usr/local/bin/my-linter", commands)
-        self.assertTrue(any("scribe-hook" in c for c in commands))
+        self.assertTrue(any("emaki-hook" in c for c in commands))
 
     def test_reinstall_does_not_duplicate(self):
         install.install()
@@ -73,7 +73,7 @@ class TestInstall(Isolated):
             h
             for group in self.settings()["hooks"]["Stop"]
             for h in group["hooks"]
-            if "scribe-hook" in h["command"]
+            if "emaki-hook" in h["command"]
         ]
         self.assertEqual(len(ours), 1)
 
@@ -104,7 +104,7 @@ class TestInstall(Isolated):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"model": "opus"}))
         install.install()
-        backups = list(target.parent.glob("settings.json.scribe-backup-*"))
+        backups = list(target.parent.glob("settings.json.emaki-backup-*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(json.loads(backups[0].read_text()), {"model": "opus"})
 
@@ -134,7 +134,7 @@ class TestInstall(Isolated):
         target.write_text("{ not json")
         install.install()
         # Unparseable input is treated as empty, but the backup keeps the original.
-        backups = list(target.parent.glob("settings.json.scribe-backup-*"))
+        backups = list(target.parent.glob("settings.json.emaki-backup-*"))
         self.assertEqual(backups[0].read_text(), "{ not json")
         self.assertTrue(install.is_installed())
 
@@ -142,7 +142,7 @@ class TestInstall(Isolated):
         command = install.hook_command()
         path = command.split('" "')[-1].rstrip('"')
         self.assertTrue(Path(path).is_file(), path)
-        self.assertIn("scribe-hook", command)
+        self.assertIn("emaki-hook", command)
 
 
 if __name__ == "__main__":
@@ -150,7 +150,7 @@ if __name__ == "__main__":
 
 
 class TestFirstRun(Isolated):
-    """Bare `scribe` is the whole setup: the first run registers the hooks."""
+    """Bare `emaki` is the whole setup: the first run registers the hooks."""
 
     def setUp(self):
         super().setUp()
@@ -161,7 +161,7 @@ class TestFirstRun(Isolated):
     def test_the_first_run_installs_the_hooks_and_opens_the_page(self):
         from unittest import mock
 
-        from scribe import cli, daemon
+        from emaki import cli, daemon
 
         opened = []
         with mock.patch.object(daemon, "ensure_running", return_value={"url": "http://127.0.0.1:1"}), \
