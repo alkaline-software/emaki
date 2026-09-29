@@ -29,8 +29,9 @@ use crate::ui_state::{Rect, Scroll, UiState};
 use emaki_core::adapters;
 use emaki_core::build::Phase;
 use emaki_core::config::Config;
-use emaki_core::driver::{self, image_block, mode_detail, mode_label, model_label, PermissionRequest, IMAGE_TYPES, MODELS, MODES};
+use emaki_core::driver::{self, effort_detail, effort_label, image_block, mode_detail, mode_label, model_label, PermissionRequest, EFFORTS, IMAGE_TYPES, MODELS, MODES};
 use emaki_core::find::{FindIndex, Hit};
+use emaki_core::limits::Limits;
 use emaki_core::model::{AgentId, Session};
 use emaki_core::search::Results;
 use emaki_core::transcript::SessionRef;
@@ -305,6 +306,9 @@ pub struct Workbench {
     pub new_id: String,
     pub next_mode: String,
     pub next_model: String,
+    /// The account's usage windows and the models' context sizes, as the
+    /// last driver turn reported them; kept in `state/limits.json`.
+    pub limits: Limits,
     pub status: String,
     pub now: f64,
     /// Who to greet on the home page.
@@ -546,6 +550,7 @@ impl Workbench {
             new_id: String::new(),
             next_mode,
             next_model,
+            limits: Limits::load(),
             status: "scanning…".into(),
             now: now_secs(),
             user_name: crate::sys::user_first_name(),
@@ -685,6 +690,14 @@ impl Workbench {
                 view.state = if r.queued > 0 { "running".into() } else { "idle".into() };
                 if r.is_error {
                     self.status = format!("turn ended: {}", r.subtype);
+                }
+                if self.limits.absorb_model_usage(&r.model_usage) {
+                    let _ = self.limits.save();
+                }
+            }
+            driver::Event::RateLimit(info) => {
+                if self.limits.absorb_rate_limit(&info, self.now) {
+                    let _ = self.limits.save();
                 }
             }
             driver::Event::Mode(m) => view.mode = m,
@@ -1063,12 +1076,17 @@ impl Workbench {
             pill(format!("default-model-{m}"), label, default_model == *m, None, cx, Box::new(move |this, _, cx| this.set_default_model(m, cx)))
         }));
 
+        // The scrim is a flex box, so the panel sits in the middle of the
+        // window both ways (an absolute panel with auto margins did not).
         div()
             .id("settings-overlay")
             .absolute()
             .inset_0()
             .occlude()
             .bg(theme.overlay)
+            .flex()
+            .items_center()
+            .justify_center()
             .on_click(cx.listener(|this, _, _, cx| {
                 this.settings_open = false;
                 cx.notify();
@@ -1077,12 +1095,8 @@ impl Workbench {
                 v_flex()
                     .id("settings-panel")
                     .on_click(|_, window, cx| swallow_click(window, cx))
-                    .absolute()
-                    .top(px(44.))
-                    .left_0()
-                    .right_0()
-                    .mx_auto()
                     .w(px(600.))
+                    .max_w(gpui::relative(0.94))
                     .max_h(gpui::relative(0.9))
                     .rounded(px(16.))
                     .bg(theme.popover)
@@ -1643,20 +1657,108 @@ impl Workbench {
         MODES.iter().copied().filter(|m| allow_bypass || *m != "bypassPermissions").collect()
     }
 
+    /// The session showing, once loaded.
+    fn shown_session(&self) -> Option<&Session> {
+        let d = self.detail.as_ref()?;
+        (self.page == Page::Session && self.selected.as_deref() == Some(d.key.as_str())).then_some(&*d.session)
+    }
+
     /// The mode the composer's pill shows: the driver's own when one is
-    /// behind the session, else what the next session will start in.
+    /// behind the session, else the transcript's for a terminal session,
+    /// else what the next session will start in.
     fn current_mode(&self) -> String {
-        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
-        let m = self.drivers.get(&sid).map(|v| v.mode.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| self.next_mode.clone());
+        let r = self.selected_ref();
+        let sid = r.map(|r| r.session_id.clone()).unwrap_or_default();
+        let m = self
+            .drivers
+            .get(&sid)
+            .map(|v| v.mode.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| r.filter(|_| self.page == Page::Session).map(|r| r.state.mode.clone()).filter(|m| !m.is_empty()))
+            .unwrap_or_else(|| self.next_mode.clone());
         if m.is_empty() { "default".into() } else { m }
     }
 
-    /// The model, as the driver reports it (a full id after its first turn)
-    /// or as it was asked for.
+    /// The model, as the driver reports it (a full id after its first
+    /// turn), else the transcript's last, else what was asked for.
     fn current_model(&self) -> String {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
-        let m = self.drivers.get(&sid).map(|v| v.model.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| self.next_model.clone());
+        let m = self
+            .drivers
+            .get(&sid)
+            .map(|v| v.model.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| self.shown_session().and_then(|s| s.models.last().cloned()))
+            .unwrap_or_else(|| self.next_model.clone());
         if m.is_empty() { "default".into() } else { m }
+    }
+
+    /// The effort level the transcript last recorded; empty when none.
+    fn current_effort(&self) -> String {
+        self.shown_session().map(|s| s.effort.clone()).unwrap_or_default()
+    }
+
+    fn set_effort(&mut self, effort: &str, cx: &mut Context<Self>) {
+        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+        if self.hub.set_driver_effort(&sid, effort.to_string()) {
+            self.status = format!("setting {}…", effort_label(effort).to_lowercase());
+        } else {
+            self.status = "no driver behind this session".into();
+        }
+        cx.notify();
+    }
+
+    /// `Context 37% (386k of 1M) · 5h 3% (4h26m) · 7d 6% (6d7h)`, as the
+    /// terminal's status line has it, above the composer. The context is
+    /// the transcript's; the windows are what the last driver turn saw,
+    /// which a terminal turn does not refresh, so the row says how old
+    /// they are.
+    fn render_limits(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let theme = cx.theme().clone();
+        let s = self.shown_session()?;
+        if s.agent != AgentId::ClaudeCode {
+            return None;
+        }
+        let now = self.now;
+        let muted = theme.muted_foreground;
+        let part = |label: &'static str, pct: u64, color: Hsla, tail: String| {
+            h_flex()
+                .gap(px(4.))
+                .items_center()
+                .child(div().text_color(muted).child(label))
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(color).child(format!("{pct}%")))
+                .when(!tail.is_empty(), |d| d.child(div().text_color(muted).child(tail)))
+        };
+        let mut row = h_flex().w_full().max_w(CONTENT_W).px(px(6.)).gap(px(12.)).items_center().text_size(px(11.5)).flex_wrap();
+        if s.context_tokens > 0 {
+            let model = s.models.last().map(String::as_str).unwrap_or("");
+            let window = self.limits.context_window(model);
+            let pct = (s.context_tokens * 100 / window.max(1)).min(999);
+            let color = if pct >= 85 { theme.danger } else if pct >= 70 { theme.warning } else { theme.success };
+            row = row.child(part("Context", pct, color, format!("({} of {})", emaki_core::render_md::human_tokens(s.context_tokens), emaki_core::render_md::human_tokens(window))));
+        }
+        let usage_color = |pct: u64| if pct >= 90 { theme.danger } else if pct >= 70 { theme.magenta } else { theme.blue };
+        for (label, w) in [("5h", self.limits.five_hour), ("7d", self.limits.seven_day)] {
+            match w {
+                Some(w) => {
+                    let pct = (w.utilization * 100.0).round().max(0.0) as u64;
+                    let left = emaki_core::limits::until(w.resets_at, now);
+                    row = row.child(part(label, pct, usage_color(pct), if left.is_empty() { String::new() } else { format!("({left})") }));
+                }
+                None => {
+                    row = row.child(h_flex().gap(px(4.)).text_color(muted).child(label).child("--"));
+                }
+            }
+        }
+        let seen = self.limits.seen_at;
+        let age = if seen > 0.0 && now - seen > 300.0 { format!("limits as of {}", relative(seen, now)) } else { String::new() };
+        row = row.when(!age.is_empty(), |d| d.child(div().text_color(muted.opacity(0.8)).child(age)));
+        let tip = if seen > 0.0 {
+            "The account's usage windows, from the last turn a session run through Emaki made. A terminal session's turns do not report them here."
+        } else {
+            "The account's usage windows are learned from a session run through Emaki; none has run yet."
+        };
+        Some(row.id("limits").tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx)))
     }
 
     /// Switch the permission mode: for the driver behind this session, and
@@ -2360,7 +2462,7 @@ impl Workbench {
             .child(meta_line)
             .when(self.find_open, |d| d.child(self.render_find_bar(cx)))
             .child(transcript)
-            .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).child(self.render_composer(cx)))
+            .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).children(self.render_limits(cx)).child(self.render_composer(cx)))
             .into_any_element()
     }
 
@@ -2421,6 +2523,11 @@ impl Workbench {
         let running = drv.as_ref().map(|v| v.state == "running" || v.starting).unwrap_or(false);
         let can_send = via == "driver" || via == "spawn" || via == "inbox";
         let settable = via == "driver" || via == "spawn";
+        // A terminal session shows its mode, model and effort but cannot
+        // take a change: the inbox reads everything as prose.
+        let readonly = via == "inbox";
+        let effort = self.current_effort();
+        let on_session = self.page == Page::Session;
         let hint = match via {
             "driver" => match drv.as_ref().map(|v| v.state.as_str()) {
                 Some("running") => "Claude is working. ⌘↩ queues a message behind this turn.".to_string(),
@@ -2430,9 +2537,9 @@ impl Workbench {
             "inbox" => {
                 let mode = self.selected_ref().map(|r| r.state.mode.clone()).unwrap_or_default();
                 if emaki_core::peer::HELD_MODES.contains(&mode.as_str()) {
-                    "Goes straight into the terminal session. Permissions are bypassed there, so the terminal asks before reading it.".to_string()
+                    "Goes straight into the terminal session; permissions are bypassed there, so the terminal asks before reading it. Mode, model and effort are set there (⇧Tab, /model, /effort).".to_string()
                 } else {
-                    "Goes straight into the terminal session, as if typed there.".to_string()
+                    "Goes straight into the terminal session, as if typed there. Mode, model and effort are set there (⇧Tab, /model, /effort).".to_string()
                 }
             }
             "spawn" => {
@@ -2605,11 +2712,17 @@ impl Workbench {
                         let options = self.modes().into_iter().map(|m| (m, mode_label(m).to_string(), mode_detail(m).to_string())).collect();
                         d.child(picker("mode", mode_label(&mode).to_string(), options, mode.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_mode(key, cx)), cx))
                     })
+                    .when(settable && on_session, |d| {
+                        let options = EFFORTS.iter().map(|e| (*e, effort_label(e), effort_detail(e).to_string())).collect();
+                        d.child(picker("effort", effort_label(&effort), options, effort.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_effort(key, cx)), cx))
+                    })
+                    .when(readonly, |d| d.child(chip_static("ro-mode", mode_label(&mode).to_string(), cx)).child(chip_static("ro-effort", effort_label(&effort), cx)))
                     .child(div().flex_1())
                     .when(settable, |d| {
                         let options = MODELS.iter().map(|m| (*m, model_label(m), model_detail(m).to_string())).collect();
                         d.child(picker("model", model_label(&model), options, model_key(&model).to_string(), Anchor::BottomRight, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_model(key, cx)), cx))
                     })
+                    .when(readonly, |d| d.child(chip_static("ro-model", model_label(&model), cx)))
                     .child(send),
             );
 
@@ -3218,6 +3331,22 @@ fn kbd_hint(text: &'static str, theme: &gpui_component::Theme) -> impl IntoEleme
 fn icon_button(id: &'static str, icon: IconName, tip: &'static str, cx: &mut Context<Workbench>, on: impl Fn(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static) -> impl IntoElement {
     let theme = cx.theme().clone();
     Button::new(id).ghost().small().icon(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground)).tooltip(tip).on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
+}
+
+/// A pill under the composer that only says what a terminal session is
+/// set to; the terminal is where it changes.
+fn chip_static(id: &'static str, label: String, cx: &App) -> impl IntoElement {
+    let theme = cx.theme().clone();
+    h_flex()
+        .id(id)
+        .h(px(28.))
+        .px(px(10.))
+        .items_center()
+        .rounded_full()
+        .text_size(px(12.5))
+        .text_color(theme.muted_foreground)
+        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Set in the terminal: ⇧Tab for the mode, /model, /effort").build(window, cx))
+        .child(label)
 }
 
 /// A pill under the composer that opens a list of choices: the permission

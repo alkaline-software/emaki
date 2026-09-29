@@ -373,6 +373,12 @@ pub struct Session {
     pub rounds: Vec<Round>,
     pub usage: Usage,
     pub usage_by_model: Vec<(String, u64)>,
+    /// What the last request carried (input, cache read, cache creation):
+    /// the context in use, against the model's window.
+    pub context_tokens: u64,
+    /// The effort level the session was last set to with `/effort`, or
+    /// empty when it never was.
+    pub effort: String,
     pub transcript_path: String,
     pub log_path: String,
 }

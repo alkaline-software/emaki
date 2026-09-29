@@ -54,7 +54,15 @@ last spring is still there, whole, after the sweep.
 - **More settings.** ⌘, now has the appearance (follow the system, light,
   dark), six accent colours, the chat font, three text sizes, and the
   permission mode and model a session started from the window begins in.
-  Everything is drawn at once and kept in `config.json`.
+  Everything is drawn at once and kept in `config.json`. The panel sits in
+  the middle of the window.
+- **Mode, model and effort on every conversation.** The pills under the
+  composer show them for a terminal session too, read from the transcript;
+  a session run through Emaki can change all three, effort included.
+- **Context and limits, as in the terminal.** A line above the composer
+  reads `Context 37% · 5h 3% (4h26m) · 7d 6% (6d7h)`: the context the next
+  request carries against the model's window, and the account's five-hour
+  and seven-day windows as the last session run through Emaki saw them.
 
 **Installing**
 

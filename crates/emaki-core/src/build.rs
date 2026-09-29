@@ -629,6 +629,13 @@ pub fn build(input: BuildInput) -> Session {
         if !str_of(row, "slug").is_empty() {
             session.slug = str_of(row, "slug").into();
         }
+        // `/effort <level>` lands as a `system/local_command` row whose
+        // `commandRun` names the command; the last one is the level in force.
+        if let Some(run) = row.get("commandRun") {
+            if str_of(run, "command") == "effort" && !str_of(run, "args").trim().is_empty() {
+                session.effort = str_of(run, "args").trim().to_string();
+            }
+        }
     }
     session.title = pick_title(rows);
     if session.cwd.is_empty() {
@@ -764,6 +771,10 @@ fn handle_assistant(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut S
     }
     let usage = Usage::from_raw(message.and_then(|m| m.get("usage")));
     session.usage.add(&usage);
+    let context = usage.input_tokens + usage.cache_read + usage.cache_write;
+    if context > 0 {
+        session.context_tokens = context;
+    }
     let total = usage.total();
     {
         let rnd = b.ensure_round(ts);
