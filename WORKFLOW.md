@@ -46,12 +46,10 @@ are built here by `scripts/release-mac.sh` and uploaded over them.
 
 ### 1. Bump the version
 
-The version lives in three files that must agree:
+The version lives in one file:
 
 ```
 Cargo.toml            version = "X.Y.Z"      (the workspace; both crates inherit it)
-pyproject.toml        version = "X.Y.Z"      (the Python CLI)
-emaki/__init__.py     __version__ = "X.Y.Z"
 ```
 
 `Cargo.lock` records the crates' versions too, and CI builds with
@@ -202,7 +200,7 @@ GitHub macOS runners too.
 ## When something fails
 
 - **"Cargo.toml says X but the tag is vY"**: the version and the tag
-  disagree. Fix `Cargo.toml` (and the two Python files), commit, redo the tag.
+  disagree. Fix `Cargo.toml`, commit, redo the tag.
 - **"CHANGELOG.md has no section '## vX.Y.Z'"**: add it, commit, redo the tag.
 - **`--locked` fails in CI after a bump**: `Cargo.lock` was not refreshed.
   `cargo check -p emaki-app`, commit the lock.

@@ -26,6 +26,9 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 # The window selection layer, for ending a drag a swallowed click would leave open.
 gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
 uuid = { version = "1", features = ["v4"] }
+# The parser behind the toolkit's text view, at the same version, so a
+# text can be tried before the view gets it (see `md_view`).
+markdown = "1.0.0"
 # Open-with and the person's name, without shelling out to macOS commands.
 opener = "0.7"
 whoami = "1"

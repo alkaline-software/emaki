@@ -3,14 +3,18 @@
 //! 6% (6d7h)`.
 //!
 //! Claude Code learns both from the API on every request and hands them
-//! to a status-line script, but writes neither to the transcript. What
-//! Emaki can see is the stream-json wire of its own drivers: a
+//! to a status-line script, but writes neither to the transcript. Emaki
+//! sees them two ways. The stream-json wire of its own drivers: a
 //! `rate_limit_event` frame after each turn carries the five-hour and
 //! seven-day windows (they are per account, so one driver's answer holds
 //! for every session), and the `result` frame's `modelUsage` names each
-//! model's `contextWindow`. Both are kept in `~/.emaki/state/limits.json`
-//! so they outlive the driver and the window, with the time they were
-//! seen, since a terminal session's turns do not refresh them.
+//! model's `contextWindow`. And the terminal's own status line: the
+//! script Claude Code runs (`~/.claude/statusline.sh` here) is handed the
+//! same windows on stdin and leaves a copy in
+//! `~/.emaki/state/rate_limits.json`, which `refresh_from_statusline`
+//! reads, so a terminal session keeps the row current too. What was
+//! learned is kept in `~/.emaki/state/limits.json` with the time it was
+//! seen, and the newer source wins.
 //!
 //! The context percentage itself needs no wire: the last assistant row's
 //! usage (input, cache read, cache creation) is what the next request
@@ -91,6 +95,48 @@ impl Limits {
         }
         self.seen_at = now;
         true
+    }
+
+    /// Where the terminal's status line leaves the windows it was handed:
+    /// `{"rate_limits": {"five_hour": {"used_percentage", "resets_at"},
+    /// "seven_day": {...}}, "seen_at": <unix seconds>}`.
+    pub fn statusline_path() -> std::path::PathBuf {
+        paths::state_dir().join("rate_limits.json")
+    }
+
+    /// One status-line stdin, as the script wrote it. Absorbed only when
+    /// it is newer than what is held, so a driver's fresher answer is not
+    /// overwritten by a stale file. Returns whether anything was learned.
+    pub fn absorb_statusline(&mut self, v: &Value) -> bool {
+        let seen = v.get("seen_at").and_then(Value::as_f64).unwrap_or(0.0);
+        if seen <= self.seen_at {
+            return false;
+        }
+        let Some(rl) = v.get("rate_limits").and_then(Value::as_object) else { return false };
+        let read = |key: &str| -> Option<Window> {
+            let w = rl.get(key)?;
+            let pct = w.get("used_percentage").and_then(Value::as_f64)?;
+            let resets_at = w.get("resets_at").and_then(Value::as_f64).unwrap_or(0.0);
+            Some(Window { utilization: pct / 100.0, resets_at })
+        };
+        let (five, seven) = (read("five_hour"), read("seven_day"));
+        if five.is_none() && seven.is_none() {
+            return false;
+        }
+        if five.is_some() {
+            self.five_hour = five;
+        }
+        if seven.is_some() {
+            self.seven_day = seven;
+        }
+        self.seen_at = seen;
+        true
+    }
+
+    /// Read the status line's file if there is one. Cheap enough to call
+    /// every second: a few hundred bytes, and nothing when unchanged.
+    pub fn refresh_from_statusline(&mut self) -> bool {
+        paths::read_json(&Self::statusline_path()).map(|v| self.absorb_statusline(&v)).unwrap_or(false)
     }
 
     /// The `modelUsage` object of a `result` frame: each model's context

@@ -32,12 +32,14 @@ use emaki_core::config::Config;
 use emaki_core::driver::{self, effort_detail, effort_label, image_block, mode_detail, mode_label, model_label, PermissionRequest, EFFORTS, IMAGE_TYPES, MODELS, MODES};
 use emaki_core::find::{FindIndex, Hit};
 use emaki_core::limits::Limits;
-use emaki_core::model::{AgentId, Session};
+use emaki_core::model::{AgentId, Item, Session};
 use emaki_core::search::Results;
 use emaki_core::transcript::SessionRef;
 
 use crate::format::{clock, day, elapsed_since, now_secs, plural, relative, short_id};
-use crate::hub::{Hub, HubEvent};
+use crate::hub::{Hub, HubEvent, UpdateEvent};
+use emaki_core::update::{self, UpdateState};
+use gpui_component::checkbox::Checkbox;
 
 actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev]);
 
@@ -132,10 +134,69 @@ pub struct Detail {
     pub open_subagents: HashSet<(usize, usize)>,
     /// Runs of tool calls unfolded by hand, keyed by (round, first item).
     pub open_runs: HashSet<(usize, usize)>,
+    /// Tool calls whose plain-words line is showing, by call id.
+    pub open_explanations: HashSet<String>,
+    /// Where each opened tool body is scrolled to inside its card, and
+    /// whose the current wheel stroke is; both must outlive the frame or
+    /// the bar and the wheel forget them.
+    pub body_scrolls: HashMap<(usize, usize), BodyScroll>,
     /// Everything in the session lowered for the find bar, built the first
     /// time it is needed and dropped whenever the session is reloaded.
     pub find: Option<Rc<FindIndex>>,
 }
+
+/// What the settings panel says about updates.
+#[derive(Clone, Default)]
+pub struct UpdateView {
+    pub checking: bool,
+    /// A newer version, once a check found one.
+    pub available: Option<String>,
+    /// When the last check ran (Unix seconds; 0 = never) and what it found.
+    pub last_check: f64,
+    pub latest: String,
+    /// The last check was the daily one, not a click.
+    pub automatic: bool,
+    /// Whether a check has answered since the panel asked (so "up to
+    /// date" is said only after a click).
+    pub answered: bool,
+    pub error: String,
+    /// Bytes fetched and the total, while an installer downloads.
+    pub progress: Option<(u64, Option<u64>)>,
+    pub installing: bool,
+    pub install_error: String,
+}
+
+/// A tool body's scroll position and the wheel stroke in progress over it.
+/// A stroke is one gesture: on a trackpad it begins when a finger touches
+/// (the event's `TouchPhase::Started`; macOS reports the finger's phase,
+/// and the momentum that follows a lift comes as phase-less `Moved`
+/// events, so a long tail never counts as a new stroke and a fresh touch
+/// always does); a mouse wheel has no phases, so a pause of `STROKE_GAP`
+/// separates its strokes. Whose a stroke is gets decided on its first
+/// event with any travel: the body's when the body has room in that
+/// direction, the conversation's when the body is already at that edge. A
+/// stroke that reaches the edge midway stops there, tail included, rather
+/// than spilling into the conversation, so a long pull never overshoots;
+/// the next touch goes on.
+#[derive(Clone, Default)]
+pub struct BodyScroll {
+    pub handle: ScrollHandle,
+    pub stroke: Rc<std::cell::RefCell<Stroke>>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Stroke {
+    pub last: Option<std::time::Instant>,
+    /// Whether this stroke's owner has been decided yet (a touch may
+    /// begin with events that carry no travel).
+    pub decided: bool,
+    /// True while the stroke belongs to the conversation.
+    pub handed_over: bool,
+}
+
+/// A pause longer than this between phase-less wheel events (a mouse)
+/// begins a new stroke.
+pub const STROKE_GAP: Duration = Duration::from_millis(160);
 
 /// A file waiting in the composer. Images go to a driver as content blocks
 /// so the model sees the picture; everything else, and everything on the
@@ -302,6 +363,11 @@ pub struct Workbench {
     pub done_open: bool,
     pub permissions: Vec<(String, PermissionRequest)>,
     pub drivers: HashMap<String, DriverView>,
+    /// Explanations that landed since the session showing was loaded, by
+    /// call id; a reload folds them into the model from the cache.
+    pub explanations: HashMap<String, String>,
+    /// Calls a model is explaining right now.
+    pub explaining: HashSet<String>,
     pub new_cwd: String,
     pub new_id: String,
     pub next_mode: String,
@@ -309,6 +375,8 @@ pub struct Workbench {
     /// The account's usage windows and the models' context sizes, as the
     /// last driver turn reported them; kept in `state/limits.json`.
     pub limits: Limits,
+    /// The update check and install, as the settings panel shows them.
+    pub update: UpdateView,
     pub status: String,
     pub now: f64,
     /// Who to greet on the home page.
@@ -455,6 +523,8 @@ impl Workbench {
             if this
                 .update(cx, |this, cx| {
                     this.now = now_secs();
+                    this.limits.refresh_from_statusline();
+                    this.check_updates_daily();
                     if this.page == Page::Board || this.drivers.values().any(|d| d.state == "running" || d.starting) {
                         cx.notify();
                     }
@@ -477,16 +547,14 @@ impl Workbench {
             _ => {}
         })
         .detach();
+        // ⌘↩ never gets here: the composer wrapper captures it and sends
+        // (see `render_composer`), so what arrives is a bare or shifted ↩.
         cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { secondary, shift } = ev {
-                if *secondary {
-                    this.send_message(window, cx);
-                } else {
-                    // A bare ↩ on an empty composer answers the oldest
-                    // permission card, ⇧↩ turns it down; with words typed
-                    // they stay what they are, a new line.
-                    this.answer_pending_by_key(!*shift, window, cx);
-                }
+            if let InputEvent::PressEnter { secondary: false, shift } = ev {
+                // A bare ↩ on an empty composer answers the oldest
+                // permission card, ⇧↩ turns it down; with words typed
+                // they stay what they are, a new line.
+                this.answer_pending_by_key(!*shift, window, cx);
             }
         })
         .detach();
@@ -546,11 +614,21 @@ impl Workbench {
             done_open: false,
             permissions: Vec::new(),
             drivers: HashMap::new(),
+            explanations: HashMap::new(),
+            explaining: HashSet::new(),
             new_cwd: String::new(),
             new_id: String::new(),
             next_mode,
             next_model,
-            limits: Limits::load(),
+            limits: {
+                let mut l = Limits::load();
+                l.refresh_from_statusline();
+                l
+            },
+            update: {
+                let s = UpdateState::load();
+                UpdateView { last_check: s.last_check, latest: s.latest, ..Default::default() }
+            },
             status: "scanning…".into(),
             now: now_secs(),
             user_name: crate::sys::user_first_name(),
@@ -666,6 +744,175 @@ impl Workbench {
             HubEvent::Note(text) => {
                 self.status = text;
                 cx.notify();
+            }
+            HubEvent::Explained { call_id, text } => {
+                self.explaining.remove(&call_id);
+                if !text.is_empty() {
+                    self.explanations.insert(call_id, text);
+                }
+                cx.notify();
+            }
+            HubEvent::Update(ev) => self.on_update_event(ev, cx),
+        }
+    }
+
+    // -- updates ------------------------------------------------------------
+
+    /// Once a day, when the setting allows: the same check the button
+    /// makes, but quiet unless it finds something.
+    fn check_updates_daily(&mut self) {
+        if !self.cfg.app.check_updates || self.update.checking || self.update.installing {
+            return;
+        }
+        if self.now - self.update.last_check < 86_400.0 {
+            return;
+        }
+        self.update.last_check = self.now;
+        self.update.automatic = true;
+        self.hub.check_updates();
+    }
+
+    fn check_updates_now(&mut self, cx: &mut Context<Self>) {
+        if self.update.checking {
+            return;
+        }
+        self.update.automatic = false;
+        self.update.answered = false;
+        self.update.error.clear();
+        self.hub.check_updates();
+        cx.notify();
+    }
+
+    fn install_update_now(&mut self, cx: &mut Context<Self>) {
+        let Some(v) = self.update.available.clone() else { return };
+        if self.update.installing {
+            return;
+        }
+        self.update.installing = true;
+        self.update.install_error.clear();
+        self.update.progress = Some((0, None));
+        self.hub.install_update(v);
+        cx.notify();
+    }
+
+    fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.cfg.app.check_updates = on;
+        if let Err(e) = Config::edit(move |c| c.app.check_updates = on) {
+            self.status = format!("could not save settings: {e}");
+        }
+        cx.notify();
+    }
+
+    fn on_update_event(&mut self, ev: UpdateEvent, cx: &mut Context<Self>) {
+        match ev {
+            UpdateEvent::Checking => self.update.checking = true,
+            UpdateEvent::UpToDate { latest } => {
+                self.update.checking = false;
+                self.update.answered = true;
+                self.update.last_check = self.now;
+                self.update.latest = latest;
+                self.update.available = None;
+            }
+            UpdateEvent::Available { latest } => {
+                self.update.checking = false;
+                self.update.answered = true;
+                self.update.last_check = self.now;
+                self.update.latest = latest.clone();
+                self.update.available = Some(latest.clone());
+                if self.update.automatic {
+                    self.status = format!("Emaki {latest} is available. Update from Settings (⌘,).");
+                }
+            }
+            UpdateEvent::CheckFailed(e) => {
+                self.update.checking = false;
+                self.update.answered = true;
+                if !self.update.automatic {
+                    self.update.error = e;
+                }
+            }
+            UpdateEvent::Downloading { done, total } => self.update.progress = Some((done, total)),
+            UpdateEvent::Installing => self.update.progress = None,
+            UpdateEvent::Relaunch => {
+                // The new app is already running; this one leaves.
+                self.save_ui(true);
+                cx.quit();
+            }
+            UpdateEvent::InstallFailed(e) => {
+                self.update.installing = false;
+                self.update.progress = None;
+                self.update.install_error = e;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The line under a tool call: what the transcript carries (a cached
+    /// answer folded in at load), else what landed since.
+    pub fn explanation_for(&self, call: &emaki_core::model::ToolCall) -> String {
+        if !call.explanation.is_empty() {
+            return call.explanation.clone();
+        }
+        self.explanations.get(&call.id).cloned().unwrap_or_default()
+    }
+
+    /// The Explain pill on a tool row: show the plain-words line, or hide
+    /// it again. A line already known (in the model, the overlay or the
+    /// cache) shows at once; only a call never explained asks the model.
+    pub fn toggle_explain(&mut self, call_id: &str, name: &str, input: &serde_json::Map<String, serde_json::Value>, has_text: bool, cx: &mut Context<Self>) {
+        self.pin_scroll();
+        let Some(d) = self.detail.as_mut() else { return };
+        if d.open_explanations.remove(call_id) {
+            cx.notify();
+            return;
+        }
+        d.open_explanations.insert(call_id.to_string());
+        if !has_text && !self.explaining.contains(call_id) {
+            let cached = self.hub.explainer.lookup(name, input);
+            if !cached.is_empty() {
+                self.explanations.insert(call_id.to_string(), cached);
+            } else {
+                self.explaining.insert(call_id.to_string());
+                self.hub.explainer.request(call_id, name, input, true);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Keep the row just clicked where it is when what it opens makes its
+    /// item taller. Scrolled to the very end, the list has no logical top
+    /// (it hangs from its bottom and grows upward), so an opened card would
+    /// push its own row up the screen. Giving the list a real top first
+    /// makes the new content extend below the row instead.
+    pub fn pin_scroll(&self) {
+        let Some(d) = &self.detail else { return };
+        if d.list.logical_scroll_top().item_ix >= d.session.rounds.len() {
+            let h = d.list.viewport_bounds().size.height;
+            if h > px(0.) {
+                d.list.scroll_by(-h);
+            }
+        }
+    }
+
+    /// With the scope on `all`, every opaque call in the tail of a live
+    /// session is explained as it appears. Only the last two rounds are
+    /// looked at, and only on a reload of the session already showing, so
+    /// opening an old session never spends anything.
+    fn request_live_explanations(&mut self) {
+        if self.cfg.explain.scope != "all" {
+            return;
+        }
+        let Some(d) = &self.detail else { return };
+        let session = Rc::clone(&d.session);
+        let start = session.rounds.len().saturating_sub(2);
+        for rnd in &session.rounds[start..] {
+            for item in &rnd.items {
+                if let Item::Tool(call) = item {
+                    let known = !call.explanation.is_empty() || self.explanations.contains_key(&call.id) || self.explaining.contains(&call.id);
+                    if !known && self.hub.explainer.needs_model(&call.name, &call.input) {
+                        self.explaining.insert(call.id.clone());
+                        self.hub.explainer.request(&call.id, &call.name, &call.input, false);
+                    }
+                }
             }
         }
     }
@@ -829,7 +1076,7 @@ impl Workbench {
         let started = std::time::Instant::now();
         let task = cx.background_spawn(async move { adapters::for_agent(r.agent).load(&r) });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let session = task.await;
+            let mut session = task.await;
             let loaded = started.elapsed();
             this.update(cx, |this, cx| {
                 this.loading = None;
@@ -838,7 +1085,14 @@ impl Workbench {
                 }
                 let rounds = session.rounds.len();
                 let t = std::time::Instant::now();
+                // Cached explanations are free and belong to every session
+                // they match, however old.
+                this.hub.explainer.attach(&mut session);
+                let reload = this.detail.as_ref().map(|d| d.key == key).unwrap_or(false);
                 this.set_detail(key.clone(), path, session);
+                if reload {
+                    this.request_live_explanations();
+                }
                 this.after_detail_loaded(cx);
                 if timing {
                     eprintln!("emaki: open {} — load {}ms, set_detail {}ms, {} rounds", &key, loaded.as_millis(), t.elapsed().as_millis(), rounds);
@@ -888,6 +1142,8 @@ impl Workbench {
                     open_thoughts: HashSet::new(),
                     open_subagents: HashSet::new(),
                     open_runs: HashSet::new(),
+                    open_explanations: HashSet::new(),
+                    body_scrolls: HashMap::new(),
                     find: None,
                 });
             }
@@ -971,6 +1227,15 @@ impl Workbench {
         self.cfg.driver.default_model = v.clone();
         self.next_model = v.clone();
         if let Err(e) = Config::edit(move |c| c.driver.default_model = v) {
+            self.status = format!("could not save settings: {e}");
+        }
+        cx.notify();
+    }
+
+    fn set_explain_scope(&mut self, choice: &'static str, cx: &mut Context<Self>) {
+        self.cfg.explain.scope = choice.to_string();
+        self.hub.set_explain(self.cfg.explain.clone());
+        if let Err(e) = Config::edit(move |c| c.explain.scope = choice.to_string()) {
             self.status = format!("could not save settings: {e}");
         }
         cx.notify();
@@ -1076,6 +1341,56 @@ impl Workbench {
             pill(format!("default-model-{m}"), label, default_model == *m, None, cx, Box::new(move |this, _, cx| this.set_default_model(m, cx)))
         }));
 
+        let scope = if self.cfg.explain.enabled { self.cfg.explain.scope.as_str() } else { "off" };
+        let explain = h_flex().gap(px(6.)).children([("off", "Off"), ("permission", "Permission cards"), ("all", "Every new call")].into_iter().map(|(key, label)| {
+            pill(format!("explain-{key}"), label.into(), scope == key, None, cx, Box::new(move |this, _, cx| this.set_explain_scope(key, cx)))
+        }));
+        // Updates: the version, what the last check said, and the buttons.
+        let u = &self.update;
+        let current = update::current_version();
+        let update_line = if u.installing {
+            match u.progress {
+                Some((done, Some(total))) if total > 0 => format!("Downloading {}… {}%", u.available.as_deref().unwrap_or(""), done * 100 / total),
+                Some(_) => format!("Downloading {}…", u.available.as_deref().unwrap_or("")),
+                None => "Installing… Emaki restarts by itself.".to_string(),
+            }
+        } else if !u.install_error.is_empty() {
+            format!("The update did not go through: {}", u.install_error)
+        } else if u.checking {
+            "Looking for a newer version…".to_string()
+        } else if !u.error.is_empty() {
+            format!("Could not check: {}.", u.error)
+        } else if let Some(v) = &u.available {
+            format!("Emaki {v} is available.")
+        } else if u.answered && !u.automatic {
+            "This is the newest version.".to_string()
+        } else if u.last_check > 0.0 {
+            format!("Last checked {}.", relative(u.last_check, self.now))
+        } else {
+            "Not checked yet.".to_string()
+        };
+        let can_install = u.available.is_some() && !u.installing && update::asset_name().is_some();
+        let checking = u.checking;
+        let installing = u.installing;
+        let notes_url = u.available.as_deref().map(update::release_page);
+        let version_row = h_flex()
+            .gap(px(6.))
+            .items_center()
+            .when(can_install, |d| {
+                let label: SharedString = format!("Update to {}", u.available.as_deref().unwrap_or("")).into();
+                d.child(pill_button("update-now", label, &theme, cx.listener(|this, _, _, cx| this.install_update_now(cx))))
+            })
+            .when_some(notes_url, |d, url| d.child(pill_button("update-notes", "Release notes", &theme, move |_, _, _| { let _ = opener::open(&url); })))
+            .when(!installing, |d| d.child(pill_button("update-check", if checking { "Checking…" } else { "Check for updates" }, &theme, cx.listener(|this, _, _, cx| this.check_updates_now(cx)))));
+        let auto_check = Checkbox::new("update-auto").checked(self.cfg.app.check_updates).label("Once a day").on_click(cx.listener(|this, on: &bool, _, cx| this.set_check_updates(*on, cx)));
+        let version_detail: SharedString = format!("Emaki {current}. {update_line}").into();
+
+        let explain_model = if self.cfg.explain.model.is_empty() { "claude-haiku-4-5".to_string() } else { self.cfg.explain.model.clone() };
+        let explain_note = format!(
+            "An opaque call (a heredoc, a piped chain, anything long) gets one or two plain sentences from {} through your own Claude Code login. Simple calls explain themselves for free, answers are kept by content so a command is explained once, and every tool card has an Explain button.",
+            model_label(&explain_model)
+        );
+
         // The scrim is a flex box, so the panel sits in the middle of the
         // window both ways (an absolute panel with auto margins did not).
         div()
@@ -1135,7 +1450,22 @@ impl Workbench {
                             .child(heading("NEW SESSIONS", &theme))
                             .child(row("Permission mode", "What a session started here begins in.", modes.into_any_element(), &theme))
                             .child(row("Model", "Which model a session started here uses.", models.into_any_element(), &theme))
-                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes.")),
+                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes."))
+                            .child(div().h(px(4.)))
+                            .child(heading("EXPLANATIONS", &theme))
+                            .child(row("Explain tool calls", "Which calls are put into plain words without asking.", explain.into_any_element(), &theme))
+                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(explain_note))
+                            .child(div().h(px(4.)))
+                            .child(heading("UPDATES", &theme))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child("Version")).child(div().text_size(px(12.)).text_color(theme.muted_foreground).whitespace_normal().child(version_detail)))
+                                    .child(version_row),
+                            )
+                            .child(row("Check for updates automatically", "Asks GitHub for the newest release once a day and says so here. Nothing is installed unasked.", auto_check.into_any_element(), &theme))
+                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("Updating fetches the installer for this machine, puts it in place and restarts Emaki. Tabs and the page come back as they were.")),
                     ),
             )
     }
@@ -1721,6 +2051,10 @@ impl Workbench {
         }
         let now = self.now;
         let muted = theme.muted_foreground;
+        // The terminal's line, word for word: `Context 32% | 5h: 5% (4h45m)
+        // | 7d: 11% (6d2h)`, the same colours at the same thresholds as
+        // ~/.claude/statusline.sh. The token counts and where the windows
+        // came from are on the tooltip.
         let part = |label: &'static str, pct: u64, color: Hsla, tail: String| {
             h_flex()
                 .gap(px(4.))
@@ -1729,16 +2063,16 @@ impl Workbench {
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(color).child(format!("{pct}%")))
                 .when(!tail.is_empty(), |d| d.child(div().text_color(muted).child(tail)))
         };
-        let mut row = h_flex().w_full().max_w(CONTENT_W).px(px(6.)).gap(px(12.)).items_center().text_size(px(11.5)).flex_wrap();
-        if s.context_tokens > 0 {
-            let model = s.models.last().map(String::as_str).unwrap_or("");
-            let window = self.limits.context_window(model);
-            let pct = (s.context_tokens * 100 / window.max(1)).min(999);
-            let color = if pct >= 85 { theme.danger } else if pct >= 70 { theme.warning } else { theme.success };
-            row = row.child(part("Context", pct, color, format!("({} of {})", emaki_core::render_md::human_tokens(s.context_tokens), emaki_core::render_md::human_tokens(window))));
-        }
+        let bar = || div().text_color(muted.opacity(0.6)).child("|");
+        let mut row = h_flex().w_full().max_w(CONTENT_W).px(px(6.)).gap(px(8.)).items_center().text_size(px(11.5)).flex_wrap();
+        let model = s.models.last().map(String::as_str).unwrap_or("");
+        let window = self.limits.context_window(model);
+        let ctx_pct = if s.context_tokens > 0 { (s.context_tokens * 100 / window.max(1)).min(999) } else { 0 };
+        let ctx_color = if ctx_pct >= 85 { theme.danger } else if ctx_pct >= 70 { theme.warning } else { theme.success };
+        row = row.child(part("Context", ctx_pct, ctx_color, String::new()));
         let usage_color = |pct: u64| if pct >= 90 { theme.danger } else if pct >= 70 { theme.magenta } else { theme.blue };
-        for (label, w) in [("5h", self.limits.five_hour), ("7d", self.limits.seven_day)] {
+        for (label, w) in [("5h:", self.limits.five_hour), ("7d:", self.limits.seven_day)] {
+            row = row.child(bar());
             match w {
                 Some(w) => {
                     let pct = (w.utilization * 100.0).round().max(0.0) as u64;
@@ -1751,14 +2085,13 @@ impl Workbench {
             }
         }
         let seen = self.limits.seen_at;
-        let age = if seen > 0.0 && now - seen > 300.0 { format!("limits as of {}", relative(seen, now)) } else { String::new() };
-        row = row.when(!age.is_empty(), |d| d.child(div().text_color(muted.opacity(0.8)).child(age)));
+        let tokens = format!("Context: {} of {}.", emaki_core::render_md::human_tokens(s.context_tokens), emaki_core::render_md::human_tokens(window));
         let tip = if seen > 0.0 {
-            "The account's usage windows, from the last turn a session run through Emaki made. A terminal session's turns do not report them here."
+            format!("{tokens} The usage windows are as of {}, from the terminal's status line or the last turn a session run through Emaki made.", relative(seen, now))
         } else {
-            "The account's usage windows are learned from a session run through Emaki; none has run yet."
+            format!("{tokens} The usage windows come from the terminal's status line (~/.claude/statusline.sh) or a session run through Emaki; neither has reported yet.")
         };
-        Some(row.id("limits").tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx)))
+        Some(row.id("limits").tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
     }
 
     /// Switch the permission mode: for the driver behind this session, and
@@ -2462,7 +2795,7 @@ impl Workbench {
             .child(meta_line)
             .when(self.find_open, |d| d.child(self.render_find_bar(cx)))
             .child(transcript)
-            .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).children(self.render_limits(cx)).child(self.render_composer(cx)))
+            .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).child(self.render_composer(cx)).children(self.render_limits(cx)))
             .into_any_element()
     }
 
@@ -2482,6 +2815,18 @@ impl Workbench {
             };
             let id_allow = p.request_id.clone();
             let id_deny = p.request_id.clone();
+            // What it does, in words: the model's answer when one has
+            // landed, else the free line a simple call carries in its
+            // arguments; "Explaining…" while a model is on it.
+            let call_id = if p.tool_use_id.is_empty() { p.request_id.clone() } else { p.tool_use_id.clone() };
+            let mut explanation = self.explanations.get(&call_id).cloned().unwrap_or_default();
+            if explanation.is_empty() {
+                explanation = self.hub.explainer.lookup(&p.tool_name, &p.input);
+            }
+            if explanation.is_empty() {
+                explanation = emaki_core::explain::canned(&p.tool_name, &p.input, &cwd);
+            }
+            let explaining = explanation.is_empty() && self.hub.explainer.in_flight(&p.tool_name, &p.input);
             v_flex()
                 .p(px(14.))
                 .gap(px(8.))
@@ -2499,6 +2844,7 @@ impl Workbench {
                         .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(subject)),
                 )
                 .when(!detail.is_empty(), |d| d.child(div().p(px(8.)).rounded(px(8.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_size(px(12.)).whitespace_normal().child(detail)))
+                .when(!explanation.is_empty() || explaining, |d| d.child(crate::transcript::explain_card(format!("pex-{}", p.request_id), explanation.clone(), explaining, px(13.5), cx)))
                 .child(
                     h_flex()
                         .gap(px(8.))
@@ -2528,34 +2874,16 @@ impl Workbench {
         let readonly = via == "inbox";
         let effort = self.current_effort();
         let on_session = self.page == Page::Session;
-        let hint = match via {
-            "driver" => match drv.as_ref().map(|v| v.state.as_str()) {
-                Some("running") => "Claude is working. ⌘↩ queues a message behind this turn.".to_string(),
-                Some("starting") => "Starting Claude…".to_string(),
-                _ => "Claude is listening.".to_string(),
-            },
-            "inbox" => {
-                let mode = self.selected_ref().map(|r| r.state.mode.clone()).unwrap_or_default();
-                if emaki_core::peer::HELD_MODES.contains(&mode.as_str()) {
-                    "Goes straight into the terminal session; permissions are bypassed there, so the terminal asks before reading it. Mode, model and effort are set there (⇧Tab, /model, /effort).".to_string()
-                } else {
-                    "Goes straight into the terminal session, as if typed there. Mode, model and effort are set there (⇧Tab, /model, /effort).".to_string()
-                }
+        // Nothing is said under the composer unless nothing can send, and
+        // then only why.
+        let hint = if can_send {
+            String::new()
+        } else {
+            let mut w = why.clone();
+            if let Some(f) = w.get(..1) {
+                w = f.to_uppercase() + &w[1..];
             }
-            "spawn" => {
-                if self.page == Page::New {
-                    format!("Starts Claude Code in {}.", emaki_core::paths::tilde(&self.new_cwd))
-                } else {
-                    "Sending starts Claude here and resumes this session.".to_string()
-                }
-            }
-            _ => {
-                let mut w = why.clone();
-                if let Some(f) = w.get(..1) {
-                    w = f.to_uppercase() + &w[1..];
-                }
-                w
-            }
+            w
         };
         let send = div()
             .id("send")
@@ -2676,6 +3004,17 @@ impl Workbench {
                         this.cycle_mode(cx);
                         cx.stop_propagation();
                     }))
+                    // ⌘↩ sends. Taken here, before the textarea sees it,
+                    // because the textarea puts a newline at the caret for
+                    // every Enter and only then reports the key, which left
+                    // a line break wherever the caret stood in a sent
+                    // message. A bare ↩ still reaches the textarea.
+                    .capture_action(cx.listener(|this, a: &gpui_component::input::Enter, window, cx| {
+                        if a.secondary {
+                            this.send_message(window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
                     .role(Role::MultilineTextInput)
                     .track_focus(&field_focus)
                     .aria_label("Message")
@@ -2726,7 +3065,7 @@ impl Workbench {
                     .child(send),
             );
 
-        v_flex().w_full().items_center().gap(px(8.)).child(card).child(div().text_size(px(11.5)).text_color(theme.muted_foreground).text_center().child(hint))
+        v_flex().w_full().items_center().gap(px(8.)).child(card).when(!hint.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).text_center().child(hint)))
     }
 
     // -- the board -----------------------------------------------------------
@@ -3066,30 +3405,44 @@ impl Workbench {
                 cx.notify();
             }))
             .child(div().id("lightbox-img").on_click(|_, window, cx| swallow_click(window, cx)).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain)))
+            // The bar under the picture: the whole name or path, in the mono
+            // face, selectable and wrapping rather than cut short, with Open
+            // and Reveal when there is a file behind it.
             .child(
                 h_flex()
                     .id("lightbox-bar")
                     .on_click(|_, window, cx| swallow_click(window, cx))
-                    .gap(px(10.))
+                    .gap(px(12.))
                     .items_center()
-                    .px(px(14.))
-                    .py(px(8.))
-                    .rounded_full()
+                    .max_w(gpui::relative(0.88))
+                    .px(px(16.))
+                    .py(px(10.))
+                    .rounded(px(12.))
                     .bg(theme.popover)
                     .border_1()
                     .border_color(theme.border)
                     .shadow_md()
-                    .child(div().max_w(px(360.)).truncate().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(lb.title.clone()))
-                    .when_some(path_open, |d, p| {
-                        d.child(Button::new("lb-open").ghost().small().label("Open").on_click(move |_, _, _| crate::sys::open_path(&p)))
-                    })
-                    .when_some(path_reveal, |d, p| {
-                        d.child(Button::new("lb-reveal").ghost().small().label(crate::sys::REVEAL_LABEL).on_click(move |_, _, _| crate::sys::reveal_path(&p)))
-                    })
-                    .child(Button::new("lb-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| {
-                        this.lightbox = None;
-                        cx.notify();
-                    }))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_size(px(12.5))
+                            .whitespace_normal()
+                            .child(crate::transcript::md_view("lightbox-title".into(), lb.title.clone(), cx)),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap(px(4.))
+                            .items_center()
+                            .when_some(path_open, |d, p| d.child(pill_button("lb-open", "Open", &theme, move |_, _, _| crate::sys::open_path(&p))))
+                            .when_some(path_reveal, |d, p| d.child(pill_button("lb-reveal", crate::sys::REVEAL_LABEL, &theme, move |_, _, _| crate::sys::reveal_path(&p))))
+                            .child(Button::new("lb-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| {
+                                this.lightbox = None;
+                                cx.notify();
+                            }))),
+                    ),
             )
     }
 
@@ -3321,6 +3674,29 @@ pub fn agent_glyph(agent: AgentId, size: Pixels, color: Hsla, working: bool, id:
             .with_animation(ElementId::Name(id), Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.3, 1.0)), |d, t| d.opacity(t))
             .into_any_element(),
     }
+}
+
+/// A small outlined pill with a word on it, the same drawing as the Explain
+/// pill on a tool row: the label sits in the middle of a fixed height, so
+/// two of them side by side line up.
+pub fn pill_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: &gpui_component::Theme, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    h_flex()
+        .id(id)
+        .flex_shrink_0()
+        .h(px(24.))
+        .px(px(10.))
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .text_size(px(12.))
+        .text_color(theme.foreground)
+        .hover(|s| s.border_color(theme.primary.opacity(0.6)).bg(theme.primary.opacity(0.10)))
+        .active(|s| s.border_color(theme.primary).bg(theme.primary.opacity(0.22)))
+        .on_click(on_click)
+        .child(label.into())
 }
 
 fn kbd_hint(text: &'static str, theme: &gpui_component::Theme) -> impl IntoElement {

@@ -57,11 +57,14 @@ pub struct AppConfig {
     pub appearance: String,
     /// The accent colour, by name; see `ACCENTS`.
     pub accent: String,
+    /// Ask GitHub for the newest release once a day and say so in the
+    /// settings panel when there is one. Nothing is installed unasked.
+    pub check_updates: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "serif".into(), chat_size: "medium".into(), appearance: "system".into(), accent: "terracotta".into() }
+        Self { chat_font: "serif".into(), chat_size: "medium".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true }
     }
 }
 
@@ -74,6 +77,43 @@ impl AppConfig {
             "large" => 16.0,
             _ => 14.5,
         }
+    }
+}
+
+/// Margin explanations of opaque tool calls, asked of a small model
+/// through the `claude` binary. See `explain.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Explain {
+    pub enabled: bool,
+    pub model: String,
+    /// `off`, `permission` (calls waiting on a card) or `all` (every new
+    /// call in the conversation showing).
+    pub scope: String,
+    /// A call shorter than this, with no opaque shape in it, is left alone.
+    pub min_chars: usize,
+    pub timeout_s: u64,
+    /// Tools whose canned line is always enough.
+    pub canned_tools: Vec<String>,
+}
+
+impl Default for Explain {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "claude-haiku-4-5".into(),
+            scope: "permission".into(),
+            min_chars: 60,
+            timeout_s: 25,
+            canned_tools: ["Read", "Glob", "Grep", "NotebookRead", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"].iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+impl Explain {
+    /// Whether any call may reach a model at all.
+    pub fn active(&self) -> bool {
+        self.enabled && self.scope != "off"
     }
 }
 
@@ -96,6 +136,7 @@ pub struct Config {
     pub markdown: Markdown,
     pub driver: Driver,
     pub redact: Redact,
+    pub explain: Explain,
     pub app: AppConfig,
     /// How often the app rescans the session index, in milliseconds.
     pub scan_interval_ms: u64,
@@ -111,6 +152,7 @@ impl Default for Config {
             markdown: Markdown::default(),
             driver: Driver::default(),
             redact: Redact::default(),
+            explain: Explain::default(),
             app: AppConfig::default(),
             scan_interval_ms: 4000,
             active_window_min: 180,

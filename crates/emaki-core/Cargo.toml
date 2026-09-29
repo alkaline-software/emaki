@@ -15,6 +15,9 @@ chrono.workspace = true
 sha1_smol.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true
+# The update check and the installer download: one small HTTPS client on
+# rustls, which the tree already carries.
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 # Probing a pid (the inbox registry) is a Unix signal; a file's identity on
 # Windows needs the NTFS file index, which std does not expose on stable.

@@ -2,7 +2,7 @@
 
 Plan for the `gpui-app` branch (Rust + GPUI desktop app). Written by JP after a review of the branch as of 2026-09-27; checkmarks and the notes in italics record what landed on the branch on 2026-09-28.
 
-**Status:** Phases 1, 2, 3 and 5 are implemented and verified on macOS; Windows and Linux are type-checked locally (MinGW target) and wait for the first CI run. Phase 4 was measured and needs no work. Phase 6 has not started. The app is called Emaki now (binary, menu, wordmark, bundle, installer names); the crates, the `emaki` CLI, `~/.emaki` and the repository keep the old name until the organisation decision.
+**Status:** Phases 1, 2, 3 and 5 are implemented and verified on macOS; Windows and Linux are type-checked locally (MinGW target) and wait for the first CI run. Phase 4 was measured and needs no work. Phase 6 has not started. The app is called Emaki now, and so are the crates, the data directory and the repository (renamed 2026-09-28). The Python CLI and daemon the app grew out of were removed on 2026-09-29; the explainer was ported to the core first.
 
 ## Goals
 

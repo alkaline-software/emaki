@@ -1,32 +1,46 @@
 # Emaki
 
-**A permanent archive of every Claude Code conversation, and a live web view to
-read it in.**
+**Every coding-agent session on your machine, kept for good, in one window
+you can also talk to.**
+
+Emaki is a desktop app for macOS, Windows and Linux, written in Rust on
+[GPUI](https://www.gpui.rs) (the Zed editor's UI framework). It reads Claude
+Code and Codex sessions, copies every one of them before the agents' own
+expiry sweeps it, searches all of them, and lets you continue a Claude Code
+session from the window. Nothing here writes to a transcript, and recording
+adds nothing to a session's context window.
+
+## Install
+
+Download the installer for your machine from the
+[latest release](https://github.com/alkaline-software/emaki/releases/latest):
 
 ```
-uv tool install git+https://github.com/alkaline-software/emaki
-emaki
+Emaki-mac-arm64.dmg            Apple silicon
+Emaki-mac-x64.dmg              Intel Mac
+Emaki-windows-x64-setup.exe    Windows
+Emaki-linux-x64.AppImage       Linux (a .deb is there too)
 ```
 
-Python 3 standard library only. Nothing here writes to a transcript, and
-recording adds nothing to the session's context window.
+The Mac image is signed and notarized. Windows is unsigned, so SmartScreen
+asks once: *More info*, then *Run anyway*.
 
-## The native app
-
-Emaki is also a desktop app, written in Rust on [GPUI](https://www.gpui.rs)
-(the Zed editor's UI framework), with the same archive, the same on-disk
-layout and the same conversation model. It reads Claude Code and Codex
-sessions, keeps every one of them past the agents' own expiry, searches all of
-them, and lets you talk to a Claude Code session from the window.
+Or build it from a clone with a Rust toolchain from [rustup.rs](https://rustup.rs):
 
 ```
-cargo build --release -p emaki-app      # needs a Rust toolchain: https://rustup.rs
+cargo build --release -p emaki-app
 ./target/release/Emaki
-scripts/make-app.sh                      # dist/Emaki.app
+scripts/make-app.sh                      # a local Emaki.app under dist/
 ```
 
-The Python CLI and daemon below keep working alongside it; both read and write
-`~/.emaki`.
+The first launch copies every transcript it can see into the archive, so
+nothing you still have is at risk from that moment on. There is no daemon,
+no hook and nothing written into Claude Code's settings.
+
+Emaki keeps itself current: it asks GitHub for the newest release once a
+day (a tick in Settings turns that off) and says so in the settings panel,
+where *Check for updates* asks now and *Update* fetches the installer for
+your machine, puts it in place and restarts the app.
 
 ---
 
@@ -39,11 +53,12 @@ On the machine this was built on, the cleanup had already run that morning:
 136 MB of transcripts remained, the oldest dated exactly 28 days back, and
 everything before it was gone.
 
-There are already several good Claude Code session viewers — [claude-code-viewer](https://github.com/d-kimuson/claude-code-viewer),
-[claude-code-trace](https://github.com/delexw/claude-code-trace),
-[claude-code-log](https://github.com/daaain/claude-code-log) among them. Every
-one of them reads `~/.claude/projects` and stops there, so every one of them
-inherits that expiry. Emaki's reason to exist is that it copies first.
+There are already several good Claude Code session viewers, among them
+[claude-code-viewer](https://github.com/d-kimuson/claude-code-viewer),
+[claude-code-trace](https://github.com/delexw/claude-code-trace) and
+[claude-code-log](https://github.com/daaain/claude-code-log). Every one of
+them reads `~/.claude/projects` and stops there, so every one of them inherits
+that expiry. Emaki's reason to exist is that it copies first.
 
 **Compaction is not the threat.** `/compact` appends a boundary marker and keeps
 writing to the same file; the earlier rows stay. In a real session that dropped
@@ -65,338 +80,160 @@ disk, and all four are captured:
 <project>/<session>/tool-results/<id>.txt        outputs too large to inline
 ```
 
-When Claude Code deletes the original, the session keeps working — it stays
-listed, searchable, renderable and exportable, marked `kept` in the sidebar.
+When Claude Code deletes the original, the session keeps working: it stays
+listed, searchable and renderable, marked *kept* in the sidebar.
 
-**Searches every conversation.** Full-text across the whole corpus — live and
-archived — grouped by conversation, ranked, with highlighted context. Indexing
-107 sessions takes under a second and the index is 12 MB.
+**Shows what needs you on a board.** Live sessions sit in columns by what
+they are waiting on: *needs you* (an approval, a question, a plan),
+*planning*, *working*, *your turn* (Claude replied). Each card names its
+project, branch and agent. Everything without a process behind it is the
+collapsed *done* strip. The column is read off the transcript, so it is right
+even for a session that started before Emaki did.
 
-```
-$ emaki search "reveal.js fragment"
-15 matches in 4 conversations
+**Searches every conversation.** Full-text across the whole corpus, live and
+archived, one document per prompt, reply, thought or tool call, so a hit says
+where to look. ⌘K opens the palette; a hit opens its session on the round that
+matched. ⌘F finds inside the conversation showing.
 
-ba25902e  Improve scroll responsiveness and restore reveal state
-        quarto-lexis · 2026-07-28 16:33 · 8 hits
-        r1 …the rest of that controller and Quarto's hash/fragment defaults.
-```
+**Lays the conversation out like the Claude app.** Prompts on the right,
+replies as prose in Anthropic Serif when the Claude app is installed, tool
+calls as cards that fold, runs of them folded into one row, edits as diffs,
+subagents nested inside the call that spawned them, pictures and files shown
+as what they are.
 
-In the browser, the sidebar box searches everything; clicking a result opens
-that conversation centred on the round that matched.
+**Explains opaque tool calls in plain words.** A `python3 - <<'EOF'` heredoc
+or a piped shell chain gets one or two sentences from a small model (Haiku,
+through your own Claude Code login, no key of ours), on a permission card
+while you decide, and on any tool card's *Explain* button. Simple calls
+explain themselves for free, and answers are kept by content, so a command
+explained once is annotated everywhere it ever appears.
 
 **Renders readable markdown.** One file per session under `~/.emaki/logs/`,
 regenerated from the archive at any time. Greppable, diffable, and readable in
 ten years when this program no longer exists.
 
-**Serves a live web view.** One daemon for every project, one URL to bookmark.
-Updates stream over SSE and are applied in place, so an open tool call stays
-open and your scroll position holds while the log grows underneath you.
-
-**Shows every live session on a board.** It is the home page; `b` toggles it against the open session. Sessions
-sit in columns by what they are waiting on — *needs you* (an approval, a
-question, a plan), *planning*, *working*, *your turn* (Claude replied) — with
-the running command, the reply's first line, or the approval countdown on the
-card, and approve/deny right there. Everything without a process behind it is
-the collapsed *done* column. The column is read off the transcript, so it is
-right even when the daemon was started after the session.
-
-**Explains opaque tool calls in plain English.** A `python3 - <<'EOF'` heredoc
-becomes a sentence in the margin, next to the call — ideally while you are still
-deciding whether to approve it. Answers cache by content, so a command explained
-once is annotated everywhere it ever appears.
-
-**Can talk back** (both opt-in, both off by default). Approve or deny a tool call
-from the browser, edit the command first, or type a reply delivered when the
-turn ends.
+**Talks back.** See below.
 
 ---
 
-## Install
+## Continuing a conversation from the window
 
-Requires `python3` (3.9+) and Claude Code. No dependencies. macOS and Linux;
-on Windows see [Things worth knowing](#things-worth-knowing).
+The composer at the foot of a session sends a message into that session.
+Every message is something you typed and pressed send on; nothing is injected
+on your behalf. How it gets there depends on what is behind the session, and
+the line under the composer says which.
 
-```bash
-uv tool install git+https://github.com/alkaline-software/emaki
-```
+**A running terminal session.** Claude Code 2.1 gives every session an inbox,
+the same channel one Claude session uses to message another. Emaki writes your
+message there and it lands exactly as a prompt typed in the terminal would. The
+transcript records it as an ordinary row, so the conversation shows it as
+*you · emaki* with Claude's reply underneath. Mode, model and effort show as
+the transcript says them and cannot be changed from here: the inbox reads
+everything as prose.
 
-No `uv`? `pipx install git+https://github.com/alkaline-software/emaki` does the same.
-Either puts a `emaki` command on your PATH. Append `@<branch>` to the URL to
-install a branch other than `main`. Then:
+One thing Claude Code enforces: a session running with permissions bypassed
+holds a message from any other process and asks in the terminal before
+delivering it. Emaki does not claim otherwise on your behalf. To let messages
+through without the prompt, set `"crossSessionInbound": "accept"` in your
+Claude Code settings.
 
-```bash
-emaki
-```
+**A finished session.** With no process behind it, sending starts a headless
+Claude Code child of Emaki's own (`claude -p --resume <id>`) in the session's
+own directory. It appends to the same transcript under the same id, so the
+window updates as the turn runs and `claude --resume` in a terminal later
+picks up from there. The child stays between turns and closes after
+`driver.idle_min` of silence. Because Emaki hosts that process, the window
+gets what a terminal has: pictures in the message, the permission mode and
+model to pick (⇧Tab cycles the mode), `/effort`, a stop button, and a tool
+that needs permission shows as a card you answer (↩ allows the oldest, ⇧↩
+denies). If you open the same session in a terminal, Emaki retires its child
+after the current turn so two processes never write one transcript.
 
-That is the whole setup, and the everyday command. The first run registers
-Emaki's hooks in `~/.claude/settings.json` and says so; every run starts the
-daemon in the background if it is not up and opens the board in your browser.
-The daemon copies every transcript it can see into the archive as it starts,
-so nothing you still have is at risk from that moment on. `emaki stop` stops
-the daemon; `emaki install --uninstall` removes the hooks and restores the
-settings file exactly as it was, leaving the archive intact.
+**A new session.** The home page is a greeting over the composer: pick a
+folder, write the first message, and a session starts there under a fresh id.
 
-Registering the hooks backs `settings.json` up first, writes *through* a
-symlink rather than replacing it (dotfiles setups keep working), and only
-touches entries it recognises as its own. `emaki install --dry-run` shows the
-diff without writing.
+**Attachments.** The `+` button, a paste, or a drop onto the composer attaches
+files; a pasted image is kept under `~/.emaki/uploads/<session>/` and never
+enters a repository. On a session Emaki hosts an image goes to Claude as an
+image; anything else, and everything on a terminal session, is named by path
+so Claude reads it with its own tools.
 
-To update, run the install line again.
+**The limits row** above the composer is the terminal's status line: context
+used against the model's window, and the account's five-hour and seven-day
+windows once a session has run through Emaki.
 
-### Working from a clone
+---
 
-From the repo root, once:
-
-```bash
-uv tool install --editable .
-```
-
-`emaki` then runs the checkout as it is: switch branches or pull and the
-command follows, with no reinstall. `./bin/emaki` does the same without
-installing anything. Both the hooks and the editable install record the
-checkout's absolute path, so moving or deleting the clone breaks them until
-you run those commands again.
-
-### Where it puts things
+## Where it puts things
 
 Everything lives in `~/.emaki`, mode `0700`, outside every repository:
 
 ```
-~/.emaki/archive/     the permanent byte-for-byte copies — the irreplaceable part
+~/.emaki/archive/     the permanent byte-for-byte copies: the irreplaceable part
 ~/.emaki/logs/        rendered markdown, one file per session (regenerable)
-~/.emaki/index.db     the search index (regenerable)
+~/.emaki/search.db    the search index (regenerable)
+~/.emaki/cache/       explanations, by content
+~/.emaki/state/       what the window remembers, the account's limits
+~/.emaki/uploads/     pictures pasted into the composer
 ~/.emaki/config.json  settings
 ```
 
 Only `archive/` holds anything that cannot be rebuilt. Back up that directory
-and you have kept everything; `emaki build --all` regenerates the rest.
-`EMAKI_HOME` moves the whole tree elsewhere.
+and you have kept everything. `EMAKI_HOME` moves the whole tree elsewhere,
+which is also how to run a second copy beside the installed app.
 
----
-
-## Commands
-
-```
-emaki                               # start the daemon if needed, open the board
-emaki search <query>                # full-text across every conversation
-emaki archive [session]             # copy transcripts into the archive
-emaki serve [--port N] [--background] [--no-browser]
-emaki open [session]                # browser, at this project's latest session
-emaki list [-n N] [--all] [--json]  # sessions, newest first
-emaki build <session|--all>         # (re)generate markdown
-emaki path|show <session>           # the markdown path, or its contents
-emaki export <session> -o f.html    # one self-contained HTML file
-emaki status | stop
-emaki config list|get|set <key> <value>
-emaki install [--uninstall] [--project] [--dry-run]
-emaki replay <session> [--speed N]
-```
-
-A session argument can be a full id, a unique prefix, or a path. Leave it out
-and Emaki uses the newest session for the current directory.
-
----
-
-## The archive
-
-Incremental: an unchanged session costs one `stat`. A growing one copies only
-the new bytes. Backing up 107 sessions and 134 MB took 0.2s cold, and 0.0s warm.
-
-The one case that could destroy data is a source file being rewritten or
-truncated underneath us. Rather than overwrite, Emaki rotates the existing
-archive to `<session>.gen1.jsonl` and starts fresh — so both incarnations
-survive. Sessions that outlive their originals are never fed back into the
-archive as sources.
-
-`emaki status` reports how much is held and how many sessions exist only
-because they were archived.
-
----
-
-## The viewer
-
-- **Sidebar collapsed to projects.** Click to expand; the active project opens
-  itself, and typing a filter opens whatever matches.
-- **Click anything to centre it.** A message that fits is centred; one that
-  doesn't is top-aligned, because centring a long message would start it above
-  the fold.
-- **Margin notes behave like Google Docs comments.** A cluster distributes
-  *around* its anchors instead of ratcheting downward, and clicking a note (or
-  its tool call) snaps them into exact alignment while neighbours move aside. A
-  dashed tether shows the pairing. The layout is an exact solve — see
-  `emaki/viewer/rail.js`.
-- **Tool calls** show command, stdout, stderr and status; edits render as
-  red/green diffs; subagent conversations nest inside the call that spawned
-  them, matched by `toolUseId` rather than guessed.
-- **Explain any call, any time** — hover a tool card, click *explain*. Works on
-  sessions recorded months ago.
-- Search with match counts, `j`/`k` to step rounds, `/` to find, `f`/`.` for
-  follow, `t` for theme, dark and light throughout.
-
----
-
-## Continuing a conversation from the page
-
-The compose box at the bottom of a session sends a message into that session.
-It is on by default because every message is something you typed and pressed
-send on; nothing is injected on your behalf. How it gets there depends on what
-is behind the session, and the placeholder text says which:
-
-**A running session.** Claude Code 2.1 gives every session an inbox: a Unix
-socket registered in `~/.claude/sessions/`, the same channel one Claude
-session uses to message another. Emaki writes your message there and it lands
-exactly as a prompt typed in the terminal would: it starts a turn if Claude is
-waiting for you, and waits its turn if Claude is busy. No hooks needed. The
-message is recorded in the transcript as an ordinary row, so the log shows it
-as *you · web* with Claude's reply underneath.
-
-One thing Claude Code enforces: a session running with permissions bypassed
-(`--dangerously-skip-permissions`, or auto mode) holds a message from any other
-process and asks in the terminal before delivering it. Emaki does not claim
-otherwise on your behalf. To let page messages through without the prompt, set
-`"crossSessionInbound": "accept"` in your Claude Code settings.
-
-**A finished session.** With no process behind it, sending starts a headless
-Claude Code child of Emaki's own, `claude -p --resume <id>` speaking Claude
-Code's stream-json protocol, in the session's own directory. It appends to the
-same transcript under the same id, so the page updates as the turn runs and
-`claude --resume` in a terminal later picks up from there. The child stays
-between turns (follow-ups go straight in, a message sent mid-turn is queued)
-and closes after `driver.idle_min` of silence. Because Emaki is the host of
-that process, the page gets what a terminal has: pictures in the message, the
-permission mode and model to pick, a stop button, and the session's skills and
-commands, and a tool that needs permission is approved in the margin rail
-rather than refused. The board's *done* strip offers *continue* for these.
-
-If you open the same session in a terminal, Emaki retires its child after the
-current turn so two processes never write one transcript.
-
-**Attachments.** The `+` button, a paste, or a drop onto the compose box
-attaches files; they are kept under `~/.emaki/uploads/<session>/` and never
-enter a repository. On a page-driven session an image goes to Claude as an
-image (it sees the picture); anything else, and everything on a terminal
-session, is named by path so Claude reads it with its own tools. `uploads.max_mb`
-caps the size. In the conversation an attached picture shows as the picture
-and any other file as a card with its name, type and size; either opens in a
-new tab. Screenshots pasted in the terminal show the same way.
-
-**The home page is the board.** `#/` (the brand name, or `h`) lands on it,
-so the first thing the page shows is what needs you.
-
-**A new session.** `+ new` in the sidebar (or `n`, or the `+` on a project
-group) opens a page like the desktop app's: pick a folder, write the first
-message, and a page-driven session starts there under a fresh id. It shows in
-the list at once as a draft and becomes an ordinary session the moment Claude
-writes its transcript.
-
-**Slash commands and `@` files.** Typing `/` at the start of the box lists
-what this session can run: your skills (`~/.claude/skills`), your commands,
-the project's own under `.claude/`, every enabled plugin's, and, once a
-page-driven session has started, the bundled skills and built-in commands
-Claude Code itself reported (kept for later, so they show on other sessions
-too). Entries a channel cannot carry are greyed with the reason: a built-in
-like `/compact` only works at Claude Code's own prompt, so it is refused on a
-terminal session rather than sent as prose. `@` lists files under the
-session's folder (from the driver when there is one, else `git ls-files`).
-↑↓ move, Tab or Enter completes, Esc closes.
-
-**Mode and model.** On a page-driven session the two chips under the compose
-box switch the permission mode (`Shift+Tab` cycles, like the terminal) and the
-model; on a terminal session they show what the transcript says and point you
-at the terminal. `Esc` while Claude is working stops the turn.
-
-**A running session without an inbox** (an older Claude Code, or messaging
-turned off there) falls back to the Stop-hook queue below when that is enabled.
-
-```bash
-emaki config set messaging.enabled false   # hide the compose box entirely
-emaki config set driver.enabled false      # never start a process
-emaki config set driver.idle_min 10        # close an idle child sooner
-emaki config set driver.default_mode plan  # mode a started session begins in
-emaki config set driver.allow_bypass true  # offer bypassPermissions on the page
-```
-
-## Two-way control through hooks
-
-Off by default. Turn on deliberately.
-
-```bash
-emaki config set remote_approval.enabled true
-emaki config set reply_queue.enabled true
-```
-
-**Approvals.** Press *approvals* to arm a session. The next permission request
-appears in the browser with its explanation, and the `PermissionRequest` hook
-waits for you. It releases immediately if you close the tab or disarm, and after
-`remote_approval.wait_s` (default 120) regardless.
-
-The honest cost: while the hook is held your terminal shows nothing, because
-Claude Code's dialog does not appear until the hook returns. That is why arming
-is explicit, per-session, and shows a countdown.
-
-Note this goes through Claude Code's own hook system, not the Agent SDK — so it
-is not subject to the subscription-account restriction that affects SDK-based
-tools.
-
-**The Stop-hook queue.** The older reply path, kept for sessions the inbox
-cannot reach. Text is queued and delivered through the `Stop` hook when the
-turn ends. Guards: `stop_hook_active` is honoured so a blocked stop never
-triggers another, and `reply_queue.max_chain` (default 5) caps consecutive
-injections. A prompt typed in the terminal resets the count. A message
-delivered this way reaches Claude as the reason for a blocked stop rather than
-as a user row, so the daemon splices it into the view itself.
-
-These are the features that put text *into* a conversation. A message enters
-the context window exactly as a typed one would — which is the point of it, but
-it is why the blanket claim at the top of this file is about recording.
+The archive is incremental: an unchanged session costs one `stat`, a growing
+one copies only the new bytes. The one case that could destroy data is a
+source file rewritten underneath us; rather than overwrite, Emaki rotates the
+existing copy to `<session>.gen1.jsonl` and starts fresh, so both survive.
 
 ---
 
 ## Configuration
 
-`emaki config list` shows everything; `~/.emaki/config.json` holds it.
+The settings panel (⌘, on macOS, Ctrl+, elsewhere) covers the look, the
+explainer and what a new session starts with. `~/.emaki/config.json` holds
+everything:
 
 | Key | Default | |
 |---|---|---|
-| `port` | `4517` | the daemon's port |
-| `markdown.tools` | `full` | `full`, `summary`, or `none` |
-| `markdown.max_output_chars` | `4000` | per tool call, markdown only |
-| `explain.enabled` | `true` | plain-English margin notes |
+| `app.appearance` | `system` | `system`, `light` or `dark` |
+| `app.accent` | `terracotta` | `terracotta`, `blue`, `green`, `violet`, `teal` or `graphite` |
+| `app.chat_font` | `serif` | the conversation's face: `serif` or `sans` |
+| `app.chat_size` | `medium` | `small`, `medium` or `large` |
+| `app.check_updates` | `true` | ask GitHub for the newest release once a day |
+| `explain.scope` | `permission` | `off`, `permission` (cards) or `all` (every new call in the session showing) |
 | `explain.model` | `claude-haiku-4-5` | |
-| `messaging.enabled` | `true` | the compose box: message a session from the page |
 | `driver.enabled` | `true` | start a headless Claude Code child for a session with no process behind it |
 | `driver.idle_min` | `30` | close that child after this many idle minutes |
 | `driver.default_mode` | `""` | permission mode for a started session (`""` = Claude Code's `permissions.defaultMode`) |
 | `driver.default_model` | `""` | model for a started session (`""` = the account default) |
-| `app.appearance` | `system` | the desktop app's look: `system`, `light` or `dark` |
-| `app.accent` | `terracotta` | the desktop app's accent: `terracotta`, `blue`, `green`, `violet`, `teal` or `graphite` |
-| `app.chat_font` | `serif` | the conversation's face in the desktop app: `serif` or `sans` |
-| `app.chat_size` | `medium` | the conversation's size in the desktop app: `small`, `medium` or `large` |
-| `driver.allow_bypass` | `false` | offer `bypassPermissions` on the page |
-| `uploads.max_mb` | `20` | largest file the compose box accepts |
-| `remote_approval.enabled` | `false` | approve from the browser |
-| `reply_queue.enabled` | `false` | Stop-hook replies, for sessions without an inbox |
-| `redact.enabled` | `true` | scrub secrets |
+| `driver.allow_bypass` | `false` | offer `bypassPermissions` |
+| `driver.claude_path` | `""` | where `claude` is, when `PATH` does not say |
+| `markdown.tools` | `full` | `full`, `summary`, or `none` |
+| `markdown.max_output_chars` | `4000` | per tool call, markdown only |
+| `redact.enabled` | `true` | scrub secrets from the markdown and the window |
 
 ---
 
 ## Privacy
 
 The archive holds complete transcripts, which means whatever the agent read.
-Everything lives in `~/.emaki` at mode `0700`, outside every repository — an
+Everything lives in `~/.emaki` at mode `0700`, outside every repository; an
 in-project log is one `git add -A` away from being published.
 
 `redact.enabled` scrubs the shapes that leak most often: provider key prefixes
 (`sk-ant-`, `ghp_`, AWS, Slack, Google), `Authorization` headers, private key
 blocks, and `NAME=value` assignments for password/secret/token-ish names. It
-applies to the rendered markdown and the viewer, **not** to the raw archive —
+applies to the rendered markdown and the window, **not** to the raw archive:
 the archive is deliberately verbatim, because a redacted archive is not a
-reproducible one. Add patterns with `redact.extra_patterns`. It is a safety net,
-not a guarantee.
+reproducible one. Add patterns with `redact.extra_patterns`. It is a safety
+net, not a guarantee.
 
 Explanations are the only feature that sends anything anywhere: the call's
-arguments go to Anthropic. Cheap calls never leave your machine, answers are
-cached so nothing is sent twice, and `explain.enabled false` turns it off.
+arguments go to Anthropic through your own Claude Code login. Cheap calls
+never leave your machine, answers are cached so nothing is sent twice, and
+`explain.scope` set to `off` turns it off.
 
 ---
 
@@ -409,23 +246,25 @@ cached so nothing is sent twice, and `explain.enabled false` turns it off.
 - **Token counts exclude cache reads.** Every message re-reads the cached prefix,
   so summing that field reports tens of millions for a session that produced a
   few hundred thousand.
-- **`emaki serve` binds loopback only**, checks `Host` against DNS rebinding, and
-  serves a CSP forbidding inline script and every external origin. Transcript
-  content is escaped, never rendered as HTML.
-- **`--background` is POSIX-only** (it forks) and hooks need `AF_UNIX`. On Windows
-  run the daemon in the foreground; capture still works.
+- **The inbox is a Unix socket.** On Windows a terminal session cannot be
+  messaged; a finished one still resumes through Emaki's own child.
+- **An older Emaki was a Python CLI and web daemon** that registered hooks in
+  `~/.claude/settings.json`. The app needs none of that. If those hooks are
+  still in your settings, delete the `hooks` entries whose command names
+  `emaki-hook`; a stale one blocks every prompt in Claude Code.
 
 ---
 
 ## Development
 
-```bash
-python3 -m unittest discover -s tests -t tests   # 268 tests
-node tests/test_rail.mjs                          # the rail's layout solver
-node tests/test_compose.mjs                       # the composer's key and token rules
+```
+cargo test -p emaki-core                 # the core, on temp directories
+cargo build -p emaki-app && ./target/debug/Emaki
+target/debug/emaki-core help             # list, render, archive, search, bench, explain …
 ```
 
-`EMAKI_HOME` and `CLAUDE_CONFIG_DIR` redirect everything, which is how the tests
-stay off your real data.
+`EMAKI_HOME` and `CLAUDE_CONFIG_DIR` redirect everything, which is how the
+tests stay off your real data. `AGENTS.md` is the map of the code and the
+reasoning behind it; `WORKFLOW.md` is how a release is cut.
 
 MIT.

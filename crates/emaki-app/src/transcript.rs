@@ -5,6 +5,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::highlighter::HighlightTheme;
+use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 use emaki_core::model::*;
@@ -12,17 +13,55 @@ use emaki_core::render_md::{clip, code_block, command_text, human_duration, huma
 
 use crate::format::clock;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use std::collections::HashSet;
 
-use crate::workbench::{agent_color, agent_glyph, badge, file_icon, file_kind, fit_thumb, human_size, Workbench, CONTENT_W};
+use crate::workbench::{agent_color, agent_glyph, badge, file_icon, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W};
 
 const MAX_BODY: usize = 6000;
+/// An opened tool call shows at most this much before it scrolls inside
+/// its card, so one long output never takes the whole window.
+const MAX_BODY_H: Pixels = px(400.);
 /// How far a reply's right edge stays inside the prompts' right edge.
 const REPLY_INSET: Pixels = px(40.);
 
+/// Whether the markdown crate can parse `text` without panicking. Version
+/// 1.0.0, the one the toolkit's text view uses, aborts on some inputs
+/// ("Cannot push to non-parent" in `to_mdast`); the smallest one found is a
+/// paragraph followed by two `---` lines, which YAML front matter quoted in
+/// a Codex tool result produces. A panic inside an element's layout takes
+/// the app down, so every text is tried here first, under `catch_unwind`,
+/// once per distinct text (the answer is kept by hash).
+fn markdown_is_safe(text: &str) -> bool {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    thread_local! {
+        static SEEN: std::cell::RefCell<HashMap<u64, bool>> = std::cell::RefCell::new(HashMap::new());
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    let key = h.finish();
+    if let Some(known) = SEEN.with(|s| s.borrow().get(&key).copied()) {
+        return known;
+    }
+    let opts = markdown::ParseOptions::gfm();
+    let safe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(text, &opts).is_ok())).unwrap_or(false);
+    SEEN.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() > 4096 {
+            s.clear();
+        }
+        s.insert(key, safe);
+    });
+    safe
+}
+
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
+    // A text the parser cannot take is shown as it is, in a code block,
+    // rather than taking the window down.
+    let text = if markdown_is_safe(&text) { text } else { code_block(&text, "text") };
     let dark = theme.mode.is_dark();
     let code_bg = theme.muted;
     let border = theme.border;
@@ -37,6 +76,48 @@ pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
             }
             .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.))),
         )
+}
+
+/// The plain-words line on a tool call or a permission card: a box on a
+/// faint accent tint, the text drawn through the markdown view so it can
+/// be selected and copied. With no text yet it says so. It fades and
+/// settles in over a moment when it appears, keyed on its own id, so each
+/// opening plays once.
+pub(crate) fn explain_card(id: String, text: String, pending: bool, size: Pixels, cx: &App) -> impl IntoElement {
+    let theme = cx.theme().clone();
+    let anim: SharedString = format!("{id}-in").into();
+    v_flex()
+        .w_full()
+        .px(px(14.))
+        .py(px(10.))
+        .rounded(px(10.))
+        .bg(theme.primary.opacity(if theme.mode.is_dark() { 0.10 } else { 0.07 }))
+        .when(pending && text.is_empty(), |d| d.child(div().italic().text_size(size - px(1.)).text_color(theme.muted_foreground).child("Explaining…")))
+        .when(!(pending && text.is_empty()), |d| d.child(div().text_size(size).text_color(theme.foreground).line_height(relative(1.6)).child(md_view(id, text, cx))))
+        .with_animation(ElementId::Name(anim), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-4. * (1. - t))))
+}
+
+/// The strip under a picture tile: its name, centred, in the mono face on
+/// a muted ground, wrapping when it is long.
+pub(crate) fn tile_caption(w: f32, name: String, theme: &gpui_component::Theme) -> impl IntoElement {
+    div()
+        .w(px(w))
+        .px(px(8.))
+        .py(px(5.))
+        .border_t_1()
+        .border_color(theme.border)
+        .bg(theme.muted)
+        .font_family(theme.mono_font_family.clone())
+        .text_size(px(11.))
+        .text_color(theme.muted_foreground)
+        .text_center()
+        .whitespace_normal()
+        .child(name)
+}
+
+/// Straight-line mix of two colours, for a state change drawn over a moment.
+fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+    Hsla { h: a.h + (b.h - a.h) * t, s: a.s + (b.s - a.s) * t, l: a.l + (b.l - a.l) * t, a: a.a + (b.a - a.a) * t }
 }
 
 fn mono_block(id: String, text: &str, lang: &str, cx: &App) -> impl IntoElement {
@@ -294,6 +375,7 @@ impl Workbench {
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_active))
             .on_click(cx.listener(move |this, _, _, cx| {
+                this.pin_scroll();
                 if let Some(d) = this.detail.as_mut() {
                     if !d.open_runs.remove(&(ix, start)) {
                         d.open_runs.insert((ix, start));
@@ -353,10 +435,13 @@ impl Workbench {
         } else {
             None
         };
+        // A picture's tile is square-cornered: the picture itself has sharp
+        // corners, and a rounded frame around a sharp picture reads as a
+        // mismatch. File chips keep their rounding.
         let frame = |el: AnyElement| {
             div()
                 .id(SharedString::from(format!("att-{ix}-{}-{}", a.index, a.name)))
-                .rounded(px(10.))
+                .when(!is_image, |d| d.rounded(px(10.)))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.popover)
@@ -385,7 +470,14 @@ impl Workbench {
                     // 180, so nothing is cropped away; a picture whose size
                     // the header did not give gets the old box, letterboxed.
                     let (w, h) = fit_thumb(size, 240., 180., (176., 118.));
-                    frame(img(src).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain).into_any_element()).into_any_element()
+                    let caption = if a.name.is_empty() { "image".to_string() } else { a.name.clone() };
+                    frame(
+                        v_flex()
+                            .child(img(src).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain))
+                            .child(tile_caption(w, caption, &theme))
+                            .into_any_element(),
+                    )
+                    .into_any_element()
                 }
                 None => frame(
                     h_flex().h(px(48.)).px(px(12.)).gap(px(8.)).items_center().text_size(px(12.)).text_color(theme.muted_foreground).child(file_icon("x.png", px(18.), theme.muted_foreground)).child(if a.name.is_empty() { "image".to_string() } else { a.name.clone() }).into_any_element(),
@@ -482,6 +574,40 @@ impl Workbench {
         let has_body = self.tool_has_body(call);
         let subject = call.subject.clone();
         let name = call.name.clone();
+        let explanation = self.explanation_for(call);
+        let explaining = self.explaining.contains(&call.id);
+        let ex_open = self.detail.as_ref().map(|d| d.open_explanations.contains(&call.id)).unwrap_or(false);
+        let can_explain = self.hub.explainer.cfg().enabled;
+        let pill = {
+            let (id, cname, input, has_text) = (call.id.clone(), call.name.clone(), call.input.clone(), !explanation.is_empty());
+            // Off is an outline in the muted ink; on is filled with the
+            // accent tint. The switch between them is drawn over a moment,
+            // keyed on the state so each click plays it once.
+            let (off_border, off_bg, off_ink) = (theme.border, theme.transparent, theme.muted_foreground);
+            let (on_border, on_bg, on_ink) = (theme.primary.opacity(0.6), theme.primary.opacity(0.14), theme.primary);
+            let anim: SharedString = format!("explain-{ix}-{jx}-{}", if ex_open { "on" } else { "off" }).into();
+            h_flex()
+                .id(SharedString::from(format!("explain-{ix}-{jx}")))
+                .flex_shrink_0()
+                .h(px(20.))
+                .px(px(8.))
+                .items_center()
+                .rounded_full()
+                .border_1()
+                .cursor_pointer()
+                .text_size(px(11.))
+                .when(!ex_open, |d| d.hover(|s| s.border_color(theme.primary.opacity(0.6)).bg(theme.primary.opacity(0.10)).text_color(theme.foreground)))
+                .active(|s| s.bg(theme.primary.opacity(0.22)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.toggle_explain(&id, &cname, &input, has_text, cx);
+                }))
+                .child(if ex_open && explaining && !has_text { "Explaining…" } else { "Explain" })
+                .with_animation(ElementId::Name(anim), Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()), move |d, t| {
+                    let t = if ex_open { t } else { 1. - t };
+                    d.border_color(mix(off_border, on_border, t)).bg(mix(off_bg, on_bg, t)).text_color(mix(off_ink, on_ink, t))
+                })
+        };
 
         let mut card = v_flex().w_full().rounded(px(10.)).border_1().border_color(theme.border).bg(theme.popover).overflow_hidden();
         card = card.child(
@@ -497,6 +623,7 @@ impl Workbench {
                     if !has_body {
                         return;
                     }
+                    this.pin_scroll();
                     if let Some(d) = this.detail.as_mut() {
                         if !d.open_tools.remove(&(ix, jx)) {
                             d.open_tools.insert((ix, jx));
@@ -510,10 +637,79 @@ impl Workbench {
                 .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(theme.muted_foreground).child(subject))
                 .when(!stat.is_empty(), |d| d.child(div().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(stat)))
                 .when(!status_text.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(status_color).child(status_text)))
-                .when(!duration.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(duration))),
+                .when(!duration.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(duration)))
+                .when(can_explain, |d| d.child(pill)),
         );
+        if ex_open {
+            let text = if explanation.is_empty() && !explaining { "Nothing came back from the model. Click Explain again to retry.".to_string() } else { explanation };
+            let size = px(self.cfg.app.chat_px());
+            card = card.child(div().w_full().px(px(10.)).pb(px(8.)).child(explain_card(format!("ex-{ix}-{jx}"), text, explaining, size, cx)));
+        }
         if open && has_body {
-            card = card.child(div().w_full().px(px(10.)).pb(px(10.)).border_t_1().border_color(theme.border).pt(px(8.)).child(self.render_tool_body(ix, jx, call, sub_open, cwd, cx)));
+            // The body is bounded and scrolls inside the card, so a long
+            // output never takes the whole window; the clip's "n more
+            // lines" note still says what was left out entirely.
+            let body = self.render_tool_body(ix, jx, call, sub_open, cwd, cx);
+            // The scroll handle lives in the detail, so the position and the
+            // bar survive the redraw every frame brings.
+            let scroll = self.detail.as_mut().map(|d| d.body_scrolls.entry((ix, jx)).or_default().clone()).unwrap_or_default();
+            let handle = scroll.handle.clone();
+            // The wheel over a body that scrolls belongs to the body: the
+            // list would otherwise take the same event (gpui hands a scroll
+            // to every scrollable under the mouse) and both would move.
+            // Whose a stroke is gets decided as it starts (see `Stroke`):
+            // the body's own handler has run by the time this one does, so
+            // the offset before it is `at - dy`, and an edge there in the
+            // wheel's direction means the body had nothing to give and the
+            // conversation takes the stroke. A body that fits passes
+            // everything on.
+            let wheel_handle = handle.clone();
+            let stroke = scroll.stroke.clone();
+            card = card.child(
+                div()
+                    .relative()
+                    .w_full()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .on_scroll_wheel(move |event, window, cx| {
+                        let max = wheel_handle.max_offset().y;
+                        if max <= px(0.) {
+                            return;
+                        }
+                        let now = std::time::Instant::now();
+                        let mut s = stroke.borrow_mut();
+                        let touched = matches!(event.touch_phase, gpui::TouchPhase::Started);
+                        let paused = s.last.map(|t| now.duration_since(t) > crate::workbench::STROKE_GAP).unwrap_or(true);
+                        s.last = Some(now);
+                        if touched || paused {
+                            s.decided = false;
+                            s.handed_over = false;
+                        }
+                        if !s.decided {
+                            let dy = event.delta.pixel_delta(window.line_height()).y;
+                            if dy != px(0.) {
+                                let before = wheel_handle.offset().y - dy;
+                                let at_bottom = before <= -max;
+                                let at_top = before >= px(0.);
+                                s.handed_over = (dy < px(0.) && at_bottom) || (dy > px(0.) && at_top);
+                                s.decided = true;
+                            }
+                        }
+                        if !s.handed_over {
+                            cx.stop_propagation();
+                        }
+                    })
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("tool-body-{ix}-{jx}")))
+                            .w_full()
+                            .max_h(MAX_BODY_H)
+                            .overflow_y_scroll()
+                            .track_scroll(&handle)
+                            .child(div().w_full().px(px(10.)).pt(px(8.)).pb(px(10.)).child(body)),
+                    )
+                    .vertical_scrollbar(&handle),
+            );
         }
         card.into_any_element()
     }
@@ -531,9 +727,6 @@ impl Workbench {
         let theme = cx.theme().clone();
         let data = &call.input;
         let mut parts = v_flex().w_full().gap(px(8.)).text_size(px(12.5));
-        if !call.explanation.is_empty() {
-            parts = parts.child(div().text_color(theme.muted_foreground).child(call.explanation.clone()));
-        }
         match call.tool_kind {
             ToolKind::Read => {
                 if call.result_images > 0 {
@@ -542,20 +735,25 @@ impl Workbench {
                     match self.thumb(ix, &call.result_uuid, call.result_index, cx) {
                         Some(t) => {
                             let (w, h) = fit_thumb(t.size, 320., 240., (176., 118.));
-                            let title = call.subject.clone();
                             let image = ImageSource::from(t.image.clone());
+                            // The same square tile as a pasted picture, the
+                            // file's name under it. The lightbox gets the
+                            // file's full path, so it can open and reveal it.
+                            let file = data.get("file_path").and_then(|v| v.as_str()).filter(|p| !p.is_empty()).map(PathBuf::from);
+                            let title = file.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| call.subject.clone());
+                            let caption = std::path::Path::new(&call.subject).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| call.subject.clone());
                             parts = parts.child(
                                 div()
                                     .id(SharedString::from(format!("read-img-{ix}-{jx}")))
                                     .w(px(w))
-                                    .rounded(px(10.))
                                     .border_1()
                                     .border_color(theme.border)
                                     .overflow_hidden()
                                     .cursor_pointer()
                                     .hover(|s| s.border_color(theme.primary))
-                                    .on_click(cx.listener(move |this, _, window, cx| this.preview_attachment(title.clone(), None, Some(image.clone()), window, cx)))
-                                    .child(img(ImageSource::from(t.image)).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain)),
+                                    .on_click(cx.listener(move |this, _, window, cx| this.preview_attachment(title.clone(), file.clone(), Some(image.clone()), window, cx)))
+                                    .child(img(ImageSource::from(t.image)).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain))
+                                    .child(tile_caption(w, caption, &theme)),
                             );
                         }
                         None => parts = parts.child(div().text_color(theme.muted_foreground).italic().child("loading the picture…")),
@@ -615,6 +813,7 @@ impl Workbench {
                             .text_size(px(12.))
                             .text_color(theme.muted_foreground)
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pin_scroll();
                                 if let Some(d) = this.detail.as_mut() {
                                     if !d.open_subagents.remove(&(ix, jx)) {
                                         d.open_subagents.insert((ix, jx));

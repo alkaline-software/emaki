@@ -134,6 +134,62 @@ fn main() {
                 Err(e) => println!("refused: {e}"),
             }
         }
+        "explain" => {
+            // emaki-core explain <command...>: put one shell command into
+            // plain words the way a permission card does, cached by content.
+            // A probe of the model call, which the tests never make.
+            let command = args[1..].join(" ");
+            let mut input = serde_json::Map::new();
+            input.insert("command".into(), serde_json::Value::String(command));
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            let ex = emaki_core::explain::Explainer::new(cfg.explain.clone(), std::sync::Arc::new(move |_: &str, text: &str| {
+                let _ = tx.send(text.to_string());
+            }));
+            let cached = !ex.lookup("Bash", &input).is_empty();
+            ex.request("probe", "Bash", &input, true);
+            match rx.recv_timeout(std::time::Duration::from_secs(cfg.explain.timeout_s + 5)) {
+                Ok(text) if !text.is_empty() => println!("{text}\n  ({})", if cached { "from the cache" } else { "from the model" }),
+                Ok(_) => println!("no explanation: the model gave nothing usable (is `claude` logged in?)"),
+                Err(_) => println!("no explanation: timed out"),
+            }
+        }
+        "update" if args.get(1).map(String::as_str) == Some("install") => {
+            // emaki-core update install <version> [<bundle>]: fetch that
+            // release's installer and put it in place, over the named
+            // bundle (macOS) or the running one. The app's own Update
+            // button, from a terminal, for trying the swap on a copy.
+            let version = args.get(2).expect("update install <version> [<bundle>]").clone();
+            let bundle = args.get(3).map(PathBuf::from);
+            let file = match emaki_core::update::download(&version, &|done, total| {
+                if let Some(t) = total {
+                    eprint!("\r{done} of {t} bytes");
+                }
+            }) {
+                Ok(f) => f,
+                Err(e) => {
+                    println!("download failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            eprintln!("\nfetched {}", file.display());
+            match emaki_core::update::install_into(&file, bundle.as_deref()) {
+                Ok(()) => println!("installed {version}; the new app is starting"),
+                Err(e) => {
+                    println!("install failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "update" => {
+            // emaki-core update: what the newest release is, against this
+            // build. A probe of the check the app makes once a day.
+            let current = emaki_core::update::current_version();
+            match emaki_core::update::latest() {
+                Ok(latest) if emaki_core::update::is_newer(&latest, current) => println!("{latest} is available (this is {current}): {}", emaki_core::update::release_page(&latest)),
+                Ok(latest) => println!("{current} is the newest release (GitHub has {latest})"),
+                Err(e) => println!("could not check: {e}"),
+            }
+        }
         "drive" => {
             // emaki-core drive <cwd> <message...>: start a fresh headless
             // session, send one message, print events until the turn ends.
@@ -178,7 +234,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | drive <cwd> <text>");
+            eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | explain <command> | update | drive <cwd> <text>");
         }
     }
 }

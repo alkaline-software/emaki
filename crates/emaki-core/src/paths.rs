@@ -118,9 +118,6 @@ pub fn run_dir() -> PathBuf {
 pub fn archive_dir() -> PathBuf {
     root().join("archive")
 }
-pub fn index_db() -> PathBuf {
-    root().join("index.db")
-}
 pub fn uploads_dir(session_id: &str) -> PathBuf {
     let base = root().join("uploads");
     if session_id.is_empty() {

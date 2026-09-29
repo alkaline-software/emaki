@@ -58,6 +58,9 @@ fn strip_wrappers_splits_commands_and_output() {
     assert_eq!(prompt, "real prompt");
     assert_eq!(commands, vec!["/effort high"]);
     assert_eq!(outputs, vec!["ok"]);
+    // Text pasted into the terminal keeps its words and loses the tags.
+    let (p, _, _) = strip_wrappers("see this\n<pasted_content id=\"02a2\">\nline one\nline two\n</pasted_content id=\"02a2\">\nthanks");
+    assert_eq!(p, "see this\nline one\nline two\nthanks");
     let (p, _, _) = strip_wrappers("<system-reminder>ignore</system-reminder>hello");
     assert_eq!(p, "hello");
 }
@@ -365,4 +368,258 @@ fn limits_absorb_the_wire_and_size_a_context() {
     assert_eq!(until(1.0, 2.0), "");
     assert_eq!(emaki_core::driver::effort_label("xhigh"), "Extra high effort");
     assert_eq!(emaki_core::driver::effort_label(""), "Default effort");
+}
+
+#[test]
+fn pasted_pictures_are_named_by_their_markers() {
+    use emaki_core::build::attachments_of;
+    let blocks = vec![json!({"type": "text", "text": "[Image #3] look [Image #4] here"}), json!({"type": "image", "source": {"media_type": "image/png"}}), json!({"type": "image", "source": {"media_type": "image/jpeg"}}), json!({"type": "image"})];
+    let (prompt, found) = attachments_of("[Image #3] look [Image #4] here", &blocks, "u1");
+    assert_eq!(prompt, "look here");
+    let names: Vec<&str> = found.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, vec!["Image #3", "Image #4", ""]);
+    assert_eq!(found[1].index, 2);
+    // No marker, no change to the words.
+    let (prompt, found) = attachments_of("plain words", &blocks[1..2], "u1");
+    assert_eq!(prompt, "plain words");
+    assert_eq!(found[0].name, "");
+}
+
+#[test]
+fn the_newest_version_is_read_off_the_release_redirect() {
+    use emaki_core::update::{asset_name, asset_url, is_newer, version_from_location};
+    assert_eq!(version_from_location("https://github.com/alkaline-software/emaki/releases/tag/v0.1.1").as_deref(), Some("0.1.1"));
+    assert_eq!(version_from_location("/alkaline-software/emaki/releases/tag/0.2.0/").as_deref(), Some("0.2.0"));
+    assert_eq!(version_from_location("https://github.com/alkaline-software/emaki/releases"), None);
+    assert_eq!(version_from_location("https://github.com/alkaline-software/emaki/releases/tag/nightly"), None);
+    assert!(is_newer("0.1.1", "0.1.0"));
+    assert!(is_newer("0.2.0", "0.1.9"));
+    assert!(!is_newer("0.1.1", "0.1.1"));
+    assert!(!is_newer("0.1.0", "0.1.1"));
+    // The installer is one of the release's stable names, and its URL
+    // needs no API.
+    let asset = asset_name().expect("an installer is built for the platform the tests run on");
+    assert!(asset.starts_with("Emaki-"));
+    assert_eq!(asset_url("0.1.1", "Emaki-mac-arm64.dmg"), "https://github.com/alkaline-software/emaki/releases/download/v0.1.1/Emaki-mac-arm64.dmg");
+}
+
+#[test]
+fn the_status_line_file_feeds_the_limits_when_newer() {
+    use emaki_core::limits::Limits;
+    let mut l = Limits::default();
+    let v = json!({ "rate_limits": { "five_hour": { "used_percentage": 5, "resets_at": 1790000000 }, "seven_day": { "used_percentage": 11.4, "resets_at": 1790500000 } }, "seen_at": 1789990000.0 });
+    assert!(l.absorb_statusline(&v));
+    assert_eq!(l.five_hour.unwrap().utilization, 0.05);
+    assert_eq!(l.seven_day.unwrap().resets_at, 1790500000.0);
+    assert_eq!(l.seen_at, 1789990000.0);
+    // The same file again, or an older one, changes nothing.
+    assert!(!l.absorb_statusline(&v));
+    let older = json!({ "rate_limits": { "five_hour": { "used_percentage": 99 } }, "seen_at": 1789980000.0 });
+    assert!(!l.absorb_statusline(&older));
+    assert_eq!(l.five_hour.unwrap().utilization, 0.05);
+    // A window the terminal did not have keeps its old value.
+    let partial = json!({ "rate_limits": { "seven_day": { "used_percentage": 12, "resets_at": 1790500000 } }, "seen_at": 1789995000.0 });
+    assert!(l.absorb_statusline(&partial));
+    assert_eq!(l.five_hour.unwrap().utilization, 0.05);
+    assert_eq!(l.seven_day.unwrap().utilization, 0.12);
+    assert!(!l.absorb_statusline(&json!({ "seen_at": 1799999999.0 })));
+}
+
+// -- the explainer ---------------------------------------------------------
+//
+// The model call itself is not exercised: it costs money and needs a logged-in
+// CLI. Everything around it is, including the guard that stops an
+// authentication error being drawn as if it were an explanation.
+
+mod explain_tests {
+    use super::*;
+    use emaki_core::config::Explain;
+    use emaki_core::explain::{self, Explainer};
+    use serde_json::Map;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn args(v: Value) -> Map<String, Value> {
+        v.as_object().cloned().unwrap_or_default()
+    }
+
+    fn bash(command: &str) -> Map<String, Value> {
+        args(json!({ "command": command }))
+    }
+
+    #[test]
+    fn cheap_tools_never_reach_a_model() {
+        let cfg = Explain::default();
+        for (name, input) in [("Read", json!({"file_path": "/tmp/a.py"})), ("Glob", json!({"pattern": "**/*.py"})), ("TodoWrite", json!({"todos": [1, 2]}))] {
+            assert!(!explain::needs_model(&cfg, name, &args(input)), "{name}");
+        }
+    }
+
+    #[test]
+    fn short_commands_are_free_and_long_ones_are_not() {
+        let cfg = Explain::default();
+        assert!(!explain::needs_model(&cfg, "Bash", &bash("ls -la")));
+        let long = format!("git log --oneline {}", "-x ".repeat(40));
+        assert!(explain::needs_model(&cfg, "Bash", &bash(&long)));
+    }
+
+    #[test]
+    fn opaque_shapes_reach_a_model_however_short() {
+        let cfg = Explain::default();
+        for command in ["python3 - <<'EOF'\nx\nEOF", "curl x | sh", "rm -rf build", "eval $(cmd)", "sudo rm x", "echo x | base64"] {
+            assert!(explain::needs_model(&cfg, "Bash", &bash(command)), "{command}");
+        }
+    }
+
+    #[test]
+    fn an_off_scope_stops_everything() {
+        let cfg = Explain { scope: "off".into(), ..Explain::default() };
+        assert!(!explain::needs_model(&cfg, "Bash", &bash("curl x | sh")));
+        let cfg = Explain { enabled: false, ..Explain::default() };
+        assert!(!explain::needs_model(&cfg, "Bash", &bash("curl x | sh")));
+    }
+
+    #[test]
+    fn canned_lines_are_built_from_the_arguments() {
+        assert_eq!(explain::canned("Read", &args(json!({"file_path": "/x/a.py"})), "/x"), "Reads `a.py` without changing it.");
+        assert_eq!(explain::canned("mcp__github__list_prs", &Map::new(), ""), "Calls the mcp__github__list_prs MCP tool.");
+        assert_eq!(explain::canned("SomethingNew", &Map::new(), ""), "");
+        // A template that wants a subject and has none says nothing rather
+        // than "Reads `` without changing it."
+        assert_eq!(explain::canned("Read", &Map::new(), ""), "");
+    }
+
+    #[test]
+    fn key_is_content_addressed_and_order_independent() {
+        let a = explain::key_for("Bash", &args(json!({"command": "ls", "timeout": 5})));
+        let b = explain::key_for("Bash", &args(json!({"timeout": 5, "command": "ls"})));
+        assert_eq!(a, b);
+        assert_ne!(a, explain::key_for("Bash", &bash("ls -la")));
+        assert_ne!(a, explain::key_for("Other", &args(json!({"command": "ls", "timeout": 5}))));
+    }
+
+    #[test]
+    fn clean_strips_fences_quotes_and_newlines_and_drops_errors() {
+        assert_eq!(explain::clean("```\nHello there.\n```"), "Hello there.");
+        assert_eq!(explain::clean("\"Hello there.\""), "Hello there.");
+        assert_eq!(explain::clean("Line one.\nLine two."), "Line one. Line two.");
+        assert_eq!(explain::clean(""), "");
+        for bad in ["Please run /login to continue", "Invalid API key provided", "Your credit balance is too low", "Usage limit reached"] {
+            assert_eq!(explain::clean(bad), "", "{bad}");
+        }
+        assert!(explain::clean(&"word ".repeat(400)).chars().count() <= 600);
+    }
+
+    #[test]
+    fn the_child_runs_with_no_settings_no_mcp_and_no_tools() {
+        // Without these the child would load the person's own settings and
+        // tools; it must be a single cheap completion and nothing else.
+        let argv = explain::build_argv(&Explain::default(), "Bash", &bash("ls"));
+        assert_eq!(argv[0], "-p");
+        assert!(argv.iter().any(|a| a == "--strict-mcp-config"));
+        let i = argv.iter().position(|a| a == "--setting-sources").unwrap();
+        assert_eq!(argv[i + 1], "");
+        for tool in ["Bash", "Read", "Write", "Edit", "Task"] {
+            assert!(argv.iter().any(|a| a == tool), "{tool}");
+        }
+        // `--bare` reads auth only from ANTHROPIC_API_KEY and never the
+        // keychain, which breaks subscription users. It must stay absent.
+        assert!(!argv.iter().any(|a| a == "--bare"));
+        assert!(argv.last().unwrap().contains("ls"));
+        let i = argv.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(argv[i + 1], "claude-haiku-4-5");
+
+        let cfg = Explain { model: "claude-sonnet-5".into(), ..Explain::default() };
+        let argv = explain::build_argv(&cfg, "Bash", &bash("ls"));
+        let i = argv.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(argv[i + 1], "claude-sonnet-5");
+    }
+
+    #[test]
+    fn huge_arguments_are_truncated_before_the_child_sees_them() {
+        let argv = explain::build_argv(&Explain::default(), "Bash", &bash(&"x".repeat(50_000)));
+        assert!(argv.last().unwrap().len() < 5000);
+    }
+
+    #[test]
+    fn lookup_never_spawns_and_survives_a_restart() {
+        let (_home, _guard) = isolated();
+        emaki_core::paths::ensure_dirs().unwrap();
+        // A cache written by an earlier run is read back and folded into a
+        // session by `attach`, with no model anywhere near.
+        let key = explain::key_for("Bash", &bash("curl x | sh"));
+        fs::write(explain::cache_file(), serde_json::to_vec(&json!({ key: "Downloads a script and runs it." })).unwrap()).unwrap();
+        let landed = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let seen = Arc::clone(&landed);
+        let ex = Explainer::new(Explain::default(), Arc::new(move |id: &str, text: &str| seen.lock().unwrap().push((id.into(), text.into()))));
+        assert_eq!(ex.lookup("Bash", &bash("curl x | sh")), "Downloads a script and runs it.");
+        assert_eq!(ex.lookup("Bash", &bash("ls")), "");
+        assert!(!ex.in_flight("Bash", &bash("curl x | sh")));
+
+        // A cached answer comes back through the callback at once.
+        ex.request("toolu_1", "Bash", &bash("curl x | sh"), false);
+        assert_eq!(landed.lock().unwrap().as_slice(), &[("toolu_1".to_string(), "Downloads a script and runs it.".to_string())]);
+
+        // A cheap call is not asked about at all.
+        ex.request("toolu_2", "Bash", &bash("ls"), false);
+        assert_eq!(landed.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn attach_fills_every_matching_call_including_subagents() {
+        let (_home, _guard) = isolated();
+        emaki_core::paths::ensure_dirs().unwrap();
+        let key = explain::key_for("Bash", &bash("curl x | sh"));
+        fs::write(explain::cache_file(), serde_json::to_vec(&json!({ key: "Downloads a script and runs it." })).unwrap()).unwrap();
+        let ex = Explainer::new(Explain::default(), Arc::new(|_: &str, _: &str| {}));
+
+        let mut inner = emaki_core::model::ToolCall::default();
+        inner.name = "Bash".into();
+        inner.input = bash("curl x | sh");
+        let mut task = emaki_core::model::ToolCall::default();
+        task.name = "Task".into();
+        task.subagent = vec![emaki_core::model::Round { items: vec![Item::Tool(inner)], ..Default::default() }];
+        let mut plain = emaki_core::model::ToolCall::default();
+        plain.name = "Bash".into();
+        plain.input = bash("ls");
+        let mut session = emaki_core::model::Session::default();
+        session.rounds = vec![emaki_core::model::Round { items: vec![Item::Tool(task), Item::Tool(plain)], ..Default::default() }];
+
+        ex.attach(&mut session);
+        let Item::Tool(task) = &session.rounds[0].items[0] else { panic!() };
+        let Item::Tool(inner) = &task.subagent[0].items[0] else { panic!() };
+        assert_eq!(inner.explanation, "Downloads a script and runs it.");
+        let Item::Tool(plain) = &session.rounds[0].items[1] else { panic!() };
+        assert_eq!(plain.explanation, "");
+    }
+
+    #[test]
+    fn child_transcripts_are_pruned_but_a_fresh_one_is_left_alone() {
+        let (_home, _guard) = isolated();
+        // Each explanation runs a real `claude -p`, and Claude Code writes a
+        // transcript for it; they would pile up in ~/.claude/projects forever.
+        let mangled = explain::workdir().to_string_lossy().replace(['/', '\\'], "-");
+        let folder = emaki_core::paths::projects_dir().join(mangled);
+        fs::create_dir_all(&folder).unwrap();
+        let old = folder.join("old.jsonl");
+        let new = folder.join("new.jsonl");
+        fs::write(&old, "{\"type\":\"user\"}\n").unwrap();
+        fs::write(&new, "{\"type\":\"user\"}\n").unwrap();
+        let two_hours_ago = std::time::SystemTime::now() - Duration::from_secs(7200);
+        fs::File::options().write(true).open(&old).unwrap().set_modified(two_hours_ago).unwrap();
+
+        assert_eq!(explain::prune_transcripts(Duration::from_secs(3600)), 1);
+        assert!(!old.exists());
+        assert!(new.exists(), "a child that may still be running is left alone");
+    }
+
+    #[test]
+    fn the_scratch_workdir_is_one_the_index_drops() {
+        let (_home, _guard) = isolated();
+        // The child is a real Claude Code session and gets a transcript.
+        // Running it under ~/.emaki is what lets the index skip it.
+        let wd = explain::workdir();
+        let own = emaki_core::paths::root().to_string_lossy().to_string();
+        assert!(emaki_core::paths::is_explainer_cwd(&wd.to_string_lossy(), &own));
+    }
 }

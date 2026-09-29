@@ -3,6 +3,49 @@
 Each release has a section here, and `release.yml` puts that section on the
 GitHub Release as its notes. Write it for the person installing the app.
 
+## v0.1.1
+
+The app stands alone now. The Python command-line tool and web daemon Emaki
+grew out of are gone from the repository, and nothing the app does ever
+needed them.
+
+- **Emaki updates itself.** Settings (⌘,) shows the version, checks for a
+  newer release on a click or once a day (a tick turns the daily check
+  off), and *Update* fetches the installer for your machine, puts it in
+  place and restarts the app with your tabs as they were.
+- **Opaque tool calls explained in plain words.** A tool row has an
+  *Explain* button; click it and one short sentence on what the call does
+  appears under the row, written by Haiku through your own Claude Code
+  login. A permission card shows the same while you decide. Simple calls
+  explain themselves for free, and an answer is kept by content, so a
+  command explained once is annotated everywhere it appears. The settings
+  panel chooses whether cards, every new call, or nothing gets explained
+  unasked.
+- **The status line, under the composer.** `Context 32% | 5h: 5% (4h45m)
+  | 7d: 11% (6d2h)`, the same numbers and colours as the terminal's status
+  line, fed by it: `~/.claude/statusline.sh` leaves a copy of the windows
+  for Emaki.
+- **Long tool output scrolls inside its card**, capped at a comfortable
+  height with its own bar. A scroll stroke that reaches the card's edge
+  stops there; the next stroke moves the conversation.
+- **Opening a tool call keeps its row where it is**, also at the very end
+  of a conversation, where the new content used to push the row up.
+- **Pictures show their names.** A pasted picture is captioned with the
+  `[Image #n]` the terminal gave it, in a square tile; the preview shows
+  the whole path, selectable, with *Open* and *Reveal in Finder* when there
+  is a file. Text pasted into the terminal shows without its wrapper tags.
+- **⌘↩ sends the message as typed**, with no line break left where the
+  caret stood.
+- **A Codex session that quoted YAML front matter no longer crashes the
+  app.** The markdown parser the text view uses aborts on that shape; such
+  a text is now shown as a code block instead.
+- **No hooks, ever.** The old daemon registered hooks in Claude Code's
+  settings by absolute path; renaming the folder broke them and Claude Code
+  blocked every prompt. The app installs nothing. If those entries are still
+  in your `~/.claude/settings.json`, delete the ones naming `emaki-hook`.
+- **Removed:** the `emaki` command, the web viewer, and the hook. The archive,
+  the markdown and `~/.emaki` are unchanged and the app reads them as before.
+
 ## v0.1.0
 
 The first release of Emaki, a desktop app that keeps every coding-agent
