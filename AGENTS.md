@@ -437,14 +437,27 @@ one and where each was scrolled (`ListState::logical_scroll_top`, put back
 with `scroll_to` when the tab is opened again). It is written when any of
 that changes, bounds changes at most every two seconds, and again at quit;
 the bounds are reused only when their centre is still on a screen.
-`EMAKI_PAGE` and `EMAKI_OPEN` still win over it. Tabs are keys in
-`Workbench::tabs`; there is one `Detail` at a time and switching tabs
+The page is saved but not restored: the window opens on the new-session
+page, as the Claude app opens on a new chat, and the tabs come back in the
+sidebar; `EMAKI_PAGE` and `EMAKI_OPEN` pick something else. Tabs are keys
+in `Workbench::tabs`; there is one `Detail` at a time and switching tabs
 reloads from disk, which the numbers below say costs nothing a person can
 see. ⌘W is one global `CloseTab` binding that closes the showing tab, then
-the last tab, then the window: a context-bound binding would lose to a
+the last tab (which lands on the new-session page with the caret in its
+composer), then the window: a context-bound binding would lose to a
 global one whenever the focus sits in the composer. The app stays running
 with no window, and `on_reopen` in `main.rs` (a Dock click, or a second
 launch) opens it again; without that handler the Dock icon did nothing.
+
+**The focused element must be one the page draws.** gpui dispatches a
+keystroke from the focused node, or from the window root when that node is
+not in the frame, and the root sits above every handler in the workbench.
+Clicking a session puts the caret in the composer; closing that last tab
+used to land on the board, which draws no composer, and from then on ⌘W
+and every other shortcut went nowhere. `Workbench::render` now moves the
+focus to the workbench's own handle whenever the page is the board or the
+sessions list and the composer still holds it, and `main.rs` answers a
+`CloseTab` no view claimed by closing the window, as any app does.
 
 **Opening is measured, not guessed.** `emaki-core bench [<id>...]` times
 read, build and render for a transcript (the five largest by default) and

@@ -198,6 +198,9 @@ fn main() {
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |w| w.remove_window()));
+        // ⌘W that no view claimed (nothing focused, or nothing showing that
+        // ⌘W could close) closes the window, as it does in any app.
+        cx.on_action(|_: &CloseTab, cx| with_active_window(cx, |w| w.remove_window()));
         cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w| w.minimize_window()));
         cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w| w.zoom_window()));
         cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |w| w.toggle_fullscreen()));

@@ -265,6 +265,8 @@ pub struct Workbench {
     pub page: Page,
     pub sidebar_open: bool,
     pub selected: Option<String>,
+    /// A session to show once the index knows it (opened before the first
+    /// scan, or a draft that has just got its file).
     pending_select: Option<String>,
     pub detail: Option<Detail>,
     loading: Option<String>,
@@ -469,24 +471,17 @@ impl Workbench {
 
         let next_mode = cfg.driver.default_mode.clone();
         let next_model = cfg.driver.default_model.clone();
-        // Last time's tabs, page and sidebar come back; `EMAKI_OPEN=<session-id
-        // prefix>` opens a session on launch and `EMAKI_PAGE=new|sessions|board`
-        // picks the page over what was saved.
+        // Last time's tabs and sidebar come back; the window opens on the
+        // new-session page, as the Claude app opens on a new chat.
+        // `EMAKI_OPEN=<session-id prefix>` opens a session on launch instead
+        // and `EMAKI_PAGE=new|sessions|board` picks the page.
         let ui = UiState::load();
         let startup_open = std::env::var("EMAKI_OPEN").ok().filter(|s| !s.is_empty());
-        let saved_page = match ui.page.as_str() {
-            "sessions" => Page::Sessions,
-            "new" => Page::New,
-            "session" if ui.active.is_some() => Page::Session,
-            _ => Page::Board,
-        };
         let page = match std::env::var("EMAKI_PAGE").as_deref() {
-            Ok("new") => Page::New,
             Ok("sessions") => Page::Sessions,
             Ok("board") => Page::Board,
-            _ => saved_page,
+            _ => Page::New,
         };
-        let pending_select = if page == Page::Session { ui.active.clone() } else { None };
         Self {
             hub,
             cfg,
@@ -495,7 +490,7 @@ impl Workbench {
             page,
             sidebar_open: ui.sidebar_open.unwrap_or(true),
             selected: None,
-            pending_select,
+            pending_select: None,
             detail: None,
             loading: None,
             load_task: None,
@@ -702,9 +697,9 @@ impl Workbench {
 
     /// Close a tab. The session goes on without it: a driver behind it
     /// keeps running until its idle timeout, and the transcript is on disk.
-    /// Closing the showing tab moves to its neighbour, or to the board when
-    /// it was the last one.
-    pub fn close_tab(&mut self, key: &str, cx: &mut Context<Self>) {
+    /// Closing the showing tab moves to its neighbour, or to the new-session
+    /// page when it was the last one, with the caret in its composer.
+    pub fn close_tab(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.tabs.iter().position(|t| t == key) else { return };
         if self.selected.as_deref() == Some(key) {
             self.remember_scroll();
@@ -717,7 +712,7 @@ impl Workbench {
             self.load_task = None;
             match self.tabs.get(ix.min(self.tabs.len().saturating_sub(1))).cloned() {
                 Some(next) if !self.tabs.is_empty() => self.open_session(&next, cx),
-                _ => self.page = Page::Board,
+                _ => self.show_new(None, window, cx),
             }
         }
         self.save_ui(true);
@@ -1739,7 +1734,7 @@ impl Workbench {
                             .hover(move |s| s.bg(close_bg))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 swallow_click(window, cx);
-                                this.close_tab(&close_key, cx);
+                                this.close_tab(&close_key, window, cx);
                             }))
                             .child(Icon::new(IconName::Close).xsmall().text_color(theme.muted_foreground)),
                     ),
@@ -2833,6 +2828,14 @@ fn chip_button(id: &'static str, label: String, cx: &mut Context<Workbench>, on:
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The focused element must be one this page draws. gpui dispatches a
+        // keystroke from the focused node, or from the window root when that
+        // node is not in the frame, and the root is above every handler here:
+        // with the caret left in a composer the board does not draw, ⌘W and
+        // every other shortcut went nowhere.
+        if matches!(self.page, Page::Board | Page::Sessions) && self.composer.read(cx).focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
         let theme = cx.theme().clone();
         let search_open = self.search_open;
         // Below `NARROW_W` the sidebar leaves the row and comes back only as
@@ -2878,7 +2881,7 @@ impl Render for Workbench {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {
-                Some(key) if this.page == Page::Session && this.tabs.contains(&key) => this.close_tab(&key, cx),
+                Some(key) if this.page == Page::Session && this.tabs.contains(&key) => this.close_tab(&key, window, cx),
                 _ => window.remove_window(),
             }))
             .on_action(cx.listener(|this, _: &GoSessions, _, cx| this.show_sessions(Scope::All, cx)))
