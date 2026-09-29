@@ -302,6 +302,33 @@ textarea's own `OutdentInline` for it. Checked against 2.1.284:
 sends no `system/status` frame for it, unlike the other modes, so the
 reply is what the driver trusts.
 
+**Mode, model and effort show on every Claude conversation.** A driver
+session's pills open pickers; a terminal session's are `chip_static`, read
+from the transcript (`r.state.mode`, `Session::models.last()`,
+`Session::effort`) and not clickable: the inbox reads everything as prose,
+and a `control_request` frame sent to it is dropped without a reply
+(tried against 2.1.284), so there is no channel to change them from here.
+The hint under the composer says so. Effort has no control request either
+(`set_effort` is "Unsupported"), but `/effort <level>` as a user turn runs
+as the local command it is, and Claude Code records it as a
+`system/local_command` row with `commandRun: {command: "effort", args}`,
+which `build` reads into `Session::effort`; `Driver::set_effort` sends that
+turn and the pill updates when the file does.
+
+**The limits row is the terminal's status line.** Above the composer:
+`Context 37% (386k of 1M) · 5h 3% (4h26m) · 7d 6% (6d7h)`, coloured at the
+same thresholds as `~/.claude/statusline.sh`. The context is the
+transcript's (`Session::context_tokens`, the last assistant row's input plus
+cache read plus cache creation) over the model's window
+(`limits::Limits::context_window`: what a driver's `result` frame reported
+in `modelUsage`, else an assumption; `claude-fable-5-1` answered 1,000,000).
+The five-hour and seven-day windows come only from a driver's
+`rate_limit_event` frames (they are per account, so any driver's answer
+holds for every session) and are kept in `state/limits.json` with the time
+they were seen, because Claude Code writes them to no file a terminal
+session leaves behind; the row says "limits as of …" once they are older
+than five minutes and shows `--` until a session has run through Emaki.
+
 **A permission card answers to the keyboard.** ↩ on an empty composer
 allows the oldest card waiting on the session showing, ⇧↩ denies it, and
 the oldest card says so on its buttons; with words typed, ↩ is a new line

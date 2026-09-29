@@ -319,6 +319,25 @@ impl Hub {
         true
     }
 
+    /// Set a driver's effort level: a `/effort` turn, queued behind a
+    /// running one like any message. The transcript records the result and
+    /// the pill reads it from there.
+    pub fn set_driver_effort(self: &Arc<Self>, session_id: &str, effort: String) -> bool {
+        let Some(d) = self.driver_for(session_id) else { return false };
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        thread::spawn(move || {
+            let r = d.set_effort(&effort);
+            hub.send(HubEvent::Sent {
+                session_id: sid,
+                via: "driver",
+                queued: r.as_ref().map(|q| *q).unwrap_or(false),
+                error: r.err().map(|e| e.0).unwrap_or_default(),
+            });
+        });
+        true
+    }
+
     pub fn stop_driver(&self, session_id: &str) {
         let d = self.drivers.lock().unwrap().remove(session_id);
         if let Some(d) = d {

@@ -54,6 +54,8 @@ pub const TESTED_CLAUDE_VERSION: &str = "2.1.283";
 
 pub const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "bypassPermissions"];
 pub const MODELS: &[&str] = &["default", "fable", "opus", "sonnet", "haiku"];
+/// `/effort` levels, as `claude --help` lists them.
+pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// What to call a model on a pill. Claude Code reports the full id in
 /// `system/init` (`claude-opus-5-5`, `claude-haiku-4-5-20251001`,
@@ -99,6 +101,31 @@ pub fn model_label(model: &str) -> String {
         out.push_str(" 1M");
     }
     out
+}
+
+/// What to call an effort level on a pill; empty is the session's default.
+pub fn effort_label(effort: &str) -> String {
+    match effort {
+        "" => "Default effort".into(),
+        "xhigh" => "Extra high effort".into(),
+        e => {
+            let mut c = e.chars();
+            let head = c.next().map(|f| f.to_uppercase().collect::<String>()).unwrap_or_default();
+            format!("{head}{} effort", c.as_str())
+        }
+    }
+}
+
+/// One line on an effort level, as `/effort` describes them.
+pub fn effort_detail(effort: &str) -> &'static str {
+    match effort {
+        "low" => "Quick answers, little deliberation.",
+        "medium" => "Balanced reasoning for everyday work.",
+        "high" => "Deeper reasoning on harder problems.",
+        "xhigh" => "Very deep reasoning; slower.",
+        "max" => "Deepest reasoning; may overthink. For the hardest tasks.",
+        _ => "Whatever the session started with.",
+    }
 }
 
 /// What to call a permission mode on a pill.
@@ -164,6 +191,8 @@ pub struct TurnResult {
     pub duration_ms: u64,
     pub cost_usd: f64,
     pub queued: usize,
+    /// `modelUsage` from the frame: per model, tokens and `contextWindow`.
+    pub model_usage: Value,
 }
 
 /// A `can_use_tool` request waiting on the person.
@@ -183,6 +212,9 @@ pub enum Event {
     Turn { text: String, queued: usize },
     Result(TurnResult),
     Mode(String),
+    /// The `rate_limit_info` of a `rate_limit_event` frame: the account's
+    /// five-hour and seven-day windows.
+    RateLimit(Value),
     Permission(PermissionRequest),
     PermissionSettled(String),
     Exit { code: Option<i32>, error: String },
@@ -665,6 +697,17 @@ impl Driver {
         Ok(())
     }
 
+    /// Set the effort level. There is no control request for it (2.1.284
+    /// answers "Unsupported control request subtype: set_effort"), but
+    /// `/effort <level>` as a user turn is run as the local command it is,
+    /// and the transcript records it, which is where the pill reads it back.
+    pub fn set_effort(&self, effort: &str) -> Result<bool, DriverError> {
+        if !EFFORTS.contains(&effort) {
+            return Err(DriverError(format!("unknown effort level: {effort}")));
+        }
+        self.send(&format!("/effort {effort}"), Vec::new())
+    }
+
     /// Answer a `can_use_tool` card. Unknown ids are ignored.
     pub fn answer_permission(&self, request_id: &str, allow: bool, message: &str) {
         let req = self.inner.lock().unwrap().pending_permissions.remove(request_id);
@@ -778,6 +821,11 @@ impl Driver {
                 _ => {}
             },
             "result" => self.end_turn(&frame),
+            "rate_limit_event" => {
+                if let Some(info) = frame.get("rate_limit_info") {
+                    let _ = self.events.send(Event::RateLimit(info.clone()));
+                }
+            }
             _ => {}
         }
     }
@@ -843,6 +891,7 @@ impl Driver {
             duration_ms: u64_of(result, "duration_ms"),
             cost_usd: result.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
             queued: 0,
+            model_usage: result.get("modelUsage").cloned().unwrap_or(Value::Null),
         };
         {
             let mut g = self.inner.lock().unwrap();

@@ -327,3 +327,42 @@ fn find_index_locates_prompts_items_and_subagents() {
     assert!(idx.find("   ").is_empty());
     assert!(idx.find("nothing here").is_empty());
 }
+
+#[test]
+fn builder_records_context_and_effort() {
+    let mut rows = vec![
+        user("go", "2026-01-01T10:00:00Z"),
+        assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:02Z"),
+    ];
+    rows.push(json!({"type": "user", "uuid": "u-cmd", "timestamp": "2026-01-01T10:01:00Z", "sessionId": "s1",
+        "message": {"role": "user", "content": "<command-name>/effort</command-name><command-args>max</command-args>"}}));
+    rows.push(json!({"type": "system", "subtype": "local_command", "uuid": "s-cmd", "timestamp": "2026-01-01T10:01:00Z", "sessionId": "s1",
+        "content": "<local-command-stdout>Set effort level to max</local-command-stdout>", "commandRun": {"command": "effort", "args": "max"}}));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    // input 10 + cache read 1000 (the test assistant rows carry no cache creation).
+    assert_eq!(s.context_tokens, 1010);
+    assert_eq!(s.effort, "max");
+}
+
+#[test]
+fn limits_absorb_the_wire_and_size_a_context() {
+    use emaki_core::limits::{until, Limits};
+    let mut l = Limits::default();
+    let info = json!({"unifiedWindows": {"five_hour": {"utilization": 0.04, "resetsAt": 1790676000}, "seven_day": {"utilization": 0.07, "resetsAt": 1791205200}}});
+    assert!(l.absorb_rate_limit(&info, 1790660000.0));
+    assert_eq!(l.five_hour.unwrap().utilization, 0.04);
+    assert_eq!(l.seven_day.unwrap().resets_at, 1791205200.0);
+    assert_eq!(l.seen_at, 1790660000.0);
+    assert!(!l.absorb_rate_limit(&json!({}), 1.0));
+    assert!(l.absorb_model_usage(&json!({"claude-fable-5-1": {"contextWindow": 1000000}})));
+    assert!(!l.absorb_model_usage(&json!({"claude-fable-5-1": {"contextWindow": 1000000}})));
+    assert_eq!(l.context_window("claude-fable-5-1"), 1_000_000);
+    assert_eq!(l.context_window("claude-opus-5-5"), 200_000);
+    assert_eq!(l.context_window("opus[1m]"), 1_000_000);
+    assert_eq!(until(1790676000.0, 1790660000.0), "4h26m");
+    assert_eq!(until(1791205200.0, 1790660000.0), "6d7h");
+    assert_eq!(until(1790660100.0, 1790660000.0), "1m");
+    assert_eq!(until(1.0, 2.0), "");
+    assert_eq!(emaki_core::driver::effort_label("xhigh"), "Extra high effort");
+    assert_eq!(emaki_core::driver::effort_label(""), "Default effort");
+}
