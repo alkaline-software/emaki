@@ -20,7 +20,8 @@ use futures::StreamExt;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_component::input::{Input, InputEvent, InputState, OutdentInline, Textarea, TextareaState};
+use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 
@@ -28,7 +29,8 @@ use crate::ui_state::{Rect, Scroll, UiState};
 use emaki_core::adapters;
 use emaki_core::build::Phase;
 use emaki_core::config::Config;
-use emaki_core::driver::{self, image_block, PermissionRequest, IMAGE_TYPES, MODELS, MODES};
+use emaki_core::driver::{self, image_block, mode_detail, mode_label, model_label, PermissionRequest, IMAGE_TYPES, MODELS, MODES};
+use emaki_core::find::{FindIndex, Hit};
 use emaki_core::model::{AgentId, Session};
 use emaki_core::search::Results;
 use emaki_core::transcript::SessionRef;
@@ -36,11 +38,12 @@ use emaki_core::transcript::SessionRef;
 use crate::format::{clock, day, elapsed_since, now_secs, plural, relative, short_id};
 use crate::hub::{Hub, HubEvent};
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Escape, Send, CloseTab, OpenSettings]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
 pub const SEARCH_CONTEXT: &str = "SearchPalette";
+pub const FIND_CONTEXT: &str = "FindBar";
 
 pub const SIDEBAR_W: Pixels = px(268.);
 pub const TITLEBAR_H: Pixels = px(48.);
@@ -128,6 +131,9 @@ pub struct Detail {
     pub open_subagents: HashSet<(usize, usize)>,
     /// Runs of tool calls unfolded by hand, keyed by (round, first item).
     pub open_runs: HashSet<(usize, usize)>,
+    /// Everything in the session lowered for the find bar, built the first
+    /// time it is needed and dropped whenever the session is reloaded.
+    pub find: Option<Rc<FindIndex>>,
 }
 
 /// A file waiting in the composer. Images go to a driver as content blocks
@@ -282,6 +288,16 @@ pub struct Workbench {
     pub settings_open: bool,
     pub search_results: Option<Results>,
     search_task: Option<Task<()>>,
+    /// Find inside the conversation showing (⌘F): the field, whether the
+    /// bar is up, every hit in reading order and the one the bar is on.
+    pub find_input: Entity<InputState>,
+    pub find_open: bool,
+    pub find_hits: Vec<Hit>,
+    pub find_at: usize,
+    /// Once the session being opened has loaded, land on the first hit at
+    /// or after this round: how a hit in the search palette opens on its
+    /// match.
+    find_pending: Option<usize>,
     pub done_open: bool,
     pub permissions: Vec<(String, PermissionRequest)>,
     pub drivers: HashMap<String, DriverView>,
@@ -376,26 +392,20 @@ fn greeting(name: &str) -> String {
     if name.is_empty() { part.to_string() } else { format!("{part}, {name}") }
 }
 
-fn mode_label(mode: &str) -> &'static str {
-    match mode {
-        "acceptEdits" => "Accept edits",
-        "plan" => "Plan mode",
-        "bypassPermissions" => "Bypass permissions",
-        "dontAsk" => "Don't ask",
-        _ => "Default permissions",
-    }
+/// The alias on the wire (`opus`) for a model however it is named: the
+/// alias itself, or the id Claude Code reports (`claude-opus-5-5`).
+fn model_key(model: &str) -> &'static str {
+    MODELS.iter().skip(1).find(|a| model == **a || model.contains(**a)).copied().unwrap_or("default")
 }
 
-fn model_label(model: &str) -> String {
+/// One line on a model, under its name in the picker.
+fn model_detail(model: &str) -> &'static str {
     match model {
-        "" | "default" => "Default model".into(),
-        m => {
-            let mut c = m.chars();
-            match c.next() {
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                None => String::new(),
-            }
-        }
+        "fable" => "The most capable; slowest.",
+        "opus" => "Deep work on hard problems.",
+        "sonnet" => "The everyday balance of speed and depth.",
+        "haiku" => "Fastest and cheapest.",
+        _ => "Whatever this account uses by default.",
     }
 }
 
@@ -406,6 +416,7 @@ impl Workbench {
 
         let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder("Reply…  (⌘↩ to send)").auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search every conversation, live and kept"));
+        let find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this conversation"));
 
         // Every headless child is ours to close: a driver left running after
         // the window is gone would keep writing to a transcript nobody reads.
@@ -463,9 +474,22 @@ impl Workbench {
         })
         .detach();
         cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { secondary: true, .. } = ev {
-                this.send_message(window, cx);
+            if let InputEvent::PressEnter { secondary, shift } = ev {
+                if *secondary {
+                    this.send_message(window, cx);
+                } else {
+                    // A bare ↩ on an empty composer answers the oldest
+                    // permission card, ⇧↩ turns it down; with words typed
+                    // they stay what they are, a new line.
+                    this.answer_pending_by_key(!*shift, window, cx);
+                }
             }
+        })
+        .detach();
+        cx.subscribe_in(&find_input, window, |this, _, ev: &InputEvent, _window, cx| match ev {
+            InputEvent::Change => this.run_find(cx),
+            InputEvent::PressEnter { shift, .. } => this.find_step(if *shift { -1 } else { 1 }, cx),
+            _ => {}
         })
         .detach();
 
@@ -474,9 +498,17 @@ impl Workbench {
         // Last time's tabs and sidebar come back; the window opens on the
         // new-session page, as the Claude app opens on a new chat.
         // `EMAKI_OPEN=<session-id prefix>` opens a session on launch instead
-        // and `EMAKI_PAGE=new|sessions|board` picks the page.
+        // and `EMAKI_PAGE=new|sessions|board` picks the page. For probing
+        // the window from a script with no accessibility access,
+        // `EMAKI_FIND=<text>` opens the find bar on that query and
+        // `EMAKI_SETTINGS=1` opens the settings panel.
         let ui = UiState::load();
         let startup_open = std::env::var("EMAKI_OPEN").ok().filter(|s| !s.is_empty());
+        let startup_find = std::env::var("EMAKI_FIND").ok().filter(|s| !s.is_empty());
+        if let Some(q) = &startup_find {
+            find_input.update(cx, |s, cx| s.set_value(q.clone(), window, cx));
+        }
+        let settings_open = std::env::var("EMAKI_SETTINGS").is_ok();
         let page = match std::env::var("EMAKI_PAGE").as_deref() {
             Ok("sessions") => Page::Sessions,
             Ok("board") => Page::Board,
@@ -499,9 +531,14 @@ impl Workbench {
             lightbox: None,
             search_input,
             search_open: false,
-            settings_open: false,
+            settings_open,
             search_results: None,
             search_task: None,
+            find_input,
+            find_open: startup_find.is_some(),
+            find_hits: Vec::new(),
+            find_at: 0,
+            find_pending: startup_find.map(|_| 0),
             done_open: false,
             permissions: Vec::new(),
             drivers: HashMap::new(),
@@ -621,6 +658,10 @@ impl Workbench {
                 cx.notify();
             }
             HubEvent::Driver { session_id, event } => self.on_driver_event(session_id, event, cx),
+            HubEvent::Note(text) => {
+                self.status = text;
+                cx.notify();
+            }
         }
     }
 
@@ -785,6 +826,7 @@ impl Workbench {
                 let rounds = session.rounds.len();
                 let t = std::time::Instant::now();
                 this.set_detail(key.clone(), path, session);
+                this.after_detail_loaded(cx);
                 if timing {
                     eprintln!("emaki: open {} — load {}ms, set_detail {}ms, {} rounds", &key, loaded.as_millis(), t.elapsed().as_millis(), rounds);
                 }
@@ -801,6 +843,7 @@ impl Workbench {
                 let old = d.session.rounds.len();
                 d.session = Rc::new(session);
                 d.path = path;
+                d.find = None;
                 // A splice that covers the item the reader is scrolled into
                 // moves the scroll anchor to that item's top: for a live
                 // session whose last round is one tall item, that is a jump
@@ -832,6 +875,7 @@ impl Workbench {
                     open_thoughts: HashSet::new(),
                     open_subagents: HashSet::new(),
                     open_runs: HashSet::new(),
+                    find: None,
                 });
             }
         }
@@ -859,31 +903,83 @@ impl Workbench {
 
     // -- settings ----------------------------------------------------------
 
-    /// Remember a chat font choice: in memory for this window, and in
-    /// `config.json` for the next launch.
+    /// Write the look section of `config.json` as this window now has it.
+    fn save_app_config(&mut self) {
+        let app = self.cfg.app.clone();
+        if let Err(e) = Config::edit(move |c| c.app = app) {
+            self.status = format!("could not save settings: {e}");
+        }
+    }
+
     fn set_chat_font(&mut self, choice: &str, cx: &mut Context<Self>) {
         self.cfg.app.chat_font = choice.to_string();
-        let choice = choice.to_string();
-        if let Err(e) = Config::edit(move |c| c.app.chat_font = choice) {
+        self.save_app_config();
+        cx.notify();
+    }
+
+    fn set_chat_size(&mut self, choice: &str, cx: &mut Context<Self>) {
+        self.cfg.app.chat_size = choice.to_string();
+        self.save_app_config();
+        cx.notify();
+    }
+
+    /// System, light or dark: drawn now and kept for the next launch.
+    fn set_appearance(&mut self, choice: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.cfg.app.appearance = choice.to_string();
+        self.save_app_config();
+        crate::look::apply(choice, Some(window), cx);
+        cx.notify();
+    }
+
+    /// A new accent is painted into both palettes, then the current
+    /// appearance is drawn again with it.
+    fn set_accent(&mut self, choice: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.cfg.app.accent = choice.to_string();
+        self.save_app_config();
+        crate::look::install(choice, cx);
+        crate::look::apply(&self.cfg.app.appearance, Some(window), cx);
+        cx.notify();
+    }
+
+    /// What a session started from this window begins in. A running
+    /// session's own pills under the composer change it for that session.
+    fn set_default_mode(&mut self, choice: &str, cx: &mut Context<Self>) {
+        let v = if choice == "default" { String::new() } else { choice.to_string() };
+        self.cfg.driver.default_mode = v.clone();
+        self.next_mode = v.clone();
+        if let Err(e) = Config::edit(move |c| c.driver.default_mode = v) {
             self.status = format!("could not save settings: {e}");
         }
         cx.notify();
     }
 
-    /// The settings panel (⌘,): what the window looks like. One section so
-    /// far, the conversation's typeface.
+    fn set_default_model(&mut self, choice: &str, cx: &mut Context<Self>) {
+        let v = if choice == "default" { String::new() } else { choice.to_string() };
+        self.cfg.driver.default_model = v.clone();
+        self.next_model = v.clone();
+        if let Err(e) = Config::edit(move |c| c.driver.default_model = v) {
+            self.status = format!("could not save settings: {e}");
+        }
+        cx.notify();
+    }
+
+    /// The settings panel (⌘,): how the window looks (appearance, accent,
+    /// the conversation's face and size) and what a new session starts
+    /// with (permission mode, model). Every choice is a row of pills, and
+    /// every change is drawn at once and written to `config.json`.
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let fonts = cx.global::<crate::fonts::ChatFonts>().clone();
-        let current = self.cfg.app.chat_font.clone();
-        let choice = |key: &'static str, label: &'static str, family: Option<String>, cx: &mut Context<Self>| {
+        let app = self.cfg.app.clone();
+        let dark = theme.mode.is_dark();
+
+        // One pill: bordered, filled with the ink when it is the choice.
+        let pill = |id: String, label: String, active: bool, family: Option<String>, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
             let theme = cx.theme().clone();
-            let active = current == key;
             h_flex()
-                .id(SharedString::from(format!("font-{key}")))
+                .id(SharedString::from(id))
                 .h(px(30.))
                 .px(px(12.))
-                .gap(px(6.))
                 .items_center()
                 .rounded_full()
                 .cursor_pointer()
@@ -893,15 +989,80 @@ impl Workbench {
                 .when(active, |d| d.bg(theme.foreground).text_color(theme.background))
                 .when(!active, |d| d.hover(|s| s.bg(theme.muted)))
                 .when_some(family, |d, f| d.font_family(f))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_chat_font(key, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
                 .child(label)
         };
+        // A row: a title and a line on it at the left, the choices at the right.
+        let row = |title: &'static str, detail: &'static str, control: AnyElement, theme: &gpui_component::Theme| {
+            h_flex()
+                .items_center()
+                .gap(px(12.))
+                .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child(title)).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(detail)))
+                .child(control)
+        };
+        let heading = |text: &'static str, theme: &gpui_component::Theme| div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(text);
+
+        let appearance = h_flex().gap(px(6.)).children([("system", "System"), ("light", "Light"), ("dark", "Dark")].into_iter().map(|(key, label)| {
+            pill(format!("appearance-{key}"), label.into(), app.appearance == key, None, cx, Box::new(move |this, window, cx| this.set_appearance(key, window, cx)))
+        }));
+
+        // Accents are swatches: a disc of the colour, ringed when chosen.
+        let accents = h_flex().gap(px(8.)).children(crate::look::ACCENTS.iter().map(|a| {
+            let active = app.accent == a.key;
+            let color: Hsla = gpui::Rgba::try_from(crate::look::accent_hex(a.key, dark)).map(Hsla::from).unwrap_or(theme.primary);
+            let key = a.key;
+            div()
+                .id(SharedString::from(format!("accent-{}", a.key)))
+                .size(px(26.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .border_2()
+                .border_color(if active { theme.foreground } else { theme.transparent })
+                .hover(|s| s.border_color(theme.muted_foreground))
+                .tooltip({
+                    let name = a.name;
+                    move |window, cx| gpui_component::tooltip::Tooltip::new(name).build(window, cx)
+                })
+                .on_click(cx.listener(move |this, _, window, cx| this.set_accent(key, window, cx)))
+                .child(div().size(px(18.)).rounded_full().bg(color))
+        }));
+
         let serif_family = Some(fonts.serif.clone().unwrap_or_else(|| crate::fonts::SERIF_FALLBACK.into()));
         let sans_family = fonts.sans.clone();
+        let font = h_flex()
+            .gap(px(6.))
+            .child(pill("font-serif".into(), "Anthropic Serif".into(), app.chat_font == "serif", serif_family, cx, Box::new(|this, _, cx| this.set_chat_font("serif", cx))))
+            .child(pill("font-sans".into(), "Anthropic Sans".into(), app.chat_font == "sans", sans_family, cx, Box::new(|this, _, cx| this.set_chat_font("sans", cx))));
+        let size = h_flex().gap(px(6.)).children([("small", "Small"), ("medium", "Medium"), ("large", "Large")].into_iter().map(|(key, label)| {
+            pill(format!("size-{key}"), label.into(), app.chat_size == key, None, cx, Box::new(move |this, _, cx| this.set_chat_size(key, cx)))
+        }));
         let note = match &fonts.source {
             Some(dir) => format!("Anthropic Serif and Anthropic Sans are loaded from the Claude app at {}.", emaki_core::paths::tilde(&dir.to_string_lossy())),
             None => "Anthropic Serif and Anthropic Sans are the Claude desktop app's fonts and are loaded from it when it is installed. It was not found here, so Georgia stands in for the serif and the window's own face for the sans.".to_string(),
         };
+
+        let default_mode = if self.cfg.driver.default_mode.is_empty() { "default".to_string() } else { self.cfg.driver.default_mode.clone() };
+        // Short names here; the picker under the composer has the long ones
+        // with a line on each.
+        let short_mode = |m: &str| match m {
+            "acceptEdits" => "Accept edits",
+            "plan" => "Plan",
+            "auto" => "Auto",
+            "bypassPermissions" => "Bypass",
+            _ => "Default",
+        };
+        let modes = h_flex().gap(px(6.)).flex_wrap().justify_end().max_w(px(360.)).children(self.modes().into_iter().map(|m| {
+            pill(format!("default-mode-{m}"), short_mode(m).into(), default_mode == m, None, cx, Box::new(move |this, _, cx| this.set_default_mode(m, cx)))
+        }));
+        let default_model = if self.cfg.driver.default_model.is_empty() { "default".to_string() } else { self.cfg.driver.default_model.clone() };
+        let models = h_flex().gap(px(6.)).flex_wrap().justify_end().max_w(px(360.)).children(MODELS.iter().map(|m| {
+            let label = if *m == "default" { "Default".to_string() } else { model_label(m) };
+            pill(format!("default-model-{m}"), label, default_model == *m, None, cx, Box::new(move |this, _, cx| this.set_default_model(m, cx)))
+        }));
+
         div()
             .id("settings-overlay")
             .absolute()
@@ -917,20 +1078,23 @@ impl Workbench {
                     .id("settings-panel")
                     .on_click(|_, window, cx| swallow_click(window, cx))
                     .absolute()
-                    .top(px(80.))
+                    .top(px(44.))
                     .left_0()
                     .right_0()
                     .mx_auto()
-                    .w(px(560.))
+                    .w(px(600.))
+                    .max_h(gpui::relative(0.9))
                     .rounded(px(16.))
                     .bg(theme.popover)
                     .border_1()
                     .border_color(theme.border)
                     .shadow_lg()
+                    .overflow_hidden()
                     .child(
                         h_flex()
                             .px(px(18.))
                             .h(px(50.))
+                            .flex_shrink_0()
                             .items_center()
                             .border_b_1()
                             .border_color(theme.border)
@@ -942,19 +1106,204 @@ impl Workbench {
                     )
                     .child(
                         v_flex()
+                            .id("settings-body")
+                            .min_h_0()
+                            .overflow_y_scroll()
                             .p(px(18.))
                             .gap(px(14.))
-                            .child(div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("APPEARANCE"))
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(12.))
-                                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child("Chat font")).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("The face the conversation is set in.")))
-                                    .child(h_flex().gap(px(6.)).child(choice("serif", "Anthropic Serif", serif_family, cx)).child(choice("sans", "Anthropic Sans", sans_family, cx))),
-                            )
-                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(note)),
+                            .child(heading("APPEARANCE", &theme))
+                            .child(row("Theme", "Follow the system, or keep one look.", appearance.into_any_element(), &theme))
+                            .child(row("Accent", "The colour of the send button, links and the mark.", accents.into_any_element(), &theme))
+                            .child(row("Chat font", "The face the conversation is set in.", font.into_any_element(), &theme))
+                            .child(row("Text size", "How large the conversation reads.", size.into_any_element(), &theme))
+                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(note))
+                            .child(div().h(px(4.)))
+                            .child(heading("NEW SESSIONS", &theme))
+                            .child(row("Permission mode", "What a session started here begins in.", modes.into_any_element(), &theme))
+                            .child(row("Model", "Which model a session started here uses.", models.into_any_element(), &theme))
+                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes.")),
                     ),
             )
+    }
+
+    // -- find in the conversation ------------------------------------------
+
+    /// ⌘F: put the find bar over the conversation showing, with the caret
+    /// in it. Nothing to find in on any other page.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != Page::Session {
+            return;
+        }
+        self.find_open = true;
+        self.find_input.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        self.run_find(cx);
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = false;
+        self.find_hits.clear();
+        self.find_at = 0;
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    /// Open a session on a match from the search palette: the query goes
+    /// into the find bar and the first hit in `round` (numbered from one,
+    /// as the index numbers them) is the one the bar lands on once the
+    /// session has loaded.
+    fn open_with_find(&mut self, key: &str, query: &str, round: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_input.update(cx, |s, cx| s.set_value(query.to_string(), window, cx));
+        self.find_open = true;
+        self.find_pending = round.map(|r| r.saturating_sub(1));
+        self.open_session(key, cx);
+        self.find_input.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// The session just loaded (or reloaded): keep the find bar's answer
+    /// current without moving the reader, unless a palette hit asked to.
+    fn after_detail_loaded(&mut self, cx: &mut Context<Self>) {
+        if !self.find_open {
+            return;
+        }
+        self.compute_hits(cx);
+        if let Some(round) = self.find_pending.take() {
+            if let Some(i) = self.find_hits.iter().position(|h| h.round >= round) {
+                self.find_at = i;
+            }
+            self.reveal_current(cx);
+        }
+    }
+
+    /// Scan the session for the query, keeping the current hit where it
+    /// was when it still exists.
+    fn compute_hits(&mut self, cx: &mut Context<Self>) {
+        let q = self.find_input.read(cx).value().to_string();
+        let Some(d) = self.detail.as_mut() else {
+            self.find_hits.clear();
+            return;
+        };
+        if d.find.is_none() {
+            d.find = Some(Rc::new(FindIndex::build(&d.session)));
+        }
+        let idx = d.find.clone().unwrap();
+        let was = self.find_hits.get(self.find_at).copied();
+        self.find_hits = idx.find(&q);
+        self.find_at = was.and_then(|w| self.find_hits.iter().position(|h| *h == w)).unwrap_or(0).min(self.find_hits.len().saturating_sub(1));
+    }
+
+    /// The query changed: scan again and land on the first hit at or after
+    /// the round in view, so typing takes the reader to the nearest match.
+    fn run_find(&mut self, cx: &mut Context<Self>) {
+        self.compute_hits(cx);
+        let top = self.detail.as_ref().map(|d| d.list.logical_scroll_top().item_ix).unwrap_or(0);
+        self.find_at = self.find_hits.iter().position(|h| h.round >= top).unwrap_or(0);
+        if self.find_hits.is_empty() {
+            cx.notify();
+        } else {
+            self.reveal_current(cx);
+        }
+    }
+
+    /// ↩ / ⌘G forward, ⇧↩ / ⌘⇧G back, wrapping at either end.
+    fn find_step(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let n = self.find_hits.len() as i64;
+        if n == 0 {
+            return;
+        }
+        self.find_at = (self.find_at as i64 + delta).rem_euclid(n) as usize;
+        self.reveal_current(cx);
+    }
+
+    /// Scroll the current hit's round into view and unfold whatever hides
+    /// the item: a tool card, a thought, a folded run of tool calls.
+    fn reveal_current(&mut self, cx: &mut Context<Self>) {
+        let Some(h) = self.find_hits.get(self.find_at).copied() else { return };
+        if let Some(d) = self.detail.as_mut() {
+            if let Some(jx) = h.item {
+                if let Some(rnd) = d.session.rounds.get(h.round) {
+                    match rnd.items.get(jx) {
+                        Some(emaki_core::model::Item::Tool(_)) => {
+                            d.open_tools.insert((h.round, jx));
+                        }
+                        Some(emaki_core::model::Item::Thinking { .. }) => {
+                            d.open_thoughts.insert((h.round, jx));
+                        }
+                        _ => {}
+                    }
+                    if let Some(start) = crate::transcript::run_start(rnd, jx) {
+                        d.open_runs.insert((h.round, start));
+                    }
+                }
+            }
+            d.list.scroll_to(ListOffset { item_ix: h.round, offset_in_item: px(0.) });
+        }
+        cx.notify();
+    }
+
+    /// How the transcript should draw a prompt (`item` is `None`) or an
+    /// item: 0 plain, 1 a hit, 2 the hit the find bar is on.
+    pub(crate) fn find_mark(&self, round: usize, item: Option<usize>) -> u8 {
+        if !self.find_open || self.find_hits.is_empty() {
+            return 0;
+        }
+        let here = Hit { round, item };
+        if self.find_hits.get(self.find_at) == Some(&here) {
+            return 2;
+        }
+        if self.find_hits.iter().any(|h| *h == here) { 1 } else { 0 }
+    }
+
+    /// The find bar: the field, "n of m", up, down, close. It sits between
+    /// the title strip and the conversation, in the reading column.
+    fn render_find_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let focus = self.find_input.read(cx).focus_handle(cx);
+        let value = self.find_input.read(cx).value().to_string();
+        let n = self.find_hits.len();
+        let empty = value.trim().is_empty();
+        let count = if empty {
+            String::new()
+        } else if n == 0 {
+            "no matches".into()
+        } else {
+            format!("{} of {}", self.find_at + 1, n)
+        };
+        h_flex().w_full().justify_center().px(px(24.)).pb(px(8.)).child(
+            h_flex()
+                .id("find-bar")
+                .key_context(FIND_CONTEXT)
+                .w_full()
+                .max_w(CONTENT_W)
+                .h(px(36.))
+                .px(px(10.))
+                .gap(px(8.))
+                .items_center()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .shadow_sm()
+                .child(Icon::new(IconName::Search).with_size(px(14.)).text_color(theme.muted_foreground))
+                .child(
+                    div()
+                        .id("find-field")
+                        .track_focus(&focus)
+                        .role(Role::TextInput)
+                        .aria_label("Find in conversation")
+                        .aria_value(value)
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(13.))
+                        .child(Input::new(&self.find_input).appearance(false).bordered(false)),
+                )
+                .child(div().text_size(px(11.5)).flex_shrink_0().text_color(if n == 0 && !empty { theme.danger } else { theme.muted_foreground }).child(count))
+                .child(icon_button("find-prev", IconName::ChevronUp, "Previous (⇧↩, ⌘⇧G)", cx, |this, _, cx| this.find_step(-1, cx)))
+                .child(icon_button("find-next", IconName::ChevronDown, "Next (↩, ⌘G)", cx, |this, _, cx| this.find_step(1, cx)))
+                .child(icon_button("find-close", IconName::Close, "Close (esc)", cx, |this, window, cx| this.close_find(window, cx))),
+        )
     }
 
     // -- search ------------------------------------------------------------
@@ -1099,6 +1448,8 @@ impl Workbench {
             cx.notify();
         } else if self.search_open {
             self.close_search(window, cx);
+        } else if self.find_open {
+            self.close_find(window, cx);
         }
     }
 
@@ -1285,39 +1636,58 @@ impl Workbench {
         s
     }
 
-    fn cycle_mode(&mut self, cx: &mut Context<Self>) {
-        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+    /// The modes the picker offers: every one Claude Code has, bypass only
+    /// when config allows it.
+    fn modes(&self) -> Vec<&'static str> {
         let allow_bypass = self.cfg.driver.allow_bypass;
-        let current = self.drivers.get(&sid).map(|v| v.mode.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| self.next_mode.clone());
-        let modes: Vec<&str> = MODES.iter().copied().filter(|m| allow_bypass || *m != "bypassPermissions").collect();
-        let i = modes.iter().position(|m| *m == current).map(|i| (i + 1) % modes.len()).unwrap_or(0);
-        let next = modes[i].to_string();
-        self.next_mode = next.clone();
-        if let Some(d) = self.hub.driver_for(&sid) {
-            let n = next.clone();
-            std::thread::spawn(move || {
-                let _ = d.set_mode(&n);
-            });
+        MODES.iter().copied().filter(|m| allow_bypass || *m != "bypassPermissions").collect()
+    }
+
+    /// The mode the composer's pill shows: the driver's own when one is
+    /// behind the session, else what the next session will start in.
+    fn current_mode(&self) -> String {
+        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+        let m = self.drivers.get(&sid).map(|v| v.mode.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| self.next_mode.clone());
+        if m.is_empty() { "default".into() } else { m }
+    }
+
+    /// The model, as the driver reports it (a full id after its first turn)
+    /// or as it was asked for.
+    fn current_model(&self) -> String {
+        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+        let m = self.drivers.get(&sid).map(|v| v.model.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| self.next_model.clone());
+        if m.is_empty() { "default".into() } else { m }
+    }
+
+    /// Switch the permission mode: for the driver behind this session, and
+    /// for the next session started here. The hub answers with the mode
+    /// Claude Code actually holds, so a refused switch shows on the status
+    /// row and the pill goes back.
+    fn set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+        self.next_mode = mode.to_string();
+        if self.hub.set_driver_mode(&sid, mode.to_string()) {
             if let Some(v) = self.drivers.get_mut(&sid) {
-                v.mode = next;
+                v.mode = mode.to_string();
             }
         }
         cx.notify();
     }
 
-    fn cycle_model(&mut self, cx: &mut Context<Self>) {
+    /// ⇧Tab in the composer, as in Claude Code's own terminal.
+    fn cycle_mode(&mut self, cx: &mut Context<Self>) {
+        let modes = self.modes();
+        let current = self.current_mode();
+        let i = modes.iter().position(|m| *m == current).map(|i| (i + 1) % modes.len()).unwrap_or(0);
+        self.set_mode(modes[i], cx);
+    }
+
+    fn set_model(&mut self, model: &str, cx: &mut Context<Self>) {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
-        let current = self.next_model.clone();
-        let i = MODELS.iter().position(|m| *m == current).map(|i| (i + 1) % MODELS.len()).unwrap_or(1);
-        let next = MODELS[i].to_string();
-        self.next_model = next.clone();
-        if let Some(d) = self.hub.driver_for(&sid) {
-            let n = next.clone();
-            std::thread::spawn(move || {
-                let _ = d.set_model(&n);
-            });
+        self.next_model = model.to_string();
+        if self.hub.set_driver_model(&sid, model.to_string()) {
             if let Some(v) = self.drivers.get_mut(&sid) {
-                v.model = next;
+                v.model = model.to_string();
             }
         }
         cx.notify();
@@ -1342,6 +1712,29 @@ impl Workbench {
         }
         self.permissions.retain(|(_, r)| r.request_id != request_id);
         cx.notify();
+    }
+
+    /// ↩ on an empty composer allows the oldest card waiting on this
+    /// session, ⇧↩ denies it. Says whether a card was answered.
+    fn answer_pending_by_key(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.composer.read(cx).value().trim().is_empty() {
+            return false;
+        }
+        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+        let Some(id) = self.permissions.iter().find(|(s, _)| *s == sid).map(|(_, p)| p.request_id.clone()) else { return false };
+        // The textarea put a new line in before saying ↩ was pressed.
+        self.composer.update(cx, |s, cx| s.set_value("", window, cx));
+        self.answer_permission(id, allow, cx);
+        true
+    }
+
+    /// Every card waiting on this session, allowed at once.
+    fn allow_all_pending(&mut self, cx: &mut Context<Self>) {
+        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+        let ids: Vec<String> = self.permissions.iter().filter(|(s, _)| *s == sid).map(|(_, p)| p.request_id.clone()).collect();
+        for id in ids {
+            self.answer_permission(id, true, cx);
+        }
     }
 
     fn reply_from_board(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1965,6 +2358,7 @@ impl Workbench {
             .bg(theme.background)
             .child(topbar)
             .child(meta_line)
+            .when(self.find_open, |d| d.child(self.render_find_bar(cx)))
             .child(transcript)
             .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).child(self.render_composer(cx)))
             .into_any_element()
@@ -1975,7 +2369,10 @@ impl Workbench {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         let cwd = self.selected_ref().map(|r| r.cwd.clone()).unwrap_or_default();
         let cards: Vec<PermissionRequest> = self.permissions.iter().filter(|(s, _)| *s == sid).map(|(_, p)| p.clone()).collect();
-        v_flex().w_full().max_w(CONTENT_W).gap(px(8.)).children(cards.into_iter().map(|p| {
+        let several = cards.len() > 1;
+        v_flex().w_full().max_w(CONTENT_W).gap(px(8.)).children(cards.into_iter().enumerate().map(|(i, p)| {
+            // The oldest card is the one ↩ answers, and says so.
+            let first = i == 0;
             let subject = emaki_core::build::tool_subject(&p.tool_name, &p.input, &cwd);
             let detail = match p.tool_name.as_str() {
                 "Bash" => p.input.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -2003,8 +2400,10 @@ impl Workbench {
                 .child(
                     h_flex()
                         .gap(px(8.))
-                        .child(Button::new(SharedString::from(format!("allow-{}", p.request_id))).primary().small().label("Allow").on_click(cx.listener(move |this, _, _, cx| this.answer_permission(id_allow.clone(), true, cx))))
-                        .child(Button::new(SharedString::from(format!("deny-{}", p.request_id))).outline().small().label("Deny").on_click(cx.listener(move |this, _, _, cx| this.answer_permission(id_deny.clone(), false, cx)))),
+                        .items_center()
+                        .child(Button::new(SharedString::from(format!("allow-{}", p.request_id))).primary().small().label(if first { "Allow  ↩" } else { "Allow" }).on_click(cx.listener(move |this, _, _, cx| this.answer_permission(id_allow.clone(), true, cx))))
+                        .child(Button::new(SharedString::from(format!("deny-{}", p.request_id))).outline().small().label(if first { "Deny  ⇧↩" } else { "Deny" }).on_click(cx.listener(move |this, _, _, cx| this.answer_permission(id_deny.clone(), false, cx))))
+                        .when(first && several, |d| d.child(div().flex_1()).child(Button::new("allow-all").ghost().small().label("Allow all").on_click(cx.listener(|this, _, _, cx| this.allow_all_pending(cx))))),
                 )
         }))
     }
@@ -2017,8 +2416,8 @@ impl Workbench {
         let (via, why) = self.reply_via();
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         let drv = self.drivers.get(&sid).cloned();
-        let mode = drv.as_ref().map(|v| v.mode.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| if self.next_mode.is_empty() { "default".into() } else { self.next_mode.clone() });
-        let model = drv.as_ref().map(|v| v.model.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| if self.next_model.is_empty() { "default".into() } else { self.next_model.clone() });
+        let mode = self.current_mode();
+        let model = self.current_model();
         let running = drv.as_ref().map(|v| v.state == "running" || v.starting).unwrap_or(false);
         let can_send = via == "driver" || via == "spawn" || via == "inbox";
         let settable = via == "driver" || via == "spawn";
@@ -2164,6 +2563,12 @@ impl Workbench {
                             cx.stop_propagation();
                         }
                     }))
+                    // ⇧Tab cycles the permission mode, as in Claude Code's
+                    // terminal; the textarea would otherwise outdent.
+                    .capture_action(cx.listener(|this, _: &OutdentInline, _, cx| {
+                        this.cycle_mode(cx);
+                        cx.stop_propagation();
+                    }))
                     .role(Role::MultilineTextInput)
                     .track_focus(&field_focus)
                     .aria_label("Message")
@@ -2196,9 +2601,15 @@ impl Workbench {
                             }))
                             .child(Icon::new(IconName::Plus).with_size(px(15.))),
                     )
-                    .when(settable, |d| d.child(chip_button("mode", mode_label(&mode).to_string(), cx, |this, cx| this.cycle_mode(cx))))
+                    .when(settable, |d| {
+                        let options = self.modes().into_iter().map(|m| (m, mode_label(m).to_string(), mode_detail(m).to_string())).collect();
+                        d.child(picker("mode", mode_label(&mode).to_string(), options, mode.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_mode(key, cx)), cx))
+                    })
                     .child(div().flex_1())
-                    .when(settable, |d| d.child(chip_button("model", model_label(&model), cx, |this, cx| this.cycle_model(cx))))
+                    .when(settable, |d| {
+                        let options = MODELS.iter().map(|m| (*m, model_label(m), model_detail(m).to_string())).collect();
+                        d.child(picker("model", model_label(&model), options, model_key(&model).to_string(), Anchor::BottomRight, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_model(key, cx)), cx))
+                    })
                     .child(send),
             );
 
@@ -2631,6 +3042,8 @@ impl Workbench {
                         Some(res) if res.sessions.is_empty() => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("No matches.")),
                         Some(res) => d.children(res.sessions.into_iter().take(40).map(|s| {
                             let key = format!("{}:{}", s.agent, s.id);
+                            let query = res.query.clone();
+                            let round = s.matches.first().map(|m| m.round.max(0) as usize);
                             let theme = cx.theme().clone();
                             v_flex()
                                 .id(SharedString::from(format!("hit-{key}")))
@@ -2642,7 +3055,7 @@ impl Workbench {
                                 .hover(|st| st.bg(theme.list_hover))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.close_search(window, cx);
-                                    this.open_and_focus(&key, window, cx);
+                                    this.open_with_find(&key, &query, round, window, cx);
                                 }))
                                 .child(
                                     h_flex()
@@ -2807,23 +3220,54 @@ fn icon_button(id: &'static str, icon: IconName, tip: &'static str, cx: &mut Con
     Button::new(id).ghost().small().icon(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground)).tooltip(tip).on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
 }
 
-/// A pill that cycles a setting: the mode and model pickers under the composer.
-fn chip_button(id: &'static str, label: String, cx: &mut Context<Workbench>, on: impl Fn(&mut Workbench, &mut Context<Workbench>) + 'static) -> impl IntoElement {
+/// A pill under the composer that opens a list of choices: the permission
+/// mode and the model. Every choice is on the list with a line on what it
+/// does, the current one ticked, so all of them can be reached (a pill that
+/// cycled on click hid the fourth mode behind three clicks and a label that
+/// did not know it). Picking one calls `on` with its key.
+#[allow(clippy::too_many_arguments)]
+fn picker(
+    id: &'static str,
+    label: String,
+    options: Vec<(&'static str, String, String)>,
+    current: String,
+    anchor: Anchor,
+    wb: WeakEntity<Workbench>,
+    on: Rc<dyn Fn(&mut Workbench, &str, &mut Context<Workbench>)>,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme().clone();
-    h_flex()
-        .id(id)
-        .h(px(28.))
-        .px(px(10.))
-        .gap(px(4.))
-        .items_center()
-        .rounded_full()
-        .text_size(px(12.5))
-        .text_color(theme.muted_foreground)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
-        .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
-        .child(div().child(label))
-        .child(Icon::new(IconName::ChevronDown).with_size(px(12.)))
+    let options = Rc::new(options);
+    let trigger = Button::new(SharedString::from(format!("{id}-trigger"))).ghost().small().label(label).dropdown_caret(true).text_color(theme.muted_foreground);
+    Popover::new(id).anchor(anchor).trigger(trigger).content(move |_, _, cx| {
+        let theme = cx.theme().clone();
+        let popover = cx.entity();
+        v_flex().min_w(px(250.)).gap(px(2.)).children(options.iter().map(|(key, name, detail)| {
+            let active = *key == current;
+            let (wb, on, popover, key) = (wb.clone(), on.clone(), popover.clone(), *key);
+            v_flex()
+                .id(SharedString::from(format!("{id}-{key}")))
+                .px(px(10.))
+                .py(px(6.))
+                .gap(px(1.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(active, |d| d.bg(theme.muted))
+                .hover(|s| s.bg(theme.list_hover))
+                .on_click(move |_, window, cx| {
+                    let _ = wb.update(cx, |this, cx| on(this, key, cx));
+                    popover.update(cx, |s, cx| s.dismiss(window, cx));
+                })
+                .child(
+                    h_flex()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()))
+                        .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary))),
+                )
+                .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(detail.clone()))
+        }))
+    })
 }
 
 impl Render for Workbench {
@@ -2901,6 +3345,9 @@ impl Render for Workbench {
                 }
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &FindInPage, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_step(1, cx)))
+            .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.find_step(-1, cx)))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 if this.narrow && this.sidebar_peek {
                     this.sidebar_peek = false;

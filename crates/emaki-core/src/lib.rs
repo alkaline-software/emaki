@@ -10,6 +10,7 @@ pub mod archive;
 pub mod build;
 pub mod config;
 pub mod driver;
+pub mod find;
 pub mod json;
 pub mod model;
 pub mod paths;

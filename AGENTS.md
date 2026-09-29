@@ -94,7 +94,14 @@ cargo build -p emaki-app && ./target/debug/Emaki
 cargo test -p emaki-core
 EMAKI_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launch
 EMAKI_PAGE=new|sessions|board ./target/debug/Emaki     # land on a page
+EMAKI_FIND=<text> ./target/debug/Emaki                 # open the find bar on that query
+EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings panel
 ```
+
+The last two exist for probing: a terminal without accessibility access
+cannot press ⌘F or ⌘, in the window from a script, so a screenshot of
+either state is one launch away. Point `EMAKI_HOME` at a scratch directory
+to run a second copy beside the installed app without sharing its state.
 
 **The board is the web viewer's board.** Same four columns (needs you,
 planning, working, your turn) with the same empty-state lines, the same card
@@ -261,6 +268,66 @@ panel (⌘, on macOS, Ctrl+, and Win+, elsewhere, or the app menu) through
 `Config::edit`, which rewrites the file without the environment overrides
 `Config::load` applies. `driver.claude_path` in the same file names the
 `claude` binary when `PATH` does not.
+
+**The look is four settings, all in `config.json` under `app`.**
+`appearance` (`system`, `light`, `dark`), `accent` (a name from
+`look::ACCENTS`), `chat_font` and `chat_size` (`small`, `medium`, `large`;
+`AppConfig::chat_px` turns it into the reply's pixel size, the prompt half a
+pixel under, thoughts two under). `look.rs` owns the first two: the palette
+stays in `themes/emaki.json`, and an accent is a substitution over the
+dozen keys that carry the terracotta there, painted into both configs
+before they are handed to the toolkit, so `Theme::change` keeps the accent
+on every appearance switch with nothing to patch afterwards. `look::apply`
+draws the appearance config asks for and replaces every direct
+`sync_system_appearance` call, including the one in the window's appearance
+observer, which is what keeps a pinned appearance pinned when the system
+flips. The settings panel (⌘,) also sets `driver.default_mode` and
+`driver.default_model`, what a session started from the window begins in.
+
+**Every mode and model is on a list, with a tick.** The pills under the
+composer open a `Popover` (`picker` in `workbench.rs`) naming each choice
+with a line on what it does; a pill that cycled on click hid the fourth
+mode behind three clicks, and its label did not know `auto`, so auto mode
+read as "Default permissions" and looked broken. `driver::mode_label`,
+`mode_detail` and `model_label` are the words, in the core so they are
+tested; `model_label` reads the id Claude Code reports in `system/init`
+(`claude-opus-5-5` is "Opus 5.5") as well as the alias sent on the wire
+(`opus` is "Opus" until the first turn confirms the version). A switch goes
+through `Hub::set_driver_mode` / `set_driver_model`, which answer with the
+mode Claude Code actually holds: a refused switch (bypass without the flag)
+puts the pill back and says why on the status row. ⇧Tab in the composer
+cycles the mode as Claude Code's terminal does; the wrapper captures the
+textarea's own `OutdentInline` for it. Checked against 2.1.284:
+`set_permission_mode` accepts `auto` and answers `{"mode": "auto"}` but
+sends no `system/status` frame for it, unlike the other modes, so the
+reply is what the driver trusts.
+
+**A permission card answers to the keyboard.** ↩ on an empty composer
+allows the oldest card waiting on the session showing, ⇧↩ denies it, and
+the oldest card says so on its buttons; with words typed, ↩ is a new line
+as before. The textarea inserts the newline before it reports `PressEnter`,
+so `answer_pending_by_key` clears the composer after answering. When
+several cards are stacked the first also offers "Allow all".
+
+**⌘F finds inside the conversation showing.** `find.rs` in the core lowers
+every prompt, reply, thought and tool call (arguments, output, the
+subagent's rounds counted against the Task call) once per session load,
+and a query is a substring scan over that, so the answer is exactly what
+the page shows and needs no index. The bar sits between the title strip
+and the transcript: the field, "n of m", up, down, close; ↩ and ⇧↩ step
+from the field, ⌘G and ⌘⇧G from anywhere, Escape closes. Stepping scrolls
+the hit's round to the top of the view (`ListState::scroll_to`, item
+offset zero; the list cannot address a point inside an item) and unfolds
+whatever hides the item: the tool card, the thought, the folded run
+(`transcript::run_start`). The transcript draws a hit on a faint accent
+tint and the current one with an accent bar (`find_wrap`), a matched
+prompt with an accent ring, a folded run with a hit inside with an accent
+edge. A live reload recomputes the hits without moving the reader
+(`compute_hits`); typing lands on the first hit at or after the round in
+view (`run_find`). A hit in the search palette opens its session through
+`open_with_find`, which puts the query in the bar and lands on the matched
+round once the session has loaded (`find_pending`); the index numbers
+rounds from one, the model from zero.
 
 **The composer is plain text, on purpose.** It is a growing `TextareaState`
 (three to twelve rows) with no markdown rendering of its own; markdown in a

@@ -32,6 +32,30 @@ last spring is still there, whole, after the sweep.
 - **Markdown on disk.** Every session also renders to a CommonMark file,
   regenerated from the archive, readable without Emaki.
 
+**After the first day of use**
+
+- **Find in the conversation.** ⌘F opens a find bar over the session you
+  are reading. Every prompt, reply, thought and tool call is searched, the
+  hits are marked in the transcript, and ↩, ⇧↩, ⌘G and ⌘⇧G step through
+  them, unfolding whatever hides one. A hit in the search palette (⌘K) now
+  opens its session with the find bar on that query, on the matched round.
+- **Every permission mode, and its name.** The pills under the composer
+  open a list with all four modes (and bypass, when config allows it),
+  each with a line on what it does. Auto mode used to show as "Default
+  permissions", so it looked as if it could not be reached. ⇧Tab in the
+  composer cycles the mode, as in Claude Code's terminal. A switch Claude
+  Code refuses now says why in the status row instead of pretending.
+- **Model names with their version.** The model pill reads "Opus 5.5",
+  "Fable 5.1", "Haiku 4.5" once Claude Code has said which it is running,
+  not "Opus".
+- **Permission cards from the keyboard.** With the composer empty, ↩ allows
+  the oldest card waiting on the session and ⇧↩ denies it; the card says
+  so on its buttons. Several cards at once get an "Allow all".
+- **More settings.** ⌘, now has the appearance (follow the system, light,
+  dark), six accent colours, the chat font, three text sizes, and the
+  permission mode and model a session started from the window begins in.
+  Everything is drawn at once and kept in `config.json`.
+
 **Installing**
 
 - macOS: open the disk image and drag Emaki to Applications. The app is
