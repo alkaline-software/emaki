@@ -43,8 +43,8 @@ raw-window-handle = "0.6"
 # Installers: `cargo packager --release` (cargo-packager) builds the app and
 # wraps it per platform. release.yml passes `--formats` per OS and renames
 # the results to the stable names the docs link to. No signing identity is
-# set: the macOS bundle is ad-hoc signed afterwards, and the docs explain
-# the "Open Anyway" and SmartScreen steps.
+# set here: the macOS bundle is signed afterwards by scripts/release-mac.sh,
+# and Windows is unsigned, which the docs' SmartScreen steps cover.
 [package.metadata.packager]
 productName = "Emaki"
 identifier = "com.pingfanhu.emaki"

@@ -1,9 +1,10 @@
 #!/bin/zsh
 # The macOS release build, the way Pingfan's other apps ship: a Developer ID
-# signature with the hardened runtime, a disk image with an Applications
-# link, and (with --notarize) notarization and stapling. One script for a
-# laptop, where the notarytool keychain profile does the talking, and for
-# CI, where the identity comes from secrets (see .github/workflows/release.yml).
+# signature with the hardened runtime, a disk image laid out by Finder (the
+# app, an arrow, the Applications link, over scripts/dmg/background.png),
+# and (with --notarize) notarization and stapling. One script for a laptop,
+# where the notarytool keychain profile does the talking, and for CI, where
+# the identity comes from secrets (see .github/workflows/release.yml).
 #
 #   scripts/release-mac.sh [--target <triple>] [--no-build] [--identity <name>|-]
 #                          [--notarize] [--out <path.dmg>]
@@ -57,13 +58,62 @@ else
 fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-# The disk image: the app and an Applications link, compressed.
-rm -rf dist/dmg-temp "$OUT"
-mkdir -p dist/dmg-temp "$(dirname "$OUT")"
-cp -R "$APP" dist/dmg-temp/
-ln -s /Applications dist/dmg-temp/Applications
-hdiutil create -volname "Emaki $VERSION" -srcfolder dist/dmg-temp -ov -format UDZO -imagekey zlib-level=9 "$OUT"
-rm -rf dist/dmg-temp
+# The disk image. Finder lays the window out on a read-write image (the
+# layout lives in the volume's .DS_Store, and only Finder writes one Finder
+# will honour), then hdiutil compresses it read-only. The window is 660x420
+# points over scripts/dmg/background.png, which is that size at 2x.
+VOLNAME="Emaki v$VERSION"
+STAGE=dist/dmg-staging
+RW=dist/Emaki-rw.dmg
+detach_stale() {
+  local dev
+  for dev in $(hdiutil info | grep -F "/Volumes/$VOLNAME" | awk '{print $1}'); do
+    hdiutil detach "$dev" -force >/dev/null 2>&1 || true
+  done
+}
+detach_stale
+rm -rf "$STAGE" "$RW" "$OUT"
+mkdir -p "$STAGE/.background" "$(dirname "$OUT")"
+cp -R "$APP" "$STAGE/Emaki.app"
+ln -s /Applications "$STAGE/Applications"
+cp scripts/dmg/background.png "$STAGE/.background/background.png"
+mkdir -p "$STAGE/.fseventsd" && touch "$STAGE/.fseventsd/no_log"
+hdiutil create -quiet -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDRW "$RW"
+ATTACHED=$(hdiutil attach -readwrite -noverify -noautoopen "$RW")
+DEVICE=$(echo "$ATTACHED" | awk '/^\/dev\// {print $1; exit}')
+osascript >/dev/null <<APPLESCRIPT
+tell application "Finder"
+  tell disk "$VOLNAME"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {100, 100, 760, 520}
+    set opts to the icon view options of container window
+    set arrangement of opts to not arranged
+    set icon size of opts to 128
+    set text size of opts to 14
+    set background picture of opts to file ".background:background.png"
+    set position of item "Emaki.app" of container window to {165, 260}
+    set position of item "Applications" of container window to {495, 260}
+    -- Housekeeping items sit far outside the window for anyone showing hidden files.
+    repeat with n in {".background", ".fseventsd", ".Trashes", ".DS_Store"}
+      try
+        set position of item (n as text) of container window to {1400, 700}
+      end try
+    end repeat
+    close
+    open
+    update without registering applications
+    delay 2
+    close
+  end tell
+end tell
+APPLESCRIPT
+sync
+hdiutil detach "$DEVICE" -force >/dev/null
+hdiutil convert -quiet "$RW" -format UDZO -imagekey zlib-level=9 -ov -o "$OUT"
+rm -rf "$STAGE" "$RW"
 if [[ "$IDENTITY" != "-" ]]; then
   codesign --force --sign "$IDENTITY" "$OUT"
 fi
