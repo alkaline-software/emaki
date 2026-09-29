@@ -37,6 +37,8 @@ pub enum HubEvent {
     Driver { session_id: String, event: driver::Event },
     /// A message left through `via` ("driver" or "inbox").
     Sent { session_id: String, via: &'static str, queued: bool, error: String },
+    /// One line for the status row: what a background request came back with.
+    Note(String),
 }
 
 pub struct Hub {
@@ -279,6 +281,42 @@ impl Hub {
             hub.send(HubEvent::Sent { session_id: sid, via: "inbox", queued: false, error });
             hub.refresh();
         });
+    }
+
+    /// Ask a driver to change its permission mode, on a thread. The answer
+    /// comes back as a `Driver` event either way: the mode Claude Code now
+    /// holds, so a refused switch (auto mode not enabled here, bypass without
+    /// the flag) puts the pill back and says why on the status row.
+    pub fn set_driver_mode(self: &Arc<Self>, session_id: &str, mode: String) -> bool {
+        let Some(d) = self.driver_for(session_id) else { return false };
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        thread::spawn(move || {
+            let now = match d.set_mode(&mode) {
+                Ok(now) => now,
+                Err(e) => {
+                    hub.send(HubEvent::Note(format!("could not switch to {}: {}", driver::mode_label(&mode), e.0)));
+                    d.mode()
+                }
+            };
+            hub.send(HubEvent::Driver { session_id: sid, event: driver::Event::Mode(now) });
+        });
+        true
+    }
+
+    /// The same for the model. The child's own `system/init` on the next
+    /// turn confirms what it is actually running.
+    pub fn set_driver_model(self: &Arc<Self>, session_id: &str, model: String) -> bool {
+        let Some(d) = self.driver_for(session_id) else { return false };
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        thread::spawn(move || {
+            if let Err(e) = d.set_model(&model) {
+                hub.send(HubEvent::Note(format!("could not switch to {}: {}", driver::model_label(&model), e.0)));
+            }
+            hub.send(HubEvent::Driver { session_id: sid, event: driver::Event::Init(d.caps()) });
+        });
+        true
     }
 
     pub fn stop_driver(&self, session_id: &str) {

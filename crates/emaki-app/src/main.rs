@@ -7,6 +7,7 @@ mod assets;
 mod fonts;
 mod format;
 mod hub;
+mod look;
 mod sys;
 mod transcript;
 mod ui_state;
@@ -14,11 +15,11 @@ mod workbench;
 
 use gpui::*;
 use gpui_component::Root;
-use workbench::{Workbench, COMPOSER_CONTEXT, KEY_CONTEXT, SEARCH_CONTEXT};
+use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_CONTEXT};
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -30,6 +31,12 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-s", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(SEARCH_CONTEXT)),
+        KeyBinding::new("escape", Escape, Some(FIND_CONTEXT)),
+        // Find inside the conversation showing; ⌘G and ⌘⇧G step through
+        // the hits from anywhere, Enter and ⇧Enter from the find field.
+        KeyBinding::new("secondary-f", FindInPage, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-g", FindNext, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-g", FindPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-enter", Send, Some(COMPOSER_CONTEXT)),
         KeyBinding::new("secondary-q", Quit, None),
         // ⌘, on macOS, Ctrl+, elsewhere; Win+, as well where there is a
@@ -97,7 +104,17 @@ fn app_menus() -> Vec<Menu> {
     menus.push(Menu {
         name: "View".into(),
         disabled: false,
-        items: vec![MenuItem::action("Board", GoBoard), MenuItem::action("Sessions", GoSessions), MenuItem::action("Search", ToggleSearch), MenuItem::separator(), MenuItem::action("Toggle Sidebar", ToggleSidebar)],
+        items: vec![
+            MenuItem::action("Board", GoBoard),
+            MenuItem::action("Sessions", GoSessions),
+            MenuItem::action("Search", ToggleSearch),
+            MenuItem::separator(),
+            MenuItem::action("Find in Conversation", FindInPage),
+            MenuItem::action("Find Next", FindNext),
+            MenuItem::action("Find Previous", FindPrev),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Sidebar", ToggleSidebar),
+        ],
     });
     menus.push(Menu {
         name: "Window".into(),
@@ -105,29 +122,6 @@ fn app_menus() -> Vec<Menu> {
         items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom), MenuItem::action("Toggle Full Screen", ToggleFullScreen)],
     });
     menus
-}
-
-/// The window's palette: cream and charcoal with a terracotta accent, one
-/// config per appearance. `Theme::change` re-applies whichever the system
-/// appearance asks for.
-fn install_theme(cx: &mut App) {
-    use gpui_component::theme::{Theme, ThemeSet};
-    let set: ThemeSet = match serde_json::from_str(include_str!("../themes/emaki.json")) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("emaki: theme file is invalid, using the default look: {e}");
-            return;
-        }
-    };
-    let theme = Theme::global_mut(cx);
-    for cfg in set.themes {
-        let cfg = std::rc::Rc::new(cfg);
-        if cfg.mode.is_dark() {
-            theme.dark_theme = cfg;
-        } else {
-            theme.light_theme = cfg;
-        }
-    }
 }
 
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
@@ -163,12 +157,15 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             ..Default::default()
         },
         |window, cx| {
+            // The palette follows the system only when the settings say so;
+            // a pinned appearance is re-asserted on every system change.
             window
                 .observe_window_appearance(|window, cx| {
-                    gpui_component::Theme::sync_system_appearance(Some(window), cx);
+                    let appearance = emaki_core::config::Config::load().app.appearance;
+                    look::apply(&appearance, Some(window), cx);
                 })
                 .detach();
-            gpui_component::Theme::sync_system_appearance(Some(window), cx);
+            look::apply(&emaki_core::config::Config::load().app.appearance, Some(window), cx);
             a11y::install_window_focus_forwarder(window);
             let workbench = cx.new(|cx| Workbench::new(window, cx));
             window.focus(&workbench.read(cx).focus_handle(cx), cx);
@@ -193,8 +190,11 @@ fn main() {
         gpui_component::init(cx);
         sys::install_dock_icon();
         fonts::install(cx);
-        install_theme(cx);
-        gpui_component::Theme::sync_system_appearance(None, cx);
+        // The palette (cream and charcoal, one config per appearance) with
+        // the accent from config painted in, then the appearance it asks for.
+        let app_cfg = emaki_core::config::Config::load().app;
+        look::install(&app_cfg.accent, cx);
+        look::apply(&app_cfg.appearance, None, cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |w| w.remove_window()));

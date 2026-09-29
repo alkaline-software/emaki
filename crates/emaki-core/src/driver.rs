@@ -54,6 +54,76 @@ pub const TESTED_CLAUDE_VERSION: &str = "2.1.283";
 
 pub const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "bypassPermissions"];
 pub const MODELS: &[&str] = &["default", "fable", "opus", "sonnet", "haiku"];
+
+/// What to call a model on a pill. Claude Code reports the full id in
+/// `system/init` (`claude-opus-5-5`, `claude-haiku-4-5-20251001`,
+/// `claude-3-5-sonnet-20241022`) and takes the family alias on the wire
+/// (`opus`, `opus[1m]`); both read as "Opus 5.5", "Haiku 4.5", "Sonnet
+/// 3.5", "Opus" and "Opus 1M". The version is the run of one- or two-digit
+/// numbers next to the family name; a date stamp is longer and dropped.
+pub fn model_label(model: &str) -> String {
+    let m = model.trim();
+    if m.is_empty() || m == "default" {
+        return "Default model".into();
+    }
+    let (m, long_context) = match m.strip_suffix("[1m]") {
+        Some(base) => (base, true),
+        None => (m, false),
+    };
+    let body = m.strip_prefix("claude-").unwrap_or(m);
+    let mut family = String::new();
+    let mut version: Vec<&str> = Vec::new();
+    for part in body.split('-') {
+        let numeric = !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+        if numeric {
+            if part.len() <= 2 {
+                version.push(part);
+            }
+        } else if family.is_empty() {
+            let mut c = part.chars();
+            family = match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            };
+        }
+    }
+    if family.is_empty() {
+        family = m.to_string();
+    }
+    let mut out = family;
+    if !version.is_empty() {
+        out.push(' ');
+        out.push_str(&version.join("."));
+    }
+    if long_context {
+        out.push_str(" 1M");
+    }
+    out
+}
+
+/// What to call a permission mode on a pill.
+pub fn mode_label(mode: &str) -> &'static str {
+    match mode {
+        "acceptEdits" => "Accept edits",
+        "plan" => "Plan mode",
+        "auto" => "Auto mode",
+        "bypassPermissions" => "Bypass permissions",
+        "dontAsk" => "Don't ask",
+        _ => "Default permissions",
+    }
+}
+
+/// One line on what a mode does, under its name in the picker.
+pub fn mode_detail(mode: &str) -> &'static str {
+    match mode {
+        "acceptEdits" => "File edits go through; commands still ask.",
+        "plan" => "Reads and plans; writes nothing until the plan is approved.",
+        "auto" => "Claude Code decides what is safe to run, and asks about the rest.",
+        "bypassPermissions" => "Nothing asks; nothing is held.",
+        "dontAsk" => "Anything not already allowed is denied without asking.",
+        _ => "Asks before each tool that needs permission.",
+    }
+}
 pub const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

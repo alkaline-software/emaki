@@ -283,3 +283,47 @@ fn read_all_skips_bad_lines() {
     fs::write(&p, "{\"a\":1}\nnot json\n\n[1,2]\n{\"b\":2}\n").unwrap();
     assert_eq!(read_all(&p).len(), 2);
 }
+
+#[test]
+fn model_label_reads_ids_and_aliases() {
+    use emaki_core::driver::{mode_label, model_label};
+    assert_eq!(model_label(""), "Default model");
+    assert_eq!(model_label("default"), "Default model");
+    assert_eq!(model_label("opus"), "Opus");
+    assert_eq!(model_label("opus[1m]"), "Opus 1M");
+    assert_eq!(model_label("claude-opus-5-5"), "Opus 5.5");
+    assert_eq!(model_label("claude-fable-5-1"), "Fable 5.1");
+    assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
+    assert_eq!(model_label("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
+    assert_eq!(model_label("claude-sonnet-4-20250514"), "Sonnet 4");
+    assert_eq!(mode_label("auto"), "Auto mode");
+    assert_eq!(mode_label("default"), "Default permissions");
+}
+
+#[test]
+fn find_index_locates_prompts_items_and_subagents() {
+    use emaki_core::find::{FindIndex, Hit};
+    let rows = vec![
+        user("Please refactor the Widget", "2026-01-01T00:00:00Z"),
+        assistant(vec![json!({"type": "thinking", "thinking": "the widget needs a Gadget"})], "tool_use", "2026-01-01T00:00:01Z"),
+        assistant(vec![json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "grep -r Sprocket src"}})], "tool_use", "2026-01-01T00:00:02Z"),
+        tool_result("t1", "src/a.rs: Sprocket::new()", "2026-01-01T00:00:03Z"),
+        assistant(vec![json!({"type": "text", "text": "Done with the widget."})], "end_turn", "2026-01-01T00:00:04Z"),
+        user("thanks", "2026-01-01T00:00:05Z"),
+        assistant(vec![json!({"type": "text", "text": "Any time."})], "end_turn", "2026-01-01T00:00:06Z"),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let idx = FindIndex::build(&s);
+    // Case-insensitive, prompt and items alike, in reading order.
+    let hits = idx.find("WIDGET");
+    assert_eq!(hits.len(), 3);
+    assert_eq!(hits[0], Hit { round: 0, item: None });
+    assert!(hits[1..].iter().all(|h| h.round == 0 && h.item.is_some()));
+    // A tool call is found by its command and by what came back.
+    assert_eq!(idx.find("sprocket").len(), 1);
+    assert_eq!(idx.find("src/a.rs").len(), 1);
+    // The second round.
+    assert_eq!(idx.find("any time"), vec![Hit { round: 1, item: Some(0) }]);
+    assert!(idx.find("   ").is_empty());
+    assert!(idx.find("nothing here").is_empty());
+}

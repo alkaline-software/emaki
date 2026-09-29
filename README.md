@@ -367,6 +367,11 @@ it is why the blanket claim at the top of this file is about recording.
 | `driver.enabled` | `true` | start a headless Claude Code child for a session with no process behind it |
 | `driver.idle_min` | `30` | close that child after this many idle minutes |
 | `driver.default_mode` | `""` | permission mode for a started session (`""` = Claude Code's `permissions.defaultMode`) |
+| `driver.default_model` | `""` | model for a started session (`""` = the account default) |
+| `app.appearance` | `system` | the desktop app's look: `system`, `light` or `dark` |
+| `app.accent` | `terracotta` | the desktop app's accent: `terracotta`, `blue`, `green`, `violet`, `teal` or `graphite` |
+| `app.chat_font` | `serif` | the conversation's face in the desktop app: `serif` or `sans` |
+| `app.chat_size` | `medium` | the conversation's size in the desktop app: `small`, `medium` or `large` |
 | `driver.allow_bypass` | `false` | offer `bypassPermissions` on the page |
 | `uploads.max_mb` | `20` | largest file the compose box accepts |
 | `remote_approval.enabled` | `false` | approve from the browser |

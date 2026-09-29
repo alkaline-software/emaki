@@ -43,18 +43,37 @@ impl Default for Driver {
     }
 }
 
-/// What the window looks like.
+/// What the window looks like. Every field has a spelled-out default so a
+/// hand-edited `config.json` with one of them missing still loads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     /// The conversation's typeface: `serif` (Anthropic Serif) or `sans`
     /// (Anthropic Sans).
     pub chat_font: String,
+    /// How large the conversation is set: `small`, `medium` or `large`.
+    pub chat_size: String,
+    /// `system` follows the OS; `light` and `dark` pin one look.
+    pub appearance: String,
+    /// The accent colour, by name; see `ACCENTS`.
+    pub accent: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "serif".into() }
+        Self { chat_font: "serif".into(), chat_size: "medium".into(), appearance: "system".into(), accent: "terracotta".into() }
+    }
+}
+
+impl AppConfig {
+    /// The conversation's body size in pixels for `chat_size`; the reply
+    /// text is set at this, the prompt half a pixel smaller, as before.
+    pub fn chat_px(&self) -> f32 {
+        match self.chat_size.as_str() {
+            "small" => 13.5,
+            "large" => 16.0,
+            _ => 14.5,
+        }
     }
 }
 

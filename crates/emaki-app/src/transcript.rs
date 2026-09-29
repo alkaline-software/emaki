@@ -48,6 +48,27 @@ fn mono_block(id: String, text: &str, lang: &str, cx: &App) -> impl IntoElement 
     md_view(id, md, cx)
 }
 
+/// Where the folded run of tool calls holding item `jx` begins, when there
+/// is one: three or more tool calls in a row, thoughts between them
+/// included, fold into one row (see `render_round`), and the find bar has
+/// to open that row to show a hit inside it.
+pub(crate) fn run_start(rnd: &Round, jx: usize) -> Option<usize> {
+    let is_run_item = |it: &Item| matches!(it, Item::Tool(_) | Item::Thinking { .. });
+    if !rnd.items.get(jx).map(is_run_item).unwrap_or(false) {
+        return None;
+    }
+    let mut start = jx;
+    while start > 0 && is_run_item(&rnd.items[start - 1]) {
+        start -= 1;
+    }
+    let mut end = jx + 1;
+    while end < rnd.items.len() && is_run_item(&rnd.items[end]) {
+        end += 1;
+    }
+    let tools = rnd.items[start..end].iter().filter(|it| matches!(it, Item::Tool(_))).count();
+    (tools >= 3).then_some(start)
+}
+
 fn tool_kind_label(kind: ToolKind) -> &'static str {
     match kind {
         ToolKind::Bash => "run",
@@ -77,6 +98,10 @@ impl Workbench {
         let speaker = session.agent.speaker();
         let theme = cx.theme().clone();
         let is_last = ix + 1 == session.rounds.len();
+        // The conversation's size from the settings: replies at it, the
+        // prompt half a pixel under, thoughts two under.
+        let body_px = self.cfg.app.chat_px();
+        let prompt_mark = self.find_mark(ix, None);
 
         let who = match rnd.source {
             Source::Web => "You · Emaki",
@@ -102,7 +127,19 @@ impl Workbench {
         // (pictures, then files), the words under them, the way a message
         // with a picture reads in the Claude app.
         if !rnd.prompt.is_empty() || rnd.images > 0 || !rnd.attachments.is_empty() {
-            let mut bubble = v_flex().max_w(px(600.)).px(px(16.)).py(px(11.)).gap(px(4.)).rounded(px(18.)).bg(theme.muted).text_size(px(14.)).line_height(relative(1.55));
+            let mut bubble = v_flex()
+                .max_w(px(600.))
+                .px(px(16.))
+                .py(px(11.))
+                .gap(px(4.))
+                .rounded(px(18.))
+                .bg(theme.muted)
+                .text_size(px(body_px - 0.5))
+                .line_height(relative(1.55))
+                // A prompt the find bar matched wears the accent on its
+                // edge; the one the bar is on now, a full ring.
+                .when(prompt_mark == 1, |d| d.border_1().border_color(theme.primary.opacity(0.45)))
+                .when(prompt_mark == 2, |d| d.border_2().border_color(theme.primary));
             let has_text = !rnd.prompt.is_empty();
             if !rnd.attachments.is_empty() {
                 let (pics, files): (Vec<&Attachment>, Vec<&Attachment>) = rnd.attachments.iter().partition(|a| a.kind == "image");
@@ -161,7 +198,7 @@ impl Workbench {
                 }
             }
             let el = self.render_item(ix, jx, &rnd.items[jx], &open_tools, &open_thoughts, &open_subagents, &session, cx);
-            body = body.child(el);
+            body = body.child(self.find_wrap(ix, jx, el, &theme));
             jx += 1;
         }
         if any {
@@ -184,9 +221,21 @@ impl Workbench {
         h_flex().w_full().justify_center().child(column).into_any_element()
     }
 
+    /// An item the find bar matched sits on a faint accent tint; the one the
+    /// bar is on now also carries an accent bar down its left edge. Nothing
+    /// is re-laid-out for it: the wrapper takes the item's own width.
+    fn find_wrap(&self, ix: usize, jx: usize, el: AnyElement, theme: &gpui_component::Theme) -> AnyElement {
+        match self.find_mark(ix, Some(jx)) {
+            0 => el,
+            1 => div().w_full().rounded(px(8.)).px(px(6.)).ml(px(-6.)).bg(theme.primary.opacity(0.08)).child(el).into_any_element(),
+            _ => div().w_full().rounded(px(8.)).px(px(6.)).ml(px(-6.)).bg(theme.primary.opacity(0.14)).border_l_2().border_color(theme.primary).child(el).into_any_element(),
+        }
+    }
+
     fn render_item(&mut self, ix: usize, jx: usize, item: &Item, open_tools: &HashSet<(usize, usize)>, open_thoughts: &HashSet<(usize, usize)>, open_subagents: &HashSet<(usize, usize)>, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+        let body_px = self.cfg.app.chat_px();
         match item {
-            Item::Text { md, .. } => div().w_full().text_size(px(14.5)).line_height(relative(1.65)).child(md_view(format!("t-{ix}-{jx}"), md.clone(), cx)).into_any_element(),
+            Item::Text { md, .. } => div().w_full().text_size(px(body_px)).line_height(relative(1.65)).child(md_view(format!("t-{ix}-{jx}"), md.clone(), cx)).into_any_element(),
             Item::Thinking { md, seconds, .. } => self.render_thought(ix, jx, md, *seconds, open_thoughts.contains(&(ix, jx)), cx),
             Item::Notice { text, variant, .. } => self.render_notice(text, *variant, cx),
             Item::Tool(call) => self.render_tool(ix, jx, call, open_tools.contains(&(ix, jx)), open_subagents.contains(&(ix, jx)), &session.cwd, cx),
@@ -228,6 +277,9 @@ impl Workbench {
         }
         kinds.sort_by(|a, b| b.1.cmp(&a.1));
         let tally = kinds.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(" · ");
+        // A folded run with a find hit inside says so on its edge, so the
+        // hit is not invisible until the run is opened.
+        let run_mark = (start..end).map(|jx| self.find_mark(ix, Some(jx))).max().unwrap_or(0);
         let head = h_flex()
             .id(SharedString::from(format!("run-{ix}-{start}")))
             .w_full()
@@ -237,6 +289,8 @@ impl Workbench {
             .items_center()
             .rounded(px(10.))
             .bg(theme.muted)
+            .when(run_mark == 1 && !open, |d| d.border_1().border_color(theme.primary.opacity(0.45)))
+            .when(run_mark == 2 && !open, |d| d.border_1().border_color(theme.primary))
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_active))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -265,7 +319,8 @@ impl Workbench {
             let session_rc = session.clone();
             for jx in start..end {
                 let item = session_rc.rounds[ix].items[jx].clone();
-                inner = inner.child(self.render_item(ix, jx, &item, open_tools, open_thoughts, open_subagents, session, cx));
+                let el = self.render_item(ix, jx, &item, open_tools, open_thoughts, open_subagents, session, cx);
+                inner = inner.child(self.find_wrap(ix, jx, el, &theme));
             }
             v = v.child(inner);
         }
@@ -373,6 +428,7 @@ impl Workbench {
 
     fn render_thought(&self, ix: usize, jx: usize, md: &str, seconds: f64, open: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let body_px = self.cfg.app.chat_px();
         let label = if seconds >= 2.0 { format!("Thought for {}", human_duration((seconds * 1000.0) as u64)) } else { "Thinking".to_string() };
         v_flex()
             .w_full()
@@ -402,7 +458,7 @@ impl Workbench {
                         .pl(px(14.))
                         .border_l_2()
                         .border_color(theme.border)
-                        .text_size(px(12.5))
+                        .text_size(px(body_px - 2.))
                         .text_color(theme.muted_foreground)
                         .line_height(relative(1.55))
                         .child(md_view(format!("tk-{ix}-{jx}"), md.to_string(), cx)),
