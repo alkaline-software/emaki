@@ -2,32 +2,18 @@
 .DS_Store
 ._*
 
-# Python
+# Python, for scripts/dmg/background.py
 __pycache__/
 *.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
-.venv/
-venv/
-.python-version
-
-# Test and tooling caches
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.coverage
-htmlcov/
 
 # emaki's own data, in case EMAKI_HOME ever points at the checkout.
 # These hold real conversation transcripts — never commit them.
 .emaki/
 archive/
 logs/
-index.db
-index.db-wal
-index.db-shm
+search.db
+search.db-wal
+search.db-shm
 *.jsonl
 emaki-export-*.html
 

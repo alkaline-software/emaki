@@ -18,9 +18,11 @@ use emaki_core::adapters;
 use emaki_core::archive;
 use emaki_core::config::Config;
 use emaki_core::driver::{self, Driver};
+use emaki_core::explain::Explainer;
 use emaki_core::peer::{self, Peer};
 use emaki_core::search::{self, SearchIndex};
 use emaki_core::transcript::SessionRef;
+use emaki_core::update::{self, UpdateState};
 use emaki_core::watcher::Watcher;
 
 /// A process behind a transcript is assumed for this long after its last write
@@ -39,6 +41,24 @@ pub enum HubEvent {
     Sent { session_id: String, via: &'static str, queued: bool, error: String },
     /// One line for the status row: what a background request came back with.
     Note(String),
+    /// An explanation landed for a tool call (empty when the model had
+    /// nothing usable to say).
+    Explained { call_id: String, text: String },
+    /// The update check, the download and the install, as they go.
+    Update(UpdateEvent),
+}
+
+#[derive(Debug, Clone)]
+pub enum UpdateEvent {
+    Checking,
+    UpToDate { latest: String },
+    Available { latest: String },
+    CheckFailed(String),
+    Downloading { done: u64, total: Option<u64> },
+    Installing,
+    /// The new app is running (or its installer is up); the window quits.
+    Relaunch,
+    InstallFailed(String),
 }
 
 pub struct Hub {
@@ -53,6 +73,9 @@ pub struct Hub {
     /// inbox, refreshed on each scan.
     peers: Mutex<HashMap<String, Peer>>,
     pub cfg: RwLock<Config>,
+    /// Plain-English lines for opaque tool calls, asked of a small model
+    /// on a thread; a permission card asks on arrival, a tool card on click.
+    pub explainer: Arc<Explainer>,
 }
 
 impl Hub {
@@ -60,6 +83,13 @@ impl Hub {
         let (tx, rx) = unbounded();
         let (wake_tx, wake_rx) = mpsc::channel::<()>();
         let (search_tx, search_rx) = mpsc::channel::<Vec<SessionRef>>();
+        let etx = tx.clone();
+        let explainer = Explainer::new(
+            cfg.explain.clone(),
+            Arc::new(move |call_id: &str, text: &str| {
+                let _ = etx.unbounded_send(HubEvent::Explained { call_id: call_id.to_string(), text: text.to_string() });
+            }),
+        );
         let hub = Arc::new(Hub {
             tx,
             wake: Mutex::new(wake_tx),
@@ -68,6 +98,7 @@ impl Hub {
             ended: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             cfg: RwLock::new(cfg),
+            explainer,
         });
         let _ = emaki_core::paths::ensure_dirs();
         hub.spawn_scanner(wake_rx);
@@ -221,6 +252,12 @@ impl Hub {
             thread::spawn(move || {
                 while let Ok(ev) = ev_rx.recv() {
                     let exit = matches!(ev, driver::Event::Exit { .. });
+                    // The explanation is asked for the moment the card
+                    // exists: reading it while you decide is the point.
+                    if let driver::Event::Permission(p) = &ev {
+                        let id = if p.tool_use_id.is_empty() { p.request_id.clone() } else { p.tool_use_id.clone() };
+                        hub2.explainer.request(&id, &p.tool_name, &p.input, false);
+                    }
                     hub2.send(HubEvent::Driver { session_id: sid.clone(), event: ev });
                     if exit {
                         hub2.drivers.lock().unwrap().remove(&sid);
@@ -336,6 +373,57 @@ impl Hub {
             });
         });
         true
+    }
+
+    /// Ask GitHub for the newest release, on a thread. What it says comes
+    /// back as `HubEvent::Update`, and the time and answer are kept in
+    /// `state/update.json` so the daily check knows when it last ran.
+    pub fn check_updates(self: &Arc<Self>) {
+        let hub = Arc::clone(self);
+        thread::spawn(move || {
+            hub.send(HubEvent::Update(UpdateEvent::Checking));
+            match update::latest() {
+                Ok(latest) => {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+                    let _ = UpdateState { last_check: now, latest: latest.clone() }.save();
+                    if update::is_newer(&latest, update::current_version()) {
+                        hub.send(HubEvent::Update(UpdateEvent::Available { latest }));
+                    } else {
+                        hub.send(HubEvent::Update(UpdateEvent::UpToDate { latest }));
+                    }
+                }
+                Err(e) => hub.send(HubEvent::Update(UpdateEvent::CheckFailed(e))),
+            }
+        });
+    }
+
+    /// Fetch `version`'s installer for this machine and put it in place, on
+    /// a thread, reporting as it goes. Ends in `Relaunch` or `InstallFailed`.
+    pub fn install_update(self: &Arc<Self>, version: String) {
+        let hub = Arc::clone(self);
+        thread::spawn(move || {
+            let progress = |done: u64, total: Option<u64>| hub.send(HubEvent::Update(UpdateEvent::Downloading { done, total }));
+            let file = match update::download(&version, &progress) {
+                Ok(f) => f,
+                Err(e) => {
+                    hub.send(HubEvent::Update(UpdateEvent::InstallFailed(e)));
+                    return;
+                }
+            };
+            hub.send(HubEvent::Update(UpdateEvent::Installing));
+            match update::install(&file) {
+                Ok(()) => hub.send(HubEvent::Update(UpdateEvent::Relaunch)),
+                Err(e) => hub.send(HubEvent::Update(UpdateEvent::InstallFailed(e))),
+            }
+        });
+    }
+
+    /// A settings change for the explainer, applied to the running one.
+    pub fn set_explain(&self, cfg: emaki_core::config::Explain) {
+        if let Ok(mut c) = self.cfg.write() {
+            c.explain = cfg.clone();
+        }
+        self.explainer.set_cfg(cfg);
     }
 
     pub fn stop_driver(&self, session_id: &str) {

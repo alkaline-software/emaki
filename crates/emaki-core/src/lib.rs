@@ -10,6 +10,7 @@ pub mod archive;
 pub mod build;
 pub mod config;
 pub mod driver;
+pub mod explain;
 pub mod find;
 pub mod json;
 pub mod limits;
@@ -21,6 +22,7 @@ pub mod render_md;
 pub mod search;
 pub mod store;
 pub mod transcript;
+pub mod update;
 pub mod watcher;
 
 pub fn version() -> &'static str {

@@ -54,6 +54,11 @@ re!(RE_PEER_HEADER, r"\A(?:Another Claude session|A peer session) sent a message
 re!(RE_PEER_FOOTER, r"\n\n(?:This came from another Claude session|That \x22other Claude session\x22)[^\n]*\z");
 re!(RE_PEER_ENVELOPE, r"(?s)\A<cross-session-message(?: [^>]*)?>\n(.*)\n</cross-session-message>\z");
 re!(RE_ATTACHED, r"(?m)^Attached file: (\S.*?)\s*$");
+// The terminal writes `[Image #3]` where a picture was pasted; the picture
+// itself is a content block after the text. The marker names the block.
+re!(RE_IMAGE_MARK, r"\[Image #(\d+)\]\s*");
+// Text pasted into the terminal arrives wrapped, with the id on both tags.
+re!(RE_PASTED_TAG, r"</?pasted_content[^>]*>\s*");
 re!(RE_UPLOAD_ID, r"^[0-9a-f]{12}-");
 re!(RE_ANSI, r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b\x0c\x0e-\x1f]");
 
@@ -73,9 +78,12 @@ pub fn media_type_for(name: &str) -> &'static str {
     }
 }
 
-/// Split what came with a prompt from the prompt itself.
+/// Split what came with a prompt from the prompt itself. A pasted picture
+/// takes its name from the `[Image #n]` marker the terminal left in the
+/// text, in order, and the marker goes.
 pub fn attachments_of(prompt: &str, blocks: &[Value], row_uuid: &str) -> (String, Vec<Attachment>) {
     let mut found = Vec::new();
+    let mut marks = RE_IMAGE_MARK.captures_iter(prompt).map(|c| format!("Image #{}", &c[1]));
     for (i, block) in blocks.iter().enumerate() {
         if block_type(block) == "image" {
             let media = block.get("source").map(|s| str_of(s, "media_type")).unwrap_or("");
@@ -83,11 +91,15 @@ pub fn attachments_of(prompt: &str, blocks: &[Value], row_uuid: &str) -> (String
                 kind: "image".into(),
                 uuid: row_uuid.into(),
                 index: i,
+                name: marks.next().unwrap_or_default(),
                 media_type: if media.is_empty() { "image/png".into() } else { media.into() },
                 ..Default::default()
             });
         }
     }
+    let marked = RE_IMAGE_MARK.is_match(prompt);
+    let prompt: std::borrow::Cow<str> = if marked { RE_IMAGE_MARK.replace_all(prompt, "") } else { prompt.into() };
+    let prompt = prompt.as_ref();
     for cap in RE_ATTACHED.captures_iter(prompt) {
         // A path written before the rename points into ~/.scribe; the file
         // moved with the directory.
@@ -180,7 +192,7 @@ pub fn strip_wrappers(text: &str) -> (String, Vec<String>, Vec<String>) {
         RE_COMMAND_STDOUT.captures_iter(text).map(|c| c[1].trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     let mut cleaned = text.to_string();
-    for re in [&*RE_SYSTEM_REMINDER, &*RE_CAVEAT, &*RE_TASK_NOTIFICATION, &*RE_HOOK_OUTPUT, &*RE_COMMAND_MESSAGE] {
+    for re in [&*RE_SYSTEM_REMINDER, &*RE_CAVEAT, &*RE_TASK_NOTIFICATION, &*RE_HOOK_OUTPUT, &*RE_COMMAND_MESSAGE, &*RE_PASTED_TAG] {
         cleaned = re.replace_all(&cleaned, "").into_owned();
     }
     cleaned = RE_COMMAND_NAME.replace_all(&cleaned, "").into_owned();
