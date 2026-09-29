@@ -374,7 +374,10 @@ gh release upload v0.1.0 dist/Emaki-mac-arm64.dmg dist/Emaki-mac-x64.dmg --clobb
 
 replaces the ad-hoc images with signed ones under the same names. Upload
 after the job, not before: `action-gh-release` replaces same-named assets.
-Windows is unsigned until SignPath. The packager does not run the build
+Windows is unsigned until SignPath. The script deletes `dist/Emaki.app`
+once it is inside the image: left there, Launchpad and Spotlight list a
+second Emaki beside the installed one (`make-app.sh` keeps its bundle,
+being for a local run). The packager does not run the build
 (its `beforePackagingCommand` cannot see `--target`), so build first:
 `cargo build --release -p emaki-app`, then `scripts/release-mac.sh
 --no-build [--notarize]`, or on other platforms `cargo packager --release
@@ -439,7 +442,9 @@ the bounds are reused only when their centre is still on a screen.
 reloads from disk, which the numbers below say costs nothing a person can
 see. ⌘W is one global `CloseTab` binding that closes the showing tab, then
 the last tab, then the window: a context-bound binding would lose to a
-global one whenever the focus sits in the composer.
+global one whenever the focus sits in the composer. The app stays running
+with no window, and `on_reopen` in `main.rs` (a Dock click, or a second
+launch) opens it again; without that handler the Dock icon did nothing.
 
 **Opening is measured, not guessed.** `emaki-core bench [<id>...]` times
 read, build and render for a transcript (the five largest by default) and

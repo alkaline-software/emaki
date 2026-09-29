@@ -179,6 +179,16 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
 
 fn main() {
     let app = gpui_platform::application().with_assets(assets::Assets);
+    // A click on the Dock icon, or a second launch, after the window was
+    // closed (⌘W on the last tab): open it again, or bring it forward.
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            if let Err(e) = open_main_window(cx) {
+                eprintln!("emaki: could not open a window: {e}");
+            }
+        }
+        cx.activate(true);
+    });
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         sys::install_dock_icon();

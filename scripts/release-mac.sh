@@ -113,7 +113,9 @@ APPLESCRIPT
 sync
 hdiutil detach "$DEVICE" -force >/dev/null
 hdiutil convert -quiet "$RW" -format UDZO -imagekey zlib-level=9 -ov -o "$OUT"
-rm -rf "$STAGE" "$RW"
+# The bundle lives on in the image only. Left in dist/ it is a second
+# Emaki for Launchpad and Spotlight beside the installed one.
+rm -rf "$STAGE" "$RW" "$APP" dist/.cargo-packager
 if [[ "$IDENTITY" != "-" ]]; then
   codesign --force --sign "$IDENTITY" "$OUT"
 fi
