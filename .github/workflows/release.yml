@@ -3,7 +3,8 @@ name: release
 # Installers, built only when a version tag is pushed (`git tag v0.2.0 &&
 # git push --tags`). Each OS packages its own build with cargo-packager and
 # the files are attached to a GitHub Release under stable names, so the
-# docs can link `releases/latest/download/<name>` and never go stale.
+# docs can link `releases/latest/download/<name>` and never go stale. The
+# release's notes are the tag's section of CHANGELOG.md.
 on:
   push:
     tags: ["v*"]
@@ -41,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: The tag matches the workspace version
+      - name: The tag matches the workspace version and has release notes
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
@@ -49,6 +50,7 @@ jobs:
           if [ "v$v" != "${GITHUB_REF_NAME}" ]; then
             echo "Cargo.toml says $v but the tag is ${GITHUB_REF_NAME}"; exit 1
           fi
+          scripts/release-notes.sh "$v" >/dev/null
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -137,8 +139,28 @@ jobs:
           name: ${{ matrix.asset }}
           path: upload/*
 
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+  # One release, made once the four builds are in, with the tag's section of
+  # CHANGELOG.md as its notes. (Each package job making the release itself
+  # left four copies of an auto-generated changelog on the page.)
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
         with:
+          path: upload
+          merge-multiple: true
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > notes.md
+          ls -la upload
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Emaki ${{ github.ref_name }}
+          body_path: notes.md
           files: upload/*
-          generate_release_notes: true

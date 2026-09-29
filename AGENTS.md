@@ -80,6 +80,9 @@ crates/emaki-app/         the window
   assets/icon/               the icon in every size, cut from scripts/icon/logo.png
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
 scripts/make-icon.sh       remakes assets/icon from scripts/icon/logo.png
+scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
+scripts/dmg/               the disk image's background and the script that draws it
+scripts/release-notes.sh   one version's section of CHANGELOG.md, the release notes
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
 .github/workflows/release.yml  installers on a v* tag, via cargo-packager
 ```
@@ -332,27 +335,51 @@ sysroot); `rust.yml` is the real test for both.
 tests, builds the app and runs the CLI on all three OSes, with
 `Swatinem/rust-cache` because a cold GPUI build is long. `release.yml`
 runs on a `v*` tag: it refuses a tag that disagrees with the workspace
-version, builds per target (both Mac architectures from the Apple Silicon
-runner), packages with `cargo-packager` (config under
-`[package.metadata.packager]` in `crates/emaki-app/Cargo.toml`), ad-hoc
-signs the Mac bundle and makes its disk image with `hdiutil` so the signed
-bundle is what ships, and attaches everything under stable names
+version or has no section in `CHANGELOG.md`, builds per target (both Mac
+architectures from the Apple Silicon runner), packages with
+`cargo-packager` (config under `[package.metadata.packager]` in
+`crates/emaki-app/Cargo.toml`), and then one `release` job makes the
+GitHub Release with the tag's changelog section as its notes
+(`scripts/release-notes.sh`) and everything attached under stable names
 (`Emaki-mac-arm64.dmg`, `Emaki-mac-x64.dmg`,
 `Emaki-windows-x64-setup.exe`, `Emaki-linux-x64.AppImage`,
 `Emaki-linux-x64.deb`) so links to `releases/latest/download/<name>` never
-go stale. The Mac build is signed the way Pingfan's other apps are, by
+go stale. The changelog is written for the person installing; the first
+release taught that four package jobs each creating the release leaves
+four auto-generated changelogs on the page and nothing a user can read.
+
+**The Mac build is signed the way Pingfan's other apps are**, by
 `scripts/release-mac.sh`: a Developer ID signature with the hardened
-runtime and a secure timestamp, a disk image with an Applications link,
-and with `--notarize` notarization, stapling and validation (the keychain
-profile `notarytool-profile` on a laptop; `APPLE_ID`, `APPLE_APP_PASSWORD`
-and `APPLE_TEAM_ID` in CI). In CI the identity comes from the
+runtime and a secure timestamp, and with `--notarize` notarization,
+stapling and validation (the keychain profile `notarytool-profile` on a
+laptop; `APPLE_ID`, `APPLE_APP_PASSWORD` and `APPLE_TEAM_ID` in CI). The
+disk image is laid out by Finder over `scripts/dmg/background.png` ("Drag
+Emaki to Applications", the app's cream and terracotta, drawn by
+`scripts/dmg/background.py` with Pillow and LXGW WenKai Medium, as
+MiniNotes' is): a read-write image is mounted, an AppleScript sets the
+660x420 window, the 128pt icons at 165 and 495, and the picture, and
+`hdiutil convert` makes the compressed read-only image from it. Only
+Finder writes a `.DS_Store` Finder honours, which is why the layout is not
+generated offline. In CI the identity comes from the
 `MACOS_CERTIFICATE_P12` and `MACOS_CERTIFICATE_PASSWORD` secrets; without
 them the bundle is ad-hoc signed and the docs' "Open Anyway" steps apply,
-so a fork still builds. Windows is unsigned until SignPath. The packager
-does not run the build (its `beforePackagingCommand` cannot see
-`--target`), so build first: `cargo build --release -p emaki-app`, then
-`scripts/release-mac.sh --no-build [--notarize]`, or on other platforms
-`cargo packager --release -p emaki-app --formats <fmt>`.
+so a fork still builds. Until those secrets are in the repository the Mac
+images ship from the laptop: after the `release` job has made the release,
+
+```
+scripts/release-mac.sh --notarize
+scripts/release-mac.sh --notarize --target x86_64-apple-darwin
+gh release upload v0.1.0 dist/Emaki-mac-arm64.dmg dist/Emaki-mac-x64.dmg --clobber
+```
+
+replaces the ad-hoc images with signed ones under the same names. Upload
+after the job, not before: `action-gh-release` replaces same-named assets.
+Windows is unsigned until SignPath. The packager does not run the build
+(its `beforePackagingCommand` cannot see `--target`), so build first:
+`cargo build --release -p emaki-app`, then `scripts/release-mac.sh
+--no-build [--notarize]`, or on other platforms `cargo packager --release
+-p emaki-app --formats <fmt>`. To redo a release under the same tag:
+delete the release and the tag on both sides, tag again, push the tag.
 
 **Everything is Emaki now, and the old name is only history.** The rename
 on 2026-09-28 reached the crates (`emaki-core`, `emaki-app`), the Python
@@ -389,7 +416,16 @@ anti-aliased edge from the white it was drawn on, fits the plate to 824 of
 a 1024 canvas (the rounded square on Apple's icon grid, so the Dock shows
 it at every other icon's size) and shrinks that by area averaging to every
 smaller size, writing the `.ico` too; `scripts/make-icon.sh` runs it and
-makes the `.icns` with `iconutil`. Replace the logo, run the script,
+makes the `.icns` with `iconutil`. The `.icns` alone is the plate filling
+the whole canvas and opaque to its corners: macOS 26 masks every app icon
+to its own rounded square over a grey backing, so anything transparent (a
+margin, the plate's own rounder corners, its soft edge) shows as a grey
+border in Finder, the switcher and Spotlight. That was the grey border
+around the icon in the disk image, and a thin rim of it stayed until the
+corners were filled by extending the plate's edge colour outward; the
+system's mask cuts them to its shape. The PNGs keep the grid, because the
+Dock draws the PNG the app sets at start (`sys::install_dock_icon`) as it
+is, and Windows and Linux want the margin. Replace the logo, run the script,
 rebuild (the Dock icon is `include_bytes!`), commit the assets.
 
 **The window remembers itself.** `ui_state.rs` keeps

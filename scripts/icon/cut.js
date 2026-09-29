@@ -4,8 +4,8 @@
 // makes everything outside it transparent, un-blends the anti-aliased edge
 // from the white it was drawn on, and writes every size the platforms want.
 //
-//   node draw.js <out-dir>   writes icon-1024.png, the smaller PNGs, icon.ico
-//                            and an icon.iconset/ for iconutil.
+//   node cut.js <out-dir>    writes icon-1024.png, the smaller PNGs, icon.ico
+//                            and an icon.iconset/ (full-bleed) for iconutil.
 const { createCanvas, loadImage, ImageData } = require('@napi-rs/canvas');
 const fs = require('fs'), path = require('path');
 
@@ -80,17 +80,56 @@ async function main() {
   // The plate, alone, filling PLATE of a 1024 canvas. The drawing is a
   // hair off square (1012 by 1001); it is fitted to the square outright,
   // a stretch of one percent that no eye finds.
-  const big = createCanvas(S, S), bx = big.getContext('2d');
-  bx.imageSmoothingEnabled = true; bx.imageSmoothingQuality = 'high';
-  const m = (S - PLATE) / 2;
-  bx.drawImage(canvas, box[0], box[1], box[2], box[3], m, m, PLATE, PLATE);
-  const master = bx.getImageData(0, 0, S, S).data;
-  const draw = (size) => {
-    const c = createCanvas(size, size);
-    if (size === S) { c.getContext('2d').drawImage(big, 0, 0); return c; }
-    c.getContext('2d').putImageData(new ImageData(shrink(master, S, S, size, size), size, size), 0, 0);
+  // Two masters. The grid one (PLATE of S) is the Dock icon the app sets at
+  // start, and the Windows and Linux icon. The bundle's .icns is the plate
+  // filling the whole canvas and opaque to its corners: macOS 26 masks every
+  // app icon to its own rounded square and sets a grey backing under it, so
+  // anything transparent (a margin, the plate's own rounder corners, its
+  // soft edge) shows as a grey border in Finder, the switcher and Spotlight.
+  // The corners are filled by extending the plate's edge colour outward,
+  // and the system's mask cuts them to its shape.
+  const plate = (side) => {
+    const c = createCanvas(S, S), x = c.getContext('2d');
+    x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
+    const m = (S - side) / 2;
+    x.drawImage(canvas, box[0], box[1], box[2], box[3], m, m, side, side);
     return c;
   };
+  const big = plate(PLATE), full = plate(S);
+  {
+    const x = full.getContext('2d'), img = x.getImageData(0, 0, S, S), d = img.data;
+    const opaque = (i) => d[i + 3] === 255;
+    const copy = (to, from) => { d[to] = d[from]; d[to + 1] = d[from + 1]; d[to + 2] = d[from + 2]; d[to + 3] = 255; };
+    // Every row: the first and last opaque pixel spread to the row's ends.
+    for (let y = 0; y < S; y++) {
+      let first = -1, last = -1;
+      for (let xx = 0; xx < S; xx++) if (opaque((y * S + xx) * 4)) { if (first < 0) first = xx; last = xx; }
+      if (first < 0) continue;
+      for (let xx = 0; xx < first; xx++) copy((y * S + xx) * 4, (y * S + first) * 4);
+      for (let xx = last + 1; xx < S; xx++) copy((y * S + xx) * 4, (y * S + last) * 4);
+    }
+    // Every column, for rows the plate never reached.
+    for (let xx = 0; xx < S; xx++) {
+      let first = -1, last = -1;
+      for (let y = 0; y < S; y++) if (opaque((y * S + xx) * 4)) { if (first < 0) first = y; last = y; }
+      if (first < 0) continue;
+      for (let y = 0; y < first; y++) copy((y * S + xx) * 4, (first * S + xx) * 4);
+      for (let y = last + 1; y < S; y++) copy((y * S + xx) * 4, (last * S + xx) * 4);
+    }
+    // What is left half-covered (the anti-aliased edge) sits on its own colour.
+    for (let i = 0; i < d.length; i += 4) d[i + 3] = 255;
+    x.putImageData(img, 0, 0);
+  }
+  const drawer = (source) => {
+    const master = source.getContext('2d').getImageData(0, 0, S, S).data;
+    return (size) => {
+      const c = createCanvas(size, size);
+      if (size === S) { c.getContext('2d').drawImage(source, 0, 0); return c; }
+      c.getContext('2d').putImageData(new ImageData(shrink(master, S, S, size, size), size, size), 0, 0);
+      return c;
+    };
+  };
+  const draw = drawer(big), drawFull = drawer(full);
 
   const out = process.argv[2] || '.';
   fs.mkdirSync(out, { recursive: true });
@@ -98,7 +137,7 @@ async function main() {
   const iconset = path.join(out, 'icon.iconset');
   fs.mkdirSync(iconset, { recursive: true });
   for (const [name, size] of [['16x16', 16], ['16x16@2x', 32], ['32x32', 32], ['32x32@2x', 64], ['128x128', 128], ['128x128@2x', 256], ['256x256', 256], ['256x256@2x', 512], ['512x512', 512], ['512x512@2x', 1024]]) {
-    fs.writeFileSync(path.join(iconset, `icon_${name}.png`), draw(size).toBuffer('image/png'));
+    fs.writeFileSync(path.join(iconset, `icon_${name}.png`), drawFull(size).toBuffer('image/png'));
   }
   for (const size of [32, 128, 256, 512]) {
     fs.writeFileSync(path.join(out, `icon-${size}.png`), draw(size).toBuffer('image/png'));
