@@ -69,13 +69,16 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// The conversation's body size in pixels for `chat_size`; the reply
-    /// text is set at this, the prompt half a pixel smaller, as before.
+    /// The reply's pixel size for `chat_size`, the prompt half a pixel
+    /// under. Medium is the Claude
+    /// desktop app's own body size (its stylesheet's
+    /// `font-claude-response-body`: 16px, line height 1.5); the others
+    /// step a point and a half either side.
     pub fn chat_px(&self) -> f32 {
         match self.chat_size.as_str() {
-            "small" => 13.5,
-            "large" => 16.0,
-            _ => 14.5,
+            "small" => 14.5,
+            "large" => 17.5,
+            _ => 16.0,
         }
     }
 }

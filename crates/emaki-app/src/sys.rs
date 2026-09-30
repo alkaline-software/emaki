@@ -30,6 +30,52 @@ pub fn reveal_path(path: &Path) {
     }
 }
 
+/// Run `argv` in `cwd` in a terminal window of the person's own. The script
+/// is `emaki_core::terminal::write_script`; what opens it is per OS. On
+/// macOS `open` hands a `.command` file to the app the system keeps for
+/// shell scripts, Terminal unless another terminal claimed the type, so the
+/// choice is the system's, not ours. On Windows it is a new `cmd` window
+/// through `start`, in `cwd`. On Linux `$TERMINAL`, then the usual names.
+pub fn open_in_terminal(session_id: &str, cwd: &str, argv: &[String]) -> Result<(), String> {
+    let script = emaki_core::terminal::write_script(session_id, cwd, argv).map_err(|e| format!("could not write the script: {e}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open").arg(&script).status().map_err(|e| format!("could not run open: {e}"))?;
+        if !status.success() {
+            return Err("no app on this Mac opens shell scripts".into());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = script;
+        let line = argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ");
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", "/D", cwd, "cmd", "/k", &line])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("could not open a terminal: {e}"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let mut candidates: Vec<String> = std::env::var("TERMINAL").ok().filter(|t| !t.is_empty()).into_iter().collect();
+        candidates.extend(["x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "alacritty", "kitty", "wezterm", "xterm"].map(String::from));
+        for term in candidates {
+            let mut cmd = std::process::Command::new(&term);
+            // gnome-terminal takes its command after `--`; the rest after `-e`.
+            if term.ends_with("gnome-terminal") {
+                cmd.arg("--");
+            } else {
+                cmd.arg("-e");
+            }
+            if cmd.arg(&script).current_dir(cwd).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        Err("no terminal emulator found; set $TERMINAL".into())
+    }
+}
+
 /// What the reveal action is called where we are.
 pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Reveal in Finder"

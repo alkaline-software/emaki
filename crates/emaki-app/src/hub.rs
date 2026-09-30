@@ -32,13 +32,11 @@ pub const LIVE_GRACE_S: f64 = 600.0;
 pub enum HubEvent {
     Index(Vec<SessionRef>),
     Changed(PathBuf),
-    Archived(archive::Stats),
-    SearchSynced(search::SyncReport),
     DriverStarted { session_id: String },
     DriverFailed { session_id: String, error: String },
     Driver { session_id: String, event: driver::Event },
     /// A message left through `via` ("driver" or "inbox").
-    Sent { session_id: String, via: &'static str, queued: bool, error: String },
+    Sent { session_id: String, queued: bool, error: String },
     /// One line for the status row: what a background request came back with.
     Note(String),
     /// An explanation landed for a tool call (empty when the model had
@@ -143,11 +141,9 @@ impl Hub {
                     // cached on (size, mtime).
                     hub.send(HubEvent::Index(refs.clone()));
                     if changed {
-                        // Copy first, render second.
-                        let stats = archive::sweep(&refs);
-                        if stats.files > 0 || stats.rotated > 0 || stats.errors > 0 {
-                            hub.send(HubEvent::Archived(stats));
-                        }
+                        // Copy first, render second. The counts are
+                        // bookkeeping and go nowhere the person looks.
+                        let _ = archive::sweep(&refs);
                         if let Ok(s) = hub.search_tx.lock() {
                             let _ = s.send(refs.clone());
                         }
@@ -165,8 +161,7 @@ impl Hub {
             .ok();
     }
 
-    fn spawn_search(self: &Arc<Self>, rx: mpsc::Receiver<Vec<SessionRef>>) {
-        let hub = Arc::clone(self);
+    fn spawn_search(&self, rx: mpsc::Receiver<Vec<SessionRef>>) {
         thread::Builder::new()
             .name("emaki-search".into())
             .spawn(move || {
@@ -176,10 +171,7 @@ impl Hub {
                     while let Ok(newer) = rx.try_recv() {
                         refs = newer;
                     }
-                    let report = index.sync(&refs, false);
-                    if report.indexed > 0 || report.failed > 0 {
-                        hub.send(HubEvent::SearchSynced(report));
-                    }
+                    let _ = index.sync(&refs, false);
                 }
             })
             .ok();
@@ -281,7 +273,6 @@ impl Hub {
                         let r = d.send(&text, images);
                         hub.send(HubEvent::Sent {
                             session_id: session_id.clone(),
-                            via: "driver",
                             queued: r.as_ref().map(|q| *q).unwrap_or(false),
                             error: r.err().map(|e| e.0).unwrap_or_default(),
                         });
@@ -301,7 +292,6 @@ impl Hub {
             let r = d.send(&text, images);
             hub.send(HubEvent::Sent {
                 session_id: sid,
-                via: "driver",
                 queued: r.as_ref().map(|q| *q).unwrap_or(false),
                 error: r.err().map(|e| e.0).unwrap_or_default(),
             });
@@ -320,7 +310,7 @@ impl Hub {
                 None => "this session has no inbox any more".to_string(),
                 Some(p) => peer::send(&p, &text).err().unwrap_or_default(),
             };
-            hub.send(HubEvent::Sent { session_id: sid, via: "inbox", queued: false, error });
+            hub.send(HubEvent::Sent { session_id: sid, queued: false, error });
             hub.refresh();
         });
     }
@@ -372,7 +362,6 @@ impl Hub {
             let r = d.set_effort(&effort);
             hub.send(HubEvent::Sent {
                 session_id: sid,
-                via: "driver",
                 queued: r.as_ref().map(|q| *q).unwrap_or(false),
                 error: r.err().map(|e| e.0).unwrap_or_default(),
             });
