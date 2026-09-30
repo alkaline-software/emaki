@@ -52,10 +52,7 @@ fn memo_file() -> PathBuf {
 /// script, with the home directory written as `~` so a synced settings
 /// file works on another machine.
 pub fn command() -> String {
-    // A bash line, so the path is written with forward slashes whatever the
-    // OS builds it with: on Windows `~\.emaki\bin\statusline.sh` would
-    // reach bash as escapes.
-    format!("bash {}", paths::tilde(&script_path().to_string_lossy()).replace('\\', "/"))
+    format!("bash {}", slashed(&paths::tilde(&script_path().to_string_lossy())))
 }
 
 /// What Claude Code's status line is right now.
@@ -87,11 +84,20 @@ fn current_command(settings: &Map<String, Value>) -> Option<String> {
     settings.get("statusLine")?.get("command")?.as_str().map(str::to_string)
 }
 
+/// A path as a bash line spells it: forward slashes whatever the OS
+/// builds it with. On Windows `~\.emaki\bin\statusline.sh` would reach
+/// bash as escapes, and a setting written that way would not be
+/// recognised as ours afterwards.
+fn slashed(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 /// Does this `statusLine.command` run our script, at either spelling of
-/// the path?
+/// the path (full or `~`), with either slash?
 fn is_ours(command: &str) -> bool {
+    let command = slashed(command);
     let full = script_path().to_string_lossy().to_string();
-    command.contains(&full) || command.contains(&paths::tilde(&full))
+    command.contains(&slashed(&full)) || command.contains(&slashed(&paths::tilde(&full)))
 }
 
 pub fn state() -> State {
