@@ -52,7 +52,10 @@ fn memo_file() -> PathBuf {
 /// script, with the home directory written as `~` so a synced settings
 /// file works on another machine.
 pub fn command() -> String {
-    format!("bash {}", paths::tilde(&script_path().to_string_lossy()))
+    // A bash line, so the path is written with forward slashes whatever the
+    // OS builds it with: on Windows `~\.emaki\bin\statusline.sh` would
+    // reach bash as escapes.
+    format!("bash {}", paths::tilde(&script_path().to_string_lossy()).replace('\\', "/"))
 }
 
 /// What Claude Code's status line is right now.
