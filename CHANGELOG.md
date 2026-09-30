@@ -3,6 +3,19 @@
 Each release has a section here, and `release.yml` puts that section on the
 GitHub Release as its notes. Write it for the person installing the app.
 
+## v0.1.2
+
+- **The status line is Emaki's own.** The five-hour and seven-day limits
+  under the composer came from a script outside the app, patched by hand;
+  the patch went missing and the row froze. Now the script ships inside
+  the app: at launch it lands at `~/.emaki/bin/statusline.sh` and Claude
+  Code's `statusLine` is set to run it, with nothing else in your settings
+  touched. The line in the terminal reads as before, `Context 18% | 5h:
+  12% (3h20m) | 7d: 42% (4d6h)`, and the row in the app follows it from
+  the next Claude Code session. `emaki-core statusline restore` puts the
+  old setting back.
+- **No tooltip on the limits row.**
+
 ## v0.1.1
 
 The app stands alone now. The Python command-line tool and web daemon Emaki

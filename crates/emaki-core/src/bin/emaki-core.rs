@@ -153,6 +153,27 @@ fn main() {
                 Err(_) => println!("no explanation: timed out"),
             }
         }
+        "statusline" => {
+            // emaki-core statusline [install|restore]: what Claude Code's
+            // status line is, or make it Emaki's script and back.
+            use emaki_core::statusline::{self, State};
+            let result = match args.get(1).map(String::as_str) {
+                Some("install") => statusline::install(),
+                Some("restore") => statusline::restore(),
+                Some(other) => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("statusline install | restore, not {other}"))),
+                None => Ok(()),
+            };
+            if let Err(e) = result {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            match statusline::state() {
+                State::Emaki { current: true } => println!("Emaki's script: {}", statusline::script_path().display()),
+                State::Emaki { current: false } => println!("Emaki's script at {}, older than this build (install again to refresh it)", statusline::script_path().display()),
+                State::Other(cmd) => println!("another command: {cmd}"),
+                State::None => println!("none set in {}", statusline::settings_file().display()),
+            }
+        }
         "update" if args.get(1).map(String::as_str) == Some("install") => {
             // emaki-core update install <version> [<bundle>]: fetch that
             // release's installer and put it in place, over the named
@@ -234,7 +255,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | explain <command> | update | drive <cwd> <text>");
+            eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | explain <command> | update | statusline [install|restore] | drive <cwd> <text>");
         }
     }
 }

@@ -20,6 +20,7 @@ pub mod peer;
 pub mod redact;
 pub mod render_md;
 pub mod search;
+pub mod statusline;
 pub mod store;
 pub mod transcript;
 pub mod update;

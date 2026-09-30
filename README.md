@@ -34,8 +34,9 @@ scripts/make-app.sh                      # a local Emaki.app under dist/
 ```
 
 The first launch copies every transcript it can see into the archive, so
-nothing you still have is at risk from that moment on. There is no daemon,
-no hook and nothing written into Claude Code's settings.
+nothing you still have is at risk from that moment on. There is no daemon
+and no hook. The one thing Emaki puts into Claude Code's settings is its
+status line, described below.
 
 Emaki keeps itself current: it asks GitHub for the newest release once a
 day (a tick in Settings turns that off) and says so in the settings panel,
@@ -160,7 +161,13 @@ so Claude reads it with its own tools.
 
 **The limits row** above the composer is the terminal's status line: context
 used against the model's window, and the account's five-hour and seven-day
-windows once a session has run through Emaki.
+windows. Those two come from a session run through Emaki, or from Emaki's
+own status line in the terminal. At launch the app puts a script at
+`~/.emaki/bin/statusline.sh` that prints `Context 18% | 5h: 12% (3h20m) |
+7d: 42% (4d6h)` in the terminal and leaves the limits for the app, and
+sets Claude Code's `statusLine` to run it, changing nothing else there
+(needs `jq`). `emaki-core statusline restore` puts back whatever was there
+before.
 
 ---
 
@@ -174,6 +181,7 @@ Everything lives in `~/.emaki`, mode `0700`, outside every repository:
 ~/.emaki/search.db    the search index (regenerable)
 ~/.emaki/cache/       explanations, by content
 ~/.emaki/state/       what the window remembers, the account's limits
+~/.emaki/bin/         the status-line script
 ~/.emaki/uploads/     pictures pasted into the composer
 ~/.emaki/config.json  settings
 ```
