@@ -2053,8 +2053,7 @@ impl Workbench {
         let muted = theme.muted_foreground;
         // The terminal's line, word for word: `Context 32% | 5h: 5% (4h45m)
         // | 7d: 11% (6d2h)`, the same colours at the same thresholds as
-        // ~/.claude/statusline.sh. The token counts and where the windows
-        // came from are on the tooltip.
+        // scripts/statusline.sh. No tooltip: the line is the whole story.
         let part = |label: &'static str, pct: u64, color: Hsla, tail: String| {
             h_flex()
                 .gap(px(4.))
@@ -2084,14 +2083,7 @@ impl Workbench {
                 }
             }
         }
-        let seen = self.limits.seen_at;
-        let tokens = format!("Context: {} of {}.", emaki_core::render_md::human_tokens(s.context_tokens), emaki_core::render_md::human_tokens(window));
-        let tip = if seen > 0.0 {
-            format!("{tokens} The usage windows are as of {}, from the terminal's status line or the last turn a session run through Emaki made.", relative(seen, now))
-        } else {
-            format!("{tokens} The usage windows come from the terminal's status line (~/.claude/statusline.sh) or a session run through Emaki; neither has reported yet.")
-        };
-        Some(row.id("limits").tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
+        Some(row)
     }
 
     /// Switch the permission mode: for the driver behind this session, and

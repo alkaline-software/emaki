@@ -9,12 +9,12 @@
 //! seven-day windows (they are per account, so one driver's answer holds
 //! for every session), and the `result` frame's `modelUsage` names each
 //! model's `contextWindow`. And the terminal's own status line: the
-//! script Claude Code runs (`~/.claude/statusline.sh` here) is handed the
-//! same windows on stdin and leaves a copy in
-//! `~/.emaki/state/rate_limits.json`, which `refresh_from_statusline`
-//! reads, so a terminal session keeps the row current too. What was
-//! learned is kept in `~/.emaki/state/limits.json` with the time it was
-//! seen, and the newer source wins.
+//! status-line command Claude Code runs is handed the same windows on
+//! stdin, and Emaki's script (`statusline.rs`, installed from the
+//! settings panel) leaves a copy in `~/.emaki/state/rate_limits.json`,
+//! which `refresh_from_statusline` reads, so a terminal session keeps the
+//! row current too. What was learned is kept in `~/.emaki/state/limits.json`
+//! with the time it was seen, and the newer source wins.
 //!
 //! The context percentage itself needs no wire: the last assistant row's
 //! usage (input, cache read, cache creation) is what the next request

@@ -101,6 +101,11 @@ impl Hub {
             explainer,
         });
         let _ = emaki_core::paths::ensure_dirs();
+        // Claude Code's status line is ours from the first launch on; the
+        // limits row under the composer reads what it leaves.
+        if let Err(e) = emaki_core::statusline::ensure() {
+            eprintln!("emaki: could not install the status line: {e}");
+        }
         hub.spawn_scanner(wake_rx);
         hub.spawn_search(search_rx);
         hub.spawn_watcher();

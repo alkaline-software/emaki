@@ -70,8 +70,9 @@ crates/emaki-core/        everything without a window
   src/driver.rs              a headless `claude -p` child on stream-json
   src/explain.rs             opaque tool calls in plain words, via `claude -p`
   src/update.rs              the newest release, its installer, and putting it in place
+  src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
   src/watcher.rs             notify over every agent's data roots
-  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | explain | update | drive
+  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | explain | update | statusline | drive
   tests/core.rs
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
@@ -86,6 +87,7 @@ scripts/make-icon.sh       remakes assets/icon from scripts/icon/logo.png
 scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
 scripts/release-notes.sh   one version's section of CHANGELOG.md, the release notes
+scripts/statusline.sh      Claude Code's status line, ours: prints the line, leaves the rate limits
 WORKFLOW.md                how to cut a release, step by step
 CHANGELOG.md               one section per release; the release job reads it
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
@@ -174,8 +176,8 @@ label it.
 can never collide with one, and `iter_archived(ClaudeCode)` skips those
 directories.
 
-**No hooks.** The app has no daemon and installs nothing into Claude Code's
-settings. Presence is the registry, a driver of our own when we started the
+**No hooks.** The app has no daemon and writes one thing into Claude Code's
+settings, the status line, described with the limits row. Presence is the registry, a driver of our own when we started the
 process, and a ten-minute mtime grace for anything else. A fresh file with
 neither is a session that just ended (an interactive Claude Code always has
 an inbox), so the composer offers to resume it. The Python daemon did write
@@ -183,7 +185,9 @@ seven hook entries into `~/.claude/settings.json`, each an absolute path
 into the checkout; when the folder was renamed, Python exited 2 on the
 missing file and Claude Code, which reads exit 2 as "block", refused every
 prompt. Nothing may write a hook again. If a hook is ever needed, it is a
-binary at a stable path outside the repository that never exits 2.
+binary at a stable path outside the repository that never exits 2. The
+status line is held to the same two rules, and a `statusLine` command
+cannot block anything: if it fails, the terminal's line goes blank.
 
 **Codex has no stop reason.** Its phase is derived from the built model's tail
 (`adapters::turn_state_from_session`), not from the rows.
@@ -342,12 +346,32 @@ transcript's (`Session::context_tokens`, the last assistant row's input plus
 cache read plus cache creation) over the model's window
 (`limits::Limits::context_window`: what a driver's `result` frame reported
 in `modelUsage`, else an assumption; `claude-fable-5-1` answered 1,000,000).
-The five-hour and seven-day windows come only from a driver's
-`rate_limit_event` frames (they are per account, so any driver's answer
-holds for every session) and are kept in `state/limits.json` with the time
-they were seen, because Claude Code writes them to no file a terminal
-session leaves behind; the row says "limits as of …" once they are older
-than five minutes and shows `--` until a session has run through Emaki.
+The five-hour and seven-day windows are per account and reach Emaki two
+ways, the newer winning: a driver's `rate_limit_event` frames, and the
+terminal's status line. Claude Code writes the windows to no file a
+terminal session leaves behind; the status-line command in
+`~/.claude/settings.json` is the only place it hands them out, on stdin,
+once per refresh. So Emaki has a status line of its own,
+`scripts/statusline.sh`, built into the binary (`statusline::SCRIPT`): it
+prints the terminal's line and, when `~/.emaki/state` exists, leaves the
+windows in `state/rate_limits.json`, written whole and renamed into place,
+which `Limits::refresh_from_statusline` reads every second.
+`statusline::ensure` runs in `Hub::start`, at every launch: it writes the
+script to `~/.emaki/bin/statusline.sh`, a stable path outside any
+checkout, and sets `statusLine` to `bash ~/.emaki/bin/statusline.sh`
+unless it already says so, touching no other key. There is nothing to
+switch on and no settings for it; the previous value is kept in
+`state/statusline.json` and `emaki-core statusline restore` returns it
+from a terminal. A copy run with `EMAKI_HOME` set leaves the settings
+alone, or it would point Claude Code at its scratch tree. That is the
+only write the app makes to Claude Code's settings, and the hooks rule
+above says why it is allowed: the script never exits non-zero, never
+writes to stderr, and the tests run it. The first version of the row
+leaned on a hand-patched script outside the repository; the patch was
+lost and the row froze, hence this. What was learned is kept in
+`state/limits.json` with the time it was seen; the row says "limits as
+of …" once that is older than five minutes and shows `--` until either
+source has reported. The row has no tooltip: the line is the whole story.
 
 **A permission card answers to the keyboard.** ↩ on an empty composer
 allows the oldest card waiting on the session showing, ⇧↩ denies it, and

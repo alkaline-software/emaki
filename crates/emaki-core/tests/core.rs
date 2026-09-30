@@ -425,6 +425,151 @@ fn the_status_line_file_feeds_the_limits_when_newer() {
     assert!(!l.absorb_statusline(&json!({ "seen_at": 1799999999.0 })));
 }
 
+#[test]
+fn installing_the_status_line_points_claude_code_at_our_script_and_restore_puts_it_back() {
+    use emaki_core::statusline::{self, State};
+    let (_home, _g) = isolated();
+    // Nothing yet: no settings file at all.
+    assert_eq!(statusline::state(), State::None);
+
+    // Someone else's status line, and other settings that must survive.
+    let settings = statusline::settings_file();
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, r#"{"model": "opus", "statusLine": {"type": "command", "command": "bash ~/.claude/statusline.sh"}}"#).unwrap();
+    assert_eq!(statusline::state(), State::Other("bash ~/.claude/statusline.sh".into()));
+
+    statusline::install().unwrap();
+    assert_eq!(statusline::state(), State::Emaki { current: true });
+    let script = statusline::script_path();
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), statusline::SCRIPT);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&script).unwrap().permissions().mode() & 0o111, 0o111);
+    }
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v["model"], "opus", "other keys are kept");
+    assert_eq!(v["statusLine"]["type"], "command");
+    assert_eq!(v["statusLine"]["command"], statusline::command());
+    assert!(statusline::command().ends_with("bin/statusline.sh"));
+    assert_eq!(statusline::previous().unwrap()["command"], "bash ~/.claude/statusline.sh");
+
+    // Installing again keeps the original previous value, not ours, and
+    // the launch path writes nothing once the setting is ours and current.
+    statusline::install().unwrap();
+    assert_eq!(statusline::previous().unwrap()["command"], "bash ~/.claude/statusline.sh");
+    assert!(!statusline::install_if_needed().unwrap());
+    assert!(!statusline::ensure().unwrap(), "EMAKI_HOME is set here, so a launch leaves the settings alone");
+
+    // An older copy of the script on disk reads as not current, and the
+    // launch path refreshes it.
+    std::fs::write(&script, "#!/bin/bash\necho old\n").unwrap();
+    assert_eq!(statusline::state(), State::Emaki { current: false });
+    assert!(statusline::install_if_needed().unwrap());
+    assert_eq!(statusline::state(), State::Emaki { current: true });
+
+    statusline::restore().unwrap();
+    assert_eq!(statusline::state(), State::Other("bash ~/.claude/statusline.sh".into()));
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v["model"], "opus");
+    assert!(statusline::previous().is_none());
+    assert!(statusline::restore().is_err(), "nothing of ours to put back");
+
+    // With no status line before, restore removes the key.
+    std::fs::write(&settings, r#"{"model": "opus"}"#).unwrap();
+    statusline::install().unwrap();
+    assert!(statusline::previous().is_none());
+    statusline::restore().unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert!(v.get("statusLine").is_none());
+    assert_eq!(v["model"], "opus");
+
+    // A settings file that does not parse is left alone.
+    std::fs::write(&settings, "{not json").unwrap();
+    assert!(statusline::install().is_err());
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{not json");
+}
+
+/// The script itself, run as Claude Code runs it: one JSON object on stdin.
+/// It leaves the windows for the app and prints the terminal's line.
+#[cfg(unix)]
+#[test]
+fn the_status_line_script_leaves_the_windows_for_the_app_and_never_fails() {
+    use emaki_core::limits::Limits;
+    use emaki_core::statusline;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let (_home, _g) = isolated();
+    if Command::new("jq").arg("--version").output().is_err() {
+        eprintln!("jq is not installed; skipping");
+        return;
+    }
+    let script = statusline::write_script().unwrap();
+    let run = |stdin: &str| {
+        let mut child = Command::new("bash")
+            .arg(&script)
+            .env("EMAKI_HOME", emaki_core::paths::root())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "the script must never fail");
+        assert!(out.stderr.is_empty(), "the script must never write to stderr");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let input = json!({
+        "context_window": { "current_usage": { "input_tokens": 1000, "cache_read_input_tokens": 8000 }, "context_window_size": 100000 },
+        "rate_limits": { "five_hour": { "used_percentage": 7.4, "resets_at": now + 13500.0 }, "seven_day": { "used_percentage": 15, "resets_at": now + 5.0 * 86400.0 + 1800.0 } }
+    });
+
+    // Before the app has made its state directory the script writes nothing.
+    let line = run(&input.to_string());
+    assert!(!Limits::statusline_path().exists());
+    assert!(line.contains("Context"), "{line}");
+
+    emaki_core::paths::ensure_dirs().unwrap();
+    let line = run(&input.to_string());
+    let plain: String = strip_ansi(&line);
+    assert!(plain.starts_with("Context 9% | 5h: 7% (3h4"), "{plain}");
+    // Half an hour past the day boundary, so the seconds the script takes
+    // to run cannot tip the reading over to 4d23h.
+    assert!(plain.contains("| 7d: 15% (5d0h)"), "{plain}");
+    let mut l = Limits::default();
+    assert!(l.refresh_from_statusline());
+    assert!((l.five_hour.unwrap().utilization - 0.074).abs() < 1e-9);
+    assert_eq!(l.seven_day.unwrap().utilization, 0.15);
+    assert!(l.seen_at >= now.floor());
+
+    // Empty and broken input: a blank-ish line, the file kept, exit 0.
+    let before = std::fs::read_to_string(Limits::statusline_path()).unwrap();
+    assert_eq!(strip_ansi(&run("")), "Context 0% | 5h: -- | 7d: --\n");
+    assert_eq!(strip_ansi(&run("not json")), "Context 0% | 5h: -- | 7d: --\n");
+    assert_eq!(std::fs::read_to_string(Limits::statusline_path()).unwrap(), before);
+    assert_eq!(std::fs::read_dir(emaki_core::paths::state_dir()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains(".tmp")).count(), 0);
+}
+
+#[cfg(unix)]
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for d in chars.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 // -- the explainer ---------------------------------------------------------
 //
 // The model call itself is not exercised: it costs money and needs a logged-in
