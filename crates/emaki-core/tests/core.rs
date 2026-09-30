@@ -768,3 +768,54 @@ mod explain_tests {
         assert!(emaki_core::paths::is_explainer_cwd(&wd.to_string_lossy(), &own));
     }
 }
+
+#[test]
+fn terminal_script_quotes_and_resumes() {
+    use emaki_core::terminal::{resume_argv, script, script_path, shell_quote, write_script};
+    let (_home, _guard) = isolated();
+    assert_eq!(shell_quote("plain-word_1.txt"), "plain-word_1.txt");
+    assert_eq!(shell_quote("has space"), "'has space'");
+    assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    assert_eq!(shell_quote(""), "''");
+
+    std::env::set_var("EMAKI_CLAUDE", "/opt/x/claude");
+    let argv = resume_argv(AgentId::ClaudeCode, "abc-123");
+    assert_eq!(argv, vec!["/opt/x/claude", "--resume", "abc-123"]);
+    std::env::remove_var("EMAKI_CLAUDE");
+    assert_eq!(resume_argv(AgentId::Codex, "abc-123"), vec!["codex", "resume", "abc-123"]);
+
+    let text = script("/Users/me/My Project", &argv);
+    assert_eq!(text, format!("#!/bin/bash\n{}\ncd '/Users/me/My Project' && exec /opt/x/claude --resume abc-123\n", emaki_core::terminal::UNSET_LINE));
+    // The script really clears an inherited session mark, on this machine's bash.
+    #[cfg(unix)]
+    {
+        let probe = script("/", &["/usr/bin/env".to_string()]);
+        let probe_path = emaki_core::paths::run_dir().join("probe.sh");
+        fs::create_dir_all(probe_path.parent().unwrap()).unwrap();
+        fs::write(&probe_path, probe).unwrap();
+        let out = std::process::Command::new("/bin/bash")
+            .arg(&probe_path)
+            .env("CLAUDE_CODE_CHILD_SESSION", "1")
+            .env("CLAUDECODE", "1")
+            .env("CLAUDE_CONFIG_DIR", "/keep")
+            .env("EMAKI_DISABLE", "1")
+            .output()
+            .unwrap();
+        let env = String::from_utf8_lossy(&out.stdout);
+        assert!(env.contains("CLAUDE_CONFIG_DIR=/keep"), "{env}");
+        assert!(!env.contains("CLAUDE_CODE_CHILD_SESSION"), "{env}");
+        assert!(!env.contains("CLAUDECODE="), "{env}");
+        assert!(!env.contains("EMAKI_DISABLE"), "{env}");
+    }
+
+    let path = write_script("abc-123", "/Users/me/My Project", &argv).unwrap();
+    assert_eq!(path, script_path("abc-123"));
+    assert!(path.starts_with(emaki_core::paths::run_dir()));
+    assert_eq!(path.extension().unwrap(), "command");
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(fs::metadata(&path).unwrap().permissions().mode() & 0o111, 0);
+    }
+}

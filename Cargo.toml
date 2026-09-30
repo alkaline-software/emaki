@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/emaki-core", "crates/emaki-app"]
+# The vendored toolkit is a workspace of its own; see vendor/gpui-component/UPSTREAM.md.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.1"
@@ -29,3 +31,12 @@ opt-level = 2
 [profile.release]
 strip = true
 lto = "thin"
+
+# The toolkit is vendored: the same crates, from the same revision the git
+# dependencies name, built from vendor/ so they can be changed here. See
+# vendor/gpui-component/UPSTREAM.md.
+[patch."https://github.com/longbridge/gpui-component"]
+gpui-component = { path = "vendor/gpui-component/crates/ui" }
+gpui-base = { path = "vendor/gpui-component/crates/base" }
+gpui-component-macros = { path = "vendor/gpui-component/crates/macros" }
+gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }

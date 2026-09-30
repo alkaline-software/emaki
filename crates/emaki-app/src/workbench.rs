@@ -109,6 +109,30 @@ impl Column {
     }
 }
 
+/// What the row under the composer says on its right, and since when.
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub text: String,
+    pub error: bool,
+    pub at: f64,
+}
+
+/// How long a notice stays under the composer.
+pub const NOTICE_SECS: f64 = 8.0;
+
+/// The height of the row under the composer (limits on the left, the
+/// notice on the right), taken whether or not either has words.
+pub const NOTICE_H: Pixels = px(18.);
+
+impl Notice {
+    pub fn said(text: impl Into<String>) -> Self {
+        Notice { text: text.into(), error: false, at: now_secs() }
+    }
+    pub fn error(text: impl Into<String>) -> Self {
+        Notice { text: text.into(), error: true, at: now_secs() }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DriverView {
     pub state: String,
@@ -377,7 +401,11 @@ pub struct Workbench {
     pub limits: Limits,
     /// The update check and install, as the settings panel shows them.
     pub update: UpdateView,
-    pub status: String,
+    /// A line for the person at the right end of the row under the
+    /// composer: what a send or an action did, or why it did not. It fades
+    /// after `NOTICE_SECS`; the row's space stays, so nothing moves when it
+    /// comes and goes.
+    pub notice: Option<Notice>,
     pub now: f64,
     /// Who to greet on the home page.
     pub user_name: String,
@@ -525,6 +553,10 @@ impl Workbench {
                     this.now = now_secs();
                     this.limits.refresh_from_statusline();
                     this.check_updates_daily();
+                    if this.notice.as_ref().is_some_and(|n| this.now - n.at > NOTICE_SECS) {
+                        this.notice = None;
+                        cx.notify();
+                    }
                     if this.page == Page::Board || this.drivers.values().any(|d| d.state == "running" || d.starting) {
                         cx.notify();
                     }
@@ -629,7 +661,7 @@ impl Workbench {
                 let s = UpdateState::load();
                 UpdateView { last_check: s.last_check, latest: s.latest, ..Default::default() }
             },
-            status: "scanning…".into(),
+            notice: None,
             now: now_secs(),
             user_name: crate::sys::user_first_name(),
             tabs: ui.tabs.clone(),
@@ -654,9 +686,6 @@ impl Workbench {
         match ev {
             HubEvent::Index(refs) => {
                 self.refs = refs;
-                if self.status == "scanning…" {
-                    self.status = format!("{} sessions", self.refs.len());
-                }
                 if self.page == Page::New && self.new_cwd.is_empty() {
                     self.new_cwd = self.recent_cwds().first().cloned().unwrap_or_default();
                 }
@@ -694,14 +723,6 @@ impl Workbench {
                     }
                 }
             }
-            HubEvent::Archived(stats) => {
-                self.status = format!("archived {} file{}", stats.files, if stats.files == 1 { "" } else { "s" });
-                cx.notify();
-            }
-            HubEvent::SearchSynced(report) => {
-                self.status = format!("indexed {} session{}", report.indexed, if report.indexed == 1 { "" } else { "s" });
-                cx.notify();
-            }
             HubEvent::DriverStarted { session_id } => {
                 let view = self.drivers.entry(session_id.clone()).or_default();
                 view.starting = false;
@@ -717,21 +738,17 @@ impl Workbench {
                 view.starting = false;
                 view.state = "exited".into();
                 view.error = error.clone();
-                self.status = format!("could not start claude: {error}");
+                self.notice = Some(Notice::error(format!("could not start claude: {error}")));
                 cx.notify();
             }
-            HubEvent::Sent { session_id, via, queued, error } => {
-                let held = via == "inbox" && self.refs.iter().any(|r| r.session_id == session_id && emaki_core::peer::HELD_MODES.contains(&r.state.mode.as_str()));
+            HubEvent::Sent { session_id, queued, error } => {
+                // A message that went through shows up in the transcript,
+                // which says it better than a "sent" would; only what did
+                // not go, or is waiting, is worth a line.
                 if !error.is_empty() {
-                    self.status = format!("not sent: {error}");
-                } else if held {
-                    self.status = "delivered; the terminal will ask before reading it (permissions are bypassed there)".into();
-                } else if via == "inbox" {
-                    self.status = "delivered to the terminal session".into();
+                    self.notice = Some(Notice::error(format!("not sent: {error}")));
                 } else if queued {
-                    self.status = "queued behind the running turn".into();
-                } else {
-                    self.status = "sent".into();
+                    self.notice = Some(Notice::said("queued behind the running turn"));
                 }
                 if let Some(v) = self.drivers.get_mut(&session_id) {
                     if error.is_empty() && !queued {
@@ -742,7 +759,7 @@ impl Workbench {
             }
             HubEvent::Driver { session_id, event } => self.on_driver_event(session_id, event, cx),
             HubEvent::Note(text) => {
-                self.status = text;
+                self.notice = Some(Notice::error(text));
                 cx.notify();
             }
             HubEvent::Explained { call_id, text } => {
@@ -798,7 +815,7 @@ impl Workbench {
     fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
         self.cfg.app.check_updates = on;
         if let Err(e) = Config::edit(move |c| c.app.check_updates = on) {
-            self.status = format!("could not save settings: {e}");
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
         }
         cx.notify();
     }
@@ -820,7 +837,7 @@ impl Workbench {
                 self.update.latest = latest.clone();
                 self.update.available = Some(latest.clone());
                 if self.update.automatic {
-                    self.status = format!("Emaki {latest} is available. Update from Settings (⌘,).");
+                    self.notice = Some(Notice::said(format!("Emaki {latest} is available. Update from Settings (⌘,).")));
                 }
             }
             UpdateEvent::CheckFailed(e) => {
@@ -936,7 +953,7 @@ impl Workbench {
                 view.queued = r.queued;
                 view.state = if r.queued > 0 { "running".into() } else { "idle".into() };
                 if r.is_error {
-                    self.status = format!("turn ended: {}", r.subtype);
+                    self.notice = Some(Notice::error(format!("turn ended: {}", r.subtype)));
                 }
                 if self.limits.absorb_model_usage(&r.model_usage) {
                     let _ = self.limits.save();
@@ -956,7 +973,7 @@ impl Workbench {
                 view.starting = false;
                 self.permissions.retain(|(s, _)| s != &session_id);
                 if !error.is_empty() {
-                    self.status = format!("claude exited: {error}");
+                    self.notice = Some(Notice::error(format!("claude exited: {error}")));
                 }
             }
         }
@@ -1176,7 +1193,7 @@ impl Workbench {
     fn save_app_config(&mut self) {
         let app = self.cfg.app.clone();
         if let Err(e) = Config::edit(move |c| c.app = app) {
-            self.status = format!("could not save settings: {e}");
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
         }
     }
 
@@ -1217,7 +1234,7 @@ impl Workbench {
         self.cfg.driver.default_mode = v.clone();
         self.next_mode = v.clone();
         if let Err(e) = Config::edit(move |c| c.driver.default_mode = v) {
-            self.status = format!("could not save settings: {e}");
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
         }
         cx.notify();
     }
@@ -1227,7 +1244,7 @@ impl Workbench {
         self.cfg.driver.default_model = v.clone();
         self.next_model = v.clone();
         if let Err(e) = Config::edit(move |c| c.driver.default_model = v) {
-            self.status = format!("could not save settings: {e}");
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
         }
         cx.notify();
     }
@@ -1236,7 +1253,7 @@ impl Workbench {
         self.cfg.explain.scope = choice.to_string();
         self.hub.set_explain(self.cfg.explain.clone());
         if let Err(e) = Config::edit(move |c| c.explain.scope = choice.to_string()) {
-            self.status = format!("could not save settings: {e}");
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
         }
         cx.notify();
     }
@@ -1694,6 +1711,49 @@ impl Workbench {
         self.reply_via_for(r)
     }
 
+    /// Whether the session showing can be continued in a terminal, and in a
+    /// few words why not. The rule is one writer per transcript: a
+    /// terminal session with an inbox already has one, and a driver of ours
+    /// mid-reply is one too (an idle driver is stopped on the way out).
+    fn terminal_check(&self, r: &SessionRef) -> Result<(), &'static str> {
+        if r.archived {
+            return Err("Kept only: the agent no longer has this transcript");
+        }
+        if r.cwd.is_empty() || !std::path::Path::new(&r.cwd).is_dir() {
+            return Err("The session's folder is gone");
+        }
+        if let Some(v) = self.drivers.get(&r.session_id) {
+            if v.starting || v.state == "running" {
+                return Err("Wait for the running reply, then open");
+            }
+        }
+        if self.hub.peer_for(&r.session_id).is_some() {
+            return Err("Already open in a terminal");
+        }
+        Ok(())
+    }
+
+    /// The button at the top left: continue the session showing in the
+    /// person's own terminal, with the agent's resume command. See
+    /// `emaki_core::terminal` and `sys::open_in_terminal`.
+    pub fn open_in_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.selected_ref().cloned() else { return };
+        if let Err(why) = self.terminal_check(&r) {
+            self.notice = Some(Notice::error(why));
+            cx.notify();
+            return;
+        }
+        if self.drivers.remove(&r.session_id).is_some() {
+            self.hub.stop_driver(&r.session_id);
+        }
+        let argv = emaki_core::terminal::resume_argv(r.agent, &r.session_id);
+        self.notice = Some(match crate::sys::open_in_terminal(&r.session_id, &r.cwd, &argv) {
+            Ok(()) => Notice::said("opened in your terminal"),
+            Err(e) => Notice::error(format!("could not open a terminal: {e}")),
+        });
+        cx.notify();
+    }
+
     pub fn reply_via_for(&self, r: &SessionRef) -> (&'static str, String) {
         if r.agent != AgentId::ClaudeCode {
             return ("", format!("{} sessions are read-only here", r.agent.display_name()));
@@ -1737,12 +1797,11 @@ impl Workbench {
             "inbox" => {
                 let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
                 self.hub.send_to_inbox(&sid, text);
-                self.status = "delivering to the terminal…".into();
             }
             "driver" => {
                 let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
                 if !self.hub.send_to_driver(&sid, text.clone(), images) {
-                    self.status = "the driver is gone; try again".into();
+                    self.notice = Some(Notice::error("the driver is gone; try again"));
                     cx.notify();
                     return;
                 }
@@ -1769,10 +1828,10 @@ impl Workbench {
                     self.new_id = String::new();
                     self.page = Page::Session;
                 }
-                self.status = "starting claude…".into();
+                self.notice = Some(Notice::said("starting claude…"));
             }
             _ => {
-                self.status = why;
+                self.notice = Some(Notice::error(why));
                 cx.notify();
                 return;
             }
@@ -1850,7 +1909,7 @@ impl Workbench {
     pub fn attach_image_bytes(&mut self, mime: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let dir = self.upload_dir();
         if std::fs::create_dir_all(&dir).is_err() {
-            self.status = "could not create the uploads folder".into();
+            self.notice = Some(Notice::error("could not create the uploads folder"));
             cx.notify();
             return;
         }
@@ -1867,7 +1926,7 @@ impl Workbench {
         let name = format!("{}-pasted.{ext}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
         let path = dir.join(&name);
         if let Err(e) = emaki_core::paths::write_atomic(&path, &bytes) {
-            self.status = format!("could not keep the pasted image: {e}");
+            self.notice = Some(Notice::error(format!("could not keep the pasted image: {e}")));
             cx.notify();
             return;
         }
@@ -2031,9 +2090,9 @@ impl Workbench {
     fn set_effort(&mut self, effort: &str, cx: &mut Context<Self>) {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         if self.hub.set_driver_effort(&sid, effort.to_string()) {
-            self.status = format!("setting {}…", effort_label(effort).to_lowercase());
+            self.notice = Some(Notice::said(format!("setting {}…", effort_label(effort).to_lowercase())));
         } else {
-            self.status = "no driver behind this session".into();
+            self.notice = Some(Notice::error("no driver behind this session"));
         }
         cx.notify();
     }
@@ -2043,6 +2102,7 @@ impl Workbench {
     /// the transcript's; the windows are what the last driver turn saw,
     /// which a terminal turn does not refresh, so the row says how old
     /// they are.
+    /// The left of the row under the composer, on a Claude conversation.
     fn render_limits(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let theme = cx.theme().clone();
         let s = self.shown_session()?;
@@ -2063,7 +2123,7 @@ impl Workbench {
                 .when(!tail.is_empty(), |d| d.child(div().text_color(muted).child(tail)))
         };
         let bar = || div().text_color(muted.opacity(0.6)).child("|");
-        let mut row = h_flex().w_full().max_w(CONTENT_W).px(px(6.)).gap(px(8.)).items_center().text_size(px(11.5)).flex_wrap();
+        let mut row = h_flex().flex_shrink_0().gap(px(8.)).items_center();
         let model = s.models.last().map(String::as_str).unwrap_or("");
         let window = self.limits.context_window(model);
         let ctx_pct = if s.context_tokens > 0 { (s.context_tokens * 100 / window.max(1)).min(999) } else { 0 };
@@ -2126,7 +2186,7 @@ impl Workbench {
             std::thread::spawn(move || {
                 let _ = d.interrupt();
             });
-            self.status = "interrupting…".into();
+            self.notice = Some(Notice::said("interrupting…"));
             cx.notify();
         }
     }
@@ -2479,8 +2539,7 @@ impl Workbench {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if self.user_name.is_empty() { "Emaki".to_string() } else { self.user_name.clone() }))
-                    .child(div().truncate().text_size(px(11.)).text_color(theme.muted_foreground).child(self.status.clone())),
+                    .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if self.user_name.is_empty() { "Emaki".to_string() } else { self.user_name.clone() })),
             );
 
         v_flex().w(SIDEBAR_W).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(scroll).child(footer)
@@ -2497,7 +2556,7 @@ impl Workbench {
     fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let centre = div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title).into_any_element();
-        self.render_topbar_with(centre, right, cx)
+        self.render_topbar_with(centre, Vec::new(), right, cx)
     }
 
     /// One tab per open session in the top strip: the agent's mark (turning
@@ -2563,11 +2622,14 @@ impl Workbench {
         row.into_any_element()
     }
 
-    fn render_topbar_with(&self, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `left` sits after the sidebar button (and the traffic lights when
+    /// the sidebar is hidden); `right` is the page's actions. Both ends
+    /// are at least 120px so the centre stays centred when they are short.
+    fn render_topbar_with(&self, centre: AnyElement, left: Vec<AnyElement>, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
-        let mut left = h_flex().w(px(120.)).flex_shrink_0().items_center().gap(px(4.));
+        let mut left_end = h_flex().min_w(px(120.)).flex_shrink_0().items_center().gap(px(4.));
         if !self.sidebar_open || self.narrow {
-            left = left
+            left_end = left_end
                 .when(mac, |d| d.pl(TRAFFIC_W - px(12.)))
                 .child(icon_button("sidebar-open", IconName::PanelLeftOpen, "Show sidebar (⌘⇧S)", cx, |this, _, cx| {
                     this.show_sidebar();
@@ -2579,9 +2641,9 @@ impl Workbench {
             .flex_shrink_0()
             .px(px(12.))
             .items_center()
-            .child(left)
+            .child(left_end.children(left))
             .child(centre)
-            .child(h_flex().w(px(120.)).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
+            .child(h_flex().min_w(px(120.)).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
     }
 
     // -- the sessions page ----------------------------------------------------
@@ -2726,8 +2788,13 @@ impl Workbench {
             })
             .into_any_element(),
         );
+        let terminal_tip = match self.terminal_check(&r) {
+            Ok(()) => "Open in your terminal",
+            Err(why) => why,
+        };
+        let left = vec![icon_button("terminal", Icon::default().path("icons/square-terminal.svg"), terminal_tip, cx, |this, _, cx| this.open_in_terminal(cx)).into_any_element()];
         let tabs = self.render_tabs(cx);
-        let topbar = self.render_topbar_with(tabs, right, cx);
+        let topbar = self.render_topbar_with(tabs, left, right, cx);
 
         let mut meta = vec![emaki_core::paths::tilde(&session.cwd)];
         if !session.git_branch.is_empty() {
@@ -2787,7 +2854,7 @@ impl Workbench {
             .child(meta_line)
             .when(self.find_open, |d| d.child(self.render_find_bar(cx)))
             .child(transcript)
-            .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).child(self.render_composer(cx)).children(self.render_limits(cx)))
+            .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).child(self.render_composer(cx)))
             .into_any_element()
     }
 
@@ -2866,16 +2933,21 @@ impl Workbench {
         let readonly = via == "inbox";
         let effort = self.current_effort();
         let on_session = self.page == Page::Session;
-        // Nothing is said under the composer unless nothing can send, and
-        // then only why.
-        let hint = if can_send {
-            String::new()
+        // The right of the row under the composer: a notice while one is
+        // showing (what the last send or action did, an error in red), else
+        // why nothing can send, else empty. The row always takes `NOTICE_H`,
+        // so the composer stays put as a notice comes and goes, and it is
+        // the only thing under the card: the limits sit on its left.
+        let (hint, hint_color) = if let Some(n) = &self.notice {
+            (n.text.clone(), if n.error { theme.danger } else { theme.muted_foreground })
+        } else if can_send {
+            (String::new(), theme.muted_foreground)
         } else {
             let mut w = why.clone();
             if let Some(f) = w.get(..1) {
                 w = f.to_uppercase() + &w[1..];
             }
-            w
+            (w, theme.muted_foreground)
         };
         let send = div()
             .id("send")
@@ -3057,7 +3129,19 @@ impl Workbench {
                     .child(send),
             );
 
-        v_flex().w_full().items_center().gap(px(8.)).child(card).when(!hint.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).text_center().child(hint)))
+        let foot = h_flex()
+            .w_full()
+            .max_w(CONTENT_W)
+            .h(NOTICE_H)
+            .flex_shrink_0()
+            .px(px(6.))
+            .gap(px(8.))
+            .items_center()
+            .text_size(px(11.5))
+            .children(self.render_limits(cx))
+            .child(div().flex_1())
+            .child(div().min_w_0().truncate().text_color(hint_color).child(hint));
+        v_flex().w_full().items_center().gap(px(8.)).child(card).child(foot)
     }
 
     // -- the board -----------------------------------------------------------
@@ -3696,7 +3780,7 @@ fn kbd_hint(text: &'static str, theme: &gpui_component::Theme) -> impl IntoEleme
 }
 
 /// A round ghost button holding one icon.
-fn icon_button(id: &'static str, icon: IconName, tip: &'static str, cx: &mut Context<Workbench>, on: impl Fn(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static) -> impl IntoElement {
+fn icon_button(id: &'static str, icon: impl Into<Icon>, tip: &'static str, cx: &mut Context<Workbench>, on: impl Fn(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static) -> impl IntoElement {
     let theme = cx.theme().clone();
     Button::new(id).ghost().small().icon(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground)).tooltip(tip).on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
 }
@@ -3809,10 +3893,8 @@ impl Render for Workbench {
                     this.open_search(window, cx)
                 }
             }))
-            .on_action(cx.listener(|this, _: &Refresh, _, cx| {
+            .on_action(cx.listener(|this, _: &Refresh, _, _| {
                 this.hub.refresh();
-                this.status = "refreshing…".into();
-                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
             .on_action(cx.listener(|this, _: &GoBoard, _, cx| {

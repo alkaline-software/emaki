@@ -15,6 +15,35 @@ GitHub Release as its notes. Write it for the person installing the app.
   the next Claude Code session. `emaki-core statusline restore` puts the
   old setting back.
 - **No tooltip on the limits row.**
+- **Open in your terminal.** A button at the top left of a conversation
+  continues that session in a terminal window of your own: the session's
+  folder, `claude --resume` (or `codex resume`), in the terminal app your
+  Mac keeps for shell scripts. It refuses when the session is already open
+  in a terminal, so two processes never write one transcript.
+- **Find hits wear one ring.** Whatever ⌘F matched, a prompt, a reply
+  paragraph, a tool card or a folded run, it is outlined the same way: a
+  faint accent ring for a hit, a full one for the hit the bar is on.
+- **Bold is a semibold, and inline code is monospaced.** Strong text
+  in a conversation is set at weight 600, as the Claude app sets it,
+  instead of the font's heavier true Bold, and `inline code` is drawn in
+  the mono face like a code block. The UI toolkit is now vendored under
+  `vendor/` to make both possible.
+- **The arrow keys reach the ends of the composer.** Up on the first line
+  puts the caret at the start of the text, Down on the last line at the
+  end, as in any input box.
+- **The conversation is set at the Claude app's size.** Medium is now
+  16px at line height 1.5, the same as the Claude desktop app's replies;
+  small and large moved up with it.
+- **Bold is bold again.** Bold and semibold text in a conversation drew
+  in the regular weight, because the Claude app's fonts are variable
+  fonts and only their regular instance had been loaded. On macOS every
+  weight is available now.
+- **Messages under the composer, not in the sidebar.** What a send or a
+  click did ("opened in your terminal") and why it did not (in
+  red) now appear at the right end of the limits row under the composer,
+  and fade. The sidebar
+  footer no longer blinks "indexed 1 session" after every turn; it is
+  your name alone.
 
 ## v0.1.1
 

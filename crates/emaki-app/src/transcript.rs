@@ -72,6 +72,11 @@ pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
                 heading_base_font_size: px(15.),
                 paragraph_gap: rems(0.6),
                 highlight_theme: if dark { HighlightTheme::default_dark() } else { HighlightTheme::default_light() },
+                // As the Claude app sets them: strong text at 600, not the
+                // font's true Bold; inline code in the mono face. Both are
+                // Emaki's additions to the vendored toolkit.
+                strong_font_weight: Some(FontWeight::SEMIBOLD),
+                inline_code_font_family: Some(theme.mono_font_family.clone()),
                 ..Default::default()
             }
             .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.))),
@@ -305,18 +310,21 @@ impl Workbench {
     /// An item the find bar matched sits on a faint accent tint; the one the
     /// bar is on now also carries an accent bar down its left edge. Nothing
     /// is re-laid-out for it: the wrapper takes the item's own width.
+    /// An item the find bar matched wears the same accent ring a matched
+    /// prompt does: a faint one for a hit, a full one for the hit the bar
+    /// is on. One look for every kind of hit; no tints, no edge bars.
     fn find_wrap(&self, ix: usize, jx: usize, el: AnyElement, theme: &gpui_component::Theme) -> AnyElement {
         match self.find_mark(ix, Some(jx)) {
             0 => el,
-            1 => div().w_full().rounded(px(8.)).px(px(6.)).ml(px(-6.)).bg(theme.primary.opacity(0.08)).child(el).into_any_element(),
-            _ => div().w_full().rounded(px(8.)).px(px(6.)).ml(px(-6.)).bg(theme.primary.opacity(0.14)).border_l_2().border_color(theme.primary).child(el).into_any_element(),
+            1 => div().w_full().rounded(px(10.)).px(px(6.)).py(px(3.)).ml(px(-6.)).border_1().border_color(theme.primary.opacity(0.45)).child(el).into_any_element(),
+            _ => div().w_full().rounded(px(10.)).px(px(6.)).py(px(3.)).ml(px(-6.)).border_2().border_color(theme.primary).child(el).into_any_element(),
         }
     }
 
     fn render_item(&mut self, ix: usize, jx: usize, item: &Item, open_tools: &HashSet<(usize, usize)>, open_thoughts: &HashSet<(usize, usize)>, open_subagents: &HashSet<(usize, usize)>, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let body_px = self.cfg.app.chat_px();
         match item {
-            Item::Text { md, .. } => div().w_full().text_size(px(body_px)).line_height(relative(1.65)).child(md_view(format!("t-{ix}-{jx}"), md.clone(), cx)).into_any_element(),
+            Item::Text { md, .. } => div().w_full().text_size(px(body_px)).line_height(relative(1.5)).child(md_view(format!("t-{ix}-{jx}"), md.clone(), cx)).into_any_element(),
             Item::Thinking { md, seconds, .. } => self.render_thought(ix, jx, md, *seconds, open_thoughts.contains(&(ix, jx)), cx),
             Item::Notice { text, variant, .. } => self.render_notice(text, *variant, cx),
             Item::Tool(call) => self.render_tool(ix, jx, call, open_tools.contains(&(ix, jx)), open_subagents.contains(&(ix, jx)), &session.cwd, cx),
@@ -371,7 +379,7 @@ impl Workbench {
             .rounded(px(10.))
             .bg(theme.muted)
             .when(run_mark == 1 && !open, |d| d.border_1().border_color(theme.primary.opacity(0.45)))
-            .when(run_mark == 2 && !open, |d| d.border_1().border_color(theme.primary))
+            .when(run_mark == 2 && !open, |d| d.border_2().border_color(theme.primary))
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_active))
             .on_click(cx.listener(move |this, _, _, cx| {

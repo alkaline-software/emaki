@@ -71,6 +71,7 @@ crates/emaki-core/        everything without a window
   src/explain.rs             opaque tool calls in plain words, via `claude -p`
   src/update.rs              the newest release, its installer, and putting it in place
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
+  src/terminal.rs            the agent's resume command as a script a terminal can be handed
   src/watcher.rs             notify over every agent's data roots
   src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | explain | update | statusline | drive
   tests/core.rs
@@ -79,7 +80,7 @@ crates/emaki-app/         the window
   src/workbench.rs           sidebar, session list, board, search, composer
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/main.rs                menus, key bindings, the window
-  src/sys.rs                 open, reveal, the person's name: per OS
+  src/sys.rs                 open, reveal, open in a terminal, the person's name: per OS
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers
   assets/icon/               the icon in every size, cut from scripts/icon/logo.png
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
@@ -108,6 +109,13 @@ cannot press ⌘F or ⌘, in the window from a script, so a screenshot of
 either state is one launch away. Point `EMAKI_HOME` at a scratch directory
 to run a second copy beside the installed app without sharing its state.
 
+**One Emaki at a time.** Before launching a build, quit the one running:
+`pkill -x Emaki` stops both a bare `target/debug/Emaki` and the installed
+`/Applications/Emaki.app`. Two copies share `~/.emaki` and both write
+`state/ui.json`, the Dock shows two identical icons, and the one the
+person looks at is usually the old build, so the change "is not there".
+Relaunch, then check `pgrep -fl Emaki` lists one process.
+
 **The board is the home of what needs you.** Four columns (needs you,
 planning, working, your turn), a card per live session (project, branch,
 title, a status chip with a clock, "since", the one or two actions that make
@@ -124,7 +132,7 @@ the machine costs nothing.
 collapsible sidebar (⌘⇧S): the wordmark, an accent "New session" entry,
 Board, Sessions and Search, then Agents (one row per agent with its count
 and a live dot, plus Kept only), Projects and Recents, and an account-style
-footer that carries the status line. The content pane has a 48px top strip
+footer with the person's name and nothing else: no version, no status. The content pane has a 48px top strip
 with the title centred and actions on the right; when the sidebar is hidden
 the strip makes room for the traffic lights. Everything readable sits in one
 column of `CONTENT_W` (768px), centred in whatever is left of the window:
@@ -142,8 +150,8 @@ card with a round accent send button, mode/model pills (driver channels
 only), a "+" that opens the file picker, and a row of attachment chips; it
 also takes drops and image pastes. The textarea grows with its content from
 three to twelve rows, which also keeps the caret laid out, so the caret
-rectangle macOS asks for (dictation, the input-source badge) is real. The hint line under it says which channel
-a message would take. Prompts are rounded
+rectangle macOS asks for (dictation, the input-source badge) is real. The row under it carries the limits on the left and, on the right,
+which channel a message would take or what the app has to say (below). Prompts are rounded
 surface boxes on the right, attachments above the words (pictures as
 tiles, then file chips), replies are plain prose under the agent's mark,
 stopping `REPLY_INSET` (40px) short of the prompts' right edge so the two
@@ -196,6 +204,25 @@ cannot block anything: if it fails, the terminal's line goes blank.
 `rev` on our own gpui dependency produces a second copy that gpui-component
 does not build against. The pin lives in `Cargo.lock` instead:
 `cargo update -p gpui --precise <rev>` moves it.
+
+**The toolkit is vendored, in this repository.** `vendor/gpui-component/`
+holds the four gpui-component crates Emaki uses (`ui`, `base`, `macros`,
+`assets`), copied from the revision the crate manifests still name, with
+upstream's licence and a trimmed workspace manifest of their own so their
+`workspace = true` references resolve. The root `Cargo.toml` excludes
+`vendor` from the workspace and `[patch]`es the git source with those
+paths, so the `git` + `rev` dependencies keep saying where the code came
+from while the build uses the copies. This exists because the markdown
+view hard-coded strong text to weight 700 and gave inline code the
+paragraph's face, and gpui's highlight styles carry no family, so neither
+could be changed from outside; a fork on GitHub was the alternative and
+one repository was preferred. Every change is marked `(Emaki addition.)`
+in the source and listed in `vendor/gpui-component/UPSTREAM.md`, which
+also says how to move to a newer upstream revision: copy the crates over,
+re-apply the list, build. Four changes so far: the strong weight and the
+inline-code family as `TextViewStyle` settings (`md_view` sets 600 and the
+theme's mono face, as the Claude app does), and the input's Up on the first
+line going to the start of the text, Down on the last to the end.
 
 **The search database is `search.db`.** FTS5, one document per item (a
 prompt, a reply paragraph, a thought, a tool call): coarser and a hit in a
@@ -281,8 +308,19 @@ JSONL (`transcript::image_block_bytes`, cached per session in
 are the Claude desktop app's own fonts and not ours to ship, so `fonts.rs`
 loads them at start from a Claude app installed on this machine (its
 `Resources/fonts` on macOS, the Squirrel install under `LOCALAPPDATA` on
-Windows) through `text_system().add_fonts`, and resolves the family names
-the text system reports. Without a Claude app the serif falls back to
+Windows) and resolves the family names the text system reports. The app
+ships each face as one variable font, and gpui picks a weight by matching
+against the faces it holds, so handed the bytes through
+`text_system().add_fonts` it held one face per file (the default
+instance, Regular) and drew every bold as regular: "**Pingfan**" in a
+prompt came out plain. On macOS the files are registered with CoreText
+for the process (`CTFontManagerRegisterFontsForURL`) instead: CoreText
+lists a variable font's named instances (Light, Medium, Semibold, Bold,
+their italics, in Text and Display) as faces of their own, and gpui's
+family lookup falls through to the system source when it was not handed
+the family, so bold finds a bold. Elsewhere the bytes still go in as they
+are, and bold stays regular until that platform's text system learns
+variable fonts. Without a Claude app the serif falls back to
 Georgia and the sans to the window's face, and the settings panel says so.
 The face is applied to the transcript container only (`render_detail`),
 which the markdown view inherits; code stays in the mono face, the chrome
@@ -297,7 +335,10 @@ panel (⌘, on macOS, Ctrl+, and Win+, elsewhere, or the app menu) through
 `appearance` (`system`, `light`, `dark`), `accent` (a name from
 `look::ACCENTS`), `chat_font` and `chat_size` (`small`, `medium`, `large`;
 `AppConfig::chat_px` turns it into the reply's pixel size, the prompt half a
-pixel under, thoughts two under). `look.rs` owns the first two: the palette
+pixel under, thoughts two under; medium is 16px at line height 1.5, the
+Claude desktop app's own body setting read from its stylesheet, which
+also sets its bold to weight 600, matched through the vendored toolkit's
+`strong_font_weight`). `look.rs` owns the first two: the palette
 stays in `themes/emaki.json`, and an accent is a substitution over the
 dozen keys that carry the terracotta there, painted into both configs
 before they are handed to the toolkit, so `Theme::change` keeps the accent
@@ -332,14 +373,15 @@ from the transcript (`r.state.mode`, `Session::models.last()`,
 `Session::effort`) and not clickable: the inbox reads everything as prose,
 and a `control_request` frame sent to it is dropped without a reply
 (tried against 2.1.284), so there is no channel to change them from here.
-The hint under the composer says so. Effort has no control request either
+The row under the composer says so. Effort has no control request either
 (`set_effort` is "Unsupported"), but `/effort <level>` as a user turn runs
 as the local command it is, and Claude Code records it as a
 `system/local_command` row with `commandRun: {command: "effort", args}`,
 which `build` reads into `Session::effort`; `Driver::set_effort` sends that
 turn and the pill updates when the file does.
 
-**The limits row is the terminal's status line.** Above the composer:
+**The limits row is the terminal's status line.** Under the composer, on
+the left of the row the notice shares:
 `Context 37% (386k of 1M) · 5h 3% (4h26m) · 7d 6% (6d7h)`, coloured at the
 same thresholds as `~/.claude/statusline.sh`. The context is the
 transcript's (`Session::context_tokens`, the last assistant row's input plus
@@ -390,10 +432,11 @@ from the field, ⌘G and ⌘⇧G from anywhere, Escape closes. Stepping scrolls
 the hit's round to the top of the view (`ListState::scroll_to`, item
 offset zero; the list cannot address a point inside an item) and unfolds
 whatever hides the item: the tool card, the thought, the folded run
-(`transcript::run_start`). The transcript draws a hit on a faint accent
-tint and the current one with an accent bar (`find_wrap`), a matched
-prompt with an accent ring, a folded run with a hit inside with an accent
-edge. A live reload recomputes the hits without moving the reader
+(`transcript::run_start`). Every hit wears the same accent ring, whatever it
+is: a faint one for a hit, a full one for the hit the bar is on, on a
+prompt bubble, a reply paragraph, a tool card or a thought (`find_wrap`)
+and a folded run with a hit inside. Tints and edge bars were tried and
+read as clutter. A live reload recomputes the hits without moving the reader
 (`compute_hits`); typing lands on the first hit at or after the round in
 view (`run_find`). A hit in the search palette opens its session through
 `open_with_find`, which puts the query in the bar and lands on the matched
@@ -431,6 +474,47 @@ the window swallows goes through `swallow_click`, which calls
 `gpui_base::TextSelection::end` before stopping propagation; `gpui-base` is
 a direct dependency for that one call. The lightbox backdrop is also
 `occlude`d so nothing beneath it hears the mouse.
+
+**What the app has to say goes under the composer, on the right.** The
+row under the composer card has the limits on its left and
+`Workbench::notice` on its right, where the eye is after a send or a
+click and where nothing else was: "opened in your terminal", "starting
+claude…", "queued behind the running turn", every refusal ("Already open
+in a terminal", "not sent: …", "claude exited: …") in the theme's danger
+colour, and the daily update check's "Emaki x is available". A message
+that went through gets no line: it shows up in the transcript, which says
+it better than "sent" or "delivered" did, so those are gone.
+Every notice fades after `NOTICE_SECS` on the clock tick, errors too,
+and the row always takes `NOTICE_H` whether or not either side has words,
+so the composer does not jump as one comes and goes. The right side
+otherwise says why nothing can send, as before. Nothing but "Claude is
+working" sits above the card; two things there was one too many. Nothing goes anywhere else: the sidebar
+footer used to carry a status string, and the scanner's "indexed 1
+session" and "archived 3 files" rewrote it after every turn of a live
+session, so the footer blinked with bookkeeping nobody acts on. Those
+counts are not shown now, and the two events that carried them are gone.
+
+**The button at the top left continues the session in your terminal.**
+`terminal.rs` in the core writes `~/.emaki/run/terminal/<session>.command`:
+clear every `CLAUDE*` variable but `CLAUDE_CONFIG_DIR` (the same rule as
+`driver::child_env`, because a terminal app started from inside a Claude
+Code session carries its marker, and a resumed session that inherits it
+stops writing its transcript), `cd` to the session's folder, `exec` the
+agent's own resume command (`claude --resume <id>` with the binary the
+driver resolves, `codex resume <id>`). `sys::open_in_terminal` hands it
+over per OS: on macOS `open` gives the `.command` file to whatever app the
+system keeps for shell scripts, Terminal unless another terminal claimed
+the type, so the choice is the system's and there is no setting; Windows
+opens a `cmd` window through `start` in that folder; Linux tries
+`$TERMINAL`, then the usual emulators, with the script as the command.
+One writer per transcript: `Workbench::terminal_check` refuses a session
+whose registry entry shows a terminal already (the tooltip says so), one
+kept only, one whose folder is gone, and one a driver of ours is
+mid-reply on; an idle driver is stopped on the way out, and once the
+terminal registers, the channel flips to `inbox` on its own. Checked by
+hand against Kaku, which had claimed `.command` on this machine: the
+session resumed in the folder, the row went live, and the second click
+was refused.
 
 **Attachments open on click.** A picture opens in the lightbox over the
 window (Escape or a click outside closes it, with Open and Reveal in Finder
