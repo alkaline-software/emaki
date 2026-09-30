@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use std::collections::HashSet;
 
-use crate::workbench::{agent_color, agent_glyph, badge, file_icon, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W};
+use crate::workbench::{agent_color, agent_glyph, agent_icon, badge, file_icon, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W};
 
 const MAX_BODY: usize = 6000;
 /// An opened tool call shows at most this much before it scrolls inside
@@ -289,12 +289,11 @@ impl Workbench {
         }
         if any {
             let mark_color = if session.agent == emaki_core::model::AgentId::ClaudeCode { theme.primary } else { theme.muted_foreground };
-            let working = is_last && self.selected_ref().map(|r| self.is_working(r)).unwrap_or(false);
             column = column.child(
                 v_flex()
                     .w_full()
                     .gap(px(8.))
-                    .child(h_flex().gap(px(7.)).items_center().child(agent_glyph(session.agent, px(15.), mark_color, working, SharedString::from(format!("round-glyph-{ix}")))).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
+                    .child(h_flex().gap(px(7.)).items_center().child(agent_icon(session.agent, px(15.), mark_color)).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
                     // The reply stops short of the column's right edge, where
                     // the prompt bubbles end: the two voices sit at different
                     // widths, as in the Claude app, and read apart at a glance.

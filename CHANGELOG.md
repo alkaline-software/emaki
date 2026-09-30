@@ -28,6 +28,21 @@ GitHub Release as its notes. Write it for the person installing the app.
   instead of the font's heavier true Bold, and `inline code` is drawn in
   the mono face like a code block. The UI toolkit is now vendored under
   `vendor/` to make both possible.
+- **The conversation follows the reply.** Sitting at the end, the view
+  stays at the end while a reply streams in, and comes back to following
+  once you scroll to the bottom again.
+- **The scrollbar goes sooner.** It fades a second after the last scroll,
+  not two.
+- **A session opens at its end.** Opening a session, or coming back to
+  its tab, lands on the newest turn instead of wherever it was left.
+- **Claude's own mark, and the way it moves.** Claude is drawn with the
+  starburst from the Claude app wherever the agent is named, and while
+  Claude works the mark on the status row turns and breathes, as the first
+  Emaki's did. Emaki's own asterisk stays on the wordmark.
+- **A flick stays where it started.** A trackpad scroll's momentum no
+  longer follows the pointer into the other pane: a flick in the
+  conversation keeps scrolling the conversation while the pointer crosses
+  to the sidebar, and the other way round.
 - **The arrow keys reach the ends of the composer.** Up on the first line
   puts the caret at the start of the text, Down on the last line at the
   end, as in any input box.
@@ -39,11 +54,10 @@ GitHub Release as its notes. Write it for the person installing the app.
   fonts and only their regular instance had been loaded. On macOS every
   weight is available now.
 - **Messages under the composer, not in the sidebar.** What a send or a
-  click did ("opened in your terminal") and why it did not (in
-  red) now appear at the right end of the limits row under the composer,
-  and fade. The sidebar
-  footer no longer blinks "indexed 1 session" after every turn; it is
-  your name alone.
+  click did ("opened in your terminal") and why it did not (in red) now
+  appear at the right end of the limits row under the composer, and fade.
+  The sidebar footer no longer blinks "indexed 1 session" after every
+  turn; it is your name alone.
 
 ## v0.1.1
 

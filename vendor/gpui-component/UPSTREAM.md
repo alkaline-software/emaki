@@ -34,6 +34,9 @@ upstream revision finds them.
 4. `crates/base/src/input/base/movement.rs`: Up on the first display row
    moves to the start of the text and Down on the last to the end, as
    inputs generally do; `display_row_of_cursor` is the helper.
+5. `crates/base/src/scrollbar.rs`: `FADE_OUT_DELAY` 1.0 and
+   `FADE_OUT_DURATION` 1.5 (upstream 2.0 and 3.0), so the scrollbar goes a
+   second after the last scroll instead of two.
 
 ## Updating
 

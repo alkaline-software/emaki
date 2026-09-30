@@ -25,8 +25,10 @@ const THUMB_ACTIVE_WIDTH: Pixels = px(8.);
 const THUMB_ACTIVE_RADIUS: Pixels = Pixels::ZERO;
 const THUMB_ACTIVE_INSET: Pixels = px(4.);
 
-const FADE_OUT_DURATION: f32 = 3.0;
-const FADE_OUT_DELAY: f32 = 2.0;
+// The bar stays a second after the last scroll, then fades over half a
+// second (upstream: two seconds, then a one-second fade). (Emaki addition.)
+const FADE_OUT_DURATION: f32 = 1.5;
+const FADE_OUT_DELAY: f32 = 1.0;
 
 fn clamp_thumb_radius(radius: Pixels, bounds: Bounds<Pixels>) -> Pixels {
     radius

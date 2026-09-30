@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Timelike;
 use futures::StreamExt;
@@ -25,7 +25,7 @@ use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 
-use crate::ui_state::{Rect, Scroll, UiState};
+use crate::ui_state::{Rect, UiState};
 use emaki_core::adapters;
 use emaki_core::build::Phase;
 use emaki_core::config::Config;
@@ -116,6 +116,19 @@ pub struct Notice {
     pub error: bool,
     pub at: f64,
 }
+
+/// The two panes a trackpad gesture can belong to. Momentum events keep
+/// arriving after the finger lifts, addressed to wherever the pointer is by
+/// then; they belong to the pane the gesture began in. See `route_scroll`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane {
+    Sidebar,
+    Content,
+}
+
+/// A wheel event this long after the previous one begins a new gesture: a
+/// mouse wheel sends no phases, and momentum comes at frame rate.
+const SCROLL_GAP: Duration = Duration::from_millis(150);
 
 /// How long a notice stays under the composer.
 pub const NOTICE_SECS: f64 = 8.0;
@@ -413,12 +426,19 @@ pub struct Workbench {
     pub tabs: Vec<String>,
     /// Where each tab was scrolled when the reader left it, restored when
     /// the tab is opened again, here or on the next launch.
-    scroll_memory: HashMap<String, Scroll>,
     window_rect: Option<Rect>,
     last_ui_save: std::time::Instant,
     /// The window is too narrow for the sidebar beside the content; it is
     /// hidden and only shows over the content, on request (`sidebar_peek`).
     narrow: bool,
+    /// The pane the current scroll gesture began in, and when its last event
+    /// came; see `route_scroll`.
+    scroll_owner: Option<Pane>,
+    last_scroll: Instant,
+    /// The scroll positions momentum may be forwarded to.
+    side_scroll: ScrollHandle,
+    sessions_scroll: ScrollHandle,
+    home_scroll: ScrollHandle,
     sidebar_peek: bool,
     startup_open: Option<String>,
     focus_handle: FocusHandle,
@@ -665,10 +685,14 @@ impl Workbench {
             now: now_secs(),
             user_name: crate::sys::user_first_name(),
             tabs: ui.tabs.clone(),
-            scroll_memory: ui.scroll.clone(),
             window_rect: Some(rect_of(window.bounds())),
             last_ui_save: std::time::Instant::now(),
             narrow: false,
+            scroll_owner: None,
+            last_scroll: Instant::now(),
+            side_scroll: ScrollHandle::new(),
+            sessions_scroll: ScrollHandle::new(),
+            home_scroll: ScrollHandle::new(),
             sidebar_peek: false,
             startup_open,
             focus_handle: cx.focus_handle(),
@@ -983,9 +1007,6 @@ impl Workbench {
     // -- navigation ----------------------------------------------------------
 
     pub fn open_session(&mut self, key: &str, cx: &mut Context<Self>) {
-        if self.selected.as_deref() != Some(key) {
-            self.remember_scroll();
-        }
         if !self.tabs.iter().any(|t| t == key) {
             self.tabs.push(key.to_string());
         }
@@ -1004,24 +1025,12 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Note where the reader is in the session showing, so the same spot
-    /// comes back when its tab is opened again.
-    fn remember_scroll(&mut self) {
-        if let Some(d) = &self.detail {
-            let top = d.list.logical_scroll_top();
-            self.scroll_memory.insert(d.key.clone(), Scroll { item: top.item_ix, offset: f32::from(top.offset_in_item) });
-        }
-    }
-
     /// Close a tab. The session goes on without it: a driver behind it
     /// keeps running until its idle timeout, and the transcript is on disk.
     /// Closing the showing tab moves to its neighbour, or to the new-session
     /// page when it was the last one, with the caret in its composer.
     pub fn close_tab(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.tabs.iter().position(|t| t == key) else { return };
-        if self.selected.as_deref() == Some(key) {
-            self.remember_scroll();
-        }
         self.tabs.remove(ix);
         if self.selected.as_deref() == Some(key) {
             self.selected = None;
@@ -1044,21 +1053,18 @@ impl Workbench {
         if !now && self.last_ui_save.elapsed() < Duration::from_secs(2) {
             return;
         }
-        self.remember_scroll();
         let page = match self.page {
             Page::Board => "board",
             Page::Sessions => "sessions",
             Page::Session => "session",
             Page::New => "new",
         };
-        let scroll = self.scroll_memory.iter().filter(|(k, _)| self.tabs.contains(k)).map(|(k, v)| (k.clone(), *v)).collect();
         UiState {
             window: self.window_rect,
             sidebar_open: Some(self.sidebar_open),
             page: page.into(),
             tabs: self.tabs.clone(),
             active: self.selected.clone().filter(|_| self.page == Page::Session),
-            scroll,
         }
         .save();
         self.last_ui_save = std::time::Instant::now();
@@ -1142,12 +1148,18 @@ impl Workbench {
                 }
             }
             _ => {
+                // Bottom alignment opens every session at its end, where the
+                // newest turn is; a remembered position was tried and
+                // dropped, since the end is where the reader wants to be.
+                // Tail following keeps it there as a reply streams in: the
+                // list re-pins to the end on every layout, pauses when the
+                // reader scrolls up (or a card opened at the end gives the
+                // list a real top, `pin_scroll`), and resumes once the view
+                // is back at the bottom. Without it the first thing that
+                // set a logical top left the list anchored to the prompt
+                // while the reply grew below the view.
                 let list = ListState::new(n, ListAlignment::Bottom, px(512.));
-                if let Some(s) = self.scroll_memory.get(&key) {
-                    if s.item < n {
-                        list.scroll_to(ListOffset { item_ix: s.item, offset_in_item: px(s.offset) });
-                    }
-                }
+                list.set_follow_mode(FollowMode::Tail);
                 self.detail = Some(Detail {
                     key,
                     path,
@@ -1173,7 +1185,6 @@ impl Workbench {
     }
 
     fn show_new(&mut self, cwd: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        self.remember_scroll();
         self.page = Page::New;
         self.selected = None;
         self.sidebar_peek = false;
@@ -1751,6 +1762,52 @@ impl Workbench {
             Ok(()) => Notice::said("opened in your terminal"),
             Err(e) => Notice::error(format!("could not open a terminal: {e}")),
         });
+        cx.notify();
+    }
+
+    /// Keep a scroll gesture's momentum in the pane it began in. macOS goes
+    /// on sending wheel events after the finger lifts, and gpui hands each
+    /// to whatever is under the pointer by then, so a flick in the
+    /// conversation followed by a move to the sidebar scrolled the sidebar.
+    /// This runs in the capture phase, before any scroll container: the pane
+    /// under the pointer at `Started` (or at the first event after a pause,
+    /// which is how a mouse wheel begins) owns the gesture, and an event
+    /// that lands in the other pane is applied to the owner's scroll
+    /// position and stopped. With the sidebar folded away there is one pane
+    /// and nothing to do.
+    fn route_scroll(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if std::env::var("EMAKI_SCROLL_DEBUG").is_ok() {
+            eprintln!("scroll {:?} at ({:.0},{:.0}) delta {:?} owner {:?}", e.touch_phase, f32::from(e.position.x), f32::from(e.position.y), e.delta, self.scroll_owner);
+        }
+        let now = Instant::now();
+        let fresh = now.duration_since(self.last_scroll) > SCROLL_GAP;
+        self.last_scroll = now;
+        let inline_sidebar = self.sidebar_open && !self.narrow;
+        let here = if inline_sidebar && e.position.x < SIDEBAR_W { Pane::Sidebar } else { Pane::Content };
+        match e.touch_phase {
+            TouchPhase::Started => self.scroll_owner = Some(here),
+            TouchPhase::Moved if fresh || self.scroll_owner.is_none() => self.scroll_owner = Some(here),
+            _ => {}
+        }
+        let Some(owner) = self.scroll_owner else { return };
+        if owner == here || !inline_sidebar {
+            return;
+        }
+        let delta = e.delta.pixel_delta(px(20.));
+        match owner {
+            Pane::Sidebar => self.side_scroll.set_offset(self.side_scroll.offset() + delta),
+            Pane::Content => match self.page {
+                Page::Session => {
+                    if let Some(d) = &self.detail {
+                        d.list.scroll_by(-delta.y);
+                    }
+                }
+                Page::Sessions => self.sessions_scroll.set_offset(self.sessions_scroll.offset() + delta),
+                Page::New => self.home_scroll.set_offset(self.home_scroll.offset() + delta),
+                Page::Board => {}
+            },
+        }
+        cx.stop_propagation();
         cx.notify();
     }
 
@@ -2423,7 +2480,7 @@ impl Workbench {
         }
         let shown_projects = projects.iter().take(8).cloned().collect::<Vec<_>>();
         let more_projects = projects.len().saturating_sub(shown_projects.len());
-        let mut scroll = v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().px(px(10.)).pb(px(8.));
+        let mut scroll = v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(10.)).pb(px(8.));
         scroll = scroll.child(self.group_label("Agents", cx));
         scroll = scroll.children(agents.into_iter().map(|(a, n)| {
             let active = sessions_active && scope == Scope::Agent(a);
@@ -2741,7 +2798,7 @@ impl Workbench {
         let count = self.scoped_refs().len();
 
         v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
-            v_flex().id("sessions").flex_1().min_h_0().overflow_y_scroll().px(px(24.)).items_center().child(
+            v_flex().id("sessions").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.sessions_scroll).px(px(24.)).items_center().child(
                 v_flex()
                     .w_full()
                     .max_w(CONTENT_W)
@@ -3441,7 +3498,7 @@ impl Workbench {
         }));
 
         v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
-            v_flex().id("home").flex_1().min_h_0().overflow_y_scroll().px(px(24.)).child(
+            v_flex().id("home").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.home_scroll).px(px(24.)).child(
                 v_flex()
                     .w_full()
                     .min_h_full()
@@ -3706,10 +3763,16 @@ pub fn mark_icon(size: Pixels, color: Hsla) -> Icon {
     Icon::default().path("icons/mark.svg").with_size(size).text_color(color)
 }
 
+/// Claude's own mark, the starburst, for the agent's glyph; Emaki's plain
+/// asterisk (`mark_icon`) stays on the wordmark and the greeting.
+pub fn claude_icon(size: Pixels, color: Hsla) -> Icon {
+    Icon::default().path("icons/claude.svg").with_size(size).text_color(color)
+}
+
 /// The glyph that says which agent a session belongs to.
 pub fn agent_icon(agent: AgentId, size: Pixels, color: Hsla) -> Icon {
     match agent {
-        AgentId::ClaudeCode => mark_icon(size, color),
+        AgentId::ClaudeCode => claude_icon(size, color),
         AgentId::Codex => Icon::new(IconName::SquareTerminal).with_size(size).text_color(color),
     }
 }
@@ -3742,8 +3805,20 @@ pub fn agent_glyph(agent: AgentId, size: Pixels, color: Hsla, working: bool, id:
     }
     let id: SharedString = id.into();
     match agent {
-        AgentId::ClaudeCode => agent_icon(agent, size, color)
-            .with_animation(ElementId::Name(id), Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::FRAC_PI_2)))
+        // Claude's mark turns once every 2.8 s and breathes twice a turn
+        // (down to 82% of its size and 55% opacity), what the Python
+        // viewer's `spark` did; a fixed box keeps the breathing from
+        // moving anything around it.
+        AgentId::ClaudeCode => div()
+            .size(size)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(agent_icon(agent, size, color).with_animation(ElementId::Name(id), Animation::new(Duration::from_millis(2800)).repeat(), move |icon, t| {
+                let breath = 0.5 - 0.5 * (t * 4.0 * std::f32::consts::PI).cos();
+                icon.rotate(gpui::Radians(t * std::f32::consts::TAU)).with_size(size * (1.0 - 0.18 * breath)).opacity(1.0 - 0.45 * breath)
+            }))
             .into_any_element(),
         AgentId::Codex => div()
             .child(agent_icon(agent, size, color))
@@ -3886,6 +3961,23 @@ impl Render for Workbench {
             .id("workbench")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            // A raw wheel listener in the capture phase, registered at paint
+            // (nothing is drawn): see `route_scroll`.
+            .child({
+                let this = cx.entity().downgrade();
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = this.update(cx, |w, cx| w.route_scroll(e, cx));
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_0()
+            })
             .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| {
                 if this.search_open {
                     this.close_search(window, cx)
@@ -3898,7 +3990,6 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
             .on_action(cx.listener(|this, _: &GoBoard, _, cx| {
-                this.remember_scroll();
                 this.page = Page::Board;
                 this.save_ui(true);
                 cx.notify();
