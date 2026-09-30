@@ -219,10 +219,11 @@ could be changed from outside; a fork on GitHub was the alternative and
 one repository was preferred. Every change is marked `(Emaki addition.)`
 in the source and listed in `vendor/gpui-component/UPSTREAM.md`, which
 also says how to move to a newer upstream revision: copy the crates over,
-re-apply the list, build. Four changes so far: the strong weight and the
+re-apply the list, build. Five changes so far: the strong weight and the
 inline-code family as `TextViewStyle` settings (`md_view` sets 600 and the
-theme's mono face, as the Claude app does), and the input's Up on the first
-line going to the start of the text, Down on the last to the end.
+theme's mono face, as the Claude app does), the input's Up on the first
+line going to the start of the text, Down on the last to the end, and the
+scrollbar fading a second after the last scroll instead of two.
 
 **The search database is `search.db`.** FTS5, one document per item (a
 prompt, a reply paragraph, a thought, a tool call): coarser and a hit in a
@@ -269,11 +270,19 @@ by kind, the last subject, the total time, and the agent's turning mark with
 "running…" while one is still going. Opening the row shows every call, each
 folding on its own. Fewer than three stay inline.
 
-**The agent's mark moves while it works.** `agent_glyph` turns Claude's mark
-and breathes Codex's whenever `is_working` (board column working or
-planning) holds, in the round header, the status row under the transcript,
-the top bar, recents, the sessions page and board cards. Each place passes
-its own animation id.
+**The agent's mark moves while it works.** Claude's glyph is Claude's own
+starburst (`assets/icons/claude.svg`, the brand mark as simple-icons
+carries it; Emaki's plain asterisk `mark.svg` stays on the wordmark and
+the greeting). `agent_glyph` turns it once every 2.8 s while it breathes
+twice a turn, to 82% of its size and 55% opacity, inside a fixed box so
+nothing around it moves; that is the Python viewer's `spark` animation,
+which is what the person remembered. Codex's glyph breathes. It moves
+whenever `is_working` (board column working or planning) holds: in the
+status row under the transcript, the top bar, recents, the sessions page
+and board cards. The round header's mark is still, and there is no mark
+at the foot of the conversation: one was tried, as the Claude app draws
+it, and read as one too many beside the status row. Each place passes its
+own animation id.
 
 **The focused text field must be visible to assistive apps.** Two gaps
 stood between the composer and a dictation app, both found with the AX
@@ -464,6 +473,25 @@ window from a script, send real key codes (System Events `key code` or a
 `CGEvent` with the right virtual key); a unicode string on virtual key 0
 reaches the composer but not a single-line input.
 
+**A scroll gesture's momentum stays in the pane it began in.** macOS goes
+on sending wheel events after the finger lifts, addressed to wherever the
+pointer is by then, and gpui hands each to the scroll container under it
+(its `touch_phase` tells `Started` and `Ended`, but a momentum event is
+just `Moved`), so a flick in the conversation followed by a move to the
+sidebar scrolled the sidebar. `Workbench::route_scroll` runs in the
+capture phase from a raw listener a zero-size `canvas` registers at paint,
+before any container: the pane under the pointer at `Started`, or at the
+first event after `SCROLL_GAP` (a mouse wheel sends no phases), owns the
+gesture, and an event that lands in the other pane is applied to the
+owner's scroll position (`ListState::scroll_by` for the conversation, a
+`ScrollHandle` on the sidebar, sessions and home containers) and stopped.
+With the sidebar folded away there is one pane and nothing to do.
+`EMAKI_SCROLL_DEBUG=1` prints every wheel event with its phase and owner.
+Probing note: a synthetic `CGEvent` scroll carries `CGScrollPhase` values
+(began 1, changed 2, ended 4) and `CGMomentumScrollPhase` (begin 1,
+continue 2, end 3), not the `NSEventPhase` bits gpui reads; the checked
+sequence is in the session scratchpad's `scroll.swift`.
+
 **A swallowed click must end the text drag.** gpui-component's window
 selection layer begins a drag on every left mouse-down, anywhere, and ends
 it on the bubble-phase mouse-up. A click handler that calls
@@ -608,9 +636,18 @@ in Finder, the switcher and Spotlight. WORKFLOW.md says how to regenerate
 it.
 
 **The window remembers itself.** `ui_state.rs` keeps
-`~/.emaki/state/ui.json`: bounds, sidebar, page, the open tabs, the active
-one and where each was scrolled (`ListState::logical_scroll_top`, put back
-with `scroll_to` when the tab is opened again). It is written when any of
+`~/.emaki/state/ui.json`: bounds, sidebar, page, the open tabs and the
+active one. Where each tab was scrolled was remembered too, and put back
+on the next open; that went, because every open should land at the end of
+the conversation, where the newest turn is, which the list's bottom
+alignment does on its own (an older `scroll` key in the file is ignored).
+The list is in gpui's `FollowMode::Tail`, so it stays at the end while a
+reply streams in: following pauses when the reader scrolls up, when a
+find hit is scrolled to, or when `pin_scroll` gives the list a real top
+so an opened card extends downward, and it resumes once the view is back
+at the bottom. Without it, the first of those left the list anchored to
+the prompt while the reply grew out of sight.
+It is written when any of
 that changes, bounds changes at most every two seconds, and again at quit;
 the bounds are reused only when their centre is still on a screen.
 The page is saved but not restored: the window opens on the new-session
