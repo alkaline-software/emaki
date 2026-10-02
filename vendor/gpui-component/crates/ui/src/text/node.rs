@@ -1340,6 +1340,7 @@ impl Paragraph {
                             node_cx.link_click_handler.clone(),
                         )
                         .with_mono(node_cx.style.inline_code_font_family.clone(), code_ranges.clone())
+                        .with_chip(node_cx.style.inline_code_chip, code_ranges.clone())
                         .into_any_element(),
                     );
                 }
@@ -1462,7 +1463,8 @@ impl Paragraph {
                     highlights,
                     node_cx.link_click_handler.clone(),
                 )
-                .with_mono(node_cx.style.inline_code_font_family.clone(), code_ranges)
+                .with_mono(node_cx.style.inline_code_font_family.clone(), code_ranges.clone())
+                .with_chip(node_cx.style.inline_code_chip, code_ranges)
                 .into_any_element(),
             );
         }

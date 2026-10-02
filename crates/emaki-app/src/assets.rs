@@ -11,6 +11,7 @@ use gpui::{AssetSource, Result, SharedString};
 pub struct Assets;
 
 const OWN: &[(&str, &[u8])] = &[
+    ("icon/app.png", include_bytes!("../assets/icon/icon-128.png")),
     ("icons/mark.svg", include_bytes!("../assets/icons/mark.svg")),
     ("icons/claude.svg", include_bytes!("../assets/icons/claude.svg")),
     ("icons/file-text.svg", include_bytes!("../assets/icons/file-text.svg")),

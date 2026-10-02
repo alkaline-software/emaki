@@ -7,7 +7,7 @@ use std::{
 
 use gpui::{
     App, BorderStyle, Bounds, ClickEvent, CursorStyle, Edges, Element, ElementId, GlobalElementId,
-    Half, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    Half, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
     MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
     SharedString, StyledText, TextLayout, Window, point, px, quad,
 };
@@ -33,6 +33,9 @@ pub(super) struct Inline {
     /// A font family and the ranges (inline code spans) drawn in it.
     /// (Emaki addition.)
     mono: Option<(SharedString, Vec<Range<usize>>)>,
+    /// A plate, as (fill, border), and the ranges (inline code spans) it
+    /// is painted behind. (Emaki addition.)
+    chip: Option<((Hsla, Hsla), Vec<Range<usize>>)>,
     styled_text: StyledText,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
 
@@ -73,6 +76,7 @@ impl Inline {
             links: Rc::new(links),
             highlights,
             mono: None,
+            chip: None,
             text: text.clone(),
             styled_text: StyledText::new(text),
             link_click_handler,
@@ -89,6 +93,95 @@ impl Inline {
             }
         }
         self
+    }
+
+    /// Paint a rounded plate behind the text inside `ranges` (inline code).
+    /// Nothing changes without colours. (Emaki addition.)
+    pub(super) fn with_chip(mut self, colors: Option<(Hsla, Hsla)>, ranges: Vec<Range<usize>>) -> Self {
+        if let Some(colors) = colors {
+            if !ranges.is_empty() {
+                self.chip = Some((colors, ranges));
+            }
+        }
+        self
+    }
+
+    /// The plates behind inline code: one per line a span is on, a little
+    /// taller than the letters and centred on the line. A plate takes in
+    /// the nearer of the two spaces set at each end of the span (`CODE_PAD`).
+    /// Painted before the text. (Emaki addition.)
+    fn paint_code_chips(&self, text_layout: &TextLayout, bounds: &Bounds<Pixels>, window: &mut Window) {
+        use crate::text::style::CODE_PAD;
+        let Some(((fill, border), ranges)) = &self.chip else {
+            return;
+        };
+        let line_height = text_layout.line_height();
+        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+        let height = (font_size * 1.35).min(line_height);
+        let inset = (line_height - height).half();
+        let pad_len = CODE_PAD.len_utf8();
+        for range in ranges {
+            let mut start = range.start;
+            let mut end = range.end.min(self.text.len());
+            if self.text.get(..start).is_some_and(|t| t.ends_with(CODE_PAD)) {
+                start -= pad_len;
+            }
+            if self.text.get(end..).is_some_and(|t| t.starts_with(CODE_PAD)) {
+                end += pad_len;
+            }
+            let Some(span) = self.text.get(start..end) else {
+                continue;
+            };
+            // One box per line, and whether a letter of the code is on it:
+            // a line holding only the padding space gets no plate.
+            let mut lines: Vec<(Bounds<Pixels>, bool)> = Vec::new();
+            let mut offset = start;
+            for c in span.chars() {
+                let next_offset = offset + c.len_utf8();
+                let (Some(pos), Some(next_pos)) = (
+                    text_layout.position_for_index(offset),
+                    text_layout.position_for_index(next_offset),
+                ) else {
+                    offset = next_offset;
+                    continue;
+                };
+                // An index at a wrap is reported at the end of the line
+                // above, so the first letter of a wrapped line is found by
+                // where the next index is: it runs from the line's start.
+                let (left, top) = if next_pos.y == pos.y { (pos.x, pos.y) } else { (bounds.left(), next_pos.y) };
+                let letter = Bounds::from_corners(
+                    point(left, top + inset),
+                    point(next_pos.x, top + inset + height),
+                );
+                let is_code = c != CODE_PAD;
+                match lines.last_mut() {
+                    Some((line, any)) if line.origin.y == letter.origin.y => {
+                        *line = line.union(&letter);
+                        *any |= is_code;
+                    }
+                    _ => lines.push((letter, is_code)),
+                }
+                offset = next_offset;
+            }
+            for (line, any) in lines {
+                if !any {
+                    continue;
+                }
+                // A hair wider than the padding space, out of the margin.
+                let plate = Bounds::from_corners(
+                    point(line.left() - px(1.), line.top()),
+                    point(line.right() + px(1.), line.bottom()),
+                );
+                window.paint_quad(quad(
+                    plate,
+                    px(6.),
+                    *fill,
+                    px(0.5),
+                    *border,
+                    BorderStyle::default(),
+                ));
+            }
+        }
     }
 
     /// Get link at given mouse position.
@@ -434,6 +527,7 @@ impl Element for Inline {
         };
 
         let text_layout = self.styled_text.layout().clone();
+        self.paint_code_chips(&text_layout, &bounds, window);
         self.styled_text
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 

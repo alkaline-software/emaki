@@ -81,6 +81,9 @@ fn builder_makes_rounds_and_closes_tool_calls() {
     let r = &s.rounds[0];
     assert_eq!(r.prompt, "fix the bug");
     assert_eq!(r.tool_count(), 1);
+    // The reply to copy is the text on both sides of the tool call.
+    assert_eq!(r.reply_markdown(), "Looking.\n\nDone.");
+    assert_eq!(s.rounds[1].reply_markdown(), "");
     let call = r.tool_calls().next().unwrap();
     assert_eq!(call.status, CallStatus::Ok);
     assert_eq!(call.stdout, "a\nb\n");

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{App, FontWeight, HighlightStyle, Pixels, Rems, SharedString, StyleRefinement, px, rems};
+use gpui::{App, FontWeight, HighlightStyle, Hsla, Pixels, Rems, SharedString, StyleRefinement, px, rems};
 
 use crate::{ActiveTheme as _, highlighter::HighlightTheme};
 
@@ -43,11 +43,24 @@ pub struct TextViewStyle {
     /// The font family for inline code spans; `None` keeps the paragraph's.
     /// (Emaki: added so inline code can be set in the mono face.)
     pub inline_code_font_family: Option<SharedString>,
+    /// A rounded plate behind inline code, as (fill, border); with it the
+    /// flat background [`Self::inline_code`] falls back to is not drawn.
+    /// (Emaki addition: a highlight's background is a square-cornered box
+    /// the full height of the line.)
+    pub inline_code_chip: Option<(Hsla, Hsla)>,
     /// The weight strong (bold) text is drawn at; `None` is [`FontWeight::BOLD`].
     /// (Emaki: added so strong text can be a semibold, as the Claude app sets it.)
     pub strong_font_weight: Option<FontWeight>,
     pub is_dark: bool,
 }
+
+/// The space set around an inline code span, twice at each end: the inner
+/// one is the padding of the plate drawn behind the span, the outer one
+/// the plate's margin. A text run has no padding of its own. It is the
+/// narrow no-break space because gpui's line wrapper treats that as part
+/// of a word, so the spaces stay with the span at a line's end; a
+/// breaking space left the next line starting with a gap. (Emaki addition.)
+pub(crate) const CODE_PAD: char = '\u{202F}';
 
 impl PartialEq for TextViewStyle {
     fn eq(&self, other: &Self) -> bool {
@@ -67,6 +80,7 @@ impl PartialEq for TextViewStyle {
             && self.table_cell == other.table_cell
             && self.inline_code == other.inline_code
             && self.inline_code_font_family == other.inline_code_font_family
+            && self.inline_code_chip == other.inline_code_chip
             && self.strong_font_weight == other.strong_font_weight
             && self.is_dark == other.is_dark
     }
@@ -84,6 +98,7 @@ impl Default for TextViewStyle {
             table_cell: StyleRefinement::default(),
             inline_code: HighlightStyle::default(),
             inline_code_font_family: None,
+            inline_code_chip: None,
             strong_font_weight: None,
             is_dark: false,
         }
@@ -153,7 +168,8 @@ impl TextViewStyle {
     /// fallback `background_color` to `cx.theme().accent`, if it is `None`.
     pub(crate) fn inline_code_highlight(&self, cx: &App) -> HighlightStyle {
         let mut style = self.inline_code;
-        if style.background_color.is_none() {
+        // The plate replaces the flat background. (Emaki addition.)
+        if style.background_color.is_none() && self.inline_code_chip.is_none() {
             style.background_color = Some(cx.theme().accent);
         }
         style
