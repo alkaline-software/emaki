@@ -1,6 +1,6 @@
 //! Small text helpers for the window.
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Datelike, Local, Utc};
 
 pub fn now_secs() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
@@ -41,12 +41,23 @@ pub fn elapsed_since(ts: &str, now: f64) -> String {
     format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
 }
 
-pub fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
 pub fn clock(ts: &str) -> String {
     emaki_core::render_md::fmt_time(ts).chars().take(5).collect()
+}
+
+/// When a prompt was sent: "19:39" today, "Oct 2, 19:39" on another day,
+/// with the year once it is not this one.
+pub fn stamp(ts: &str) -> String {
+    let Some(dt) = emaki_core::build::parse_ts(ts).map(|d| d.with_timezone(&Local)) else { return String::new() };
+    let today = Local::now().date_naive();
+    let form = if dt.date_naive() == today {
+        "%H:%M"
+    } else if dt.year() == today.year() {
+        "%b %-d, %H:%M"
+    } else {
+        "%b %-d %Y, %H:%M"
+    };
+    dt.format(form).to_string()
 }
 
 pub fn day(ts: &str) -> String {

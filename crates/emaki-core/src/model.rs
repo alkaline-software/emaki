@@ -344,6 +344,14 @@ impl Round {
         self.items.iter().any(|i| matches!(i, Item::Text { .. }))
     }
 
+    /// What the agent said this round, as the markdown it wrote: every text
+    /// item in order with a blank line between, tool calls and thoughts
+    /// left out. It is what the window's copy button puts on the clipboard.
+    pub fn reply_markdown(&self) -> String {
+        let texts: Vec<&str> = self.items.iter().filter_map(|i| if let Item::Text { md, .. } = i { Some(md.trim()) } else { None }).filter(|m| !m.is_empty()).collect();
+        texts.join("\n\n")
+    }
+
     pub(crate) fn add_model_usage(&mut self, model: &str, total: u64) {
         add_model_usage(&mut self.usage_by_model, model, total)
     }

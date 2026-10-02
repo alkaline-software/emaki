@@ -196,10 +196,16 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             );
         }
         Node::InlineCode(val) => {
-            text = val.value.clone();
-            paragraph.push(
-                InlineNode::new(&text).marks(vec![(0..text.len(), TextMark::default().code())]),
-            );
+            // The span is set between spaces of its own, two at each end:
+            // padding and margin for the plate drawn behind it (see
+            // `CODE_PAD`). They are taken out again when a selection is
+            // copied. The parser runs before the view's style is known, so
+            // this does not depend on the plate being asked for.
+            // (Emaki addition.)
+            use crate::text::style::CODE_PAD;
+            let lead = CODE_PAD.len_utf8() * 2;
+            text = format!("{CODE_PAD}{CODE_PAD}{}{CODE_PAD}{CODE_PAD}", val.value);
+            paragraph.push(InlineNode::new(&text).marks(vec![(lead..text.len() - lead, TextMark::default().code())]));
         }
         Node::Link(val) => {
             let link_mark = Some(LinkMark {

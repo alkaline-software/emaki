@@ -74,9 +74,15 @@ pub fn install(accent_key: &str, cx: &mut App) {
         }
     };
     let a = accent(accent_key);
+    let code = crate::fonts::code_family(cx);
     let theme = Theme::global_mut(cx);
     for mut cfg in set.themes {
         paint(&mut cfg, a);
+        // The face for code goes into the config, so `Theme::change` keeps
+        // it through every appearance switch, as it does the accent.
+        if code.is_some() {
+            cfg.mono_font_family = code.clone();
+        }
         let cfg = std::rc::Rc::new(cfg);
         if cfg.mode.is_dark() {
             theme.dark_theme = cfg;

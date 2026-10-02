@@ -38,6 +38,21 @@ upstream revision finds them.
    `FADE_OUT_DURATION` 1.5 (upstream 2.0 and 3.0), so the scrollbar goes a
    second after the last scroll instead of two.
 
+6. `crates/ui/src/text/style.rs`, `inline.rs`, `node.rs`,
+   `format/markdown.rs`, `text_view.rs`: the rounded plate behind inline
+   code. `TextViewStyle::inline_code_chip: Option<(Hsla, Hsla)>` is its
+   fill and border; with it set, `inline_code_highlight` leaves the flat
+   background off, `Paragraph::render` hands the code ranges to
+   `Inline::with_chip`, and `Inline::paint_code_chips` paints one rounded
+   quad per line of each span before the text, 1.35 times the font size
+   tall and centred on the line. A text run has no padding, so the
+   markdown parser sets every inline code span between two `CODE_PAD`
+   characters (U+202F) at each end, outside the code mark: the plate takes
+   in the nearer one as its padding and the farther one is its margin.
+   The parser runs before the view's style is known, so the spaces are
+   set whether or not a plate is asked for. The view's Copy action takes
+   each pair out of the copied text again.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

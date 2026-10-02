@@ -3,6 +3,38 @@
 Each release has a section here, and `release.yml` puts that section on the
 GitHub Release as its notes. Write it for the person installing the app.
 
+## v0.1.3
+
+- **Three buttons at the top right take a session somewhere else.** The
+  terminal button moved from the top left to sit with the other two: open
+  the session in your terminal, open its project folder, show its
+  transcript file. The project folder button is new.
+- **Under the tabs, the session's folder and nothing else.** The long
+  grey line of branch, rounds, tool calls, tokens, model and id is gone.
+  In its place is a band with the folder's full path, its own name
+  picked out, and a click on it opens the folder.
+- **The app's icon and name in the sidebar.** Emaki's icon and its name
+  have a row of their own above "New session", where a plain asterisk
+  and a small name sat beside the window buttons.
+- **A copy button on every prompt and reply.** Hover a prompt or a reply
+  and a copy button appears under it, with the time. It copies the
+  markdown as it was written: your words, or the whole reply without its
+  tool calls.
+- **Only the time under a prompt, and only on hover.** The line that read
+  "You · Emaki 19:39 · 41.7s · 4 tool calls · 19.7k tokens" under every
+  prompt is now the time alone, shown with the copy button.
+- **Inline code looks like the Claude app's.** `Inline code` is drawn in
+  your accent colour on a rounded plate tinted with it, with room around
+  the letters, and it follows the accent you pick in settings.
+- **Code is set in the Claude app's face.** On a Mac, code is drawn in SF
+  Mono, the system's monospaced face, where it was Menlo. The Claude app
+  itself uses Anthropic Mono, a font it downloads as it runs; Emaki does
+  not ship it, and uses it when you have put it in `~/.emaki/fonts`.
+- **A tool card names its tool once.** The label at the left of a card
+  now says the tool itself (`bash`, `read`, `write`), followed by the
+  command or the file. It used to say "run Bash", "read Read", "write
+  Write".
+
 ## v0.1.2
 
 - **The status line is Emaki's own.** The five-hour and seven-day limits

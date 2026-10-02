@@ -36,7 +36,7 @@ use emaki_core::model::{AgentId, Item, Session};
 use emaki_core::search::Results;
 use emaki_core::transcript::SessionRef;
 
-use crate::format::{clock, day, elapsed_since, now_secs, plural, relative, short_id};
+use crate::format::{clock, day, elapsed_since, now_secs, plural, relative};
 use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
@@ -129,6 +129,9 @@ pub enum Pane {
 /// A wheel event this long after the previous one begins a new gesture: a
 /// mouse wheel sends no phases, and momentum comes at frame rate.
 const SCROLL_GAP: Duration = Duration::from_millis(150);
+
+/// Why neither the terminal nor the project folder button can do anything.
+const FOLDER_GONE: &str = "The session's folder is gone";
 
 /// How long a notice stays under the composer.
 pub const NOTICE_SECS: f64 = 8.0;
@@ -419,6 +422,9 @@ pub struct Workbench {
     /// after `NOTICE_SECS`; the row's space stays, so nothing moves when it
     /// comes and goes.
     pub notice: Option<Notice>,
+    /// The copy button that has just copied, by its id, so it can show a
+    /// tick for a moment.
+    pub copied: Option<SharedString>,
     pub now: f64,
     /// Who to greet on the home page.
     pub user_name: String,
@@ -668,6 +674,7 @@ impl Workbench {
             drivers: HashMap::new(),
             explanations: HashMap::new(),
             explaining: HashSet::new(),
+            copied: None,
             new_cwd: String::new(),
             new_id: String::new(),
             next_mode,
@@ -1643,7 +1650,7 @@ impl Workbench {
         } else {
             format!("{} of {}", self.find_at + 1, n)
         };
-        h_flex().w_full().justify_center().px(px(24.)).pb(px(8.)).child(
+        h_flex().w_full().justify_center().px(px(24.)).py(px(8.)).child(
             h_flex()
                 .id("find-bar")
                 .key_context(FIND_CONTEXT)
@@ -1730,8 +1737,8 @@ impl Workbench {
         if r.archived {
             return Err("Kept only: the agent no longer has this transcript");
         }
-        if r.cwd.is_empty() || !std::path::Path::new(&r.cwd).is_dir() {
-            return Err("The session's folder is gone");
+        if !Self::folder_exists(r) {
+            return Err(FOLDER_GONE);
         }
         if let Some(v) = self.drivers.get(&r.session_id) {
             if v.starting || v.state == "running" {
@@ -1744,8 +1751,8 @@ impl Workbench {
         Ok(())
     }
 
-    /// The button at the top left: continue the session showing in the
-    /// person's own terminal, with the agent's resume command. See
+    /// The first of the three buttons at the top right: continue the session
+    /// showing in the person's own terminal, with the agent's resume command. See
     /// `emaki_core::terminal` and `sys::open_in_terminal`.
     pub fn open_in_terminal(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
@@ -1763,6 +1770,40 @@ impl Workbench {
             Err(e) => Notice::error(format!("could not open a terminal: {e}")),
         });
         cx.notify();
+    }
+
+    /// Put `text` on the clipboard, and have the button `key` show a tick
+    /// for a moment.
+    pub fn copy_text(&mut self, key: SharedString, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied = Some(key.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied.as_ref() == Some(&key) {
+                    this.copied = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn folder_exists(r: &SessionRef) -> bool {
+        !r.cwd.is_empty() && std::path::Path::new(&r.cwd).is_dir()
+    }
+
+    /// The second button at the top right: the folder the session ran in,
+    /// opened in the file manager.
+    pub fn open_project_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.selected_ref() else { return };
+        if !Self::folder_exists(r) {
+            self.notice = Some(Notice::error(FOLDER_GONE));
+            cx.notify();
+            return;
+        }
+        crate::sys::open_path(std::path::Path::new(&r.cwd));
     }
 
     /// Keep a scroll gesture's momentum in the pane it began in. macOS goes
@@ -2412,15 +2453,27 @@ impl Workbench {
         let page = self.page;
         let scope = self.scope.clone();
 
-        let header = h_flex()
-            .h(TITLEBAR_H)
-            .flex_shrink_0()
-            .pl(if cfg!(target_os = "macos") { TRAFFIC_W } else { px(16.) })
-            .pr(px(10.))
+        // The app's own icon, the one in the Dock, and its name in a light,
+        // elegant sans at regular weight (`fonts::wordmark_family`). The PNG keeps Apple's margin
+        // around the plate, so the box is larger than what shows. On macOS the pair has a row of
+        // its own under the traffic lights, in line with the entries below
+        // it; elsewhere nothing holds the corner, so it sits in the strip.
+        let mac = cfg!(target_os = "macos");
+        let brand = h_flex()
+            .h(px(36.))
+            .gap(px(5.))
             .items_center()
-            .gap(px(8.))
-            .child(mark_icon(px(16.), theme.primary))
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).font_family(SERIF).child("Emaki"))
+            .child(img("icon/app.png").size(px(30.)).flex_shrink_0())
+            .child(div().text_size(px(22.)).when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f)).child("Emaki"));
+
+        let mut header = h_flex().h(TITLEBAR_H).flex_shrink_0().pl(px(16.)).pr(px(10.)).items_center();
+        let mut top = v_flex().px(px(10.)).pt(px(2.)).gap(px(2.));
+        if mac {
+            top = top.child(brand.pl(px(7.)).mb(px(6.)));
+        } else {
+            header = header.child(brand);
+        }
+        let header = header
             .child(div().flex_1())
             .child(icon_button("sidebar-close", IconName::PanelLeftClose, "Hide sidebar (⌘⇧S)", cx, |this, _, cx| {
                 this.hide_sidebar();
@@ -2459,10 +2512,7 @@ impl Workbench {
         };
 
         let sessions_active = page == Page::Sessions;
-        let top = v_flex()
-            .px(px(10.))
-            .pt(px(2.))
-            .gap(px(2.))
+        let top = top
             .child(new_row)
             .child(nav("nav-board", IconName::LayoutDashboard, "Board", "⌘B", page == Page::Board, cx, Box::new(|this, _, cx| {
                 this.page = Page::Board;
@@ -2613,7 +2663,7 @@ impl Workbench {
     fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let centre = div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title).into_any_element();
-        self.render_topbar_with(centre, Vec::new(), right, cx)
+        self.render_topbar_with(centre, right, cx)
     }
 
     /// One tab per open session in the top strip: the agent's mark (turning
@@ -2679,10 +2729,10 @@ impl Workbench {
         row.into_any_element()
     }
 
-    /// `left` sits after the sidebar button (and the traffic lights when
-    /// the sidebar is hidden); `right` is the page's actions. Both ends
+    /// The left end holds the sidebar button (and the traffic lights) when
+    /// the sidebar is hidden; `right` is the page's actions. Both ends
     /// are at least 120px so the centre stays centred when they are short.
-    fn render_topbar_with(&self, centre: AnyElement, left: Vec<AnyElement>, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_topbar_with(&self, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
         let mut left_end = h_flex().min_w(px(120.)).flex_shrink_0().items_center().gap(px(4.));
         if !self.sidebar_open || self.narrow {
@@ -2698,7 +2748,7 @@ impl Workbench {
             .flex_shrink_0()
             .px(px(12.))
             .items_center()
-            .child(left_end.children(left))
+            .child(left_end)
             .child(centre)
             .child(h_flex().min_w(px(120.)).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
     }
@@ -2831,40 +2881,67 @@ impl Workbench {
         let session = detail.session.clone();
         let list = detail.list.clone();
         let entity = cx.entity().downgrade();
-        let tokens = emaki_core::render_md::human_tokens(session.usage.total());
 
         let mut right: Vec<AnyElement> = Vec::new();
         if r.archived {
             right.push(badge("kept", theme.muted, theme.muted_foreground).into_any_element());
         }
-        right.push(agent_badge(r.agent, &theme, self.is_working(&r), "top-glyph").into_any_element());
+        // The three places a session can be taken to, side by side: the
+        // terminal, the project's folder, the transcript on disk.
+        let terminal_tip = match self.terminal_check(&r) {
+            Ok(()) => "Open in your terminal",
+            Err(why) => why,
+        };
+        right.push(icon_button("terminal", Icon::default().path("icons/square-terminal.svg"), terminal_tip, cx, |this, _, cx| this.open_in_terminal(cx)).into_any_element());
+        let folder_tip = if Self::folder_exists(&r) { "Open the project folder" } else { FOLDER_GONE };
+        right.push(icon_button("project-folder", IconName::FolderOpen, folder_tip, cx, |this, _, cx| this.open_project_folder(cx)).into_any_element());
         right.push(
-            icon_button("reveal", IconName::FolderOpen, crate::sys::REVEAL_LABEL, cx, {
+            icon_button("reveal", Icon::default().path("icons/file-text.svg"), crate::sys::REVEAL_TRANSCRIPT_LABEL, cx, {
                 let p = r.path.clone();
                 move |_, _, _| crate::sys::reveal_path(&p)
             })
             .into_any_element(),
         );
-        let terminal_tip = match self.terminal_check(&r) {
-            Ok(()) => "Open in your terminal",
-            Err(why) => why,
-        };
-        let left = vec![icon_button("terminal", Icon::default().path("icons/square-terminal.svg"), terminal_tip, cx, |this, _, cx| this.open_in_terminal(cx)).into_any_element()];
         let tabs = self.render_tabs(cx);
-        let topbar = self.render_topbar_with(tabs, left, right, cx);
+        let topbar = self.render_topbar_with(tabs, right, cx);
 
-        let mut meta = vec![emaki_core::paths::tilde(&session.cwd)];
-        if !session.git_branch.is_empty() {
-            meta.push(format!("⎇ {}", session.git_branch));
-        }
-        meta.push(plural(session.rounds.len(), "round", "rounds"));
-        meta.push(plural(session.tool_count(), "tool call", "tool calls"));
-        meta.push(format!("{tokens} tokens"));
-        if let Some(m) = session.models.last() {
-            meta.push(m.clone());
-        }
-        meta.push(short_id(&session.id));
-        let meta_line = div().w_full().px(px(24.)).pb(px(4.)).text_center().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(meta.join("  ·  "));
+        // Under the tabs, where the session lives and nothing else: a band
+        // across the pane, as a file manager's path bar is, so it reads as
+        // part of the frame and not as a second tab under the first. The
+        // folder's parents are dimmed, its own name is in the foreground,
+        // and a click opens it, as the folder button above does. Rounds,
+        // tool calls, tokens, the model and the id used to follow the path
+        // on one long line nobody read.
+        let cwd = session.cwd.clone();
+        let name_len = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().len()).filter(|n| cwd.len() >= *n).unwrap_or(0);
+        let (parents, name) = cwd.split_at(cwd.len() - name_len);
+        let path_line = (!cwd.is_empty()).then(|| {
+            let hover_bg = theme.muted;
+            h_flex().w_full().h(px(30.)).px(px(24.)).justify_center().items_center().bg(theme.muted.opacity(0.45)).border_y_1().border_color(theme.border).child(
+                h_flex()
+                    .id("path-bar")
+                    .max_w_full()
+                    .min_w_0()
+                    .h(px(22.))
+                    .px(px(8.))
+                    .gap(px(6.))
+                    .items_center()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(px(11.))
+                    .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(folder_tip).build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_project_folder(cx)))
+                    .child(Icon::new(IconName::Folder).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(parents.to_string()))
+                            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(name.to_string())),
+                    ),
+            )
+        });
 
         let chat_font = crate::fonts::chat_family(&self.cfg.app.chat_font, cx);
         let transcript = div()
@@ -2908,7 +2985,7 @@ impl Workbench {
             .h_full()
             .bg(theme.background)
             .child(topbar)
-            .child(meta_line)
+            .children(path_line)
             .when(self.find_open, |d| d.child(self.render_find_bar(cx)))
             .child(transcript)
             .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).child(self.render_composer(cx)))
@@ -3764,7 +3841,7 @@ pub fn mark_icon(size: Pixels, color: Hsla) -> Icon {
 }
 
 /// Claude's own mark, the starburst, for the agent's glyph; Emaki's plain
-/// asterisk (`mark_icon`) stays on the wordmark and the greeting.
+/// asterisk (`mark_icon`) stays on the greeting.
 pub fn claude_icon(size: Pixels, color: Hsla) -> Icon {
     Icon::default().path("icons/claude.svg").with_size(size).text_color(color)
 }

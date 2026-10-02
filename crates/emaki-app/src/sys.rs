@@ -85,6 +85,15 @@ pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Show in folder"
 };
 
+/// The same action on the button that shows a session's transcript file.
+pub const REVEAL_TRANSCRIPT_LABEL: &str = if cfg!(target_os = "macos") {
+    "Reveal the transcript in Finder"
+} else if cfg!(target_os = "windows") {
+    "Show the transcript in Explorer"
+} else {
+    "Show the transcript in its folder"
+};
+
 /// The account's first name, else the login name, capitalised.
 pub fn user_first_name() -> String {
     let full = whoami::fallible::realname().unwrap_or_default();

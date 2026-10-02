@@ -356,7 +356,12 @@ impl Element for TextView {
             })
             .relative()
             .on_action(move |_: &crate::input::Copy, window, cx| {
+                // The pairs of spaces set around inline code for its plate
+                // are not part of the text; a single one is the writer's
+                // own and stays. (Emaki addition.)
+                let pad = crate::text::style::CODE_PAD;
                 let text = gpui_base::TextSelection::selected_text(window, cx)
+                    .replace(&format!("{pad}{pad}"), "")
                     .trim()
                     .to_string();
                 if text.is_empty() {

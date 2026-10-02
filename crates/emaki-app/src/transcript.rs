@@ -9,15 +9,15 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 use emaki_core::model::*;
-use emaki_core::render_md::{clip, code_block, command_text, human_duration, human_tokens, patch_stat, pretty_args, render_patch};
+use emaki_core::render_md::{clip, code_block, command_text, human_duration, patch_stat, pretty_args, render_patch};
 
-use crate::format::clock;
+use crate::format::stamp;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use std::collections::HashSet;
 
-use crate::workbench::{agent_color, agent_glyph, agent_icon, badge, file_icon, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W};
+use crate::workbench::{agent_color, agent_glyph, agent_icon, badge_str, file_icon, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W};
 
 const MAX_BODY: usize = 6000;
 /// An opened tool call shows at most this much before it scrolls inside
@@ -25,6 +25,9 @@ const MAX_BODY: usize = 6000;
 const MAX_BODY_H: Pixels = px(400.);
 /// How far a reply's right edge stays inside the prompts' right edge.
 const REPLY_INSET: Pixels = px(40.);
+/// The line under a prompt or a reply that shows on hover: the time and
+/// the copy button. It is always laid out at this height.
+const HOVER_ROW_H: Pixels = px(24.);
 
 /// Whether the markdown crate can parse `text` without panicking. Version
 /// 1.0.0, the one the toolkit's text view uses, aborts on some inputs
@@ -73,10 +76,15 @@ pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
                 paragraph_gap: rems(0.6),
                 highlight_theme: if dark { HighlightTheme::default_dark() } else { HighlightTheme::default_light() },
                 // As the Claude app sets them: strong text at 600, not the
-                // font's true Bold; inline code in the mono face. Both are
-                // Emaki's additions to the vendored toolkit.
+                // font's true Bold; inline code in the mono face. These and
+                // the plate are Emaki's additions to the vendored toolkit.
                 strong_font_weight: Some(FontWeight::SEMIBOLD),
-                inline_code_font_family: Some(theme.mono_font_family.clone()),
+                inline_code_font_family: Some(crate::fonts::inline_code_family(cx).unwrap_or_else(|| theme.mono_font_family.clone())),
+                // Inline code as the Claude app draws it, in the accent
+                // config asks for: the readable shade of it for the
+                // letters, a faint wash of it on a rounded plate behind.
+                inline_code: HighlightStyle { color: Some(theme.link), ..Default::default() },
+                inline_code_chip: Some((theme.primary.opacity(if dark { 0.16 } else { 0.10 }), theme.primary.opacity(if dark { 0.22 } else { 0.18 }))),
                 ..Default::default()
             }
             .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.))),
@@ -155,21 +163,13 @@ pub(crate) fn run_start(rnd: &Round, jx: usize) -> Option<usize> {
     (tools >= 3).then_some(start)
 }
 
-fn tool_kind_label(kind: ToolKind) -> &'static str {
-    match kind {
-        ToolKind::Bash => "run",
-        ToolKind::Edit => "edit",
-        ToolKind::Write => "write",
-        ToolKind::Read => "read",
-        ToolKind::Search => "search",
-        ToolKind::Web => "web",
-        ToolKind::Task => "agent",
-        ToolKind::Todo => "todo",
-        ToolKind::Ask => "ask",
-        ToolKind::Plan => "plan",
-        ToolKind::Mcp => "mcp",
-        ToolKind::Other => "tool",
-    }
+/// What a tool call's badge says: the tool's own name in lower case
+/// ("bash", "read", "write"), and for an MCP tool the last part of it
+/// ("mcp__server__navigate" is "navigate"). The badge is the only place
+/// the card names the tool; it used to say the kind ("run") beside the
+/// name ("Bash"), which for most tools said the same word twice.
+fn tool_label(name: &str) -> String {
+    name.rsplit("__").next().unwrap_or(name).to_lowercase()
 }
 
 impl Workbench {
@@ -189,25 +189,17 @@ impl Workbench {
         let body_px = self.cfg.app.chat_px();
         let prompt_mark = self.find_mark(ix, None);
 
+        // Under a prompt: when it was sent, and whose it was when it was
+        // not the person's own. The duration, the tool calls and the tokens
+        // used to follow; nobody read them there.
         let who = match rnd.source {
-            Source::Web => "You · Emaki",
-            Source::Peer => "Another session",
-            Source::System => "Session",
-            _ => "You",
+            Source::Peer => Some("Another session"),
+            Source::System => Some("Session"),
+            _ => None,
         };
-        let mut meta = vec![clock(&rnd.ts)];
-        if rnd.duration_ms > 0 {
-            meta.push(human_duration(rnd.duration_ms));
-        }
-        let tools = rnd.tool_count();
-        if tools > 0 {
-            meta.push(format!("{tools} tool call{}", if tools == 1 { "" } else { "s" }));
-        }
-        if rnd.usage.total() > 0 {
-            meta.push(format!("{} tokens", human_tokens(rnd.usage.total())));
-        }
+        let sent = stamp(&rnd.ts);
 
-        let mut column = v_flex().w_full().max_w(CONTENT_W).px(px(24.)).pt(px(20.)).pb(if is_last { px(28.) } else { px(6.) }).gap(px(12.));
+        let mut column = v_flex().w_full().max_w(CONTENT_W).px(px(24.)).pt(px(14.)).pb(if is_last { px(28.) } else { px(6.) }).gap(px(12.));
 
         // The prompt, as a bubble on the right: what was attached first
         // (pictures, then files), the words under them, the way a message
@@ -249,16 +241,29 @@ impl Workbench {
             if has_text {
                 bubble = bubble.child(md_view(format!("p-{ix}"), rnd.prompt.clone(), cx));
             }
+            // The time and the copy button show while the pointer is over
+            // the prompt's row, as in the Claude app. Their line is always
+            // laid out, so nothing moves when they appear.
+            let group = SharedString::from(format!("prompt-{ix}"));
+            let copy = has_text.then(|| self.copy_button(ix, false, cx));
             column = column.child(
-                v_flex()
-                    .w_full()
-                    .items_end()
-                    .gap(px(3.))
-                    .child(bubble)
-                    .child(h_flex().gap(px(8.)).pr(px(6.)).text_size(px(11.)).text_color(theme.muted_foreground).child(div().child(who)).child(div().child(meta.join(" · ")))),
+                v_flex().group(group.clone()).w_full().items_end().gap(px(2.)).child(bubble).child(
+                    h_flex()
+                        .h(HOVER_ROW_H)
+                        .gap(px(6.))
+                        .pr(px(2.))
+                        .items_center()
+                        .text_size(px(11.5))
+                        .text_color(theme.muted_foreground)
+                        .opacity(0.)
+                        .group_hover(group, |s| s.opacity(1.))
+                        .children(who.map(|w| div().child(w)))
+                        .child(div().child(sent))
+                        .children(copy),
+                ),
             );
         } else {
-            column = column.child(h_flex().gap(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).child(div().child(who)).child(div().child(meta.join(" · "))));
+            column = column.child(h_flex().gap(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).children(who.map(|w| div().child(w))).child(div().child(sent)));
         }
 
         // The agent's items, on the left. Consecutive tool calls (thoughts
@@ -289,15 +294,36 @@ impl Workbench {
         }
         if any {
             let mark_color = if session.agent == emaki_core::model::AgentId::ClaudeCode { theme.primary } else { theme.muted_foreground };
+            // The reply's copy button and the time of its last words, under
+            // its last line and shown while the pointer is over the reply.
+            // The button's icon lines up with the text.
+            let group = SharedString::from(format!("reply-{ix}"));
+            let said = rnd.items.iter().rev().find_map(|i| if let Item::Text { ts, .. } = i { Some(stamp(ts)) } else { None }).unwrap_or_default();
+            let copy = rnd.has_text().then(|| {
+                h_flex()
+                    .h(HOVER_ROW_H)
+                    .mt(px(-4.))
+                    .pl(px(17.))
+                    .gap(px(6.))
+                    .items_center()
+                    .text_size(px(11.5))
+                    .text_color(theme.muted_foreground)
+                    .opacity(0.)
+                    .group_hover(group.clone(), |s| s.opacity(1.))
+                    .child(self.copy_button(ix, true, cx))
+                    .child(div().child(said))
+            });
             column = column.child(
                 v_flex()
+                    .group(group)
                     .w_full()
                     .gap(px(8.))
                     .child(h_flex().gap(px(7.)).items_center().child(agent_icon(session.agent, px(15.), mark_color)).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
                     // The reply stops short of the column's right edge, where
                     // the prompt bubbles end: the two voices sit at different
                     // widths, as in the Claude app, and read apart at a glance.
-                    .child(div().w_full().pl(px(22.)).pr(REPLY_INSET).child(body)),
+                    .child(div().w_full().pl(px(22.)).pr(REPLY_INSET).child(body))
+                    .children(copy),
             );
         }
         // The list lays each item out on its own, so an auto margin has
@@ -306,9 +332,32 @@ impl Workbench {
         h_flex().w_full().justify_center().child(column).into_any_element()
     }
 
-    /// An item the find bar matched sits on a faint accent tint; the one the
-    /// bar is on now also carries an accent bar down its left edge. Nothing
-    /// is re-laid-out for it: the wrapper takes the item's own width.
+    /// The copy button under a prompt or a reply. It copies the markdown as
+    /// it was written, not the rendered text: the prompt's words, or every
+    /// text item of the reply (`Round::reply_markdown`), read out of the
+    /// session at the click. The icon is a tick for a moment afterwards.
+    fn copy_button(&self, ix: usize, reply: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let key = SharedString::from(format!("copy-{}-{ix}", if reply { "reply" } else { "prompt" }));
+        let done = self.copied.as_ref() == Some(&key);
+        let hover_bg = theme.muted;
+        div()
+            .id(key.clone())
+            .size(px(24.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover_bg))
+            .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let text = this.detail.as_ref().and_then(|d| d.session.rounds.get(ix)).map(|r| if reply { r.reply_markdown() } else { r.prompt.clone() }).unwrap_or_default();
+                this.copy_text(key.clone(), text, cx);
+            }))
+            .child(Icon::new(if done { IconName::Check } else { IconName::Copy }).with_size(px(14.)).text_color(theme.muted_foreground))
+    }
+
     /// An item the find bar matched wears the same accent ring a matched
     /// prompt does: a faint one for a hit, a full one for the hit the bar
     /// is on. One look for every kind of hit; no tints, no edge bars.
@@ -337,7 +386,7 @@ impl Workbench {
         let theme = cx.theme().clone();
         let rnd = &session.rounds[ix];
         let items = &rnd.items[start..end];
-        let mut kinds: Vec<(&'static str, usize)> = Vec::new();
+        let mut kinds: Vec<(String, usize)> = Vec::new();
         let mut total_ms = 0u64;
         let mut last_subject = String::new();
         let mut running = false;
@@ -347,7 +396,7 @@ impl Workbench {
             if let Item::Tool(c) = it {
                 count += 1;
                 total_ms += c.duration_ms;
-                let k = tool_kind_label(c.tool_kind);
+                let k = tool_label(&c.name);
                 match kinds.iter_mut().find(|(n, _)| *n == k) {
                     Some(e) => e.1 += 1,
                     None => kinds.push((k, 1)),
@@ -575,12 +624,11 @@ impl Workbench {
             CallStatus::NoResult => ("not run", theme.muted_foreground),
             CallStatus::Pending => ("running…", theme.primary),
         };
-        let kind_label = tool_kind_label(call.tool_kind);
+        let label = tool_label(&call.name);
         let stat = if call.tool_kind == ToolKind::Edit { patch_stat(&call.patch) } else { String::new() };
         let duration = if call.duration_ms > 1500 { human_duration(call.duration_ms) } else { String::new() };
         let has_body = self.tool_has_body(call);
         let subject = call.subject.clone();
-        let name = call.name.clone();
         let explanation = self.explanation_for(call);
         let explaining = self.explaining.contains(&call.id);
         let ex_open = self.detail.as_ref().map(|d| d.open_explanations.contains(&call.id)).unwrap_or(false);
@@ -639,8 +687,7 @@ impl Workbench {
                     cx.notify();
                 }))
                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(if has_body { theme.muted_foreground } else { theme.border }))
-                .child(badge(kind_label, theme.muted, theme.muted_foreground))
-                .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(name))
+                .child(div().flex_shrink_0().child(badge_str(label, theme.muted, theme.muted_foreground)))
                 .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(theme.muted_foreground).child(subject))
                 .when(!stat.is_empty(), |d| d.child(div().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(stat)))
                 .when(!status_text.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(status_color).child(status_text)))
@@ -877,8 +924,7 @@ impl Workbench {
                             .gap(px(6.))
                             .text_size(px(11.5))
                             .text_color(theme.muted_foreground)
-                            .child(badge(match c.tool_kind { ToolKind::Bash => "run", ToolKind::Edit => "edit", ToolKind::Write => "write", ToolKind::Read => "read", ToolKind::Search => "search", ToolKind::Web => "web", ToolKind::Task => "agent", _ => "tool" }, theme.muted, theme.muted_foreground))
-                            .child(div().child(c.name.clone()))
+                            .child(div().flex_shrink_0().child(badge_str(tool_label(&c.name), theme.muted, theme.muted_foreground)))
                             .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).child(c.subject.clone())),
                     );
                 }

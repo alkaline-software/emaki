@@ -89,6 +89,7 @@ scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
 scripts/release-notes.sh   one version's section of CHANGELOG.md, the release notes
 scripts/statusline.sh      Claude Code's status line, ours: prints the line, leaves the rate limits
+scripts/anthropic-mono.py  the Claude app's code font into ~/.emaki/fonts, plus its 0.9 copy for inline code
 WORKFLOW.md                how to cut a release, step by step
 CHANGELOG.md               one section per release; the release job reads it
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
@@ -129,7 +130,17 @@ the title from, cached on (size, mtime), so a rescan of every transcript on
 the machine costs nothing.
 
 **The rest of the window is laid out like the Claude desktop app.** One
-collapsible sidebar (⌘⇧S): the wordmark, an accent "New session" entry,
+collapsible sidebar (⌘⇧S): the app's icon and the wordmark (the Dock
+icon from `assets/icon/icon-128.png`, served as `icon/app.png`, beside
+"Emaki" at 22px, regular weight, in an elegant sans,
+`fonts::wordmark_family`: Optima, else Avenir Next, else Avenir, else the
+window's own face; on macOS the pair has a row of its own under the
+traffic lights, lined up with the entries below, and elsewhere it sits in
+the top strip. Tried and dropped on the way: the plain asterisk with a
+15px Georgia name, which did not stand out, a 20px bold italic Georgia,
+the window's sans at 17px semibold, clean and still too quiet, Didot Bold
+(the person wants a sans), and Avenir Next Bold, too thick),
+an accent "New session" entry,
 Board, Sessions and Search, then Agents (one row per agent with its count
 and a live dot, plus Kept only), Projects and Recents, and an account-style
 footer with the person's name and nothing else: no version, no status. The content pane has a 48px top strip
@@ -219,11 +230,62 @@ could be changed from outside; a fork on GitHub was the alternative and
 one repository was preferred. Every change is marked `(Emaki addition.)`
 in the source and listed in `vendor/gpui-component/UPSTREAM.md`, which
 also says how to move to a newer upstream revision: copy the crates over,
-re-apply the list, build. Five changes so far: the strong weight and the
+re-apply the list, build. Six changes so far: the strong weight and the
 inline-code family as `TextViewStyle` settings (`md_view` sets 600 and the
 theme's mono face, as the Claude app does), the input's Up on the first
-line going to the start of the text, Down on the last to the end, and the
-scrollbar fading a second after the last scroll instead of two.
+line going to the start of the text, Down on the last to the end, the
+scrollbar fading a second after the last scroll instead of two, and the
+rounded plate behind inline code.
+
+**Inline code is the accent on a wash of itself, as the Claude app draws
+it.** `md_view` sets the letters to `theme.link` (the accent's readable
+shade: darker on cream, lighter on charcoal) and `inline_code_chip` to
+`theme.primary` at 10% (16% dark) with a border at 18% (22% dark), so
+both follow the accent in `config.json`. The plate is the vendored
+toolkit's `Inline::paint_code_chips`: a text highlight's own background is
+a square box the full height of the line, so the plate is painted before
+the text instead, one rounded quad per line of each span, 1.35 times the
+font size tall. A text run has no padding either, so the vendored
+markdown parser sets each span between two narrow no-break spaces
+(U+202F) at each end: the plate takes in the nearer one as its padding,
+the farther one is its margin, and gpui's line wrapper counts that
+character as part of a word, so they stay with the span at a line's end
+(a breaking space left the next line starting with a gap). The view's
+Copy action takes the pairs out again; the copy buttons read the model
+and never see them. The Claude app sets inline code at 0.9em, and a gpui
+text run carries a face but no size, so the smaller size is a font of
+its own: `Inline Anthropic Mono`, the same font with a larger em
+(`fonts::inline_code_family`; without it inline code is the size of the
+paragraph). What still differs from the Claude app: the plate has about
+2px of margin where theirs has none, and a span that wraps gets a plate
+per line with no padding at the break.
+
+**Code is set in Anthropic Mono when the machine has it.** The Claude
+app's live stylesheet (fetched from `assets-proxy.anthropic.com`, not the
+copy inside the bundle, which only shows the fallbacks) declares
+`@font-face{font-family:anthropic-mono; src:url(….woff2)}` and
+`--font-mono: "anthropic-mono", ui-monospace, monospace`. The font is
+downloaded when the app runs; the bundle's `Resources/fonts` holds the
+serif and the sans and no mono, so there is no file to load it from the
+way those two are, and it is Anthropic's, not ours to ship.
+`fonts::install` therefore also registers whatever is in
+`~/.emaki/fonts`, and `fonts::code_family` takes the first family that
+starts with "Anthropic Mono" (the file calls itself "Anthropic Mono
+Web"), else on macOS `.AppleSystemUIFontMonospaced` (SF Mono, what
+`ui-monospace` is there), else the toolkit's own (Consolas, DejaVu Sans
+Mono). `look::install` writes it into both theme configs as
+`mono_font_family`, so it is every mono in the window: inline code, code
+blocks, tool subjects, the path band. `scripts/anthropic-mono.py` is how
+the files get into `~/.emaki/fonts`: given the roman and italic woff2 the
+stylesheet names, it unpacks each to TrueType and writes a second copy
+under the family `Inline Anthropic Mono` with the em enlarged by 1/0.9,
+which is the face inline code is drawn in. The URLs carry a content hash
+and change, so read them out of the
+stylesheet again. The official rule for inline code, for comparison, is
+`code:not(pre code)`: the mono face at `.9em`, `padding: .0625em .25em`,
+`border: .5px solid` at about 15%, `border-radius: .4em`, the text in
+the danger red on a 5% wash of the text colour. First guess, wrong: SF
+Mono, read from the stylesheet inside the app bundle.
 
 **The search database is `search.db`.** FTS5, one document per item (a
 prompt, a reply paragraph, a thought, a tool call): coarser and a hit in a
@@ -254,6 +316,27 @@ session on every frame and are re-measured as they render, so `set_detail`
 only tells the list about a change in count (append new rounds, reset on a
 rewrite), and toggling a tool, thought, run or thumbnail just notifies.
 
+**A prompt and a reply each show a copy button on hover.** Under a
+prompt's bubble, on the right: when it was sent (`format::stamp`, the
+clock today, the date with it on another day) and the button. Under a
+reply's last line, on the left: the button, then when its last words
+were written (the last text item's time). Both lines are gpui
+groups (`prompt-<ix>`, `reply-<ix>`) at opacity 0 until the pointer is
+over the prompt's row or anywhere in the reply, and both are always laid
+out at `HOVER_ROW_H`, so nothing moves when they appear and the list has
+nothing to re-measure. The button copies the markdown as written, not
+the rendered text: the prompt's words, or `Round::reply_markdown`, every
+text item of the round with a blank line between and tool calls and
+thoughts left out. The text is read out of the session at the click
+(`Workbench::copy_text`), and the icon is a tick for a second and a half.
+The line under a prompt used to read "You · Emaki 19:39 · 41.7s · 4 tool
+calls · 19.7k tokens" all the time; only the time is kept, and a prompt
+that was not the person's own still says whose ("Another session",
+"Session"). Probing note: a `mouseMoved` `CGEvent` sent with `postToPid`
+moves gpui's hover without moving the real pointer, so a hover state is
+one event and a window capture away; mouse-down and mouse-up sent the
+same way did not reach a click handler in a background window.
+
 **A Read opens on what came back.** Its subject names the file, and for a
 long time that was all a successful Read showed: the contents live on
 disk. That left a Read of a picture with a dimmed chevron and nothing to
@@ -266,13 +349,21 @@ first image) and drawn as a tile that opens the lightbox.
 
 **Runs of tool calls fold.** Three or more consecutive tool calls (thoughts
 between them included) draw as one row in `render_run`: the count, a tally
-by kind, the last subject, the total time, and the agent's turning mark with
+by tool, the last subject, the total time, and the agent's turning mark with
 "running…" while one is still going. Opening the row shows every call, each
 folding on its own. Fewer than three stay inline.
 
+**A tool card names its tool once.** The small badge at the left says the
+tool's own name in lower case (`tool_label`: "bash", "read", "write", and
+for an MCP tool the last part of its name), then comes the subject. The
+badge used to say the kind ("run", "read", "write") with the name in a
+larger face beside it ("Bash", "Read", "Write"), the same word twice for
+most tools. The run row's tally counts by the same label ("3 bash · 1
+write"), and a subagent's calls are drawn the same way.
+
 **The agent's mark moves while it works.** Claude's glyph is Claude's own
 starburst (`assets/icons/claude.svg`, the brand mark as simple-icons
-carries it; Emaki's plain asterisk `mark.svg` stays on the wordmark and
+carries it; Emaki's plain asterisk `mark.svg` stays on
 the greeting). `agent_glyph` turns it once every 2.8 s while it breathes
 twice a turn, to 82% of its size and 55% opacity, inside a fixed box so
 nothing around it moves; that is the Python viewer's `spark` animation,
@@ -522,7 +613,32 @@ session" and "archived 3 files" rewrote it after every turn of a live
 session, so the footer blinked with bookkeeping nobody acts on. Those
 counts are not shown now, and the two events that carried them are gone.
 
-**The button at the top left continues the session in your terminal.**
+**Three buttons at the top right take a session somewhere else.** In
+this order: the terminal (continue it there), the project folder (the
+session's `cwd`, opened in the file manager by
+`Workbench::open_project_folder`, refused with a notice when the folder is
+gone), and the transcript (the JSONL revealed in the file manager, under a
+file icon so it does not read as a second folder). The terminal button
+used to sit alone at the top left, with the reveal button and an agent
+badge at the top right; the split read as two unrelated things, so they
+are one group now and the left end holds only the sidebar button. The
+agent is named by its mark on the tab and its name over every reply.
+
+**Under the tabs is the session's folder, and nothing else.** A band
+across the content pane (`path_line` in `render_detail`): a faint
+background between two hairlines, as a file manager's path bar is, with
+the absolute path centred in it in the mono face behind a small folder
+icon, the parents dimmed and the folder's own name in the foreground. In
+a narrow window the parents are what truncates. Clicking the path opens
+the folder, the same `open_project_folder` the button above calls. Two
+earlier versions failed: a line of plain grey text reading "~/path ·
+⎇ main · 2 rounds · 22 tool calls · 200.9k tokens · model · id", too much
+to read, and then the path alone on a small rounded plate, which sat
+under the active tab's plate and read as two tabs stacked. The model and
+the context are under the composer, and the rest is in the rendered
+markdown.
+
+**The first of them continues the session in your terminal.**
 `terminal.rs` in the core writes `~/.emaki/run/terminal/<session>.command`:
 clear every `CLAUDE*` variable but `CLAUDE_CONFIG_DIR` (the same rule as
 `driver::child_env`, because a terminal app started from inside a Claude
@@ -594,7 +710,7 @@ hardened runtime, a disk image laid out by Finder over
 `scripts/dmg/background.png`, notarization and stapling. Until the signing
 secrets are in the repository, CI's Mac images are ad-hoc and the
 notarized ones are built here and uploaded over them after the release
-job. **WORKFLOW.md is the procedure**: the version bump (three files and
+job. **WORKFLOW.md is the procedure**: the version bump (`Cargo.toml` and
 `Cargo.lock`), the changelog, the tag, the Mac build and upload, redoing a
 release, enabling CI signing, the icon and the background. Three facts an
 agent needs even without opening it: only Finder writes a `.DS_Store`
