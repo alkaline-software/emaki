@@ -1,8 +1,0 @@
-{
-  "name": "emaki-icon",
-  "private": true,
-  "description": "Cuts the app icon out of logo.png. `npm install && node cut.js <out>`; scripts/make-icon.sh does the rest.",
-  "dependencies": {
-    "@napi-rs/canvas": "^0.1"
-  }
-}
