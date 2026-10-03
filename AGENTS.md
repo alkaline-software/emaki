@@ -92,6 +92,8 @@ scripts/statusline.sh      Claude Code's status line, ours: prints the line, lea
 scripts/anthropic-mono.py  the Claude app's code font into ~/.emaki/fonts, plus its 0.9 copy for inline code
 WORKFLOW.md                how to cut a release, step by step
 CHANGELOG.md               one section per release; the release job reads it
+STAGES.md                  the high-level plan: three stages, a page
+PLAN.md                    the detailed plan: tasks, decisions, what has landed
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
 .github/workflows/release.yml  installers on a v* tag, via cargo-packager
 ```
@@ -116,6 +118,14 @@ The last two exist for probing: a terminal without accessibility access
 cannot press ⌘F or ⌘, in the window from a script, so a screenshot of
 either state is one launch away. Point `EMAKI_HOME` at a scratch directory
 to run a second copy beside the installed app without sharing its state.
+
+**Each document has one job.** STAGES.md is where the app is going, in
+three stages, short enough to hand to someone outside the project; a
+change of direction goes there. PLAN.md is the detailed plan under it:
+phases, tasks with checkmarks, decisions and their dates. This file is
+how the code works and why. WORKFLOW.md is how to cut a release,
+CHANGELOG.md what each release changed for the person installing it, and
+README.md how to use the app and how it is built.
 
 **One Emaki at a time.** Before launching a build, quit the one running:
 `pkill -x Emaki` stops both a bare `target/debug/Emaki` and the installed
