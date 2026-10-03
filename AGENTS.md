@@ -107,7 +107,8 @@ EMAKI_TYPE=/co ./target/debug/Emaki                    # put that text in the co
 EMAKI_QUESTION=1 EMAKI_OPEN=<id> ./target/debug/Emaki  # hold a sample question on that session
 EMAKI_GO=terminal EMAKI_OPEN=<id> ./target/debug/Emaki  # press "go to the terminal" on it
 EMAKI_GO=type:/status EMAKI_OPEN=<id> ./target/debug/Emaki  # type that into its terminal and send
-EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # pick from a pill's list: effort:, model:, mode:
+EMAKI_GO=pill:mode EMAKI_OPEN=<id> ./target/debug/Emaki  # click a pill of a terminal session: pill:mode, pill:model, pill:effort
+EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value without the picker: effort:, model:
 EMAKI_KEYS=down,down,tab EMAKI_TYPE=/mod ./target/debug/Emaki  # press the slash list's keys (up, down, tab, esc)
 ```
 
@@ -579,51 +580,65 @@ effort and model check below, and six digits typed through it
 (`EMAKI_GO=type:123456`) arrived whole; the case it exists for, focus
 left in a file, was not reproduced from a script.
 
-**Mode, model and effort are three pills on every Claude conversation,
-and each opens its list.** A light grey pill with an icon in front
-(`icons/shield.svg`, `gauge.svg`, `box.svg`), darker under the pointer,
-darker again while pressed or open, no tooltip and no caret (`picker`;
-the toolkit draws a custom button colour at a fifth of its strength, so
-the resting grey is the muted ink thinned). On a driver session a pick
-is a control request. A terminal session takes nothing over its inbox
+**Mode, model and effort are three pills on every Claude conversation.**
+A light grey pill with an icon in front (`icons/shield.svg`, `gauge.svg`,
+`box.svg`), darker under the pointer, darker again while pressed or open,
+no tooltip and no caret (`composer_pill`; the toolkit draws a custom
+button colour at a fifth of its strength, so the resting grey is the
+muted ink thinned). On a driver session, and before a session exists,
+each opens its list (`picker`) and a pick is a control request. On a
+terminal session a pill is a button, and the choice is made in the
+terminal with Claude Code's own picker (`Workbench::pick_in_terminal`):
+the terminal comes to the front, the person chooses, and the window
+comes back by itself. A terminal session takes nothing over its inbox
 (it reads everything as prose, and a `control_request` frame sent to it
-is dropped without a reply, tried against 2.1.284), so a pick goes
-through the terminal as a slash command does: the model as `/model
-<name>` and the effort as `/effort <level>`, typed and sent
-(`run_in_terminal`), the window coming back when the transcript shows it
-ran. The mode has no such command. Only ⇧Tab changes it, stepping
-through an order that depends on what the session was started with, and
-nothing says where a press landed: the status line reruns on a mode
-change but is not handed the mode (read from a captured input, 2.1.288),
-and the transcript records it only with its next prompt row. Claude
-Code's key bindings offer `chat:cycleMode` and nothing that names a
-mode. Pressing ⇧Tab a counted number of times along that order was
-built twice and tried on a live session both times. One press worked
-(auto to default). A switch to auto did not: the first try, auto to plan
-and back, ended in plan; the second, with the terminal checked to be in
-front and all presses from one script at a steady pace, went default,
-accept edits, plan and then default again instead of auto. The 2.1.288
-binary steps from plan to bypass, auto or default by flags of the
-session (`isBypassPermissionsModeAvailable`, `isAutoModeAvailable` and a
-gate) that nothing outside it can read, so what follows plan cannot be
-known from here, and one of the candidates is bypass. It was taken out
-both times. `set_mode_in_terminal` sends plan mode as `/plan`, which is
-a command and always lands (its output, "Enabled plan mode", is what
-`turn_state` reads the mode from until the next prompt). For any other
-mode nothing is pressed: the row under the composer says to press ⇧Tab
-in the terminal until its footer names the mode, and `MODE_HINT_MS`
-later, once that has been read, the terminal comes to the front (the
-first version jumped at once, so the hint showed in a window the person
-had just left and the pick looked like it did nothing). Do not bring
-the counting back without something that reports the mode. What the
-pills show on a terminal session is the status line's
-word where it has one (`terminal_ctx`: model and effort, live, from
-`state/context/<session>.json`), else the transcript's. Checked on a
-session in Positron's terminal with `EMAKI_GO=effort:` and `model:`:
-effort medium, high, medium and model Opus, Sonnet, Opus, each confirmed
-by the status line's file. `/model` on a conversation with a warm cache
-asks "Switch model?" in the terminal before it switches, which is the
-person's to answer there; the window comes back once it has. Effort has no control request either
+is dropped without a reply, tried against 2.1.284), so there is no other
+way in. The model is a bare `/model` typed there, which opens the list,
+and the effort a bare `/effort`, which opens the slider. Done is the
+status line naming another model or effort (`state/context/<session>.json`,
+read once a second while the person is away, `watch_terminal`), or on an
+idle session the row the command leaves in the transcript, which a
+cancelled picker also writes ("Kept model as …"); nothing is written
+while the picker is open. `/model` on a warm cache asks "Switch model?"
+before it switches, and the window comes back after that answer. In
+both pickers Enter saves the choice as the default for new sessions and
+`s` keeps it to the session; that is Claude Code's and the person's to
+decide. The mode has no command and no picker. Only ⇧Tab changes it,
+stepping through an order that depends on flags of the session nothing
+outside it can read (`isBypassPermissionsModeAvailable`,
+`isAutoModeAvailable` and a gate), and Claude Code's key bindings offer
+`chat:cycleMode` and nothing that names a mode. So the pill takes the
+person to the terminal with the keyboard in it (`sys::enter_terminal`:
+for an IDE that is the command palette's "Terminal: Focus Terminal",
+since ⇧Tab in an editor outdents a line of a file) and they press the
+key. Every press reruns the status line (`permissionMode` is in the list
+of things it reruns on, though the mode is not in what it is handed), so
+the file's `seen_at` moves with each press, and done is
+`MODE_SETTLE_SECS` (2 s) without another. While the agent works the
+status line runs on its own, so a mode change is not watched for then and
+the person comes back by hand. What the pills show on a terminal session
+is the status line's word for the model and the effort (`terminal_ctx`),
+else the transcript's. The mode is read off the terminal's screen
+(`sys::terminal_text`: Terminal and iTerm2 by AppleScript, WezTerm and
+Kaku by `cli get-text`; `driver::mode_on_screen` finds "manual mode on",
+"plan mode on", "accept edits on" and the rest in the last three lines,
+the footer under the prompt) when the session is opened and whenever the
+window comes back, and kept in `mode_seen` until a turn starts, whose
+prompt row carries the mode. An IDE's terminal cannot be read, so after
+a change there the pill says "Mode" until the next turn rather than the
+transcript's old mode. Tried before and taken out: a list in the window
+for a terminal session, which for the model and the effort typed
+`/model <name>` and worked, and for the mode pressed ⇧Tab a counted
+number of times, which twice ended in the wrong mode on a live session
+(auto to plan and back ended in plan; default to auto passed plan and
+landed on default), and then only said which key to press. Do not bring
+the counting back: one of the modes after plan can be bypass. Checked on
+a session in Kaku with `EMAKI_GO=pill:mode`, `pill:model` and
+`pill:effort`: two ⇧Tabs and the window was back within three seconds
+with the pill on the footer's mode; a model picked with `s` and the
+"Switch model?" answered, back within a second; the slider moved and
+confirmed, the same. The IDE path of `enter_terminal` was not run.
+A driver has no control request for the effort
 (`set_effort` is "Unsupported"), but `/effort <level>` as a user turn runs
 as the local command it is, and Claude Code records it as a
 `system/local_command` row with `commandRun: {command: "effort", args}`,
@@ -733,7 +748,7 @@ history is the point of the app, so for a question's dialog, an
 approval, a slash command or the mode, Emaki brings that terminal to the
 front and comes back when it is done (`Workbench::go_to_terminal`). The
 button is wherever the need shows: on the waiting line under the
-conversation, on the slash-command card, on the read-only mode, model and
+conversation, on the slash-command card, on the mode, model and
 effort pills, and the top-right terminal button, which for a session
 already in a terminal goes there instead of refusing. `sys::focus_terminal`
 finds the app: the session's pid from the registry, then up the parent
@@ -953,7 +968,13 @@ One writer per transcript: `Workbench::terminal_check` refuses a session
 whose registry entry shows a terminal already (the tooltip says so), one
 kept only, one whose folder is gone, and one a driver of ours is
 mid-reply on; an idle driver is stopped on the way out, and once the
-terminal registers, the channel flips to `inbox` on its own. Checked by
+terminal registers, the channel flips to `inbox` on its own. "A terminal
+already" is `Workbench::in_terminal`, the inbox channel, not the registry
+alone: a driver's child registers an inbox too, and the button took a
+driven session for a terminal one, walked up from the child to find the
+terminal app, met Emaki itself and said "could not tell which app the
+terminal is" (an idle driven session was refused as "Already open in a
+terminal" for the same reason). Checked by
 hand against Kaku, which had claimed `.command` on this machine: the
 session resumed in the folder, the row went live, and the second click
 was refused.

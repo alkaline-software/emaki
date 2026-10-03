@@ -414,6 +414,20 @@ fn model_label_reads_ids_and_aliases() {
 }
 
 #[test]
+fn mode_on_screen_reads_the_footer_only() {
+    use emaki_core::driver::mode_on_screen;
+    // The foot of a terminal session as Kaku hands it over, 2.1.288.
+    let foot = |last: &str| format!("⏺ I left plan mode on for you.\n\n\n\n\n\n────\n❯ \n────\n  Context 0% | 5h: 14% (38m) | 7d: 49% (2d3h)\n  {last}\n\n");
+    assert_eq!(mode_on_screen(&foot("⏸ manual mode on · ← 1 agent")), Some("default"));
+    assert_eq!(mode_on_screen(&foot("⏵⏵ accept edits on (shift+tab to cycle)")), Some("acceptEdits"));
+    assert_eq!(mode_on_screen(&foot("⏸ plan mode on (shift+tab to cycle)")), Some("plan"));
+    assert_eq!(mode_on_screen(&foot("⏵⏵ auto mode on (shift+tab to cycle)")), Some("auto"));
+    // A dialog over the prompt: no footer, and the reply's words are not one.
+    assert_eq!(mode_on_screen(&foot("Esc to cancel")), None);
+    assert_eq!(mode_on_screen(""), None);
+}
+
+#[test]
 fn find_index_locates_prompts_items_and_subagents() {
     use emaki_core::find::{FindIndex, Hit};
     let rows = vec![
