@@ -415,7 +415,7 @@ pub fn pick_title(rows: &[Value]) -> String {
 
 pub fn first_prompt_title(rows: &[Value], limit: usize) -> String {
     for row in rows {
-        if str_of(row, "type") != "user" || bool_of(row, "isSidechain") {
+        if str_of(row, "type") != "user" || bool_of(row, "isSidechain") || crate::build::machine_authored(row) {
             continue;
         }
         let text = user_prompt_text(row);
@@ -462,7 +462,10 @@ pub fn image_block_bytes(path: &Path, uuid: &str, index: usize) -> Option<(Strin
         if row.get("uuid").and_then(|v| v.as_str()) != Some(uuid) {
             continue;
         }
-        let block = row.get("message")?.get("content")?.as_array()?.get(index)?;
+        // A message sent mid-turn is an attachment row with the blocks under
+        // `attachment.prompt`; see `build::queued_prompt`.
+        let content = row.get("message").and_then(|m| m.get("content")).or_else(|| row.get("attachment").and_then(|a| a.get("prompt")))?;
+        let block = content.as_array()?.get(index)?;
         let block = if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
             block.get("content")?.as_array()?.iter().find(|b| b.get("type").and_then(|v| v.as_str()) == Some("image"))?
         } else {

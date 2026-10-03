@@ -948,6 +948,46 @@ compaction rewrite in place. `TranscriptTail::restarted` signals it (the
 file identity, `transcript::file_id`, tells a rewrite from an append) and
 the reader drops its accumulated rows; without that the session doubles.
 
+**A slash command answers its own prompt.** `/compact` typed in the
+terminal is written as a user row saying `/compact`, then the rows the
+command leaves (`<command-name>` in a user row, or a
+`system/local_command` row with `commandRun`), and no assistant row.
+`turn_state` would read the prompt as one waiting on a reply and the board
+would say working, with the clock running, until the next turn; so a
+prompt that is a slash command with a command row of the same name after
+it is skipped, and the state is the turn before it. A skill (`/review`)
+leaves no command row and is a prompt like any other. In the
+conversation the command's own chip is left out when the prompt above
+already says it, and `/compact`'s output line, "Compacted (ctrl+o to see
+full summary)", is the terminal's instruction and is dropped: the round
+reads as the prompt and the boundary's notice, nothing else.
+
+**A message sent mid-turn is never a user row.** Typed in the terminal
+or sent from the window while the agent is working, it is absorbed into
+the running turn (`queue-operation` `remove`, reason `absorbed_mid_turn`)
+and written as an `attachment` row of type `queued_command` with
+`commandMode: prompt`, the text or content blocks under `prompt`, and the
+`origin` a user row would carry. Seventeen such messages on this machine,
+none of them with a user row to match, so a transcript that ignored
+attachment rows lost every one. `build::queued_prompt` turns the row into
+the user row it stands for and `handle_user` opens a round for it in its
+place, with what the agent did next under it; `image_block_bytes` reads a
+pasted picture from `attachment.prompt` by the row's uuid. The
+`task-notification` rows in the same shape are the harness's and stay
+out. The turn state is untouched: the turn it cut into is still running.
+
+**The compaction summary is not a prompt.** After the boundary, Claude
+Code writes the summary it hands the model as a `user` row flagged
+`isCompactSummary` (and `isVisibleInTranscriptOnly`: its own view hides
+it too). It opened a round of the person's, "This session is being
+continued…", and left the board working. `build::machine_authored` says
+which user rows are Claude Code's own (that one, and `isMeta` without a
+peer origin), and `turn_state`, `handle_user` and `first_prompt_title`
+all skip them. The boundary row's `compactMetadata.postTokens` becomes
+`context_tokens` at that point, so the row under the composer drops to
+the summary's size the moment compaction lands instead of holding the
+old figure until the next assistant row.
+
 **Cache-read tokens are not a total.** Every assistant message re-reads the
 whole cached prefix. `Usage::total` deliberately excludes `cache_read`.
 
