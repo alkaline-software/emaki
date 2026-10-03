@@ -228,7 +228,20 @@ fn main() {
                 match rx.recv_timeout(std::time::Duration::from_secs(180)) {
                     Ok(emaki_core::driver::Event::Permission(p)) => {
                         println!("permission: {} {}", p.tool_name, serde_json::to_string(&p.input).unwrap());
-                        d.answer_permission(&p.request_id, true, "");
+                        if p.is_question() {
+                            // Answer every question with its first option, so the
+                            // wire for answers can be checked from a terminal.
+                            let mut answers = serde_json::Map::new();
+                            for q in emaki_core::model::questions_of(&p.input) {
+                                if let Some((label, _)) = q.options.first() {
+                                    answers.insert(q.question.clone(), serde_json::Value::String(label.clone()));
+                                }
+                            }
+                            println!("answering: {}", serde_json::to_string(&answers).unwrap());
+                            d.answer_question(&p.request_id, answers);
+                        } else {
+                            d.answer_permission(&p.request_id, true, "");
+                        }
                     }
                     Ok(emaki_core::driver::Event::Result(r)) => {
                         println!("result: {} error={} {}ms ${:.4}", r.subtype, r.is_error, r.duration_ms, r.cost_usd);

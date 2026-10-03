@@ -5,6 +5,380 @@
 
 use std::path::Path;
 
+/// Bring the terminal a session runs in to the front: the application
+/// that owns the process `pid`, found by walking up its parents until one
+/// is an application the system knows (the terminal app, or an IDE with a
+/// terminal inside it), and within it, where the app can be asked, the
+/// tab or pane whose tty the process is on. Returns the app's name. There
+/// is no general way to put the pane itself in front: Terminal and iTerm2
+/// take an AppleScript keyed on the tty, WezTerm (and Kaku, built on it)
+/// a `cli activate-pane` keyed on the same, and anything else is brought
+/// forward as an app and left as it was.
+#[cfg(target_os = "macos")]
+pub fn focus_terminal(pid: i32) -> Result<String, String> {
+    let host = host_of(pid)?;
+    host.focus();
+    Ok(host.name)
+}
+
+/// Type `text` into the terminal a session runs in and send it, as the
+/// person would: the slash command Claude Code only takes at its own
+/// prompt. Terminal (`do script`), iTerm2 (`write text`) and WezTerm or
+/// Kaku (`cli send-text --no-paste`) take the text for the tab or pane on
+/// the process's tty. Any other host (an IDE's terminal, say) is typed
+/// into with System Events keystrokes, which needs Accessibility access
+/// for Emaki; without it the text is put on the clipboard and the error
+/// says so. Returns the host's name.
+#[cfg(target_os = "macos")]
+pub fn type_in_terminal(pid: i32, text: &str) -> Result<String, String> {
+    let host = host_of(pid)?;
+    host.focus();
+    let typed = match host.bundle.as_str() {
+        "com.apple.Terminal" => osascript(&format!(
+            r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{}" then do script "{}" in t
+    end repeat
+  end repeat
+end tell"#,
+            host.tty,
+            as_quoted(text)
+        )),
+        "com.googlecode.iterm2" => osascript(&format!(
+            r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{}" then write text "{}"
+      end repeat
+    end repeat
+  end repeat
+end tell"#,
+            host.tty,
+            as_quoted(text)
+        )),
+        _ => match host.wezterm_pane() {
+            Some((exe, pane)) => std::process::Command::new(exe)
+                .args(["cli", "send-text", "--no-paste", "--pane-id", &pane.to_string(), &format!("{text}\r")])
+                .output()
+                .map_err(|e| e.to_string())
+                .and_then(|o| if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).to_string()) }),
+            None => {
+                // The app has to be in front before the keys arrive, and
+                // its terminal panel under them.
+                host.wait_front()
+                    .and_then(|_| host.focus_ide_terminal())
+                    .and_then(|_| osascript(&format!(r#"tell application "System Events" to keystroke "{}""#, as_quoted(text))))
+                    .and_then(|_| osascript(r#"tell application "System Events" to key code 36"#))
+            }
+        },
+    };
+    match typed {
+        Ok(()) => Ok(host.name),
+        Err(e) => {
+            // Second best: the text is one ⌘V away.
+            let _ = std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn().and_then(|mut c| {
+                use std::io::Write;
+                if let Some(mut i) = c.stdin.take() {
+                    let _ = i.write_all(text.as_bytes());
+                }
+                c.wait()
+            });
+            if e.contains("assistive access") || e.contains("not allowed") {
+                Err(format!("{text} is on your clipboard: paste it in {}, or give Emaki Accessibility access in System Settings › Privacy & Security so it can type there", host.name))
+            } else {
+                Err(format!("could not type in {}: {e}. {text} is on your clipboard", host.name))
+            }
+        }
+    }
+}
+
+/// A key Claude Code's terminal takes that is not text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalKey {
+    /// Stops the running turn.
+    Escape,
+}
+
+/// Press `key` in the terminal a session runs in. WezTerm and Kaku take
+/// it for the pane and iTerm2 for the session, without coming to the
+/// front; Terminal and any other host have to be in front for System
+/// Events to press it (checked, `Host::wait_front`, and an IDE with its
+/// terminal panel focused first, `Host::focus_ide_terminal`), which
+/// needs Accessibility access for Emaki, and the front is given back to
+/// Emaki after, since nothing there needs reading. Returns the host's
+/// name.
+#[cfg(target_os = "macos")]
+pub fn key_in_terminal(pid: i32, key: TerminalKey) -> Result<String, String> {
+    let host = host_of(pid)?;
+    // What the key is on the wire, as iTerm2 is told it, and as System
+    // Events presses it.
+    let (bytes, iterm, events, name) = match key {
+        TerminalKey::Escape => ("\x1b", "(ASCII character 27)", "key code 53", "Escape"),
+    };
+    let pressed = if host.bundle == "com.googlecode.iterm2" {
+        osascript(&format!(
+            r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{}" then tell s to write text {} newline NO
+      end repeat
+    end repeat
+  end repeat
+end tell"#,
+            host.tty, iterm
+        ))
+    } else if let Some((exe, pane)) = host.wezterm_pane() {
+        std::process::Command::new(exe)
+            .args(["cli", "send-text", "--no-paste", "--pane-id", &pane.to_string(), bytes])
+            .output()
+            .map_err(|e| e.to_string())
+            .and_then(|o| if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).to_string()) })
+    } else {
+        host.focus();
+        let pressed = host
+            .wait_front()
+            .and_then(|_| host.focus_ide_terminal())
+            .and_then(|_| osascript(&format!(r#"tell application "System Events" to {events}"#)));
+        if pressed.is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            activate_self();
+        }
+        pressed
+    };
+    match pressed {
+        Ok(()) => Ok(host.name),
+        Err(e) if e.contains("assistive access") || e.contains("not allowed") => {
+            Err(format!("press {name} in {}, or give Emaki Accessibility access in System Settings › Privacy & Security so it can", host.name))
+        }
+        Err(e) => Err(format!("could not press {name} from here: {e}. Press it in {}", host.name)),
+    }
+}
+
+/// Bring this app back to the front.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn activate_self() {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+    NSRunningApplication::currentApplication().activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn key_in_terminal(_pid: i32, _key: TerminalKey) -> Result<String, String> {
+    Err("reaching the terminal's keys from here is not done on this platform yet: press it in the terminal".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn focus_terminal(_pid: i32) -> Result<String, String> {
+    Err("finding the terminal's window is not done on this platform yet".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn type_in_terminal(_pid: i32, _text: &str) -> Result<String, String> {
+    Err("typing into the terminal is not done on this platform yet".into())
+}
+
+/// The application a session's process runs under, and the tty it is on.
+#[cfg(target_os = "macos")]
+struct Host {
+    app: objc2::rc::Retained<objc2_app_kit::NSRunningApplication>,
+    name: String,
+    bundle: String,
+    path: String,
+    tty: String,
+}
+
+#[cfg(target_os = "macos")]
+impl Host {
+    /// The tab or pane in front, where the app can be asked, then the app.
+    /// (The ignoring-other-apps flag is said to do nothing from macOS 14 on,
+    /// and the activation still lands; it stays for older systems.)
+    #[allow(deprecated)]
+    fn focus(&self) {
+        use objc2_app_kit::NSApplicationActivationOptions;
+        if !self.tty.is_empty() {
+            select_pane(&self.bundle, &self.path, &self.tty);
+        }
+        self.app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+    }
+
+    /// Wait until this app is the one in front, which is where System
+    /// Events sends keys. Asking an app to activate is a request the
+    /// system may be slow to grant or may refuse, and keys sent before
+    /// it lands go to whatever is in front instead: Emaki's own
+    /// composer, where ⇧Tab is bound to the mode. Nothing is pressed
+    /// unless the app answers as frontmost.
+    fn wait_front(&self) -> Result<(), String> {
+        let want = self.app.processIdentifier().to_string();
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let out = std::process::Command::new("osascript")
+                .args(["-e", r#"tell application "System Events" to get unix id of first process whose frontmost is true"#])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            }
+            if String::from_utf8_lossy(&out.stdout).trim() == want {
+                return Ok(());
+            }
+        }
+        Err(format!("{} did not come to the front", self.name))
+    }
+
+    /// An IDE built on VS Code (Positron, Cursor, VS Code itself) takes
+    /// keys wherever its focus was left: an editor, the file tree. The
+    /// app coming to the front does not move that, and keys meant for
+    /// Claude Code then land in a file. Its command palette can be asked
+    /// for "Terminal: Focus Terminal", which puts the focus in the
+    /// terminal panel whatever held it, and is the same from the panel
+    /// itself (the toggle on ⌃` would close the panel from there). The
+    /// app must already be in front. It focuses the terminal the IDE
+    /// has active, which with several open may not be this session's:
+    /// nothing outside the IDE can pick one by its tty. Anything that is
+    /// not such an IDE is left as it is.
+    fn focus_ide_terminal(&self) -> Result<(), String> {
+        if !std::path::Path::new(&self.path).join("Contents/Resources/app/product.json").exists() {
+            return Ok(());
+        }
+        osascript(
+            r#"tell application "System Events"
+  keystroke "p" using {command down, shift down}
+  delay 0.35
+  keystroke "Terminal: Focus Terminal"
+  delay 0.35
+  key code 36
+  delay 0.3
+end tell"#,
+        )
+    }
+
+    /// For WezTerm and Kaku: the CLI beside the gui binary and the pane on
+    /// our tty, from `cli list`.
+    fn wezterm_pane(&self) -> Option<(std::path::PathBuf, u64)> {
+        for cli in ["kaku", "wezterm"] {
+            let exe = std::path::Path::new(&self.path).join("Contents/MacOS").join(cli);
+            if !exe.exists() {
+                continue;
+            }
+            let out = std::process::Command::new(&exe).args(["cli", "list", "--format", "json"]).output().ok()?;
+            let panes: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).ok()?;
+            let pane = panes.iter().find(|p| p.get("tty_name").and_then(|v| v.as_str()) == Some(self.tty.as_str()))?;
+            return pane.get("pane_id").and_then(|v| v.as_u64()).map(|id| (exe, id));
+        }
+        None
+    }
+}
+
+/// Walk up from `pid` to the application the system knows: the terminal
+/// app, or the IDE holding a terminal.
+#[cfg(target_os = "macos")]
+fn host_of(pid: i32) -> Result<Host, String> {
+    use objc2_app_kit::NSRunningApplication;
+    let tty = ps(pid, "tty").map(|t| format!("/dev/{t}")).unwrap_or_default();
+    let mut p = pid;
+    for _ in 0..12 {
+        if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(p) {
+            if let Some(bundle) = app.bundleIdentifier().map(|b| b.to_string()) {
+                let name = app.localizedName().map(|n| n.to_string()).unwrap_or_else(|| "the terminal".into());
+                let path = app.bundleURL().and_then(|u| u.path().map(|p| p.to_string())).unwrap_or_default();
+                return Ok(Host { app, name, bundle, path, tty });
+            }
+        }
+        match ps(p, "ppid").and_then(|v| v.parse::<i32>().ok()) {
+            Some(pp) if pp > 1 => p = pp,
+            _ => break,
+        }
+    }
+    Err("could not tell which app the terminal is".into())
+}
+
+#[cfg(target_os = "macos")]
+fn osascript(script: &str) -> Result<(), String> {
+    let out = std::process::Command::new("osascript").arg("-e").arg(script).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// `text` inside an AppleScript string literal.
+#[cfg(target_os = "macos")]
+fn as_quoted(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// One column of `ps` for a process, trimmed.
+#[cfg(target_os = "macos")]
+fn ps(pid: i32, column: &str) -> Option<String> {
+    let out = std::process::Command::new("ps").args(["-o", &format!("{column}="), "-p", &pid.to_string()]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty() && s != "??").then_some(s)
+}
+
+/// Put the tab or pane on `tty` in front inside the terminal app, where
+/// the app can be asked. Best effort: a failure leaves the app to be
+/// activated as it is.
+#[cfg(target_os = "macos")]
+fn select_pane(bundle: &str, bundle_path: &str, tty: &str) {
+    let osascript = |script: String| {
+        let _ = osascript(&script);
+    };
+    match bundle {
+        "com.apple.Terminal" => osascript(format!(
+            r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{tty}" then
+        set selected tab of w to t
+        set index of w to 1
+      end if
+    end repeat
+  end repeat
+end tell"#
+        )),
+        "com.googlecode.iterm2" => osascript(format!(
+            r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{tty}" then
+          select s
+          select t
+          select w
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell"#
+        )),
+        _ => {
+            // WezTerm, and Kaku built on it: the CLI beside the gui binary
+            // lists every pane with its tty and can focus one.
+            for cli in ["kaku", "wezterm"] {
+                let exe = std::path::Path::new(bundle_path).join("Contents/MacOS").join(cli);
+                if !exe.exists() {
+                    continue;
+                }
+                let Ok(out) = std::process::Command::new(&exe).args(["cli", "list", "--format", "json"]).output() else { continue };
+                let Ok(panes) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else { continue };
+                if let Some(pane) = panes.iter().find(|p| p.get("tty_name").and_then(|v| v.as_str()) == Some(tty)) {
+                    if let Some(tab) = pane.get("tab_id").and_then(|v| v.as_u64()) {
+                        let _ = std::process::Command::new(&exe).args(["cli", "activate-tab", "--tab-id", &tab.to_string()]).output();
+                    }
+                    if let Some(id) = pane.get("pane_id").and_then(|v| v.as_u64()) {
+                        let _ = std::process::Command::new(&exe).args(["cli", "activate-pane", "--pane-id", &id.to_string()]).output();
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
 /// Open `path` with the application the system associates with it.
 pub fn open_path(path: &Path) {
     let _ = opener::open(path);

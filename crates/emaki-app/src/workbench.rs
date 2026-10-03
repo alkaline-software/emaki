@@ -19,20 +19,20 @@ use chrono::Timelike;
 use futures::StreamExt;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, OutdentInline, Textarea, TextareaState};
 use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
+use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Disableable as _, Sizable as _};
 
 use crate::ui_state::{Rect, UiState};
 use emaki_core::adapters;
 use emaki_core::build::Phase;
 use emaki_core::config::Config;
-use emaki_core::driver::{self, effort_detail, effort_label, image_block, mode_detail, mode_label, model_label, PermissionRequest, EFFORTS, IMAGE_TYPES, MODELS, MODES};
+use emaki_core::driver::{self, effort_detail, effort_label, image_block, mode_detail, mode_label, model_label, acts_alone, slash_token_at, slash_tokens, CommandInfo, PermissionRequest, EFFORTS, IMAGE_TYPES, MODELS, MODES};
 use emaki_core::find::{FindIndex, Hit};
-use emaki_core::limits::Limits;
-use emaki_core::model::{AgentId, Item, Session};
+use emaki_core::limits::{Limits, SessionContext};
+use emaki_core::model::{questions_of, AgentId, Item, Session};
 use emaki_core::search::Results;
 use emaki_core::transcript::SessionRef;
 
@@ -69,6 +69,21 @@ pub const SETTINGS_RAIL_W: Pixels = px(180.);
 /// What the composer says when empty: on the home page, and on a session.
 pub const PLACEHOLDER_NEW: &str = "Start a session…  (⌘↩ to send)";
 pub const PLACEHOLDER_REPLY: &str = "Reply…  (⌘↩ to send)";
+/// While a question of Claude's is waiting, what is typed answers it.
+pub const PLACEHOLDER_ANSWER: &str = "Type an answer…  (⌘↩ to send)";
+/// How long the window waits to come back from the terminal on its own.
+const COME_BACK_SECS: f64 = 15. * 60.;
+
+/// The slash commands offered for a session that has not started yet,
+/// where no child has said what it knows: the ones that run headlessly
+/// and mean something on a fresh session. A running driver lists its own.
+const BUILTIN_COMMANDS: &[(&str, &str, &str)] = &[
+    ("compact", "Free up context by summarising the conversation so far", "[instructions]"),
+    ("effort", "Set the effort level", "low | medium | high | max"),
+    ("context", "Show what is in the context window", ""),
+    ("cost", "Show what this session has cost", ""),
+    ("status", "Show the session's status", ""),
+];
 /// How many folders the home page offers.
 pub const HOME_FOLDERS: usize = 6;
 /// The composer grows with its text between these row counts.
@@ -149,6 +164,13 @@ const FOLDER_GONE: &str = "The session's folder is gone";
 /// How long a notice stays under the composer.
 pub const NOTICE_SECS: f64 = 8.0;
 
+/// How often the clock reads the status line's files, in seconds.
+const LIMITS_SECS: f64 = 60.0;
+
+/// How long the hint for a mode pick shows before the terminal comes to
+/// the front, in milliseconds: long enough to read one line.
+const MODE_HINT_MS: u64 = 1800;
+
 /// The height of the row under the composer (limits on the left, the
 /// notice on the right), taken whether or not either has words.
 pub const NOTICE_H: Pixels = px(18.);
@@ -170,6 +192,9 @@ pub struct DriverView {
     pub error: String,
     pub queued: usize,
     pub starting: bool,
+    /// Every slash command the child said it knows, for the list that
+    /// opens when a message starts with "/".
+    pub commands: Vec<CommandInfo>,
 }
 
 pub struct Detail {
@@ -426,6 +451,19 @@ pub struct Workbench {
     find_pending: Option<usize>,
     pub done_open: bool,
     pub permissions: Vec<(String, PermissionRequest)>,
+    /// Options picked on a question card that has not been sent yet, by
+    /// request id, then by question: a card with several questions, or a
+    /// question allowing several answers, is sent by its button.
+    pub picks: HashMap<String, HashMap<String, Vec<String>>>,
+    /// A session the person was sent to the terminal for, with the
+    /// transcript's time then and when: the next change to that transcript
+    /// is the interaction done, and the window comes back to the front.
+    pub come_back: Option<(String, f64, f64)>,
+    /// Which row of the slash-command list the keys are on, counted over
+    /// every match; back to the first whenever the typed text changes.
+    pub slash_sel: usize,
+    /// Escape put the list away; typing brings it back.
+    pub slash_closed: bool,
     pub drivers: HashMap<String, DriverView>,
     /// Explanations that landed since the session showing was loaded, by
     /// call id; a reload folds them into the model from the cache.
@@ -439,6 +477,23 @@ pub struct Workbench {
     /// The account's usage windows and the models' context sizes, as the
     /// last driver turn reported them; kept in `state/limits.json`.
     pub limits: Limits,
+    /// What the terminal's status line last said of the session showing:
+    /// its id and its context window. Read on every tick and every load.
+    session_ctx: Option<(String, SessionContext)>,
+    /// When the status line's files were last read on the clock.
+    limits_read: f64,
+    /// Until when the showing session's status-line file is read every
+    /// second: a mode, model or effort was just changed in its terminal.
+    ctx_watch_until: f64,
+    /// The last message sent from here, with the tab it went to and what
+    /// was attached, so a stopped turn can hand it back whole.
+    last_sent: Option<(String, String, Vec<Attachment>)>,
+    /// The session that was showing and working at the last index, to
+    /// notice the moment it is stopped.
+    was_working: Option<String>,
+    /// A turn was just stopped: put its prompt back in the composer at
+    /// the next draw, which is where a window is at hand.
+    restore_due: bool,
     /// The update check and install, as the settings panel shows them.
     pub update: UpdateView,
     /// A line for the person at the right end of the row under the
@@ -606,7 +661,24 @@ impl Workbench {
             if this
                 .update(cx, |this, cx| {
                     this.now = now_secs();
-                    this.limits.refresh_from_statusline();
+                    // The status line's files once a minute, which is the
+                    // countdown's own resolution; a session's load reads
+                    // them too, and that is when they change.
+                    if this.now - this.limits_read >= LIMITS_SECS {
+                        this.limits_read = this.now;
+                        this.limits.refresh_from_statusline();
+                        if let Some(id) = this.shown_session().map(|s| s.id.clone()) {
+                            this.refresh_context(&id);
+                        }
+                        cx.notify();
+                    }
+                    if this.now < this.ctx_watch_until {
+                        if let Some(id) = this.shown_session().map(|s| s.id.clone()) {
+                            if this.refresh_context(&id) {
+                                cx.notify();
+                            }
+                        }
+                    }
                     this.check_updates_daily();
                     if this.notice.as_ref().is_some_and(|n| this.now - n.at > NOTICE_SECS) {
                         this.notice = None;
@@ -637,6 +709,11 @@ impl Workbench {
         // ⌘↩ never gets here: the composer wrapper captures it and sends
         // (see `render_composer`), so what arrives is a bare or shifted ↩.
         cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| {
+            if let InputEvent::Change = ev {
+                this.slash_sel = 0;
+                this.slash_closed = false;
+                this.mark_slash(cx);
+            }
             if let InputEvent::PressEnter { secondary: false, shift } = ev {
                 // A bare ↩ on an empty composer answers the oldest
                 // permission card, ⇧↩ turns it down; with words typed
@@ -659,13 +736,45 @@ impl Workbench {
         // `EMAKI_OPEN=<session-id prefix>` opens a session on launch instead
         // and `EMAKI_PAGE=new|sessions|board` picks the page. For probing
         // the window from a script with no accessibility access,
-        // `EMAKI_FIND=<text>` opens the find bar on that query and
-        // `EMAKI_SETTINGS=1` opens the settings panel.
+        // `EMAKI_FIND=<text>` opens the find bar on that query,
+        // `EMAKI_SETTINGS=1` opens the settings panel, `EMAKI_TYPE=<text>`
+        // puts that text in the composer, and `EMAKI_QUESTION=1` holds a
+        // sample question of Claude's on the session opened, as a driver
+        // would (nothing answers it).
         let ui = UiState::load();
         let startup_open = std::env::var("EMAKI_OPEN").ok().filter(|s| !s.is_empty());
         let startup_find = std::env::var("EMAKI_FIND").ok().filter(|s| !s.is_empty());
         if let Some(q) = &startup_find {
             find_input.update(cx, |s, cx| s.set_value(q.clone(), window, cx));
+        }
+        if let Some(t) = std::env::var("EMAKI_TYPE").ok().filter(|s| !s.is_empty()) {
+            // With the caret after it, as typing would leave it.
+            let end = gpui_component::input::Position::new(t.matches('\n').count() as u32, t.rsplit('\n').next().unwrap_or("").encode_utf16().count() as u32);
+            composer.update(cx, |s, cx| {
+                s.set_value(t, window, cx);
+                s.set_cursor_position(end, window, cx);
+            });
+        }
+        // `EMAKI_KEYS=down,down,tab` presses those keys in the composer a
+        // few seconds in (up, down, tab, esc: the slash list's keys, less
+        // the one that runs a command), as actions through the focus.
+        if let Some(keys) = std::env::var("EMAKI_KEYS").ok().filter(|s| !s.is_empty()) {
+            let composer = composer.clone();
+            cx.spawn_in(window, async move |_, cx| {
+                cx.background_executor().timer(Duration::from_secs(4)).await;
+                let _ = cx.update(|window, cx| composer.update(cx, |s, cx| s.focus(window, cx)));
+                for key in keys.split(',') {
+                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                    let _ = cx.update(|window, cx| match key {
+                        "up" => window.dispatch_action(Box::new(gpui_component::input::MoveUp), cx),
+                        "down" => window.dispatch_action(Box::new(gpui_component::input::MoveDown), cx),
+                        "tab" => window.dispatch_action(Box::new(gpui_component::input::IndentInline), cx),
+                        "esc" => window.dispatch_action(Box::new(gpui_component::input::Escape), cx),
+                        _ => {}
+                    });
+                }
+            })
+            .detach();
         }
         let settings_open = std::env::var("EMAKI_SETTINGS").is_ok();
         // `EMAKI_SETTINGS=<section>` opens the panel on that section.
@@ -703,6 +812,10 @@ impl Workbench {
             find_pending: startup_find.map(|_| 0),
             done_open: false,
             permissions: Vec::new(),
+            picks: HashMap::new(),
+            come_back: None,
+            slash_sel: 0,
+            slash_closed: false,
             drivers: HashMap::new(),
             explanations: HashMap::new(),
             explaining: HashSet::new(),
@@ -714,8 +827,16 @@ impl Workbench {
             limits: {
                 let mut l = Limits::load();
                 l.refresh_from_statusline();
+                // A month without a status line is a session that ended.
+                emaki_core::limits::prune_contexts(now_secs(), 30.0 * 86_400.0);
                 l
             },
+            session_ctx: None,
+            limits_read: now_secs(),
+            ctx_watch_until: 0.0,
+            last_sent: None,
+            was_working: None,
+            restore_due: false,
             update: {
                 let s = UpdateState::load();
                 UpdateView { last_check: s.last_check, latest: s.latest, ..Default::default() }
@@ -754,6 +875,18 @@ impl Workbench {
         match ev {
             HubEvent::Index(refs) => {
                 self.refs = refs;
+                // The turn showing was working and now reads as stopped
+                // (Escape in the terminal, or Stop here): its prompt goes
+                // back to the composer.
+                let shown = self.selected_ref().filter(|_| self.page == Page::Session).cloned();
+                let working = shown.as_ref().filter(|r| self.is_working(r)).map(|r| r.session_id.clone());
+                if let (Some(was), Some(r)) = (&self.was_working, &shown) {
+                    if *was == r.session_id && working.is_none() && r.state.activity_kind == "stop" {
+                        self.restore_due = true;
+                        cx.notify();
+                    }
+                }
+                self.was_working = working;
                 if self.page == Page::New && self.new_cwd.is_empty() {
                     self.new_cwd = self.recent_cwds().first().cloned().unwrap_or_default();
                 }
@@ -767,6 +900,18 @@ impl Workbench {
                     if self.refs.iter().any(|r| key_of(r) == key) {
                         self.pending_select = None;
                         self.open_session(&key, cx);
+                    }
+                }
+                // Sent to the terminal for a question, an approval or a
+                // command: the transcript moving is that done, and the
+                // window comes back. Forgotten after a while unanswered.
+                if let Some((sid, then, at)) = self.come_back.clone() {
+                    let moved = self.refs.iter().any(|r| r.session_id == sid && r.mtime > then);
+                    if moved {
+                        self.come_back = None;
+                        cx.activate(true);
+                    } else if self.now - at > COME_BACK_SECS {
+                        self.come_back = None;
                     }
                 }
                 // A selected session that grew is reloaded even when the
@@ -828,6 +973,10 @@ impl Workbench {
             HubEvent::Driver { session_id, event } => self.on_driver_event(session_id, event, cx),
             HubEvent::Note(text) => {
                 self.notice = Some(Notice::error(text));
+                cx.notify();
+            }
+            HubEvent::Commands => {
+                self.mark_slash(cx);
                 cx.notify();
             }
             HubEvent::Explained { call_id, text } => {
@@ -1012,6 +1161,9 @@ impl Workbench {
                 if !caps.model.is_empty() {
                     view.model = caps.model;
                 }
+                if !caps.commands.is_empty() {
+                    view.commands = caps.commands;
+                }
             }
             driver::Event::Turn { queued, .. } => {
                 view.state = "running".into();
@@ -1062,7 +1214,21 @@ impl Workbench {
             if self.detail.as_ref().map(|d| d.key != key).unwrap_or(true) {
                 self.detail = None;
             }
+            if std::env::var_os("EMAKI_QUESTION").is_some() && self.permissions.is_empty() {
+                self.permissions.push((r.session_id.clone(), sample_question()));
+            }
             self.load_detail(r, cx);
+            // `EMAKI_GO=terminal` presses the go-to-terminal action once the
+            // session is open, and `EMAKI_GO=type:<text>` types that into
+            // its terminal, for a check from a script.
+            match std::env::var("EMAKI_GO").as_deref() {
+                Ok("terminal") => self.go_to_terminal(cx),
+                Ok(t) if t.starts_with("type:") => self.run_in_terminal(t["type:".len()..].to_string(), cx),
+                Ok(t) if t.starts_with("mode:") => self.set_mode(&t["mode:".len()..], cx),
+                Ok(t) if t.starts_with("model:") => self.set_model(&t["model:".len()..], cx),
+                Ok(t) if t.starts_with("effort:") => self.set_effort(&t["effort:".len()..], cx),
+                _ => {}
+            }
         } else {
             self.pending_select = Some(key.to_string());
         }
@@ -1137,6 +1303,11 @@ impl Workbench {
         let key = key_of(&r);
         self.loading = Some(key.clone());
         let path = r.path.clone();
+        // The folder's commands, read once per folder, so the commands a
+        // prompt names are known by the time they are drawn.
+        if r.agent == AgentId::ClaudeCode && !r.cwd.is_empty() && std::path::Path::new(&r.cwd).is_dir() {
+            let _ = self.hub.commands_for(&r.cwd);
+        }
         // EMAKI_TIMING=1 prints how long the load and the hand-over to the
         // list took, per open, so a slow session can be measured, not guessed.
         let timing = std::env::var_os("EMAKI_TIMING").is_some();
@@ -1171,6 +1342,8 @@ impl Workbench {
     }
 
     fn set_detail(&mut self, key: String, path: PathBuf, session: Session) {
+        self.limits.refresh_from_statusline();
+        self.refresh_context(&session.id);
         let n = session.rounds.len();
         match self.detail.as_mut() {
             Some(d) if d.key == key => {
@@ -1925,6 +2098,56 @@ impl Workbench {
     /// few words why not. The rule is one writer per transcript: a
     /// terminal session with an inbox already has one, and a driver of ours
     /// mid-reply is one too (an idle driver is stopped on the way out).
+    /// Bring the terminal this session runs in to the front, for what only
+    /// it can take: a question's dialog, an approval, a slash command, the
+    /// mode. When the session is waiting on the person or idle, the next
+    /// change to its transcript brings the window back (`come_back`); while
+    /// the agent works, the next change would be its own, so nothing is
+    /// armed.
+    pub fn go_to_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.selected_ref().cloned() else { return };
+        let Some(peer) = self.hub.peer_for(&r.session_id) else {
+            self.notice = Some(Notice::error("this session is not open in a terminal"));
+            cx.notify();
+            return;
+        };
+        match crate::sys::focus_terminal(peer.pid) {
+            Ok(app) => {
+                if !self.is_working(&r) {
+                    self.come_back = Some((r.session_id.clone(), r.mtime, self.now));
+                }
+                self.notice = Some(Notice::said(format!("in {app}; back here when that is done")));
+            }
+            Err(e) => self.notice = Some(Notice::error(e)),
+        }
+        cx.notify();
+    }
+
+    /// Type `text` into the terminal this session runs in and send it, the
+    /// way a slash command has to go on a terminal session; the terminal
+    /// comes to the front, and the window comes back once the transcript
+    /// shows the command ran (`come_back`). The typing runs on a thread,
+    /// since the app may take a moment to answer, and reports on the row
+    /// under the composer.
+    pub fn run_in_terminal(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(r) = self.selected_ref().cloned() else { return };
+        let Some(peer) = self.hub.peer_for(&r.session_id) else {
+            self.notice = Some(Notice::error("this session is not open in a terminal"));
+            cx.notify();
+            return;
+        };
+        if !self.is_working(&r) {
+            self.come_back = Some((r.session_id.clone(), r.mtime, self.now));
+        }
+        self.notice = Some(Notice::said(format!("sending {text} to the terminal…")));
+        let hub = Arc::clone(&self.hub);
+        std::thread::spawn(move || match crate::sys::type_in_terminal(peer.pid, &text) {
+            Ok(app) => hub.say(format!("sent to {app}; back here when it has run")),
+            Err(e) => hub.say(e),
+        });
+        cx.notify();
+    }
+
     fn terminal_check(&self, r: &SessionRef) -> Result<(), &'static str> {
         if r.archived {
             return Err("Kept only: the agent no longer has this transcript");
@@ -1948,6 +2171,10 @@ impl Workbench {
     /// `emaki_core::terminal` and `sys::open_in_terminal`.
     pub fn open_in_terminal(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
+        if self.hub.peer_for(&r.session_id).is_some() {
+            self.go_to_terminal(cx);
+            return;
+        }
         if let Err(why) = self.terminal_check(&r) {
             self.notice = Some(Notice::error(why));
             cx.notify();
@@ -2082,6 +2309,25 @@ impl Workbench {
             return;
         }
         let (via, why) = self.reply_via();
+        // A slash command reaches a headless session as the command it is
+        // (`/compact` runs; Claude Code marks it as fine without a
+        // terminal). A terminal session's inbox hands everything to the
+        // model as words from a peer, checked on the wire: there the
+        // command is refused here rather than spent as a prompt.
+        if slash_command(typed.trim()).is_some() {
+            if via == "inbox" {
+                self.run_in_terminal(typed.trim().to_string(), cx);
+                self.composer.update(cx, |s, cx| s.set_value("", window, cx));
+                cx.notify();
+                return;
+            }
+        } else if let Some(q) = self.question_pending() {
+            // Words typed while Claude is asking are the answer.
+            if self.attachments.is_empty() {
+                self.answer_question_typed(q, typed.trim().to_string(), window, cx);
+                return;
+            }
+        }
         let (text, images) = self.fold_attachments(&typed, via == "driver" || via == "spawn");
         match via {
             "inbox" => {
@@ -2126,8 +2372,47 @@ impl Workbench {
                 return;
             }
         }
+        self.last_sent = self.selected.clone().map(|key| (key, typed.trim().to_string(), self.attachments.clone()));
         self.composer.update(cx, |s, cx| s.set_value("", window, cx));
         self.attachments.clear();
+        cx.notify();
+    }
+
+    /// Hand a stopped turn's prompt back: its words in the composer with
+    /// the caret after them, and what was attached on the chips again, as
+    /// Claude Code's own terminal does on Escape. The message as it left
+    /// this window when it was the last thing sent to this session
+    /// (pictures included, which a driver takes as blocks and the
+    /// transcript keeps no path for); else what the transcript's last
+    /// round holds, files and kept pictures by their paths. Nothing is
+    /// touched when the composer already has something in it.
+    fn restore_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.composer.read(cx).value().trim().is_empty() || !self.attachments.is_empty() {
+            return;
+        }
+        // The prompt the stop withdrew, when the agent had not started on
+        // it; else the last round, which stays in the conversation.
+        let Some(rnd) = self.shown_session().and_then(|s| s.withdrawn.as_ref().or_else(|| s.rounds.iter().rev().find(|r| !r.queued))) else { return };
+        if !matches!(rnd.source, emaki_core::model::Source::User | emaki_core::model::Source::Web) {
+            return;
+        }
+        let prompt = rnd.prompt.trim().to_string();
+        let from_round: Vec<PathBuf> = rnd.attachments.iter().filter(|a| !a.path.is_empty()).map(|a| PathBuf::from(&a.path)).collect();
+        let sent = self.last_sent.clone().filter(|(key, text, _)| Some(key) == self.selected.as_ref() && *text == prompt);
+        match sent {
+            Some((_, _, attached)) => self.attachments = attached.into_iter().filter(|a| a.path.is_file()).collect(),
+            None => self.attach_paths(&from_round, cx),
+        }
+        if !prompt.is_empty() {
+            let end = prompt.lines().count().saturating_sub(1) as u32;
+            let col = prompt.lines().last().map(|l| l.encode_utf16().count()).unwrap_or(0) as u32;
+            self.composer.update(cx, |s, cx| {
+                s.set_value(prompt.clone(), window, cx);
+                s.set_cursor_position(gpui_component::input::Position::new(end, col), window, cx);
+            });
+            self.mark_slash(cx);
+        }
+        self.notice = Some(Notice::said("stopped; your message is back in the box"));
         cx.notify();
     }
 
@@ -2337,6 +2622,22 @@ impl Workbench {
     }
 
     /// The session showing, once loaded.
+    /// Read what the status line left about `session`'s context window,
+    /// and keep its size for the model too. Returns whether it changed.
+    fn refresh_context(&mut self, session: &str) -> bool {
+        let next = emaki_core::limits::session_context(session).map(|c| (session.to_string(), c));
+        if next == self.session_ctx {
+            return false;
+        }
+        if let Some((_, c)) = &next {
+            if self.limits.learn_window(c) {
+                let _ = self.limits.save();
+            }
+        }
+        self.session_ctx = next;
+        true
+    }
+
     fn shown_session(&self) -> Option<&Session> {
         let d = self.detail.as_ref()?;
         (self.page == Page::Session && self.selected.as_deref() == Some(d.key.as_str())).then_some(&*d.session)
@@ -2361,6 +2662,9 @@ impl Workbench {
     /// The model, as the driver reports it (a full id after its first
     /// turn), else the transcript's last, else what was asked for.
     fn current_model(&self) -> String {
+        if let Some(m) = self.terminal_ctx().map(|c| c.model.clone()).filter(|m| !m.is_empty()) {
+            return m;
+        }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         let m = self
             .drivers
@@ -2374,10 +2678,17 @@ impl Workbench {
 
     /// The effort level the transcript last recorded; empty when none.
     fn current_effort(&self) -> String {
+        if let Some(e) = self.terminal_ctx().map(|c| c.effort.clone()).filter(|e| !e.is_empty()) {
+            return e;
+        }
         self.shown_session().map(|s| s.effort.clone()).unwrap_or_default()
     }
 
     fn set_effort(&mut self, effort: &str, cx: &mut Context<Self>) {
+        if self.terminal_peer().is_some() {
+            self.ctx_watch_until = self.now + 20.0;
+            return self.run_in_terminal(format!("/effort {effort}"), cx);
+        }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         if self.hub.set_driver_effort(&sid, effort.to_string()) {
             self.notice = Some(Notice::said(format!("setting {}…", effort_label(effort).to_lowercase())));
@@ -2415,7 +2726,8 @@ impl Workbench {
         let bar = || div().text_color(muted.opacity(0.6)).child("|");
         let mut row = h_flex().flex_shrink_0().gap(px(8.)).items_center();
         let model = s.models.last().map(String::as_str).unwrap_or("");
-        let window = self.limits.context_window(model);
+        let own = self.session_ctx.as_ref().filter(|(id, _)| *id == s.id).map(|(_, c)| c);
+        let window = self.limits.window_for(model, s.context_tokens, own);
         let ctx_pct = if s.context_tokens > 0 { (s.context_tokens * 100 / window.max(1)).min(999) } else { 0 };
         let ctx_color = if ctx_pct >= 85 { theme.danger } else if ctx_pct >= 70 { theme.warning } else { theme.success };
         row = row.child(part("Context", ctx_pct, ctx_color, String::new()));
@@ -2441,6 +2753,9 @@ impl Workbench {
     /// Claude Code actually holds, so a refused switch shows on the status
     /// row and the pill goes back.
     fn set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        if self.terminal_peer().is_some() {
+            return self.set_mode_in_terminal(mode, cx);
+        }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         self.next_mode = mode.to_string();
         if self.hub.set_driver_mode(&sid, mode.to_string()) {
@@ -2460,6 +2775,10 @@ impl Workbench {
     }
 
     fn set_model(&mut self, model: &str, cx: &mut Context<Self>) {
+        if self.terminal_peer().is_some() {
+            self.ctx_watch_until = self.now + 20.0;
+            return self.run_in_terminal(format!("/model {model}"), cx);
+        }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         self.next_model = model.to_string();
         if self.hub.set_driver_model(&sid, model.to_string()) {
@@ -2470,15 +2789,96 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Stop the turn running on the session showing, and hand its prompt
+    /// back (`restore_prompt`). A driver of ours takes an `interrupt`
+    /// request. A terminal session is stopped the way the person stops
+    /// it, with Escape in its terminal (`sys::key_in_terminal`); the
+    /// registry then says idle and the next scan, asked for at once,
+    /// shows it stopped.
     fn interrupt(&mut self, cx: &mut Context<Self>) {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         if let Some(d) = self.hub.driver_for(&sid) {
             std::thread::spawn(move || {
                 let _ = d.interrupt();
             });
-            self.notice = Some(Notice::said("interrupting…"));
-            cx.notify();
+            self.restore_due = true;
+        } else if let Some(peer) = self.hub.peer_for(&sid) {
+            let hub = Arc::clone(&self.hub);
+            self.notice = Some(Notice::said("stopping…"));
+            std::thread::spawn(move || match crate::sys::key_in_terminal(peer.pid, crate::sys::TerminalKey::Escape) {
+                Ok(_) => {
+                    // The registry flips a moment after the key lands.
+                    for wait in [400, 1200] {
+                        std::thread::sleep(Duration::from_millis(wait));
+                        hub.refresh();
+                    }
+                }
+                Err(e) => hub.say(e),
+            });
+        } else {
+            self.notice = Some(Notice::error("nothing here can stop it: the session has no terminal and no driver"));
         }
+        cx.notify();
+    }
+
+    /// What the terminal's status line last said of the session showing,
+    /// when that session is in a terminal and not driven from here.
+    fn terminal_ctx(&self) -> Option<&SessionContext> {
+        let r = self.selected_ref().filter(|_| self.page == Page::Session)?;
+        if self.drivers.contains_key(&r.session_id) {
+            return None;
+        }
+        self.session_ctx.as_ref().filter(|(id, _)| *id == r.session_id).map(|(_, c)| c)
+    }
+
+    /// The terminal session behind the composer, when a message from here
+    /// would go to its inbox: the one whose mode, model and effort are
+    /// changed in the terminal.
+    fn terminal_peer(&self) -> Option<(String, emaki_core::peer::Peer)> {
+        if self.reply_via().0 != "inbox" {
+            return None;
+        }
+        let sid = self.selected_ref()?.session_id.clone();
+        self.hub.peer_for(&sid).map(|p| (sid, p))
+    }
+
+    /// A terminal session's permission mode, picked from the list. Claude
+    /// Code has no command or key binding that sets a mode by name (its
+    /// bindings offer `chat:cycleMode` and nothing else): only ⇧Tab,
+    /// which steps to the next mode, and nothing a terminal session
+    /// writes says which mode a press landed on until its next prompt
+    /// row (the status line is not handed it). Pressing ⇧Tab a counted
+    /// number of times was built twice and tried on a live session both
+    /// times. One press worked. A switch to auto did not: the first try
+    /// ended in plan, the second, with the terminal checked to be in
+    /// front and steady timing, passed plan and ended in default. What
+    /// follows plan depends on the session, and it cannot be seen from
+    /// here. So nothing is pressed. Plan mode goes as `/plan`, which is
+    /// a command and always lands. For any other mode the row under the
+    /// composer says which key to press, and a moment later, once that
+    /// has been read, the terminal comes to the front.
+    fn set_mode_in_terminal(&mut self, target: &str, cx: &mut Context<Self>) {
+        if target == self.current_mode() {
+            return;
+        }
+        if target == "plan" {
+            return self.run_in_terminal("/plan".into(), cx);
+        }
+        // Short enough to show whole beside the limits in a narrow window.
+        let hint = format!("press ⇧Tab in the terminal until it says {}", mode_label(target).to_lowercase());
+        self.notice = Some(Notice::said(hint.clone()));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(MODE_HINT_MS)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.go_to_terminal(cx);
+                if this.notice.as_ref().is_some_and(|n| !n.error) {
+                    this.notice = Some(Notice::said(hint));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn answer_permission(&mut self, request_id: String, allow: bool, cx: &mut Context<Self>) {
@@ -2498,7 +2898,8 @@ impl Workbench {
             return false;
         }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
-        let Some(id) = self.permissions.iter().find(|(s, _)| *s == sid).map(|(_, p)| p.request_id.clone()) else { return false };
+        // A question is never answered by a bare ↩: it takes a choice or words.
+        let Some(id) = self.permissions.iter().find(|(s, p)| *s == sid && !p.is_question()).map(|(_, p)| p.request_id.clone()) else { return false };
         // The textarea put a new line in before saying ↩ was pressed.
         self.composer.update(cx, |s, cx| s.set_value("", window, cx));
         self.answer_permission(id, allow, cx);
@@ -2508,10 +2909,90 @@ impl Workbench {
     /// Every card waiting on this session, allowed at once.
     fn allow_all_pending(&mut self, cx: &mut Context<Self>) {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
-        let ids: Vec<String> = self.permissions.iter().filter(|(s, _)| *s == sid).map(|(_, p)| p.request_id.clone()).collect();
+        let ids: Vec<String> = self.permissions.iter().filter(|(s, p)| *s == sid && !p.is_question()).map(|(_, p)| p.request_id.clone()).collect();
         for id in ids {
             self.answer_permission(id, true, cx);
         }
+    }
+
+    /// The oldest question waiting on the session showing, when a driver
+    /// of ours holds one. A terminal session's questions are its own.
+    pub fn question_pending(&self) -> Option<PermissionRequest> {
+        let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+        self.permissions.iter().find(|(s, p)| *s == sid && p.is_question()).map(|(_, p)| p.clone())
+    }
+
+    fn answer_question_with(&mut self, request_id: String, answers: serde_json::Map<String, serde_json::Value>, cx: &mut Context<Self>) {
+        let Some((sid, _)) = self.permissions.iter().find(|(_, r)| r.request_id == request_id).cloned() else { return };
+        if let Some(d) = self.hub.driver_for(&sid) {
+            let rid = request_id.clone();
+            std::thread::spawn(move || d.answer_question(&rid, answers));
+        }
+        self.permissions.retain(|(_, r)| r.request_id != request_id);
+        self.picks.remove(&request_id);
+        cx.notify();
+    }
+
+    /// A click on an option: the answer at once when the card holds one
+    /// question with one choice, else a pick the card's button sends.
+    fn pick_option(&mut self, request_id: String, question: String, label: String, multi: bool, cx: &mut Context<Self>) {
+        let Some((_, req)) = self.permissions.iter().find(|(_, r)| r.request_id == request_id).cloned() else { return };
+        let single = questions_of(&req.input).len() == 1 && !multi;
+        let entry = self.picks.entry(request_id.clone()).or_default().entry(question).or_default();
+        if multi {
+            match entry.iter().position(|l| *l == label) {
+                Some(i) => {
+                    entry.remove(i);
+                }
+                None => entry.push(label),
+            }
+        } else {
+            *entry = vec![label];
+        }
+        if single {
+            self.submit_question(request_id, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn submit_question(&mut self, request_id: String, cx: &mut Context<Self>) {
+        let picks = self.picks.get(&request_id).cloned().unwrap_or_default();
+        let mut answers = serde_json::Map::new();
+        for (q, labels) in picks {
+            if !labels.is_empty() {
+                answers.insert(q, serde_json::Value::String(labels.join(", ")));
+            }
+        }
+        self.answer_question_with(request_id, answers, cx);
+    }
+
+    /// Words typed while a question waits: they answer the first question
+    /// without a pick, and the picks stand for the rest.
+    fn answer_question_typed(&mut self, req: PermissionRequest, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let qs = questions_of(&req.input);
+        let picks = self.picks.get(&req.request_id).cloned().unwrap_or_default();
+        let mut answers = serde_json::Map::new();
+        let mut placed = false;
+        for q in &qs {
+            match picks.get(&q.question).filter(|l| !l.is_empty()) {
+                Some(labels) => {
+                    answers.insert(q.question.clone(), serde_json::Value::String(labels.join(", ")));
+                }
+                None if !placed => {
+                    answers.insert(q.question.clone(), serde_json::Value::String(text.clone()));
+                    placed = true;
+                }
+                None => {}
+            }
+        }
+        if !placed {
+            if let Some(q) = qs.first() {
+                answers.insert(q.question.clone(), serde_json::Value::String(text));
+            }
+        }
+        self.composer.update(cx, |s, cx| s.set_value("", window, cx));
+        self.answer_question_with(req.request_id, answers, cx);
     }
 
     fn reply_from_board(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -3115,9 +3596,13 @@ impl Workbench {
         }
         // The three places a session can be taken to, side by side: the
         // terminal, the project's folder, the transcript on disk.
-        let terminal_tip = match self.terminal_check(&r) {
-            Ok(()) => "Open in your terminal",
-            Err(why) => why,
+        let terminal_tip = if self.hub.peer_for(&r.session_id).is_some() {
+            "Go to its terminal"
+        } else {
+            match self.terminal_check(&r) {
+                Ok(()) => "Open in your terminal",
+                Err(why) => why,
+            }
         };
         right.push(icon_button("terminal", Icon::default().path("icons/square-terminal.svg"), terminal_tip, cx, |this, _, cx| this.open_in_terminal(cx)).into_any_element());
         let folder_tip = if Self::folder_exists(&r) { "Open the project folder" } else { FOLDER_GONE };
@@ -3204,6 +3689,64 @@ impl Workbench {
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} is working", r.agent.speaker())))
                 .child(div().flex_1().min_w_0().truncate().child(what))
                 .child(div().child(elapsed_since(from, self.now)))
+                .child(
+                    // Stop, as Escape is in the terminal: a square on a
+                    // pill that fills with the danger colour under the
+                    // pointer, so it is found without shouting.
+                    h_flex()
+                        .id("stop-turn")
+                        .occlude()
+                        .h(px(22.))
+                        .px(px(9.))
+                        .gap(px(6.))
+                        .items_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.foreground)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)).text_color(theme.danger))
+                        .active(|s| s.bg(theme.danger.opacity(0.18)))
+                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Stop this turn (Escape in the terminal)").build(window, cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.interrupt(cx);
+                        }))
+                        .child(div().size(px(7.)).rounded(px(1.5)).bg(theme.danger))
+                        .child("Stop"),
+                )
+        });
+
+        // The agent waiting on you, said in the same place: what it waits
+        // for, and where to give it when the terminal holds the dialog and
+        // nothing here can answer it.
+        let waiting = (!working).then(|| self.card_for(&r)).filter(|c| c.column == Column::NeedsYou).map(|card| {
+            let in_terminal = card.pending.is_none();
+            let question = card.pending.as_ref().map(|p| p.is_question()).unwrap_or(card.chip_kind == "ask");
+            let what = if question {
+                "your answer"
+            } else if card.chip_kind == "plan" {
+                "your go-ahead on the plan"
+            } else {
+                "your approval"
+            };
+            let from = if !r.state.since.is_empty() { r.state.since.clone() } else { r.updated.clone() };
+            let where_ = if in_terminal { "in your terminal".to_string() } else { "below".to_string() };
+            h_flex()
+                .w_full()
+                .max_w(CONTENT_W)
+                .px(px(6.))
+                .gap(px(8.))
+                .items_center()
+                .text_size(px(12.))
+                .text_color(theme.muted_foreground)
+                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "status-glyph"))
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} is waiting for {what}", r.agent.speaker())))
+                .child(div().flex_1().min_w_0().truncate().child(where_))
+                .when(in_terminal, |d| d.child(Button::new("waiting-terminal").primary().small().label("Open the terminal").on_click(cx.listener(|this, _, _, cx| this.go_to_terminal(cx)))))
+                .child(div().child(elapsed_since(&from, self.now)))
         });
 
         v_flex()
@@ -3215,7 +3758,22 @@ impl Workbench {
             .children(path_line)
             .when(self.find_open, |d| d.child(self.render_find_bar(cx)))
             .child(transcript)
-            .child(v_flex().w_full().items_center().px(px(24.)).pb(px(14.)).gap(px(8.)).children(status).child(self.render_permissions(cx)).child(self.render_composer(cx)))
+            // The working or waiting line gets air above it: without any,
+            // it sat against the conversation's clipped edge and read as
+            // part of the last tool card.
+            .child(
+                v_flex()
+                    .w_full()
+                    .items_center()
+                    .px(px(24.))
+                    .when(status.is_some() || waiting.is_some(), |d| d.pt(px(12.)))
+                    .pb(px(14.))
+                    .gap(px(8.))
+                    .children(status)
+                    .children(waiting)
+                    .child(self.render_permissions(cx))
+                    .child(self.render_composer(cx)),
+            )
             .into_any_element()
     }
 
@@ -3226,6 +3784,9 @@ impl Workbench {
         let cards: Vec<PermissionRequest> = self.permissions.iter().filter(|(s, _)| *s == sid).map(|(_, p)| p.clone()).collect();
         let several = cards.len() > 1;
         v_flex().w_full().max_w(CONTENT_W).gap(px(8.)).children(cards.into_iter().enumerate().map(|(i, p)| {
+            if p.is_question() {
+                return self.render_question(&p, cx);
+            }
             // The oldest card is the one ↩ answers, and says so.
             let first = i == 0;
             let subject = emaki_core::build::tool_subject(&p.tool_name, &p.input, &cwd);
@@ -3273,7 +3834,383 @@ impl Workbench {
                         .child(Button::new(SharedString::from(format!("deny-{}", p.request_id))).outline().small().label(if first { "Deny  ⇧↩" } else { "Deny" }).on_click(cx.listener(move |this, _, _, cx| this.answer_permission(id_deny.clone(), false, cx))))
                         .when(first && several, |d| d.child(div().flex_1()).child(Button::new("allow-all").ghost().small().label("Allow all").on_click(cx.listener(|this, _, _, cx| this.allow_all_pending(cx))))),
                 )
+                .into_any_element()
         }))
+    }
+
+    /// A question of Claude's, where a permission card would be: each
+    /// question with its options as rows to click, the chosen one filled.
+    /// One question with one choice is answered by the click; several
+    /// questions, or several choices, are sent by the button once every
+    /// question has one. Words typed in the composer answer instead.
+    fn render_question(&self, p: &PermissionRequest, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let qs = questions_of(&p.input);
+        let picks = self.picks.get(&p.request_id).cloned().unwrap_or_default();
+        let by_button = qs.len() > 1 || qs.iter().any(|q| q.multi);
+        let ready = qs.iter().all(|q| picks.get(&q.question).map(|l| !l.is_empty()).unwrap_or(false));
+        let rid = p.request_id.clone();
+        v_flex()
+            .p(px(14.))
+            .gap(px(12.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.primary)
+            .bg(theme.popover)
+            .shadow_sm()
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(badge_str("question".into(), theme.primary.opacity(0.14), theme.primary))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Claude asks")),
+            )
+            .children(qs.iter().enumerate().map(|(qi, q)| {
+                let chosen = picks.get(&q.question).cloned().unwrap_or_default();
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .when(!q.header.is_empty(), |d| d.child(badge_str(q.header.clone(), theme.muted, theme.muted_foreground)))
+                            .child(div().flex_1().min_w_0().text_size(px(14.)).child(q.question.clone())),
+                    )
+                    .child(v_flex().gap(px(4.)).children(q.options.iter().enumerate().map(|(oi, (label, detail))| {
+                        let on = chosen.iter().any(|l| l == label);
+                        let (rid, question, label_c, multi) = (rid.clone(), q.question.clone(), label.clone(), q.multi);
+                        h_flex()
+                            .id(SharedString::from(format!("opt-{}-{qi}-{oi}", p.request_id)))
+                            .w_full()
+                            .px(px(10.))
+                            .py(px(7.))
+                            .gap(px(10.))
+                            .items_start()
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(if on { theme.primary } else { theme.border })
+                            .bg(if on { theme.primary.opacity(0.08) } else { theme.transparent })
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.list_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.pick_option(rid.clone(), question.clone(), label_c.clone(), multi, cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .size(px(16.))
+                                    .mt(px(1.))
+                                    .rounded(if q.multi { px(4.) } else { px(8.) })
+                                    .border_1()
+                                    .border_color(if on { theme.primary } else { theme.muted_foreground })
+                                    .bg(if on { theme.primary } else { theme.transparent })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(on, |d| d.child(Icon::new(IconName::Check).with_size(px(11.)).text_color(theme.primary_foreground))),
+                            )
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .gap(px(1.))
+                                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(label.clone()))
+                                    .when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(detail.clone()))),
+                            )
+                    })))
+            }))
+            .child(
+                h_flex()
+                    .gap(px(10.))
+                    .items_center()
+                    .when(by_button, |d| {
+                        let rid = p.request_id.clone();
+                        d.child(Button::new(SharedString::from(format!("answer-{}", p.request_id))).primary().small().label("Answer").disabled(!ready).on_click(cx.listener(move |this, _, _, cx| this.submit_question(rid.clone(), cx))))
+                    })
+                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child("or type an answer below")),
+            )
+            .into_any_element()
+    }
+
+    /// The commands the list over the composer offers for what is typed
+    /// so far, best match first, and whether the folder's own catalogue is
+    /// still being read. A driver's own list, else the folder's catalogue
+    /// read from a headless child, else the built-ins until that is in.
+    fn slash_rows(&self, prefix: &str, via: &str, whole: bool) -> (Vec<(String, String, String)>, bool) {
+        let (sid, cwd) = self.selected_ref().map(|r| (r.session_id.clone(), r.cwd.clone())).unwrap_or_default();
+        let (known, loading): (Vec<(String, String, String)>, bool) = match self.drivers.get(&sid).filter(|v| !v.commands.is_empty()) {
+            Some(v) => (v.commands.iter().map(|c| (c.name.clone(), c.description.clone(), c.argument_hint.clone())).collect(), false),
+            None => {
+                let cwd = if via == "spawn" && self.page == Page::New { self.new_cwd.clone() } else { cwd };
+                match (!cwd.is_empty()).then(|| self.hub.commands_for(&cwd)).flatten() {
+                    Some(list) => (list.iter().map(|c| (c.name.clone(), c.description.clone(), c.argument_hint.clone())).collect(), false),
+                    None => (BUILTIN_COMMANDS.iter().map(|(n, d, a)| (n.to_string(), d.to_string(), a.to_string())).collect(), !cwd.is_empty()),
+                }
+            }
+        };
+        // As the terminal lists them: names that start with what is typed,
+        // then names holding it, then descriptions.
+        let needle = prefix.to_lowercase();
+        let rank = |name: &str, description: &str| {
+            let name = name.to_lowercase();
+            if name.starts_with(&needle) {
+                Some(0u8)
+            } else if name.contains(&needle) {
+                Some(1)
+            } else if !needle.is_empty() && description.to_lowercase().contains(&needle) {
+                Some(2)
+            } else {
+                None
+            }
+        };
+        // Inside a sentence only what can be named there is offered: a
+        // command that acts by itself means nothing in the middle of one.
+        let mut ranked: Vec<(u8, (String, String, String))> =
+            known.into_iter().filter(|row| whole || !acts_alone(&row.0)).filter_map(|row| rank(&row.0, &row.1).map(|r| (r, row))).collect();
+        // Within a rank the shorter name is the nearer match ("/co" is
+        // /color and /config before a plugin's long name); with nothing
+        // typed the catalogue's own order stands.
+        ranked.sort_by_key(|(r, row)| (*r, if needle.is_empty() { 0 } else { row.0.len() }));
+        (ranked.into_iter().map(|(_, row)| row).collect(), loading)
+    }
+
+    /// The slash command being typed at the caret, while the list is
+    /// showing: the channel a message would take, where the token starts
+    /// and ends in the text, what is typed of its name, and whether the
+    /// message is that token and nothing else.
+    fn slash_open(&self, cx: &App) -> Option<SlashAt> {
+        if self.slash_closed {
+            return None;
+        }
+        let (via, _) = self.reply_via();
+        if !matches!(via, "driver" | "spawn" | "inbox") {
+            return None;
+        }
+        let state = self.composer.read(cx);
+        let text = state.value().to_string();
+        let (start, end, prefix) = slash_token_at(&text, state.cursor())?;
+        let whole = text[..start].trim().is_empty() && text[end..].trim().is_empty();
+        Some(SlashAt { via, start, end, prefix, whole, text })
+    }
+
+    /// Runs a command chosen from the list: typed into the terminal on a
+    /// terminal session, through the driver otherwise.
+    fn slash_run(&mut self, command: String, via: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if via == "inbox" {
+            self.run_in_terminal(command, cx);
+            self.composer.update(cx, |s, cx| s.set_value("", window, cx));
+        } else {
+            self.composer.update(cx, |s, cx| s.set_value(command, window, cx));
+            self.send_message(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Puts a command's name where the token being typed is, with a space
+    /// and the caret after it, and leaves the message to be written on.
+    fn slash_insert(&mut self, name: &str, at: &SlashAt, window: &mut Window, cx: &mut Context<Self>) {
+        let tail = &at.text[at.end..];
+        let word = format!("/{name}{}", if tail.starts_with(' ') { "" } else { " " });
+        let caret = at.start + name.len() + 2;
+        let text = format!("{}{word}{tail}", &at.text[..at.start]);
+        let before = &text[..caret.min(text.len())];
+        let line = before.matches('\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap_or("").encode_utf16().count() as u32;
+        self.composer.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.set_cursor_position(gpui_component::input::Position::new(line, column), window, cx);
+        });
+        // A value set from code reports no change.
+        self.slash_sel = 0;
+        self.mark_slash(cx);
+    }
+
+    /// A row of the list was chosen, by ↩ or a click. A command that acts
+    /// by itself (`driver::acts_alone`: `/compact`, `/model`) runs when it
+    /// is the whole message; a skill, or anything chosen inside a
+    /// sentence, goes into the text, since a skill is as often asked for
+    /// in words ("use my /ph-image skill to…") and running one unasked
+    /// cannot be taken back. ⌘↩ still sends a message that is only a
+    /// command as that command.
+    fn slash_pick(&mut self, name: &str, at: &SlashAt, window: &mut Window, cx: &mut Context<Self>) {
+        if at.whole && acts_alone(name) {
+            self.slash_run(format!("/{name}"), at.via, window, cx);
+        } else {
+            self.slash_insert(name, at, window, cx);
+        }
+    }
+
+    /// A key pressed in the composer while the list is showing: ↑ and ↓
+    /// move the choice (round the ends), ↩ picks it, ⇥ puts its name in
+    /// the text whatever it is, Escape puts the list away. False when the
+    /// list is not showing, and the key is the textarea's.
+    fn slash_key(&mut self, key: SlashKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self.slash_open(cx) else { return false };
+        let (rows, _) = self.slash_rows(&at.prefix, at.via, at.whole);
+        if rows.is_empty() {
+            return false;
+        }
+        let n = rows.len();
+        let sel = self.slash_sel.min(n - 1);
+        match key {
+            SlashKey::Up => self.slash_sel = (sel + n - 1) % n,
+            SlashKey::Down => self.slash_sel = (sel + 1) % n,
+            SlashKey::Run => self.slash_pick(&rows[sel].0, &at, window, cx),
+            SlashKey::Complete => self.slash_insert(&rows[sel].0, &at, window, cx),
+            SlashKey::Close => self.slash_closed = true,
+        }
+        cx.notify();
+        true
+    }
+
+    /// Colours every command the composer's text names (`/ph-image` in a
+    /// sentence, `/compact` alone) in the accent, as the conversation does
+    /// once it is sent. Set again on every change: the ranges are not
+    /// tracked across edits.
+    fn mark_slash(&mut self, cx: &mut Context<Self>) {
+        let (via, _) = self.reply_via();
+        let text = self.composer.read(cx).value().to_string();
+        let mut marks = Vec::new();
+        if text.contains('/') {
+            let (known, _) = self.slash_rows("", via, true);
+            let style = HighlightStyle { color: Some(cx.theme().link), ..Default::default() };
+            for (a, b) in slash_tokens(&text) {
+                let name = &text[a + 1..b];
+                if acts_alone(name) || known.iter().any(|row| row.0 == name) {
+                    marks.push(gpui_component::input::TextDecoration::new(a..b, style));
+                }
+            }
+        }
+        self.composer.update(cx, |s, cx| s.set_marks(marks, cx));
+    }
+
+    /// The list that opens over the composer while a message is a slash
+    /// command being typed: the commands the session knows, filtered by
+    /// what is typed so far. Each row is the name and its arguments in one
+    /// column and what it does in the other, both cut with an ellipsis, so
+    /// a long argument hint never pushes the row past the card. The keys
+    /// are on one row (`slash_sel`), the first after every keystroke.
+    fn render_slash_help(&self, at: SlashAt, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let via = at.via;
+        let (rows, loading) = self.slash_rows(&at.prefix, via, at.whole);
+        if rows.is_empty() && !loading {
+            return div().into_any_element();
+        }
+        let total = rows.len();
+        let sel = self.slash_sel.min(total.saturating_sub(1));
+        // Eight rows show; the window slides once the choice passes them.
+        let start = (sel + 1).saturating_sub(SLASH_ROWS);
+        // What ↩ does to the row the keys are on: run it, or put it in
+        // the message.
+        let runs = at.whole && rows.get(sel).is_some_and(|row| acts_alone(&row.0));
+        let to_terminal = via == "inbox" && runs;
+        let at = Rc::new(at);
+        let mono = theme.mono_font_family.clone();
+        let keycap = |label: &'static str| {
+            div()
+                .h(px(16.))
+                .min_w(px(16.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .text_size(px(10.))
+                .text_color(theme.muted_foreground)
+                .child(label)
+        };
+        let key = |cap: &'static str, does: &'static str| h_flex().flex_shrink_0().gap(px(5.)).items_center().child(keycap(cap)).child(does);
+        let wash = theme.primary.opacity(if theme.is_dark() { 0.16 } else { 0.10 });
+        let list = v_flex().p(px(6.)).gap(px(1.)).children(rows.into_iter().enumerate().skip(start).take(SLASH_ROWS).map(|(i, (name, description, hint))| {
+            let command = format!("/{name}");
+            let chosen = i == sel;
+            h_flex()
+                .id(SharedString::from(format!("slash-{i}")))
+                .w_full()
+                .h(px(32.))
+                .px(px(10.))
+                .gap(px(14.))
+                .items_center()
+                .rounded(px(8.))
+                .cursor_pointer()
+                .map(|d| if chosen { d.bg(wash) } else { d.hover(|s| s.bg(theme.list_hover)) })
+                .on_click(cx.listener({
+                    let at = Rc::clone(&at);
+                    move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.slash_pick(&name, &at, window, cx);
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    h_flex()
+                        .w(gpui::relative(0.36))
+                        .flex_shrink_0()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .gap(px(8.))
+                        .items_baseline()
+                        .font_family(mono.clone())
+                        .child(div().flex_shrink_0().max_w_full().truncate().text_size(px(12.5)).text_color(if chosen { theme.link } else { theme.foreground }).child(command))
+                        .when(!hint.is_empty(), |d| d.child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(hint))),
+                )
+                .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(if chosen { theme.foreground } else { theme.muted_foreground }).child(description))
+                .when(chosen, |d| d.child(keycap("↩")))
+        }));
+        let foot = h_flex()
+            .h(px(32.))
+            .px(px(16.))
+            .gap(px(14.))
+            .items_center()
+            .border_t_1()
+            .border_color(theme.border)
+            .text_size(px(11.))
+            .text_color(theme.muted_foreground)
+            .child(h_flex().flex_shrink_0().gap(px(3.)).items_center().child(keycap("↑")).child(keycap("↓")).child(div().pl(px(2.)).child("choose")))
+            .child(key("↩", if runs { "run" } else { "insert" }))
+            .when(runs, |d| d.child(key("⇥", "insert")))
+            .child(key("esc", "close"))
+            .child(div().flex_1())
+            .child(div().min_w_0().truncate().child(if loading {
+                "reading this folder's commands…".to_string()
+            } else if total > SLASH_ROWS {
+                format!("{} of {total}", sel + 1)
+            } else {
+                String::new()
+            }))
+            .when(to_terminal, |d| {
+                d.child(
+                    h_flex()
+                        .id("slash-terminal")
+                        .flex_shrink_0()
+                        .gap(px(5.))
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.foreground))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.go_to_terminal(cx);
+                        }))
+                        .child(Icon::new(IconName::SquareTerminal).with_size(px(12.)))
+                        .child("runs in the terminal"),
+                )
+            });
+        v_flex()
+            .w_full()
+            .max_w(CONTENT_W)
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow(float_shadow(&theme))
+            .overflow_hidden()
+            .child(list)
+            .child(foot)
+            .into_any_element()
     }
 
     /// The composer card: a textarea, the mode and model chips, and a round
@@ -3288,10 +4225,10 @@ impl Workbench {
         let model = self.current_model();
         let running = drv.as_ref().map(|v| v.state == "running" || v.starting).unwrap_or(false);
         let can_send = via == "driver" || via == "spawn" || via == "inbox";
-        let settable = via == "driver" || via == "spawn";
-        // A terminal session shows its mode, model and effort but cannot
-        // take a change: the inbox reads everything as prose.
-        let readonly = via == "inbox";
+        // A terminal session's mode, model and effort are changed in the
+        // terminal, which the same lists do for it (`set_mode` and the
+        // rest): the inbox reads everything as prose.
+        let settable = via == "driver" || via == "spawn" || via == "inbox";
         let effort = self.current_effort();
         let on_session = self.page == Page::Session;
         // The right of the row under the composer: a notice while one is
@@ -3438,6 +4375,30 @@ impl Workbench {
                         if a.secondary {
                             this.send_message(window, cx);
                             cx.stop_propagation();
+                        } else if this.slash_key(SlashKey::Run, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    // While the list of slash commands is open, the arrows,
+                    // Tab and Escape are its keys, not the textarea's.
+                    .capture_action(cx.listener(|this, _: &gpui_component::input::MoveUp, window, cx| {
+                        if this.slash_key(SlashKey::Up, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &gpui_component::input::MoveDown, window, cx| {
+                        if this.slash_key(SlashKey::Down, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &gpui_component::input::IndentInline, window, cx| {
+                        if this.slash_key(SlashKey::Complete, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
+                        if this.slash_key(SlashKey::Close, window, cx) {
+                            cx.stop_propagation();
                         }
                     }))
                     .role(Role::MultilineTextInput)
@@ -3452,7 +4413,7 @@ impl Workbench {
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(4.))
+                    .gap(px(8.))
                     .child(
                         div()
                             .id("attach")
@@ -3474,19 +4435,17 @@ impl Workbench {
                     )
                     .when(settable, |d| {
                         let options = self.modes().into_iter().map(|m| (m, mode_label(m).to_string(), mode_detail(m).to_string())).collect();
-                        d.child(picker("mode", mode_label(&mode).to_string(), options, mode.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_mode(key, cx)), cx))
+                        d.child(picker("mode", "icons/shield.svg", mode_label(&mode).to_string(), options, mode.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_mode(key, cx)), cx))
                     })
                     .when(settable && on_session, |d| {
                         let options = EFFORTS.iter().map(|e| (*e, effort_label(e), effort_detail(e).to_string())).collect();
-                        d.child(picker("effort", effort_label(&effort), options, effort.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_effort(key, cx)), cx))
+                        d.child(picker("effort", "icons/gauge.svg", effort_label(&effort), options, effort.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_effort(key, cx)), cx))
                     })
-                    .when(readonly, |d| d.child(chip_static("ro-mode", mode_label(&mode).to_string(), cx)).child(chip_static("ro-effort", effort_label(&effort), cx)))
                     .child(div().flex_1())
                     .when(settable, |d| {
                         let options = MODELS.iter().map(|m| (*m, model_label(m), model_detail(m).to_string())).collect();
-                        d.child(picker("model", model_label(&model), options, model_key(&model).to_string(), Anchor::BottomRight, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_model(key, cx)), cx))
+                        d.child(picker("model", "icons/box.svg", model_label(&model), options, model_key(&model).to_string(), Anchor::BottomRight, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_model(key, cx)), cx))
                     })
-                    .when(readonly, |d| d.child(chip_static("ro-model", model_label(&model), cx)))
                     .child(send),
             );
 
@@ -3502,7 +4461,11 @@ impl Workbench {
             .children(self.render_limits(cx))
             .child(div().flex_1())
             .child(div().min_w_0().truncate().text_color(hint_color).child(hint));
-        v_flex().w_full().items_center().gap(px(8.)).child(card).child(foot)
+        // A message that is a slash command being typed opens the list of
+        // commands over the card; it closes as soon as a space or a line
+        // follows the name.
+        let help = self.slash_open(cx).map(|at| self.render_slash_help(at, cx));
+        v_flex().w_full().items_center().gap(px(8.)).children(help).child(card).child(foot)
     }
 
     // -- the board -----------------------------------------------------------
@@ -4297,18 +5260,51 @@ fn icon_button(id: &'static str, icon: impl Into<Icon>, tip: &'static str, cx: &
 
 /// A pill under the composer that only says what a terminal session is
 /// set to; the terminal is where it changes.
-fn chip_static(id: &'static str, label: String, cx: &App) -> impl IntoElement {
-    let theme = cx.theme().clone();
-    h_flex()
-        .id(id)
-        .h(px(28.))
-        .px(px(10.))
-        .items_center()
-        .rounded_full()
-        .text_size(px(12.5))
-        .text_color(theme.muted_foreground)
-        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Set in the terminal: ⇧Tab for the mode, /model, /effort").build(window, cx))
-        .child(label)
+/// The question `EMAKI_QUESTION=1` holds on the session opened, for a
+/// look at the card from a script.
+fn sample_question() -> PermissionRequest {
+    let input = serde_json::json!({"questions": [{
+        "question": "Commit the compaction and mid-turn message fixes and push to origin, no version bump?",
+        "header": "Commit",
+        "options": [
+            {"label": "Yes, commit and push (Recommended)", "description": "One commit with the core builder changes, tests, AGENTS.md and CHANGELOG, pushed to origin."},
+            {"label": "Commit only", "description": "Make the commit but leave the push to you."},
+            {"label": "Not yet", "description": "Leave the working tree as it is."}
+        ],
+        "multiSelect": false
+    }]});
+    PermissionRequest { request_id: "probe-q".into(), tool_name: "AskUserQuestion".into(), tool_use_id: "probe-q".into(), input: input.as_object().cloned().unwrap_or_default(), description: String::new(), asked_at: 0. }
+}
+
+/// How many rows of the slash-command list show at once.
+const SLASH_ROWS: usize = 8;
+
+/// The slash command being typed at the caret (`Workbench::slash_open`).
+struct SlashAt {
+    via: &'static str,
+    start: usize,
+    end: usize,
+    prefix: String,
+    whole: bool,
+    text: String,
+}
+
+/// A key the slash-command list takes from the composer.
+#[derive(Clone, Copy)]
+enum SlashKey {
+    Up,
+    Down,
+    Run,
+    Complete,
+    Close,
+}
+
+/// The name of the slash command `text` is, when it is one: a first line
+/// starting with "/" and a name after it.
+pub fn slash_command(text: &str) -> Option<String> {
+    let first = text.lines().next().unwrap_or("").trim();
+    let name = first.strip_prefix('/')?.split_whitespace().next()?;
+    (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')).then(|| name.to_string())
 }
 
 /// A pill under the composer that opens a list of choices: the permission
@@ -4319,6 +5315,7 @@ fn chip_static(id: &'static str, label: String, cx: &App) -> impl IntoElement {
 #[allow(clippy::too_many_arguments)]
 fn picker(
     id: &'static str,
+    icon: &'static str,
     label: String,
     options: Vec<(&'static str, String, String)>,
     current: String,
@@ -4329,7 +5326,18 @@ fn picker(
 ) -> impl IntoElement {
     let theme = cx.theme().clone();
     let options = Rc::new(options);
-    let trigger = Button::new(SharedString::from(format!("{id}-trigger"))).ghost().small().label(label).dropdown_caret(true).text_color(theme.muted_foreground);
+    // A light grey pill with its icon in front: darker under the pointer,
+    // darker again while pressed or open. No tooltip and no caret; the
+    // list says everything.
+    // (The toolkit draws a custom colour at a fifth of its strength, so
+    // the resting grey is the ink's own, thinned.)
+    let look = ButtonCustomVariant::new(cx).color(theme.muted_foreground.opacity(0.65)).foreground(theme.muted_foreground).hover(theme.muted_foreground.opacity(0.22)).active(theme.muted_foreground.opacity(0.34));
+    let trigger = Button::new(SharedString::from(format!("{id}-trigger")))
+        .custom(look)
+        .small()
+        .rounded(ButtonRounded::Size(px(999.)))
+        .icon(Icon::default().path(icon))
+        .label(label);
     Popover::new(id).anchor(anchor).trigger(trigger).content(move |_, _, cx| {
         let theme = cx.theme().clone();
         let popover = cx.entity();
@@ -4371,10 +5379,20 @@ impl Render for Workbench {
         if matches!(self.page, Page::Board | Page::Sessions) && self.composer.read(cx).focus_handle(cx).is_focused(window) {
             window.focus(&self.focus_handle, cx);
         }
+        if std::mem::take(&mut self.restore_due) {
+            let this = cx.entity();
+            window.defer(cx, move |window, cx| this.update(cx, |this, cx| this.restore_prompt(window, cx)));
+        }
         // The composer is one field for both pages; its placeholder says
         // what a message here does. Set only when it differs, since the
         // setter notifies.
-        let want = if self.page == Page::New { PLACEHOLDER_NEW } else { PLACEHOLDER_REPLY };
+        let want = if self.question_pending().is_some() {
+            PLACEHOLDER_ANSWER
+        } else if self.page == Page::New {
+            PLACEHOLDER_NEW
+        } else {
+            PLACEHOLDER_REPLY
+        };
         if self.composer_placeholder != want {
             self.composer_placeholder = want;
             self.composer.update(cx, |s, cx| s.set_placeholder(want, window, cx));

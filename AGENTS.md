@@ -103,6 +103,12 @@ EMAKI_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launc
 EMAKI_PAGE=new|sessions|board ./target/debug/Emaki     # land on a page
 EMAKI_FIND=<text> ./target/debug/Emaki                 # open the find bar on that query
 EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings panel (=updates: on that section)
+EMAKI_TYPE=/co ./target/debug/Emaki                    # put that text in the composer
+EMAKI_QUESTION=1 EMAKI_OPEN=<id> ./target/debug/Emaki  # hold a sample question on that session
+EMAKI_GO=terminal EMAKI_OPEN=<id> ./target/debug/Emaki  # press "go to the terminal" on it
+EMAKI_GO=type:/status EMAKI_OPEN=<id> ./target/debug/Emaki  # type that into its terminal and send
+EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # pick from a pill's list: effort:, model:, mode:
+EMAKI_KEYS=down,down,tab EMAKI_TYPE=/mod ./target/debug/Emaki  # press the slash list's keys (up, down, tab, esc)
 ```
 
 The last two exist for probing: a terminal without accessibility access
@@ -275,12 +281,12 @@ could be changed from outside; a fork on GitHub was the alternative and
 one repository was preferred. Every change is marked `(Emaki addition.)`
 in the source and listed in `vendor/gpui-component/UPSTREAM.md`, which
 also says how to move to a newer upstream revision: copy the crates over,
-re-apply the list, build. Six changes so far: the strong weight and the
+re-apply the list, build. Seven changes so far: the strong weight and the
 inline-code family as `TextViewStyle` settings (`md_view` sets 600 and the
 theme's mono face, as the Claude app does), the input's Up on the first
 line going to the start of the text, Down on the last to the end, the
-scrollbar fading a second after the last scroll instead of two, and the
-rounded plate behind inline code.
+scrollbar fading a second after the last scroll instead of two, the
+rounded plate behind inline code, and ranges a textarea can colour.
 
 **Inline code is the accent on a wash of itself, as the Claude app draws
 it.** `md_view` sets the letters to `theme.link` (the accent's readable
@@ -512,13 +518,112 @@ textarea's own `OutdentInline` for it. Checked against 2.1.284:
 sends no `system/status` frame for it, unlike the other modes, so the
 reply is what the driver trusts.
 
-**Mode, model and effort show on every Claude conversation.** A driver
-session's pills open pickers; a terminal session's are `chip_static`, read
-from the transcript (`r.state.mode`, `Session::models.last()`,
-`Session::effort`) and not clickable: the inbox reads everything as prose,
-and a `control_request` frame sent to it is dropped without a reply
-(tried against 2.1.284), so there is no channel to change them from here.
-The row under the composer says so. Effort has no control request either
+**A turn is stopped from the window, and a stop in the terminal shows
+here.** Escape in the terminal usually leaves a "[Request interrupted"
+row, which `turn_state` reads. Escape during `/compact` leaves nothing:
+the `/compact` prompt, a caveat row, and no boundary, so the transcript
+read as working for ever. Claude Code's registry record carries `status`
+(`idle` or `busy`) and `statusUpdatedAt`, and that is the word on
+whether a turn is running: `Hub::settle_stopped` runs on every scan and
+`TurnState::settle_idle` turns a working state into your turn, chip
+"interrupted", when the registry has been idle since after the rows the
+state was read from (idle from before them is the registry not having
+caught up with a turn that just began). The row "Claude is working" has
+a Stop pill at its right end (`Workbench::interrupt`): a driver takes
+an `interrupt` request; a terminal session gets Escape in its terminal
+(`sys::key_in_terminal`: WezTerm and Kaku by `cli send-text` to the
+pane and iTerm2 by `write text`, neither coming to the front; Terminal
+and other hosts by a System Events key press after being brought
+forward), then the scan is asked for twice so the row goes within a
+second or so. Escape in the window itself was not bound to it: it
+already closes the find bar, the lightbox and the slash list. A host
+that had to come forward for the key gives the front back to Emaki once
+it is pressed. A stopped turn hands its prompt back
+(`Workbench::restore_prompt`), as Claude Code's terminal does on Escape:
+the words in the composer with the caret after them and the attachments
+on the chips again, from the message as it left the window when that
+was the last thing sent to the session (`last_sent`, pictures
+included), else from the transcript's last round by its paths. It
+happens on the Stop click and when the index shows the session going
+from working to stopped (`was_working`), which is Escape in the
+terminal, and never over something already typed. The conversation lets
+go of what the composer got back: "[Request interrupted by user]" is
+Claude Code's marker, not something the person said, and is never drawn,
+and a prompt stopped before the agent wrote or ran anything is taken out
+of `rounds` and kept as `Session::withdrawn` (`handle_user` in `build`),
+which is what `restore_prompt` reads first; left in, the message showed
+twice once it was sent again. A prompt the agent had started on stays
+where it is. The Stop click and the restore were checked by the person
+on a session in Positron's terminal; the withdrawal is covered by a
+test.
+
+**An IDE's terminal has to be given the focus before keys are sent.**
+Terminal, iTerm2, WezTerm and Kaku take text for a tab or pane by its
+tty. An IDE built on VS Code (Positron, Cursor, VS Code) is typed into
+with System Events, and takes keys wherever its focus was left: an
+editor, the file tree. Bringing the app forward does not move that, so
+`/compact` sent from the window landed in a file. `Host::
+focus_ide_terminal` (any host with `Contents/Resources/app/
+product.json`) first asks the IDE's command palette for "Terminal: Focus
+Terminal" (⌘⇧P, the words, ↩), which lands in the terminal panel
+whatever held the focus and is harmless from the panel itself, where
+the toggle on ⌃` would close it. `type_in_terminal` and
+`key_in_terminal` both go through it, and before it through
+`Host::wait_front`, which asks System Events which process is frontmost
+and sends nothing until it is the host: activating an app is a request
+the system may grant late, and keys sent early land in whatever is in
+front, Emaki's own composer included. It focuses the terminal the IDE
+has active, which with several open may not be this session's: nothing
+outside the IDE can pick one by its tty. The palette step ran in every
+effort and model check below, and six digits typed through it
+(`EMAKI_GO=type:123456`) arrived whole; the case it exists for, focus
+left in a file, was not reproduced from a script.
+
+**Mode, model and effort are three pills on every Claude conversation,
+and each opens its list.** A light grey pill with an icon in front
+(`icons/shield.svg`, `gauge.svg`, `box.svg`), darker under the pointer,
+darker again while pressed or open, no tooltip and no caret (`picker`;
+the toolkit draws a custom button colour at a fifth of its strength, so
+the resting grey is the muted ink thinned). On a driver session a pick
+is a control request. A terminal session takes nothing over its inbox
+(it reads everything as prose, and a `control_request` frame sent to it
+is dropped without a reply, tried against 2.1.284), so a pick goes
+through the terminal as a slash command does: the model as `/model
+<name>` and the effort as `/effort <level>`, typed and sent
+(`run_in_terminal`), the window coming back when the transcript shows it
+ran. The mode has no such command. Only ⇧Tab changes it, stepping
+through an order that depends on what the session was started with, and
+nothing says where a press landed: the status line reruns on a mode
+change but is not handed the mode (read from a captured input, 2.1.288),
+and the transcript records it only with its next prompt row. Claude
+Code's key bindings offer `chat:cycleMode` and nothing that names a
+mode. Pressing ⇧Tab a counted number of times along that order was
+built twice and tried on a live session both times. One press worked
+(auto to default). A switch to auto did not: the first try, auto to plan
+and back, ended in plan; the second, with the terminal checked to be in
+front and all presses from one script at a steady pace, went default,
+accept edits, plan and then default again instead of auto. The 2.1.288
+binary steps from plan to bypass, auto or default by flags of the
+session (`isBypassPermissionsModeAvailable`, `isAutoModeAvailable` and a
+gate) that nothing outside it can read, so what follows plan cannot be
+known from here, and one of the candidates is bypass. It was taken out
+both times. `set_mode_in_terminal` sends plan mode as `/plan`, which is
+a command and always lands (its output, "Enabled plan mode", is what
+`turn_state` reads the mode from until the next prompt). For any other
+mode nothing is pressed: the row under the composer says to press ⇧Tab
+in the terminal until its footer names the mode, and `MODE_HINT_MS`
+later, once that has been read, the terminal comes to the front (the
+first version jumped at once, so the hint showed in a window the person
+had just left and the pick looked like it did nothing). Do not bring
+the counting back without something that reports the mode. What the
+pills show on a terminal session is the status line's
+word where it has one (`terminal_ctx`: model and effort, live, from
+`state/context/<session>.json`), else the transcript's. Checked on a
+session in Positron's terminal with `EMAKI_GO=effort:` and `model:`:
+effort medium, high, medium and model Opus, Sonnet, Opus, each confirmed
+by the status line's file. `/model` on a conversation with a warm cache
+asks "Switch model?" in the terminal before it switches, which is the
+person's to answer there; the window comes back once it has. Effort has no control request either
 (`set_effort` is "Unsupported"), but `/effort <level>` as a user turn runs
 as the local command it is, and Claude Code records it as a
 `system/local_command` row with `commandRun: {command: "effort", args}`,
@@ -533,6 +638,19 @@ transcript's (`Session::context_tokens`, the last assistant row's input plus
 cache read plus cache creation) over the model's window
 (`limits::Limits::context_window`: what a driver's `result` frame reported
 in `modelUsage`, else an assumption; `claude-fable-5-1` answered 1,000,000).
+The window is the half the transcript cannot give: one model id comes in
+two sizes (`claude-opus-5-5` is 200k or 1M by the session's choice), so
+after a `/model` to Opus the row took 238k of an assumed 200k and read
+119% where the terminal said 23%, and every figure after it was five
+times too large. The status line is handed the size, so the script also
+leaves `state/context/<session>.json` (model, window, tokens in use) and
+`Limits::window_for` takes the session's own window from it
+(`limits::session_context`, read with the windows), else the size
+last seen for the model (`learn_window`), else the assumption, and never
+a window smaller than what is in it: more tokens than the window means
+the window is the 1M one. `Session::models` ends on the model in use,
+so a `/model` back to an earlier one counts, and `<synthetic>` is not a
+model. Files a month old are pruned at launch.
 The five-hour and seven-day windows are per account and reach Emaki two
 ways, the newer winning: a driver's `rate_limit_event` frames, and the
 terminal's status line. Claude Code writes the windows to no file a
@@ -542,7 +660,9 @@ once per refresh. So Emaki has a status line of its own,
 `scripts/statusline.sh`, built into the binary (`statusline::SCRIPT`): it
 prints the terminal's line and, when `~/.emaki/state` exists, leaves the
 windows in `state/rate_limits.json`, written whole and renamed into place,
-which `Limits::refresh_from_statusline` reads every second.
+which `Limits::refresh_from_statusline` reads once a minute on the clock
+(`LIMITS_SECS`, the countdown's own resolution) and whenever the session
+showing is loaded, which is when the file changes.
 `statusline::ensure` runs in `Hub::start`, at every launch: it writes the
 script to `~/.emaki/bin/statusline.sh`, a stable path outside any
 checkout, and sets `statusLine` to `bash ~/.emaki/bin/statusline.sh`
@@ -559,6 +679,139 @@ lost and the row froze, hence this. What was learned is kept in
 `state/limits.json` with the time it was seen; the row says "limits as
 of …" once that is older than five minutes and shows `--` until either
 source has reported. The row has no tooltip: the line is the whole story.
+
+**A question of Claude's is a card, and what channel the session is on
+decides who answers it.** `AskUserQuestion` is a tool call, so the
+conversation draws it as a card wherever it was asked (`transcript::
+render_question_call`): each question with its header chip and its
+options, the chosen one ticked once the result's sidecar carries
+`answers` (`ToolCall::answers`, kept by question; words typed instead
+are quoted under the options; "not answered" when the person declined).
+It never folds into a run of tool calls. Who answers depends on the
+channel. A driver of ours gets the question as a `can_use_tool` request
+like any permission (checked against 2.1.288 with `emaki-core drive`:
+the request carries the questions, the reply is allow with the input
+completed by `answers`, question text to the label chosen, which is how
+Claude Code's own dialog answers; `Driver::answer_question`,
+`driver::question_decision`), so the card where permission cards sit
+(`Workbench::render_question`) takes a click on an option, a button
+when there are several questions or several choices (`picks` holds the
+staging), or whatever is typed in the composer (`send_message` routes
+words to `answer_question_typed` while a question waits, and the
+placeholder says so). A bare ↩ never answers a question, and "Allow
+all" skips them. A terminal session's question lives in the terminal's
+dialog: the inbox socket takes only `auth` and `user` frames (read out
+of the 2.1.288 binary), so nothing from here can answer it, and the
+status row under the conversation says "Claude is waiting for your
+answer · in your terminal" (the same line says "below" for a driver,
+and "your approval" or "your go-ahead on the plan" for the other
+holds). `emaki-core drive` answers a question with its first option, so
+the wire can be checked from a terminal.
+
+**A slash command runs only where a session is driven from here.** A
+headless child runs `/compact` as the command it is (the 2.1.288 binary
+marks it `supportsNonInteractive`; checked on the wire: a `status:
+compacting` frame, the boundary, then a `result` with no turns, so the
+driver's turn ends as usual), and the list of commands it knows comes
+with `initialize` (`DriverView::commands`). A terminal session's inbox
+cannot: Claude Code wraps every `user` frame on that socket as a message
+from a peer, with or without our envelope (checked by sending a bare
+`/effort low`: the terminal showed "Message from @…" and the model
+answered that it cannot run a command sent by a peer), so there is no
+frame that passes for typing and no way to make a message from here
+read as the person's own. `send_message` refuses a slash command on the
+inbox channel with a notice saying to type it in the terminal, rather
+than spend it as a prompt. While a message is a slash command being
+typed, a list of the session's commands opens over the composer
+(`render_slash_help`: the driver's own, `BUILTIN_COMMANDS` before one
+has started, one line of explanation for a terminal session), a click
+completing the name.
+
+**What only the terminal can take, the window takes you to.** The
+conversation stays in the person's terminal, because keeping that
+history is the point of the app, so for a question's dialog, an
+approval, a slash command or the mode, Emaki brings that terminal to the
+front and comes back when it is done (`Workbench::go_to_terminal`). The
+button is wherever the need shows: on the waiting line under the
+conversation, on the slash-command card, on the read-only mode, model and
+effort pills, and the top-right terminal button, which for a session
+already in a terminal goes there instead of refusing. `sys::focus_terminal`
+finds the app: the session's pid from the registry, then up the parent
+chain until a process is an application the system knows
+(`NSRunningApplication`), which is the terminal app or the IDE holding a
+terminal (this very session ran under Positron). Within it, where the app
+can be asked, the tab or pane on the process's tty is selected first:
+Terminal and iTerm2 by AppleScript, WezTerm and Kaku (built on WezTerm)
+by the `cli list` / `activate-pane` binary beside the gui, keyed on
+`tty_name`; anything else is activated as an app and left as it was.
+A slash command on a terminal session goes the same way, typed: the
+list over the composer (`render_slash_help`) is the folder's own
+catalogue, read once per folder from a headless child's `initialize`
+reply (`driver::catalogue`, `Hub::commands_for`: 87 entries here, names,
+descriptions and argument hints, no model call, no transcript left, about
+half a second; the built-ins stand in until it is in), and a click on a
+row, or ⌘↩ on the typed command, sends the text to the terminal
+(`Workbench::run_in_terminal`, `sys::type_in_terminal`): Terminal takes
+`do script` in the tab on the tty, iTerm2 `write text` in the session,
+WezTerm and Kaku `cli send-text --no-paste` with a carriage return to the
+pane, and any other host (an IDE's terminal) System Events keystrokes
+after the app is in front, which need Accessibility access for Emaki;
+refused, the text goes on the clipboard and the row under the composer
+says so. On a driven session a click sends the command through the
+driver. Checked by hand against Kaku with `EMAKI_GO=type:/status`.
+The list is a card of two columns and a foot (`render_slash_help`): the
+name with its argument hint in the first, 36% of the card, what it does
+in the second, each cut with an ellipsis, because a hint like
+`/code-review`'s ran out of the card when it was allowed its own width.
+Eight rows show (`SLASH_ROWS`) and the window slides with the choice.
+The keys are the composer's while the list is open
+(`Workbench::slash_key`, captured before the textarea as ⇧Tab is): ↑ and
+↓ move the choice, round the ends, ↩ picks it, ⇥ puts its name in the
+text, Escape puts the list away until the text changes.
+The choice (`slash_sel`) goes back to the first row on every change to
+the text, so typing and ↩ takes the best match (within a rank the
+shorter name first: "/co" is /color, /config, /compact before a plugin's
+long name). The foot names the keys and what ↩ will do to the row chosen
+("run" or "insert"), the place in the list when it is longer than the
+card, and on a terminal session "runs in the terminal", a click on which
+goes there.
+
+**Two kinds of slash command, told apart by name.** `/compact`, `/model`
+and `/clear` act by themselves; `/ph-image` or `/code-review` is a skill,
+a prompt for the model, which a person as often names inside a sentence
+("use my /ph-image skill to…"), and running one unasked cannot be taken
+back. The catalogue on the wire cannot say which is which: it marks
+`builtin` (55 of 87 here) and bundled skills are built in too. The
+2.1.288 binary can: every command declares `type` `local`, `local-jsx`
+or `prompt`, and `driver::LOCAL_COMMANDS` is the first two, read out of
+it; `driver::acts_alone` answers, and a name not on the list is taken
+for a skill, the harmless side to be wrong on. `Workbench::slash_pick`
+(↩ or a click) runs a command only when it acts alone and is the whole
+message; anything else goes into the text at the caret with a space
+after it (`slash_insert`). ⌘↩ on a message that is only a command still
+sends it as that command, a skill with its arguments included. The list
+follows the caret, not the start of the message
+(`driver::slash_token_at`: a "/" at the start or after a space, and the
+name characters around the caret), and inside a sentence it offers
+skills only. Every command a message names is coloured in the accent:
+in the composer by ranges on the textarea (`Workbench::mark_slash`, set
+again on every change; the vendored toolkit's `set_marks`, which is why
+this is not the live markdown rendering the composer gave up on), and
+in a sent prompt by `driver::mark_commands`, which sets it as inline
+code before the markdown view sees it, leaving code spans and fenced
+blocks alone. A token counts when `driver::slash_tokens` finds it as a
+word of its own (`/usr/bin` and `a/b` are not) and its name acts alone
+or is in the folder's catalogue (`Hub::knows_command`, cache only; the
+catalogue is read when a Claude session of that folder is opened).
+`EMAKI_KEYS` dispatches those actions through the focus, since a
+synthetic key does not reach a background window.
+Coming back: when the session was waiting or idle at the hand-off, the
+next change to its transcript is the interaction done, and the window
+activates itself (`come_back`, forgotten after fifteen minutes); when the
+agent was working, the next change would be its own, so nothing is
+armed. Considered and set aside: a terminal of Emaki's own (gpui-terminal
+on alacritty, or Ghostty) and a tmux bridge, both of which would own
+sessions rather than follow the terminal, and both far larger.
 
 **A permission card answers to the keyboard.** ↩ on an empty composer
 allows the oldest card waiting on the session showing, ⇧↩ denies it, and
@@ -960,7 +1213,12 @@ leaves no command row and is a prompt like any other. In the
 conversation the command's own chip is left out when the prompt above
 already says it, and `/compact`'s output line, "Compacted (ctrl+o to see
 full summary)", is the terminal's instruction and is dropped: the round
-reads as the prompt and the boundary's notice, nothing else.
+reads as the prompt and the boundary's notice, nothing else. Only that
+command's output goes (`RoundBuilder::command` is the command the next
+output belongs to): a `/model` run later, still in the `/compact`
+round because no prompt came between, keeps its "Set model to …" line.
+The first version dropped every output in a round that began with
+`/compact`.
 
 **A message sent mid-turn is never a user row.** Typed in the terminal
 or sent from the window while the agent is working, it is absorbed into
@@ -975,6 +1233,20 @@ place, with what the agent did next under it; `image_block_bytes` reads a
 pasted picture from `attachment.prompt` by the row's uuid. The
 `task-notification` rows in the same shape are the harness's and stay
 out. The turn state is untouched: the turn it cut into is still running.
+That row is written only when the agent takes the message up, at its
+next step, which behind a long tool call was half a minute later: the
+window showed nothing, and the person sent the message again from the
+terminal. What is written at once is the queue: a `queue-operation` row,
+`enqueue` with the message as `content`, then `dequeue` (the front one
+starts a turn of its own) or `remove` with the same content (absorbed).
+`build::Queue` replays them, and whatever is still queued at the end of
+the file is drawn as a round of its own at the foot of the conversation
+with `Round::queued` set, saying "Queued, Claude will read it at its
+next step" under the bubble, until the attachment row lands and the
+next build puts it where it was taken up. A harness notification in the
+queue is kept for the order and never drawn. Replayed over every
+transcript on this machine, 296 enqueues met 222 dequeues and 74
+removes, and nothing was left over.
 
 **The compaction summary is not a prompt.** After the boundary, Claude
 Code writes the summary it hands the model as a `user` row flagged

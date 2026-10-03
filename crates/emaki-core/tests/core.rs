@@ -122,6 +122,41 @@ fn turn_state_reads_the_tail() {
     assert_eq!(st.activity, "interrupted");
 }
 
+/// A question the agent asks is a tool call whose result carries the
+/// answers in its sidecar; the model keeps them by question, and the
+/// markdown draws the options as a checklist with the chosen one ticked.
+#[test]
+fn a_question_keeps_its_answers() {
+    let input = json!({"questions": [{"question": "Tea or coffee?", "header": "Drink", "options": [{"label": "Tea", "description": "Hot"}, {"label": "Coffee", "description": "Hotter"}], "multiSelect": false}]});
+    let qs = emaki_core::model::questions_of(input.as_object().unwrap());
+    assert_eq!(qs.len(), 1);
+    assert_eq!(qs[0].header, "Drink");
+    assert_eq!(qs[0].options, vec![("Tea".to_string(), "Hot".to_string()), ("Coffee".to_string(), "Hotter".to_string())]);
+    let mut rows = vec![user("ask me", "2026-01-01T10:00:00Z")];
+    rows.push(assistant(vec![json!({"type": "tool_use", "id": "t1", "name": "AskUserQuestion", "input": input})], "tool_use", "2026-01-01T10:00:01Z"));
+    let mut result = tool_result("t1", "Your questions have been answered: \"Tea or coffee?\"=\"Tea\".", "2026-01-01T10:00:02Z");
+    result["toolUseResult"] = json!({"questions": input["questions"], "answers": {"Tea or coffee?": "Tea"}});
+    rows.push(result);
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let call = s.rounds[0].tool_calls().next().unwrap();
+    assert_eq!(call.answers, vec![("Tea or coffee?".to_string(), "Tea".to_string())]);
+    let md = emaki_core::render_md::render(&s, &emaki_core::config::Config::default(), &Redactor::new(false, &[]));
+    assert!(md.contains("- [x] Tea — Hot"), "{md}");
+    assert!(md.contains("- [ ] Coffee — Hotter"), "{md}");
+
+    // A label with a comma in it is matched whole, not split on the comma.
+    let input = json!({"questions": [{"question": "Commit?", "header": "Commit", "options": [{"label": "Yes, commit and push", "description": ""}, {"label": "Not yet", "description": ""}], "multiSelect": false}]});
+    let mut rows = vec![user("ask me", "2026-01-01T10:00:00Z")];
+    rows.push(assistant(vec![json!({"type": "tool_use", "id": "t2", "name": "AskUserQuestion", "input": input})], "tool_use", "2026-01-01T10:00:01Z"));
+    let mut result = tool_result("t2", "answered", "2026-01-01T10:00:02Z");
+    result["toolUseResult"] = json!({"questions": input["questions"], "answers": {"Commit?": "Yes, commit and push"}});
+    rows.push(result);
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let md = emaki_core::render_md::render(&s, &emaki_core::config::Config::default(), &Redactor::new(false, &[]));
+    assert!(md.contains("- [x] Yes, commit and push"), "{md}");
+    assert!(!md.contains("> Yes, commit"), "{md}");
+}
+
 /// A message sent while the agent is working is absorbed into the turn and
 /// recorded as a `queued_command` attachment, never as a user row. It is a
 /// prompt in its place: a round of its own, from the person or the peer
@@ -178,6 +213,13 @@ fn compact_summary_is_not_a_prompt() {
     assert!(!s.rounds.iter().any(|r| r.prompt.starts_with("This session is being continued")));
     assert_eq!(first_prompt_title(&rows[2..], 72), "/compact");
     assert_eq!(s.context_tokens, 11752, "the context in use is the summary's size until the next turn");
+
+    // A command run later in the same round keeps its output.
+    rows.push(user("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>", "2026-01-01T10:01:00Z"));
+    rows.push(user("<local-command-stdout>Set model to `Opus 5.5`</local-command-stdout>", "2026-01-01T10:01:00Z"));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let notices: Vec<&str> = s.rounds[1].items.iter().filter_map(|i| if let Item::Notice { text, .. } = i { Some(text.as_str()) } else { None }).collect();
+    assert_eq!(notices, vec!["Context compacted, earlier messages summarised", "/model", "Set model to `Opus 5.5`"]);
 
     let mut rows = vec![user("go", "2026-01-01T10:00:00Z"), assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:01Z")];
     rows.push(user("/effort high", "2026-01-01T10:00:02Z"));
@@ -415,6 +457,105 @@ fn builder_records_context_and_effort() {
     assert_eq!(s.effort, "max");
 }
 
+/// A message sent mid-turn shows the moment it is queued, and moves to
+/// where it was taken up once the row that records it is written.
+#[test]
+fn a_queued_message_shows_before_it_is_absorbed() {
+    let envelope = "<cross-session-message from-name=\"emaki\">\nand also this\n</cross-session-message>";
+    let mut rows = vec![
+        row(json!({"type": "queue-operation", "operation": "enqueue", "content": "first", "timestamp": "2026-01-01T10:00:00Z", "sessionId": "s1"})),
+        row(json!({"type": "queue-operation", "operation": "dequeue", "timestamp": "2026-01-01T10:00:00Z", "sessionId": "s1"})),
+        user("first", "2026-01-01T10:00:00Z"),
+        assistant(vec![json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "sleep 60"}})], "tool_use", "2026-01-01T10:00:01Z"),
+        row(json!({"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n<task-id>x</task-id>", "timestamp": "2026-01-01T10:00:02Z", "sessionId": "s1"})),
+        row(json!({"type": "queue-operation", "operation": "enqueue", "content": envelope, "timestamp": "2026-01-01T10:00:05Z", "sessionId": "s1"})),
+        row(json!({"type": "queue-operation", "operation": "enqueue", "content": "typed in the terminal", "timestamp": "2026-01-01T10:00:09Z", "sessionId": "s1"})),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let seen: Vec<(&str, bool)> = s.rounds.iter().map(|r| (r.prompt.as_str(), r.queued)).collect();
+    assert_eq!(seen, vec![("first", false), ("and also this", true), ("typed in the terminal", true)]);
+    assert_eq!(s.rounds[1].source, emaki_core::model::Source::Web, "the window's own message is the person's");
+    assert_eq!(s.rounds[0].tool_count(), 1, "the running turn keeps its calls");
+
+    // Taken into the turn: the queue empties and the attachment row is the round.
+    rows.push(row(json!({"type": "queue-operation", "operation": "remove", "reason": "absorbed_mid_turn", "content": envelope, "timestamp": "2026-01-01T10:00:30Z", "sessionId": "s1"})));
+    rows.push(row(json!({"type": "queue-operation", "operation": "remove", "reason": "absorbed_mid_turn", "content": "typed in the terminal", "timestamp": "2026-01-01T10:00:30Z", "sessionId": "s1"})));
+    rows.push(row(json!({"type": "attachment", "uuid": "a1", "timestamp": "2026-01-01T10:00:05Z", "sessionId": "s1", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": envelope, "origin": {"kind": "peer", "name": "emaki", "body": "and also this"}}})));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let seen: Vec<(&str, bool)> = s.rounds.iter().map(|r| (r.prompt.as_str(), r.queued)).collect();
+    assert_eq!(seen, vec![("first", false), ("and also this", false)]);
+}
+
+/// Escape during `/compact` leaves the prompt and nothing after it; the
+/// registry's idle, when it is newer than those rows, is what says stopped.
+#[test]
+fn the_registrys_idle_settles_a_turn_the_transcript_left_working() {
+    use emaki_core::build::{turn_state, Phase};
+    let rows = vec![user("hello", "2026-01-01T10:00:00Z"), assistant(vec![json!({"type": "text", "text": "hi"})], "end_turn", "2026-01-01T10:00:02Z"), user("/compact", "2026-01-01T10:05:00Z")];
+    let at = |ts: &str| emaki_core::build::parse_ts(ts).unwrap().timestamp() as f64;
+    let mut st = turn_state(&rows, "/tmp/proj");
+    assert_eq!(st.phase, Phase::Working);
+    // Idle since the turn before: the registry has not caught up yet.
+    assert!(!st.settle_idle(at("2026-01-01T10:00:03Z")));
+    assert_eq!(st.phase, Phase::Working);
+    assert!(st.settle_idle(at("2026-01-01T10:05:20Z")));
+    assert_eq!((st.phase, st.activity_kind.as_str()), (Phase::YourTurn, "stop"));
+    // A turn that ended on its own is left as it reads.
+    let mut done = turn_state(&rows[..2], "/tmp/proj");
+    assert!(!done.settle_idle(at("2026-01-01T10:09:00Z")));
+    assert_eq!(done.phase, Phase::YourTurn);
+    assert_ne!(done.activity_kind, "stop");
+}
+
+/// Escape before the agent did anything withdraws the prompt; after it
+/// did, the round stays and only the marker goes.
+#[test]
+fn a_prompt_stopped_untouched_is_withdrawn() {
+    use emaki_core::build::turn_state;
+    let mut rows = vec![
+        user("hello", "2026-01-01T10:00:00Z"),
+        assistant(vec![json!({"type": "text", "text": "hi"})], "end_turn", "2026-01-01T10:00:02Z"),
+        user("do the thing", "2026-01-01T10:01:00Z"),
+        user("[Request interrupted by user]", "2026-01-01T10:01:03Z"),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["hello"]);
+    assert_eq!(s.withdrawn.as_ref().map(|r| r.prompt.as_str()), Some("do the thing"));
+    assert_eq!(turn_state(&rows, "/tmp/proj").activity_kind, "stop");
+
+    // The next prompt is a round as usual, and nothing is withdrawn any more.
+    rows.push(user("do the other thing", "2026-01-01T10:02:00Z"));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.len(), 2);
+    assert!(s.withdrawn.is_none());
+
+    // Stopped after the agent had started: the round stays, the marker does not show.
+    let rows = vec![
+        user("do the thing", "2026-01-01T10:01:00Z"),
+        assistant(vec![json!({"type": "text", "text": "starting"})], "", "2026-01-01T10:01:02Z"),
+        user("[Request interrupted by user]", "2026-01-01T10:01:03Z"),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["do the thing"]);
+    assert!(s.withdrawn.is_none());
+}
+
+/// `/plan` leaves no mode row until the next prompt; its output says it.
+#[test]
+fn plan_mode_is_read_from_the_commands_own_output() {
+    use emaki_core::build::turn_state;
+    let mut auto = user("hello", "2026-01-01T10:00:00Z");
+    auto["permissionMode"] = json!("auto");
+    let rows = vec![
+        auto,
+        assistant(vec![json!({"type": "text", "text": "hi"})], "end_turn", "2026-01-01T10:00:02Z"),
+        row(json!({"type": "user", "timestamp": "2026-01-01T10:01:00Z", "sessionId": "s1", "message": {"role": "user", "content": "<command-name>/plan</command-name>"}})),
+        row(json!({"type": "user", "timestamp": "2026-01-01T10:01:00Z", "sessionId": "s1", "message": {"role": "user", "content": "<local-command-stdout>Enabled plan mode</local-command-stdout>"}})),
+    ];
+    assert_eq!(turn_state(&rows[..2], "/tmp/proj").mode, "auto");
+    assert_eq!(turn_state(&rows, "/tmp/proj").mode, "plan");
+}
+
 #[test]
 fn limits_absorb_the_wire_and_size_a_context() {
     use emaki_core::limits::{until, Limits};
@@ -430,6 +571,18 @@ fn limits_absorb_the_wire_and_size_a_context() {
     assert_eq!(l.context_window("claude-fable-5-1"), 1_000_000);
     assert_eq!(l.context_window("claude-opus-5-5"), 200_000);
     assert_eq!(l.context_window("opus[1m]"), 1_000_000);
+    // A session's own window, as its status line named it, beats the
+    // model's; one about another model does not; and a context larger
+    // than its window means the window is the large one.
+    use emaki_core::limits::SessionContext;
+    let own = SessionContext { model: "claude-opus-5-5[1m]".into(), window: 1_000_000, used: 238_000, seen_at: 1.0, ..Default::default() };
+    assert_eq!(l.window_for("claude-opus-5-5", 238_000, Some(&own)), 1_000_000);
+    assert_eq!(l.window_for("claude-haiku-4-5", 50_000, Some(&own)), 200_000);
+    assert_eq!(l.window_for("claude-opus-5-5", 90_000, None), 200_000);
+    assert_eq!(l.window_for("claude-opus-5-5", 238_000, None), 1_000_000);
+    assert!(l.learn_window(&own));
+    assert!(!l.learn_window(&own));
+    assert_eq!(l.window_for("claude-opus-5-5", 90_000, None), 1_000_000);
     assert_eq!(until(1790676000.0, 1790660000.0), "4h26m");
     assert_eq!(until(1791205200.0, 1790660000.0), "6d7h");
     assert_eq!(until(1790660100.0, 1790660000.0), "1m");
@@ -590,6 +743,9 @@ fn the_status_line_script_leaves_the_windows_for_the_app_and_never_fails() {
     };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
     let input = json!({
+        "session_id": "abc-123",
+        "model": { "id": "claude-opus-5-5[1m]" },
+        "effort": { "level": "high" },
         "context_window": { "current_usage": { "input_tokens": 1000, "cache_read_input_tokens": 8000 }, "context_window_size": 100000 },
         "rate_limits": { "five_hour": { "used_percentage": 7.4, "resets_at": now + 13500.0 }, "seven_day": { "used_percentage": 15, "resets_at": now + 5.0 * 86400.0 + 1800.0 } }
     });
@@ -611,6 +767,14 @@ fn the_status_line_script_leaves_the_windows_for_the_app_and_never_fails() {
     assert!((l.five_hour.unwrap().utilization - 0.074).abs() < 1e-9);
     assert_eq!(l.seven_day.unwrap().utilization, 0.15);
     assert!(l.seen_at >= now.floor());
+    // And the session's own context window, under its id.
+    let c = emaki_core::limits::session_context("abc-123").expect("the script leaves the session's context");
+    assert_eq!((c.model.as_str(), c.window, c.used), ("claude-opus-5-5[1m]", 100_000, 9_000));
+    assert_eq!(c.effort, "high");
+    assert!(emaki_core::limits::session_context("another").is_none());
+    assert_eq!(emaki_core::limits::prune_contexts(now, 3600.0), 0);
+    assert_eq!(emaki_core::limits::prune_contexts(now + 7200.0, 3600.0), 1);
+    assert!(emaki_core::limits::session_context("abc-123").is_none());
 
     // Empty and broken input: a blank-ish line, the file kept, exit 0.
     let before = std::fs::read_to_string(Limits::statusline_path()).unwrap();

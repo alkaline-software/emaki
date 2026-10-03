@@ -237,6 +237,42 @@ pub struct ToolCall {
     /// Nested rounds for Task calls.
     pub subagent: Vec<Round>,
     pub agent_name: String,
+    /// What the person answered an `AskUserQuestion` with, question by
+    /// question, from the result's sidecar; empty until they have, or when
+    /// they never did.
+    #[serde(default)]
+    pub answers: Vec<(String, String)>,
+}
+
+/// One question of an `AskUserQuestion` call, as the tool's input shapes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    pub question: String,
+    /// The short chip the terminal shows beside the question.
+    pub header: String,
+    /// Each option's label and the line under it.
+    pub options: Vec<(String, String)>,
+    pub multi: bool,
+}
+
+/// The questions in an `AskUserQuestion` input.
+pub fn questions_of(input: &Map<String, Value>) -> Vec<Question> {
+    let Some(list) = input.get("questions").and_then(Value::as_array) else { return Vec::new() };
+    list.iter()
+        .filter_map(|q| {
+            let s = |k: &str| q.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let question = s("question");
+            if question.is_empty() {
+                return None;
+            }
+            let options = q
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|o| o.iter().map(|opt| (opt.get("label").and_then(Value::as_str).unwrap_or("").trim().to_string(), opt.get("description").and_then(Value::as_str).unwrap_or("").trim().to_string())).filter(|(l, _)| !l.is_empty()).collect())
+                .unwrap_or_default();
+            Some(Question { question, header: s("header"), options, multi: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false) })
+        })
+        .collect()
 }
 
 impl Default for ToolKind {
@@ -329,6 +365,10 @@ pub struct Round {
     pub duration_ms: u64,
     pub images: u32,
     pub attachments: Vec<Attachment>,
+    /// Sent while the agent was working and not reached yet: the message
+    /// is in Claude Code's queue, and this round is where it waits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queued: bool,
 }
 
 impl Round {
@@ -387,6 +427,12 @@ pub struct Session {
     /// The effort level the session was last set to with `/effort`, or
     /// empty when it never was.
     pub effort: String,
+    /// The last prompt, when it was stopped before the agent did anything
+    /// with it: taken out of `rounds`, as Claude Code's own terminal takes
+    /// it back into its input, and kept here so the window can hand it
+    /// back to the composer. Cleared by the next prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<Round>,
     pub transcript_path: String,
     pub log_path: String,
 }

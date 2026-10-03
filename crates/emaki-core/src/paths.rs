@@ -132,7 +132,7 @@ pub fn ensure_dirs() -> std::io::Result<()> {
     let r = root();
     fs::create_dir_all(&r)?;
     chmod700(&r);
-    for d in [logs_dir(), state_dir(), cache_dir(), run_dir(), archive_dir(), uploads_dir("")] {
+    for d in [logs_dir(), state_dir(), state_dir().join("context"), cache_dir(), run_dir(), archive_dir(), uploads_dir("")] {
         fs::create_dir_all(&d)?;
         chmod700(&d);
     }
@@ -237,7 +237,24 @@ static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 /// would collide, so the first cwd to claim a slug keeps it and later ones get
 /// a short hash suffix. The claim is recorded in `state/projects.json` so the
 /// answer never changes underneath an existing log directory.
+///
+/// A claim never changes, so each answer is kept for the life of the
+/// process (per registry file, since tests and `EMAKI_HOME` move it). The
+/// window asks for every session's project on every frame, and without
+/// this each ask read the registry off disk: a third of a core while
+/// anything on screen was moving.
 pub fn project_slug(cwd: &str) -> String {
+    static KNOWN: std::sync::Mutex<BTreeMap<(PathBuf, String), String>> = std::sync::Mutex::new(BTreeMap::new());
+    let known_key = (state_dir().join("projects.json"), cwd.to_string());
+    if let Some(found) = KNOWN.lock().unwrap_or_else(|e| e.into_inner()).get(&known_key) {
+        return found.clone();
+    }
+    let slug = claim_project_slug(cwd);
+    KNOWN.lock().unwrap_or_else(|e| e.into_inner()).insert(known_key, slug.clone());
+    slug
+}
+
+fn claim_project_slug(cwd: &str) -> String {
     let cwd = absolute(cwd);
     let base_name = cwd
         .file_name()

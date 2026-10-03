@@ -398,6 +398,31 @@ impl<'a> MarkdownRenderer<'a> {
                     parts.push(self.result_block(call));
                 }
             }
+            ToolKind::Ask => {
+                // Each question, its options as a checklist with the
+                // chosen ones ticked, and words typed instead as a quote.
+                for q in questions_of(data) {
+                    let chosen = call.answers.iter().find(|(k, _)| *k == q.question).map(|(_, a)| a.clone()).unwrap_or_default();
+                    let mut lines = vec![format!("**{}**", esc(&q.question))];
+                    let mut typed = !chosen.is_empty();
+                    for (label, detail) in &q.options {
+                        // A label may hold a comma, so the answer is matched
+                        // whole, and as a part only where several were allowed.
+                        let on = chosen == *label || (q.multi && chosen.contains(label.as_str()));
+                        typed &= !on;
+                        let mark = if on { "x" } else { " " };
+                        let tail = if detail.is_empty() { String::new() } else { format!(" — {}", esc(detail)) };
+                        lines.push(format!("- [{mark}] {}{tail}", esc(label)));
+                    }
+                    if typed {
+                        lines.push(format!("\n> {}", esc(&chosen)));
+                    }
+                    parts.push(lines.join("\n"));
+                }
+                if call.answers.is_empty() && call.status == CallStatus::Ok {
+                    parts.push("*Not answered.*".into());
+                }
+            }
             ToolKind::Task => {
                 let prompt = data.get("prompt").or(data.get("description")).and_then(Value::as_str).unwrap_or("");
                 let (snippet, _) = clip(prompt, 700);

@@ -16,9 +16,16 @@
 //! row current too. What was learned is kept in `~/.emaki/state/limits.json`
 //! with the time it was seen, and the newer source wins.
 //!
-//! The context percentage itself needs no wire: the last assistant row's
-//! usage (input, cache read, cache creation) is what the next request
-//! carries, and `build` records it as `Session::context_tokens`.
+//! The context percentage is two numbers. The tokens in use need no wire:
+//! the last assistant row's usage (input, cache read, cache creation) is
+//! what the next request carries, and `build` records it as
+//! `Session::context_tokens`. The size of the window does: one model id
+//! comes in two sizes (`claude-opus-5-5` is 200k or 1M by the session's
+//! choice), and the transcript never says which. The status line is
+//! handed it, per session, and leaves it in
+//! `state/context/<session>.json` (`session_context`); `window_for`
+//! takes that, else what was learned for the model, else the assumption,
+//! and never a window smaller than what is in it.
 
 use std::collections::BTreeMap;
 
@@ -45,6 +52,65 @@ pub struct Limits {
     pub seen_at: f64,
     /// Context window size per model id, as `modelUsage` reported it.
     pub context_windows: BTreeMap<String, u64>,
+}
+
+/// What the status line was last handed about one session:
+/// `{"model", "effort", "window", "used", "seen_at"}`. Claude Code reruns
+/// the status line when the model or the effort changes (its own refresh
+/// list names `mainLoopModel` and `effortValue`), so this is the
+/// terminal's word on both, sooner than the transcript. The permission
+/// mode is on that refresh list too and is not in what the script is
+/// handed (read from a captured input, 2.1.288), so the mode a terminal
+/// session is in stays what its transcript last recorded.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SessionContext {
+    pub model: String,
+    /// The effort level; empty when the model takes none.
+    pub effort: String,
+    /// The window's size in tokens.
+    pub window: u64,
+    pub used: u64,
+    pub seen_at: f64,
+}
+
+/// Where the status line leaves each session's context, one file a session.
+pub fn context_dir() -> std::path::PathBuf {
+    paths::state_dir().join("context")
+}
+
+/// What the terminal's status line last said of `session`, if it ever
+/// ran for it and named a window.
+pub fn session_context(session: &str) -> Option<SessionContext> {
+    if session.is_empty() {
+        return None;
+    }
+    let v = paths::read_json(&context_dir().join(format!("{session}.json")))?;
+    serde_json::from_value::<SessionContext>(v).ok().filter(|c| c.window > 0)
+}
+
+/// Drop the context files of sessions the status line has not run for in
+/// `max_age` seconds. Returns how many went.
+pub fn prune_contexts(now: f64, max_age: f64) -> usize {
+    let Ok(dir) = std::fs::read_dir(context_dir()) else { return 0 };
+    let mut gone = 0;
+    for e in dir.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|t| now - t.as_secs_f64() > max_age);
+        if old && std::fs::remove_file(e.path()).is_ok() {
+            gone += 1;
+        }
+    }
+    gone
+}
+
+/// A model id without the `[1m]` the status line may put after it.
+fn bare_model(model: &str) -> &str {
+    model.split('[').next().unwrap_or(model)
 }
 
 /// The size assumed for a model nothing has reported on yet. A `[1m]`
@@ -154,10 +220,33 @@ impl Limits {
         changed
     }
 
-    /// The context window for `model`: what a driver reported, else the
-    /// assumption.
+    /// The context window for `model`: what a driver or a status line
+    /// reported, else the assumption.
     pub fn context_window(&self, model: &str) -> u64 {
         self.context_windows.get(model).copied().unwrap_or_else(|| assumed_context_window(model))
+    }
+
+    /// Remember the window a status line named for a session's model, so
+    /// a session no status line has run for starts from the size last
+    /// seen for that model. Returns whether anything changed.
+    pub fn learn_window(&mut self, ctx: &SessionContext) -> bool {
+        let model = bare_model(&ctx.model);
+        if model.is_empty() || ctx.window == 0 || self.context_windows.get(model) == Some(&ctx.window) {
+            return false;
+        }
+        self.context_windows.insert(model.to_string(), ctx.window);
+        true
+    }
+
+    /// The window a session's percentage is taken of. The session's own,
+    /// as its status line named it, while that is still about the model
+    /// the transcript is on; else the model's. `tokens` in use is the
+    /// floor: a context larger than the window it is supposed to be in
+    /// means the window is the large one, whatever was assumed.
+    pub fn window_for(&self, model: &str, tokens: u64, ctx: Option<&SessionContext>) -> u64 {
+        let own = ctx.filter(|c| c.window > 0 && (model.is_empty() || c.model.is_empty() || bare_model(&c.model) == bare_model(model)));
+        let window = own.map(|c| c.window).unwrap_or_else(|| self.context_window(model));
+        if tokens > window { window.max(1_000_000) } else { window }
     }
 }
 

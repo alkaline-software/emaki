@@ -167,6 +167,121 @@ pub struct CommandInfo {
     pub name: String,
     pub description: String,
     pub argument_hint: String,
+    /// Claude Code's own, as opposed to the person's skills and plugins.
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// The commands that act by themselves when typed alone: Claude Code's
+/// `local` and `local-jsx` commands (`/compact`, `/model`, `/clear`), read
+/// out of the 2.1.288 binary, where each command declares its type. The
+/// other type, `prompt`, is a skill: text handed to the model, which a
+/// person as often names inside a sentence. The catalogue on the wire
+/// marks `builtin` and nothing finer, and bundled skills are built in too
+/// (`/code-review`, `/loop`), so the type is kept here by name.
+const LOCAL_COMMANDS: &[&str] = &[
+    "add-dir", "advisor", "agents", "artifacts", "auto-mode-setup", "autocompact", "background", "branch", "brief", "btw", "bug", "cd", "chrome",
+    "clear", "color", "compact", "config", "context", "copy", "desktop", "diff", "effort", "exit", "export", "extra-usage", "fast", "feedback",
+    "focus", "fork", "goal", "help", "hooks", "ide", "import", "install-github-app", "install-slack-app", "keybindings", "list-agents", "login",
+    "logout", "loops", "mcp", "memory", "mobile", "model", "output-style", "permissions", "plan", "plugin", "privacy-settings", "recap",
+    "release-notes", "reload-plugins", "reload-skills", "remote-control", "rename", "resume", "rewind", "skill-doctor", "skills", "status",
+    "stickers", "tasks", "terminal-setup", "theme", "tui", "ultrareview", "upgrade", "usage", "usage-credits", "version", "voice", "workflows",
+];
+
+/// Whether `/name` typed alone does something by itself, rather than being
+/// a skill's prompt. A name not on the list is taken for a skill: putting
+/// a command in the message is harmless where running one unasked is not.
+pub fn acts_alone(name: &str) -> bool {
+    LOCAL_COMMANDS.contains(&name)
+}
+
+fn name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '-' || c == '_' || c == ':'
+}
+
+/// Every `/name` in `text` that stands as a word of its own, as byte
+/// ranges with the slash: at the start or after a space or an opening
+/// bracket or quote, and not the first part of a path (`/usr/bin`,
+/// `/etc.conf`). A colon or dash that ends the name is punctuation.
+pub fn slash_tokens(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut prev: Option<char> = None;
+    let mut it = text.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
+        let opens = prev.map(|p| p.is_whitespace() || "([{\"'".contains(p)).unwrap_or(true);
+        prev = Some(c);
+        if c != '/' || !opens {
+            continue;
+        }
+        let mut end = i + 1;
+        while let Some(&(j, n)) = it.peek() {
+            if !name_char(n) {
+                break;
+            }
+            end = j + n.len_utf8();
+            prev = Some(n);
+            it.next();
+        }
+        let after = text[end..].chars().next();
+        let mut after2 = text[end..].chars().skip(1);
+        let path = after == Some('/') || (after == Some('.') && after2.next().is_some_and(|c| c.is_alphanumeric()));
+        let name = text[i + 1..end].trim_end_matches([':', '-']);
+        if !path && name.chars().next().is_some_and(|c| c.is_alphanumeric()) {
+            out.push((i, i + 1 + name.len()));
+        }
+    }
+    out
+}
+
+/// The slash token the caret is in or just after, while one is being
+/// typed: where it starts, where its name ends, and what of the name lies
+/// before the caret.
+pub fn slash_token_at(text: &str, caret: usize) -> Option<(usize, usize, String)> {
+    let caret = caret.min(text.len());
+    if !text.is_char_boundary(caret) {
+        return None;
+    }
+    let back = text[..caret].chars().rev().take_while(|c| name_char(*c)).map(char::len_utf8).sum::<usize>();
+    let name_start = caret - back;
+    let start = name_start.checked_sub(1).filter(|s| text.as_bytes()[*s] == b'/')?;
+    if text[..start].chars().next_back().is_some_and(|p| !p.is_whitespace() && !"([{\"'".contains(p)) {
+        return None;
+    }
+    let end = caret + text[caret..].chars().take_while(|c| name_char(*c)).map(char::len_utf8).sum::<usize>();
+    Some((start, end, text[name_start..caret].to_string()))
+}
+
+/// `text` as markdown with each command `known` names set as inline code,
+/// which is how the conversation colours it. Code is left alone: fenced
+/// blocks, and anything already between backticks on its line.
+pub fn mark_commands(text: &str, known: impl Fn(&str) -> bool) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            out.push_str(line);
+            continue;
+        }
+        if fenced || line.starts_with("    ") || line.starts_with('\t') {
+            out.push_str(line);
+            continue;
+        }
+        let mut at = 0;
+        for (a, b) in slash_tokens(line) {
+            let in_code = line[..a].matches('`').count() % 2 == 1;
+            if in_code || !known(&line[a + 1..b]) {
+                continue;
+            }
+            out.push_str(&line[at..a]);
+            out.push('`');
+            out.push_str(&line[a..b]);
+            out.push('`');
+            at = b;
+        }
+        out.push_str(&line[at..]);
+    }
+    out
 }
 
 /// What the child said it can do, from `initialize` and `system/init`.
@@ -204,6 +319,15 @@ pub struct PermissionRequest {
     pub input: Map<String, Value>,
     pub description: String,
     pub asked_at: f64,
+}
+
+impl PermissionRequest {
+    /// Whether this is the agent asking a question rather than for leave
+    /// to run a tool: `AskUserQuestion` comes down the same wire, and the
+    /// answer goes back in the input (`Driver::answer_question`).
+    pub fn is_question(&self) -> bool {
+        self.tool_name == "AskUserQuestion"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -721,6 +845,18 @@ impl Driver {
         let _ = self.events.send(Event::PermissionSettled(request_id.into()));
     }
 
+    /// Answer an `AskUserQuestion` card: the call is allowed with its input
+    /// completed by `answers`, question text to the label chosen (or the
+    /// words typed), which is how Claude Code's own dialog answers it. An
+    /// empty map is "the user did not answer". Unknown ids are ignored.
+    pub fn answer_question(&self, request_id: &str, answers: Map<String, Value>) {
+        let req = self.inner.lock().unwrap().pending_permissions.remove(request_id);
+        let Some(req) = req else { return };
+        let decision = question_decision(&req.input, answers);
+        let _ = self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": decision}}));
+        let _ = self.events.send(Event::PermissionSettled(request_id.into()));
+    }
+
     // -- the wire ----------------------------------------------------------
 
     fn error_or(&self, fallback: &str) -> String {
@@ -839,7 +975,7 @@ impl Driver {
             }
             let hint = str_of(item, "argumentHint");
             let hint = if hint.is_empty() { str_of(item, "argument_hint") } else { hint };
-            commands.push(CommandInfo { name: name.into(), description: str_of(item, "description").into(), argument_hint: hint.into() });
+            commands.push(CommandInfo { name: name.into(), description: str_of(item, "description").into(), argument_hint: hint.into(), builtin: item.get("builtin").and_then(Value::as_bool).unwrap_or(false) });
         }
         let mut g = self.inner.lock().unwrap();
         if !commands.is_empty() {
@@ -942,6 +1078,39 @@ impl Driver {
     }
 }
 
+/// The commands a session in `cwd` would know: built-ins, bundled skills,
+/// the person's own skills and command files, plugins. Read from a headless
+/// child's `initialize` reply, which costs no model call and leaves no
+/// transcript (checked against 2.1.288: nothing is written until a message
+/// is sent), about half a second. The child is stopped at once.
+pub fn catalogue(cwd: &str) -> Result<Vec<CommandInfo>, DriverError> {
+    let (tx, _rx) = mpsc::channel();
+    let id = throwaway_session_id();
+    let d = Driver::start(&id, cwd, false, "", "", tx)?;
+    let commands = d.caps().commands;
+    d.stop();
+    Ok(commands)
+}
+
+/// A fresh v4-shaped session id for a child that will never write a row.
+fn throwaway_session_id() -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let mut h = sha1_smol::Sha1::new();
+    h.update(nanos.to_string().as_bytes());
+    h.update(std::process::id().to_string().as_bytes());
+    h.update(b"catalogue");
+    let x = h.digest().to_string();
+    format!("{}-{}-4{}-a{}-{}", &x[..8], &x[8..12], &x[13..16], &x[17..20], &x[20..32])
+}
+
+/// The `can_use_tool` reply that answers a question: allow, with the
+/// input the call was made with and the answers beside its questions.
+pub fn question_decision(input: &Map<String, Value>, answers: Map<String, Value>) -> Value {
+    let mut input = input.clone();
+    input.insert("answers".into(), Value::Object(answers));
+    json!({"behavior": "allow", "updatedInput": input})
+}
+
 impl Drop for Driver {
     fn drop(&mut self) {
         if let Ok(mut c) = self.child.lock() {
@@ -974,6 +1143,21 @@ mod tests {
 
     /// Frames as Claude Code 2.1.283 writes them (`--verbose`, stream-json).
     /// If a release changes a key we read, this is the test that goes red.
+    #[test]
+    fn slash_commands_in_a_sentence() {
+        let text = "please use my /ph-image skill, then /compact. See /usr/bin and a/b, (/model) /x.rs /review: ok";
+        let names: Vec<&str> = slash_tokens(text).into_iter().map(|(a, b)| &text[a..b]).collect();
+        assert_eq!(names, vec!["/ph-image", "/compact", "/model", "/review"]);
+        assert!(acts_alone("compact") && acts_alone("model") && !acts_alone("ph-image") && !acts_alone("code-review"));
+        assert_eq!(slash_token_at("use /ph-im now", 10), Some((4, 10, "ph-im".into())));
+        assert_eq!(slash_token_at("use /ph-im now", 7), Some((4, 10, "ph".into())));
+        assert_eq!(slash_token_at("/mod", 4), Some((0, 4, "mod".into())));
+        assert_eq!(slash_token_at("a/mod", 5), None);
+        assert_eq!(slash_token_at("use /ph-im now", 11), None);
+        let known = |n: &str| n == "ph-image" || n == "compact";
+        assert_eq!(mark_commands("use /ph-image and `/compact` or /nope\n```\n/compact\n```\n/compact", known), "use `/ph-image` and `/compact` or /nope\n```\n/compact\n```\n`/compact`");
+    }
+
     #[test]
     fn frames_from_the_recorded_wire() {
         let (d, rx) = detached();
@@ -1008,6 +1192,28 @@ mod tests {
             other => panic!("expected Permission, got {other:?}"),
         }
         assert!(d.inner.lock().unwrap().pending_permissions.contains_key("req-7"));
+
+        // A question comes down the same wire and is answered in its input.
+        d.on_frame(json!({
+            "type": "control_request", "request_id": "req-8",
+            "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_2",
+                        "input": {"questions": [{"question": "Tea or coffee?", "header": "Drink", "options": [{"label": "Tea", "description": ""}, {"label": "Coffee", "description": ""}], "multiSelect": false}]}}
+        }));
+        match rx.recv().unwrap() {
+            Event::Permission(p) => {
+                assert!(p.is_question());
+                let mut answers = Map::new();
+                answers.insert("Tea or coffee?".into(), Value::String("Tea".into()));
+                let decision = question_decision(&p.input, answers.clone());
+                assert_eq!(decision["behavior"], "allow");
+                assert_eq!(decision["updatedInput"]["answers"]["Tea or coffee?"], "Tea");
+                assert_eq!(decision["updatedInput"]["questions"][0]["question"], "Tea or coffee?");
+                d.answer_question("req-8", answers);
+            }
+            other => panic!("expected Permission, got {other:?}"),
+        }
+        assert!(matches!(rx.recv().unwrap(), Event::PermissionSettled(id) if id == "req-8"));
+        assert!(!d.inner.lock().unwrap().pending_permissions.contains_key("req-8"));
 
         d.on_frame(json!({"type": "system", "subtype": "status", "permissionMode": "plan"}));
         assert!(matches!(rx.recv().unwrap(), Event::Mode(m) if m == "plan"));

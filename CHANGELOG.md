@@ -34,10 +34,72 @@ GitHub Release as its notes. Write it for the person installing the app.
   output; the context drops to the summary's size at the boundary. The
   round reads as the command and one line, "Context compacted", not the
   command twice and a terminal hint.
-- **A message sent while Claude is working shows in its place.** Claude
-  Code folds such a message into the running turn and records it apart
-  from the conversation's rows, so the window never showed it. It is now
-  a prompt where it was sent, with what Claude did next under it.
+- **Claude's questions are cards, and a session started here answers
+  them from the window.** A question Claude asks shows in the
+  conversation with its options and, once answered, the choice ticked.
+  On a session Emaki is driving, the question also sits above the
+  composer like a permission card: click an option, or type an answer.
+  On a terminal session the line under the conversation says Claude is
+  waiting for your answer in the terminal, instead of nothing.
+- **The terminal is one click away, and the window comes back.** For
+  what only the terminal can take on a terminal session, a question's
+  dialog, an approval, a slash command, the mode, the window brings that
+  terminal to the front, selecting the right tab or pane in Terminal,
+  iTerm2, WezTerm and Kaku, and returns to the front once the transcript
+  shows it done. The button sits on the waiting line, the command card,
+  the mode and effort pills, and the top-right terminal button.
+- **Slash commands, on every session.** Typing "/" opens the list of
+  commands the session's folder knows, with their descriptions, read from
+  Claude Code itself. A click runs one: through Emaki on a session it
+  drives; on a terminal session, by typing it into that terminal and
+  sending it, since Claude Code takes a command only at its own prompt.
+  Terminal, iTerm2, WezTerm and Kaku are typed into directly; an IDE's
+  terminal needs Accessibility access for Emaki, and without it the
+  command is put on the clipboard. ↑ and ↓ move through the list, ↩ runs
+  the one chosen (the first, after every keystroke), ⇥ completes its name
+  and Escape closes the list; long argument hints and descriptions are
+  cut with an ellipsis.
+- **Commands and skills are told apart.** `/compact` or `/model` chosen
+  from the list runs; a skill such as `/ph-image` goes into the message
+  instead, so it can be asked for in a sentence. The list opens wherever
+  a "/" is typed, not only at the start, and every command a message
+  names is coloured, while typing and once sent.
+- **A command's result shows after a compaction.** A `/model` run after
+  `/compact` showed its name and not what it answered.
+- **The context percentage is of the session's real window.** One model
+  comes with a 200k or a 1M window, and Emaki guessed, so a session
+  switched to Opus read 119% where the terminal said 23%. The status
+  line now tells Emaki each session's window, and a context larger than
+  the guess corrects it.
+- **Stop a turn from the window, and get your message back.** "Claude
+  is working" has a Stop button, which does what Escape does in the
+  terminal, and a turn stopped in the terminal shows as stopped here,
+  `/compact` included. Either way the message you sent returns to the
+  composer with its pictures and files, ready to edit, and leaves the
+  conversation when Claude had not started on it, so sending it again
+  does not show it twice. "[Request interrupted by user]" is no longer
+  drawn.
+- **Commands reach an IDE's terminal wherever its focus was.** In
+  Positron, Cursor or VS Code, a command sent from the window went into
+  whatever had the focus, a file as often as not. The terminal panel is
+  focused first.
+- **Mode, effort and model are pills with lists, on terminal sessions
+  too.** Each is a grey pill with an icon that darkens under the pointer
+  and again when pressed. On a terminal session a model or an effort
+  picked from the list is sent to the terminal as its command; plan mode
+  goes as `/plan`, and the other modes take you to the terminal to press
+  ⇧Tab. The pills show the terminal's model and effort as they change,
+  and plan mode as soon as `/plan` has run.
+- **Lighter while something is moving.** Every frame read the project
+  registry off disk once per session listed; the names are now kept in
+  memory. The status line's files are read once a minute and when the
+  conversation moves, not every second.
+- **A message sent while Claude is working shows at once, then in its
+  place.** Claude Code folds such a message into the running turn and
+  records it apart from the conversation's rows, so the window never
+  showed it. It now appears the moment it is sent, marked as queued, and
+  once Claude takes it up it is a prompt where it was sent, with what
+  Claude did next under it.
 - **Settings are segmented controls.** Each choice sits on a raised plate
   in a muted track, in both appearances, and the plate slides to the
   choice you click instead of jumping.
