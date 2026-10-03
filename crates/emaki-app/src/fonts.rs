@@ -176,6 +176,13 @@ pub fn wordmark_family(cx: &App) -> Option<SharedString> {
     cx.global::<ChatFonts>().wordmark.clone().map(SharedString::from)
 }
 
+/// The face titles and the greeting are set in: the Claude app's serif
+/// when this machine has it, else the fallback. One display face for the
+/// whole window, so a page title and the conversation agree.
+pub fn display_family(cx: &App) -> SharedString {
+    SharedString::from(cx.global::<ChatFonts>().serif.clone().unwrap_or_else(|| SERIF_FALLBACK.into()))
+}
+
 /// The family a conversation is drawn in for `choice` (`serif` or `sans`),
 /// or None to leave the window's own face.
 pub fn chat_family(choice: &str, cx: &App) -> Option<SharedString> {

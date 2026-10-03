@@ -3,6 +3,49 @@
 Each release has a section here, and `release.yml` puts that section on the
 GitHub Release as its notes. Write it for the person installing the app.
 
+## v0.1.4
+
+- **A new icon.** A handscroll on the terracotta plate: cream paper
+  between two rollers, a chevron and three lines of ink on the sheet. It
+  is drawn, not generated, so it reads at every size and matches the
+  window's colours.
+- **The home page starts in a folder you can see.** The six most recent
+  folders are cards with the folder's name in front and its parents
+  dimmed, three to a row, where a cloud of full-path pills used to wrap
+  every which way. The greeting is set in the Claude app's serif, with
+  the date and how many sessions are live and kept under it.
+- **The sidebar's recents are headed by when.** Today, yesterday, this
+  week, this month, earlier. The agent's mark is quiet unless the session
+  is live, so the list reads as titles, not as a column of marks. A
+  settings gear sits in the footer.
+- **The sessions page is headed the same way**, and a live row carries
+  its state as a chip at the right (working, your turn, needs you)
+  instead of a few cut-off words from its last message.
+- **The board has no grey slabs.** Four open columns under hairlines,
+  side by side when the window has room, two by two or one under another
+  when it does not, never scrolling sideways. An empty column says so
+  inside a dashed outline. Done is a row under them that opens into a
+  grid.
+- **Settings are segmented controls.** Each choice sits on a raised plate
+  in a muted track, in both appearances, and the plate slides to the
+  choice you click instead of jumping.
+- **Softer depth.** The composer, the search palette and the settings
+  panel lift off the page with a wide, warm shadow instead of a grey
+  halo. The search palette is centred in the window; it sat at the left
+  edge.
+- **Pages settle in.** Home, sessions and the board fade and rise over a
+  moment as they arrive. The conversation itself never animates.
+- **The composer says what it does.** "Start a session…" on the home
+  page, "Reply…" on a conversation.
+- **Settings in sections.** The panel is a fixed-size sheet with a rail
+  on the left: Appearance, New sessions, Explanations, Updates. One
+  section shows at a time, and the rows scroll with a scrollbar when they
+  need to.
+- **Updates, in one button.** *Check for updates* becomes *Update to x*
+  in the same place when there is one, with a small *Release notes* link
+  under it, and the daily check is a plain tick. The sentences that
+  explained all this are gone.
+
 ## v0.1.3
 
 - **Three buttons at the top right take a session somewhere else.** The

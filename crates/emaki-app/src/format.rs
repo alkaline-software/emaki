@@ -64,6 +64,26 @@ pub fn day(ts: &str) -> String {
     emaki_core::render_md::fmt_date(ts)
 }
 
+/// Which group of a list by recency a time falls in: the sidebar and the
+/// sessions page head their rows with these.
+pub fn bucket(mtime: f64) -> &'static str {
+    let today = Local::now().date_naive();
+    let Some(dt) = DateTime::<Utc>::from_timestamp(mtime as i64, 0).map(|d| d.with_timezone(&Local)) else { return "Earlier" };
+    let days = (today - dt.date_naive()).num_days();
+    match days {
+        i64::MIN..=0 => "Today",
+        1 => "Yesterday",
+        2..=6 => "This week",
+        7..=30 => "This month",
+        _ => "Earlier",
+    }
+}
+
+/// "Friday, 3 October".
+pub fn today_line() -> String {
+    Local::now().format("%A, %-d %B").to_string()
+}
+
 pub fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("{n} {one}") } else { format!("{n} {many}") }
 }

@@ -36,7 +36,7 @@ use emaki_core::model::{AgentId, Item, Session};
 use emaki_core::search::Results;
 use emaki_core::transcript::SessionRef;
 
-use crate::format::{clock, day, elapsed_since, now_secs, plural, relative};
+use crate::format::{bucket, clock, day, elapsed_since, now_secs, plural, relative, today_line};
 use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
@@ -56,8 +56,21 @@ pub const TRAFFIC_W: Pixels = px(80.);
 pub const CONTENT_W: Pixels = px(768.);
 /// A board column never gets narrower than this; past that the board scrolls.
 pub const COL_MIN_W: Pixels = px(210.);
-/// The serif used for greetings and page titles.
-pub const SERIF: &str = "Georgia";
+/// Home-page folder cards to a row.
+pub const FOLDER_COLS: usize = 3;
+/// The settings panel's sections, in rail order: key, label, icon.
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("explain", "Explanations", "icons/bot.svg"), ("updates", "Updates", "icons/redo-2.svg")];
+/// The panel's size: wide enough for a rail beside the rows, and a fixed
+/// height so it reads as a sheet, not a second window (capped by the
+/// window when that is smaller).
+pub const SETTINGS_W: Pixels = px(720.);
+pub const SETTINGS_H: Pixels = px(520.);
+pub const SETTINGS_RAIL_W: Pixels = px(180.);
+/// What the composer says when empty: on the home page, and on a session.
+pub const PLACEHOLDER_NEW: &str = "Start a session…  (⌘↩ to send)";
+pub const PLACEHOLDER_REPLY: &str = "Reply…  (⌘↩ to send)";
+/// How many folders the home page offers.
+pub const HOME_FOLDERS: usize = 6;
 /// The composer grows with its text between these row counts.
 pub const COMPOSER_MIN_ROWS: usize = 3;
 pub const COMPOSER_MAX_ROWS: usize = 12;
@@ -382,12 +395,23 @@ pub struct Workbench {
     /// The message being written: plain text, on purpose. Markdown in it
     /// renders once sent, like any prompt.
     pub composer: Entity<TextareaState>,
+    /// What the composer's placeholder says now; see `render`.
+    composer_placeholder: &'static str,
+    /// Where each segment of a settings control sat on the last draw,
+    /// relative to its track, by `control-key`, so the raised plate can
+    /// slide from the old choice to the new one. See `segmented`.
+    seg_bounds: Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// For each control, the choice the plate slides from and the one it
+    /// is on, as of the last draw.
+    seg_state: std::cell::RefCell<HashMap<&'static str, (&'static str, &'static str)>>,
     pub attachments: Vec<Attachment>,
     /// An attachment opened large over the window.
     pub lightbox: Option<Lightbox>,
     pub search_input: Entity<InputState>,
     pub search_open: bool,
     pub settings_open: bool,
+    /// Which section of the settings panel is showing; see `SETTINGS_SECTIONS`.
+    pub settings_section: &'static str,
     pub search_results: Option<Results>,
     search_task: Option<Task<()>>,
     /// Find inside the conversation showing (⌘F): the field, whether the
@@ -437,6 +461,9 @@ pub struct Workbench {
     /// The window is too narrow for the sidebar beside the content; it is
     /// hidden and only shows over the content, on request (`sidebar_peek`).
     narrow: bool,
+    /// The content pane's width as of the last draw, for layouts that
+    /// choose their column count from it (the board).
+    pane_w: Pixels,
     /// The pane the current scroll gesture began in, and when its last event
     /// came; see `route_scroll`.
     scroll_owner: Option<Pane>,
@@ -445,6 +472,8 @@ pub struct Workbench {
     side_scroll: ScrollHandle,
     sessions_scroll: ScrollHandle,
     home_scroll: ScrollHandle,
+    /// The settings body's scroll position, for its scrollbar.
+    settings_scroll: ScrollHandle,
     sidebar_peek: bool,
     startup_open: Option<String>,
     focus_handle: FocusHandle,
@@ -540,7 +569,7 @@ impl Workbench {
         let cfg = Config::load();
         let (hub, mut rx) = Hub::start(cfg.clone());
 
-        let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder("Reply…  (⌘↩ to send)").auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
+        let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder(PLACEHOLDER_NEW).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search every conversation, live and kept"));
         let find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this conversation"));
 
@@ -639,6 +668,8 @@ impl Workbench {
             find_input.update(cx, |s, cx| s.set_value(q.clone(), window, cx));
         }
         let settings_open = std::env::var("EMAKI_SETTINGS").is_ok();
+        // `EMAKI_SETTINGS=<section>` opens the panel on that section.
+        let settings_section = std::env::var("EMAKI_SETTINGS").ok().and_then(|v| SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == v).map(|(k, _, _)| *k)).unwrap_or("appearance");
         let page = match std::env::var("EMAKI_PAGE").as_deref() {
             Ok("sessions") => Page::Sessions,
             Ok("board") => Page::Board,
@@ -662,6 +693,7 @@ impl Workbench {
             search_input,
             search_open: false,
             settings_open,
+            settings_section,
             search_results: None,
             search_task: None,
             find_input,
@@ -695,6 +727,11 @@ impl Workbench {
             window_rect: Some(rect_of(window.bounds())),
             last_ui_save: std::time::Instant::now(),
             narrow: false,
+            pane_w: px(1180.),
+            composer_placeholder: PLACEHOLDER_NEW,
+            settings_scroll: ScrollHandle::new(),
+            seg_bounds: Rc::new(std::cell::RefCell::new(HashMap::new())),
+            seg_state: std::cell::RefCell::new(HashMap::new()),
             scroll_owner: None,
             last_scroll: Instant::now(),
             side_scroll: ScrollHandle::new(),
@@ -1286,25 +1323,12 @@ impl Workbench {
         let app = self.cfg.app.clone();
         let dark = theme.mode.is_dark();
 
-        // One pill: bordered, filled with the ink when it is the choice.
-        let pill = |id: String, label: String, active: bool, family: Option<String>, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
-            let theme = cx.theme().clone();
-            h_flex()
-                .id(SharedString::from(id))
-                .h(px(30.))
-                .px(px(12.))
-                .items_center()
-                .rounded_full()
-                .cursor_pointer()
-                .text_size(px(13.))
-                .border_1()
-                .border_color(if active { theme.foreground } else { theme.border })
-                .when(active, |d| d.bg(theme.foreground).text_color(theme.background))
-                .when(!active, |d| d.hover(|s| s.bg(theme.muted)))
-                .when_some(family, |d, f| d.font_family(f))
-                .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
-                .child(label)
+        let appearance_key = match app.appearance.as_str() {
+            "light" => "light",
+            "dark" => "dark",
+            _ => "system",
         };
+        let appearance = self.segmented("appearance", vec![("system", "System".into(), None), ("light", "Light".into(), None), ("dark", "Dark".into(), None)], appearance_key, Rc::new(|this, key, window, cx| this.set_appearance(key, window, cx)), cx);
         // A row: a title and a line on it at the left, the choices at the right.
         let row = |title: &'static str, detail: &'static str, control: AnyElement, theme: &gpui_component::Theme| {
             h_flex()
@@ -1313,11 +1337,6 @@ impl Workbench {
                 .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child(title)).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(detail)))
                 .child(control)
         };
-        let heading = |text: &'static str, theme: &gpui_component::Theme| div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(text);
-
-        let appearance = h_flex().gap(px(6.)).children([("system", "System"), ("light", "Light"), ("dark", "Dark")].into_iter().map(|(key, label)| {
-            pill(format!("appearance-{key}"), label.into(), app.appearance == key, None, cx, Box::new(move |this, window, cx| this.set_appearance(key, window, cx)))
-        }));
 
         // Accents are swatches: a disc of the colour, ringed when chosen.
         let accents = h_flex().gap(px(8.)).children(crate::look::ACCENTS.iter().map(|a| {
@@ -1345,13 +1364,14 @@ impl Workbench {
 
         let serif_family = Some(fonts.serif.clone().unwrap_or_else(|| crate::fonts::SERIF_FALLBACK.into()));
         let sans_family = fonts.sans.clone();
-        let font = h_flex()
-            .gap(px(6.))
-            .child(pill("font-serif".into(), "Anthropic Serif".into(), app.chat_font == "serif", serif_family, cx, Box::new(|this, _, cx| this.set_chat_font("serif", cx))))
-            .child(pill("font-sans".into(), "Anthropic Sans".into(), app.chat_font == "sans", sans_family, cx, Box::new(|this, _, cx| this.set_chat_font("sans", cx))));
-        let size = h_flex().gap(px(6.)).children([("small", "Small"), ("medium", "Medium"), ("large", "Large")].into_iter().map(|(key, label)| {
-            pill(format!("size-{key}"), label.into(), app.chat_size == key, None, cx, Box::new(move |this, _, cx| this.set_chat_size(key, cx)))
-        }));
+        let font_key = if app.chat_font == "sans" { "sans" } else { "serif" };
+        let font = self.segmented("font", vec![("serif", "Anthropic Serif".into(), serif_family), ("sans", "Anthropic Sans".into(), sans_family)], font_key, Rc::new(|this, key, _, cx| this.set_chat_font(key, cx)), cx);
+        let size_key = match app.chat_size.as_str() {
+            "small" => "small",
+            "large" => "large",
+            _ => "medium",
+        };
+        let size = self.segmented("size", vec![("small", "Small".into(), None), ("medium", "Medium".into(), None), ("large", "Large".into(), None)], size_key, Rc::new(|this, key, _, cx| this.set_chat_size(key, cx)), cx);
         let note = match &fonts.source {
             Some(dir) => format!("Anthropic Serif and Anthropic Sans are loaded from the Claude app at {}.", emaki_core::paths::tilde(&dir.to_string_lossy())),
             None => "Anthropic Serif and Anthropic Sans are the Claude desktop app's fonts and are loaded from it when it is installed. It was not found here, so Georgia stands in for the serif and the window's own face for the sans.".to_string(),
@@ -1367,64 +1387,125 @@ impl Workbench {
             "bypassPermissions" => "Bypass",
             _ => "Default",
         };
-        let modes = h_flex().gap(px(6.)).flex_wrap().justify_end().max_w(px(360.)).children(self.modes().into_iter().map(|m| {
-            pill(format!("default-mode-{m}"), short_mode(m).into(), default_mode == m, None, cx, Box::new(move |this, _, cx| this.set_default_mode(m, cx)))
-        }));
+        let modes_all = self.modes();
+        let mode_key = modes_all.iter().copied().find(|m| *m == default_mode).unwrap_or("default");
+        let modes = self.segmented("mode", modes_all.iter().map(|m| (*m, short_mode(m).to_string(), None)).collect(), mode_key, Rc::new(|this, key, _, cx| this.set_default_mode(key, cx)), cx);
         let default_model = if self.cfg.driver.default_model.is_empty() { "default".to_string() } else { self.cfg.driver.default_model.clone() };
-        let models = h_flex().gap(px(6.)).flex_wrap().justify_end().max_w(px(360.)).children(MODELS.iter().map(|m| {
-            let label = if *m == "default" { "Default".to_string() } else { model_label(m) };
-            pill(format!("default-model-{m}"), label, default_model == *m, None, cx, Box::new(move |this, _, cx| this.set_default_model(m, cx)))
-        }));
+        let model_key_now = MODELS.iter().copied().find(|m| *m == default_model).unwrap_or("default");
+        let models = self.segmented(
+            "model",
+            MODELS.iter().map(|m| (*m, if *m == "default" { "Default".to_string() } else { model_label(m) }, None)).collect(),
+            model_key_now,
+            Rc::new(|this, key, _, cx| this.set_default_model(key, cx)),
+            cx,
+        );
 
         let scope = if self.cfg.explain.enabled { self.cfg.explain.scope.as_str() } else { "off" };
-        let explain = h_flex().gap(px(6.)).children([("off", "Off"), ("permission", "Permission cards"), ("all", "Every new call")].into_iter().map(|(key, label)| {
-            pill(format!("explain-{key}"), label.into(), scope == key, None, cx, Box::new(move |this, _, cx| this.set_explain_scope(key, cx)))
-        }));
-        // Updates: the version, what the last check said, and the buttons.
+        let explain_key = match scope {
+            "off" => "off",
+            "all" => "all",
+            _ => "permission",
+        };
+        let explain = self.segmented("explain", vec![("off", "Off".into(), None), ("permission", "Permission cards".into(), None), ("all", "Every new call".into(), None)], explain_key, Rc::new(|this, key, _, cx| this.set_explain_scope(key, cx)), cx);
+        // Updates, as little as possible: the version on the left, one
+        // button on the right that is "Check for updates" until a check
+        // finds something and "Update to x" after, in the same place, and
+        // a small underlined "Release notes" link under it only then. The
+        // detail line says something only when there is something to say
+        // (downloading, a failure, up to date after a click). Three pills
+        // and two sentences used to sit here.
         let u = &self.update;
         let current = update::current_version();
         let update_line = if u.installing {
             match u.progress {
-                Some((done, Some(total))) if total > 0 => format!("Downloading {}… {}%", u.available.as_deref().unwrap_or(""), done * 100 / total),
-                Some(_) => format!("Downloading {}…", u.available.as_deref().unwrap_or("")),
+                Some((done, Some(total))) if total > 0 => format!("Downloading… {}%", done * 100 / total),
+                Some(_) => "Downloading…".to_string(),
                 None => "Installing… Emaki restarts by itself.".to_string(),
             }
         } else if !u.install_error.is_empty() {
             format!("The update did not go through: {}", u.install_error)
-        } else if u.checking {
-            "Looking for a newer version…".to_string()
         } else if !u.error.is_empty() {
-            format!("Could not check: {}.", u.error)
-        } else if let Some(v) = &u.available {
-            format!("Emaki {v} is available.")
-        } else if u.answered && !u.automatic {
-            "This is the newest version.".to_string()
-        } else if u.last_check > 0.0 {
-            format!("Last checked {}.", relative(u.last_check, self.now))
+            "Could not reach GitHub.".to_string()
+        } else if u.available.is_none() && u.answered && !u.automatic {
+            "Up to date.".to_string()
         } else {
-            "Not checked yet.".to_string()
+            String::new()
         };
         let can_install = u.available.is_some() && !u.installing && update::asset_name().is_some();
         let checking = u.checking;
         let installing = u.installing;
         let notes_url = u.available.as_deref().map(update::release_page);
-        let version_row = h_flex()
-            .gap(px(6.))
-            .items_center()
-            .when(can_install, |d| {
-                let label: SharedString = format!("Update to {}", u.available.as_deref().unwrap_or("")).into();
-                d.child(pill_button("update-now", label, &theme, cx.listener(|this, _, _, cx| this.install_update_now(cx))))
-            })
-            .when_some(notes_url, |d, url| d.child(pill_button("update-notes", "Release notes", &theme, move |_, _, _| { let _ = opener::open(&url); })))
-            .when(!installing, |d| d.child(pill_button("update-check", if checking { "Checking…" } else { "Check for updates" }, &theme, cx.listener(|this, _, _, cx| this.check_updates_now(cx)))));
-        let auto_check = Checkbox::new("update-auto").checked(self.cfg.app.check_updates).label("Once a day").on_click(cx.listener(|this, on: &bool, _, cx| this.set_check_updates(*on, cx)));
-        let version_detail: SharedString = format!("Emaki {current}. {update_line}").into();
+        let button = if can_install {
+            let label: SharedString = format!("Update to {}", u.available.as_deref().unwrap_or("")).into();
+            pill_button("update-now", label, &theme, cx.listener(|this, _, _, cx| this.install_update_now(cx))).into_any_element()
+        } else if installing {
+            pill_button("update-busy", "Updating…", &theme, |_, _, _| {}).into_any_element()
+        } else {
+            pill_button("update-check", if checking { "Checking…" } else { "Check for updates" }, &theme, cx.listener(|this, _, _, cx| this.check_updates_now(cx))).into_any_element()
+        };
+        let link_color = theme.muted_foreground;
+        let link_hover = theme.primary;
+        let version_row = v_flex().items_end().gap(px(6.)).child(button).when_some(notes_url, |d, url| {
+            d.child(
+                div()
+                    .id("update-notes")
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .text_color(link_color)
+                    .text_decoration_1()
+                    .text_decoration_color(link_color.opacity(0.6))
+                    .hover(move |s| s.text_color(link_hover).text_decoration_color(link_hover))
+                    .on_click(move |_, _, _| {
+                        let _ = opener::open(&url);
+                    })
+                    .child("Release notes"),
+            )
+        });
+        let auto_check = Checkbox::new("update-auto").checked(self.cfg.app.check_updates).on_click(cx.listener(|this, on: &bool, _, cx| this.set_check_updates(*on, cx)));
+        let version_detail: SharedString = if update_line.is_empty() { format!("Emaki {current}") } else { format!("Emaki {current} · {update_line}") }.into();
 
         let explain_model = if self.cfg.explain.model.is_empty() { "claude-haiku-4-5".to_string() } else { self.cfg.explain.model.clone() };
         let explain_note = format!(
             "An opaque call (a heredoc, a piped chain, anything long) gets one or two plain sentences from {} through your own Claude Code login. Simple calls explain themselves for free, answers are kept by content so a command is explained once, and every tool card has an Explain button.",
             model_label(&explain_model)
         );
+
+        // The rows of the section showing, and the rail beside them.
+        let section = self.settings_section;
+        let (section_title, section_anim): (&'static str, &'static str) = match section {
+            "sessions" => ("New sessions", "settings-sessions"),
+            "explain" => ("Explanations", "settings-explain"),
+            "updates" => ("Updates", "settings-updates"),
+            _ => ("Appearance", "settings-appearance"),
+        };
+        let rows: Vec<AnyElement> = match section {
+            "sessions" => vec![
+                row("Permission mode", "What a session started here begins in.", modes.into_any_element(), &theme).into_any_element(),
+                row("Model", "Which model a session started here uses.", models.into_any_element(), &theme).into_any_element(),
+                div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes.").into_any_element(),
+            ],
+            "explain" => vec![
+                row("Explain tool calls", "Which calls are put into plain words without asking.", explain.into_any_element(), &theme).into_any_element(),
+                div().text_size(px(12.)).text_color(theme.muted_foreground).child(explain_note).into_any_element(),
+            ],
+            "updates" => vec![
+                h_flex()
+                    .items_start()
+                    .gap(px(12.))
+                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child("Version")).child(div().text_size(px(12.)).text_color(theme.muted_foreground).whitespace_normal().child(version_detail)))
+                    .child(version_row)
+                    .into_any_element(),
+                h_flex().items_center().gap(px(12.)).child(div().flex_1().text_size(px(13.5)).child("Check for updates automatically")).child(auto_check).into_any_element(),
+            ],
+            _ => vec![
+                row("Theme", "Follow the system, or keep one look.", appearance.into_any_element(), &theme).into_any_element(),
+                row("Accent", "The colour of the send button, links and the mark.", accents.into_any_element(), &theme).into_any_element(),
+                row("Chat font", "The face the conversation is set in.", font.into_any_element(), &theme).into_any_element(),
+                row("Text size", "How large the conversation reads.", size.into_any_element(), &theme).into_any_element(),
+                div().text_size(px(12.)).text_color(theme.muted_foreground).child(note).into_any_element(),
+            ],
+        };
+        let rail = self.settings_rail(cx);
 
         // The scrim is a flex box, so the panel sits in the middle of the
         // window both ways (an absolute panel with auto margins did not).
@@ -1445,19 +1526,20 @@ impl Workbench {
                 v_flex()
                     .id("settings-panel")
                     .on_click(|_, window, cx| swallow_click(window, cx))
-                    .w(px(600.))
+                    .w(SETTINGS_W)
+                    .h(SETTINGS_H)
                     .max_w(gpui::relative(0.94))
                     .max_h(gpui::relative(0.9))
-                    .rounded(px(16.))
+                    .rounded(px(18.))
                     .bg(theme.popover)
                     .border_1()
                     .border_color(theme.border)
-                    .shadow_lg()
+                    .shadow(float_shadow(&theme))
                     .overflow_hidden()
                     .child(
                         h_flex()
-                            .px(px(18.))
-                            .h(px(50.))
+                            .px(px(22.))
+                            .h(px(52.))
                             .flex_shrink_0()
                             .items_center()
                             .border_b_1()
@@ -1468,41 +1550,151 @@ impl Workbench {
                                 cx.notify();
                             }))),
                     )
-                    .child(
-                        v_flex()
-                            .id("settings-body")
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .p(px(18.))
-                            .gap(px(14.))
-                            .child(heading("APPEARANCE", &theme))
-                            .child(row("Theme", "Follow the system, or keep one look.", appearance.into_any_element(), &theme))
-                            .child(row("Accent", "The colour of the send button, links and the mark.", accents.into_any_element(), &theme))
-                            .child(row("Chat font", "The face the conversation is set in.", font.into_any_element(), &theme))
-                            .child(row("Text size", "How large the conversation reads.", size.into_any_element(), &theme))
-                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(note))
-                            .child(div().h(px(4.)))
-                            .child(heading("NEW SESSIONS", &theme))
-                            .child(row("Permission mode", "What a session started here begins in.", modes.into_any_element(), &theme))
-                            .child(row("Model", "Which model a session started here uses.", models.into_any_element(), &theme))
-                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes."))
-                            .child(div().h(px(4.)))
-                            .child(heading("EXPLANATIONS", &theme))
-                            .child(row("Explain tool calls", "Which calls are put into plain words without asking.", explain.into_any_element(), &theme))
-                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(explain_note))
-                            .child(div().h(px(4.)))
-                            .child(heading("UPDATES", &theme))
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(12.))
-                                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child("Version")).child(div().text_size(px(12.)).text_color(theme.muted_foreground).whitespace_normal().child(version_detail)))
-                                    .child(version_row),
-                            )
-                            .child(row("Check for updates automatically", "Asks GitHub for the newest release once a day and says so here. Nothing is installed unasked.", auto_check.into_any_element(), &theme))
-                            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("Updating fetches the installer for this machine, puts it in place and restarts Emaki. Tabs and the page come back as they were.")),
-                    ),
+                    // A rail of sections on the left, the chosen section's
+                    // rows on the right. The rows scroll under the panel's
+                    // header with the toolkit's scrollbar at their edge (it
+                    // fades a second after the last scroll, as every
+                    // scrollbar in the window does).
+                    .child(h_flex().flex_1().min_h_0().items_stretch().child(rail).child(
+                        v_flex().relative().flex_1().min_w_0().min_h_0().child(
+                            v_flex()
+                                .id("settings-body")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.settings_scroll)
+                                .px(px(24.))
+                                .py(px(20.))
+                                .child(page_in(section_anim, v_flex().gap(px(16.)).child(div().pb(px(2.)).text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(section_title)).children(rows))),
+                        )
+                        .vertical_scrollbar(&self.settings_scroll),
+                    )),
             )
+    }
+
+    /// The rail of sections at the left of the settings panel: an icon and
+    /// a name per section, the chosen one on a plate.
+    fn settings_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let current = self.settings_section;
+        v_flex()
+            .w(SETTINGS_RAIL_W)
+            .flex_shrink_0()
+            .p(px(10.))
+            .gap(px(2.))
+            .bg(if theme.mode.is_dark() { theme.sidebar } else { theme.muted.opacity(0.5) })
+            .border_r_1()
+            .border_color(theme.border)
+            .children(SETTINGS_SECTIONS.iter().map(|(key, label, icon)| {
+                let active = *key == current;
+                let key: &'static str = key;
+                h_flex()
+                    .id(SharedString::from(format!("settings-nav-{key}")))
+                    .h(px(30.))
+                    .px(px(10.))
+                    .gap(px(9.))
+                    .items_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.sidebar_accent))
+                    .when(!active, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.6))))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_section = key;
+                        this.settings_scroll.set_offset(point(px(0.), px(0.)));
+                        cx.notify();
+                    }))
+                    .child(Icon::default().path(*icon).with_size(px(15.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
+                    .child(div().text_size(px(13.)).when(active, |d| d.font_weight(FontWeight::MEDIUM)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(*label))
+            }))
+            .into_any_element()
+    }
+
+    /// A segmented control: the choices in a row on a muted track, the    /// A segmented control: the choices in a row on a muted track, the
+    /// chosen one on a raised plate. The plate is one element drawn under
+    /// the row, placed from where each segment sat on the last draw
+    /// (`seg_bounds`, recorded as the row is prepainted), and it slides
+    /// from the old choice to the new one over a moment, keyed on the new
+    /// choice so each click plays it once. On the very first draw, before
+    /// any segment has been measured, the chosen segment paints its own
+    /// plate instead, so nothing flashes.
+    #[allow(clippy::type_complexity)]
+    fn segmented(&self, control: &'static str, options: Vec<(&'static str, String, Option<String>)>, current: &'static str, on: Rc<dyn Fn(&mut Self, &'static str, &mut Window, &mut Context<Self>)>, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let track_bg = if dark { theme.sidebar } else { theme.muted };
+        let plate_bg = if dark { theme.secondary_active } else { theme.popover };
+        let (from, to) = {
+            let mut st = self.seg_state.borrow_mut();
+            let e = st.entry(control).or_insert((current, current));
+            if e.1 != current {
+                e.0 = e.1;
+                e.1 = current;
+            }
+            *e
+        };
+        let (b_from, b_to) = {
+            let b = self.seg_bounds.borrow();
+            (b.get(&format!("{control}-{from}")).copied(), b.get(&format!("{control}-{to}")).copied())
+        };
+        let plate = match (b_from, b_to) {
+            (Some(a), Some(b)) => Some(
+                div()
+                    .absolute()
+                    .rounded(px(7.))
+                    .bg(plate_bg)
+                    .shadow_sm()
+                    .with_animation(ElementId::Name(format!("{control}-plate-{to}").into()), Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), move |d, t| {
+                        let x = a.origin.x + (b.origin.x - a.origin.x) * t;
+                        let w = a.size.width + (b.size.width - a.size.width) * t;
+                        d.left(x).top(b.origin.y).w(w).h(b.size.height)
+                    }),
+            ),
+            _ => None,
+        };
+        let measured = plate.is_some();
+        let ids: Vec<String> = options.iter().map(|(k, _, _)| format!("{control}-{k}")).collect();
+        let seg_bounds = self.seg_bounds.clone();
+        let entity = cx.entity().downgrade();
+        let row = h_flex()
+            .gap(px(2.))
+            // Where each segment landed, relative to the track: the row
+            // sits inside the track's 3px padding. A change is noted and
+            // the next draw places the plate from it.
+            .on_children_prepainted(move |bounds, _, cx| {
+                let Some(first) = bounds.first() else { return };
+                let mut changed = false;
+                let mut map = seg_bounds.borrow_mut();
+                for (id, b) in ids.iter().zip(bounds.iter()) {
+                    let rel = Bounds { origin: point(b.origin.x - first.origin.x + px(3.), px(3.)), size: b.size };
+                    if map.get(id) != Some(&rel) {
+                        map.insert(id.clone(), rel);
+                        changed = true;
+                    }
+                }
+                drop(map);
+                if changed {
+                    let _ = entity.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .children(options.into_iter().map(|(key, label, family)| {
+                let active = key == current;
+                let on = on.clone();
+                h_flex()
+                    .id(SharedString::from(format!("{control}-{key}")))
+                    .h(px(26.))
+                    .px(px(11.))
+                    .items_center()
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .when(active && !measured, |d| d.bg(plate_bg).shadow_sm())
+                    .when(active, |d| d.font_weight(FontWeight::MEDIUM).text_color(theme.foreground))
+                    .when(!active, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
+                    .when_some(family, |d, f| d.font_family(f))
+                    .on_click(cx.listener(move |this, _, window, cx| on(this, key, window, cx)))
+                    .child(label)
+            }));
+        h_flex().relative().p(px(3.)).rounded(px(9.)).bg(track_bg).flex_shrink_0().children(plate).child(row).into_any_element()
     }
 
     // -- find in the conversation ------------------------------------------
@@ -2606,31 +2798,45 @@ impl Workbench {
                 );
             }
         }
-        scroll = scroll.child(self.group_label("Recents", cx));
+        // Recents, headed by when: today, yesterday, this week, this month,
+        // earlier. The agent's mark is drawn in the muted ink unless the
+        // session is live, so a column of forty rows does not read as
+        // forty accents; a live one wears its agent's colour and turns.
         let recents: Vec<SessionRef> = self.refs.iter().take(40).cloned().collect();
-        scroll = scroll.children(recents.into_iter().map(|r| {
+        let mut last_bucket = "";
+        for r in recents {
+            let b = bucket(r.mtime);
+            if b != last_bucket {
+                scroll = scroll.child(self.group_label(if last_bucket.is_empty() { "Recents" } else { b }, cx));
+                if last_bucket.is_empty() && b != "Today" {
+                    scroll = scroll.child(div().px(px(10.)).pb(px(4.)).text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.7)).child(b));
+                }
+                last_bucket = b;
+            }
             let key = key_of(&r);
             let active = page == Page::Session && self.selected.as_deref() == Some(key.as_str());
             let theme = cx.theme().clone();
             let dot = self.live_color(&r, cx);
             let working = self.is_working(&r);
             let glyph_id = SharedString::from(format!("recent-glyph-{key}"));
-            h_flex()
-                .id(SharedString::from(format!("recent-{key}")))
-                .h(px(30.))
-                .px(px(10.))
-                .gap(px(10.))
-                .rounded(px(8.))
-                .cursor_pointer()
-                .when(active, |d| d.bg(theme.sidebar_accent))
-                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
-                .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), working, glyph_id)))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(r.title.clone()))
-                .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground)))
-                .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
-                .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground)))
-        }));
+            let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
+            scroll = scroll.child(
+                h_flex()
+                    .id(SharedString::from(format!("recent-{key}")))
+                    .h(px(28.))
+                    .px(px(10.))
+                    .gap(px(10.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.sidebar_accent))
+                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
+                    .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(r.title.clone()))
+                    .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
+                    .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground.opacity(0.7)))),
+            );
+        }
 
         let initial = self.user_name.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "S".into());
         let footer = h_flex()
@@ -2647,14 +2853,21 @@ impl Workbench {
                     .flex_1()
                     .min_w_0()
                     .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if self.user_name.is_empty() { "Emaki".to_string() } else { self.user_name.clone() })),
-            );
+            )
+            // Settings live behind ⌘, and the app menu; the gear says so
+            // for anyone who looks for them where every app keeps them.
+            .child(icon_button("settings-gear", IconName::Settings, "Settings (⌘,)", cx, |this, window, cx| {
+                this.settings_open = true;
+                window.focus(&this.focus_handle, cx);
+                cx.notify();
+            }));
 
         v_flex().w(SIDEBAR_W).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(scroll).child(footer)
     }
 
     fn group_label(&self, text: &'static str, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        div().pt(px(16.)).pb(px(4.)).px(px(10.)).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(text)
+        div().pt(px(18.)).pb(px(5.)).px(px(10.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(text)
     }
 
     /// The strip along the top of the content pane: room for the traffic
@@ -2795,49 +3008,62 @@ impl Workbench {
             filters = filters.child(filter("f-project", format!("{p}  ×"), true, cx, Box::new(|this, cx| this.show_sessions(Scope::All, cx))));
         }
 
-        let rows: Vec<AnyElement> = refs.into_iter().map(|r| {
+        // Rows headed by when, newest first. A live row carries its state
+        // as a chip at the right (the column it is on, in that colour); the
+        // snippet of its last message that used to sit there was cut to a
+        // few words and read as noise.
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut last_bucket = "";
+        for r in refs {
+            let b = bucket(r.mtime);
+            if b != last_bucket {
+                rows.push(div().pt(if last_bucket.is_empty() { px(4.) } else { px(18.) }).pb(px(6.)).px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(b).into_any_element());
+                last_bucket = b;
+            }
             let key = key_of(&r);
             let theme = cx.theme().clone();
             let card = self.card_for(&r);
             let dot = self.live_color(&r, cx);
             let working = self.is_working(&r);
             let glyph_id = SharedString::from(format!("row-glyph-{key}"));
+            let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
             let mut sub = vec![r.project()];
             if !r.git_branch.is_empty() {
                 sub.push(format!("⎇ {}", r.git_branch));
             }
             sub.push(relative(r.mtime, now));
-            h_flex()
-                .id(SharedString::from(format!("row-{key}")))
-                .w_full()
-                .px(px(12.))
-                .py(px(11.))
-                .gap(px(12.))
-                .items_center()
-                .rounded(px(10.))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.muted))
-                .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
-                .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(16.), agent_color(r.agent, &theme), working, glyph_id)))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(2.))
-                        .child(
-                            h_flex()
-                                .gap(px(8.))
-                                .items_center()
-                                .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
-                                .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
-                                .when(r.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground)))
-                                .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
-                        )
-                        .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
-                )
-                .when(dot.is_some() && !card.text.is_empty(), |d| d.child(div().max_w(px(220.)).truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(card.text.clone())))
-                .into_any_element()
-        }).collect();
+            rows.push(
+                h_flex()
+                    .id(SharedString::from(format!("row-{key}")))
+                    .w_full()
+                    .px(px(12.))
+                    .py(px(9.))
+                    .gap(px(12.))
+                    .items_center()
+                    .rounded(px(10.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.muted))
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
+                    .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working, glyph_id)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .items_center()
+                                    .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
+                                    .when(r.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground)))
+                                    .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
+                            )
+                            .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
+                    )
+                    .when_some(dot, |d, c| d.child(state_chip(card.column, c, &theme)))
+                    .into_any_element(),
+            );
+        }
 
         let title = match &scope {
             Scope::All => "Your sessions".to_string(),
@@ -2846,23 +3072,24 @@ impl Workbench {
             Scope::Kept => "Kept sessions".to_string(),
         };
         let count = self.scoped_refs().len();
+        let display = crate::fonts::display_family(cx);
 
         v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
-            v_flex().id("sessions").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.sessions_scroll).px(px(24.)).items_center().child(
+            v_flex().id("sessions").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.sessions_scroll).px(px(24.)).items_center().child(page_in(
+                "page-sessions",
                 v_flex()
                     .w_full()
                     .max_w(CONTENT_W)
-                    .pt(px(16.))
+                    .pt(px(20.))
                     .pb(px(40.))
                     .gap(px(14.))
-                    .child(div().text_size(px(28.)).font_family(SERIF).child(title))
+                    .child(div().text_size(px(30.)).font_family(display).child(title))
                     .child(filters)
                     .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(format!("{} on this machine, every one of them kept.", plural(count, "session", "sessions"))))
                     .child(v_flex().w_full().gap(px(2.)).children(rows)),
-            ),
+            )),
         )
     }
-
     // -- one conversation ----------------------------------------------------
 
     fn render_detail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2917,7 +3144,7 @@ impl Workbench {
         let (parents, name) = cwd.split_at(cwd.len() - name_len);
         let path_line = (!cwd.is_empty()).then(|| {
             let hover_bg = theme.muted;
-            h_flex().w_full().h(px(30.)).px(px(24.)).justify_center().items_center().bg(theme.muted.opacity(0.45)).border_y_1().border_color(theme.border).child(
+            h_flex().w_full().h(px(30.)).px(px(24.)).justify_center().items_center().bg(theme.muted.opacity(0.3)).border_b_1().border_color(theme.border).child(
                 h_flex()
                     .id("path-bar")
                     .max_w_full()
@@ -3114,11 +3341,11 @@ impl Workbench {
             .id("composer-card")
             .w_full()
             .max_w(CONTENT_W)
-            .rounded(px(18.))
+            .rounded(px(20.))
             .border_1()
-            .border_color(theme.border)
+            .border_color(if theme.mode.is_dark() { theme.secondary_active } else { theme.border })
             .bg(theme.popover)
-            .shadow_md()
+            .shadow(float_shadow(&theme))
             .px(px(14.))
             .pt(px(10.))
             .pb(px(10.))
@@ -3304,22 +3531,45 @@ impl Workbench {
 
         let stats = div().text_size(px(12.)).text_color(theme.muted_foreground).whitespace_nowrap().child(format!("{live} live · {needs} need you · {}", plural(projects.len(), "project", "projects"))).into_any_element();
 
+        // The four live columns side by side when the pane has room for
+        // them, two by two when it does not, one under another when it is
+        // narrow: the board never scrolls sideways. The columns are open
+        // regions under a hairline, not grey slabs, and done is a row
+        // under them that opens into a grid.
+        let gap = px(20.);
+        let per_row = {
+            let avail = self.pane_w - px(48.);
+            if avail >= COL_MIN_W * 4. + gap * 3. {
+                4
+            } else if avail >= COL_MIN_W * 2. + gap {
+                2
+            } else {
+                1
+            }
+        };
+        let mut rows = v_flex().w_full().gap(px(28.));
+        for chunk in Column::LIVE.chunks(per_row) {
+            let mut row = h_flex().w_full().gap(gap).items_start();
+            for c in chunk {
+                let cards = cols.remove(c).unwrap_or_default();
+                row = row.child(self.render_column(*c, cards, cx));
+            }
+            for _ in chunk.len()..per_row {
+                row = row.child(div().flex_1());
+            }
+            rows = rows.child(row);
+        }
+
         v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar("Board".into(), vec![stats], cx)).child(
-            h_flex()
+            v_flex()
                 .id("board")
                 .flex_1()
                 .min_h_0()
-                .px(px(16.))
-                .pt(px(4.))
-                .pb(px(16.))
-                .gap(px(12.))
-                .items_stretch()
-                .overflow_x_scroll()
-                .children(Column::LIVE.into_iter().map(|c| {
-                    let cards = cols.remove(&c).unwrap_or_default();
-                    self.render_column(c, cards, cx)
-                }))
-                .child(self.render_done(done, cx)),
+                .overflow_y_scroll()
+                .px(px(24.))
+                .pt(px(8.))
+                .pb(px(32.))
+                .child(page_in("page-board", v_flex().w_full().gap(px(28.)).child(rows).child(self.render_done(done, per_row, cx)))),
         )
     }
 
@@ -3343,92 +3593,109 @@ impl Workbench {
         }
     }
 
+    /// A column's heading: the dot, the name and the count over a hairline.
+    fn column_head(&self, c: Column, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        h_flex()
+            .w_full()
+            .pb(px(10.))
+            .gap(px(8.))
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(self.dot(c, cx))
+            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(c.title()))
+            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(count.to_string()))
+    }
+
     fn render_column(&self, c: Column, cards: Vec<Card>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let count = cards.len();
-        let mut col = v_flex()
-            .flex_1()
-            .min_w(COL_MIN_W)
-            .h_full()
-            .min_h_0()
-            .bg(theme.sidebar)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(14.))
-            .child(
-                h_flex()
-                    .px(px(14.))
-                    .pt(px(12.))
-                    .pb(px(8.))
-                    .gap(px(8.))
-                    .items_center()
-                    .child(self.dot(c, cx))
-                    .child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(c.title()))
-                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(count.to_string()))
-                    .when(c == Column::Done, |d| {
-                        d.child(div().flex_1()).child(icon_button("done-fold", IconName::PanelRightClose, "Collapse", cx, |this, _, cx| {
-                            this.done_open = false;
-                            cx.notify();
-                        }))
-                    }),
-            );
+        let mut col = v_flex().flex_1().min_w_0().gap(px(10.)).child(self.column_head(c, count, cx));
         if cards.is_empty() {
-            col = col.child(div().flex_1().flex().items_center().justify_center().px(px(16.)).text_size(px(12.)).text_color(theme.muted_foreground).child(c.empty()));
+            // An empty column says so inside a dashed outline the height
+            // of a card, so the page keeps its shape and the words are
+            // where a card would be, not floating in a tall void.
+            col = col.child(
+                div()
+                    .w_full()
+                    .h(px(84.))
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px(px(16.))
+                    .text_size(px(12.))
+                    .text_center()
+                    .text_color(theme.muted_foreground.opacity(0.8))
+                    .child(c.empty()),
+            );
         } else {
             let shown = cards.len().min(60);
             let more = cards.len() - shown;
-            col = col.child(
-                v_flex()
-                    .id(SharedString::from(format!("cards-{}", c.title())))
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(8.))
-                    .pb(px(10.))
-                    .gap(px(8.))
-                    .children(cards.into_iter().take(shown).map(|card| self.render_card(card, cx)))
-                    .when(more > 0, |d| d.child(div().py(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).text_center().child(format!("{more} more in the list")))),
-            );
+            col = col
+                .children(cards.into_iter().take(shown).map(|card| self.render_card(card, cx)))
+                .when(more > 0, |d| d.child(div().py(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).text_center().child(format!("{more} more in the list"))));
         }
         col.into_any_element()
     }
 
-    /// Done is a strip with a count until opened: every session with no
-    /// process behind it, newest first.
-    fn render_done(&self, done: Vec<Card>, cx: &mut Context<Self>) -> AnyElement {
+    /// Done is a row under the live columns: the count and how many are
+    /// kept, with a chevron. Opened, every finished session as a grid in
+    /// as many columns as the live ones, newest first.
+    fn render_done(&self, done: Vec<Card>, per_row: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let kept = done.iter().filter(|c| c.r.archived).count();
-        if self.done_open {
-            return self.render_column(Column::Done, done, cx);
-        }
-        let mut strip = v_flex()
-            .id("done-strip")
-            .w(px(52.))
-            .flex_shrink_0()
-            .h_full()
+        let open = self.done_open;
+        let head = h_flex()
+            .id("done-head")
+            .w_full()
+            .pb(px(10.))
+            .gap(px(8.))
             .items_center()
-            .pt(px(13.))
-            .pb(px(12.))
-            .gap(px(6.))
-            .bg(theme.sidebar)
-            .border_1()
+            .border_b_1()
             .border_color(theme.border)
-            .rounded(px(14.))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.list_hover))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.done_open = true;
+                this.done_open = !this.done_open;
                 cx.notify();
             }))
             .child(self.dot(Column::Done, cx))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(done.len().to_string()))
-            .child(v_flex().pt(px(6.)).items_center().text_size(px(10.)).text_color(theme.muted_foreground).children("done".chars().map(|ch| div().h(px(12.)).child(ch.to_string()))));
-        if kept > 0 {
-            strip = strip.child(div().flex_1()).child(badge_str(format!("{kept} kept"), theme.muted, theme.muted_foreground));
+            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("done"))
+            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(done.len().to_string()))
+            .when(kept > 0, |d| d.child(badge_str(format!("{kept} kept"), theme.muted, theme.muted_foreground)))
+            .child(div().flex_1())
+            .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if open { "hide" } else { "show" }))
+            .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).with_size(px(13.)).text_color(theme.muted_foreground));
+        let mut section = v_flex().w_full().gap(px(10.)).child(head);
+        if open {
+            let shown = done.len().min(60);
+            let more = done.len() - shown;
+            let mut grid = v_flex().w_full().gap(px(10.));
+            let cards: Vec<Card> = done.into_iter().take(shown).collect();
+            let mut iter = cards.into_iter().peekable();
+            while iter.peek().is_some() {
+                let mut row = h_flex().w_full().gap(px(10.)).items_start();
+                let mut n = 0;
+                for card in iter.by_ref().take(per_row) {
+                    row = row.child(div().flex_1().min_w_0().child(self.render_card(card, cx)));
+                    n += 1;
+                }
+                for _ in n..per_row {
+                    row = row.child(div().flex_1());
+                }
+                grid = grid.child(row);
+            }
+            section = section.child(grid);
+            if more > 0 {
+                section = section.child(div().py(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).text_center().child(format!("{more} more in the list")));
+            }
         }
-        strip.into_any_element()
+        section.into_any_element()
     }
-
     fn render_card(&self, card: Card, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let r = card.r.clone();
@@ -3448,7 +3715,7 @@ impl Workbench {
             .bg(theme.popover)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(10.))
+            .rounded(px(12.))
             .when(!done, |d| d.shadow_sm())
             .cursor_pointer()
             .hover(|s| s.border_color(accent))
@@ -3546,50 +3813,103 @@ impl Workbench {
 
     // -- new session: the home page -------------------------------------------
 
+    /// The greeting in the display serif, the composer, and the folders a
+    /// session can start in as a grid of cards: the folder's own name in
+    /// the foreground, its parents dimmed, ringed in the accent when
+    /// chosen. The folders used to be a cloud of full-path pills of every
+    /// width, which read as clutter.
     fn render_new(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let cwds = self.recent_cwds();
+        let cwds: Vec<String> = self.recent_cwds().into_iter().take(HOME_FOLDERS).collect();
         let chosen = self.new_cwd.clone();
-        let folders = h_flex().w_full().max_w(CONTENT_W).flex_wrap().gap(px(6.)).justify_center().children(cwds.into_iter().map(|c| {
+        let display = crate::fonts::display_family(cx);
+        let live = self.refs.iter().filter(|r| self.live_color(r, cx).is_some()).count();
+        let line = format!("{} · {} live · {} kept", today_line(), live, self.refs.len());
+        // Three cards to a row, each a third of the column, so the grid
+        // fills the width exactly whatever the window; a wrapping row of
+        // fixed widths fell to two per row with the sidebar open.
+        let folder_card = |c: String, cx: &mut Context<Self>| {
             let active = c == chosen;
             let theme = cx.theme().clone();
-            let label = emaki_core::paths::tilde(&c);
+            let path = std::path::Path::new(&c);
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| c.clone());
+            let parent = path.parent().map(|p| emaki_core::paths::tilde(&p.to_string_lossy())).filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into());
+            let hover_border = theme.muted_foreground.opacity(0.45);
             h_flex()
                 .id(SharedString::from(format!("cwd-{c}")))
-                .h(px(30.))
+                .flex_1()
+                .min_w_0()
+                .h(px(58.))
                 .px(px(12.))
-                .gap(px(6.))
+                .gap(px(10.))
                 .items_center()
-                .rounded_full()
+                .rounded(px(12.))
                 .border_1()
+                .bg(theme.popover)
                 .border_color(if active { theme.primary } else { theme.border })
-                .when(active, |d| d.bg(theme.primary.opacity(0.10)))
-                .when(!active, |d| d.hover(|s| s.bg(theme.muted)))
+                .when(active, |d| d.bg(theme.primary.opacity(if theme.mode.is_dark() { 0.12 } else { 0.06 })))
+                .when(!active, |d| d.hover(move |s| s.border_color(hover_border)))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.new_cwd = c.clone();
                     cx.notify();
                 }))
-                .child(Icon::new(IconName::Folder).with_size(px(13.)).text_color(if active { theme.primary } else { theme.muted_foreground }))
-                .child(div().text_size(px(12.5)).child(label))
-        }));
+                .child(
+                    div()
+                        .size(px(32.))
+                        .rounded(px(9.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if active { theme.primary.opacity(0.16) } else { theme.muted })
+                        .child(Icon::new(IconName::Folder).with_size(px(15.)).text_color(if active { theme.primary } else { theme.muted_foreground })),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(1.))
+                        .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name))
+                        .child(div().truncate().text_size(px(11.)).text_color(theme.muted_foreground).child(parent)),
+                )
+        };
+        let mut folders = v_flex().w_full().gap(px(10.));
+        for row in cwds.chunks(FOLDER_COLS) {
+            let mut line = h_flex().w_full().gap(px(10.)).items_center();
+            for c in row {
+                line = line.child(folder_card(c.clone(), cx));
+            }
+            for _ in row.len()..FOLDER_COLS {
+                line = line.child(div().flex_1());
+            }
+            folders = folders.child(line);
+        }
 
         v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
             v_flex().id("home").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.home_scroll).px(px(24.)).child(
-                v_flex()
-                    .w_full()
-                    .min_h_full()
-                    .items_center()
-                    .justify_center()
-                    .pb(px(48.))
-                    .gap(px(22.))
-                    .child(h_flex().gap(px(14.)).items_center().child(mark_icon(px(30.), theme.primary)).child(div().text_size(px(34.)).font_family(SERIF).child(greeting(&self.user_name))))
-                    .child(self.render_composer(cx))
-                    .child(v_flex().w_full().items_center().gap(px(8.)).pt(px(6.)).child(div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("START IN")).child(folders)),
+                page_in(
+                    "page-home",
+                    v_flex()
+                        .w_full()
+                        .min_h_full()
+                        .items_center()
+                        .justify_center()
+                        .pb(px(48.))
+                        .gap(px(22.))
+                        .child(
+                            v_flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(h_flex().gap(px(14.)).items_center().child(mark_icon(px(28.), theme.primary)).child(div().text_size(px(36.)).font_family(display).child(greeting(&self.user_name))))
+                                .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(line)),
+                        )
+                        .child(self.render_composer(cx))
+                        .child(v_flex().w_full().max_w(CONTENT_W).gap(px(10.)).pt(px(10.)).child(div().px(px(2.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("START IN")).child(folders)),
+                ),
             ),
         )
     }
-
     // -- lightbox --------------------------------------------------------------
 
     fn render_lightbox(&self, lb: Lightbox, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3663,11 +3983,19 @@ impl Workbench {
         let results = self.search_results.clone();
         let search_focus = self.search_input.read(cx).focus_handle(cx);
         let search_value = self.search_input.read(cx).value().to_string();
+        // The scrim is a flex box and the palette its child, so the
+        // palette sits in the middle of the window (an absolute panel with
+        // auto margins stayed at the left edge).
         div()
             .id("search-overlay")
             .absolute()
             .inset_0()
+            .occlude()
             .bg(theme.overlay)
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(80.))
             .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx)))
             .child(
                 v_flex()
@@ -3675,18 +4003,14 @@ impl Workbench {
                     .key_context(SEARCH_CONTEXT)
                     .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_search(window, cx)))
                     .on_click(|_, window, cx| swallow_click(window, cx))
-                    .absolute()
-                    .top(px(80.))
-                    .left_0()
-                    .right_0()
-                    .mx_auto()
                     .w(px(680.))
+                    .max_w(gpui::relative(0.94))
                     .max_h(px(520.))
-                    .rounded(px(16.))
+                    .rounded(px(18.))
                     .bg(theme.popover)
                     .border_1()
                     .border_color(theme.border)
-                    .shadow_lg()
+                    .shadow(float_shadow(&theme))
                     .child(
                         h_flex()
                             .px(px(16.))
@@ -3788,6 +4112,40 @@ fn ago(ts: &str, now: f64) -> String {
     } else {
         format!("{}d", (d / 86_400.0) as u64)
     }
+}
+
+/// A page's content as it arrives: it fades and settles in over a moment,
+/// once, keyed on the page so switching back plays it again. Pages only;
+/// the conversation's list items are never animated.
+pub fn page_in(id: &'static str, el: Div) -> AnyElement {
+    el.with_animation(ElementId::Name(id.into()), Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()), |d, t| d.opacity(t).pt(px(8. * (1. - t)))).into_any_element()
+}
+
+/// The shadow under a floating card (the composer, a palette): a wide soft
+/// drop in the ink's own hue and a hairline of contact under it, so the
+/// card lifts off the page rather than sitting in a grey halo.
+pub fn float_shadow(theme: &gpui_component::Theme) -> Vec<BoxShadow> {
+    let dark = theme.mode.is_dark();
+    let ink = if dark { gpui::black() } else { theme.foreground };
+    vec![
+        BoxShadow { color: ink.opacity(if dark { 0.45 } else { 0.08 }), offset: point(px(0.), px(12.)), blur_radius: px(32.), spread_radius: px(-8.), inset: false },
+        BoxShadow { color: ink.opacity(if dark { 0.3 } else { 0.05 }), offset: point(px(0.), px(1.)), blur_radius: px(3.), spread_radius: px(0.), inset: false },
+    ]
+}
+
+/// A session's state as a small chip: a dot in the column's colour and
+/// the column's name, for rows that are live.
+pub fn state_chip(column: Column, color: Hsla, theme: &gpui_component::Theme) -> impl IntoElement {
+    h_flex()
+        .flex_shrink_0()
+        .h(px(22.))
+        .px(px(8.))
+        .gap(px(6.))
+        .items_center()
+        .rounded_full()
+        .bg(color.opacity(if theme.mode.is_dark() { 0.16 } else { 0.10 }))
+        .child(div().size(px(6.)).rounded_full().bg(color))
+        .child(div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(color).child(column.title()))
 }
 
 pub fn badge(text: &'static str, bg: Hsla, fg: Hsla) -> impl IntoElement {
@@ -4013,6 +4371,14 @@ impl Render for Workbench {
         if matches!(self.page, Page::Board | Page::Sessions) && self.composer.read(cx).focus_handle(cx).is_focused(window) {
             window.focus(&self.focus_handle, cx);
         }
+        // The composer is one field for both pages; its placeholder says
+        // what a message here does. Set only when it differs, since the
+        // setter notifies.
+        let want = if self.page == Page::New { PLACEHOLDER_NEW } else { PLACEHOLDER_REPLY };
+        if self.composer_placeholder != want {
+            self.composer_placeholder = want;
+            self.composer.update(cx, |s, cx| s.set_placeholder(want, window, cx));
+        }
         let theme = cx.theme().clone();
         let search_open = self.search_open;
         // Below `NARROW_W` the sidebar leaves the row and comes back only as
@@ -4025,6 +4391,7 @@ impl Render for Workbench {
         }
         let sidebar_open = self.sidebar_open && !self.narrow;
         let sidebar_peek = self.narrow && self.sidebar_peek;
+        self.pane_w = window.viewport_size().width - if sidebar_open { SIDEBAR_W } else { px(0.) };
         // `EMAKI_A11Y=1` prints gpui's own view of the accessibility tree on
         // every draw, for checking what assistive apps are handed.
         if std::env::var("EMAKI_A11Y").is_ok() {

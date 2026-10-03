@@ -102,7 +102,7 @@ cargo test -p emaki-core
 EMAKI_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launch
 EMAKI_PAGE=new|sessions|board ./target/debug/Emaki     # land on a page
 EMAKI_FIND=<text> ./target/debug/Emaki                 # open the find bar on that query
-EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings panel
+EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings panel (=updates: on that section)
 ```
 
 The last two exist for probing: a terminal without accessibility access
@@ -120,7 +120,12 @@ Relaunch, then check `pgrep -fl Emaki` lists one process.
 **The board is the home of what needs you.** Four columns (needs you,
 planning, working, your turn), a card per live session (project, branch,
 title, a status chip with a clock, "since", the one or two actions that make
-sense), and done as a strip with a count until opened. Every card names its
+sense), and done as a row under them with a count, opening into a grid.
+The columns are open regions under a hairline, not grey slabs, and an
+empty one says so inside a dashed outline the height of a card. They sit
+four across when the pane has room (`pane_w`, measured on every draw,
+against `COL_MIN_W`), two by two when it does not, one under another in a
+narrow window; the board never scrolls sideways. Every card names its
 agent, because the board mixes them. The column is `build::turn_state`, a
 function of the transcript's tail: `stop_reason: end_turn` is your turn, a
 trailing `tool_use` is working, a trailing `AskUserQuestion` or
@@ -142,14 +147,54 @@ the window's sans at 17px semibold, clean and still too quiet, Didot Bold
 (the person wants a sans), and Avenir Next Bold, too thick),
 an accent "New session" entry,
 Board, Sessions and Search, then Agents (one row per agent with its count
-and a live dot, plus Kept only), Projects and Recents, and an account-style
-footer with the person's name and nothing else: no version, no status. The content pane has a 48px top strip
+and a live dot, plus Kept only), Projects and Recents headed by when
+(`format::bucket`: today, yesterday, this week, this month, earlier; the
+sessions page uses the same heads), with the agent's mark in the muted
+ink unless the session is live, so forty rows do not read as forty
+accents, and an account-style
+footer with the person's name and a settings gear, nothing else: no
+version, no status. The content pane has a 48px top strip
 with the title centred and actions on the right; when the sidebar is hidden
 the strip makes room for the traffic lights. Everything readable sits in one
 column of `CONTENT_W` (768px), centred in whatever is left of the window:
-the conversation, the sessions page (a serif title, filter pills, rows),
-and the home page, which is a serif greeting over the composer with recent
-folders as pills beneath. A round in the list is wrapped in an explicit
+the conversation, the sessions page (a serif title, filter pills, rows
+headed by when, a state chip at the right of a live row), and the home
+page, which is a serif greeting (the display face is
+`fonts::display_family`, the Claude app's serif when it is here, so
+titles and the conversation agree) with the date and the counts under it,
+over the composer, with the six most recent folders as a grid of cards
+beneath (`FOLDER_COLS` to a row, each a third of the column: the folder's
+own name, its parents dimmed, the accent ring on the chosen one). The
+folders were a cloud of full-path pills of every width, which read as
+clutter. Each page's content fades and settles in over a moment when it
+arrives (`page_in`, keyed on the page); the conversation's list items are
+never animated. Floating cards (the composer, the search palette, the
+settings panel) lift off the page with `float_shadow`: a wide soft drop in
+the ink's own hue and a hairline of contact under it, not a grey halo.
+The settings panel is a fixed sheet (`SETTINGS_W` by `SETTINGS_H`, 720 by
+520, capped by the window) with a rail of sections on the left
+(`SETTINGS_SECTIONS`: Appearance, New sessions, Explanations, Updates,
+each with an icon, the chosen one on a plate; `settings_section` is the
+one showing and `EMAKI_SETTINGS=<section>` opens the panel on it) and
+that section's rows on the right under its title, fading in as the
+section changes. The rows scroll under the panel's header with the
+toolkit's scrollbar at their edge (`settings_scroll`, the same fading bar
+the transcript and tool bodies have); the body is a flex column inside a
+flex column, because a block wrapper around it collapsed the panel to
+its header. Before the rail the panel was one long sheet of every
+setting at 90% of the window's height. Settings choices are segmented controls (`Workbench::segmented`: a muted
+track, the choice on a raised plate), where a row of outlined pills was
+heavier than the panel needed. The plate is one element under the row
+and slides from the old choice to the new one over 220ms: each
+segment's bounds are recorded as the row is prepainted
+(`on_children_prepainted` into `seg_bounds`, relative to the track), the
+control remembers the choice it came from (`seg_state`), and the
+animation is keyed on the new choice so a click plays it once. Before
+any bounds exist, on the first draw, the chosen segment paints its own
+plate so nothing flashes. Probing note: a synthetic click posted to the
+pid does not reach a click handler, so the slide was checked with a
+probe build that changed the choice on a timer with the animation
+slowed. A round in the list is wrapped in an explicit
 centring parent, because the list lays each item out on its own and an
 auto margin has nothing to push against there. Narrower than `NARROW_W`
 (880px) the sidebar leaves the row and comes back only as an overlay over
@@ -738,11 +783,15 @@ of it.
 startup; a bundle has it from `Emaki.icns`; on Windows `build.rs` compiles
 `icon.ico` into the executable.
 
-**The icon is JP's logo, cut out.** `scripts/icon/logo.png` is the picture
-JP generated; `scripts/icon/cut.js` finds the plate as everything that is
-not white, makes the rest transparent and un-blends the anti-aliased edge,
-and writes every size (a drawn copy was tried twice and never matched the
-original's curls, so the picture itself is the source). The PNGs sit on
+**The icon is drawn, as SVG.** `scripts/icon/draw.py` writes the picture:
+a handscroll (絵巻) across a terracotta plate, cream paper between two
+rollers lit along their length, a chevron in the accent and three lines of
+ink on the sheet, flat enough to read at 16px. `scripts/icon/render.swift`
+rasterises it through Cocoa at each size, `scripts/icon/ico.py` packs the
+Windows `.ico`, and `scripts/make-icon.sh` runs the three; nothing but a
+Mac is needed. Before 2026-10-03 the icon was cut out of a generated
+picture (`logo.png`, in git history), which read as a render and could
+not be changed without generating again. The PNGs sit on
 Apple's 824-of-1024 grid, which the Dock (`sys::install_dock_icon` sets the
 PNG at start), Windows and Linux want; the `.icns` alone is the plate at
 full bleed and opaque to its corners, because macOS 26 masks every app
@@ -829,9 +878,14 @@ and `install_update` run on threads and report as `HubEvent::Update`;
 `Workbench::check_updates_daily` runs the check once a day from the clock
 tick when `app.check_updates` is on, saying something only when it finds a
 newer version. `state/update.json` keeps when the last check ran. The
-settings panel has the version, the last answer, *Check for updates*,
-*Update to x*, *Release notes* and the daily tick. `emaki-core update` is
-the check from a terminal.
+settings panel shows as little as it can: the version, one button that
+reads *Check for updates* until a check finds a newer version and *Update
+to x* after, in the same place, a small underlined *Release notes* link
+under it only then, and a bare tick for the daily check. The detail line
+speaks only when there is something to say (downloading, a failure, up to
+date after a click). Three pills and two sentences of explanation sat
+there before and were asked to go. `emaki-core update` is the check from
+a terminal.
 
 **Every text is tried before the markdown view gets it.** The `markdown`
 crate the toolkit's `TextView` parses with (1.0.0) panics on some inputs

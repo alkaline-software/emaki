@@ -38,9 +38,9 @@ are built here by `scripts/release-mac.sh` and uploaded over them.
   (`xcrun notarytool store-credentials notarytool-profile` once, with the
   Apple ID, an app-specific password and team `XC2WL5WN7J`).
 - `gh auth login` with an account that has write access to the repository.
-- For the icon and the disk-image background only: `node` (the icon script
-  installs `@napi-rs/canvas` itself), Python with Pillow, and the LXGW WenKai
-  Medium font in `~/Library/Fonts`.
+- For the disk-image background only: Python with Pillow and the LXGW
+  WenKai Medium font in `~/Library/Fonts`. The icon needs nothing beyond
+  a Mac (`python3` and `swift` ship with it).
 
 ## Each release
 
@@ -177,13 +177,14 @@ Windows stays unsigned until SignPath (free for open source) is set up.
 
 ## The pieces a release depends on
 
-**The icon.** `scripts/icon/logo.png` is the source. `scripts/make-icon.sh`
-cuts the plate out of it into `crates/emaki-app/assets/icon`: the PNGs on
-Apple's 824-of-1024 grid (the Dock icon the app sets at start, Windows,
-Linux), `icon.ico`, and `icon.icns` at full bleed and opaque to the corners,
-because macOS 26 masks every app icon to its own rounded square over a grey
-backing and shows anything transparent as a grey border. Replace the logo,
-run the script, rebuild, commit the assets.
+**The icon.** `scripts/icon/draw.py` is the source: it writes the picture
+as SVG. `scripts/make-icon.sh` renders it (Cocoa, through
+`scripts/icon/render.swift`, so on a Mac) into `crates/emaki-app/assets/icon`:
+the PNGs on Apple's 824-of-1024 grid (the Dock icon the app sets at start,
+Windows, Linux), `icon.ico`, and `icon.icns` at full bleed and opaque to
+the corners, because macOS 26 masks every app icon to its own rounded
+square over a grey backing and shows anything transparent as a grey
+border. Change the drawing, run the script, rebuild, commit the assets.
 
 **The disk-image background.** `scripts/dmg/background.png`, drawn by
 `scripts/dmg/background.py` (Pillow, LXGW WenKai Medium) in the app's cream
