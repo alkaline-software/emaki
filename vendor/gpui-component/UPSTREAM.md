@@ -53,6 +53,12 @@ upstream revision finds them.
    set whether or not a plate is asked for. The view's Copy action takes
    each pair out of the copied text again.
 
+7. `crates/base/src/input/base/kind.rs`, `input/textarea/mod.rs`: a
+   textarea can colour ranges. `TextareaMode::Extras` is `TextareaExtras`
+   (upstream `()`), one layer of `TextDecoration`s the renderer already
+   composes for every mode, and `TextareaState::set_marks` replaces them.
+   Not tracked across edits: the application sets them again on change.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

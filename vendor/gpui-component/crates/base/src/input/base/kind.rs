@@ -316,8 +316,24 @@ impl InputModeKind for InputMode {
 impl InputModeKind for TextareaMode {
     const MULTI_LINE: bool = true;
 
-    /// Ordinary multi-line text needs nothing beyond the shared engine.
-    type Extras = ();
+    /// Ordinary multi-line text needs nothing beyond the shared engine,
+    /// except the ranges an application colours. (Emaki addition.)
+    type Extras = TextareaExtras;
+}
+
+/// Ranges of a textarea the application colours, as a code editor's
+/// decorations are, without the rest of an editor. They are not tracked
+/// across edits: the application sets them again when the text changes.
+/// (Emaki addition.)
+#[derive(Default)]
+pub struct TextareaExtras {
+    pub(crate) marks: Vec<TextDecoration>,
+}
+
+impl InputExtras for TextareaExtras {
+    fn decoration_layers(&self) -> Vec<&[TextDecoration]> {
+        vec![&self.marks]
+    }
 }
 // `EditorMode`'s implementation lives with the editor code, next to the
 // language features it dispatches to.

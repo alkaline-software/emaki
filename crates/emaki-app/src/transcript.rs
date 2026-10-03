@@ -142,12 +142,22 @@ fn mono_block(id: String, text: &str, lang: &str, cx: &App) -> impl IntoElement 
     md_view(id, md, cx)
 }
 
+/// What folds into a run: tool calls and the thoughts between them. A
+/// question is never one of them, so it is never hidden in "n tool calls".
+fn is_run_item(it: &Item) -> bool {
+    match it {
+        Item::Tool(c) => c.tool_kind != ToolKind::Ask,
+        Item::Thinking { .. } => true,
+        _ => false,
+    }
+}
+
 /// Where the folded run of tool calls holding item `jx` begins, when there
 /// is one: three or more tool calls in a row, thoughts between them
 /// included, fold into one row (see `render_round`), and the find bar has
 /// to open that row to show a hit inside it.
 pub(crate) fn run_start(rnd: &Round, jx: usize) -> Option<usize> {
-    let is_run_item = |it: &Item| matches!(it, Item::Tool(_) | Item::Thinking { .. });
+    let is_run_item = |it: &Item| is_run_item(it);
     if !rnd.items.get(jx).map(is_run_item).unwrap_or(false) {
         return None;
     }
@@ -239,7 +249,11 @@ impl Workbench {
                 bubble = bubble.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("+ {} pasted image{}", rnd.images, if rnd.images == 1 { "" } else { "s" })));
             }
             if has_text {
-                bubble = bubble.child(md_view(format!("p-{ix}"), rnd.prompt.clone(), cx));
+                // A command the prompt names (`/compact`, or a skill in a
+                // sentence) is set as inline code, so it wears the accent.
+                let cwd = &session.cwd;
+                let prompt = if rnd.prompt.contains('/') { emaki_core::driver::mark_commands(&rnd.prompt, |name| self.hub.knows_command(cwd, name)) } else { rnd.prompt.clone() };
+                bubble = bubble.child(md_view(format!("p-{ix}"), prompt, cx));
             }
             // The time and the copy button show while the pointer is over
             // the prompt's row, as in the Claude app. Their line is always
@@ -255,8 +269,11 @@ impl Workbench {
                         .items_center()
                         .text_size(px(11.5))
                         .text_color(theme.muted_foreground)
-                        .opacity(0.)
-                        .group_hover(group, |s| s.opacity(1.))
+                        // A message still in the queue says so, all the
+                        // time: it is the one thing under a prompt worth
+                        // reading without being asked.
+                        .when(!rnd.queued, |d| d.opacity(0.).group_hover(group, |s| s.opacity(1.)))
+                        .when(rnd.queued, |d| d.child(div().child("Queued, Claude will read it at its next step")))
                         .children(who.map(|w| div().child(w)))
                         .child(div().child(sent))
                         .children(copy),
@@ -275,7 +292,6 @@ impl Workbench {
         let n = rnd.items.len();
         while jx < n {
             any = true;
-            let is_run_item = |it: &Item| matches!(it, Item::Tool(_) | Item::Thinking { .. });
             if is_run_item(&rnd.items[jx]) {
                 let mut end = jx;
                 while end < n && is_run_item(&rnd.items[end]) {
@@ -616,6 +632,9 @@ impl Workbench {
     }
 
     fn render_tool(&mut self, ix: usize, jx: usize, call: &ToolCall, open: bool, sub_open: bool, cwd: &str, cx: &mut Context<Self>) -> AnyElement {
+        if call.tool_kind == ToolKind::Ask {
+            return self.render_question_call(call, cx);
+        }
         let theme = cx.theme().clone();
         let (status_text, status_color) = match call.status {
             CallStatus::Ok => ("", theme.muted_foreground),
@@ -766,6 +785,83 @@ impl Workbench {
             );
         }
         card.into_any_element()
+    }
+
+    /// A question in the conversation, as it was asked and answered: each
+    /// question with its options, the chosen one ticked, words typed instead
+    /// quoted under it. While it waits, the card says where the answer
+    /// goes: the card under the conversation when a driver of ours holds
+    /// it, the terminal otherwise.
+    fn render_question_call(&self, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let qs = questions_of(&call.input);
+        let pending = call.status == CallStatus::Pending;
+        let held_here = self.permissions.iter().any(|(_, p)| p.tool_use_id == call.id);
+        let state = if pending {
+            if held_here { "waiting for your answer below" } else { "waiting for your answer in your terminal" }
+        } else if call.answers.is_empty() {
+            "not answered"
+        } else {
+            ""
+        };
+        v_flex()
+            .w_full()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(if pending { theme.primary.opacity(0.5) } else { theme.border })
+            .bg(theme.popover)
+            .px(px(14.))
+            .py(px(10.))
+            .gap(px(10.))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(badge_str("question".into(), theme.primary.opacity(0.14), theme.primary))
+                    .when(!state.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(if pending { theme.primary } else { theme.muted_foreground }).child(state))),
+            )
+            .children(qs.iter().map(|q| {
+                let answer = call.answers.iter().find(|(k, _)| *k == q.question).map(|(_, a)| a.clone()).unwrap_or_default();
+                // A label may itself hold a comma, so the answer is matched
+                // whole, and as a part only where several were allowed.
+                let chose = |label: &str| answer == label || (q.multi && answer.contains(label));
+                let typed = !answer.is_empty() && !q.options.iter().any(|(l, _)| chose(l));
+                v_flex()
+                    .gap(px(5.))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .when(!q.header.is_empty(), |d| d.child(badge_str(q.header.clone(), theme.muted, theme.muted_foreground)))
+                            .child(div().flex_1().min_w_0().text_size(px(13.5)).child(q.question.clone())),
+                    )
+                    .children(q.options.iter().map(|(label, detail)| {
+                        let on = chose(label);
+                        h_flex()
+                            .gap(px(8.))
+                            .items_start()
+                            .pl(px(2.))
+                            .text_size(px(12.5))
+                            .text_color(if on || pending { theme.foreground } else { theme.muted_foreground })
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .size(px(14.))
+                                    .mt(px(2.))
+                                    .rounded(if q.multi { px(3.) } else { px(7.) })
+                                    .border_1()
+                                    .border_color(if on { theme.primary } else { theme.border })
+                                    .bg(if on { theme.primary } else { theme.transparent })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(on, |d| d.child(Icon::new(IconName::Check).with_size(px(10.)).text_color(theme.primary_foreground))),
+                            )
+                            .child(div().min_w_0().child(label.clone()).when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(detail.clone()))))
+                    }))
+                    .when(typed, |d| d.child(div().pl(px(24.)).text_size(px(12.5)).child(format!("↳ {answer}"))))
+            }))
+            .into_any_element()
     }
 
     fn tool_has_body(&self, call: &ToolCall) -> bool {

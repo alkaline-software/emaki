@@ -44,6 +44,8 @@ pub enum HubEvent {
     Explained { call_id: String, text: String },
     /// The update check, the download and the install, as they go.
     Update(UpdateEvent),
+    /// A folder's commands are in (`commands_for` answers now).
+    Commands,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,10 @@ pub struct Hub {
     /// inbox, refreshed on each scan.
     peers: Mutex<HashMap<String, Peer>>,
     pub cfg: RwLock<Config>,
+    /// The slash commands known in each folder asked about, for the list
+    /// over the composer on a session no driver of ours is behind; an
+    /// empty entry is a folder being asked about now.
+    commands: Mutex<HashMap<String, Vec<driver::CommandInfo>>>,
     /// Plain-English lines for opaque tool calls, asked of a small model
     /// on a thread; a permission card asks on arrival, a tool card on click.
     pub explainer: Arc<Explainer>,
@@ -96,6 +102,7 @@ impl Hub {
             ended: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             cfg: RwLock::new(cfg),
+            commands: Mutex::new(HashMap::new()),
             explainer,
         });
         let _ = emaki_core::paths::ensure_dirs();
@@ -131,8 +138,9 @@ impl Hub {
                         let cfg = hub.cfg.read().unwrap();
                         (cfg.scan_interval_ms, cfg.agents.clone())
                     };
-                    let refs = adapters::index_all(200, &agents);
+                    let mut refs = adapters::index_all(200, &agents);
                     hub.refresh_peers();
+                    hub.settle_stopped(&mut refs);
                     let sig: Vec<(String, u64, f64)> =
                         refs.iter().map(|r| (format!("{}:{}", r.agent.as_str(), r.session_id), r.size, r.mtime)).collect();
                     let changed = sig != last_sig;
@@ -205,12 +213,59 @@ impl Hub {
         self.ended.lock().unwrap().contains_key(session_id)
     }
 
+    /// A session the registry calls idle is not working, whatever its
+    /// transcript's tail reads as: see `TurnState::settle_idle`.
+    fn settle_stopped(&self, refs: &mut [SessionRef]) {
+        let peers = self.peers.lock().unwrap();
+        for r in refs.iter_mut() {
+            if let Some(p) = peers.get(&r.session_id).filter(|p| p.status == "idle" && p.status_at > 0.0) {
+                r.state.settle_idle(p.status_at);
+            }
+        }
+    }
+
     pub fn refresh_peers(&self) {
         let fresh = peer::registry();
         *self.peers.lock().unwrap() = fresh;
     }
 
     /// The inbox of a terminal session, if Claude Code has one registered.
+    /// The commands known in `cwd`, once read; asking starts the read on a
+    /// thread the first time, and `HubEvent::Commands` says when it is in.
+    pub fn commands_for(self: &Arc<Self>, cwd: &str) -> Option<Vec<driver::CommandInfo>> {
+        let mut g = self.commands.lock().unwrap();
+        if let Some(list) = g.get(cwd) {
+            return (!list.is_empty()).then(|| list.clone());
+        }
+        g.insert(cwd.to_string(), Vec::new());
+        drop(g);
+        let hub = Arc::clone(self);
+        let cwd = cwd.to_string();
+        thread::spawn(move || {
+            let commands = driver::catalogue(&cwd).unwrap_or_default();
+            if commands.is_empty() {
+                // Ask again next time rather than remember a failure.
+                hub.commands.lock().unwrap().remove(&cwd);
+                return;
+            }
+            hub.commands.lock().unwrap().insert(cwd, commands);
+            hub.send(HubEvent::Commands);
+        });
+        None
+    }
+
+    /// Whether `/name` is a command: one that acts by itself, or one the
+    /// folder's catalogue lists, when it has been read. Never starts a
+    /// read, so the conversation can ask on every draw.
+    pub fn knows_command(&self, cwd: &str, name: &str) -> bool {
+        driver::acts_alone(name) || self.commands.lock().unwrap().get(cwd).is_some_and(|list| list.iter().any(|c| c.name == name))
+    }
+
+    /// One line for the row under the composer, from a thread.
+    pub fn say(&self, text: String) {
+        self.send(HubEvent::Note(text));
+    }
+
     pub fn peer_for(&self, session_id: &str) -> Option<Peer> {
         self.peers.lock().unwrap().get(session_id).cloned()
     }

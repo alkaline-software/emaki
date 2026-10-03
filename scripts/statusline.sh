@@ -10,7 +10,11 @@
 #      overrides ~/.emaki), written whole and renamed into place, so the
 #      Emaki app can show the same numbers under its composer. Only when
 #      that directory already exists: the app made it, and nothing here
-#      makes directories.
+#      makes directories. Beside it, state/context/<session>.json holds
+#      that session as the terminal has it now: its context window's
+#      size, the tokens in use, the model and the effort. Claude
+#      Code reruns this script when any of those change. (The permission
+#      mode is not in what it hands over.)
 #   2. Prints the line the terminal shows:
 #
 #        Context 18% | 5h: 12% (3h20m) | 7d: 42% (4d6h)
@@ -37,6 +41,29 @@ if [ -d "$emaki_state" ] && [ -n "$input" ]; then
     mv -f "$tmp" "$emaki_state/rate_limits.json"
   else
     rm -f "$tmp"
+  fi
+fi
+
+# The session's own context window, under its id. The transcript says how
+# many tokens are in use but not how large the window is, and one model id
+# comes in two sizes, so the app cannot work a percentage out alone. Only
+# when the app has made the directory.
+if [ -d "$emaki_state/context" ] && [ -n "$input" ]; then
+  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' | tr -cd 'A-Za-z0-9_-')
+  if [ -n "$sid" ]; then
+    tmp="$emaki_state/context/$sid.json.tmp$$"
+    if printf '%s' "$input" | jq -c '{
+      model: (.model.id // ""),
+      effort: (.effort.level // ""),
+      window: (.context_window.context_window_size // 0),
+      used: ((.context_window.current_usage.input_tokens // 0)
+        + (.context_window.current_usage.cache_creation_input_tokens // 0)
+        + (.context_window.current_usage.cache_read_input_tokens // 0)),
+      seen_at: now}' > "$tmp"; then
+      mv -f "$tmp" "$emaki_state/context/$sid.json"
+    else
+      rm -f "$tmp"
+    fi
   fi
 fi
 

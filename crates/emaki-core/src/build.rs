@@ -52,6 +52,7 @@ re!(
 re!(RE_PEER_HEADER, r"\A(?:Another Claude session|A peer session) sent a message(?: while you were working)?:\n");
 re!(RE_PEER_FOOTER, r"\n\n(?:This came from another Claude session|That \x22other Claude session\x22)[^\n]*\z");
 re!(RE_PEER_ENVELOPE, r"(?s)\A<cross-session-message(?: [^>]*)?>\n(.*)\n</cross-session-message>\z");
+re!(RE_PEER_QUEUED, r#"(?s)\A<cross-session-message from-name="([^"]*)"[^>]*>\n(.*)\n</cross-session-message>\z"#);
 re!(RE_ATTACHED, r"(?m)^Attached file: (\S.*?)\s*$");
 // The terminal writes `[Image #3]` where a picture was pasted; the picture
 // itself is a content block after the text. The marker names the block.
@@ -385,6 +386,29 @@ pub struct TurnState {
 }
 
 impl TurnState {
+    /// Claude Code's own word that no turn is running, from the session
+    /// registry (`status: idle` since `idle_at`, Unix seconds). The
+    /// transcript cannot always say a turn stopped: Escape during
+    /// `/compact` leaves the prompt and nothing after it, and the rows
+    /// read as working for ever. Idle since after the rows this state was
+    /// read from means the turn was stopped; idle from before them is the
+    /// registry not having caught up with a turn that just began. Returns
+    /// whether the state changed.
+    pub fn settle_idle(&mut self, idle_at: f64) -> bool {
+        if self.phase != Phase::Working {
+            return false;
+        }
+        let at = |ts: &str| parse_ts(ts).map(|d| d.timestamp_millis() as f64 / 1000.0).unwrap_or(0.0);
+        if idle_at <= at(&self.since).max(at(&self.turn_started)) {
+            return false;
+        }
+        self.phase = Phase::YourTurn;
+        self.activity = "stopped".into();
+        self.activity_kind = "stop".into();
+        self.tool.clear();
+        true
+    }
+
     fn set(&mut self, phase: Phase, activity: impl Into<String>, kind: &str) {
         self.phase = phase;
         self.activity = activity.into();
@@ -406,6 +430,12 @@ pub fn turn_state(rows: &[Value], cwd: &str) -> TurnState {
         }
         if kind == "user" && !str_of(row, "permissionMode").is_empty() && !bool_of(row, "isSidechain") {
             state.mode = str_of(row, "permissionMode").into();
+            break;
+        }
+        // `/plan` changes the mode and no mode row follows until the next
+        // prompt; its own output is the only word of it.
+        if kind == "user" && !bool_of(row, "isSidechain") && row.get("message").and_then(|m| m.get("content")).and_then(Value::as_str).is_some_and(|c| c.contains("<local-command-stdout>Enabled plan mode</local-command-stdout>")) {
+            state.mode = "plan".into();
             break;
         }
     }
@@ -562,11 +592,16 @@ struct RoundBuilder {
     calls: HashMap<String, (usize, usize)>,
     pending_notices: Vec<Item>,
     last_ts: String,
+    /// The slash command whose output comes next: the open round's prompt
+    /// when it is one, then each command row as it arrives.
+    command: String,
+    /// The last prompt, stopped before anything was done with it.
+    withdrawn: Option<Round>,
 }
 
 impl RoundBuilder {
     fn new() -> Self {
-        Self { rounds: Vec::new(), current: None, calls: HashMap::new(), pending_notices: Vec::new(), last_ts: String::new() }
+        Self { rounds: Vec::new(), current: None, calls: HashMap::new(), pending_notices: Vec::new(), last_ts: String::new(), command: String::new(), withdrawn: None }
     }
 
     fn open_round(&mut self, ts: &str, uuid: &str, prompt: String, source: Source) -> &mut Round {
@@ -579,6 +614,8 @@ impl RoundBuilder {
             ..Default::default()
         };
         rnd.items.append(&mut self.pending_notices);
+        self.withdrawn = None;
+        self.command = command_name(&rnd.prompt);
         self.rounds.push(rnd);
         self.current = Some(self.rounds.len() - 1);
         self.rounds.last_mut().unwrap()
@@ -690,12 +727,16 @@ pub fn build(input: BuildInput) -> Session {
 
     let cwd = session.cwd.clone();
     let mut b = RoundBuilder::new();
+    let mut queue = Queue::default();
 
     for row in &main_rows {
         let rtype = str_of(row, "type");
         let ts = str_of(row, "timestamp");
         if !ts.is_empty() {
             b.last_ts = ts.into();
+        }
+        if rtype == "queue-operation" {
+            queue.apply(row);
         }
         if IGNORED_TYPES.contains(&rtype) {
             continue;
@@ -717,8 +758,75 @@ pub fn build(input: BuildInput) -> Session {
         attach_subagent_files(&mut b, subs, &cwd);
     }
     attach_sidechains(&mut b, &side_rows, &cwd);
+    // What is still in the queue is a message the agent has not reached:
+    // a round of its own at the end, until the row that records it lands
+    // and the next build puts it where it was taken up.
+    for row in queue.waiting() {
+        let before = b.rounds.len();
+        handle_user(&mut b, &row, str_of(&row, "timestamp"));
+        if b.rounds.len() > before {
+            b.rounds.last_mut().unwrap().queued = true;
+        }
+    }
     finalize(b, &mut session);
     session
+}
+
+/// Claude Code's queue of messages sent while a turn runs, replayed from
+/// its `queue-operation` rows: `enqueue` with the message as `content`
+/// the moment it arrives, then `dequeue` (the front one starts a turn of
+/// its own) or `remove` with the same `content` (taken into the running
+/// turn). The conversation's own row for the message is written only at
+/// that second step, which for a long tool call is a minute later, so
+/// what is still here at the end of the file is a message sent and not
+/// yet shown. An entry without words (a harness notification, or content
+/// that was not a string) is kept so the order holds, and never drawn.
+#[derive(Default)]
+struct Queue {
+    entries: Vec<(String, String)>,
+}
+
+impl Queue {
+    fn apply(&mut self, row: &Value) {
+        let content = row.get("content").and_then(Value::as_str).unwrap_or("");
+        match str_of(row, "operation") {
+            "enqueue" => self.entries.push((content.to_string(), str_of(row, "timestamp").to_string())),
+            "dequeue" if !self.entries.is_empty() => {
+                self.entries.remove(0);
+            }
+            "remove" => {
+                if let Some(i) = self.entries.iter().position(|(c, _)| c == content) {
+                    self.entries.remove(i);
+                } else if !self.entries.is_empty() {
+                    self.entries.remove(0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The waiting messages a person or a peer wrote, each as the user
+    /// row it will become.
+    fn waiting(&self) -> Vec<Value> {
+        let mut out = Vec::new();
+        for (content, ts) in &self.entries {
+            let text = content.trim();
+            let mut row = json!({
+                "type": "user",
+                "uuid": format!("queued-{ts}"),
+                "timestamp": ts,
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            });
+            if let Some(c) = RE_PEER_QUEUED.captures(text) {
+                row["origin"] = json!({"kind": "peer", "name": &c[1], "body": &c[2]});
+                row["isMeta"] = Value::Bool(true);
+            } else if text.is_empty() || text.starts_with('<') {
+                continue;
+            }
+            out.push(row);
+        }
+        out
+    }
 }
 
 /// A message sent while the agent was working, as the user row it would
@@ -781,10 +889,13 @@ fn handle_system(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut Sess
             }
             let (text, commands, outputs) = strip_wrappers(content);
             for c in commands {
+                b.command = command_name(&format!("/{}", c.trim_start_matches('/')));
                 b.add_notice(format!("/{}", c.trim_start_matches('/')), ts, NoticeVariant::Command);
             }
-            for o in outputs {
-                b.add_notice(one_line(&strip_ansi(&o), 300), ts, NoticeVariant::Info);
+            if b.command != "compact" {
+                for o in outputs {
+                    b.add_notice(one_line(&strip_ansi(&o), 300), ts, NoticeVariant::Info);
+                }
             }
             if !text.is_empty() {
                 b.add_notice(one_line(&strip_ansi(&text), 200), ts, NoticeVariant::Info);
@@ -833,6 +944,23 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
         return;
     }
 
+    // "[Request interrupted by user]" is Claude Code's marker for Escape,
+    // not something the person said, and is never a round. A prompt it
+    // stopped before the agent wrote or ran anything is withdrawn: the
+    // terminal takes those words back into its input, and the window does
+    // the same with its composer, so the conversation does not keep a
+    // message that will be sent again.
+    if prompt.starts_with(INTERRUPTED) {
+        if let Some(i) = b.current.filter(|i| *i + 1 == b.rounds.len()) {
+            let untouched = !b.rounds[i].items.iter().any(|it| !matches!(it, Item::Notice { .. }));
+            if untouched && !b.rounds[i].prompt.is_empty() {
+                b.withdrawn = b.rounds.pop();
+                b.current = b.rounds.len().checked_sub(1);
+            }
+        }
+        return;
+    }
+
     if !prompt.is_empty() || images > 0 || !attached.is_empty() {
         let rnd = b.open_round(ts, uuid, prompt, Source::User);
         rnd.images = images;
@@ -851,18 +979,18 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
     // prompt above it already says; it is left out when it would. The
     // output of `/compact` is the terminal's own instruction ("Compacted
     // (ctrl+o to see full summary)"), which means nothing here, and the
-    // boundary's notice has already said so.
+    // boundary's notice has already said so. Only that command's output
+    // goes: a `/model` run later in the same round keeps its own.
     let said = b.current.map(|i| command_name(&b.rounds[i].prompt)).unwrap_or_default();
-    let mut compacted = said == "compact";
     for c in commands {
         let name = command_name(&format!("/{}", c.trim_start_matches('/')));
-        compacted |= name == "compact";
         if name != said {
             b.add_notice(format!("/{}", c.trim_start_matches('/')), ts, NoticeVariant::Command);
         }
+        b.command = name;
     }
     // The output comes in a row of its own, after the command's.
-    if compacted {
+    if b.command == "compact" {
         return;
     }
     for o in outputs {
@@ -879,7 +1007,11 @@ fn command_name(text: &str) -> String {
 fn handle_assistant(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut Session) {
     let message = row.get("message").and_then(Value::as_object);
     let model = message.and_then(|m| m.get("model")).and_then(Value::as_str).unwrap_or("");
-    if !model.is_empty() && !session.models.iter().any(|m| m == model) {
+    // Each model once, the one in use last: `/model` back to an earlier
+    // one moves it to the end. `<synthetic>` is Claude Code's own row (an
+    // API error put into words), not a model.
+    if !model.is_empty() && model != "<synthetic>" && session.models.last().map(String::as_str) != Some(model) {
+        session.models.retain(|m| m != model);
         session.models.push(model.into());
     }
     let usage = Usage::from_raw(message.and_then(|m| m.get("usage")));
@@ -979,6 +1111,23 @@ fn apply_result(call: &mut ToolCall, block: &Value, sidecar: Option<&Value>, ts:
             call.new_string = sc.get("newString").and_then(Value::as_str).unwrap_or("").into();
         }
     }
+    // An AskUserQuestion answered: `answers` maps each question to the
+    // label chosen, several joined with ", " when the question allowed
+    // more than one, or the words typed instead.
+    if let Some(a) = sc.get("answers").and_then(Value::as_object) {
+        call.answers = a
+            .iter()
+            .map(|(q, v)| {
+                let text = match v {
+                    Value::String(t) => t.trim().to_string(),
+                    Value::Array(items) => items.iter().filter_map(Value::as_str).map(str::trim).collect::<Vec<_>>().join(", "),
+                    other => other.to_string(),
+                };
+                (q.clone(), text)
+            })
+            .filter(|(_, t)| !t.is_empty())
+            .collect();
+    }
 }
 
 /// Nest subagent conversations recorded in their own files, keyed by the
@@ -1050,6 +1199,7 @@ fn attach_sidechains(b: &mut RoundBuilder, side_rows: &[&Value], cwd: &str) {
 }
 
 fn finalize(b: RoundBuilder, session: &mut Session) {
+    let b_withdrawn = b.withdrawn;
     let mut rounds = b.rounds;
     let n = rounds.len();
     for (i, rnd) in rounds.iter_mut().enumerate() {
@@ -1092,6 +1242,7 @@ fn finalize(b: RoundBuilder, session: &mut Session) {
         session.title = fallback_title(&rounds, 72);
     }
     session.rounds = rounds;
+    session.withdrawn = b_withdrawn;
 }
 
 pub fn fallback_title(rounds: &[Round], limit: usize) -> String {

@@ -9,6 +9,16 @@ use super::{InputBaseState, TextareaMode};
 /// this type — those methods live on [`super::EditorState`].
 pub type TextareaState = InputBaseState<TextareaMode>;
 
+impl InputBaseState<TextareaMode> {
+    /// Colour these ranges (UTF-8 byte offsets into the value), replacing
+    /// whatever was set before. Call it again after the text changes.
+    /// (Emaki addition.)
+    pub fn set_marks(&mut self, marks: Vec<super::TextDecoration>, cx: &mut gpui::Context<Self>) {
+        self.extras.marks = marks.into_iter().filter(|m| !m.range.is_empty()).collect();
+        cx.notify();
+    }
+}
+
 /// An unstyled ordinary multi-line text input.
 #[derive(IntoElement)]
 pub struct Textarea {
