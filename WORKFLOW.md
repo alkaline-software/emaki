@@ -64,7 +64,9 @@ The release workflow refuses a tag whose number disagrees with `Cargo.toml`.
 ### 2. Write the changelog section
 
 Add `## vX.Y.Z` to `CHANGELOG.md`, newest first, written for the person
-installing the app: what changed for them, not which files moved. The
+installing the app: what changed for them, not which files moved. Keep it
+short: one line per change, a dozen lines at most, small fixes grouped
+into one. The
 workflow refuses a tag with no section, and `scripts/release-notes.sh X.Y.Z`
 prints exactly what the release page will show.
 

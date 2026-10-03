@@ -21,6 +21,77 @@ pub fn focus_terminal(pid: i32) -> Result<String, String> {
     Ok(host.name)
 }
 
+/// Bring the terminal a session runs in to the front with the keyboard
+/// in it, for keys the person is about to press there (⇧Tab for the
+/// mode). A terminal app has the keyboard once its tab is in front. An
+/// IDE keeps its focus wherever it was left, an editor as often as not,
+/// where ⇧Tab would outdent a line of a file; so the IDE is waited for
+/// and its terminal panel focused (`Host::focus_ide_terminal`), which
+/// needs Accessibility access for Emaki. Blocks for a second or two on
+/// an IDE: call it from a thread. Returns the host's name.
+#[cfg(target_os = "macos")]
+pub fn enter_terminal(pid: i32) -> Result<String, String> {
+    let host = host_of(pid)?;
+    host.focus();
+    if host.is_ide() {
+        host.wait_front().and_then(|_| host.focus_ide_terminal()).map_err(|e| {
+            if e.contains("assistive access") || e.contains("not allowed") {
+                format!("click in {}'s terminal first: Emaki needs Accessibility access in System Settings › Privacy & Security to put the keyboard there", host.name)
+            } else {
+                format!("click in {}'s terminal first: {e}", host.name)
+            }
+        })?;
+    }
+    Ok(host.name)
+}
+
+/// What the terminal a session runs in is showing, where the app can be
+/// asked: Terminal and iTerm2 by AppleScript for the tab on the tty,
+/// WezTerm and Kaku by `cli get-text` for the pane. Nothing for an IDE's
+/// terminal, which no one outside the IDE can read.
+#[cfg(target_os = "macos")]
+pub fn terminal_text(pid: i32) -> Option<String> {
+    let host = host_of(pid).ok()?;
+    if host.tty.is_empty() {
+        return None;
+    }
+    let text = match host.bundle.as_str() {
+        "com.apple.Terminal" => osascript_out(&format!(
+            r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{}" then return contents of t
+    end repeat
+  end repeat
+end tell"#,
+            host.tty
+        ))
+        .ok()?,
+        "com.googlecode.iterm2" => osascript_out(&format!(
+            r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{}" then return contents of s
+      end repeat
+    end repeat
+  end repeat
+end tell"#,
+            host.tty
+        ))
+        .ok()?,
+        _ => {
+            let (exe, pane) = host.wezterm_pane()?;
+            let out = std::process::Command::new(exe).args(["cli", "get-text", "--pane-id", &pane.to_string()]).output().ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&out.stdout).to_string()
+        }
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
 /// Type `text` into the terminal a session runs in and send it, as the
 /// person would: the slash command Claude Code only takes at its own
 /// prompt. Terminal (`do script`), iTerm2 (`write text`) and WezTerm or
@@ -176,6 +247,16 @@ pub fn focus_terminal(_pid: i32) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
+pub fn enter_terminal(pid: i32) -> Result<String, String> {
+    focus_terminal(pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn terminal_text(_pid: i32) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn type_in_terminal(_pid: i32, _text: &str) -> Result<String, String> {
     Err("typing into the terminal is not done on this platform yet".into())
 }
@@ -240,7 +321,7 @@ impl Host {
     /// nothing outside the IDE can pick one by its tty. Anything that is
     /// not such an IDE is left as it is.
     fn focus_ide_terminal(&self) -> Result<(), String> {
-        if !std::path::Path::new(&self.path).join("Contents/Resources/app/product.json").exists() {
+        if !self.is_ide() {
             return Ok(());
         }
         osascript(
@@ -253,6 +334,12 @@ impl Host {
   delay 0.3
 end tell"#,
         )
+    }
+
+    /// Whether this is an IDE built on VS Code, with a terminal panel
+    /// inside it and a focus of its own.
+    fn is_ide(&self) -> bool {
+        std::path::Path::new(&self.path).join("Contents/Resources/app/product.json").exists()
     }
 
     /// For WezTerm and Kaku: the CLI beside the gui binary and the pane on
@@ -300,6 +387,17 @@ fn osascript(script: &str) -> Result<(), String> {
     let out = std::process::Command::new("osascript").arg("-e").arg(script).output().map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Run a script for what it returns.
+#[cfg(target_os = "macos")]
+fn osascript_out(script: &str) -> Result<String, String> {
+    let out = std::process::Command::new("osascript").arg("-e").arg(script).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }

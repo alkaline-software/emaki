@@ -140,6 +140,26 @@ pub fn mode_label(mode: &str) -> &'static str {
     }
 }
 
+/// The permission mode a terminal session's screen shows. Claude Code
+/// names the mode at the foot of its prompt ("manual mode on" for the
+/// default, "plan mode on (shift+tab to cycle)"; read off 2.1.288), and
+/// that footer is the only place a terminal session says which mode
+/// ⇧Tab landed on before its next prompt row. `text` is what the
+/// terminal is showing; only its last lines are read, so a conversation
+/// that mentions a mode higher up is not taken for the footer. None when
+/// the footer is not there, under a dialog, say.
+pub fn mode_on_screen(text: &str) -> Option<&'static str> {
+    const SHOWN: [(&str, &str); 6] = [
+        ("manual mode on", "default"),
+        ("plan mode on", "plan"),
+        ("accept edits on", "acceptEdits"),
+        ("auto mode on", "auto"),
+        ("bypass permissions on", "bypassPermissions"),
+        ("don't ask on", "dontAsk"),
+    ];
+    text.lines().rev().filter(|l| !l.trim().is_empty()).take(3).find_map(|line| SHOWN.iter().find(|(words, _)| line.contains(words)).map(|(_, mode)| *mode))
+}
+
 /// One line on what a mode does, under its name in the picker.
 pub fn mode_detail(mode: &str) -> &'static str {
     match mode {
