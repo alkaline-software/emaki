@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use emaki_core::adapters::codex::build_codex;
 use emaki_core::archive;
 use emaki_core::build::{build, strip_wrappers, tool_subject, turn_state, BuildInput, Phase};
-use emaki_core::model::{AgentId, CallStatus, Item};
+use emaki_core::model::{AgentId, CallStatus, Item, Source};
 use emaki_core::redact::Redactor;
 use emaki_core::search::{fts_query, SearchIndex};
-use emaki_core::transcript::{peek, read_all, SessionRef, TranscriptTail};
+use emaki_core::transcript::{first_prompt_title, peek, read_all, SessionRef, TranscriptTail};
 use serde_json::{json, Value};
 
 struct Home {
@@ -120,6 +120,71 @@ fn turn_state_reads_the_tail() {
     let st = turn_state(&rows, "");
     assert_eq!(st.phase, Phase::YourTurn);
     assert_eq!(st.activity, "interrupted");
+}
+
+/// A message sent while the agent is working is absorbed into the turn and
+/// recorded as a `queued_command` attachment, never as a user row. It is a
+/// prompt in its place: a round of its own, from the person or the peer
+/// that sent it, with what the agent did next under it. It changes no
+/// state: the turn it cut into is still running.
+#[test]
+fn a_message_sent_mid_turn_is_a_round_in_its_place() {
+    let mut rows = vec![user("go", "2026-01-01T10:00:00Z")];
+    rows.push(assistant(vec![json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "make"}})], "tool_use", "2026-01-01T10:00:01Z"));
+    rows.push(tool_result("t1", "ok", "2026-01-01T10:00:02Z"));
+    rows.push(row(json!({"type": "attachment", "uuid": "q1", "timestamp": "2026-01-01T10:00:03Z", "sessionId": "s1",
+        "attachment": {"type": "queued_command", "commandMode": "prompt", "humanTurn": true, "origin": {"kind": "human"},
+            "prompt": [{"type": "text", "text": "[Image #1] also check the tests"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}]}})));
+    rows.push(row(json!({"type": "attachment", "uuid": "q2", "timestamp": "2026-01-01T10:00:04Z", "sessionId": "s1",
+        "attachment": {"type": "queued_command", "commandMode": "task-notification", "prompt": "<task-notification>done</task-notification>"}})));
+    rows.push(row(json!({"type": "attachment", "uuid": "q3", "timestamp": "2026-01-01T10:00:05Z", "sessionId": "s1",
+        "attachment": {"type": "queued_command", "commandMode": "prompt", "isMeta": true,
+            "prompt": "<cross-session-message from-name=\"emaki\">\nand this\n</cross-session-message>",
+            "origin": {"kind": "peer", "name": "emaki", "body": "and this"}}})));
+    rows.push(assistant(vec![json!({"type": "text", "text": "Checked."})], "end_turn", "2026-01-01T10:00:06Z"));
+    let st = turn_state(&rows[..4], "");
+    assert_eq!(st.phase, Phase::Working, "the turn cut into is still running");
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let prompts: Vec<(&str, Source)> = s.rounds.iter().map(|r| (r.prompt.as_str(), r.source)).collect();
+    assert_eq!(prompts, vec![("go", Source::User), ("also check the tests", Source::User), ("and this", Source::Web)], "the pasted-image label is stripped as it is on any prompt");
+    assert_eq!(s.rounds[1].uuid, "q1");
+    assert_eq!(s.rounds[1].images, 1);
+    assert!(s.rounds[2].has_text(), "what the agent did next sits under the message that cut in");
+}
+
+/// `/compact` leaves a boundary and then the summary Claude Code hands the
+/// model, as a user row flagged `isCompactSummary`. It is not a prompt:
+/// nothing is waiting on a reply, and the conversation shows the boundary,
+/// not a message the person never sent.
+#[test]
+fn compact_summary_is_not_a_prompt() {
+    let mut rows = vec![user("go", "2026-01-01T10:00:00Z"), assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:01Z")];
+    rows.push(user("/compact", "2026-01-01T10:00:02Z"));
+    rows.push(row(json!({"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted", "compactMetadata": {"preTokens": 523717, "postTokens": 11752}, "timestamp": "2026-01-01T10:00:03Z", "sessionId": "s1"})));
+    let mut summary = user("This session is being continued from a previous conversation that ran out of context.", "2026-01-01T10:00:04Z");
+    summary["isCompactSummary"] = json!(true);
+    summary["isVisibleInTranscriptOnly"] = json!(true);
+    rows.push(summary);
+    rows.push(user("<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>", "2026-01-01T10:00:05Z"));
+    rows.push(user("<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>", "2026-01-01T10:00:05Z"));
+    let st = turn_state(&rows, "");
+    assert_eq!(st.phase, Phase::YourTurn, "a local command answers its own prompt; the turn before it still stands");
+    assert_eq!(st.reply, "Done.");
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.len(), 2);
+    assert_eq!(s.rounds[1].prompt, "/compact");
+    let notices: Vec<&str> = s.rounds[1].items.iter().filter_map(|i| if let Item::Notice { text, .. } = i { Some(text.as_str()) } else { None }).collect();
+    assert_eq!(notices, vec!["Context compacted, earlier messages summarised"], "no chip repeating the prompt, no terminal instruction");
+    assert!(!s.rounds.iter().any(|r| r.prompt.starts_with("This session is being continued")));
+    assert_eq!(first_prompt_title(&rows[2..], 72), "/compact");
+    assert_eq!(s.context_tokens, 11752, "the context in use is the summary's size until the next turn");
+
+    let mut rows = vec![user("go", "2026-01-01T10:00:00Z"), assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:01Z")];
+    rows.push(user("/effort high", "2026-01-01T10:00:02Z"));
+    rows.push(row(json!({"type": "system", "subtype": "local_command", "commandRun": {"command": "effort", "args": "high"}, "timestamp": "2026-01-01T10:00:03Z", "sessionId": "s1"})));
+    assert_eq!(turn_state(&rows, "").phase, Phase::YourTurn);
+    rows.push(user("/review this", "2026-01-01T10:00:04Z"));
+    assert_eq!(turn_state(&rows, "").phase, Phase::Working, "a skill is a prompt like any other");
 }
 
 #[test]

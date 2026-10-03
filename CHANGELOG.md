@@ -26,6 +26,18 @@ GitHub Release as its notes. Write it for the person installing the app.
   when it does not, never scrolling sideways. An empty column says so
   inside a dashed outline. Done is a row under them that opens into a
   grid.
+- **`/compact` no longer leaves the board working.** The summary Claude
+  Code writes after compaction showed as a message of yours with a clock
+  running under it, and the context figure kept the pre-compaction number
+  until the next turn. The summary is Claude Code's own and is not shown;
+  a slash command typed in the terminal counts as answered by its own
+  output; the context drops to the summary's size at the boundary. The
+  round reads as the command and one line, "Context compacted", not the
+  command twice and a terminal hint.
+- **A message sent while Claude is working shows in its place.** Claude
+  Code folds such a message into the running turn and records it apart
+  from the conversation's rows, so the window never showed it. It is now
+  a prompt where it was sent, with what Claude did next under it.
 - **Settings are segmented controls.** Each choice sits on a raised plate
   in a muted track, in both appearances, and the plate slides to the
   choice you click instead of jumping.

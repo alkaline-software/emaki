@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 use chrono::{DateTime, FixedOffset};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::json::*;
 use crate::model::*;
@@ -25,7 +25,6 @@ const IGNORED_TYPES: &[&str] = &[
     "permission-mode",
     "last-prompt",
     "agent-name",
-    "attachment",
     "file-history-delta",
     "file-history-snapshot",
     "queue-operation",
@@ -147,6 +146,15 @@ pub fn user_prompt_text(row: &Value) -> String {
         return text;
     }
     strip_wrappers(&text_blocks_joined(&blocks(row))).0.trim().to_string()
+}
+
+/// A user row Claude Code wrote to itself, not one the person sent: a
+/// meta row that is not a peer message, or the summary it hands the model
+/// after compaction (`isCompactSummary`, which its own view hides too:
+/// `isVisibleInTranscriptOnly`). Neither opens a round, and neither is a
+/// prompt waiting for a reply.
+pub fn machine_authored(row: &Value) -> bool {
+    bool_of(row, "isCompactSummary") || (bool_of(row, "isMeta") && peer_message(row).is_none())
 }
 
 /// `(text, source)` for a user row delivered through the session inbox.
@@ -403,9 +411,21 @@ pub fn turn_state(rows: &[Value], cwd: &str) -> TurnState {
     }
 
     let mut decided = false;
+    // Local commands that ran, newest first, by name. A slash command the
+    // person typed (`/compact`, `/effort high`) is written as a prompt row
+    // of its own, and what answers it is not a reply but the command's own
+    // rows after it: `<command-name>` in a user row, or a
+    // `system/local_command` row. That prompt is not waiting on anything.
+    let mut ran: Vec<String> = Vec::new();
     for i in (0..rows.len()).rev() {
         let row = &rows[i];
         let kind = str_of(row, "type");
+        if kind == "system" && str_of(row, "subtype") == "local_command" {
+            if let Some(c) = row.get("commandRun").map(|c| str_of(c, "command")).filter(|c| !c.is_empty()) {
+                ran.push(c.trim_start_matches('/').to_string());
+            }
+            continue;
+        }
         if (kind != "user" && kind != "assistant") || bool_of(row, "isSidechain") {
             continue;
         }
@@ -413,8 +433,12 @@ pub fn turn_state(rows: &[Value], cwd: &str) -> TurnState {
         let ts = str_of(row, "timestamp");
 
         if kind == "user" {
-            if bool_of(row, "isMeta") && peer_message(row).is_none() {
+            if machine_authored(row) {
                 continue;
+            }
+            if peer_message(row).is_none() {
+                let (_, commands, _) = strip_wrappers(&text_blocks_joined(&bl));
+                ran.extend(commands.iter().filter_map(|c| c.split_whitespace().next()).map(|c| c.trim_start_matches('/').to_string()));
             }
             if bl.iter().any(|b| block_type(b) == "tool_result") {
                 if !decided {
@@ -435,6 +459,13 @@ pub fn turn_state(rows: &[Value], cwd: &str) -> TurnState {
             let text = user_prompt_text(row);
             if text.is_empty() && !bl.iter().any(|b| block_type(b) == "image") {
                 continue;
+            }
+            let name = command_name(&text);
+            if !name.is_empty() {
+                if let Some(at) = ran.iter().position(|c| *c == name) {
+                    ran.remove(at);
+                    continue;
+                }
             }
             if !decided {
                 if text.starts_with(INTERRUPTED) {
@@ -670,9 +701,14 @@ pub fn build(input: BuildInput) -> Session {
             continue;
         }
         match rtype {
-            "system" => handle_system(&mut b, row, ts),
+            "system" => handle_system(&mut b, row, ts, &mut session),
             "user" => handle_user(&mut b, row, ts),
             "assistant" => handle_assistant(&mut b, row, ts, &mut session),
+            "attachment" => {
+                if let Some(row) = queued_prompt(row) {
+                    handle_user(&mut b, &row, ts);
+                }
+            }
             _ => {}
         }
     }
@@ -685,9 +721,52 @@ pub fn build(input: BuildInput) -> Session {
     session
 }
 
-fn handle_system(b: &mut RoundBuilder, row: &Value, ts: &str) {
+/// A message sent while the agent was working, as the user row it would
+/// have been. Claude Code does not write one: the message is absorbed into
+/// the running turn (`queue-operation` `remove`, reason `absorbed_mid_turn`)
+/// and recorded as an `attachment` row of type `queued_command` whose
+/// `prompt` is the text, or the content blocks when a picture was pasted,
+/// with the same `origin` a user row carries (`human`, or `peer` with the
+/// sender's name). A `task-notification` in the same shape is the
+/// harness's, not the person's, and is left out. The row keeps the
+/// attachment row's uuid, so a pasted picture is read back from it.
+fn queued_prompt(row: &Value) -> Option<Value> {
+    let a = row.get("attachment")?;
+    if str_of(a, "type") != "queued_command" || str_of(a, "commandMode") != "prompt" {
+        return None;
+    }
+    let content = match a.get("prompt")? {
+        Value::String(text) => json!([{"type": "text", "text": text}]),
+        blocks @ Value::Array(_) => blocks.clone(),
+        _ => return None,
+    };
+    let mut user = json!({
+        "type": "user",
+        "uuid": str_of(row, "uuid"),
+        "timestamp": str_of(row, "timestamp"),
+        "message": {"role": "user", "content": content},
+    });
+    if let Some(origin) = a.get("origin") {
+        user["origin"] = origin.clone();
+    }
+    if bool_of(a, "isMeta") {
+        user["isMeta"] = Value::Bool(true);
+    }
+    Some(user)
+}
+
+fn handle_system(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut Session) {
     match str_of(row, "subtype") {
-        "compact_boundary" => b.add_notice("Context compacted, earlier messages summarised".into(), ts, NoticeVariant::Compact),
+        "compact_boundary" => {
+            b.add_notice("Context compacted, earlier messages summarised".into(), ts, NoticeVariant::Compact);
+            // The context in use drops to the summary's size, and no
+            // assistant row says so until the next turn: the boundary's
+            // own count holds the row under the composer until then.
+            let post = row.get("compactMetadata").map(|m| u64_of(m, "postTokens")).unwrap_or(0);
+            if post > 0 {
+                session.context_tokens = post;
+            }
+        }
         "turn_duration" => {
             if let Some(i) = b.current {
                 let d = u64_of(row, "durationMs");
@@ -741,7 +820,7 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
         return;
     }
 
-    if bool_of(row, "isMeta") {
+    if machine_authored(row) {
         return;
     }
 
@@ -767,12 +846,34 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
         return;
     }
 
+    // A slash command typed in the terminal is written as a prompt row of
+    // its own and then as these rows, so the chip would say what the
+    // prompt above it already says; it is left out when it would. The
+    // output of `/compact` is the terminal's own instruction ("Compacted
+    // (ctrl+o to see full summary)"), which means nothing here, and the
+    // boundary's notice has already said so.
+    let said = b.current.map(|i| command_name(&b.rounds[i].prompt)).unwrap_or_default();
+    let mut compacted = said == "compact";
     for c in commands {
-        b.add_notice(format!("/{}", c.trim_start_matches('/')), ts, NoticeVariant::Command);
+        let name = command_name(&format!("/{}", c.trim_start_matches('/')));
+        compacted |= name == "compact";
+        if name != said {
+            b.add_notice(format!("/{}", c.trim_start_matches('/')), ts, NoticeVariant::Command);
+        }
+    }
+    // The output comes in a row of its own, after the command's.
+    if compacted {
+        return;
     }
     for o in outputs {
         b.add_notice(one_line(&strip_ansi(&o), 300), ts, NoticeVariant::Info);
     }
+}
+
+/// The name of the slash command `text` is, without the slash or its
+/// arguments, or empty when it is not one.
+fn command_name(text: &str) -> String {
+    text.strip_prefix('/').and_then(|t| t.split_whitespace().next()).unwrap_or("").to_string()
 }
 
 fn handle_assistant(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut Session) {
