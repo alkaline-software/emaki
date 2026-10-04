@@ -89,6 +89,8 @@ scripts/make-icon.sh       remakes assets/icon from scripts/icon/icon.html
 scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
 scripts/release-notes.sh   one version's section of CHANGELOG.md, the release notes
+scripts/release-check.sh   before a tag: version, lock, changelog, tests, build, Windows type check
+scripts/release-publish.sh after CI: the notarized Mac images onto the draft release, then publish
 scripts/statusline.sh      Claude Code's status line, ours: prints the line, leaves the rate limits
 scripts/anthropic-mono.py  the Claude app's code font into ~/.emaki/fonts, plus its 0.9 copy for inline code
 WORKFLOW.md                how to cut a release, step by step
@@ -1321,7 +1323,10 @@ hardened runtime, a disk image laid out by Finder over
 `scripts/dmg/background.png`, notarization and stapling. Until the signing
 secrets are in the repository, CI's Mac images are ad-hoc and the
 notarized ones are built here and uploaded over them after the release
-job. **WORKFLOW.md is the procedure**: the version bump (`Cargo.toml` and
+job, which is why CI leaves the release a draft: `scripts/release-check.sh`
+holds a commit to what the tag will be held to before it is tagged
+(a Windows type check included), and `scripts/release-publish.sh` uploads
+the notarized images, checks them from the outside and publishes. **WORKFLOW.md is the procedure**: the version bump (`Cargo.toml` and
 `Cargo.lock`), the changelog, the tag, the Mac build and upload, redoing a
 release, enabling CI signing, the icon and the background. Three facts an
 agent needs even without opening it: only Finder writes a `.DS_Store`
