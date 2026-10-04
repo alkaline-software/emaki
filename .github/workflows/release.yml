@@ -40,7 +40,7 @@ jobs:
             asset: Emaki-linux-x64.AppImage
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: The tag matches the workspace version and has release notes
         if: startsWith(github.ref, 'refs/tags/')
@@ -134,7 +134,7 @@ jobs:
           esac
           ls -la upload
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: upload/*
@@ -145,11 +145,11 @@ jobs:
   release:
     needs: package
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: upload
           merge-multiple: true
@@ -159,7 +159,7 @@ jobs:
           scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > notes.md
           ls -la upload
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           name: Emaki ${{ github.ref_name }}
           body_path: notes.md

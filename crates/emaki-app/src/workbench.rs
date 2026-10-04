@@ -2854,7 +2854,7 @@ impl Workbench {
     /// a time: a run of the status line during a read is read after it.
     /// A terminal that cannot be read changes nothing.
     fn read_terminal_mode(&mut self, sid: &str, cx: &mut Context<Self>) {
-        if self.drivers.contains_key(sid) {
+        if self.driven(sid) {
             return;
         }
         let Some(peer) = self.hub.peer_for(sid) else { return };
@@ -3035,17 +3035,26 @@ impl Workbench {
         cx.notify();
     }
 
+    /// A headless child of ours is behind the session: the window has
+    /// been told of one, and the hub still holds it. The hub lets a
+    /// driver go by itself (idle past its limit, or its child gone, as
+    /// when the session was taken up in a terminal) and says nothing, so
+    /// the window's record alone outlived it: the session then read as
+    /// driven, every message was refused with "the driver is gone; try
+    /// again", and the terminal's inbox beside it was never tried.
+    fn driven(&self, sid: &str) -> bool {
+        self.drivers.get(sid).is_some_and(|v| v.starting || (v.state != "exited" && self.hub.driver_for(sid).is_some()))
+    }
+
     pub fn reply_via_for(&self, r: &SessionRef) -> (&'static str, String) {
         if r.agent != AgentId::ClaudeCode {
             return ("", format!("{} sessions are read-only here", r.agent.display_name()));
         }
-        if let Some(v) = self.drivers.get(&r.session_id) {
-            if v.starting {
-                return ("driver", "starting claude…".into());
-            }
-            if v.state != "exited" {
-                return ("driver", String::new());
-            }
+        if self.drivers.get(&r.session_id).is_some_and(|v| v.starting) {
+            return ("driver", "starting claude…".into());
+        }
+        if self.driven(&r.session_id) {
+            return ("driver", String::new());
         }
         // A terminal session with an inbox takes the message directly; the
         // driver is checked first because its child registers an inbox too.
@@ -3519,7 +3528,7 @@ impl Workbench {
     /// mode rather than the transcript's old one.
     fn terminal_mode_seen(&self) -> Option<Option<String>> {
         let r = self.selected_ref().filter(|_| self.page == Page::Session)?;
-        if self.drivers.contains_key(&r.session_id) {
+        if self.driven(&r.session_id) {
             return None;
         }
         self.mode_seen.as_ref().filter(|(sid, _, _)| *sid == r.session_id).map(|(_, mode, _)| mode.clone())
@@ -3642,7 +3651,7 @@ impl Workbench {
         }
         // A session with no process behind it: its terminal is opened,
         // and the key pressed there once it is up.
-        if self.page == Page::Session && self.selected_ref().is_some_and(|r| !self.drivers.contains_key(&r.session_id)) {
+        if self.page == Page::Session && self.selected_ref().is_some_and(|r| !self.driven(&r.session_id)) {
             return self.via_terminal(TerminalAction::StepMode, cx);
         }
         let modes = self.modes(&self.options());
@@ -3733,7 +3742,7 @@ impl Workbench {
     /// when that session is in a terminal and not driven from here.
     fn terminal_ctx(&self) -> Option<&SessionContext> {
         let r = self.selected_ref().filter(|_| self.page == Page::Session)?;
-        if self.drivers.contains_key(&r.session_id) {
+        if self.driven(&r.session_id) {
             return None;
         }
         self.session_ctx.as_ref().filter(|(id, _)| *id == r.session_id).map(|(_, c)| c)
