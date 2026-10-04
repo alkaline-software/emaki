@@ -174,7 +174,7 @@ fn token(peer: &Peer) -> String {
 }
 
 /// How long Claude Code remembers a peer's last message to drop a repeat.
-pub const REPEAT_WINDOW: Duration = Duration::from_secs(30);
+pub const REPEAT_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Put `text` in front of the session. `Ok` means the inbox accepted the
 /// connection and read the message; a refusal carries the reason the inbox
