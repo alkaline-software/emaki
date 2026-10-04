@@ -11,8 +11,8 @@ this file says what to run, in order.
 A `v*` tag pushed to `alkaline-software/emaki` runs `release.yml`. Four
 package jobs build the app on macOS (both architectures, from the Apple
 Silicon runner), Windows and Linux, then one `release` job creates the
-GitHub Release with the tag's section of `CHANGELOG.md` as its notes and
-attaches the installers under stable names:
+GitHub Release, as a draft, with the tag's section of `CHANGELOG.md` as
+its notes and attaches the installers under stable names:
 
 | asset | built by | signed |
 |---|---|---|
@@ -38,6 +38,8 @@ are built here by `scripts/release-mac.sh` and uploaded over them.
   (`xcrun notarytool store-credentials notarytool-profile` once, with the
   Apple ID, an app-specific password and team `XC2WL5WN7J`).
 - `gh auth login` with an account that has write access to the repository.
+- For the Windows type check in `scripts/release-check.sh`:
+  `brew install mingw-w64` and `rustup target add x86_64-pc-windows-gnu`.
 - For the disk-image background only: Python with Pillow and the LXGW
   WenKai Medium font in `~/Library/Fonts`. The icon needs nothing beyond
   a Mac (`python3` and `swift` ship with it).
@@ -70,30 +72,54 @@ into one. The
 workflow refuses a tag with no section, and `scripts/release-notes.sh X.Y.Z`
 prints exactly what the release page will show.
 
-### 3. Commit, tag, push
+### 3. Check it before the tag
+
+Commit the bump and the changelog, then:
 
 ```
-git add -A && git commit
-git push origin main
+scripts/release-check.sh X.Y.Z
+```
+
+It holds the commit to everything the tag will be held to: the version in
+`Cargo.toml`, a lock that builds with `--locked`, a changelog section of a
+dozen lines at most, a clean tree, the core tests, the app build, and a
+Windows type check (MinGW; `brew install mingw-w64 && rustup target add
+x86_64-pc-windows-gnu` once). Do not tag until it says "ready to tag". A
+tag that fails in CI has to be redone, and every redo means building and
+notarizing the Mac images again; v0.1.5 was tagged three times, the first
+for a line that did not compile on Windows, which this check catches in a
+minute.
+
+### 4. Tag and push
+
+Work happens on a branch; `main` is fast-forwarded to it at release.
+
+```
+git push origin HEAD                 # the branch
+git push origin HEAD:main            # fast-forward main
 git tag -a vX.Y.Z -m "Emaki vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The tag push starts `release.yml`. Watch it (the cold GPUI build takes
-about twenty minutes):
+The tag push starts `release.yml`. It takes about twenty minutes (the
+cold GPUI build), and ends with a **draft** release holding CI's
+installers: nothing is public, and `releases/latest` (what the app's own
+updater follows) still names the previous version. Watch it:
 
 ```
-gh run list --branch vX.Y.Z --limit 3
-gh run watch <run-id> --exit-status
+gh run list --repo alkaline-software/emaki --workflow release --limit 3
+gh run watch <run-id> --repo alkaline-software/emaki --exit-status
 ```
 
-### 4. Build, sign and notarize the Mac images here
+### 5. Build, sign and notarize the Mac images here
 
-Both architectures build on an Apple Silicon Mac. The script packages the
-bundle with cargo-packager, signs it with the Developer ID and the hardened
-runtime, lays the disk image out through Finder over
-`scripts/dmg/background.png`, compresses it, signs it, submits it to the
-notary service, waits, staples and validates:
+While CI runs, and from the tagged commit: an image built before the last
+fix is an image of other code, and `release-publish.sh` refuses one older
+than the tag's commit. Both architectures build on an Apple Silicon Mac.
+The script packages the bundle with cargo-packager, signs it with the
+Developer ID and the hardened runtime, lays the disk image out through
+Finder over `scripts/dmg/background.png`, compresses it, signs it, submits
+it to the notary service, waits, staples and validates:
 
 ```
 cargo build --release --locked -p emaki-app
@@ -104,33 +130,28 @@ scripts/release-mac.sh --no-build --notarize --target x86_64-apple-darwin
 
 Each run ends with `built dist/Emaki-mac-<arch>.dmg (X.Y.Z, <arch>, signed,
 notarized)` and leaves only the two images in `dist/`. Notarization takes a
-few minutes per image. To check one the way Gatekeeper will:
+few minutes per image; the four commands together about ten.
+
+### 6. Put them on the release and publish it
+
+Once the workflow is green and both images are built:
 
 ```
-spctl -a -t open --context context:primary-signature -v dist/Emaki-mac-arm64.dmg
-xcrun stapler validate dist/Emaki-mac-arm64.dmg
+scripts/release-publish.sh X.Y.Z
 ```
 
-### 5. Upload them over CI's images
+It refuses unless the release workflow for the tag has finished and
+succeeded (`action-gh-release` replaces same-named assets, so an upload
+made while the job runs is overwritten by it) and both images are
+notarized, stapled and newer than the tag's commit. Then it uploads them
+over CI's ad-hoc ones, downloads them back and compares checksums, checks
+the downloaded copies the way Gatekeeper will, and publishes the draft as
+the latest release. The release is not done until this prints "published
+with notarized Mac images". v0.1.5 was published by CI with the ad-hoc
+images and the upload came half an hour later; the app updated itself
+from them in between and macOS refused it.
 
-Only after the `release` job has finished. `action-gh-release` replaces
-same-named assets, so an upload made while the job is still running is
-overwritten by it.
-
-```
-gh release upload vX.Y.Z dist/Emaki-mac-arm64.dmg dist/Emaki-mac-x64.dmg --clobber --repo alkaline-software/emaki
-```
-
-Then confirm from the outside:
-
-```
-gh release view vX.Y.Z --repo alkaline-software/emaki
-gh release download vX.Y.Z --pattern 'Emaki-mac-arm64.dmg' --dir /tmp/check --repo alkaline-software/emaki
-shasum -a 256 /tmp/check/Emaki-mac-arm64.dmg dist/Emaki-mac-arm64.dmg
-spctl -a -t open --context context:primary-signature -v /tmp/check/Emaki-mac-arm64.dmg
-```
-
-### 6. Install the release build here
+### 7. Install the release build here
 
 Drag from the disk image, or:
 
@@ -145,8 +166,8 @@ Keep no other `Emaki.app` on the disk (`dist/`, a scratch folder,
 
 ## Redoing a release under the same tag
 
-Delete the release and the tag on both sides, then repeat from step 3 with
-the new commit:
+Delete the release and the tag on both sides, cancel a run still going
+(`gh run cancel <run-id>`), then repeat from step 3 with the new commit:
 
 ```
 gh release delete vX.Y.Z --yes --repo alkaline-software/emaki
@@ -156,13 +177,14 @@ git tag -a vX.Y.Z -m "Emaki vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The Mac images must be rebuilt from the new commit (step 4) and uploaded
-again (step 5).
+The Mac images must be rebuilt from the new commit (step 5) and published
+again (step 6).
 
 ## Signing in CI
 
 `release.yml` signs and notarizes on the runner when five repository
-secrets exist, and steps 4 and 5 then disappear. Write access is enough to
+secrets exist; step 5 then disappears and step 6 is only
+`gh release edit vX.Y.Z --draft=false --latest`. Write access is enough to
 set them:
 
 ```
@@ -219,5 +241,21 @@ GitHub macOS runners too.
 - **Two Emakis in Launchpad or Spotlight**: a second bundle somewhere on
   disk. `mdfind "kMDItemCFBundleIdentifier == 'com.pingfanhu.emaki'"` lists
   them; keep only `/Applications/Emaki.app`.
-- **The Mac images on the release are ad-hoc signed**: the upload in step 5
-  was skipped, or ran before the `release` job finished. Upload again.
+- **The Mac images on the release are ad-hoc signed**, or macOS says the
+  app "cannot be opened" after an update: step 6 was skipped. Run
+  `scripts/release-publish.sh X.Y.Z`. To check an installed copy:
+  `spctl -a -vv /Applications/Emaki.app` must say "Notarized Developer
+  ID"; "rejected" with `Signature=adhoc` from `codesign -dv` is CI's
+  image. Reinstall from `dist/` (step 7).
+- **The Windows job fails with "cannot find type" or an unresolved
+  import**: a line used on every platform leans on something gated for
+  Unix or macOS. `scripts/release-check.sh` runs the type check that
+  finds it; the macOS and Linux jobs pass without it.
+- **"Node.js NN is deprecated" on a run**: an action is a major version
+  behind. `gh api repos/<owner>/<action>/releases/latest -q .tag_name`
+  gives the current one; move `rust.yml` and `release.yml` together.
+- **A terminal says "Transcript saving is off, inherited
+  CLAUDE_CODE_CHILD_SESSION marker"**: Emaki was started from inside a
+  Claude Code session and a terminal app it launched carries that
+  session's variables. Quit the terminal app and reopen it. When an agent
+  starts Emaki, it must clear every `CLAUDE*` variable first.

@@ -164,3 +164,8 @@ jobs:
           name: Emaki ${{ github.ref_name }}
           body_path: notes.md
           files: upload/*
+          # A draft until scripts/release-publish.sh has put the notarized
+          # Mac images over the ad-hoc ones built here. Published at once,
+          # the page and the app's own updater handed out images macOS
+          # refuses for as long as the upload was not done (v0.1.5).
+          draft: true
