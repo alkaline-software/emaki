@@ -19,6 +19,8 @@ use emaki_core::archive;
 use emaki_core::config::Config;
 use emaki_core::driver::{self, Driver};
 use emaki_core::explain::Explainer;
+use emaki_core::model::AgentId;
+use emaki_core::options::Options;
 use emaki_core::peer::{self, Peer};
 use emaki_core::search::{self, SearchIndex};
 use emaki_core::transcript::SessionRef;
@@ -44,8 +46,13 @@ pub enum HubEvent {
     Explained { call_id: String, text: String },
     /// The update check, the download and the install, as they go.
     Update(UpdateEvent),
-    /// A folder's commands are in (`commands_for` answers now).
+    /// A folder's commands are in (`commands_for` answers now), and with
+    /// them what the agent offers (`options_for`).
     Commands,
+    /// A terminal's status line ran for this session and left what it was
+    /// handed (`state/context/<session>.json`): the model, the effort or
+    /// the mode there may have changed.
+    Context(String),
 }
 
 #[derive(Debug, Clone)]
@@ -72,11 +79,20 @@ pub struct Hub {
     /// Claude Code's own session registry: every terminal session with an
     /// inbox, refreshed on each scan.
     peers: Mutex<HashMap<String, Peer>>,
+    /// What last went to each session's inbox, as it was sent, and when:
+    /// the same words again inside Claude Code's window go as a repeat
+    /// (`peer::send`).
+    inbox_last: Mutex<HashMap<String, (String, std::time::Instant)>>,
     pub cfg: RwLock<Config>,
     /// The slash commands known in each folder asked about, for the list
     /// over the composer on a session no driver of ours is behind; an
     /// empty entry is a folder being asked about now.
     commands: Mutex<HashMap<String, Vec<driver::CommandInfo>>>,
+    /// What each agent said a session can be set to (its modes, models
+    /// and effort levels), by folder as each is asked; under the empty
+    /// folder, the last answer from anywhere, which at launch is the one
+    /// kept from the last run.
+    options: Mutex<HashMap<(AgentId, String), Options>>,
     /// Plain-English lines for opaque tool calls, asked of a small model
     /// on a thread; a permission card asks on arrival, a tool card on click.
     pub explainer: Arc<Explainer>,
@@ -101,8 +117,10 @@ impl Hub {
             drivers: Mutex::new(HashMap::new()),
             ended: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
+            inbox_last: Mutex::new(HashMap::new()),
             cfg: RwLock::new(cfg),
             commands: Mutex::new(HashMap::new()),
+            options: Mutex::new(AgentId::ALL.iter().map(|a| ((*a, String::new()), Options::cached(*a))).filter(|(_, o)| !o.is_empty()).collect()),
             explainer,
         });
         let _ = emaki_core::paths::ensure_dirs();
@@ -194,8 +212,20 @@ impl Hub {
                 for a in adapters::all() {
                     roots.extend(a.data_roots());
                 }
+                // What the status line leaves per session is watched too:
+                // a model, an effort or a mode changed in a terminal reruns
+                // it, and that file is the only word of it until the next
+                // turn. It says nothing about any transcript, so no rescan.
+                let context = emaki_core::paths::state_dir().join("context");
+                roots.push(context.clone());
                 let Ok(watcher) = Watcher::start(&roots, Duration::from_millis(250)) else { return };
                 while let Ok(path) = watcher.events.recv() {
+                    if path.starts_with(&context) {
+                        if let Some(sid) = path.file_stem().filter(|_| path.extension().is_some_and(|e| e == "json")) {
+                            hub.send(HubEvent::Context(sid.to_string_lossy().to_string()));
+                        }
+                        continue;
+                    }
                     hub.send(HubEvent::Changed(path));
                     hub.refresh();
                 }
@@ -242,16 +272,43 @@ impl Hub {
         let hub = Arc::clone(self);
         let cwd = cwd.to_string();
         thread::spawn(move || {
-            let commands = driver::catalogue(&cwd).unwrap_or_default();
-            if commands.is_empty() {
+            let catalogue = adapters::for_agent(AgentId::ClaudeCode).catalogue(&cwd);
+            hub.learn_options(AgentId::ClaudeCode, &cwd, catalogue.options);
+            if catalogue.commands.is_empty() {
                 // Ask again next time rather than remember a failure.
                 hub.commands.lock().unwrap().remove(&cwd);
                 return;
             }
-            hub.commands.lock().unwrap().insert(cwd, commands);
+            hub.commands.lock().unwrap().insert(cwd, catalogue.commands);
             hub.send(HubEvent::Commands);
         });
         None
+    }
+
+    /// The modes, models and effort levels `agent` offers a session in
+    /// `cwd`: what it said for that folder when it has been asked
+    /// (`commands_for` asks, and so does starting a driver there), else
+    /// what it last said anywhere. Never starts a read, so the composer
+    /// can ask on every draw. Empty for an agent that was never heard.
+    pub fn options_for(&self, agent: AgentId, cwd: &str) -> Options {
+        let g = self.options.lock().unwrap();
+        g.get(&(agent, cwd.to_string())).or_else(|| g.get(&(agent, String::new()))).cloned().unwrap_or_default()
+    }
+
+    /// Keep what `agent` just said it offers, for this folder, as the
+    /// last word from anywhere, and on disk for the next launch. An empty
+    /// answer is an agent that did not answer.
+    fn learn_options(&self, agent: AgentId, cwd: &str, options: Options) {
+        if options.is_empty() {
+            return;
+        }
+        {
+            let mut g = self.options.lock().unwrap();
+            g.insert((agent, cwd.to_string()), options.clone());
+            g.insert((agent, String::new()), options.clone());
+        }
+        options.remember(agent);
+        self.send(HubEvent::Commands);
     }
 
     /// Whether `/name` is a command: one that acts by itself, or one the
@@ -259,6 +316,12 @@ impl Hub {
     /// read, so the conversation can ask on every draw.
     pub fn knows_command(&self, cwd: &str, name: &str) -> bool {
         driver::acts_alone(name) || self.commands.lock().unwrap().get(cwd).is_some_and(|list| list.iter().any(|c| c.name == name))
+    }
+
+    /// Have the window read a terminal session again, as when its status
+    /// line runs: after a key sent there from here.
+    pub fn look_at(&self, session_id: &str) {
+        self.send(HubEvent::Context(session_id.to_string()));
     }
 
     /// One line for the row under the composer, from a thread.
@@ -321,6 +384,7 @@ impl Hub {
             });
             match Driver::start(&session_id, &cwd, resume, &mode, &model, ev_tx) {
                 Ok(d) => {
+                    hub.learn_options(AgentId::ClaudeCode, &cwd, d.caps().options);
                     hub.drivers.lock().unwrap().insert(session_id.clone(), Arc::clone(&d));
                     hub.ended.lock().unwrap().remove(&session_id);
                     hub.send(HubEvent::DriverStarted { session_id: session_id.clone() });
@@ -363,7 +427,13 @@ impl Hub {
             hub.refresh_peers();
             let error = match hub.peer_for(&sid) {
                 None => "this session has no inbox any more".to_string(),
-                Some(p) => peer::send(&p, &text).err().unwrap_or_default(),
+                Some(p) => {
+                    let words = text.trim().to_string();
+                    let again = hub.inbox_last.lock().unwrap().get(&sid).is_some_and(|(last, at)| *last == words && at.elapsed() < peer::REPEAT_WINDOW);
+                    let sent = if again { format!("{words} ") } else { words };
+                    hub.inbox_last.lock().unwrap().insert(sid.clone(), (sent, std::time::Instant::now()));
+                    peer::send(&p, &text, again).err().unwrap_or_default()
+                }
             };
             hub.send(HubEvent::Sent { session_id: sid, queued: false, error });
             hub.refresh();
@@ -382,7 +452,7 @@ impl Hub {
             let now = match d.set_mode(&mode) {
                 Ok(now) => now,
                 Err(e) => {
-                    hub.send(HubEvent::Note(format!("could not switch to {}: {}", driver::mode_label(&mode), e.0)));
+                    hub.send(HubEvent::Note(format!("could not switch to {}: {}", hub.options_for(AgentId::ClaudeCode, &d.cwd).mode(&mode).map(|m| m.label.clone()).unwrap_or_else(|| mode.clone()), e.0)));
                     d.mode()
                 }
             };
@@ -399,7 +469,7 @@ impl Hub {
         let sid = session_id.to_string();
         thread::spawn(move || {
             if let Err(e) = d.set_model(&model) {
-                hub.send(HubEvent::Note(format!("could not switch to {}: {}", driver::model_label(&model), e.0)));
+                hub.send(HubEvent::Note(format!("could not switch to {}: {}", hub.options_for(AgentId::ClaudeCode, &d.cwd).model(&model).map(|m| m.label.clone()).unwrap_or_else(|| driver::model_label(&model)), e.0)));
             }
             hub.send(HubEvent::Driver { session_id: sid, event: driver::Event::Init(d.caps()) });
         });

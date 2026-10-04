@@ -290,8 +290,45 @@ impl Workbench {
         let mut any = false;
         let mut jx = 0;
         let n = rnd.items.len();
+        // A mode changed since the last turn is in no row yet: Claude Code
+        // writes it with the next prompt. Said here, in the last round,
+        // in the words the transcript's own notice will use once it has
+        // one, which then takes this one's place. Each change goes where
+        // it happened: before the first line written after it, or at the
+        // foot when nothing was, or when its time is not known. With
+        // them come the setting lines the transcript folded into a later
+        // one of their kind (`Round::superseded`), and the same folding
+        // is done again over all of it, so effort, mode, effort reads as
+        // three lines and mode, mode, mode as the last.
+        let mut extras: Vec<(f64, NoticeVariant, String)> = Vec::new();
+        if ix + 1 == session.rounds.len() {
+            let modes = self.unwritten_modes();
+            if !modes.is_empty() {
+                let options = self.options();
+                let stamp_of = |ts: &str| chrono::DateTime::parse_from_rfc3339(ts).map(|t| t.timestamp_millis() as f64 / 1000.0).unwrap_or(0.0);
+                extras.extend(rnd.superseded.iter().filter_map(|i| if let Item::Notice { ts, text, variant } = i { Some((stamp_of(ts), *variant, text.clone())) } else { None }));
+                extras.extend(modes.into_iter().map(|(mode, at)| (at.unwrap_or(f64::INFINITY), NoticeVariant::Mode, crate::workbench::mode_name(&options, &mode))));
+                extras.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+        }
+        let kind_of = |item: &Item| if let Item::Notice { variant, .. } = item { variant.setting().map(|_| *variant) } else { None };
+        let at_of = |item: &Item| chrono::DateTime::parse_from_rfc3339(item.ts()).map(|t| t.timestamp_millis() as f64 / 1000.0).unwrap_or(f64::INFINITY);
+        let mut e = 0;
         while jx < n {
             any = true;
+            // The extra lines from before this item, each unless the line
+            // after it is of its own kind.
+            let until = at_of(&rnd.items[jx]);
+            while e < extras.len() && extras[e].0 < until {
+                let next = match extras.get(e + 1).filter(|x| x.0 < until) {
+                    Some(x) => Some(x.1),
+                    None => kind_of(&rnd.items[jx]),
+                };
+                if next != Some(extras[e].1) {
+                    body = body.child(self.render_notice(&extras[e].2, extras[e].1, cx));
+                }
+                e += 1;
+            }
             if is_run_item(&rnd.items[jx]) {
                 let mut end = jx;
                 while end < n && is_run_item(&rnd.items[end]) {
@@ -304,9 +341,21 @@ impl Workbench {
                     continue;
                 }
             }
-            let el = self.render_item(ix, jx, &rnd.items[jx], &open_tools, &open_thoughts, &open_subagents, &session, cx);
-            body = body.child(self.find_wrap(ix, jx, el, &theme));
+            // A written setting line followed by an extra of its kind is
+            // folded into that one.
+            let folded = kind_of(&rnd.items[jx]).is_some() && extras.get(e).is_some_and(|x| Some(x.1) == kind_of(&rnd.items[jx]) && rnd.items.get(jx + 1).map_or(true, |nx| x.0 < at_of(nx)));
+            if !folded {
+                let el = self.render_item(ix, jx, &rnd.items[jx], &open_tools, &open_thoughts, &open_subagents, &session, cx);
+                body = body.child(self.find_wrap(ix, jx, el, &theme));
+            }
             jx += 1;
+        }
+        while e < extras.len() {
+            if extras.get(e + 1).map(|x| x.1) != Some(extras[e].1) {
+                any = true;
+                body = body.child(self.render_notice(&extras[e].2, extras[e].1, cx));
+            }
+            e += 1;
         }
         if any {
             let mark_color = if session.agent == emaki_core::model::AgentId::ClaudeCode { theme.primary } else { theme.muted_foreground };
@@ -577,17 +626,65 @@ impl Workbench {
         .into_any_element()
     }
 
+    /// A line in the conversation that is neither voice: a setting that
+    /// changed, a command that ran, what it printed. All of them in the
+    /// window's own face, not the reply's, so they read as the app's.
+    ///
+    /// A change of mode, model or effort is the pill's icon, what was set
+    /// in the muted ink and what it was set to in the foreground, on no
+    /// plate: "Effort High". It used to be the command's chip and under it
+    /// the whole sentence Claude Code printed, on one plate that ran out
+    /// of the column. A command is a mono chip, what it printed is quiet
+    /// text behind a rule that wraps like any paragraph, and the two
+    /// notices that mean something happened to the session (compacted, an
+    /// error) keep a tinted plate.
     fn render_notice(&self, text: &str, variant: NoticeVariant, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let (bg, fg) = match variant {
-            NoticeVariant::Command => (theme.muted, theme.foreground),
-            NoticeVariant::Compact => (theme.info.opacity(0.15), theme.foreground),
-            NoticeVariant::Error => (theme.danger.opacity(0.15), theme.danger),
-            _ => (theme.muted, theme.muted_foreground),
-        };
-        h_flex()
-            .child(div().px(px(8.)).py(px(2.)).rounded(px(6.)).bg(bg).text_color(fg).text_size(px(11.5)).when(variant == NoticeVariant::Command, |d| d.font_family(theme.mono_font_family.clone())).child(text.to_string()))
-            .into_any_element()
+        let face = theme.font_family.clone();
+        if let Some(what) = variant.setting() {
+            // The value in bold, and in the colour its pill has: the
+            // agent's own for a mode, the level's place for an effort.
+            let options = self.options();
+            let color = match variant {
+                NoticeVariant::Mode => crate::workbench::mode_color(&options, text, &theme),
+                NoticeVariant::Effort => crate::workbench::effort_color(&options, "", text, &theme),
+                _ => crate::workbench::Tint::Plain,
+            };
+            let icon = match variant {
+                NoticeVariant::Mode => "icons/shield.svg",
+                NoticeVariant::Model => "icons/box.svg",
+                _ => "icons/gauge.svg",
+            };
+            return h_flex()
+                .gap(px(7.))
+                .items_center()
+                .font_family(face)
+                .text_size(px(12.5))
+                .child(Icon::default().path(icon).with_size(px(13.)).text_color(theme.muted_foreground))
+                .child(div().text_color(theme.muted_foreground).child(what))
+                .child(div().text_color(theme.foreground).child(crate::workbench::tinted(text, &color)))
+                .into_any_element();
+        }
+        let plate = |bg: Hsla, fg: Hsla| h_flex().child(div().px(px(9.)).py(px(3.)).rounded(px(7.)).bg(bg).text_color(fg).font_family(face.clone()).text_size(px(12.)).child(text.to_string())).into_any_element();
+        match variant {
+            NoticeVariant::Command => h_flex()
+                .child(div().px(px(8.)).py(px(2.)).rounded(px(6.)).bg(theme.muted).text_color(theme.foreground).font_family(theme.mono_font_family.clone()).text_size(px(12.)).child(text.to_string()))
+                .into_any_element(),
+            NoticeVariant::Compact => plate(theme.info.opacity(0.13), theme.foreground),
+            NoticeVariant::Error => plate(theme.danger.opacity(0.13), theme.danger),
+            _ => div()
+                .w_full()
+                .min_w_0()
+                .pl(px(10.))
+                .border_l_2()
+                .border_color(theme.border)
+                .font_family(face)
+                .text_size(px(12.5))
+                .line_height(relative(1.45))
+                .text_color(theme.muted_foreground)
+                .child(text.to_string())
+                .into_any_element(),
+        }
     }
 
     fn render_thought(&self, ix: usize, jx: usize, md: &str, seconds: f64, open: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1027,8 +1124,8 @@ impl Workbench {
                 Item::Thinking { seconds, .. } => {
                     v = v.child(div().text_size(px(11.5)).italic().text_color(theme.muted_foreground).child(if *seconds >= 2.0 { format!("thought for {}", human_duration((seconds * 1000.0) as u64)) } else { "thinking".into() }));
                 }
-                Item::Notice { text, .. } => {
-                    v = v.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(text.clone()));
+                Item::Notice { text, variant, .. } => {
+                    v = v.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(variant.said(text)));
                 }
             }
         }

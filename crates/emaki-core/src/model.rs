@@ -181,6 +181,32 @@ pub enum NoticeVariant {
     Compact,
     Error,
     Web,
+    /// The session was put in another mode, on another model or at
+    /// another effort level; the text is what it was set to, nothing else.
+    Mode,
+    Model,
+    Effort,
+}
+
+impl NoticeVariant {
+    /// What a setting's notice is a change of, or none for the others.
+    pub fn setting(self) -> Option<&'static str> {
+        match self {
+            NoticeVariant::Mode => Some("Mode"),
+            NoticeVariant::Model => Some("Model"),
+            NoticeVariant::Effort => Some("Effort"),
+            _ => None,
+        }
+    }
+
+    /// The notice as the page reads it: a setting is named before what it
+    /// was set to ("Effort High"), anything else is its text.
+    pub fn said(self, text: &str) -> String {
+        match self.setting() {
+            Some(what) => format!("{what} {text}"),
+            None => text.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +395,13 @@ pub struct Round {
     /// is in Claude Code's queue, and this round is where it waits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queued: bool,
+    /// Setting notices a later one of the same kind took the place of
+    /// (effort to high, then to medium: the first), in order. Not part of
+    /// the round as read; kept for the window, which shows one again when
+    /// something it knows of and the transcript does not yet, a change of
+    /// mode, came between the two.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded: Vec<Item>,
 }
 
 impl Round {
@@ -427,6 +460,10 @@ pub struct Session {
     /// The effort level the session was last set to with `/effort`, or
     /// empty when it never was.
     pub effort: String,
+    /// The permission mode the transcript last recorded; a change since
+    /// then is not in the file until the next turn.
+    #[serde(default)]
+    pub mode: String,
     /// The last prompt, when it was stopped before the agent did anything
     /// with it: taken out of `rounds`, as Claude Code's own terminal takes
     /// it back into its input, and kept here so the window can hand it

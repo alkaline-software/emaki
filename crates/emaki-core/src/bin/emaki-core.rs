@@ -112,6 +112,35 @@ fn main() {
                 );
             }
         }
+        "options" => {
+            // What each agent says a session in this folder can be set to,
+            // asked of the agent now: its modes, its models and the effort
+            // levels each one takes.
+            let cwd = args.get(1).cloned().unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
+            for adapter in adapters::all() {
+                let options = adapter.catalogue(&cwd).options;
+                // Kept for the app's next launch, as the app keeps it.
+                options.remember(adapter.id());
+                if options.is_empty() {
+                    eprintln!("{}: nothing to choose", adapter.id().as_str());
+                    continue;
+                }
+                println!("{}", adapter.id().as_str());
+                println!("  modes");
+                for m in &options.modes {
+                    println!("    {:<20} {:<22} {}", m.key, m.label, m.detail);
+                }
+                println!("  models");
+                for m in &options.models {
+                    let efforts: Vec<&str> = m.efforts.iter().map(|e| e.key.as_str()).collect();
+                    println!("    {:<20} {:<22} {:<28} {}", m.key, m.label, m.resolved, efforts.join(" "));
+                }
+                println!("  efforts");
+                for e in &options.efforts {
+                    println!("    {:<20} {:<22} {}", e.key, e.label, e.detail);
+                }
+            }
+        }
         "peers" => {
             // Every session with an inbox right now, and whether a message
             // could be delivered to it.
@@ -126,13 +155,24 @@ fn main() {
             // emaki-core inbox <session-id> <message...>: deliver into a
             // running terminal session.
             let sid = args.get(1).expect("inbox <session-id> <message>").clone();
-            let text = args[2..].join(" ");
+            // `--again` sends the words as a repeat of the last ones.
+            let again = args.get(2).is_some_and(|a| a == "--again");
+            let text = args[if again { 3 } else { 2 }..].join(" ");
             let peers = emaki_core::peer::registry();
             let p = peers.get(&sid).expect("no inbox for that session");
-            match emaki_core::peer::send(p, &text) {
+            match emaki_core::peer::send(p, &text, again) {
                 Ok(d) => println!("delivered {} status={} receipts={}", d.msg_id, d.status, d.receipts.len()),
                 Err(e) => println!("refused: {e}"),
             }
+        }
+        "screen" => {
+            // emaki-core screen < text: what a terminal's screen, piped
+            // in, says the session is doing or asking.
+            let mut text = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut text);
+            println!("working: {:?}", emaki_core::driver::working_on_screen(&text));
+            println!("suggestion: {:?}", emaki_core::driver::suggestion_on_screen(&text));
+            println!("dialog: {:#?}", emaki_core::driver::dialog_on_screen(&text));
         }
         "explain" => {
             // emaki-core explain <command...>: put one shell command into

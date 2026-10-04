@@ -21,36 +21,25 @@ pub fn focus_terminal(pid: i32) -> Result<String, String> {
     Ok(host.name)
 }
 
-/// Bring the terminal a session runs in to the front with the keyboard
-/// in it, for keys the person is about to press there (⇧Tab for the
-/// mode). A terminal app has the keyboard once its tab is in front. An
-/// IDE keeps its focus wherever it was left, an editor as often as not,
-/// where ⇧Tab would outdent a line of a file; so the IDE is waited for
-/// and its terminal panel focused (`Host::focus_ide_terminal`), which
-/// needs Accessibility access for Emaki. Blocks for a second or two on
-/// an IDE: call it from a thread. Returns the host's name.
-#[cfg(target_os = "macos")]
-pub fn enter_terminal(pid: i32) -> Result<String, String> {
-    let host = host_of(pid)?;
-    host.focus();
-    if host.is_ide() {
-        host.wait_front().and_then(|_| host.focus_ide_terminal()).map_err(|e| {
-            if e.contains("assistive access") || e.contains("not allowed") {
-                format!("click in {}'s terminal first: Emaki needs Accessibility access in System Settings › Privacy & Security to put the keyboard there", host.name)
-            } else {
-                format!("click in {}'s terminal first: {e}", host.name)
-            }
-        })?;
-    }
-    Ok(host.name)
-}
-
 /// What the terminal a session runs in is showing, where the app can be
 /// asked: Terminal and iTerm2 by AppleScript for the tab on the tty,
 /// WezTerm and Kaku by `cli get-text` for the pane. Nothing for an IDE's
 /// terminal, which no one outside the IDE can read.
 #[cfg(target_os = "macos")]
 pub fn terminal_text(pid: i32) -> Option<String> {
+    terminal_read(pid, false)
+}
+
+/// The same screen with its colours where the terminal gives them:
+/// WezTerm and Kaku write the escape sequences out (`--escapes`);
+/// Terminal and iTerm2 hand over plain text.
+#[cfg(target_os = "macos")]
+pub fn terminal_styled(pid: i32) -> Option<String> {
+    terminal_read(pid, true)
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_read(pid: i32, styled: bool) -> Option<String> {
     let host = host_of(pid).ok()?;
     if host.tty.is_empty() {
         return None;
@@ -82,7 +71,12 @@ end tell"#,
         .ok()?,
         _ => {
             let (exe, pane) = host.wezterm_pane()?;
-            let out = std::process::Command::new(exe).args(["cli", "get-text", "--pane-id", &pane.to_string()]).output().ok()?;
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(["cli", "get-text", "--pane-id", &pane.to_string()]);
+            if styled {
+                cmd.arg("--escapes");
+            }
+            let out = cmd.output().ok()?;
             if !out.status.success() {
                 return None;
             }
@@ -170,6 +164,8 @@ end tell"#,
 pub enum TerminalKey {
     /// Stops the running turn.
     Escape,
+    /// Steps to the next permission mode.
+    ShiftTab,
 }
 
 /// Press `key` in the terminal a session runs in. WezTerm and Kaku take
@@ -187,6 +183,8 @@ pub fn key_in_terminal(pid: i32, key: TerminalKey) -> Result<String, String> {
     // Events presses it.
     let (bytes, iterm, events, name) = match key {
         TerminalKey::Escape => ("\x1b", "(ASCII character 27)", "key code 53", "Escape"),
+        // Back-tab, as a terminal sends it: ESC [ Z.
+        TerminalKey::ShiftTab => ("\x1b[Z", r#"((ASCII character 27) & "[Z")"#, "key code 48 using shift down", "⇧Tab"),
     };
     let pressed = if host.bundle == "com.googlecode.iterm2" {
         osascript(&format!(
@@ -228,6 +226,63 @@ end tell"#,
     }
 }
 
+/// Send `text` to the terminal a session runs in as keys, with nothing
+/// added: a digit that picks a choice in a dialog, Tab, Return, or words
+/// for its text field. Only where the terminal takes text for a pane
+/// without coming forward (WezTerm and Kaku by `cli send-text
+/// --no-paste`, iTerm2 by `write text`); any other host answers with why
+/// not, and the dialog is answered in the terminal.
+#[cfg(target_os = "macos")]
+pub fn text_in_terminal(pid: i32, text: &str) -> Result<(), String> {
+    let host = host_of(pid)?;
+    if host.bundle == "com.googlecode.iterm2" {
+        // AppleScript has no escapes for control characters: the text
+        // is its printable stretches joined with `ASCII character`s.
+        let mut parts: Vec<String> = Vec::new();
+        let mut run = String::new();
+        for c in text.chars() {
+            if c.is_control() || c == '"' || c == '\\' {
+                if !run.is_empty() {
+                    parts.push(format!("\"{run}\""));
+                    run.clear();
+                }
+                parts.push(format!("(ASCII character {})", c as u32));
+            } else {
+                run.push(c);
+            }
+        }
+        if !run.is_empty() {
+            parts.push(format!("\"{run}\""));
+        }
+        return osascript(&format!(
+            r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{}" then tell s to write text ({}) newline NO
+      end repeat
+    end repeat
+  end repeat
+end tell"#,
+            host.tty,
+            parts.join(" & ")
+        ));
+    }
+    let Some((exe, pane)) = host.wezterm_pane() else {
+        return Err(format!("answer it in {}: its keys cannot be sent from here", host.name));
+    };
+    std::process::Command::new(exe)
+        .args(["cli", "send-text", "--no-paste", "--pane-id", &pane.to_string(), text])
+        .output()
+        .map_err(|e| e.to_string())
+        .and_then(|o| if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).to_string()) })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn text_in_terminal(_pid: i32, _text: &str) -> Result<(), String> {
+    Err("reaching the terminal's keys from here is not done on this platform yet: answer it in the terminal".into())
+}
+
 /// Bring this app back to the front.
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
@@ -247,12 +302,12 @@ pub fn focus_terminal(_pid: i32) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn enter_terminal(pid: i32) -> Result<String, String> {
-    focus_terminal(pid)
+pub fn terminal_text(_pid: i32) -> Option<String> {
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn terminal_text(_pid: i32) -> Option<String> {
+pub fn terminal_styled(_pid: i32) -> Option<String> {
     None
 }
 
@@ -598,3 +653,79 @@ pub fn install_dock_icon() {
 }
 #[cfg(not(target_os = "macos"))]
 pub fn install_dock_icon() {}
+
+/// A picture of the app's own window, written to `path` as a PNG, for
+/// looking at a state from a script (`EMAKI_SHOT`). A process may capture
+/// its own windows without Screen Recording access, which the terminal
+/// that runs a probe usually lacks. `CGWindowListCreateImage` is looked
+/// up by name: newer SDKs mark it unavailable in favour of
+/// ScreenCaptureKit, which wants that access, while the function itself
+/// is still there and still captures a window of the caller's own.
+#[cfg(target_os = "macos")]
+pub fn shoot_window(window: &gpui::Window, path: &std::path::Path) -> Result<(), String> {
+    use std::ffi::{c_char, c_void, CString};
+    use std::os::unix::ffi::OsStrExt;
+
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[repr(C)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+    type Capture = unsafe extern "C" fn(Rect, u32, u32, u32) -> *mut c_void;
+    #[link(name = "ImageIO", kind = "framework")]
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn CFURLCreateFromFileSystemRepresentation(alloc: *const c_void, path: *const u8, len: isize, is_dir: u8) -> *mut c_void;
+        fn CFStringCreateWithCString(alloc: *const c_void, text: *const c_char, encoding: u32) -> *mut c_void;
+        fn CGImageDestinationCreateWithURL(url: *mut c_void, kind: *mut c_void, count: usize, options: *const c_void) -> *mut c_void;
+        fn CGImageDestinationAddImage(dest: *mut c_void, image: *mut c_void, properties: *const c_void);
+        fn CGImageDestinationFinalize(dest: *mut c_void) -> u8;
+        fn CFRelease(obj: *mut c_void);
+    }
+
+    let handle = HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return Err("not an AppKit window".into()) };
+    let view = unsafe { (handle.ns_view.as_ptr() as *const NSView).as_ref() }.ok_or("no view")?;
+    let number = view.window().ok_or("the view has no window")?.windowNumber();
+    let bytes = path.as_os_str().as_bytes();
+    unsafe {
+        // RTLD_DEFAULT, then: no rectangle (the window's own bounds),
+        // only this window, without its shadow.
+        let capture = dlsym(-2isize as *mut c_void, c"CGWindowListCreateImage".as_ptr());
+        if capture.is_null() {
+            return Err("this system has no CGWindowListCreateImage".into());
+        }
+        let capture: Capture = std::mem::transmute(capture);
+        let null = Rect { x: f64::INFINITY, y: f64::INFINITY, w: 0.0, h: 0.0 };
+        let image = capture(null, 1 << 3, number as u32, 1);
+        if image.is_null() {
+            return Err("the window could not be captured".into());
+        }
+        let url = CFURLCreateFromFileSystemRepresentation(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize, 0);
+        let png = CString::new("public.png").unwrap();
+        let kind = CFStringCreateWithCString(std::ptr::null(), png.as_ptr(), 0x0800_0100);
+        let dest = CGImageDestinationCreateWithURL(url, kind, 1, std::ptr::null());
+        let written = if dest.is_null() {
+            false
+        } else {
+            CGImageDestinationAddImage(dest, image, std::ptr::null());
+            let ok = CGImageDestinationFinalize(dest) != 0;
+            CFRelease(dest);
+            ok
+        };
+        CFRelease(kind);
+        CFRelease(url);
+        CFRelease(image);
+        if written { Ok(()) } else { Err(format!("could not write {}", path.display())) }
+    }
+}
+#[cfg(not(target_os = "macos"))]
+pub fn shoot_window(_window: &gpui::Window, _path: &std::path::Path) -> Result<(), String> {
+    Err("a picture of the window is only taken on macOS".into())
+}

@@ -1183,13 +1183,34 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.select_to(self.next_boundary(self.cursor()), cx);
     }
 
+    /// The column a selection is extended up and down in: where the
+    /// cursor is when the selection starts, and that same column for as
+    /// long as it grows. (Emaki addition.)
+    fn column_for_selecting(&mut self) {
+        if self.selected_range.is_empty() {
+            self.update_preferred_column();
+        }
+        self.ensure_preferred_column();
+    }
+
     pub(super) fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
         if self.is_single_line() {
             return;
         }
         self.undo_manager.break_transaction_coalescing();
-        let offset = self.start_of_line().saturating_sub(1);
-        self.select_to(self.previous_boundary(offset), cx);
+        // One display row, in the cursor's column, as Up moves; from the
+        // first row, to the start of the text. Upstream went to the end
+        // of the line before, a whole paragraph of a wrapped text at a
+        // press. (Emaki addition.)
+        self.column_for_selecting();
+        let offset = match self.display_row_of_cursor() {
+            Some(0) => 0,
+            _ => match self.vertical_offset(-1) {
+                Some(offset) => offset,
+                None => return,
+            },
+        };
+        self.select_to(offset, cx);
     }
 
     pub(super) fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
@@ -1197,8 +1218,19 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
         self.undo_manager.break_transaction_coalescing();
-        let offset = (self.end_of_line() + 1).min(self.text.len());
-        self.select_to(self.next_boundary(offset), cx);
+        // One display row down, and from the last row to the end of the
+        // text. (Emaki addition.)
+        self.column_for_selecting();
+        let last = self.display_map.display_row_count().saturating_sub(1);
+        let offset = if self.display_row_of_cursor() == Some(last) {
+            self.text.len()
+        } else {
+            match self.vertical_offset(1) {
+                Some(offset) => offset,
+                None => return,
+            }
+        };
+        self.select_to(offset, cx);
     }
 
     pub(super) fn on_action_select_all(
@@ -1932,7 +1964,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             let new_text = clipboard.text().unwrap_or_default();
             self.undo_manager.pending_intent = Some(EditIntent::Atomic);
             self.replace_text_in_range_silent(None, &new_text, window, cx);
-            self.scroll_to(self.cursor(), None, cx);
+            // No `scroll_to` here: it measures against the layout from
+            // before the paste and clamps to the old height, and its
+            // answer would override the element's own follow, which sees
+            // the new text (`layout_cursor`). (Emaki addition.)
         }
     }
 
@@ -2764,7 +2799,12 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         M::refresh_language_features(self, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
-        self.update_preferred_column();
+        // The layout still shows the text from before this edit, so the
+        // column cannot be measured yet: it would come out stale or
+        // missing, and Up after typing went to the start of the row
+        // above. Left unknown here and measured when a vertical move
+        // needs it (`ensure_preferred_column`). (Emaki addition.)
+        self.preferred_column = None;
         self.update_search(cx);
         if self.is_multi_line() {
             self.mode.update_auto_grow(&self.display_map);

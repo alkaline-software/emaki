@@ -68,12 +68,13 @@ crates/emaki-core/        everything without a window
   src/render_md.rs store.rs  model -> CommonMark on disk
   src/search.rs              FTS5 over every item, ~/.emaki/search.db
   src/driver.rs              a headless `claude -p` child on stream-json
+  src/options.rs             the modes, models and effort levels an agent offers, as it lists them
   src/explain.rs             opaque tool calls in plain words, via `claude -p`
   src/update.rs              the newest release, its installer, and putting it in place
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
   src/terminal.rs            the agent's resume command as a script a terminal can be handed
   src/watcher.rs             notify over every agent's data roots
-  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | explain | update | statusline | drive
+  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | options | explain | update | statusline | drive
   tests/core.rs
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
@@ -82,9 +83,9 @@ crates/emaki-app/         the window
   src/main.rs                menus, key bindings, the window
   src/sys.rs                 open, reveal, open in a terminal, the person's name: per OS
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers
-  assets/icon/               the icon in every size, cut from scripts/icon/logo.png
+  assets/icon/               the icon in every size, drawn by scripts/icon/icon.html
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
-scripts/make-icon.sh       remakes assets/icon from scripts/icon/logo.png
+scripts/make-icon.sh       remakes assets/icon from scripts/icon/icon.html
 scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
 scripts/release-notes.sh   one version's section of CHANGELOG.md, the release notes
@@ -109,15 +110,23 @@ EMAKI_TYPE=/co ./target/debug/Emaki                    # put that text in the co
 EMAKI_QUESTION=1 EMAKI_OPEN=<id> ./target/debug/Emaki  # hold a sample question on that session
 EMAKI_GO=terminal EMAKI_OPEN=<id> ./target/debug/Emaki  # press "go to the terminal" on it
 EMAKI_GO=type:/status EMAKI_OPEN=<id> ./target/debug/Emaki  # type that into its terminal and send
-EMAKI_GO=pill:mode EMAKI_OPEN=<id> ./target/debug/Emaki  # click a pill of a terminal session: pill:mode, pill:model, pill:effort
+EMAKI_GO=pill:effort EMAKI_OPEN=<id> ./target/debug/Emaki  # click a pill: pill:mode, pill:model, pill:effort; step:mode is ⇧Tab
 EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value without the picker: effort:, model:
+EMAKI_GO=dialog:2 EMAKI_OPEN=<id> ./target/debug/Emaki  # press that in the terminal's dialog (a digit, or tab); answer:<words> types an answer, goto:<n> goes to that tab
 EMAKI_KEYS=down,down,tab EMAKI_TYPE=/mod ./target/debug/Emaki  # press the slash list's keys (up, down, tab, esc)
+EMAKI_SHOT=/tmp/shot.png EMAKI_OPEN=<id> ./target/debug/Emaki  # write a picture of the window there after EMAKI_SHOT_AFTER seconds (5) and quit
 ```
 
 The last two exist for probing: a terminal without accessibility access
 cannot press ⌘F or ⌘, in the window from a script, so a screenshot of
-either state is one launch away. Point `EMAKI_HOME` at a scratch directory
-to run a second copy beside the installed app without sharing its state.
+either state is one launch away. `EMAKI_SHOT` takes that screenshot from
+inside (`sys::shoot_window`): a process may capture its own window without
+Screen Recording access, which the terminal running the probe often lacks
+(`screencapture` from Kaku answered "could not create image from window").
+Point `EMAKI_HOME` at a scratch directory to run a second copy beside the
+installed app without sharing its state; with `CLAUDE_CONFIG_DIR` at a
+scratch tree holding one hand-written transcript, the copy archives and
+indexes only that, and a state can be drawn without touching the real one.
 
 **Each document has one job.** STAGES.md is where the app is going, in
 three stages, short enough to hand to someone outside the project; a
@@ -292,12 +301,22 @@ could be changed from outside; a fork on GitHub was the alternative and
 one repository was preferred. Every change is marked `(Emaki addition.)`
 in the source and listed in `vendor/gpui-component/UPSTREAM.md`, which
 also says how to move to a newer upstream revision: copy the crates over,
-re-apply the list, build. Seven changes so far: the strong weight and the
+re-apply the list, build. Ten changes so far: the strong weight and the
 inline-code family as `TextViewStyle` settings (`md_view` sets 600 and the
 theme's mono face, as the Claude app does), the input's Up on the first
 line going to the start of the text, Down on the last to the end, the
 scrollbar fading a second after the last scroll instead of two, the
-rounded plate behind inline code, and ranges a textarea can colour.
+rounded plate behind inline code, ranges a textarea can colour, ⇧↑ and
+⇧↓ extending a selection by one row on the screen (upstream took a whole
+line of the buffer, which in the composer is a paragraph), and the view
+following the caret all the way after a paste or dictation (upstream
+scrolled one line per change, enough for typing only), and Up or Down
+after typing keeping the caret's column (upstream measured the column
+at the edit, against the layout from before it, so it came out missing
+and the caret went to the start of the row; it is now measured at the
+move). The two before that were
+checked with `EMAKI_KEYS=shift-up` and a forty-line `EMAKI_TYPE`; a real
+paste and a dictation app were not driven from a script.
 
 **Inline code is the accent on a wash of itself, as the Claude app draws
 it.** `md_view` sets the letters to `theme.link` (the accent's readable
@@ -511,15 +530,105 @@ observer, which is what keeps a pinned appearance pinned when the system
 flips. The settings panel (⌘,) also sets `driver.default_mode` and
 `driver.default_model`, what a session started from the window begins in.
 
-**Every mode and model is on a list, with a tick.** The pills under the
-composer open a `Popover` (`picker` in `workbench.rs`) naming each choice
-with a line on what it does; a pill that cycled on click hid the fourth
-mode behind three clicks, and its label did not know `auto`, so auto mode
-read as "Default permissions" and looked broken. `driver::mode_label`,
-`mode_detail` and `model_label` are the words, in the core so they are
-tested; `model_label` reads the id Claude Code reports in `system/init`
-(`claude-opus-5-5` is "Opus 5.5") as well as the alias sent on the wire
-(`opus` is "Opus" until the first turn confirms the version). A switch goes
+**The modes, models and effort levels are the agent's own lists.**
+Nothing in the window names one. `options.rs` in the core holds what an
+agent offers (`Options`: `modes`, `models` each with its `efforts`, and
+the key that stands for the agent's default model), an adapter fills it
+(`Adapter::catalogue`, which also carries the slash commands; an agent
+the app cannot drive offers nothing), and the pills, their lists and the
+settings panel draw what came back, so a release that adds a model shows
+it with no change here and another agent brings its own. Claude Code
+(`driver::options_from`, checked against 2.1.289): the models are the
+`models` of the `initialize` reply a headless child gives, twelve here,
+each with `value`, `displayName`, `description`, `resolvedModel` and
+`supportedEffortLevels` (Haiku takes none, the 4.6 models have no
+`xhigh`); the modes are what `claude --help` lists as the choices of
+`--permission-mode`, the only place it lists them (no request does:
+`set_permission_mode` takes one or refuses it), with `manual` there
+being `default` on the wire; the effort levels at large are `--effort`'s.
+The wire names modes and levels and gives no words for them, so
+`driver::mode_words` and `effort_words` carry Claude Code's own titles
+("Manual", "Accept edits", "Extra high") and a line on each for the names
+known today, and a name never met is made readable (`options::humanize`)
+and offered all the same. `Hub::options_for(agent, cwd)` answers per
+folder once that folder has been asked (when a session there is opened,
+or a driver starts), else with the last answer from anywhere, which at
+launch is `cache/options.json` from the last run; it never starts a
+read. `emaki-core options [folder]` asks and prints. Before this the
+lists were constants in `driver.rs` (five modes, five model aliases,
+five levels) and the settings panel had a segmented control for each;
+with a dozen models those are the same picker the composer has.
+
+**A mode and an effort wear a colour, and every value is bold.** On the
+pills and in the conversation's lines alike (`PillText`, `render_notice`):
+the choice in semibold, the words "mode" and "effort" after it plain. A
+mode's colour is the agent's own when it has one (`Choice::color`, light
+then dark): Claude Code names each mode in a theme colour at the foot of
+its prompt, read out of the 2.1.289 binary into `driver::mode_color`
+(grey for manual, teal for plan, purple for accept edits, amber for
+auto, red for bypass and don't ask). A mode with none, and any agent
+that gives none, gets one by its place on the list (`workbench::ramp`,
+the status row's colours from low to high). An effort level is Claude
+Code's too: its `/effort` slider keeps a table of levels with a theme
+colour each (`driver::effort_color`: amber for low, green for medium,
+periwinkle for high, purple for xhigh), and draws max as a moving
+rainbow, which here is the rainbow's seven colours run through the
+letters, still (`Choice::spectrum`, `workbench::tinted`). The first
+version coloured the levels by their place alone, which was not what
+the terminal shows. The model is bold and uncoloured.
+
+**The pills have no lists, and what needs the terminal opens it.** Every
+choice on a session is made in its terminal, with Claude Code's own
+picker or key, so a pill under the composer is a button on every channel
+(`Workbench::pill_clicked`); the lists they opened on a driven or
+unstarted session are gone (they had read "no driver behind this session"
+once the terminal was closed). `Workbench::via_terminal` is the one way
+in for anything only the terminal takes (`TerminalAction`: a pick from
+`/model` or `/effort`, a typed command, ⇧Tab for the mode, or just going
+there): with the session in a terminal it is done at once; with none,
+the terminal is opened first the way the top-right button opens it (the
+agent's resume command, an idle driver stopped on the way, a driver
+mid-reply refused), the row under the composer says "opening the
+terminal, one moment…" for as long as it takes, and the action waits in
+`pending_terminal`. Nothing in the wait is a length of time, since a
+slow machine takes as long as it takes: `terminal_ready` looks, on the
+clock and whenever the terminal's status line runs, for two things to be
+so. Claude Code has registered there and its registry record says `idle`
+(a login or trust screen says `waiting` and is never typed into), and
+its prompt is on the screen, which is the mode's footer under it, read
+off the terminal where it can be read (`terminal_up`); then the action
+is done. The wait ends otherwise only when the person leaves the
+session. From there on it is the same as with the terminal already
+open: after ⇧Tab the window takes the front back at once, since the key
+asks nothing of the person, and a pick leaves them in the terminal to
+choose and brings the window back when the pick is made. That, too, is
+a state and not a time (`watch_terminal`): the registry record says
+`waiting` while the picker is up and something else once it is closed,
+chosen or cancelled, with the time of each change, so the pick is over
+when the record has been seen `waiting` since the command was typed and
+no longer is, or says `idle` as of a time after the typing (a picker
+opened and closed between two looks). A change alone is not the sign:
+recorded on 2.1.289 with `claude` on a pty, the record goes `busy`,
+`waiting` 7 ms later, and `idle` at the choice or at Escape. Two earlier versions were wrong. The first waited a second
+and a half after `idle` and gave up after forty-five. And the come-back
+was measured by the status line naming another model or effort, or the
+transcript moving: after a fresh open the status line's first run can
+differ from a stale file, and the resume itself writes rows, so the
+window came back before anything was chosen. Before a session exists there is no terminal to
+open: the pills show what a new session starts in, and a click opens
+Settings on New sessions, where the two lists that remain are (`picker`,
+naming each choice with a line on what it does, scrolling when long).
+Checked with a second copy and `EMAKI_GO=pill:effort` on a session with
+no terminal: the terminal opened, the row said so, and nothing was typed
+while the registry read `waiting`. Probing note: `open` hands a newly
+launched terminal app the opener's environment, so a probe copy run
+with `CLAUDE_CONFIG_DIR` at a scratch tree starts a terminal whose
+Claude Code is not logged in; have the terminal app running first.
+A pill says the agent's name for the choice
+(`mode_name`, `model_name`: a session reports `claude-opus-5-5` and the
+list says that is "Opus 5.5"), with "mode" after a one-word mode and
+"effort" after a level; `driver::model_label` reads an id that is not on
+the list (`claude-3-5-sonnet-20241022` is "Sonnet 3.5"). A switch goes
 through `Hub::set_driver_mode` / `set_driver_model`, which answer with the
 mode Claude Code actually holds: a refused switch (bypass without the flag)
 puts the pill back and says why on the status row. ⇧Tab in the composer
@@ -528,6 +637,32 @@ textarea's own `OutdentInline` for it. Checked against 2.1.284:
 `set_permission_mode` accepts `auto` and answers `{"mode": "auto"}` but
 sends no `system/status` frame for it, unlike the other modes, so the
 reply is what the driver trusts.
+
+**The row under the conversation says what the terminal says.** While a
+turn runs, Claude Code draws a line over its prompt: a mark that turns, a
+word that changes ("Embellishing…", or the task in hand), and the turn's
+figures in a bracket ("(13s · ↓ 1.0k tokens)", "(3s · thinking with
+medium effort)"). The row shows that line as written and in its colours:
+the word in the colour of the terminal's mark (215, 119, 87 on 2.1.289;
+the word itself shimmers a shade lighter and back, so the mark's is the
+steady one), the bracket in the muted ink where the terminal has grey.
+`Workbench::read_working` reads the screen of the session showing once a
+second and whenever its status line runs, one read at a time off the main
+thread (`sys::terminal_styled`: WezTerm and Kaku write the colour
+sequences out with `cli get-text --escapes`, Terminal and iTerm2 give
+plain text and the word takes the agent's colour), and
+`driver::working_on_screen` finds the line: among the last lines, one of
+the spinner's marks, a space, words ending in "…". A finished turn's
+line has no ellipsis and a tool call's begins with another mark. The
+bracket carries the turn's time, so the row's own clock is left out
+then. A screen without the line for a moment keeps the last word three
+seconds (`WORKING_KEPT_SECS`). Once a turn has been quiet for a while
+the terminal draws the mark in bold behind `ESC ( B`, a sequence that is
+not a colour; read as text it hid the line for as long as the quiet
+lasted, so every sequence that is not a CSI is skipped. With no line to read (a driven session,
+an IDE's terminal, another agent) the row says "<agent> is working…"
+with what the transcript shows and the clock, as before. Checked with
+`EMAKI_SHOT` on this session in Kaku mid-turn.
 
 **A turn is stopped from the window, and a stop in the terminal shows
 here.** Escape in the terminal usually leaves a "[Request interrupted"
@@ -546,8 +681,12 @@ an `interrupt` request; a terminal session gets Escape in its terminal
 pane and iTerm2 by `write text`, neither coming to the front; Terminal
 and other hosts by a System Events key press after being brought
 forward), then the scan is asked for twice so the row goes within a
-second or so. Escape in the window itself was not bound to it: it
-already closes the find bar, the lightbox and the slash list. A host
+second or so. Escape in the window does the same when it has nothing
+to close (`Workbench::escape_stops`): the slash list, settings, the
+lightbox, the search and the find bar come first, then the running
+turn. The textarea keeps its own Escape action, so the composer's
+wrapper captures it and passes it on in that order. Until 2026-10-04
+the key only closed things. A host
 that had to come forward for the key gives the front back to Emaki once
 it is pressed. A stopped turn hands its prompt back
 (`Workbench::restore_prompt`), as Claude Code's terminal does on Escape:
@@ -557,7 +696,15 @@ was the last thing sent to the session (`last_sent`, pictures
 included), else from the transcript's last round by its paths. It
 happens on the Stop click and when the index shows the session going
 from working to stopped (`was_working`), which is Escape in the
-terminal, and never over something already typed. The conversation lets
+terminal, and never over something already typed. And only when the
+terminal would: a turn stopped before the agent wrote or ran anything
+gives the message back, as if it had not been sent; once the agent has
+started it has the message, so the stop only stops, the round stays,
+and the composer is left empty for what comes next. The test is the
+withdrawal's own (no item in the round but notices), applied to
+`Session::withdrawn` or, while the stop's marker is not yet in the
+transcript, to the last round. Until 2026-10-04 any stop brought the
+last prompt back, started on or not. The conversation lets
 go of what the composer got back: "[Request interrupted by user]" is
 Claude Code's marker, not something the person said, and is never drawn,
 and a prompt stopped before the agent wrote or ran anything is taken out
@@ -592,13 +739,13 @@ left in a file, was not reproduced from a script.
 
 **Mode, model and effort are three pills on every Claude conversation.**
 A light grey pill with an icon in front (`icons/shield.svg`, `gauge.svg`,
-`box.svg`), darker under the pointer, darker again while pressed or open,
+`box.svg`), darker under the pointer, darker again while pressed,
 no tooltip and no caret (`composer_pill`; the toolkit draws a custom
 button colour at a fifth of its strength, so the resting grey is the
-muted ink thinned). On a driver session, and before a session exists,
-each opens its list (`picker`) and a pick is a control request. On a
-terminal session a pill is a button, and the choice is made in the
-terminal with Claude Code's own picker (`Workbench::pick_in_terminal`):
+muted ink thinned). A pill is a button, and the choice is made in the
+session's terminal with Claude Code's own picker
+(`Workbench::pick_in_terminal`, through `via_terminal`, which opens the
+terminal when the session has none):
 the terminal comes to the front, the person chooses, and the window
 comes back by itself. A terminal session takes nothing over its inbox
 (it reads everything as prose, and a `control_request` frame sent to it
@@ -617,24 +764,34 @@ decide. The mode has no command and no picker. Only ⇧Tab changes it,
 stepping through an order that depends on flags of the session nothing
 outside it can read (`isBypassPermissionsModeAvailable`,
 `isAutoModeAvailable` and a gate), and Claude Code's key bindings offer
-`chat:cycleMode` and nothing that names a mode. So the pill takes the
-person to the terminal with the keyboard in it (`sys::enter_terminal`:
-for an IDE that is the command palette's "Terminal: Focus Terminal",
-since ⇧Tab in an editor outdents a line of a file) and they press the
-key. Every press reruns the status line (`permissionMode` is in the list
-of things it reruns on, though the mode is not in what it is handed), so
-the file's `seen_at` moves with each press, and done is
-`MODE_SETTLE_SECS` (2 s) without another. While the agent works the
-status line runs on its own, so a mode change is not watched for then and
-the person comes back by hand. What the pills show on a terminal session
+`chat:cycleMode` and nothing that names a mode. So ⇧Tab in the composer
+presses the key once in the terminal and stays in the window
+(`Workbench::step_mode`, `sys::key_in_terminal` with
+`TerminalKey::ShiftTab`, back-tab, ESC [ Z): WezTerm, Kaku and iTerm2
+take it for the pane without coming forward, any other host comes
+forward for it and the window takes the front back at once. The pill
+follows each press, and a click on the pill only says "Use ⇧Tab to
+change the mode". Two earlier versions: the click went to the terminal
+and came back once the status line had been quiet for a moment after a
+press, which worked when it reran and not otherwise, so the person was
+sometimes returned and sometimes left; then the click went there and
+stayed, which the key in the composer made pointless. What the pills show on a terminal session
 is the status line's word for the model and the effort (`terminal_ctx`),
 else the transcript's. The mode is read off the terminal's screen
 (`sys::terminal_text`: Terminal and iTerm2 by AppleScript, WezTerm and
-Kaku by `cli get-text`; `driver::mode_on_screen` finds "manual mode on",
-"plan mode on", "accept edits on" and the rest in the last three lines,
-the footer under the prompt) when the session is opened and whenever the
-window comes back, and kept in `mode_seen` until a turn starts, whose
-prompt row carries the mode. An IDE's terminal cannot be read, so after
+Kaku by `cli get-text`; `driver::mode_on_screen` looks in the last three
+lines, the footer under the prompt, for each listed mode by its own name:
+"manual mode on", "plan mode on", "accept edits on") when the session is
+opened, when the window comes back, and every time the terminal's status
+line runs, and kept in `mode_seen` until a turn starts, whose prompt row
+carries the mode. The status line is the signal: the hub watches
+`state/context/` beside the transcripts and sends `HubEvent::Context`
+for the session whose file was rewritten, which a ⇧Tab causes within
+about a third of a second, so the pill follows each press, and the model
+and the effort no longer wait for the one-second clock. One read at a
+time (`mode_reading`). It was read only on coming back, two seconds
+after the last press, with the pill saying "Mode" in between, which read
+as slow beside the other two pills. An IDE's terminal cannot be read, so after
 a change there the pill says "Mode" until the next turn rather than the
 transcript's old mode. Tried before and taken out: a list in the window
 for a terminal session, which for the model and the effort typed
@@ -642,18 +799,69 @@ for a terminal session, which for the model and the effort typed
 number of times, which twice ended in the wrong mode on a live session
 (auto to plan and back ended in plan; default to auto passed plan and
 landed on default), and then only said which key to press. Do not bring
-the counting back: one of the modes after plan can be bypass. Checked on
+the counting back: one of the modes after plan can be bypass. One press
+for one press, which is what ⇧Tab in the composer sends, aims at nothing
+and is not that. Checked on
 a session in Kaku with `EMAKI_GO=pill:mode`, `pill:model` and
 `pill:effort`: two ⇧Tabs and the window was back within three seconds
 with the pill on the footer's mode; a model picked with `s` and the
 "Switch model?" answered, back within a second; the slider moved and
-confirmed, the same. The IDE path of `enter_terminal` was not run.
+confirmed, the same. (`enter_terminal`, which put the keyboard in an IDE's terminal for the mode pill, went with that pill's trip to the terminal.)
 A driver has no control request for the effort
 (`set_effort` is "Unsupported"), but `/effort <level>` as a user turn runs
 as the local command it is, and Claude Code records it as a
 `system/local_command` row with `commandRun: {command: "effort", args}`,
 which `build` reads into `Session::effort`; `Driver::set_effort` sends that
 turn and the pill updates when the file does.
+
+**A change of mode, model or effort is one short line in the
+conversation.** `NoticeVariant::Mode`, `Model` and `Effort`, whose text
+is what was set and nothing else, drawn as the pill's icon, the word in
+the muted ink and the value in the foreground, on no plate ("Effort
+High"; `transcript::render_notice`). `/model` and `/effort` answer with
+a sentence ("Set effort level to high (saved as your default for new
+sessions): Comprehensive implementation with extensive testing and
+documentation"), which sat under the command's chip on one plate and ran
+out of the column; `build::setting_said` reads what was set out of it
+(the model between backticks, the level after "Set effort level to"),
+`RoundBuilder::add_output` puts the line in place of the chip, and a
+picker closed with nothing changed ("Kept model as …") leaves no line.
+Anything else those commands say is shown as it is. A mode has no
+command and no row: Claude Code writes nothing when ⇧Tab is pressed (the
+2.1.289 binary only sets a field), names the mode on the next prompt row
+and restates it in a `permission-mode` row whenever it writes rows. So
+`RoundBuilder::saw_mode` says a change where the transcript first has
+it, which for a prompt is the foot of the round before, and the first
+mode a session names is where it began, not a change. Until then the
+window says it: `Workbench::unwritten_mode` is the mode read off the
+terminal, or the driver's, when it differs from `Session::mode`, drawn
+at the foot of the last round in the same words, and the built notice
+takes its place at the next turn. The other notices changed with these:
+all are in the window's face, not the reply's serif; a command's output
+is quiet text behind a rule that wraps; compaction and errors keep a
+tinted plate. A setting changed again straight after itself is one
+change, the last (`RoundBuilder::add_notice` replaces a notice of the
+same kind when it is the last thing said): effort to high, medium, high
+reads "Effort High" once, while effort, model, effort keeps all three.
+The line at the foot for a mode not yet written stays when the person
+steps away and back to the mode the transcript has (`mode_touched`): it
+was dropped as "no change", and the person had changed it. The rule
+for all three is one: AAABBB reads A, B and ABAB reads A, B, A, B.
+`mode_touched` keeps every change of mode seen since the last turn with
+its time, and `render_round` sets each before the first item written
+after it; the setting lines the transcript folded
+(`Round::superseded`) are put back among them and the folding is done
+again over the whole, so effort, mode, effort is three lines and mode,
+effort, mode is three. Before that there was one unwritten mode line,
+at the foot, and a second change of mode replaced the first across
+whatever lay between. Once the next turn writes the mode, the
+transcript's order is the only one there is: the mode is recorded with
+the prompt, after the efforts, which fold again.
+`NoticeVariant::said` is the line as the page reads it,
+which is what find, search and the markdown use. Checked with
+`EMAKI_SHOT` on a hand-written transcript; the lists under the pills and
+the read of a real terminal's footer after ⇧Tab were not run from a
+script.
 
 **The limits row is the terminal's status line.** Under the composer, on
 the left of the row the notice shares:
@@ -726,12 +934,82 @@ words to `answer_question_typed` while a question waits, and the
 placeholder says so). A bare ↩ never answers a question, and "Allow
 all" skips them. A terminal session's question lives in the terminal's
 dialog: the inbox socket takes only `auth` and `user` frames (read out
-of the 2.1.288 binary), so nothing from here can answer it, and the
+of the 2.1.288 binary), so no frame from here can answer it; the card
+below does, with keys. Where the screen cannot be read, the
 status row under the conversation says "Claude is waiting for your
 answer · in your terminal" (the same line says "below" for a driver,
 and "your approval" or "your go-ahead on the plan" for the other
 holds). `emaki-core drive` answers a question with its first option, so
 the wire can be checked from a terminal.
+
+**The prompt the terminal suggests is the composer's placeholder.** Once
+a turn is over Claude Code sets words in its input that are not typed
+yet, dim, and → takes them. The composer offers the same words the same
+way: as its placeholder, in the placeholder's lighter ink, with "(→ to
+accept, ⌘↩ to send)" after them; → or Tab in the empty box makes them
+the text with the caret at the end (`Workbench::accept_suggestion`,
+captured before the textarea's own `MoveRight` and `IndentInline`), and
+⌘↩ on the empty box sends them as they are. `read_suggestion` reads the
+screen once a second while the session showing is idle in its terminal
+and the box is empty, and `driver::suggestion_on_screen` finds them: the
+line between the prompt's two rules, after "❯", all of it written dim
+(`ESC [ 0;2 m`), which typed words are not. That needs the colours, so
+WezTerm and Kaku only. A path in the words is a link (`ESC ] 8 ;; url
+ESC \`), whose sequences ran into the rule below and hid it;
+`escape_at` is the one place that says how long a sequence is, for all
+four screen readers. Taking the words here leaves the terminal's own
+suggestion where it is. Checked with `EMAKI_SHOT` and `EMAKI_KEYS=tab`
+on a session in a Kaku tab; → goes through the same handler and was not
+pressed from a script.
+
+**A terminal session's dialog is a card in the window, answered with
+the terminal's own keys.** While a question waits in a terminal, the
+transcript does not have it: 2.1.289 writes the assistant row with the
+`AskUserQuestion` call only once it is answered (checked on a pty: no
+such row while the dialog was up), so the window showed "Claude is
+working… reading the prompt" and the question appeared after the fact.
+What says a dialog is up is the registry (`status: waiting`, with
+`waitingFor` "input needed" for a question and "permission prompt" for
+an approval), and what says which is the screen. `Workbench::read_dialog`
+reads it once a second and whenever the status line runs, for the
+session showing, and `driver::dialog_on_screen` parses it: under a rule,
+the tabs when there are several questions ("← ☐ Fruit ☒ Colors ✔ Submit
+→"), the question, the numbered choices with their lines of description,
+"[ ]" and "[✔]" on a question that takes several, and at the foot
+"Enter to select · … · Esc to cancel"; the review ("Review your
+answers", each answer behind "→", "1. Submit answers / 2. Cancel"); an
+approval (the command between dashed rules over "Do you want to
+proceed?"). `render_dialog` draws it where the permission cards sit, in
+their shape: the questions as chips, ticked once answered, what is
+asked, the choices as rows, the review's two choices as buttons. The
+terminal's dialog is the one that moves: a click sends the choice's
+digit (`sys::text_in_terminal`: WezTerm and Kaku by `cli send-text
+--no-paste`, iTerm2 by `write text`, the pane never coming forward),
+Next sends Tab, Cancel sends Escape, and the card is the screen read
+again. The chips are the terminal's tabs, the review last: the one
+showing is ringed, which the terminal says by setting it on a ground of
+its own (`Dialog::current`, read from the colours, so the screen is
+read with `--escapes`), and a click on another goes there with the
+arrow keys, one step at a time, each once the screen shows the tab
+before it (`dialog_go`, `DialogUntil::Tab`). Where the colours are not
+given (iTerm2) the chips do not take clicks. Words typed in the composer answer a question that offers "Type
+something" (`dialog_answer_typed`): the digit, then the words, then
+Return, each once the screen shows what the one before did
+(`DialogUntil`: the pointer on that choice, then the choice reading as
+the words). All three in one write lost the words and answered with the
+first choice. Not done: words of one's own on a question that takes
+several, whose field works another way, and Terminal or an IDE, where
+keys need the app in front; there the line "waiting for your answer · in
+your terminal" stands. Not shown while the person was sent to the
+terminal for `/model` or `/effort`, whose list is theirs to use there.
+Checked on a session in a Kaku tab with `EMAKI_GO=answer:Mango`,
+`dialog:1`, `dialog:tab`, `goto:2`, `goto:1` and `EMAKI_SHOT`: the
+typed answer, a tick, Next, the review, Submit, and going to the review
+and back to a question all landed. `emaki-core screen < text` says
+what a screen holds. Probing note: `kaku cli spawn` hands the new pane
+the caller's environment, so a session started from inside a Claude Code
+session is its child and never registers; start it from a script that
+unsets `CLAUDE*` first.
 
 **A slash command runs only where a session is driven from here.** A
 headless child runs `/compact` as the command it is (the 2.1.288 binary
@@ -1067,20 +1345,36 @@ of it.
 startup; a bundle has it from `Emaki.icns`; on Windows `build.rs` compiles
 `icon.ico` into the executable.
 
-**The icon is drawn, as SVG.** `scripts/icon/draw.py` writes the picture:
-a handscroll (絵巻) across a terracotta plate, cream paper between two
-rollers lit along their length, a chevron in the accent and three lines of
-ink on the sheet, flat enough to read at 16px. `scripts/icon/render.swift`
-rasterises it through Cocoa at each size, `scripts/icon/ico.py` packs the
-Windows `.ico`, and `scripts/make-icon.sh` runs the three; nothing but a
-Mac is needed. Before 2026-10-03 the icon was cut out of a generated
-picture (`logo.png`, in git history), which read as a render and could
-not be changed without generating again. The PNGs sit on
-Apple's 824-of-1024 grid, which the Dock (`sys::install_dock_icon` sets the
-PNG at start), Windows and Linux want; the `.icns` alone is the plate at
-full bleed and opaque to its corners, because macOS 26 masks every app
+**The icon is drawn, on a canvas.** `scripts/icon/icon.html` is the
+source: a handscroll (絵巻) seen from the front, a white sheet with a navy
+edge between two terracotta rolls on navy axles, on a cream ground. On
+the sheet is a conversation, the agent's line with a violet four-point
+spark in front of it, the reply in amber indented to the right, the agent
+again. The cream, navy, amber and violet are the Alkaline Software
+organisation icon's; the terracotta is the first icon's ground. Everything
+is in a 100-unit box, and `drawIcon(canvas, icon, px, bleed)` draws it at
+any pixel size as the full square (`bleed`) or as the rounded app icon,
+inset 9% with a corner radius of 23 units and a drop shadow; the page
+itself is the proof sheet, the icon at 280, 128, 64, 32 and 16px with
+pixel zooms of the last two. `scripts/icon/render.swift` loads the page
+in a `WKWebView` with no window and writes what `exportIcon(size, bleed)`
+returns for each file, so every size is drawn on its own pixels and none
+is a scaled copy; `scripts/icon/ico.py` packs the Windows `.ico`, and
+`scripts/make-icon.sh` runs it all in under two seconds; nothing but a
+Mac is needed. The conversation reads down to about 64px; at 16px the
+icon is two bars with a pale block between. Two icons came before. Until
+2026-10-03 it was cut out of a generated picture (`logo.png`, in git
+history), which read as a render and could not be changed without
+generating again. Until 2026-10-04 it was `draw.py`, an SVG of a scroll
+with a prompt chevron on a terracotta plate, rasterised by Cocoa from
+one master. The new one was designed outside this repository, in JS
+canvas and again in ggplot2; the canvas version is the one copied here,
+whole, and this copy is the app's source. The PNGs are the rounded icon
+with its margin, which the Dock (`sys::install_dock_icon` sets the
+PNG at start), Windows and Linux want; the `.icns` alone is the full
+square, opaque to its corners, because macOS 26 masks every app
 icon to its own rounded square over a grey backing and shows anything
-transparent, a margin or the plate's own rounder corners, as a grey border
+transparent, a margin or the icon's own rounder corners, as a grey border
 in Finder, the switcher and Spotlight. WORKFLOW.md says how to regenerate
 it.
 
@@ -1311,7 +1605,21 @@ from-name="emaki">` envelope. The envelope is what makes the transcript row
 carry `origin.name` and a clean `origin.body`; `build` keys on those, so a
 message from the window renders as yours and one from another Claude session
 as a peer. Those rows are `isMeta: true`; the builder and `turn_state` must
-treat a peer row as a prompt or the log shows a reply to nothing. **Do not
+treat a peer row as a prompt or the log shows a reply to nothing. **The same
+words twice go with a space after them.** Claude Code drops a peer's
+message that is identical to that peer's last one within thirty seconds
+(2.1.289: `dedupWindowMs: 30000`, keyed on the sender's name or pid; the
+terminal says "Dropped a peer message from @emaki (unknown): identical
+to the previous message from this sender"). It is a guard against two
+sessions echoing each other, and it also caught a person stopping a turn
+and sending the message again. `Hub::send_to_inbox` remembers what last
+went to each session (`inbox_last`) and `peer::send` takes `again`,
+which adds one trailing space; the envelope keeps it, the message is
+still read as ours, and the prompt is trimmed where it is drawn. The
+person chose this over a notice, as the case is rare. Checked with
+`emaki-core inbox <id> --again <text>` against `claude` on a pty; the
+drop itself is keyed on the pid, so two runs of the CLI do not reproduce
+it, only the app does. **Do not
 assert `from-mode`**: Claude Code holds a message that asserts no permission
 mode when the recipient runs with permissions bypassed, and asks in the
 terminal. That check is what stops a less trusted process steering a more

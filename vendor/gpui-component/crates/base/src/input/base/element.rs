@@ -501,7 +501,16 @@ impl<M: InputModeKind> TextElement<M> {
                     return line_origin + pos;
                 }
             }
-            line_origin
+            // A line that is not laid out, off the screen: its row comes
+            // from the wrap map, so the end of a long wrapped paragraph
+            // is where it is and not at the paragraph's first row.
+            // (Emaki addition.)
+            let wrap = state.display_map.offset_to_wrap_display_point(offset);
+            let row = state
+                .display_map
+                .wrap_row_to_display_row(wrap.row)
+                .unwrap_or_else(|| state.display_map.nearest_visible_display_row(wrap.row));
+            point(px(0.), line_height * row)
         };
 
         let current_row = Some(cursor_row);
@@ -538,14 +547,19 @@ impl<M: InputModeKind> TextElement<M> {
                 if !auto_scrolling {
                     // If we change the scroll_offset.y, GPUI will render and trigger the next run loop.
                     // So, here we just adjust offset by `line_height` for move smooth.
+                    // As far as it takes to bring the cursor in, not one
+                    // line: upstream stepped a line per change, which
+                    // follows typing and leaves the cursor out of sight
+                    // after a paste or a dictated paragraph. (Emaki
+                    // addition.)
                     scroll_offset.y = if scroll_offset.y + cursor_pos.y
                         > bounds.size.height - top_bottom_margin
                     {
                         // cursor is out of bottom
-                        scroll_offset.y - line_height
+                        bounds.size.height - top_bottom_margin - cursor_pos.y
                     } else if scroll_offset.y + cursor_pos.y < top_bottom_margin {
                         // cursor is out of top
-                        (scroll_offset.y + line_height).min(px(0.))
+                        (top_bottom_margin - cursor_pos.y).min(px(0.))
                     } else {
                         scroll_offset.y
                     };

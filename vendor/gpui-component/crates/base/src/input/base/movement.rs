@@ -34,6 +34,15 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.preferred_column = Some((pos.x, point.column));
     }
 
+    /// The column vertical moves keep, measured now when it is not known:
+    /// after an edit it is left unknown, since the layout at that moment
+    /// is the old text's. (Emaki addition.)
+    pub(super) fn ensure_preferred_column(&mut self) {
+        if self.preferred_column.is_none() {
+            self.update_preferred_column();
+        }
+    }
+
     /// Move the cursor to the given offset.
     ///
     /// The offset is the UTF-8 offset.
@@ -66,12 +75,31 @@ impl<M: InputModeKind> InputBaseState<M> {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_single_line() {
-            return;
-        }
-        let Some(last_layout) = &self.last_layout else {
+        self.ensure_preferred_column();
+        let Some(new_offset) = self.vertical_offset(move_lines) else {
             return;
         };
+        let was_preferred_column = self.preferred_column;
+        self.pause_blink_cursor(cx);
+        let direction = if move_lines < 0 {
+            MoveDirection::Up
+        } else {
+            MoveDirection::Down
+        };
+        self.move_to(new_offset, Some(direction), cx);
+        // Set back the preferred_column
+        self.preferred_column = was_preferred_column;
+        cx.notify();
+    }
+
+    /// Where the cursor lands `move_lines` display rows away (negative is
+    /// up), keeping its column where it can. Split out of `move_vertical`
+    /// so a selection can be extended by the same step. (Emaki addition.)
+    pub(super) fn vertical_offset(&self, move_lines: isize) -> Option<usize> {
+        if self.is_single_line() {
+            return None;
+        }
+        let last_layout = self.last_layout.as_ref()?;
 
         let offset = self.cursor();
         let was_preferred_column = self.preferred_column;
@@ -125,17 +153,7 @@ impl<M: InputModeKind> InputBaseState<M> {
                 new_offset = line_start_offset + column.min(max_line_len);
             }
         }
-
-        self.pause_blink_cursor(cx);
-        let direction = if move_lines < 0 {
-            MoveDirection::Up
-        } else {
-            MoveDirection::Down
-        };
-        self.move_to(new_offset, Some(direction), cx);
-        // Set back the preferred_column
-        self.preferred_column = was_preferred_column;
-        cx.notify();
+        Some(new_offset)
     }
 
     pub(super) fn left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -211,7 +229,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// The display row (folds skipped) the cursor is on, or None before the
     /// first layout. (Emaki addition.)
-    fn display_row_of_cursor(&self) -> Option<usize> {
+    pub(super) fn display_row_of_cursor(&self) -> Option<usize> {
         self.last_layout.as_ref()?;
         let point = self.display_map.offset_to_wrap_display_point(self.cursor());
         Some(

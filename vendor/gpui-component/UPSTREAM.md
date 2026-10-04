@@ -59,6 +59,30 @@ upstream revision finds them.
    composes for every mode, and `TextareaState::set_marks` replaces them.
    Not tracked across edits: the application sets them again on change.
 
+8. `crates/base/src/input/base/movement.rs`, `state.rs`: ⇧↑ and ⇧↓ extend
+   the selection by one display row in the cursor's column. Upstream's
+   `select_up` went to the end of the line before and `select_down` past
+   the end of this one, lines of the buffer, so in a wrapped text one
+   press took a whole paragraph. `move_vertical` is split so the step it
+   computes (`vertical_offset`) serves both; `column_for_selecting` fixes
+   the column when a selection starts.
+9. `crates/base/src/input/base/element.rs`, `state.rs`: the view follows
+   the cursor as far as it went. `layout_cursor` stepped the scroll one
+   line per change of selection, which keeps up with typing and leaves
+   the cursor out of sight after a paste or a dictated paragraph; it now
+   scrolls by what it takes, and places a cursor on a line that is not
+   laid out by the wrap map's row instead of its paragraph's first row.
+   `paste` no longer calls `scroll_to`, which measured against the layout
+   from before the paste and overrode the element's answer.
+
+10. `crates/base/src/input/base/state.rs`, `movement.rs`: Up and Down
+    after typing keep the cursor's column. `replace_text_in_range`
+    measured the preferred column right after the edit, against the
+    layout of the text before it, which gave none (or a stale one) and
+    sent the next Up to the start of the row above. The column is left
+    unknown at an edit and measured when a vertical move needs it
+    (`ensure_preferred_column`).
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

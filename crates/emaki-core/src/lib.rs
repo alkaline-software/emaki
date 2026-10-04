@@ -15,6 +15,7 @@ pub mod find;
 pub mod json;
 pub mod limits;
 pub mod model;
+pub mod options;
 pub mod paths;
 pub mod peer;
 pub mod redact;
