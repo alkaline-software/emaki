@@ -57,15 +57,15 @@ pub fn human_duration(ms: u64) -> String {
     if ms == 0 {
         return String::new();
     }
-    let seconds = ms as f64 / 1000.0;
-    if seconds < 1.0 {
+    if ms < 1000 {
         return format!("{ms}ms");
     }
-    if seconds < 60.0 {
-        let s = format!("{seconds:.1}s");
-        return s.replace(".0s", "s");
+    // Whole seconds, rounded: 2.5s reads 3s and 2.2s reads 2s. The
+    // tenth was noise on a tool card.
+    let total = (ms + 500) / 1000;
+    if total < 60 {
+        return format!("{total}s");
     }
-    let total = seconds as u64;
     let (minutes, secs) = (total / 60, total % 60);
     if minutes < 60 {
         return if secs > 0 { format!("{minutes}m {secs}s") } else { format!("{minutes}m") };

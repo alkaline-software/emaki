@@ -923,6 +923,21 @@ pub fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
+/// What a driven session says started it. Claude Code stamps every row
+/// of a transcript with its entry point, and a `-p` child's is `sdk-cli`
+/// unless the environment names another (`CLAUDE_CODE_ENTRYPOINT`, which
+/// is how the IDE extension and the desktop app name themselves; only
+/// `cli` is rewritten to `sdk-cli` for a headless run). The terminal's
+/// resume list leaves out every session whose first rows say `sdk-cli`,
+/// `sdk-ts` or `sdk-py` (2.1.289: the picker reads `entrypoint` from the
+/// head of the file), so a session begun in the window could be resumed
+/// by its id and never found there. Named as what it is, it is listed
+/// like any other. Checked with `claude -p` and the picker on a pty: the
+/// rows read `emaki` and the session was offered. A session whose first
+/// rows already say `sdk-cli` stays out of the list: nothing here writes
+/// to a transcript.
+pub const ENTRYPOINT: &str = "emaki";
+
 /// The environment for a Claude Code child that must be its own session. The
 /// app may itself be a grandchild of a session (started from a hook) and
 /// would otherwise hand the child its parent's id, inbox and token.
@@ -1090,6 +1105,7 @@ impl Driver {
         for (k, v) in child_env() {
             cmd.env(k, v);
         }
+        cmd.env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| DriverError(format!("could not start claude: {e}")))?;
         let stdin = child.stdin.take();
