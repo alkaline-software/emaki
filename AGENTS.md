@@ -386,7 +386,11 @@ driver and the registry before the mtime grace. A message on the inbox
 channel goes down the same wire the Python `peer.py` used, one connection
 per message, wrapped in Claude Code's `<cross-session-message>` envelope with
 no permission mode asserted; `emaki-core peers` lists what the registry
-sees and `emaki-core inbox <id> <text>` delivers by hand.
+sees and `emaki-core inbox <id> <text>` delivers by hand. "Driven" is the window's record and the hub's together
+(`Workbench::driven`): the hub lets a driver go by itself (idle past its
+limit, its child gone) without a word, and the record alone then kept a
+terminal session reading as driven, so every message was refused with
+"the driver is gone; try again" while its inbox stood by.
 
 **Never splice a list item the reader may be inside.** gpui's `ListState`
 moves the scroll anchor to the start of any spliced range that contains it.
