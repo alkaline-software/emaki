@@ -42,7 +42,7 @@ impl FindIndex {
             for (jx, item) in rnd.items.iter().enumerate() {
                 let text = match item {
                     Item::Text { md, .. } | Item::Thinking { md, .. } => md.clone(),
-                    Item::Notice { text, .. } => text.clone(),
+                    Item::Notice { text, variant, .. } => variant.said(text),
                     Item::Tool(call) => tool_text(call),
                 };
                 if text.trim().is_empty() {
@@ -100,7 +100,7 @@ fn subagent_text(rounds: &[Round], out: &mut Vec<String>) {
         for item in &rnd.items {
             match item {
                 Item::Text { md, .. } | Item::Thinking { md, .. } => out.push(md.clone()),
-                Item::Notice { text, .. } => out.push(text.clone()),
+                Item::Notice { text, variant, .. } => out.push(variant.said(text)),
                 Item::Tool(c) => {
                     out.push(format!("{} {}", c.name, c.subject));
                     if !c.result_text.trim().is_empty() {

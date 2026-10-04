@@ -173,20 +173,33 @@ fn token(peer: &Peer) -> String {
     data.get("peerToken").and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
+/// How long Claude Code remembers a peer's last message to drop a repeat.
+pub const REPEAT_WINDOW: Duration = Duration::from_secs(30);
+
 /// Put `text` in front of the session. `Ok` means the inbox accepted the
 /// connection and read the message; a refusal carries the reason the inbox
-/// gave, or ours if it never got that far.
+/// gave, or ours if it never got that far. `again` says the same words
+/// went to this session a moment ago: Claude Code drops a peer's message
+/// that is identical to that peer's last one within `REPEAT_WINDOW`
+/// (2.1.289: `dedupWindowMs: 30000`, "Dropped a peer message … identical
+/// to the previous message from this sender"), which is a guard against
+/// two sessions echoing each other and also catches a person sending a
+/// stopped message again. The words then go with a space after them,
+/// which the envelope keeps (checked on 2.1.289: the row's `origin.body`
+/// ends in the space and the message is still read as ours).
 #[cfg(not(unix))]
-pub fn send(_peer: &Peer, _text: &str) -> Result<Delivery, String> {
+pub fn send(_peer: &Peer, _text: &str, _again: bool) -> Result<Delivery, String> {
     Err("the inbox channel needs a Unix socket, which this platform does not have yet".into())
 }
 
 #[cfg(unix)]
-pub fn send(peer: &Peer, text: &str) -> Result<Delivery, String> {
+pub fn send(peer: &Peer, text: &str, again: bool) -> Result<Delivery, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("empty message".into());
     }
+    let text = if again { format!("{text} ") } else { text.to_string() };
+    let text = text.as_str();
     let token = token(peer);
     if token.is_empty() {
         return Err("no inbox key for this session".into());
@@ -276,7 +289,7 @@ mod tests {
             lines
         });
         let peer = Peer { session_id: "sid".into(), pid: 1234, socket_path: sock.to_string_lossy().into(), cwd: String::new(), kind: String::new(), name: String::new(), status: String::new(), status_at: 0.0, proc_start: "s1".into(), key_path: key.to_string_lossy().into() };
-        let d = send(&peer, "hello there").unwrap();
+        let d = send(&peer, "hello there", false).unwrap();
         assert_eq!(d.status, "delivered");
         let lines = server.join().unwrap();
         assert_eq!(lines.len(), 2);
@@ -290,7 +303,7 @@ mod tests {
 
         // A reused pid: the key's procStart disagrees, so no token, no send.
         let stale = Peer { proc_start: "other".into(), ..peer.clone() };
-        assert!(send(&stale, "x").is_err());
+        assert!(send(&stale, "x", false).is_err());
     }
 
     #[test]

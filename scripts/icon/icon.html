@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Emaki App Icon</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1280px; padding: 40px;
+    background: #f3f2f0; color: #1c1c1e;
+    font-family: -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+  }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 24px; }
+  .card {
+    background: #fff; border: 1px solid #e4e2de; border-radius: 16px;
+    padding: 36px 44px; margin-bottom: 22px;
+    display: flex; align-items: center; gap: 56px;
+  }
+  .card h2 { font-size: 18px; font-weight: 700; margin-bottom: 14px; }
+  .card p { font-size: 14px; color: #5c5c62; margin-bottom: 22px; line-height: 1.5; max-width: 760px; }
+  .sizes { display: flex; align-items: flex-end; gap: 30px; }
+  .sizes figure { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .sizes figcaption { font-size: 12px; color: #5c5c62; }
+  .sizes .gap { width: 16px; }
+  canvas { display: block; }
+  .zoom { image-rendering: pixelated; }
+  .usage { align-items: center; }
+  .usage .label { width: 300px; flex: none; }
+  .usage .label h2 { margin-bottom: 10px; }
+  .usage .label p { margin: 0; }
+  .bars { display: flex; flex-direction: column; gap: 16px; }
+  .bar { display: flex; gap: 20px; padding: 22px 24px; border-radius: 18px; }
+  .bar.dark { background: #1f2024; color: #f2f2f4; }
+  .bar.light { background: #eceae6; border: 1px solid #dcd9d3; }
+  .org { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 600; }
+  .org canvas { border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>Emaki App Icon</h1>
+<div id="cards"></div>
+<div class="card usage">
+  <div class="label">
+    <h2>Beside its name</h2>
+    <p>Drawn at 48 px as a full square. The host rounds the corners.</p>
+  </div>
+  <div class="bars">
+    <div class="bar dark" id="bar-dark"></div>
+    <div class="bar light" id="bar-light"></div>
+  </div>
+</div>
+
+<script>
+// The icon is drawn in a 100-unit box. `bleed` fills the whole canvas as a
+// square; otherwise the body is an inset squircle with a shadow (the app icon).
+const NAVY = '#2b2556', AMBER = '#ffb83e', VIOLET = '#6a3fd9', TERRACOTTA = '#eaa27e';
+
+const stroke = (ctx, pts, style, width, cap = 'round') => {
+  ctx.strokeStyle = style; ctx.lineWidth = width; ctx.lineCap = cap; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (const [x, y] of pts) ctx.lineTo(x, y);
+  ctx.stroke();
+};
+
+// the white sheet with a navy edge along the top and bottom
+function sheet(ctx) {
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(22, 30, 56, 40);
+  stroke(ctx, [[22, 30], [78, 30]], NAVY, 2.6, 'butt');
+  stroke(ctx, [[22, 70], [78, 70]], NAVY, 2.6, 'butt');
+}
+
+// A roll of paper on its axle, centred on x. The axle shows as a knob above
+// and below the roll.
+function paperRoll(ctx, x) {
+  ctx.fillStyle = NAVY; rr(ctx, x - 2.5, 19.5, 5, 61, 2.2); ctx.fill();
+  rr(ctx, x - 5, 25, 10, 50, 3.8);
+  ctx.fillStyle = TERRACOTTA; ctx.fill();
+  ctx.strokeStyle = NAVY; ctx.lineWidth = 2.6; ctx.stroke();
+}
+
+// the conversation on the sheet: the agent's line with its spark, your reply
+// on the right, the agent again
+function dialogue(ctx) {
+  stroke(ctx, [[43.5, 42], [62.5, 42]], NAVY, 4.5);
+  stroke(ctx, [[46.5, 52], [68.5, 52]], AMBER, 4.5);
+  stroke(ctx, [[32.5, 62], [53.5, 62]], NAVY, 4.5);
+  ctx.fillStyle = VIOLET; sparkle(ctx, 35, 42, 5.5); ctx.fill();
+}
+
+const ICONS = [
+  {
+    id: 'emaki', name: 'Handscroll',
+    desc: 'An emaki is a picture scroll, and this is one seen from the front: a sheet held between two rolls of paper on their axles. On the sheet is a conversation, the agent on the left with its spark and your reply on the right. The ground and the line colours are those of the Alkaline Software icon; the terracotta of the rolls is carried over from the first Emaki icon.',
+    bg: ['#fdf8ee', '#f1e4d0'],   // top left to bottom right
+    glyph(ctx) {
+      sheet(ctx);
+      paperRoll(ctx, 22);
+      paperRoll(ctx, 78);
+      dialogue(ctx);
+    }
+  }
+];
+
+// four-point AI spark centred on (cx, cy)
+function sparkle(ctx, cx, cy, r) {
+  const k = r * 0.2;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - r);
+  ctx.quadraticCurveTo(cx + k, cy - k, cx + r, cy);
+  ctx.quadraticCurveTo(cx + k, cy + k, cx, cy + r);
+  ctx.quadraticCurveTo(cx - k, cy + k, cx - r, cy);
+  ctx.quadraticCurveTo(cx - k, cy - k, cx, cy - r);
+  ctx.closePath();
+}
+
+function rr(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawIcon(canvas, icon, px, bleed) {
+  canvas.width = px; canvas.height = px;
+  const ctx = canvas.getContext('2d');
+  const inset = bleed ? 0 : Math.round(px * 0.09);
+  const body = px - inset * 2;
+
+  // the glyph on its own transparent layer, so gaps can be erased from it
+  const layer = document.createElement('canvas');
+  layer.width = body; layer.height = body;
+  const g = layer.getContext('2d');
+  g.scale(body / 100, body / 100);
+  icon.glyph(g);
+
+  ctx.save();
+  if (!bleed) {
+    ctx.translate(inset, inset); ctx.scale(body / 100, body / 100);
+    ctx.shadowColor = 'rgba(20, 16, 50, 0.28)'; ctx.shadowBlur = px * 0.045; ctx.shadowOffsetY = px * 0.022;
+    rr(ctx, 0, 0, 100, 100, 23); ctx.fillStyle = icon.bg[1]; ctx.fill();
+    ctx.shadowColor = 'transparent';
+    rr(ctx, 0, 0, 100, 100, 23); ctx.clip();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  ctx.drawImage(gradientCanvas(body, icon.bg), inset, inset);
+  ctx.drawImage(layer, inset, inset);
+  ctx.restore();
+}
+
+// Diagonal gradient computed per pixel. A canvas gradient fill is dithered by
+// the browser, and that noise makes the PNG about ten times larger.
+function gradientCanvas(size, [from, to]) {
+  const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+  const a = rgb(from), b = rgb(to);
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const t = (x + y + 1) / (2 * size), i = (y * size + x) * 4;
+      for (let k = 0; k < 3; k++) img.data[i + k] = Math.round(a[k] + (b[k] - a[k]) * t);
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+// `css` is the displayed size; `native` forces a 1:1 pixel buffer (for the zoomed proofs)
+function makeCanvas(icon, css, opts = {}) {
+  const c = document.createElement('canvas');
+  const px = opts.native || Math.round(css * (window.devicePixelRatio || 1));
+  drawIcon(c, icon, px, opts.bleed);
+  c.style.width = css + 'px'; c.style.height = css + 'px';
+  if (opts.native) c.className = 'zoom';
+  return c;
+}
+
+function fig(canvas, caption) {
+  const f = document.createElement('figure');
+  f.appendChild(canvas);
+  const cap = document.createElement('figcaption'); cap.textContent = caption;
+  f.appendChild(cap);
+  return f;
+}
+
+const cards = document.getElementById('cards');
+for (const icon of ICONS) {
+  const card = document.createElement('div'); card.className = 'card';
+  card.appendChild(makeCanvas(icon, 280));
+  const info = document.createElement('div');
+  info.innerHTML = `<h2>${icon.name}</h2><p>${icon.desc}</p>`;
+  const sizes = document.createElement('div'); sizes.className = 'sizes';
+  for (const n of [128, 64, 32, 16]) sizes.appendChild(fig(makeCanvas(icon, n), String(n)));
+  const gap = document.createElement('div'); gap.className = 'gap'; sizes.appendChild(gap);
+  sizes.appendChild(fig(makeCanvas(icon, 128, { native: 32 }), '32 px ×4'));
+  sizes.appendChild(fig(makeCanvas(icon, 64, { native: 16 }), '16 px ×4'));
+  info.appendChild(sizes);
+  card.appendChild(info);
+  cards.appendChild(card);
+}
+
+for (const id of ['bar-dark', 'bar-light']) {
+  const bar = document.getElementById(id);
+  for (const icon of ICONS) {
+    const app = document.createElement('div'); app.className = 'org';
+    app.appendChild(makeCanvas(icon, 48, { bleed: true }));
+    const t = document.createElement('span'); t.textContent = 'Emaki';
+    app.appendChild(t);
+    bar.appendChild(app);
+  }
+}
+
+// 2048 px PNG as a data URL: the full square by default, or the squircle
+// app icon with exportIcon(2048, false)
+window.exportIcon = (px = 2048, bleed = true) => {
+  const c = document.createElement('canvas');
+  drawIcon(c, ICONS[0], px, bleed);
+  return c.toDataURL('image/png');
+};
+</script>
+</body>
+</html>

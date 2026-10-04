@@ -17,7 +17,9 @@
 //! - stdin stays open across turns. Each user frame is one turn ending in a
 //!   `result` frame.
 //! - `control_request` from us: `initialize` (answers with the command
-//!   catalogue), `set_permission_mode`, `set_model`, `interrupt`.
+//!   catalogue, the `models` on offer with each one's effort levels, and
+//!   `current_permission_mode`), `set_permission_mode`, `set_model`,
+//!   `interrupt`.
 //! - `control_request` from the child: `can_use_tool` with `tool_name`,
 //!   `input`, `tool_use_id`. Only with `--permission-prompt-tool stdio`;
 //!   silence is a deny because there is no terminal to fall back to.
@@ -44,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::json::*;
+use crate::options::{humanize, Catalogue, Choice, ModelChoice, Options};
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a permission card may sit unanswered before the child is told no.
@@ -52,12 +55,8 @@ pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(600);
 /// The Claude Code release this wire was last checked against.
 pub const TESTED_CLAUDE_VERSION: &str = "2.1.283";
 
-pub const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "bypassPermissions"];
-pub const MODELS: &[&str] = &["default", "fable", "opus", "sonnet", "haiku"];
-/// `/effort` levels, as `claude --help` lists them.
-pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-
-/// What to call a model on a pill. Claude Code reports the full id in
+/// What to call a model that is not on the list Claude Code hands out
+/// (`Options::model`), from its name alone. Claude Code reports the full id in
 /// `system/init` (`claude-opus-5-5`, `claude-haiku-4-5-20251001`,
 /// `claude-3-5-sonnet-20241022`) and takes the family alias on the wire
 /// (`opus`, `opus[1m]`); both read as "Opus 5.5", "Haiku 4.5", "Sonnet
@@ -103,74 +102,544 @@ pub fn model_label(model: &str) -> String {
     out
 }
 
-/// What to call an effort level on a pill; empty is the session's default.
-pub fn effort_label(effort: &str) -> String {
-    match effort {
-        "" => "Default effort".into(),
-        "xhigh" => "Extra high effort".into(),
-        e => {
-            let mut c = e.chars();
-            let head = c.next().map(|f| f.to_uppercase().collect::<String>()).unwrap_or_default();
-            format!("{head}{} effort", c.as_str())
-        }
-    }
+/// Claude Code's words for a permission mode. The wire names its modes
+/// and says nothing more of them (`claude --help` lists the names,
+/// `initialize` the one in force), so a name known here gets the title
+/// Claude Code's own terminal gives it and a line on what it does. A name
+/// this build has not met is made readable and offered all the same: the
+/// list is the agent's, these are only the words for it.
+pub fn mode_words(key: &str) -> (String, &'static str) {
+    let (label, detail) = match key {
+        "default" | "manual" => ("Manual", "Asks before each tool that needs permission."),
+        "acceptEdits" => ("Accept edits", "File edits go through; commands still ask."),
+        "plan" => ("Plan", "Reads and plans; writes nothing until the plan is approved."),
+        "auto" => ("Auto", "Claude Code decides what is safe to run, and asks about the rest."),
+        "bypassPermissions" => ("Bypass permissions", "Nothing asks; nothing is held."),
+        "dontAsk" => ("Don't ask", "Anything not already allowed is denied without asking."),
+        _ => return (humanize(key), ""),
+    };
+    (label.into(), detail)
 }
 
-/// One line on an effort level, as `/effort` describes them.
-pub fn effort_detail(effort: &str) -> &'static str {
-    match effort {
+/// The same for an effort level, which the wire also only names.
+pub fn effort_words(key: &str) -> (String, &'static str) {
+    let detail = match key {
         "low" => "Quick answers, little deliberation.",
         "medium" => "Balanced reasoning for everyday work.",
         "high" => "Deeper reasoning on harder problems.",
         "xhigh" => "Very deep reasoning; slower.",
         "max" => "Deepest reasoning; may overthink. For the hardest tasks.",
-        _ => "Whatever the session started with.",
-    }
+        _ => "",
+    };
+    (if key == "xhigh" { "Extra high".into() } else { humanize(key) }, detail)
 }
 
-/// What to call a permission mode on a pill.
-pub fn mode_label(mode: &str) -> &'static str {
-    match mode {
-        "acceptEdits" => "Accept edits",
-        "plan" => "Plan mode",
-        "auto" => "Auto mode",
-        "bypassPermissions" => "Bypass permissions",
-        "dontAsk" => "Don't ask",
-        _ => "Default permissions",
+/// The colour Claude Code's terminal names a mode in, at the foot of its
+/// prompt: each mode has a theme colour (`inactive` for manual,
+/// `planMode`, `autoAccept` for accept edits, `warning` for auto, `error`
+/// for bypass and don't ask; read out of the 2.1.289 binary with the
+/// light and dark themes' values). None for a mode not met, which the
+/// window colours by its place on the list.
+pub fn mode_color(key: &str) -> Option<[u32; 2]> {
+    Some(match key {
+        "default" | "manual" => [0x666666, 0x999999],
+        "plan" => [0x006666, 0x48968C],
+        "acceptEdits" => [0x8700FF, 0xAF87FF],
+        "auto" => [0x966C1E, 0xFFC107],
+        "bypassPermissions" | "dontAsk" => [0xAB2B3F, 0xFF6B80],
+        _ => return None,
+    })
+}
+
+fn mode_choice(key: &str) -> Choice {
+    // `--help` calls the default mode "manual"; the wire and the
+    // transcript call it "default", and take either.
+    let key = if key == "manual" { "default" } else { key };
+    let (label, detail) = mode_words(key);
+    Choice { key: key.into(), label, detail: detail.into(), color: mode_color(key), spectrum: Vec::new() }
+}
+
+/// The colour Claude Code's `/effort` slider names a level in: its table
+/// of levels gives each a theme colour (`warning` for low, `success` for
+/// medium, `permission` for high, `autoAccept` shimmering for xhigh;
+/// read out of the 2.1.289 binary with the light and dark themes'
+/// values). Max has none of its own: it is drawn as a moving rainbow
+/// (`effort_spectrum`).
+pub fn effort_color(key: &str) -> Option<[u32; 2]> {
+    Some(match key {
+        "low" => [0x966C1E, 0xFFC107],
+        "medium" => [0x2C7A39, 0x4EBA65],
+        "high" => [0x5769F7, 0xB1B9F9],
+        "xhigh" => [0x8700FF, 0xAF87FF],
+        _ => return None,
+    })
+}
+
+/// The rainbow Claude Code draws "max" in, as its theme lists it.
+pub fn effort_spectrum(key: &str) -> Vec<u32> {
+    if key == "max" { vec![0xEB5F57, 0xF58B57, 0xFAC35F, 0x91C882, 0x82AADC, 0x9B82C8, 0xC882B4] } else { Vec::new() }
+}
+
+fn effort_choice(key: &str) -> Choice {
+    let (label, detail) = effort_words(key);
+    Choice { key: key.into(), label, detail: detail.into(), color: effort_color(key), spectrum: effort_spectrum(key) }
+}
+
+/// The values `claude --help` lists for `option`, in its order:
+/// `(choices: "acceptEdits", "auto", …)` for `--permission-mode`,
+/// `(low, medium, high, xhigh, max)` for `--effort`. The description runs
+/// over several lines, up to the next option. Empty when the option is
+/// not there or its brackets hold a sentence instead of a list.
+pub fn help_values(help: &str, option: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut inside = false;
+    for line in help.lines() {
+        let t = line.trim_start();
+        if inside {
+            if t.starts_with('-') {
+                break;
+            }
+            text.push(' ');
+            text.push_str(t);
+        } else if t.starts_with(option) && t[option.len()..].starts_with([' ', '=', ',']) {
+            inside = true;
+            text.push_str(t);
+        }
     }
+    let Some(open) = text.rfind('(') else { return Vec::new() };
+    let Some(close) = text[open..].find(')') else { return Vec::new() };
+    let list = text[open + 1..open + close].trim();
+    let list = list.strip_prefix("choices:").unwrap_or(list);
+    let values: Vec<String> = list.split(',').map(|v| v.trim().trim_matches(['"', '\'']).to_string()).collect();
+    let word = |v: &String| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if values.iter().all(word) { values } else { Vec::new() }
+}
+
+/// `claude --help`, read once: the only place Claude Code lists its
+/// permission modes.
+fn claude_help() -> &'static str {
+    static HELP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HELP.get_or_init(|| {
+        let Some(binary) = claude_binary() else { return String::new() };
+        let mut cmd = Command::new(binary);
+        cmd.arg("--help").env_clear();
+        for (k, v) in child_env() {
+            cmd.env(k, v);
+        }
+        cmd.output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+    })
+}
+
+/// What Claude Code offers a session, from its own answers: the models,
+/// each with the effort levels it takes, are the `models` of an
+/// `initialize` reply (`value`, `displayName`, `description`,
+/// `resolvedModel`, `supportedEffortLevels`; checked against 2.1.289,
+/// twelve models here), and the modes and the effort levels at large are
+/// what `--help` lists for `--permission-mode` and `--effort`. No request
+/// lists the modes: `set_permission_mode` only takes one or refuses it.
+pub fn options_from(reply: &Value, help: &str) -> Options {
+    let mut options = Options {
+        modes: help_values(help, "--permission-mode").iter().map(|k| mode_choice(k)).collect(),
+        efforts: help_values(help, "--effort").iter().map(|k| effort_choice(k)).collect(),
+        ..Default::default()
+    };
+    for m in arr_of(reply, "models") {
+        let key = str_of(m, "value");
+        if key.is_empty() {
+            continue;
+        }
+        let label = str_of(m, "displayName");
+        options.models.push(ModelChoice {
+            key: key.into(),
+            label: if label.is_empty() { model_label(key) } else { label.into() },
+            detail: str_of(m, "description").into(),
+            resolved: str_of(m, "resolvedModel").into(),
+            efforts: arr_of(m, "supportedEffortLevels").iter().filter_map(Value::as_str).map(effort_choice).collect(),
+        });
+    }
+    if options.models.iter().any(|m| m.key == "default") {
+        options.default_model = "default".into();
+    }
+    options
 }
 
 /// The permission mode a terminal session's screen shows. Claude Code
 /// names the mode at the foot of its prompt ("manual mode on" for the
-/// default, "plan mode on (shift+tab to cycle)"; read off 2.1.288), and
-/// that footer is the only place a terminal session says which mode
-/// ⇧Tab landed on before its next prompt row. `text` is what the
-/// terminal is showing; only its last lines are read, so a conversation
-/// that mentions a mode higher up is not taken for the footer. None when
-/// the footer is not there, under a dialog, say.
-pub fn mode_on_screen(text: &str) -> Option<&'static str> {
-    const SHOWN: [(&str, &str); 6] = [
-        ("manual mode on", "default"),
-        ("plan mode on", "plan"),
-        ("accept edits on", "acceptEdits"),
-        ("auto mode on", "auto"),
-        ("bypass permissions on", "bypassPermissions"),
-        ("don't ask on", "dontAsk"),
-    ];
-    text.lines().rev().filter(|l| !l.trim().is_empty()).take(3).find_map(|line| SHOWN.iter().find(|(words, _)| line.contains(words)).map(|(_, mode)| *mode))
+/// default, "plan mode on (shift+tab to cycle)", "accept edits on"; read
+/// off 2.1.288), and that footer is the only place a terminal session
+/// says which mode ⇧Tab landed on before its next prompt row. The footer
+/// uses the mode's title, so each of `modes` is looked for by its own
+/// label, the longest that fits. `text` is what the terminal is showing;
+/// only its last lines are read, so a conversation that mentions a mode
+/// higher up is not taken for the footer. None when the footer is not
+/// there, under a dialog, say.
+pub fn mode_on_screen(text: &str, modes: &[Choice]) -> Option<String> {
+    let plain = |s: &str| s.to_lowercase().replace(['\'', '’'], "");
+    text.lines().rev().filter(|l| !l.trim().is_empty()).take(3).find_map(|line| {
+        let line = plain(line);
+        modes
+            .iter()
+            .map(|m| (plain(&m.label), m))
+            .filter(|(words, _)| !words.is_empty() && (line.contains(&format!("{words} mode on")) || line.contains(&format!("{words} on"))))
+            .max_by_key(|(words, _)| words.len())
+            .map(|(_, m)| m.key.clone())
+    })
 }
 
-/// One line on what a mode does, under its name in the picker.
-pub fn mode_detail(mode: &str) -> &'static str {
-    match mode {
-        "acceptEdits" => "File edits go through; commands still ask.",
-        "plan" => "Reads and plans; writes nothing until the plan is approved.",
-        "auto" => "Claude Code decides what is safe to run, and asks about the rest.",
-        "bypassPermissions" => "Nothing asks; nothing is held.",
-        "dontAsk" => "Anything not already allowed is denied without asking.",
-        _ => "Asks before each tool that needs permission.",
+/// What a terminal session says it is doing while a turn runs: Claude
+/// Code's line over its prompt, "✳ Embellishing… (13s · ↓ 1.0k tokens)",
+/// a mark that turns, a word in the agent's colour and the turn's
+/// figures in grey.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Working {
+    /// The word, with its ellipsis: "Embellishing…".
+    pub verb: String,
+    /// The colour the terminal draws the mark in, `0xRRGGBB`, when the
+    /// screen was read with its colours. The word itself shimmers a
+    /// shade lighter and back, so the mark's is the steady one.
+    pub color: Option<u32>,
+    /// What follows the word, as written, each stretch with its colour.
+    pub detail: Vec<(String, Option<u32>)>,
+}
+
+/// The marks Claude Code's spinner turns through (2.1.289).
+const SPINNER_MARKS: &[char] = &['·', '✢', '✳', '✶', '✻', '✽', '*'];
+
+/// The working line on a terminal session's screen, read off 2.1.289 in
+/// Kaku: the last line that is one of the spinner's marks, a space, and
+/// words ending in "…", with or without a bracket of figures after it.
+/// A finished turn's line ("✻ Brewed for 11s") has no ellipsis, a tool
+/// call's line begins with another mark, and only the foot of the
+/// screen is read, so nothing the conversation quotes is taken for it.
+/// `text` may carry the terminal's colour sequences (`cli get-text
+/// --escapes`) or be plain.
+pub fn working_on_screen(text: &str) -> Option<Working> {
+    text.lines().rev().filter(|l| !strip_sgr(l).trim().is_empty()).take(14).find_map(|line| {
+        let spans = sgr_spans(line.trim_end_matches('\r'));
+        let plain: String = spans.iter().map(|(t, _)| t.as_str()).collect();
+        let mut chars = plain.chars();
+        let mark = chars.next()?;
+        if !SPINNER_MARKS.contains(&mark) || chars.next() != Some(' ') {
+            return None;
+        }
+        let rest = chars.as_str();
+        let end = rest.find('…')? + '…'.len_utf8();
+        let verb = &rest[..end];
+        if verb.contains(['(', ')']) || !verb.chars().next()?.is_alphabetic() {
+            return None;
+        }
+        // The stretches after the word, by the byte they start at.
+        let from = mark.len_utf8() + 1 + end;
+        // The bracket's greys pulse a shade as the word does; one grey.
+        let grey = |c: Option<u32>| c.is_some_and(|v| (v >> 16) & 0xff == (v >> 8) & 0xff && (v >> 8) & 0xff == v & 0xff);
+        let mut detail: Vec<(String, Option<u32>)> = Vec::new();
+        let mut at = 0;
+        for (t, c) in &spans {
+            let start = at;
+            at += t.len();
+            if at <= from {
+                continue;
+            }
+            let t = &t[from.saturating_sub(start).min(t.len())..];
+            let blank = t.trim().is_empty();
+            match detail.last_mut() {
+                Some((last, lc)) if *lc == *c || blank || (grey(*lc) && grey(*c)) => last.push_str(t),
+                _ if blank => {}
+                _ => detail.push((t.to_string(), *c)),
+            }
+        }
+        if let Some((first, _)) = detail.first_mut() {
+            *first = first.trim_start().to_string();
+        }
+        if let Some((last, _)) = detail.last_mut() {
+            *last = last.trim_end().to_string();
+        }
+        detail.retain(|(t, _)| !t.is_empty());
+        Some(Working { verb: verb.to_string(), color: spans.first().and_then(|(_, c)| *c), detail })
+    })
+}
+
+/// A dialog Claude Code holds a terminal session on: a question of its
+/// own (`AskUserQuestion`), the review before the answers go, or an
+/// approval. None of it is in the transcript until it is answered
+/// (2.1.289 writes the assistant row with the call only then), so the
+/// screen is the one place it can be read while it waits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dialog {
+    /// The questions as tabs, when there are several: the header of each
+    /// and whether it has an answer. The last, "Submit", is the review.
+    pub tabs: Vec<(String, bool)>,
+    /// The tab showing, when the screen was read with its colours: the
+    /// terminal sets it on a ground of its own. The review is the last.
+    pub current: Option<usize>,
+    /// What is asked, as the lines over the choices. In the review an
+    /// answer's line begins with "→ ".
+    pub body: Vec<String>,
+    pub options: Vec<DialogOption>,
+    /// The choices are ticked, several at once, and Tab moves on.
+    pub multi: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DialogOption {
+    /// The digit that picks it.
+    pub n: u32,
+    pub label: String,
+    /// The lines under it: what the choice means, or the rest of a long
+    /// label.
+    pub detail: String,
+    /// Ticked or not, on a question that takes several.
+    pub checked: Option<bool>,
+    /// The terminal's pointer is on it.
+    pub cursor: bool,
+}
+
+/// The dialog on a terminal session's screen, read off 2.1.289: under a
+/// rule, the tabs when there are several questions ("← ☐ Fruit ☒ Colors
+/// ✔ Submit →"), the question, the numbered choices each with its lines
+/// of description under it, and at the foot "Enter to select · … · Esc
+/// to cancel"; an approval has its command over "Do you want to
+/// proceed?" and "Esc to cancel · Tab to amend". A digit picks a choice
+/// (on a question that takes several it ticks it, and Tab moves on), so
+/// the number is what a click in the window sends. None when the foot
+/// of the screen is the prompt, not a dialog.
+pub fn dialog_on_screen(text: &str) -> Option<Dialog> {
+    // The colours are read for one thing, the tab that is showing.
+    let styled: Vec<&str> = text.lines().collect();
+    let plain: Vec<String> = styled.iter().map(|l| strip_sgr(l)).collect();
+    let lines: Vec<&str> = plain.iter().map(|l| l.trim_end()).collect();
+    let end = lines.iter().rposition(|l| !l.trim().is_empty())? + 1;
+    let is_rule = |l: &str| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
+    let option = |l: &str| -> Option<(u32, Option<bool>, String)> {
+        let t = l.trim_start().trim_start_matches('❯').trim_start();
+        let dot = t.find('.')?;
+        let n: u32 = t[..dot].parse().ok()?;
+        let rest = t[dot + 1..].strip_prefix(' ')?.trim();
+        let (checked, label) = match rest {
+            r if r.starts_with("[ ]") => (Some(false), r[3..].trim()),
+            r if r.starts_with('[') && r.chars().nth(2) == Some(']') => (Some(true), r[r.char_indices().nth(3).map(|(i, _)| i).unwrap_or(r.len())..].trim()),
+            r => (None, r),
+        };
+        (!label.is_empty()).then(|| (n, checked, label.to_string()))
+    };
+    // The prompt's own foot is a rule, the input, a rule: no dialog.
+    let rules: Vec<usize> = (0..end).rev().filter(|i| is_rule(lines[*i])).take(2).collect();
+    let last = *rules.first()?;
+    // The rule over "Chat about this" is inside the dialog: when only
+    // one choice follows the last rule, the dialog began at the one
+    // before it.
+    let after = lines[last + 1..end].iter().filter(|l| option(l).is_some()).count();
+    let start = match rules.get(1) {
+        Some(prev) if after <= 1 && lines[prev + 1..last].iter().any(|l| option(l).is_some()) => *prev,
+        _ => last,
+    };
+    let mut d = Dialog::default();
+    for (at, l) in lines[start + 1..end].iter().enumerate() {
+        let t = l.trim();
+        if t.is_empty() || is_rule(l) || t.chars().all(|c| c == '╌') || t.contains("Esc to cancel") {
+            continue;
+        }
+        if d.options.is_empty() && d.body.is_empty() && (t.contains('☐') || t.contains('☒')) {
+            for part in t.split("  ").map(|p| p.trim()).filter(|p| !p.is_empty()) {
+                let done = part.starts_with('☒');
+                let name = part.trim_start_matches(['☐', '☒', '✔', '←', '→']).trim();
+                if !name.is_empty() && (part.starts_with(['☐', '☒', '✔'])) {
+                    d.tabs.push((name.to_string(), done));
+                }
+            }
+            let lit = lit_text(styled[start + 1 + at]);
+            d.current = d.tabs.iter().position(|(name, _)| !lit.is_empty() && lit.contains(name.as_str()));
+            continue;
+        }
+        if let Some((n, checked, label)) = option(l) {
+            d.multi |= checked.is_some();
+            d.options.push(DialogOption { n, label, detail: String::new(), checked, cursor: l.trim_start().starts_with('❯') });
+            continue;
+        }
+        // An answer under review keeps its arrow, which is how the
+        // review tells it from its question.
+        let answer = t.starts_with('→');
+        let t = t.trim_start_matches(['│', '●', '→']).trim();
+        let t = if answer && d.options.is_empty() { format!("→ {t}") } else { t.to_string() };
+        let t = t.as_str();
+        match d.options.last_mut() {
+            // "Submit" under a question that takes several is the same
+            // as moving on with Tab.
+            Some(_) if t == "Submit" => {}
+            Some(o) => {
+                if !o.detail.is_empty() {
+                    o.detail.push(' ');
+                }
+                o.detail.push_str(t);
+            }
+            None if !t.is_empty() => d.body.push(t.to_string()),
+            None => {}
+        }
+    }
+    (!d.options.is_empty() && !d.body.is_empty()).then_some(d)
+}
+
+/// The escape sequence `s` begins with: how many bytes it takes, and its
+/// parameters when it is one that sets how text is drawn (`ESC [ … m`).
+/// The others are skipped whole: any other CSI, an OSC up to its
+/// terminator (`ESC ] 8 ;; url ESC \\`, the link a terminal makes of a
+/// path), and the short ones (`ESC ( B`, the character set, which the
+/// terminal writes before bold or dim text).
+fn escape_at(s: &str) -> (usize, Option<&str>) {
+    let b = s.as_bytes();
+    match b.get(1) {
+        Some(b'[') => match s[2..].find(|c: char| ('\x40'..='\x7e').contains(&c)) {
+            Some(end) => (2 + end + 1, s[2 + end..].starts_with('m').then(|| &s[2..2 + end])),
+            None => (s.len(), None),
+        },
+        Some(b']') => {
+            let st = s.find("\x1b\\").map(|i| i + 2);
+            let bel = s.find('\x07').map(|i| i + 1);
+            (st.into_iter().chain(bel).min().unwrap_or(s.len()), None)
+        }
+        Some(b'(') | Some(b')') => (3.min(s.len()), None),
+        Some(_) => (2, None),
+        None => (1, None),
     }
 }
+
+/// A line of terminal output as stretches of text, each with the
+/// foreground colour set for it: true colour only (`38:2::r:g:b` as
+/// WezTerm writes it, or `38;2;r;g;b`), which is what Claude Code uses.
+fn sgr_spans(line: &str) -> Vec<(String, Option<u32>)> {
+    let mut out: Vec<(String, Option<u32>)> = Vec::new();
+    let mut color = None;
+    let mut rest = line;
+    while let Some(i) = rest.find('\x1b') {
+        if i > 0 {
+            out.push((rest[..i].to_string(), color));
+        }
+        // The terminal writes `ESC ( B` before a bold mark, which it
+        // does once the turn has been quiet for a while; read as text,
+        // that hid the line.
+        let (len, sgr) = escape_at(&rest[i..]);
+        if let Some(params) = sgr {
+            let nums: Vec<&str> = params.split([';', ':']).collect();
+            let n = |s: &str| s.parse::<u32>().ok().filter(|v| *v < 256);
+            match nums.first().copied() {
+                Some("38") if nums.get(1) == Some(&"2") && nums.len() >= 5 => {
+                    let rgb: Vec<u32> = nums[nums.len() - 3..].iter().filter_map(|s| n(s)).collect();
+                    color = (rgb.len() == 3).then(|| rgb[0] << 16 | rgb[1] << 8 | rgb[2]);
+                }
+                Some("38") | Some("39") | Some("0") | Some("") => color = None,
+                _ => {}
+            }
+        }
+        rest = rest.get(i + len..).unwrap_or("");
+    }
+    if !rest.is_empty() {
+        out.push((rest.to_string(), color));
+    }
+    out
+}
+
+/// The prompt Claude Code suggests once a turn is over: words in its
+/// input that are not typed yet, which → takes. On the screen they are
+/// the prompt's line between its two rules, after "❯", written dim
+/// (`ESC [ 0;2 m`, read off 2.1.289 in Kaku: "❯\u{a0}" then the dim
+/// words), where typed words are not; so this needs the screen with its
+/// colours, and a line with anything not dim on it is the person's own
+/// typing and no suggestion.
+pub fn suggestion_on_screen(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
+    let is_rule = |l: &str| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
+    let below = (0..plain.len()).rev().find(|i| is_rule(&plain[*i]))?;
+    let above = (0..below).rev().find(|i| is_rule(&plain[*i]))?;
+    if below - above < 2 || !plain[above + 1].trim_start().starts_with('❯') {
+        return None;
+    }
+    let mut words = String::new();
+    for (ix, line) in lines[above + 1..below].iter().enumerate() {
+        let (dim, lit) = dim_text(line);
+        let lit = if ix == 0 { lit.trim_start().trim_start_matches('❯').to_string() } else { lit };
+        if !lit.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}').is_empty() {
+            return None;
+        }
+        let dim = dim.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}');
+        if !dim.is_empty() {
+            if !words.is_empty() {
+                words.push(' ');
+            }
+            words.push_str(dim);
+        }
+    }
+    (!words.is_empty()).then_some(words)
+}
+
+/// A line's text in two: what was written dim, and what was not.
+fn dim_text(line: &str) -> (String, String) {
+    let (mut dim, mut lit) = (String::new(), String::new());
+    let mut on = false;
+    let mut rest = line.trim_end_matches('\r');
+    loop {
+        let i = rest.find('\x1b').unwrap_or(rest.len());
+        if on { dim.push_str(&rest[..i]) } else { lit.push_str(&rest[..i]) }
+        if i == rest.len() {
+            break;
+        }
+        let (len, sgr) = escape_at(&rest[i..]);
+        for p in sgr.unwrap_or("-").split(';') {
+            match p {
+                "38" | "48" => break,
+                "2" => on = true,
+                "22" | "0" | "" => on = false,
+                _ => {}
+            }
+        }
+        rest = rest.get(i + len..).unwrap_or("");
+    }
+    (dim, lit)
+}
+
+/// The text of a line that the terminal set on a ground of its own (a
+/// background colour, or reversed), which is how a dialog marks the tab
+/// that is showing.
+fn lit_text(line: &str) -> String {
+    let mut out = String::new();
+    let mut lit = false;
+    let mut rest = line;
+    while let Some(i) = rest.find('\x1b') {
+        if lit {
+            out.push_str(&rest[..i]);
+        }
+        let (len, sgr) = escape_at(&rest[i..]);
+        {
+            for p in sgr.unwrap_or("-").split(';') {
+                // A colour written with semicolons carries its numbers
+                // as parameters of their own: nothing after it is read.
+                if p == "38" {
+                    break;
+                }
+                if p == "48" {
+                    lit = true;
+                    break;
+                }
+                match p.split(':').next().unwrap_or("") {
+                    "48" | "7" => lit = true,
+                    "49" | "27" | "0" | "" => lit = false,
+                    n if n.len() == 2 && (n.starts_with('4') && n != "48" && n != "49") => lit = true,
+                    _ => {}
+                }
+            }
+        }
+        rest = rest.get(i + len..).unwrap_or("");
+    }
+    if lit {
+        out.push_str(rest);
+    }
+    out
+}
+
+fn strip_sgr(line: &str) -> String {
+    sgr_spans(line).into_iter().map(|(t, _)| t).collect()
+}
+
 pub const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +781,9 @@ pub struct Caps {
     pub model: String,
     pub mode: String,
     pub commands: Vec<CommandInfo>,
+    /// The modes, models and effort levels on offer (`options_from`).
+    #[serde(default)]
+    pub options: Options,
     pub slash_commands: Vec<String>,
     pub terminal_commands: Vec<String>,
     pub skills: Vec<String>,
@@ -817,9 +1289,6 @@ impl Driver {
     }
 
     pub fn set_mode(&self, mode: &str) -> Result<String, DriverError> {
-        if !MODES.contains(&mode) {
-            return Err(DriverError(format!("unknown permission mode: {mode}")));
-        }
         let mut f = Map::new();
         f.insert("mode".into(), Value::String(mode.into()));
         let reply = self.request("set_permission_mode", f, REQUEST_TIMEOUT)?;
@@ -846,8 +1315,9 @@ impl Driver {
     /// `/effort <level>` as a user turn is run as the local command it is,
     /// and the transcript records it, which is where the pill reads it back.
     pub fn set_effort(&self, effort: &str) -> Result<bool, DriverError> {
-        if !EFFORTS.contains(&effort) {
-            return Err(DriverError(format!("unknown effort level: {effort}")));
+        // The level goes out as the argument of a command: one word.
+        if effort.is_empty() || !effort.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(DriverError(format!("not an effort level: {effort}")));
         }
         self.send(&format!("/effort {effort}"), Vec::new())
     }
@@ -1007,6 +1477,12 @@ impl Driver {
         if !str_of(reply, "model").is_empty() {
             g.caps.model = str_of(reply, "model").into();
         }
+        g.caps.options = options_from(reply, claude_help());
+        let mode = str_of(reply, "current_permission_mode");
+        if !mode.is_empty() && g.mode.is_empty() {
+            g.caps.mode = mode.into();
+            g.mode = mode.into();
+        }
     }
 
     fn absorb_init(&self, frame: &Value) {
@@ -1098,18 +1574,19 @@ impl Driver {
     }
 }
 
-/// The commands a session in `cwd` would know: built-ins, bundled skills,
-/// the person's own skills and command files, plugins. Read from a headless
-/// child's `initialize` reply, which costs no model call and leaves no
-/// transcript (checked against 2.1.288: nothing is written until a message
-/// is sent), about half a second. The child is stopped at once.
-pub fn catalogue(cwd: &str) -> Result<Vec<CommandInfo>, DriverError> {
+/// What a session in `cwd` would know: its commands (built-ins, bundled
+/// skills, the person's own skills and command files, plugins) and the
+/// modes, models and effort levels on offer. Read from a headless child's
+/// `initialize` reply, which costs no model call and leaves no transcript
+/// (checked against 2.1.288: nothing is written until a message is sent),
+/// about half a second. The child is stopped at once.
+pub fn catalogue(cwd: &str) -> Result<Catalogue, DriverError> {
     let (tx, _rx) = mpsc::channel();
     let id = throwaway_session_id();
     let d = Driver::start(&id, cwd, false, "", "", tx)?;
-    let commands = d.caps().commands;
+    let caps = d.caps();
     d.stop();
-    Ok(commands)
+    Ok(Catalogue { commands: caps.commands, options: caps.options })
 }
 
 /// A fresh v4-shaped session id for a child that will never write a row.

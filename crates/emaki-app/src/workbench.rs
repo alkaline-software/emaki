@@ -29,10 +29,11 @@ use crate::ui_state::{Rect, UiState};
 use emaki_core::adapters;
 use emaki_core::build::Phase;
 use emaki_core::config::Config;
-use emaki_core::driver::{self, effort_detail, effort_label, image_block, mode_detail, mode_label, model_label, acts_alone, slash_token_at, slash_tokens, CommandInfo, PermissionRequest, EFFORTS, IMAGE_TYPES, MODELS, MODES};
+use emaki_core::driver::{self, image_block, model_label, acts_alone, slash_token_at, slash_tokens, CommandInfo, PermissionRequest, IMAGE_TYPES};
 use emaki_core::find::{FindIndex, Hit};
 use emaki_core::limits::{Limits, SessionContext};
 use emaki_core::model::{questions_of, AgentId, Item, Session};
+use emaki_core::options::{humanize, Choice, Options};
 use emaki_core::search::Results;
 use emaki_core::transcript::SessionRef;
 
@@ -161,15 +162,14 @@ const SCROLL_GAP: Duration = Duration::from_millis(150);
 /// Why neither the terminal nor the project folder button can do anything.
 const FOLDER_GONE: &str = "The session's folder is gone";
 
+/// How long the terminal's last word for what it is doing is kept once
+/// its screen stops showing one.
+const WORKING_KEPT_SECS: f64 = 3.0;
 /// How long a notice stays under the composer.
 pub const NOTICE_SECS: f64 = 8.0;
 
 /// How often the clock reads the status line's files, in seconds.
 const LIMITS_SECS: f64 = 60.0;
-
-/// How long the hint for a mode pick shows before the terminal comes to
-/// the front, in milliseconds: long enough to read one line.
-const MODE_SETTLE_SECS: f64 = 2.0;
 
 /// The height of the row under the composer (limits on the left, the
 /// notice on the right), taken whether or not either has words.
@@ -421,7 +421,7 @@ pub struct Workbench {
     /// renders once sent, like any prompt.
     pub composer: Entity<TextareaState>,
     /// What the composer's placeholder says now; see `render`.
-    composer_placeholder: &'static str,
+    composer_placeholder: String,
     /// Where each segment of a settings control sat on the last draw,
     /// relative to its track, by `control-key`, so the raised plate can
     /// slide from the old choice to the new one. See `segmented`.
@@ -465,6 +465,40 @@ pub struct Workbench {
     /// transcript only learns the mode with its next prompt, so this is
     /// what the pill shows until a turn starts.
     mode_seen: Option<(String, Option<String>, f64)>,
+    /// A terminal's screen is being read for its mode, and the session to
+    /// read again once that is back, when its status line ran meanwhile.
+    mode_reading: bool,
+    mode_read_again: Option<String>,
+    /// What a terminal session's screen says it is doing, and when that
+    /// was read (`read_working`); and whether a read is out now.
+    working_seen: Option<(String, emaki_core::driver::Working, f64)>,
+    working_reading: bool,
+    /// The dialog a terminal session is held on, read off its screen
+    /// (`read_dialog`), whether a read is out now, and whether keys sent
+    /// from here are still on their way.
+    /// The prompt a terminal session's input suggests, read off its
+    /// screen (`read_suggestion`), and whether a read is out now.
+    suggestion: Option<(String, String)>,
+    suggestion_reading: bool,
+    dialog_seen: Option<(String, emaki_core::driver::Dialog)>,
+    dialog_reading: bool,
+    dialog_sending: bool,
+    /// `EMAKI_GO=dialog:<keys>`, `answer:<words>` or `goto:<tab>`, done once on the
+    /// first dialog read, for a check from a script.
+    dialog_probe: Option<String>,
+    /// What a terminal is being opened for: the session, the action, and
+    /// when the opening began (`via_terminal`, `terminal_ready`).
+    pending_terminal: Option<(String, TerminalAction, f64)>,
+    /// The session whose freshly opened terminal has its prompt on the
+    /// screen, and whether that screen is being read now.
+    terminal_up: Option<String>,
+    terminal_probing: bool,
+    /// The terminal session ⇧Tab was last sent to from here, until its
+    /// screen has been read back.
+    mode_pressed: Option<String>,
+    /// The session whose mode was changed since its last turn, from here
+    /// or in its terminal, whatever it is now.
+    mode_touched: Option<(String, Vec<(String, f64)>)>,
     /// Which row of the slash-command list the keys are on, counted over
     /// every match; back to the first whenever the typed text changes.
     pub slash_sel: usize,
@@ -608,21 +642,120 @@ fn greeting(name: &str) -> String {
     if name.is_empty() { part.to_string() } else { format!("{part}, {name}") }
 }
 
-/// The alias on the wire (`opus`) for a model however it is named: the
-/// alias itself, or the id Claude Code reports (`claude-opus-5-5`).
-fn model_key(model: &str) -> &'static str {
-    MODELS.iter().skip(1).find(|a| model == **a || model.contains(**a)).copied().unwrap_or("default")
+/// What to call a mode: the agent's name for it, else its key made
+/// readable.
+pub(crate) fn mode_name(options: &Options, key: &str) -> String {
+    options.mode(key).map(|m| m.label.clone()).unwrap_or_else(|| humanize(key))
 }
 
-/// One line on a model, under its name in the picker.
-fn model_detail(model: &str) -> &'static str {
-    match model {
-        "fable" => "The most capable; slowest.",
-        "opus" => "Deep work on hard problems.",
-        "sonnet" => "The everyday balance of speed and depth.",
-        "haiku" => "Fastest and cheapest.",
-        _ => "Whatever this account uses by default.",
+/// What to call a model, however the session names it: the agent's name
+/// for that key or id, else the id read for a family and a version.
+pub(crate) fn model_name(options: &Options, name: &str) -> String {
+    if let Some(m) = options.model(name) {
+        return m.label.clone();
     }
+    if name.is_empty() {
+        if let Some(m) = options.model(&options.default_model) {
+            return m.label.clone();
+        }
+    }
+    match name.strip_suffix("[1m]").and_then(|base| options.model(base)) {
+        Some(m) => format!("{} 1M", m.label),
+        None => model_label(name),
+    }
+}
+
+/// The colour of a choice's name: none, one, or several run through
+/// its letters.
+#[derive(Clone)]
+pub(crate) enum Tint {
+    Plain,
+    Solid(Hsla),
+    Spectrum(Vec<Hsla>),
+}
+
+/// A choice's name in bold, in its colour.
+pub(crate) fn tinted(value: &str, tint: &Tint) -> Div {
+    let bold = div().font_weight(FontWeight::SEMIBOLD);
+    match tint {
+        Tint::Plain => bold.child(value.to_string()),
+        Tint::Solid(c) => bold.text_color(*c).child(value.to_string()),
+        Tint::Spectrum(colors) => {
+            let n = value.chars().count();
+            let at = |i: usize| colors[if n > 1 { i * (colors.len() - 1) / (n - 1) } else { 0 }];
+            bold.flex().children(value.chars().enumerate().map(|(i, c)| div().text_color(at(i)).child(c.to_string())))
+        }
+    }
+}
+
+/// What a pill says: the choice in bold, in its colour when it has one,
+/// and a plain word after it ("**Plan** mode", "**High** effort").
+#[derive(Clone)]
+pub(crate) struct PillText {
+    value: String,
+    tint: Tint,
+    tail: &'static str,
+}
+
+impl PillText {
+    fn plain(value: String) -> Self {
+        PillText { value, tint: Tint::Plain, tail: "" }
+    }
+}
+
+/// The colour of a choice with none of its own, by its place on a list
+/// of `len`: the status row's colours from low to high.
+fn ramp(ix: usize, len: usize, theme: &gpui_component::Theme) -> Hsla {
+    let steps = [theme.blue, theme.success, theme.warning, theme.magenta, theme.danger];
+    let t = if len > 1 { ix as f32 / (len - 1) as f32 } else { 0. };
+    steps[(t * (steps.len() - 1) as f32).round() as usize]
+}
+
+/// The colour of the choice at `ix` of `list`: the agent's own when it
+/// shows that choice in one (or in several), else one by its place.
+fn tint_of(list: &[Choice], ix: usize, theme: &gpui_component::Theme) -> Tint {
+    let c = &list[ix];
+    if !c.spectrum.is_empty() {
+        return Tint::Spectrum(c.spectrum.iter().map(|v| rgb(*v).into()).collect());
+    }
+    Tint::Solid(match c.color {
+        Some([light, dark]) => rgb(if theme.mode.is_dark() { dark } else { light }).into(),
+        None => ramp(ix, list.len(), theme),
+    })
+}
+
+/// The colour of a mode, by its key or its name: the agent's own for it
+/// (Claude Code names each mode in a colour at the foot of its prompt),
+/// else one by its place on the list.
+pub(crate) fn mode_color(options: &Options, mode: &str, theme: &gpui_component::Theme) -> Tint {
+    match options.modes.iter().position(|m| m.key == mode || m.label == mode) {
+        Some(ix) => tint_of(&options.modes, ix, theme),
+        None => Tint::Plain,
+    }
+}
+
+/// The colour of an effort level, by its key or its name: the agent's
+/// own for it (Claude Code's `/effort` slider has one per level), else
+/// where it sits between the lowest and the highest.
+pub(crate) fn effort_color(options: &Options, model: &str, effort: &str, theme: &gpui_component::Theme) -> Tint {
+    let on = |list: &[Choice]| list.iter().position(|e| e.key == effort || e.label == effort).map(|ix| tint_of(list, ix, theme));
+    on(options.efforts_for(model)).or_else(|| on(&options.efforts)).or_else(|| options.models.iter().find_map(|m| on(&m.efforts))).unwrap_or(Tint::Plain)
+}
+
+/// What a mode's pill says: its name, and "mode" after a name of one
+/// word, so "Plan" reads as "Plan mode" beside an effort and a model.
+fn mode_pill(options: &Options, mode: &str, theme: &gpui_component::Theme) -> PillText {
+    let value = mode_name(options, mode);
+    let tail = if value.contains(' ') { "" } else { "mode" };
+    PillText { value, tint: mode_color(options, mode, theme), tail }
+}
+
+/// What the effort pill says; an empty level is the session's default.
+fn effort_pill(options: &Options, model: &str, effort: &str, theme: &gpui_component::Theme) -> PillText {
+    if effort.is_empty() {
+        return PillText { value: "Default".into(), tint: Tint::Plain, tail: "effort" };
+    }
+    PillText { value: options.effort_label(model, effort), tint: effort_color(options, model, effort, theme), tail: "effort" }
 }
 
 impl Workbench {
@@ -679,6 +812,10 @@ impl Workbench {
                         cx.notify();
                     }
                     this.watch_terminal(cx);
+                    this.terminal_ready(cx);
+                    this.read_working(cx);
+                    this.read_dialog(cx);
+                    this.read_suggestion(cx);
                     if this.now < this.ctx_watch_until {
                         if let Some(id) = this.shown_session().map(|s| s.id.clone()) {
                             if this.refresh_context(&id) {
@@ -764,7 +901,8 @@ impl Workbench {
         }
         // `EMAKI_KEYS=down,down,tab` presses those keys in the composer a
         // few seconds in (up, down, tab, esc: the slash list's keys, less
-        // the one that runs a command), as actions through the focus.
+        // the one that runs a command; shift-up and shift-down, which
+        // extend the selection), as actions through the focus.
         if let Some(keys) = std::env::var("EMAKI_KEYS").ok().filter(|s| !s.is_empty()) {
             let composer = composer.clone();
             cx.spawn_in(window, async move |_, cx| {
@@ -777,9 +915,28 @@ impl Workbench {
                         "down" => window.dispatch_action(Box::new(gpui_component::input::MoveDown), cx),
                         "tab" => window.dispatch_action(Box::new(gpui_component::input::IndentInline), cx),
                         "esc" => window.dispatch_action(Box::new(gpui_component::input::Escape), cx),
+                        "shift-up" => window.dispatch_action(Box::new(gpui_base::actions::SelectUp), cx),
+                        "shift-down" => window.dispatch_action(Box::new(gpui_base::actions::SelectDown), cx),
                         _ => {}
                     });
                 }
+            })
+            .detach();
+        }
+        // `EMAKI_SHOT=<file.png>` writes a picture of the window there a
+        // few seconds in (`EMAKI_SHOT_AFTER`, five by default) and quits:
+        // with the variables above, any state is one launch away from
+        // being looked at, and the app needs no access to capture itself.
+        if let Some(path) = std::env::var_os("EMAKI_SHOT").filter(|p| !p.is_empty()) {
+            let after = std::env::var("EMAKI_SHOT_AFTER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(5.0);
+            cx.spawn_in(window, async move |_, cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(after)).await;
+                let _ = cx.update(|window, cx| {
+                    if let Err(e) = crate::sys::shoot_window(window, std::path::Path::new(&path)) {
+                        eprintln!("emaki: EMAKI_SHOT: {e}");
+                    }
+                    cx.quit();
+                });
             })
             .detach();
         }
@@ -822,6 +979,21 @@ impl Workbench {
             picks: HashMap::new(),
             come_back: None,
             mode_seen: None,
+            mode_reading: false,
+            working_seen: None,
+            working_reading: false,
+            suggestion: None,
+            suggestion_reading: false,
+            dialog_seen: None,
+            dialog_reading: false,
+            dialog_sending: false,
+            dialog_probe: std::env::var("EMAKI_GO").ok().filter(|g| g.starts_with("dialog:") || g.starts_with("answer:") || g.starts_with("goto:")),
+            pending_terminal: None,
+            terminal_up: None,
+            terminal_probing: false,
+            mode_read_again: None,
+            mode_pressed: None,
+            mode_touched: None,
             slash_sel: 0,
             slash_closed: false,
             drivers: HashMap::new(),
@@ -857,7 +1029,7 @@ impl Workbench {
             last_ui_save: std::time::Instant::now(),
             narrow: false,
             pane_w: px(1180.),
-            composer_placeholder: PLACEHOLDER_NEW,
+            composer_placeholder: PLACEHOLDER_NEW.to_string(),
             settings_scroll: ScrollHandle::new(),
             seg_bounds: Rc::new(std::cell::RefCell::new(HashMap::new())),
             seg_state: std::cell::RefCell::new(HashMap::new()),
@@ -925,6 +1097,9 @@ impl Workbench {
                 // terminal wrote the mode with its prompt.
                 if let Some((sid, _, then)) = &self.mode_seen {
                     if self.refs.iter().any(|r| r.session_id == *sid && r.mtime > *then && self.is_working(r)) {
+                        if self.mode_touched.as_ref().is_some_and(|(s, _)| s == sid) {
+                            self.mode_touched = None;
+                        }
                         self.mode_seen = None;
                     }
                 }
@@ -988,6 +1163,21 @@ impl Workbench {
             HubEvent::Note(text) => {
                 self.notice = Some(Notice::error(text));
                 cx.notify();
+            }
+            // A terminal's status line ran: what it says of the session
+            // showing is read at once, and so is the mode on its screen,
+            // which is what a ⇧Tab there changed.
+            HubEvent::Context(sid) => {
+                self.watch_terminal(cx);
+                self.terminal_ready(cx);
+                if self.selected_ref().is_some_and(|r| self.page == Page::Session && r.session_id == sid) {
+                    if self.refresh_context(&sid) {
+                        cx.notify();
+                    }
+                    self.read_terminal_mode(&sid, cx);
+                    self.read_working(cx);
+                    self.read_dialog(cx);
+                }
             }
             HubEvent::Commands => {
                 self.mark_slash(cx);
@@ -1232,6 +1422,7 @@ impl Workbench {
                 self.permissions.push((r.session_id.clone(), sample_question()));
             }
             self.read_terminal_mode(&r.session_id, cx);
+            self.read_dialog(cx);
             self.load_detail(r, cx);
             // `EMAKI_GO=terminal` presses the go-to-terminal action once the
             // session is open, `EMAKI_GO=type:<text>` types that into its
@@ -1240,9 +1431,10 @@ impl Workbench {
             match std::env::var("EMAKI_GO").as_deref() {
                 Ok("terminal") => self.go_to_terminal(cx),
                 Ok(t) if t.starts_with("type:") => self.run_in_terminal(t["type:".len()..].to_string(), cx),
-                Ok("pill:mode") => self.pick_in_terminal(Pill::Mode, cx),
-                Ok("pill:model") => self.pick_in_terminal(Pill::Model, cx),
-                Ok("pill:effort") => self.pick_in_terminal(Pill::Effort, cx),
+                Ok("pill:mode") => self.via_terminal(TerminalAction::Pick(Pill::Mode), cx),
+                Ok("pill:model") => self.via_terminal(TerminalAction::Pick(Pill::Model), cx),
+                Ok("pill:effort") => self.via_terminal(TerminalAction::Pick(Pill::Effort), cx),
+                Ok("step:mode") => self.via_terminal(TerminalAction::StepMode, cx),
                 Ok(t) if t.starts_with("mode:") => self.set_mode(&t["mode:".len()..], cx),
                 Ok(t) if t.starts_with("model:") => self.set_model(&t["model:".len()..], cx),
                 Ok(t) if t.starts_with("effort:") => self.set_effort(&t["effort:".len()..], cx),
@@ -1487,7 +1679,8 @@ impl Workbench {
     }
 
     fn set_default_model(&mut self, choice: &str, cx: &mut Context<Self>) {
-        let v = if choice == "default" { String::new() } else { choice.to_string() };
+        // The agent's stand-in for its own default is "no model asked for".
+        let v = if choice == self.options().default_model { String::new() } else { choice.to_string() };
         self.cfg.driver.default_model = v.clone();
         self.next_model = v.clone();
         if let Err(e) = Config::edit(move |c| c.driver.default_model = v) {
@@ -1570,25 +1763,31 @@ impl Workbench {
         };
 
         let default_mode = if self.cfg.driver.default_mode.is_empty() { "default".to_string() } else { self.cfg.driver.default_mode.clone() };
-        // Short names here; the picker under the composer has the long ones
-        // with a line on each.
-        let short_mode = |m: &str| match m {
-            "acceptEdits" => "Accept edits",
-            "plan" => "Plan",
-            "auto" => "Auto",
-            "bypassPermissions" => "Bypass",
-            _ => "Default",
-        };
-        let modes_all = self.modes();
-        let mode_key = modes_all.iter().copied().find(|m| *m == default_mode).unwrap_or("default");
-        let modes = self.segmented("mode", modes_all.iter().map(|m| (*m, short_mode(m).to_string(), None)).collect(), mode_key, Rc::new(|this, key, _, cx| this.set_default_mode(key, cx)), cx);
-        let default_model = if self.cfg.driver.default_model.is_empty() { "default".to_string() } else { self.cfg.driver.default_model.clone() };
-        let model_key_now = MODELS.iter().copied().find(|m| *m == default_model).unwrap_or("default");
-        let models = self.segmented(
-            "model",
-            MODELS.iter().map(|m| (*m, if *m == "default" { "Default".to_string() } else { model_label(m) }, None)).collect(),
-            model_key_now,
-            Rc::new(|this, key, _, cx| this.set_default_model(key, cx)),
+        // The same lists the pills under the composer open, since both
+        // are whatever the agent offers.
+        let options = self.options();
+        let wb = cx.entity().downgrade();
+        let modes = picker(
+            "default-mode",
+            "icons/shield.svg",
+            PillText { tail: "", ..mode_pill(&options, &default_mode, &theme) },
+            self.modes(&options).into_iter().map(|m| (m.key, m.label, m.detail)).collect(),
+            default_mode.clone(),
+            Anchor::TopRight,
+            wb.clone(),
+            Rc::new(|this, key, cx| this.set_default_mode(key, cx)),
+            cx,
+        );
+        let default_model = if self.cfg.driver.default_model.is_empty() { options.default_model.clone() } else { self.cfg.driver.default_model.clone() };
+        let models = picker(
+            "default-model",
+            "icons/box.svg",
+            PillText::plain(model_name(&options, &default_model)),
+            options.models.iter().map(|m| (m.key.clone(), m.label.clone(), m.detail.clone())).collect(),
+            options.model(&default_model).map(|m| m.key.clone()).unwrap_or(default_model),
+            Anchor::TopRight,
+            wb,
+            Rc::new(|this, key, cx| this.set_default_model(key, cx)),
             cx,
         );
 
@@ -2125,10 +2324,8 @@ impl Workbench {
     /// armed.
     pub fn go_to_terminal(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
-        let Some(peer) = self.hub.peer_for(&r.session_id) else {
-            self.notice = Some(Notice::error("this session is not open in a terminal"));
-            cx.notify();
-            return;
+        let Some(peer) = self.hub.peer_for(&r.session_id).filter(|_| self.in_terminal(&r)) else {
+            return self.via_terminal(TerminalAction::Go, cx);
         };
         match crate::sys::focus_terminal(peer.pid) {
             Ok(app) => {
@@ -2148,10 +2345,8 @@ impl Workbench {
     /// under the composer.
     pub fn run_in_terminal(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
-        let Some(peer) = self.hub.peer_for(&r.session_id) else {
-            self.notice = Some(Notice::error("this session is not open in a terminal"));
-            cx.notify();
-            return;
+        let Some(peer) = self.hub.peer_for(&r.session_id).filter(|_| self.in_terminal(&r)) else {
+            return self.via_terminal(TerminalAction::Run(text), cx);
         };
         self.come_back = (!self.is_working(&r)).then(|| ComeBack::on_transcript(&r, self.now));
         self.notice = Some(Notice::said(format!("sending {text} to the terminal…")));
@@ -2163,50 +2358,191 @@ impl Workbench {
         cx.notify();
     }
 
-    /// A click on the mode, model or effort pill of a terminal session.
-    /// The choice is made in the terminal, with Claude Code's own picker,
-    /// and the window comes back when it has been made. The model and
-    /// the effort are a bare `/model` or `/effort` typed there, which
-    /// opens the list or the slider: done is the status line naming
-    /// another model or effort, or, on an idle session, the row the
-    /// command leaves in the transcript ("Kept model as …" when nothing
-    /// was changed). The mode has no command, only ⇧Tab, so the terminal
-    /// comes forward with the keyboard in it (`sys::enter_terminal`) and
-    /// the person presses the key: every press reruns the status line,
-    /// and done is `MODE_SETTLE_SECS` without another. While the agent
-    /// works the status line runs on its own, so a mode change there is
-    /// not watched for and the person comes back by hand.
-    pub fn pick_in_terminal(&mut self, pill: Pill, cx: &mut Context<Self>) {
+    /// A click on one of the three pills. On a session it is the
+    /// terminal's to answer (`via_terminal`). Before a session exists
+    /// there is no terminal to open: the pills show what a new session
+    /// starts in, and a click opens Settings where that is chosen.
+    fn pill_clicked(&mut self, pill: Pill, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == Page::Session {
+            return self.via_terminal(TerminalAction::Pick(pill), cx);
+        }
+        self.settings_section = "sessions";
+        self.settings_open = true;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// Do something only the session's terminal can take: a pick from
+    /// `/model` or `/effort`, a typed command, ⇧Tab for the mode, or just
+    /// going there. With the session in a terminal it is done at once.
+    /// With none, the terminal is opened first, the way the button at the
+    /// top right opens it (`open_in_terminal`: the agent's own resume
+    /// command, an idle driver of ours stopped on the way), the row under
+    /// the composer says so, and the action waits in `pending_terminal`
+    /// until Claude Code has registered there and says it is idle
+    /// (`terminal_ready`). A session a driver is mid-reply on is refused,
+    /// as the button refuses it: one writer per transcript.
+    pub fn via_terminal(&mut self, action: TerminalAction, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
-        let Some(peer) = self.hub.peer_for(&r.session_id) else {
-            self.notice = Some(Notice::error("this session is not open in a terminal"));
+        if matches!(action, TerminalAction::Pick(Pill::Mode)) {
+            return self.pick_in_terminal(Pill::Mode, cx);
+        }
+        // Asked again while the terminal is still coming up: the newer
+        // wish takes the older one's place and goes on waiting, also once
+        // the terminal has registered and is not ready for keys yet. Done
+        // at once here, it was done a second time when the wait ended.
+        if self.pending_terminal.as_ref().is_some_and(|(sid, _, _)| *sid == r.session_id) {
+            self.pending_terminal = Some((r.session_id.clone(), action, self.pending_terminal.as_ref().map(|p| p.2).unwrap_or(self.now)));
+            self.notice = Some(Notice::said("opening the terminal, one moment…"));
             cx.notify();
             return;
+        }
+        if self.in_terminal(&r) {
+            return self.do_in_terminal(action, cx);
+        }
+        if let Err(why) = self.terminal_check(&r) {
+            self.notice = Some(Notice::error(why));
+            cx.notify();
+            return;
+        }
+        if self.drivers.remove(&r.session_id).is_some() {
+            self.hub.stop_driver(&r.session_id);
+        }
+        let argv = emaki_core::terminal::resume_argv(r.agent, &r.session_id);
+        match crate::sys::open_in_terminal(&r.session_id, &r.cwd, &argv) {
+            Ok(()) => {
+                self.pending_terminal = Some((r.session_id.clone(), action, now_secs()));
+                self.notice = Some(Notice::said("opening the terminal, one moment…"));
+                self.hub.refresh();
+            }
+            Err(e) => self.notice = Some(Notice::error(format!("could not open a terminal: {e}"))),
+        }
+        cx.notify();
+    }
+
+    fn do_in_terminal(&mut self, action: TerminalAction, cx: &mut Context<Self>) {
+        match action {
+            TerminalAction::Go => self.go_to_terminal(cx),
+            TerminalAction::Pick(pill) => self.pick_in_terminal(pill, cx),
+            TerminalAction::Run(text) => self.run_in_terminal(text, cx),
+            TerminalAction::StepMode => {
+                if let Some((sid, peer)) = self.terminal_peer() {
+                    self.step_mode(sid, peer, cx);
+                }
+            }
+        }
+    }
+
+    /// While a terminal is being opened for something: wait for it to be
+    /// there and ready, however long that takes, then do what it was
+    /// opened for. Nothing here is a length of time. Two things have to be
+    /// so: Claude Code has registered in that terminal and its record
+    /// says `idle` (a login or trust screen says `waiting`, and is never
+    /// typed into), and its prompt is on the screen, which is the mode's
+    /// footer under it (`terminal_up`, read off the terminal where it can
+    /// be read; where it cannot, the registry's word stands). Looked at
+    /// on the clock and whenever the terminal's status line runs. The
+    /// wait ends only when the person leaves the session.
+    fn terminal_ready(&mut self, cx: &mut Context<Self>) {
+        let Some((sid, _, _)) = self.pending_terminal.clone() else { return };
+        let showing = self.selected_ref().is_some_and(|r| self.page == Page::Session && r.session_id == sid);
+        if !showing {
+            self.pending_terminal = None;
+            self.terminal_up = None;
+            return;
+        }
+        self.hub.refresh_peers();
+        let peer = self.hub.peer_for(&sid).filter(|p| p.status == "idle");
+        let in_terminal = self.selected_ref().is_some_and(|r| self.in_terminal(r));
+        match peer {
+            Some(_) if in_terminal && self.terminal_up.as_deref() == Some(sid.as_str()) => {
+                let (_, action, _) = self.pending_terminal.take().unwrap();
+                self.terminal_up = None;
+                self.notice = None;
+                // Opening the terminal brought it to the front. A pick
+                // keeps the person there, to choose. ⇧Tab asks nothing of
+                // them, so the window takes the front back, as it never
+                // left it when the terminal was already open.
+                let back = matches!(action, TerminalAction::StepMode);
+                self.do_in_terminal(action, cx);
+                if back {
+                    cx.activate(true);
+                }
+            }
+            Some(peer) if in_terminal => {
+                self.notice = Some(Notice::said("opening the terminal, one moment…"));
+                if !self.terminal_probing {
+                    self.terminal_probing = true;
+                    let modes = self.hub.options_for(AgentId::ClaudeCode, &peer.cwd).modes;
+                    cx.spawn(async move |this, cx| {
+                        let up = cx
+                            .background_spawn(async move {
+                                match crate::sys::terminal_text(peer.pid) {
+                                    Some(text) if !modes.is_empty() => emaki_core::driver::mode_on_screen(&text, &modes).is_some(),
+                                    _ => true,
+                                }
+                            })
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.terminal_probing = false;
+                            if up {
+                                this.terminal_up = Some(sid);
+                                this.terminal_ready(cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            _ => {
+                // Kept on the row while it waits, past a notice's usual life.
+                self.notice = Some(Notice::said("opening the terminal, one moment…"));
+                self.hub.refresh();
+            }
+        }
+        cx.notify();
+    }
+
+    /// A click on the mode, model or effort pill of a terminal session.
+    /// The choice is made in the terminal. The model and the effort are a
+    /// bare `/model` or `/effort` typed there, which opens Claude Code's
+    /// own list or slider, and the window comes back when the pick is
+    /// made: done is the status line naming another model or effort, or,
+    /// on an idle session, the row the command leaves in the transcript
+    /// ("Kept model as …" when nothing was changed). The mode has no
+    /// command, only ⇧Tab, and ⇧Tab in the composer presses it in the
+    /// terminal without leaving the window (`step_mode`), so a click on
+    /// the mode pill goes nowhere: it says which key to use. It used to
+    /// go to the terminal for the key, and for a while came back once the
+    /// presses stopped, which landed sometimes and not others.
+    pub fn pick_in_terminal(&mut self, pill: Pill, cx: &mut Context<Self>) {
+        let Some(r) = self.selected_ref().cloned() else { return };
+        if pill == Pill::Mode {
+            self.notice = Some(Notice::said("Use ⇧Tab to change the mode"));
+            cx.notify();
+            return;
+        }
+        let Some(peer) = self.hub.peer_for(&r.session_id).filter(|_| self.in_terminal(&r)) else {
+            return self.via_terminal(TerminalAction::Pick(pill), cx);
         };
         let working = self.is_working(&r);
         let ctx = emaki_core::limits::session_context(&r.session_id);
         let hub = Arc::clone(&self.hub);
         match pill {
-            Pill::Mode => {
-                self.come_back = (!working).then(|| ComeBack {
-                    mode: Some((ctx.as_ref().map(|c| c.seen_at).unwrap_or(0.0), None)),
-                    mtime: None,
-                    ..ComeBack::on_transcript(&r, self.now)
-                });
-                self.notice = Some(Notice::said("going to the terminal…"));
-                std::thread::spawn(move || match crate::sys::enter_terminal(peer.pid) {
-                    Ok(app) if working => hub.say(format!("press ⇧Tab in {app} to change the mode")),
-                    Ok(app) => hub.say(format!("press ⇧Tab in {app} to change the mode; back here once it is set")),
-                    Err(e) => hub.say(e),
-                });
-            }
+            Pill::Mode => {}
             Pill::Model | Pill::Effort => {
                 let command = if pill == Pill::Model { "/model" } else { "/effort" };
-                self.come_back = Some(ComeBack {
-                    pick: Some(ctx.map(|c| (c.model, c.effort)).unwrap_or_default()),
-                    mtime: (!working).then_some(r.mtime),
-                    ..ComeBack::on_transcript(&r, self.now)
-                });
+                // What the pick is measured against. The status line's
+                // word for the session when it has one, else what the
+                // pills show: an empty pair would be "changed" by the
+                // first run of the status line, and the window came back
+                // before anything was chosen. And the transcript as of
+                // this moment, not as of the last scan: a terminal just
+                // opened for this has written its resume rows since, and
+                // those are not the command's row.
+                let before = ctx.map(|c| (c.model, c.effort)).unwrap_or_else(|| (self.current_model(), self.current_effort()));
+                let _ = working;
+                self.come_back = Some(ComeBack { pick: Some(before), mtime: None, typed: Some(now_secs()), ..ComeBack::on_transcript(&r, self.now) });
                 self.notice = Some(Notice::said(format!("opening {command} in the terminal…")));
                 std::thread::spawn(move || match crate::sys::type_in_terminal(peer.pid, command) {
                     Ok(app) => hub.say(format!("choose in {app}; back here once it is set")),
@@ -2217,45 +2553,290 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Once a second while the person is in a terminal for a pill: read
-    /// what the status line last left for that session, and come back
-    /// when it says the choice is made.
+    /// While the person is in a terminal for the model or effort pill:
+    /// come back when the pick is made, and not before. The sign is
+    /// Claude Code's own: its registry record says `waiting` while the
+    /// picker is up and something else once it is closed, chosen or
+    /// cancelled, with the time of each change. So the pick is over when
+    /// the record was seen `waiting` after the command was typed and no
+    /// longer is, or, for a picker opened and closed between two looks,
+    /// when it says `idle` as of a time after the typing. A change alone
+    /// is not enough: the record says `busy` for a few milliseconds
+    /// between the command and the picker (recorded on 2.1.289: busy,
+    /// waiting 7 ms later, idle at the choice). Looked at on the clock
+    /// and whenever the status line runs. What it was measured by before
+    /// came back early after a
+    /// fresh open: the status line naming another effort than a stale
+    /// file had, and the transcript moving, which a resume also does. A
+    /// Claude Code whose record carries no status falls back to the
+    /// status line's word.
     fn watch_terminal(&mut self, cx: &mut Context<Self>) {
-        let now = self.now;
-        let Some(cb) = self.come_back.as_mut().filter(|cb| cb.pick.is_some() || cb.mode.is_some()) else { return };
-        let ctx = emaki_core::limits::session_context(&cb.sid);
-        let mut done = false;
-        if let (Some((model, effort)), Some(c)) = (&cb.pick, &ctx) {
-            done = c.model != *model || c.effort != *effort;
-        }
-        if let Some((seen, moved)) = cb.mode.as_mut() {
-            let at = ctx.as_ref().map(|c| c.seen_at).unwrap_or(0.0);
-            if at != *seen {
-                *seen = at;
-                *moved = Some(now);
-            } else if moved.is_some_and(|t| now - t >= MODE_SETTLE_SECS) {
-                done = true;
+        let Some(cb) = self.come_back.as_ref().filter(|cb| cb.typed.is_some()) else { return };
+        let typed = cb.typed.unwrap_or(0.0);
+        let (sid, picking) = (cb.sid.clone(), cb.picking);
+        self.hub.refresh_peers();
+        let peer = self.hub.peer_for(&sid).filter(|p| !p.status.is_empty());
+        if peer.as_ref().is_some_and(|p| p.status == "waiting" && p.status_at >= typed) {
+            if let Some(cb) = self.come_back.as_mut() {
+                cb.picking = true;
             }
+            return;
         }
+        let Some(cb) = self.come_back.as_ref() else { return };
+        let done = match peer {
+            Some(p) => picking || (p.status == "idle" && p.status_at > typed),
+            None => match (&cb.pick, emaki_core::limits::session_context(&cb.sid)) {
+                (Some((model, effort)), Some(c)) => c.model != *model || c.effort != *effort,
+                _ => false,
+            },
+        };
         if done {
             self.back_from_terminal(cx);
         }
     }
 
+    /// What the terminal says the agent is doing, for the row under the
+    /// conversation: Claude Code's own line over its prompt, the word
+    /// and the turn's figures ("Embellishing… (13s · ↓ 1.0k tokens)"),
+    /// read off the screen of the session showing while its turn runs
+    /// (`driver::working_on_screen`), once a second and whenever its
+    /// status line runs. One read at a time, off the main thread. A
+    /// driven session has no screen, and an IDE's terminal cannot be
+    /// read; the row then says "<agent> is working…".
+    fn read_working(&mut self, cx: &mut Context<Self>) {
+        let target = self
+            .selected_ref()
+            .filter(|r| self.page == Page::Session && self.is_working(r) && self.in_terminal(r))
+            .and_then(|r| self.hub.peer_for(&r.session_id).map(|p| (r.session_id.clone(), p.pid)));
+        let Some((sid, pid)) = target else {
+            if self.working_seen.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        if self.working_reading {
+            return;
+        }
+        self.working_reading = true;
+        cx.spawn(async move |this, cx| {
+            let seen = cx.background_spawn(async move { crate::sys::terminal_styled(pid).and_then(|t| emaki_core::driver::working_on_screen(&t)) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.working_reading = false;
+                // A screen without the line for a moment (a dialog over
+                // it, a redraw) keeps the last word a few seconds.
+                let seen = match seen {
+                    Some(w) => Some((sid, w, this.now)),
+                    None => this.working_seen.take().filter(|(s, _, at)| *s == sid && this.now - at < WORKING_KEPT_SECS),
+                };
+                if this.working_seen != seen {
+                    this.working_seen = seen;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The prompt the terminal suggests for the session showing, once
+    /// its turn is over: Claude Code sets words in its input, dim, that →
+    /// takes there. The composer offers the same words the same way
+    /// (`suggested`): as its placeholder, taken with → or Tab while the
+    /// box is empty, sent as they are with ⌘↩. Read off the screen
+    /// (`driver::suggestion_on_screen`, which needs its colours, so
+    /// WezTerm and Kaku only) once a second while the session is idle in
+    /// its terminal and the box is empty, one read at a time.
+    fn read_suggestion(&mut self, cx: &mut Context<Self>) {
+        let empty = self.composer.read(cx).value().is_empty();
+        let target = self
+            .selected_ref()
+            .filter(|r| self.page == Page::Session && empty && !self.is_working(r) && self.in_terminal(r))
+            .and_then(|r| self.hub.peer_for(&r.session_id).filter(|p| p.status == "idle").map(|p| (r.session_id.clone(), p.pid)));
+        let Some((sid, pid)) = target else {
+            if self.suggestion.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        if self.suggestion_reading {
+            return;
+        }
+        self.suggestion_reading = true;
+        cx.spawn(async move |this, cx| {
+            let words = cx.background_spawn(async move { crate::sys::terminal_styled(pid).and_then(|t| emaki_core::driver::suggestion_on_screen(&t)) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.suggestion_reading = false;
+                let seen = words.map(|w| (sid, w));
+                if this.suggestion != seen {
+                    this.suggestion = seen;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The suggested prompt for the session showing, when there is one.
+    fn suggested(&self) -> Option<&str> {
+        let r = self.selected_ref().filter(|_| self.page == Page::Session)?;
+        self.suggestion.as_ref().filter(|(sid, _)| *sid == r.session_id).map(|(_, w)| w.as_str())
+    }
+
+    /// → or Tab in an empty composer: the suggested prompt becomes the
+    /// text, caret after it, to send or to change. False when the box
+    /// has words or nothing is suggested, and the key is the textarea's.
+    fn accept_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.composer.read(cx).value().is_empty() {
+            return false;
+        }
+        let Some(words) = self.suggested().map(str::to_string) else { return false };
+        let col = words.encode_utf16().count() as u32;
+        self.composer.update(cx, |s, cx| {
+            s.set_value(words, window, cx);
+            s.set_cursor_position(gpui_component::input::Position::new(0, col), window, cx);
+        });
+        self.suggestion = None;
+        cx.notify();
+        true
+    }
+
+    /// The dialog the terminal holds the session showing on, for the card
+    /// over the composer: a question of Claude's, the review of the
+    /// answers, an approval. Claude Code writes none of it to the
+    /// transcript until it is answered, so it is read off the screen
+    /// (`driver::dialog_on_screen`) while the registry record says
+    /// `waiting`, once a second and whenever the status line runs, one
+    /// read at a time. Not while the person was sent to the terminal for
+    /// a pick of their own (`/model`, `/effort`), whose list is theirs to
+    /// use there. A screen that cannot be read leaves the line that says
+    /// to answer in the terminal.
+    fn read_dialog(&mut self, cx: &mut Context<Self>) {
+        let picking = self.come_back.as_ref().is_some_and(|cb| cb.typed.is_some());
+        let target = self.selected_ref().filter(|r| self.page == Page::Session && self.in_terminal(r) && !picking).map(|r| r.session_id.clone()).and_then(|sid| {
+            self.hub.refresh_peers();
+            self.hub.peer_for(&sid).filter(|p| p.status == "waiting").map(|p| (sid, p.pid))
+        });
+        let Some((sid, pid)) = target else {
+            if self.dialog_seen.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        if self.dialog_reading {
+            return;
+        }
+        self.dialog_reading = true;
+        cx.spawn(async move |this, cx| {
+            let seen = cx.background_spawn(async move { crate::sys::terminal_styled(pid).and_then(|t| emaki_core::driver::dialog_on_screen(&t)) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.dialog_reading = false;
+                let seen = seen.map(|d| (sid, d));
+                if this.dialog_seen != seen {
+                    this.dialog_seen = seen;
+                    cx.notify();
+                }
+                if this.dialog_seen.is_some() {
+                    match this.dialog_probe.take() {
+                        Some(g) if g.starts_with("answer:") => {
+                            this.dialog_answer_typed(&g["answer:".len()..], cx);
+                        }
+                        Some(g) if g.starts_with("goto:") => this.dialog_go(g["goto:".len()..].parse().unwrap_or(0), cx),
+                        Some(g) => this.dialog_send(vec![DialogStep { keys: g["dialog:".len()..].replace("tab", "\t"), until: None }], cx),
+                        None => {}
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Answer the terminal's dialog from the card: `steps` are sent to
+    /// the terminal as keys, one after another, each once the screen
+    /// shows what the step before it did. A digit picks a choice; for
+    /// words of the person's own, the digit of "Type something" puts the
+    /// terminal's pointer there, the words go into its field, and Return
+    /// sends them. Sent in one write the dialog took the digit and lost
+    /// the rest, so the steps wait on the screen, not on a clock.
+    fn dialog_send(&mut self, steps: Vec<DialogStep>, cx: &mut Context<Self>) {
+        let Some((sid, _)) = self.dialog_seen.clone() else { return };
+        let Some(peer) = self.hub.peer_for(&sid) else { return };
+        if self.dialog_sending {
+            return;
+        }
+        self.dialog_sending = true;
+        let pid = peer.pid;
+        cx.spawn(async move |this, cx| {
+            let sent = cx
+                .background_spawn(async move {
+                    for step in steps {
+                        crate::sys::text_in_terminal(pid, &step.keys)?;
+                        let Some(until) = step.until else { continue };
+                        // The screen follows the key within a frame or
+                        // two; looked at until it has, and given up on
+                        // when it never does.
+                        let mut shown = false;
+                        for _ in 0..40 {
+                            std::thread::sleep(Duration::from_millis(60));
+                            let dialog = crate::sys::terminal_styled(pid).and_then(|t| emaki_core::driver::dialog_on_screen(&t));
+                            if dialog.is_some_and(|d| until.holds(&d)) {
+                                shown = true;
+                                break;
+                            }
+                        }
+                        if !shown {
+                            return Err("the terminal's dialog did not follow; finish the answer there".to_string());
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.dialog_sending = false;
+                if let Err(e) = sent {
+                    this.notice = Some(Notice::error(e));
+                }
+                this.read_dialog(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Go to another of the dialog's questions, or to its review, as the
+    /// arrow keys do in the terminal: one arrow a step, each once the
+    /// screen shows the tab before it. `to` is the tab's place.
+    fn dialog_go(&mut self, to: usize, cx: &mut Context<Self>) {
+        let Some(from) = self.dialog_seen.as_ref().and_then(|(_, d)| d.current) else { return };
+        let (key, range): (&str, Vec<usize>) = if to > from { ("\x1b[C", (from + 1..=to).collect()) } else { ("\x1b[D", (to..from).rev().collect()) };
+        let steps = range.into_iter().map(|ix| DialogStep { keys: key.to_string(), until: Some(DialogUntil::Tab(ix)) }).collect();
+        self.dialog_send(steps, cx);
+    }
+
+    /// Words typed in the composer while the terminal's dialog offers
+    /// "Type something": they are the answer. False when the dialog on
+    /// the screen has no such field, or takes several choices, where the
+    /// field works another way and is left to the terminal.
+    fn dialog_answer_typed(&mut self, words: &str, cx: &mut Context<Self>) -> bool {
+        let shown = self.selected_ref().map(|r| r.session_id.clone());
+        let Some((_, d)) = self.dialog_seen.as_ref().filter(|(sid, _)| Some(sid) == shown.as_ref()) else { return false };
+        let Some(n) = d.options.iter().find(|o| !d.multi && o.label.starts_with("Type something")).map(|o| o.n) else { return false };
+        let words: String = words.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.dialog_send(
+            vec![
+                DialogStep { keys: n.to_string(), until: Some(DialogUntil::CursorOn(n)) },
+                DialogStep { keys: words.clone(), until: Some(DialogUntil::Says(n, words)) },
+                DialogStep { keys: "\r".into(), until: None },
+            ],
+            cx,
+        );
+        true
+    }
+
     /// The interaction in the terminal is done: the window comes to the
-    /// front, with what the status line says now, and after a change of
-    /// mode with the mode the terminal's own footer shows.
+    /// front, with what the status line says now.
     fn back_from_terminal(&mut self, cx: &mut Context<Self>) {
         let Some(cb) = self.come_back.take() else { return };
         if let Some(id) = self.shown_session().map(|s| s.id.clone()) {
             self.refresh_context(&id);
-        }
-        if cb.mode.is_some() {
-            // Not known until the screen has been read, and never the
-            // transcript's old one.
-            let mtime = self.refs.iter().find(|r| r.session_id == cb.sid).map(|r| r.mtime).unwrap_or(0.0);
-            self.mode_seen = Some((cb.sid.clone(), None, mtime));
-            self.notice = None;
         }
         self.read_terminal_mode(&cb.sid, cx);
         cx.activate(true);
@@ -2263,24 +2844,60 @@ impl Workbench {
     }
 
     /// Read the mode a terminal session is in off its screen
-    /// (`sys::terminal_text`, `driver::mode_on_screen`), for the pill: the
-    /// transcript knows the mode only as of the last prompt, and ⇧Tab
-    /// since then shows nowhere else. Done when a session is opened and
-    /// when the window comes back from its terminal, off the main
-    /// thread. A terminal that cannot be read changes nothing.
+    /// (`sys::terminal_text`, `driver::mode_on_screen`, against the modes
+    /// the agent lists), for the pill: the transcript knows the mode only
+    /// as of the last prompt, and ⇧Tab since then shows nowhere else.
+    /// Done when a session is opened, when the window comes back from its
+    /// terminal, and every time the terminal's status line runs
+    /// (`HubEvent::Context`), which a ⇧Tab makes it do, so the pill
+    /// follows the key within a moment. Off the main thread, one read at
+    /// a time: a run of the status line during a read is read after it.
+    /// A terminal that cannot be read changes nothing.
     fn read_terminal_mode(&mut self, sid: &str, cx: &mut Context<Self>) {
         if self.drivers.contains_key(sid) {
             return;
         }
         let Some(peer) = self.hub.peer_for(sid) else { return };
+        if self.mode_reading {
+            self.mode_read_again = Some(sid.to_string());
+            return;
+        }
+        let modes = self.hub.options_for(AgentId::ClaudeCode, &peer.cwd).modes;
+        if modes.is_empty() {
+            return;
+        }
+        self.mode_reading = true;
         let sid = sid.to_string();
         cx.spawn(async move |this, cx| {
-            let mode = cx.background_spawn(async move { crate::sys::terminal_text(peer.pid).and_then(|t| emaki_core::driver::mode_on_screen(&t)) }).await;
+            let mode = cx.background_spawn(async move { crate::sys::terminal_text(peer.pid).and_then(|t| emaki_core::driver::mode_on_screen(&t, &modes)) }).await;
             let _ = this.update(cx, |this, cx| {
-                let Some(mode) = mode else { return };
-                let mtime = this.refs.iter().find(|r| r.session_id == sid).map(|r| r.mtime).unwrap_or(0.0);
-                this.mode_seen = Some((sid, Some(mode.to_string()), mtime));
-                cx.notify();
+                this.mode_reading = false;
+                // A key pressed from here with no screen to read it back
+                // from: the mode moved and is not known.
+                let pressed = this.mode_pressed.as_deref() == Some(sid.as_str());
+                if mode.is_some() || pressed {
+                    if mode.is_some() {
+                        this.mode_pressed = None;
+                    }
+                    let r = this.refs.iter().find(|r| r.session_id == sid);
+                    let mtime = r.map(|r| r.mtime).unwrap_or(0.0);
+                    // Another mode than the pill had: a change.
+                    let before = match &this.mode_seen {
+                        Some((s, m, _)) if *s == sid => m.clone(),
+                        _ => r.map(|r| r.state.mode.clone()).filter(|m| !m.is_empty()),
+                    };
+                    if mode.is_some() && before.is_some() && mode != before {
+                        this.touch_mode(&sid, mode.clone().unwrap_or_default());
+                    }
+                    let seen = Some((sid, mode, mtime));
+                    if this.mode_seen != seen {
+                        this.mode_seen = seen;
+                        cx.notify();
+                    }
+                }
+                if let Some(again) = this.mode_read_again.take() {
+                    this.read_terminal_mode(&again, cx);
+                }
             });
         })
         .detach();
@@ -2451,7 +3068,15 @@ impl Workbench {
     }
 
     pub fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.composer.read(cx).value().to_string();
+        let mut typed = self.composer.read(cx).value().to_string();
+        // An empty box with a suggested prompt in it sends the prompt,
+        // as Return does in the terminal.
+        if typed.is_empty() && self.attachments.is_empty() {
+            if let Some(words) = self.suggested() {
+                typed = words.to_string();
+                self.suggestion = None;
+            }
+        }
         if typed.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
@@ -2474,6 +3099,11 @@ impl Workbench {
                 self.answer_question_typed(q, typed.trim().to_string(), window, cx);
                 return;
             }
+        } else if self.attachments.is_empty() && self.dialog_answer_typed(typed.trim(), cx) {
+            // The same for a question the terminal holds.
+            self.composer.update(cx, |s, cx| s.set_value("", window, cx));
+            cx.notify();
+            return;
         }
         let (text, images) = self.fold_attachments(&typed, via == "driver" || via == "spawn");
         match via {
@@ -2527,7 +3157,11 @@ impl Workbench {
 
     /// Hand a stopped turn's prompt back: its words in the composer with
     /// the caret after them, and what was attached on the chips again, as
-    /// Claude Code's own terminal does on Escape. The message as it left
+    /// Claude Code's own terminal does on Escape, and only when it does:
+    /// when the turn was stopped before the agent wrote or ran anything.
+    /// Once the agent has started it has the message, the round stays in
+    /// the conversation, and the composer is left for what comes next.
+    /// The message as it left
     /// this window when it was the last thing sent to this session
     /// (pictures included, which a driver takes as blocks and the
     /// transcript keeps no path for); else what the transcript's last
@@ -2537,9 +3171,14 @@ impl Workbench {
         if !self.composer.read(cx).value().trim().is_empty() || !self.attachments.is_empty() {
             return;
         }
-        // The prompt the stop withdrew, when the agent had not started on
-        // it; else the last round, which stays in the conversation.
-        let Some(rnd) = self.shown_session().and_then(|s| s.withdrawn.as_ref().or_else(|| s.rounds.iter().rev().find(|r| !r.queued))) else { return };
+        // The prompt the stop withdrew; or, when the marker of the stop
+        // is not in the transcript yet (a driver is stopped at the
+        // click), the last round while it is still only a prompt, by the
+        // rule the withdrawal goes by (`build::handle_user`).
+        let untouched = |r: &&emaki_core::model::Round| !r.items.iter().any(|it| !matches!(it, Item::Notice { .. }));
+        let Some(rnd) = self.shown_session().and_then(|s| s.withdrawn.as_ref().or_else(|| s.rounds.iter().rev().find(|r| !r.queued).filter(untouched))) else {
+            return;
+        };
         if !matches!(rnd.source, emaki_core::model::Source::User | emaki_core::model::Source::Web) {
             return;
         }
@@ -2563,7 +3202,19 @@ impl Workbench {
         cx.notify();
     }
 
-    /// What Escape closes, nearest first: the lightbox, then the search.
+    /// Escape with nothing to close stops the turn running on the session
+    /// showing, as it does in the terminal and as the Stop pill does.
+    /// False when there is no turn to stop.
+    fn escape_stops(&mut self, cx: &mut Context<Self>) -> bool {
+        let working = self.page == Page::Session && self.selected_ref().is_some_and(|r| self.is_working(r));
+        if working {
+            self.interrupt(cx);
+        }
+        working
+    }
+
+    /// What Escape closes, nearest first: the lightbox, then the search;
+    /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_open {
             self.settings_open = false;
@@ -2575,6 +3226,8 @@ impl Workbench {
             self.close_search(window, cx);
         } else if self.find_open {
             self.close_find(window, cx);
+        } else {
+            self.escape_stops(cx);
         }
     }
 
@@ -2761,11 +3414,62 @@ impl Workbench {
         s
     }
 
-    /// The modes the picker offers: every one Claude Code has, bypass only
-    /// when config allows it.
-    fn modes(&self) -> Vec<&'static str> {
+    /// What the agent offers the session showing, or the folder a new one
+    /// would start in: its modes, its models, their effort levels
+    /// (`Hub::options_for`). The lists under the pills are these.
+    pub(crate) fn options(&self) -> Options {
+        match self.selected_ref().filter(|_| self.page == Page::Session) {
+            Some(r) => self.hub.options_for(r.agent, &r.cwd),
+            None => self.hub.options_for(AgentId::ClaudeCode, &self.new_cwd),
+        }
+    }
+
+    /// The modes the picker offers: every one the agent lists, the one
+    /// that asks nothing only when config allows it.
+    fn modes(&self, options: &Options) -> Vec<Choice> {
         let allow_bypass = self.cfg.driver.allow_bypass;
-        MODES.iter().copied().filter(|m| allow_bypass || *m != "bypassPermissions").collect()
+        options.modes.iter().filter(|m| allow_bypass || m.key != "bypassPermissions").cloned().collect()
+    }
+
+    /// The mode the session showing is in when its transcript does not
+    /// say so yet: changed in the terminal or through the driver since the
+    /// last turn, which the file only learns with the next one. The
+    /// conversation says it at its foot until then (`render_round`).
+    /// Every change since then, each with when it was made where that is
+    /// known: the lines take their places among the round's other lines
+    /// by that time, so mode, effort, mode reads in that order.
+    pub(crate) fn unwritten_modes(&self) -> Vec<(String, Option<f64>)> {
+        if let (Some(r), Some((sid, changes))) = (self.selected_ref(), &self.mode_touched) {
+            if *sid == r.session_id && self.unwritten_mode().is_some() {
+                return changes.iter().map(|(mode, at)| (mode.clone(), Some(*at))).collect();
+            }
+        }
+        self.unwritten_mode().into_iter().collect()
+    }
+
+    /// A change of mode on `sid` seen just now, from here or in its
+    /// terminal.
+    fn touch_mode(&mut self, sid: &str, mode: String) {
+        match &mut self.mode_touched {
+            Some((s, changes)) if s == sid => changes.push((mode, now_secs())),
+            _ => self.mode_touched = Some((sid.to_string(), vec![(mode, now_secs())])),
+        }
+    }
+
+    fn unwritten_mode(&self) -> Option<(String, Option<f64>)> {
+        let written = &self.shown_session()?.mode;
+        let r = self.selected_ref()?;
+        if written.is_empty() {
+            return None;
+        }
+        let live = match self.terminal_mode_seen() {
+            Some(seen) => seen?,
+            None => self.drivers.get(&r.session_id).map(|v| v.mode.clone()).filter(|m| !m.is_empty()).or_else(|| Some(r.state.mode.clone()).filter(|m| !m.is_empty()))?,
+        };
+        // Stepped away and back to where the transcript has it is still a
+        // change the person made, and its line stays until the next turn.
+        let touched = self.mode_touched.as_ref().filter(|(sid, _)| *sid == r.session_id).and_then(|(_, changes)| changes.last().map(|(_, at)| *at));
+        (live != *written || touched.is_some()).then_some((live, touched))
     }
 
     /// The session showing, once loaded.
@@ -2853,7 +3557,7 @@ impl Workbench {
         }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         if self.hub.set_driver_effort(&sid, effort.to_string()) {
-            self.notice = Some(Notice::said(format!("setting {}…", effort_label(effort).to_lowercase())));
+            self.notice = Some(Notice::said(format!("setting {}…", format!("{} effort", self.options().effort_label(&self.current_model(), effort)).to_lowercase())));
         } else {
             self.notice = Some(Notice::error("no driver behind this session"));
         }
@@ -2921,6 +3625,7 @@ impl Workbench {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         self.next_mode = mode.to_string();
         if self.hub.set_driver_mode(&sid, mode.to_string()) {
+            self.touch_mode(&sid, mode.to_string());
             if let Some(v) = self.drivers.get_mut(&sid) {
                 v.mode = mode.to_string();
             }
@@ -2928,12 +3633,53 @@ impl Workbench {
         cx.notify();
     }
 
-    /// ⇧Tab in the composer, as in Claude Code's own terminal.
+    /// ⇧Tab in the composer, as in Claude Code's own terminal. A driven
+    /// session, or one not started, steps down the agent's list. A
+    /// terminal session is stepped by its own key (`step_mode`).
     fn cycle_mode(&mut self, cx: &mut Context<Self>) {
-        let modes = self.modes();
+        if let Some((sid, peer)) = self.terminal_peer() {
+            return self.step_mode(sid, peer, cx);
+        }
+        // A session with no process behind it: its terminal is opened,
+        // and the key pressed there once it is up.
+        if self.page == Page::Session && self.selected_ref().is_some_and(|r| !self.drivers.contains_key(&r.session_id)) {
+            return self.via_terminal(TerminalAction::StepMode, cx);
+        }
+        let modes = self.modes(&self.options());
+        if modes.is_empty() {
+            return;
+        }
         let current = self.current_mode();
-        let i = modes.iter().position(|m| *m == current).map(|i| (i + 1) % modes.len()).unwrap_or(0);
-        self.set_mode(modes[i], cx);
+        let i = modes.iter().position(|m| m.key == current).map(|i| (i + 1) % modes.len()).unwrap_or(0);
+        self.set_mode(&modes[i].key, cx);
+    }
+
+    /// ⇧Tab from the composer, for a terminal session: the same key,
+    /// pressed once in its terminal, which is the only thing that moves
+    /// its mode. The order is Claude Code's, whatever it is for that
+    /// session, so nothing here counts presses or aims at a mode: one
+    /// press for one press, and the pill shows where it landed. WezTerm,
+    /// Kaku and iTerm2 take the key for the pane without coming forward;
+    /// any other host comes forward for it and the window takes the
+    /// front back at once (`sys::key_in_terminal`). The key makes the
+    /// status line run, which is what has the screen read; it is asked
+    /// for twice more in case that run is slow or does not come. Where
+    /// the screen cannot be read (an IDE's terminal) the pill names no
+    /// mode until the next turn, rather than the one from before the key.
+    fn step_mode(&mut self, sid: String, peer: emaki_core::peer::Peer, cx: &mut Context<Self>) {
+        self.come_back = None;
+        self.mode_pressed = Some(sid.clone());
+        let hub = Arc::clone(&self.hub);
+        std::thread::spawn(move || match crate::sys::key_in_terminal(peer.pid, crate::sys::TerminalKey::ShiftTab) {
+            Ok(_) => {
+                for wait in [250, 600] {
+                    std::thread::sleep(Duration::from_millis(wait));
+                    hub.look_at(&sid);
+                }
+            }
+            Err(e) => hub.say(e),
+        });
+        cx.notify();
     }
 
     fn set_model(&mut self, model: &str, cx: &mut Context<Self>) {
@@ -3800,6 +4546,16 @@ impl Workbench {
             let from = if !st.turn_started.is_empty() { &st.turn_started } else if !st.since.is_empty() { &st.since } else { &r.updated };
             let card = self.card_for(&r);
             let what = if card.text.is_empty() { "working".to_string() } else { card.text.clone() };
+            // The terminal's own line when it could be read, in its own
+            // colours: the word in the colour of its mark, the figures
+            // as written (its grey is the muted ink here). Its bracket
+            // carries the turn's time, so ours is left out.
+            let seen = self.working_seen.as_ref().filter(|(sid, _, _)| *sid == r.session_id).map(|(_, w, _)| w.clone());
+            let ink = |c: Option<u32>| match c {
+                Some(v) if (v >> 16) & 0xff == (v >> 8) & 0xff && (v >> 8) & 0xff == v & 0xff => theme.muted_foreground,
+                Some(v) => rgb(v).into(),
+                None => theme.muted_foreground,
+            };
             h_flex()
                 .w_full()
                 .max_w(CONTENT_W)
@@ -3809,9 +4565,15 @@ impl Workbench {
                 .text_size(px(12.))
                 .text_color(theme.muted_foreground)
                 .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), true, "status-glyph"))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} is working", r.agent.speaker())))
-                .child(div().flex_1().min_w_0().truncate().child(what))
-                .child(div().child(elapsed_since(from, self.now)))
+                .map(|d| match seen {
+                    Some(w) => d
+                        .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(w.color.map(|c| rgb(c).into()).unwrap_or_else(|| agent_color(r.agent, &theme))).child(w.verb))
+                        .child(h_flex().flex_1().min_w_0().overflow_hidden().gap(px(4.)).children(w.detail.into_iter().map(|(t, c)| div().flex_shrink_0().text_color(ink(c)).child(t)))),
+                    None => d
+                        .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} is working…", r.agent.speaker())))
+                        .child(div().flex_1().min_w_0().truncate().child(what))
+                        .child(div().child(elapsed_since(from, self.now))),
+                })
                 .child(
                     // Stop, as Escape is in the terminal: a square on a
                     // pill that fills with the danger colour under the
@@ -3832,7 +4594,7 @@ impl Workbench {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)).text_color(theme.danger))
                         .active(|s| s.bg(theme.danger.opacity(0.18)))
-                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Stop this turn (Escape in the terminal)").build(window, cx))
+                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Stop this turn (Esc)").build(window, cx))
                         .on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.interrupt(cx);
@@ -3872,6 +4634,7 @@ impl Workbench {
                 .child(div().child(elapsed_since(&from, self.now)))
         });
 
+        let dialog = self.render_dialog(&r, cx);
         v_flex()
             .flex_1()
             .min_w_0()
@@ -3892,12 +4655,175 @@ impl Workbench {
                     .when(status.is_some() || waiting.is_some(), |d| d.pt(px(12.)))
                     .pb(px(14.))
                     .gap(px(8.))
-                    .children(status)
-                    .children(waiting)
+                    .children(status.filter(|_| dialog.is_none()))
+                    .children(waiting.filter(|_| dialog.is_none()))
+                    .children(dialog)
                     .child(self.render_permissions(cx))
                     .child(self.render_composer(cx)),
             )
             .into_any_element()
+    }
+
+    /// The dialog a terminal session is held on, as a card where the
+    /// permission cards sit: the questions as chips, ticked once
+    /// answered, what is asked, and the choices as rows. A click sends
+    /// the choice's digit to the terminal, whose dialog is the one that
+    /// moves on; the card is its screen read again. Words typed in the
+    /// composer answer a question that offers "Type something".
+    fn render_dialog(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, d) = self.dialog_seen.as_ref().filter(|(sid, _)| *sid == r.session_id)?;
+        let theme = cx.theme().clone();
+        let approval = d.body.last().is_some_and(|l| l.starts_with("Do you want"));
+        let review = d.body.first().is_some_and(|l| l.starts_with("Review your answers"));
+        // What is asked is the last line over the choices; what stands
+        // before it is the command, or the answers under review.
+        let (title, before) = match d.body.split_last() {
+            Some((last, rest)) => (last.clone(), rest.to_vec()),
+            None => (String::new(), Vec::new()),
+        };
+        let typed = !d.multi && d.options.iter().any(|o| o.label.starts_with("Type something"));
+        let busy = self.dialog_sending;
+        let head = if approval { "approval" } else if review { "review" } else { "question" };
+        let says = if approval { format!("{} asks to go ahead", r.agent.speaker()) } else { format!("{} asks", r.agent.speaker()) };
+        let rows = d.options.iter().filter(|o| !(d.multi && o.label.starts_with("Type something"))).map(|o| {
+            let on = o.checked == Some(true);
+            let (n, multi, own) = (o.n, d.multi, o.label.starts_with("Type something"));
+            // The two the dialog adds to every question are quieter.
+            let aside = own || o.label == "Chat about this";
+            h_flex()
+                .id(SharedString::from(format!("dialog-opt-{n}")))
+                .w_full()
+                .px(px(10.))
+                .py(px(7.))
+                .gap(px(10.))
+                .items_start()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(if on { theme.primary } else { theme.border })
+                .bg(if on { theme.primary.opacity(0.08) } else { theme.transparent })
+                .when(busy, |d| d.opacity(0.6))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.list_hover))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    if own {
+                        let handle = this.composer.read(cx).focus_handle(cx);
+                        window.focus(&handle, cx);
+                        this.notice = Some(Notice::said("type your answer in the box and send it"));
+                        cx.notify();
+                    } else {
+                        this.dialog_send(vec![DialogStep { keys: n.to_string(), until: None }], cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .size(px(16.))
+                        .mt(px(1.))
+                        .rounded(if multi && !aside { px(4.) } else { px(8.) })
+                        .border_1()
+                        .border_color(if on { theme.primary } else { theme.muted_foreground.opacity(if aside { 0.5 } else { 1.0 }) })
+                        .bg(if on { theme.primary } else { theme.transparent })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(on, |d| d.child(Icon::new(IconName::Check).with_size(px(11.)).text_color(theme.primary_foreground))),
+                )
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .gap(px(1.))
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).when(aside, |d| d.text_color(theme.muted_foreground)).child(if own { "Type your own answer".to_string() } else { o.label.clone() }))
+                        .when(!o.detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(o.detail.clone()))),
+                )
+        });
+        Some(
+            v_flex()
+                .w_full()
+                .max_w(CONTENT_W)
+                .p(px(14.))
+                .gap(px(12.))
+                .rounded(px(14.))
+                .border_1()
+                .border_color(theme.primary)
+                .bg(theme.popover)
+                .shadow_sm()
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .items_center()
+                        .child(badge_str(head.into(), theme.primary.opacity(0.14), theme.primary))
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(says))
+                        .child(div().flex_1())
+                        // The questions and the review, as the terminal's
+                        // tabs: the one showing ringed, an answered one
+                        // ticked, and a click goes there.
+                        .children(d.tabs.iter().enumerate().map(|(ix, (name, done))| {
+                            let here = d.current == Some(ix);
+                            let reachable = d.current.is_some() && !here && !busy;
+                            h_flex()
+                                .id(SharedString::from(format!("dialog-tab-{ix}")))
+                                .gap(px(4.))
+                                .items_center()
+                                .px(px(8.))
+                                .py(px(2.))
+                                .rounded(px(999.))
+                                .border_1()
+                                .border_color(if here { theme.primary } else { theme.transparent })
+                                .bg(if *done { theme.primary.opacity(0.12) } else { theme.muted })
+                                .text_size(px(11.))
+                                .text_color(if *done || here { theme.primary } else { theme.muted_foreground })
+                                .when(reachable, |d| d.cursor_pointer().hover(|s| s.bg(theme.list_hover)))
+                                .when(reachable, |d| {
+                                    d.on_click(cx.listener(move |this, _, window, cx| {
+                                        swallow_click(window, cx);
+                                        this.dialog_go(ix, cx);
+                                    }))
+                                })
+                                .when(*done, |d| d.child(Icon::new(IconName::Check).with_size(px(10.))))
+                                .child(if name == "Submit" { "Review".to_string() } else { name.clone() })
+                        })),
+                )
+                .when(!before.is_empty(), |el| {
+                    el.child(
+                        v_flex()
+                            .p(px(8.))
+                            .gap(px(2.))
+                            .rounded(px(8.))
+                            .bg(theme.muted)
+                            .text_size(px(12.))
+                            .when(approval, |d| d.font_family(theme.mono_font_family.clone()))
+                            .children(before.into_iter().filter(|l| !(review && l.starts_with("Review your answers"))).map(|l| match l.strip_prefix("→ ") {
+                                // An answer under review, under its question.
+                                Some(answer) => div().pb(px(4.)).whitespace_normal().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.primary).child(answer.to_string()),
+                                None => div().whitespace_normal().when(review, |d| d.text_color(theme.muted_foreground)).child(l),
+                            })),
+                    )
+                })
+                .child(div().text_size(px(14.)).child(title))
+                .when(!review, |el| el.child(v_flex().gap(px(4.)).children(rows)))
+                .when(review, |el| {
+                    // The review's two choices are the card's buttons.
+                    el.child(h_flex().gap(px(8.)).items_center().children(d.options.iter().enumerate().map(|(i, o)| {
+                        let n = o.n;
+                        let b = Button::new(SharedString::from(format!("dialog-review-{n}"))).small().label(o.label.clone()).disabled(busy);
+                        let b = if i == 0 { b.primary() } else { b.outline() };
+                        b.on_click(cx.listener(move |this, _, _, cx| this.dialog_send(vec![DialogStep { keys: n.to_string(), until: None }], cx)))
+                    })))
+                })
+                .when(!review, |el| el.child(
+                    h_flex()
+                        .gap(px(10.))
+                        .items_center()
+                        .when(d.multi, |el| {
+                            el.child(Button::new("dialog-next").primary().small().label("Next").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\t".into(), until: None }], cx))))
+                        })
+                        .child(Button::new("dialog-cancel").ghost().small().label("Cancel  esc").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx))))
+                        .child(div().flex_1())
+                        .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if typed { "or type an answer below" } else { "" })),
+                ))
+                .into_any_element(),
+        )
     }
 
     fn render_permissions(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4354,6 +5280,8 @@ impl Workbench {
         let settable = via == "driver" || via == "spawn" || via == "inbox";
         let effort = self.current_effort();
         let on_session = self.page == Page::Session;
+        let options = self.options();
+        let effort_text = effort_pill(&options, &model, &effort, &theme);
         // The right of the row under the composer: a notice while one is
         // showing (what the last send or action did, an error in red), else
         // why nothing can send, else empty. The row always takes `NOTICE_H`,
@@ -4515,12 +5443,25 @@ impl Workbench {
                         }
                     }))
                     .capture_action(cx.listener(|this, _: &gpui_component::input::IndentInline, window, cx| {
-                        if this.slash_key(SlashKey::Complete, window, cx) {
+                        if this.slash_key(SlashKey::Complete, window, cx) || this.accept_suggestion(window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &gpui_component::input::MoveRight, window, cx| {
+                        if this.accept_suggestion(window, cx) {
                             cx.stop_propagation();
                         }
                     }))
                     .capture_action(cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
+                        // The slash list first, then anything else open,
+                        // then the running turn: the textarea would keep
+                        // the key to itself otherwise.
                         if this.slash_key(SlashKey::Close, window, cx) {
+                            cx.stop_propagation();
+                        } else if this.settings_open || this.lightbox.is_some() || this.search_open || this.find_open {
+                            this.escape(window, cx);
+                            cx.stop_propagation();
+                        } else if this.escape_stops(cx) {
                             cx.stop_propagation();
                         }
                     }))
@@ -4556,32 +5497,22 @@ impl Workbench {
                             }))
                             .child(Icon::new(IconName::Plus).with_size(px(15.))),
                     )
-                    // A terminal session's pills are buttons: the choice is
-                    // made in the terminal (`pick_in_terminal`). Anywhere
-                    // else each opens its list.
-                    .when(via == "inbox", |d| {
-                        let to = |pill: Pill| cx.listener(move |this, _: &ClickEvent, _, cx| this.pick_in_terminal(pill, cx));
+                    // The pills are buttons, on every channel: a choice is
+                    // made in the session's terminal (`pill_clicked`), which
+                    // is opened first when the session has none. Before a
+                    // session exists there is nothing to open, and they say
+                    // what a new one starts in, set in Settings.
+                    .when(settable, |d| {
+                        let to = |pill: Pill| cx.listener(move |this, _: &ClickEvent, window, cx| this.pill_clicked(pill, window, cx));
                         // A mode changed in a terminal that cannot be read
                         // is not known until the next turn.
-                        let mode_text = if mode.is_empty() { "Mode" } else { mode_label(&mode) };
-                        d.child(composer_pill("mode", "icons/shield.svg", mode_text.to_string(), cx).on_click(to(Pill::Mode)))
-                            .child(composer_pill("effort", "icons/gauge.svg", effort_label(&effort), cx).on_click(to(Pill::Effort)))
+                        let mode_text = if mode.is_empty() { PillText { value: String::new(), tint: Tint::Plain, tail: "Mode" } } else { mode_pill(&options, &mode, &theme) };
+                        d.child(composer_pill("mode", "icons/shield.svg", mode_text, cx).on_click(to(Pill::Mode)))
+                            .when(on_session, |d| d.child(composer_pill("effort", "icons/gauge.svg", effort_text.clone(), cx).on_click(to(Pill::Effort))))
                             .child(div().flex_1())
-                            .child(composer_pill("model", "icons/box.svg", model_label(&model), cx).on_click(to(Pill::Model)))
+                            .child(composer_pill("model", "icons/box.svg", PillText::plain(model_name(&options, &model)), cx).on_click(to(Pill::Model)))
                     })
-                    .when(settable && via != "inbox", |d| {
-                        let options = self.modes().into_iter().map(|m| (m, mode_label(m).to_string(), mode_detail(m).to_string())).collect();
-                        d.child(picker("mode", "icons/shield.svg", mode_label(&mode).to_string(), options, mode.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_mode(key, cx)), cx))
-                    })
-                    .when(settable && via != "inbox" && on_session, |d| {
-                        let options = EFFORTS.iter().map(|e| (*e, effort_label(e), effort_detail(e).to_string())).collect();
-                        d.child(picker("effort", "icons/gauge.svg", effort_label(&effort), options, effort.clone(), Anchor::BottomLeft, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_effort(key, cx)), cx))
-                    })
-                    .when(via != "inbox", |d| d.child(div().flex_1()))
-                    .when(settable && via != "inbox", |d| {
-                        let options = MODELS.iter().map(|m| (*m, model_label(m), model_detail(m).to_string())).collect();
-                        d.child(picker("model", "icons/box.svg", model_label(&model), options, model_key(&model).to_string(), Anchor::BottomRight, cx.entity().downgrade(), Rc::new(|this, key, cx| this.set_model(key, cx)), cx))
-                    })
+                    .when(!settable, |d| d.child(div().flex_1()))
                     .child(send),
             );
 
@@ -5443,12 +6374,56 @@ pub fn slash_command(text: &str) -> Option<String> {
     (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')).then(|| name.to_string())
 }
 
+
+/// What a session's terminal is wanted for (`Workbench::via_terminal`).
+#[derive(Debug, Clone)]
+pub enum TerminalAction {
+    /// Only to be there: a question's dialog, an approval.
+    Go,
+    /// The model or effort pill: `/model` or `/effort`, Claude Code's own picker.
+    Pick(Pill),
+    /// A command typed and sent.
+    Run(String),
+    /// ⇧Tab, for the next mode.
+    StepMode,
+}
+
 /// Which of the three pills under the composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pill {
     Mode,
     Model,
     Effort,
+}
+
+/// One write of keys to the terminal's dialog, and what its screen has
+/// to show before the next one goes.
+struct DialogStep {
+    keys: String,
+    until: Option<DialogUntil>,
+}
+
+enum DialogUntil {
+    /// The terminal's pointer is on that choice.
+    CursorOn(u32),
+    /// That choice reads as these words: its field has taken them.
+    Says(u32, String),
+    /// That tab is the one showing.
+    Tab(usize),
+}
+
+impl DialogUntil {
+    fn holds(&self, d: &emaki_core::driver::Dialog) -> bool {
+        match self {
+            DialogUntil::CursorOn(n) => d.options.iter().any(|o| o.n == *n && o.cursor),
+            DialogUntil::Tab(ix) => d.current == Some(*ix),
+            // Long words wrap onto the lines under the choice.
+            DialogUntil::Says(n, words) => {
+                let bare = |t: &str| t.split_whitespace().collect::<String>();
+                d.options.iter().any(|o| o.n == *n && bare(&format!("{}{}", o.label, o.detail)) == bare(words))
+            }
+        }
+    }
 }
 
 /// What brings the window back from a terminal the person was sent to
@@ -5464,15 +6439,17 @@ pub struct ComeBack {
     /// The model and effort the status line named then, when another of
     /// either is the sign: a pick from `/model` or `/effort`.
     pick: Option<(String, String)>,
-    /// When the status line had last run then, and when it was last seen
-    /// to run again: it reruns on every ⇧Tab, and the mode is set once it
-    /// has stopped.
-    mode: Option<(f64, Option<f64>)>,
+    /// When `/model` or `/effort` was typed there: the pick is over once
+    /// the registry's record has gone to `waiting` since and left it.
+    typed: Option<f64>,
+    /// The picker has been seen up: the record said `waiting` after the
+    /// command was typed.
+    picking: bool,
 }
 
 impl ComeBack {
     fn on_transcript(r: &SessionRef, now: f64) -> Self {
-        Self { sid: r.session_id.clone(), at: now, mtime: Some(r.mtime), pick: None, mode: None }
+        Self { sid: r.session_id.clone(), at: now, mtime: Some(r.mtime), pick: None, typed: None, picking: false }
     }
 }
 
@@ -5480,14 +6457,23 @@ impl ComeBack {
 /// pointer, darker again while pressed or open. No tooltip and no caret.
 /// (The toolkit draws a custom colour at a fifth of its strength, so the
 /// resting grey is the ink's own, thinned.)
-fn composer_pill(id: &'static str, icon: &'static str, label: String, cx: &App) -> Button {
+fn composer_pill(id: &'static str, icon: &'static str, label: PillText, cx: &App) -> Button {
     let theme = cx.theme();
     let look = ButtonCustomVariant::new(cx).color(theme.muted_foreground.opacity(0.65)).foreground(theme.muted_foreground).hover(theme.muted_foreground.opacity(0.22)).active(theme.muted_foreground.opacity(0.34));
-    Button::new(SharedString::from(format!("{id}-trigger"))).custom(look).small().rounded(ButtonRounded::Size(px(999.))).icon(Icon::default().path(icon)).label(label)
+    Button::new(SharedString::from(format!("{id}-trigger"))).custom(look).small().rounded(ButtonRounded::Size(px(999.)))
+        .icon(Icon::default().path(icon))
+        .child(
+            h_flex()
+                .gap(px(4.))
+                .when(!label.value.is_empty(), |d| d.child(tinted(&label.value, &label.tint)))
+                .when(!label.tail.is_empty(), |d| d.child(label.tail)),
+        )
 }
 
-/// A pill under the composer that opens a list of choices: the permission
-/// mode and the model. Every choice is on the list with a line on what it
+/// A pill that opens a list of choices, in the settings panel: the mode
+/// and the model a new session starts in. (The pills under the composer
+/// had these lists too, until every choice on a session came to be made
+/// in its terminal.) Every choice is on the list with a line on what it
 /// does, the current one ticked, so all of them can be reached (a pill that
 /// cycled on click hid the fourth mode behind three clicks and a label that
 /// did not know it). Picking one calls `on` with its key.
@@ -5495,8 +6481,8 @@ fn composer_pill(id: &'static str, icon: &'static str, label: String, cx: &App) 
 fn picker(
     id: &'static str,
     icon: &'static str,
-    label: String,
-    options: Vec<(&'static str, String, String)>,
+    label: PillText,
+    options: Vec<(String, String, String)>,
     current: String,
     anchor: Anchor,
     wb: WeakEntity<Workbench>,
@@ -5508,9 +6494,11 @@ fn picker(
     Popover::new(id).anchor(anchor).trigger(trigger).content(move |_, _, cx| {
         let theme = cx.theme().clone();
         let popover = cx.entity();
-        v_flex().min_w(px(250.)).gap(px(2.)).children(options.iter().map(|(key, name, detail)| {
+        // The list is as long as the agent makes it (a dozen models), so
+        // it scrolls past a height the smallest window still has room for.
+        v_flex().id(SharedString::from(format!("{id}-list"))).min_w(px(250.)).max_h(px(336.)).overflow_y_scroll().gap(px(2.)).children(options.iter().map(|(key, name, detail)| {
             let active = *key == current;
-            let (wb, on, popover, key) = (wb.clone(), on.clone(), popover.clone(), *key);
+            let (wb, on, popover, key) = (wb.clone(), on.clone(), popover.clone(), key.clone());
             v_flex()
                 .id(SharedString::from(format!("{id}-{key}")))
                 .px(px(10.))
@@ -5521,7 +6509,7 @@ fn picker(
                 .when(active, |d| d.bg(theme.muted))
                 .hover(|s| s.bg(theme.list_hover))
                 .on_click(move |_, window, cx| {
-                    let _ = wb.update(cx, |this, cx| on(this, key, cx));
+                    let _ = wb.update(cx, |this, cx| on(this, &key, cx));
                     popover.update(cx, |s, cx| s.dismiss(window, cx));
                 })
                 .child(
@@ -5531,7 +6519,7 @@ fn picker(
                         .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()))
                         .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary))),
                 )
-                .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(detail.clone()))
+                .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(detail.clone())))
         }))
     })
 }
@@ -5553,15 +6541,19 @@ impl Render for Workbench {
         // The composer is one field for both pages; its placeholder says
         // what a message here does. Set only when it differs, since the
         // setter notifies.
+        // A prompt the terminal suggests stands there instead, in the
+        // placeholder's own lighter ink: words offered, not yet said.
         let want = if self.question_pending().is_some() {
-            PLACEHOLDER_ANSWER
+            PLACEHOLDER_ANSWER.to_string()
         } else if self.page == Page::New {
-            PLACEHOLDER_NEW
+            PLACEHOLDER_NEW.to_string()
+        } else if let Some(words) = self.suggested() {
+            format!("{words}   (→ to accept, ⌘↩ to send)")
         } else {
-            PLACEHOLDER_REPLY
+            PLACEHOLDER_REPLY.to_string()
         };
         if self.composer_placeholder != want {
-            self.composer_placeholder = want;
+            self.composer_placeholder = want.clone();
             self.composer.update(cx, |s, cx| s.set_placeholder(want, window, cx));
         }
         let theme = cx.theme().clone();

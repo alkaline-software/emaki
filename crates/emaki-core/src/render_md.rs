@@ -300,7 +300,10 @@ impl<'a> MarkdownRenderer<'a> {
                 Item::Notice { text, variant, .. } => match variant {
                     NoticeVariant::Command => format!("`{text}`"),
                     NoticeVariant::Compact => format!("> ⓘ {text}"),
-                    _ => format!("*{}*", self.r(text)),
+                    v => match v.setting() {
+                        Some(what) => format!("*{what}: {}*", self.r(text)),
+                        None => format!("*{}*", self.r(text)),
+                    },
                 },
             };
             if !rendered.is_empty() {

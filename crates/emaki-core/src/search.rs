@@ -356,8 +356,8 @@ fn documents(session: &Session) -> Vec<(usize, String, String, String)> {
                     Item::Thinking { ts, md, .. } if !md.trim().is_empty() => {
                         out.push((rnd.index, ts.clone(), format!("{prefix}thinking"), clip_chars(md, MAX_DOC_CHARS)))
                     }
-                    Item::Notice { ts, text, .. } if !text.trim().is_empty() => {
-                        out.push((rnd.index, ts.clone(), format!("{prefix}notice"), clip_chars(text, 500)))
+                    Item::Notice { ts, text, variant } if !text.trim().is_empty() => {
+                        out.push((rnd.index, ts.clone(), format!("{prefix}notice"), clip_chars(&variant.said(text), 500)))
                     }
                     Item::Tool(call) => {
                         let body = tool_text(call);

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::archive;
 use crate::build::{Phase, TurnState};
 use crate::model::{AgentId, CallStatus, Session};
+use crate::options::Catalogue;
 use crate::paths;
 use crate::transcript::SessionRef;
 
@@ -42,6 +43,14 @@ pub trait Adapter: Send + Sync {
 
     /// The full model for one file.
     fn load_path(&self, path: &Path, cwd_hint: &str) -> Session;
+
+    /// What a session of this agent in `cwd` can be told and set to: its
+    /// slash commands, and the modes, models and effort levels it offers,
+    /// asked of the agent itself. Blocking, so off the main thread. An
+    /// agent the app cannot drive has nothing to offer here.
+    fn catalogue(&self, _cwd: &str) -> Catalogue {
+        Catalogue::default()
+    }
 
     fn load(&self, r: &SessionRef) -> Session {
         let mut s = self.load_path(&r.path, &r.cwd);

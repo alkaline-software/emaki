@@ -179,14 +179,15 @@ Windows stays unsigned until SignPath (free for open source) is set up.
 
 ## The pieces a release depends on
 
-**The icon.** `scripts/icon/draw.py` is the source: it writes the picture
-as SVG. `scripts/make-icon.sh` renders it (Cocoa, through
+**The icon.** `scripts/icon/icon.html` is the source: it draws the picture
+on a canvas, at any size. `scripts/make-icon.sh` runs it (WebKit, through
 `scripts/icon/render.swift`, so on a Mac) into `crates/emaki-app/assets/icon`:
-the PNGs on Apple's 824-of-1024 grid (the Dock icon the app sets at start,
-Windows, Linux), `icon.ico`, and `icon.icns` at full bleed and opaque to
-the corners, because macOS 26 masks every app icon to its own rounded
-square over a grey backing and shows anything transparent as a grey
-border. Change the drawing, run the script, rebuild, commit the assets.
+the PNGs as the rounded icon with its margin and shadow (the Dock icon the
+app sets at start, Windows, Linux), `icon.ico`, and `icon.icns` as the full
+square, opaque to the corners, because macOS 26 masks every app icon to its
+own rounded square over a grey backing and shows anything transparent as a
+grey border. Open the page in a browser to see every size on one sheet.
+Change the drawing, run the script, rebuild, commit the assets.
 
 **The disk-image background.** `scripts/dmg/background.png`, drawn by
 `scripts/dmg/background.py` (Pillow, LXGW WenKai Medium) in the app's cream

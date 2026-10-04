@@ -214,12 +214,12 @@ fn compact_summary_is_not_a_prompt() {
     assert_eq!(first_prompt_title(&rows[2..], 72), "/compact");
     assert_eq!(s.context_tokens, 11752, "the context in use is the summary's size until the next turn");
 
-    // A command run later in the same round keeps its output.
+    // A command run later in the same round keeps its output: the model it set.
     rows.push(user("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>", "2026-01-01T10:01:00Z"));
     rows.push(user("<local-command-stdout>Set model to `Opus 5.5`</local-command-stdout>", "2026-01-01T10:01:00Z"));
     let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
     let notices: Vec<&str> = s.rounds[1].items.iter().filter_map(|i| if let Item::Notice { text, .. } = i { Some(text.as_str()) } else { None }).collect();
-    assert_eq!(notices, vec!["Context compacted, earlier messages summarised", "/model", "Set model to `Opus 5.5`"]);
+    assert_eq!(notices, vec!["Context compacted, earlier messages summarised", "Opus 5.5"]);
 
     let mut rows = vec![user("go", "2026-01-01T10:00:00Z"), assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:01Z")];
     rows.push(user("/effort high", "2026-01-01T10:00:02Z"));
@@ -399,7 +399,7 @@ fn read_all_skips_bad_lines() {
 
 #[test]
 fn model_label_reads_ids_and_aliases() {
-    use emaki_core::driver::{mode_label, model_label};
+    use emaki_core::driver::model_label;
     assert_eq!(model_label(""), "Default model");
     assert_eq!(model_label("default"), "Default model");
     assert_eq!(model_label("opus"), "Opus");
@@ -409,22 +409,293 @@ fn model_label_reads_ids_and_aliases() {
     assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
     assert_eq!(model_label("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
     assert_eq!(model_label("claude-sonnet-4-20250514"), "Sonnet 4");
-    assert_eq!(mode_label("auto"), "Auto mode");
-    assert_eq!(mode_label("default"), "Default permissions");
+}
+
+/// The lists are the agent's: the models and their effort levels from an
+/// `initialize` reply, the modes from `--help`. Both as 2.1.289 gives them.
+#[test]
+fn options_are_what_the_agent_lists() {
+    use emaki_core::driver::{help_values, options_from};
+    let help = "  --effort <level>                      Effort level for the current session\n                                        (low, medium, high, xhigh, max)\n  --environment <environment_id>        Create a new cloud session\n  --model <model>                       Model for the current session. Provide\n                                        an alias for the latest model (e.g.\n                                        'fable', 'opus', or 'sonnet') or a\n                                        model's full name.\n  --permission-mode <mode>              Permission mode to use for the session\n                                        (choices: \"acceptEdits\", \"auto\",\n                                        \"bypassPermissions\", \"manual\",\n                                        \"dontAsk\", \"plan\", \"sprint\")\n  --plugin-dir <path>                   Load a plugin\n";
+    assert_eq!(help_values(help, "--effort"), ["low", "medium", "high", "xhigh", "max"]);
+    // A sentence in brackets is not a list, and an option not there has none.
+    assert!(help_values(help, "--model").is_empty());
+    assert!(help_values(help, "--nothing").is_empty());
+
+    let reply = json!({"models": [
+        {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (recommended)", "description": "Opus 5.5 · Best for everyday, complex tasks", "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+        {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "description": "For complex work and everyday tasks", "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+        {"value": "haiku", "resolvedModel": "claude-haiku-4-5-20251001", "displayName": "Haiku 4.5", "description": "Fastest for quick answers"},
+        {"value": "claude-opus-4-6", "resolvedModel": "claude-opus-4-6", "displayName": "Opus 4.6", "description": "Best for everyday, complex tasks", "supportedEffortLevels": ["low", "medium", "high", "max"]},
+    ]});
+    let o = options_from(&reply, help);
+    // The modes in the agent's order, under the names the wire takes:
+    // `--help` says "manual" where the wire says "default".
+    let modes: Vec<&str> = o.modes.iter().map(|m| m.key.as_str()).collect();
+    assert_eq!(modes, ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan", "sprint"]);
+    assert_eq!(o.mode("default").unwrap().label, "Manual");
+    assert_eq!(o.mode("acceptEdits").unwrap().label, "Accept edits");
+    // A mode this build has never met is offered under its own name.
+    assert_eq!(o.mode("sprint").unwrap().label, "Sprint");
+    assert_eq!(o.mode("sprint").unwrap().detail, "");
+    // Claude Code's own colour for a mode it has one for, light then dark.
+    assert_eq!(o.mode("plan").unwrap().color, Some([0x006666, 0x48968C]));
+    assert_eq!(o.mode("sprint").unwrap().color, None);
+
+    assert_eq!(o.models.len(), 4);
+    assert_eq!(o.default_model, "default");
+    // A session reports the id; the named model answers before the default's stand-in.
+    assert_eq!(o.model("claude-opus-5-5").unwrap().label, "Opus 5.5");
+    assert_eq!(o.model("default").unwrap().label, "Default (recommended)");
+    assert_eq!(o.model("opus").unwrap().detail, "For complex work and everyday tasks");
+    assert!(o.model("gpt-9").is_none());
+    // Each model has its own levels; one that takes none has none, and a
+    // model off the list gets the agent's levels at large.
+    let keys = |model: &str| o.efforts_for(model).iter().map(|e| e.key.clone()).collect::<Vec<_>>();
+    assert_eq!(keys("claude-opus-4-6"), ["low", "medium", "high", "max"]);
+    assert!(keys("haiku").is_empty());
+    assert_eq!(keys("gpt-9"), ["low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(o.effort_label("opus", "xhigh"), "Extra high");
+    // Claude Code's slider colours: one per level, and a rainbow for max.
+    let level = |key: &str| o.efforts.iter().find(|e| e.key == key).unwrap();
+    assert_eq!(level("low").color, Some([0x966C1E, 0xFFC107]));
+    assert_eq!(level("high").color, Some([0x5769F7, 0xB1B9F9]));
+    assert_eq!(level("max").color, None);
+    assert_eq!(level("max").spectrum.len(), 7);
+    assert_eq!(o.effort_label("opus", "turbo"), "Turbo");
+    assert_eq!(emaki_core::options::humanize("readOnly-fast_mode"), "Read only fast mode");
+}
+
+#[test]
+fn options_are_kept_for_the_next_launch() {
+    use emaki_core::model::AgentId;
+    use emaki_core::options::{Choice, Options};
+    let (_home, _guard) = isolated();
+    assert!(Options::cached(AgentId::ClaudeCode).is_empty());
+    let o = Options { modes: vec![Choice { key: "plan".into(), label: "Plan".into(), ..Default::default() }], ..Default::default() };
+    o.remember(AgentId::ClaudeCode);
+    // An agent that did not answer does not wipe what is known.
+    Options::default().remember(AgentId::ClaudeCode);
+    assert_eq!(Options::cached(AgentId::ClaudeCode), o);
+    assert!(Options::cached(AgentId::Codex).is_empty());
+}
+
+#[test]
+fn working_on_screen_is_the_line_over_the_prompt() {
+    use emaki_core::driver::working_on_screen;
+    let foot = "\n\n────\n❯ \n────\n  Context 16% | 5h: 8% (3h33m)\n  ⏵⏵ auto mode on (shift+tab to cycle)\n";
+    // As Kaku hands it over with colours, 2.1.289.
+    let line = "\x1b[38:2::215:119:87m✽\x1b[39m \x1b[38:2::223:134:102mEmbellishing…\x1b[38:2::215:119:87m \x1b[38:2::153:153:153m(26s · ↓\x1b[39m \x1b[38:2::153:153:153m1.5k tokens)\r";
+    let w = working_on_screen(&format!("⏺ Reading… the file\n\n{line}\n  ⎿  Tip: Connect Claude to your IDE · /ide{foot}")).unwrap();
+    assert_eq!(w.verb, "Embellishing…");
+    assert_eq!(w.color, Some(0xD77757));
+    assert_eq!(w.detail, vec![("(26s · ↓ 1.5k tokens)".to_string(), Some(0x999999))]);
+    let pulsing = "\x1b[38:2::215:119:87m✶\x1b[39m \x1b[38:2::215:119:87mBillowing… \x1b[38:2::153:153:153m(2m 50s · \x1b[38:2::185:185:185mthinking\x1b[38:2::153:153:153m)\r";
+    assert_eq!(working_on_screen(&format!("{pulsing}{foot}")).unwrap().detail, vec![("(2m 50s · thinking)".to_string(), Some(0x999999))]);
+    // A turn gone quiet: the mark in bold behind a character-set
+    // sequence, the colours turning warm.
+    let quiet = "\x1b(B\x1b[0;1m\x1b[38:2::235:156:47m✻\x1b(B\x1b[0m \x1b[38:2::235:156:47mBillowing… \x1b[38:2::153:153:153m(3m 5s)\r";
+    let w = working_on_screen(&format!("{quiet}{foot}")).unwrap();
+    assert_eq!((w.verb.as_str(), w.color), ("Billowing…", Some(0xEB9C2F)));
+    // Plain, as Terminal and iTerm2 give it.
+    let w = working_on_screen(&format!("· Embellishing… (3s · thinking with medium effort){foot}")).unwrap();
+    assert_eq!((w.verb.as_str(), w.color), ("Embellishing…", None));
+    assert_eq!(w.detail, vec![("(3s · thinking with medium effort)".to_string(), None)]);
+    assert_eq!(working_on_screen(&format!("✳ Running the tests…{foot}")).unwrap().detail, vec![]);
+    // A finished turn, a tool call and a quoted line are not it.
+    assert_eq!(working_on_screen(&format!("✻ Brewed for 11s · done 9:44 PM{foot}")), None);
+    assert_eq!(working_on_screen(&format!("⏺ Reading… something{foot}")), None);
+    assert_eq!(working_on_screen(&format!("  · Embellishing… (3s){foot}")), None);
+}
+
+#[test]
+fn dialog_on_screen_is_the_question_and_its_choices() {
+    use emaki_core::driver::dialog_on_screen;
+    let rule = "─".repeat(60);
+    // Two questions, the first showing (2.1.289, read off a pty).
+    let screen = format!("❯ ask me\n{rule}\n←  ☐ Fruit  ☒ Colors  ✔ Submit  →\nWhich fruit?\n❯ 1. Apple\n     Crisp and sweet,\n     red or green\n  2. Banana\n     Soft\n  3. Type something.\n{rule}\n  4. Chat about this\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n");
+    let d = dialog_on_screen(&screen).unwrap();
+    assert_eq!(d.tabs, vec![("Fruit".to_string(), false), ("Colors".to_string(), true), ("Submit".to_string(), false)]);
+    assert_eq!(d.body, vec!["Which fruit?"]);
+    assert_eq!(d.current, None);
+    // With its colours, the tab showing is the one on a ground of its own.
+    let lit = screen.replace("☒ Colors", "\x1b[48:2::177:185:249m\x1b[38:2::0:0:0m ☒ Colors \x1b[49m\x1b[39m");
+    assert_eq!(dialog_on_screen(&lit).unwrap().current, Some(1));
+    assert_eq!(d.options.iter().map(|o| (o.n, o.label.as_str())).collect::<Vec<_>>(), vec![(1, "Apple"), (2, "Banana"), (3, "Type something."), (4, "Chat about this")]);
+    assert_eq!(d.options[0].detail, "Crisp and sweet, red or green");
+    assert!(!d.multi);
+    // One that takes several.
+    let screen = format!("{rule}\n←  ☒ Fruit  ☐ Colors  ✔ Submit  →\nWhich colors?\n❯ 1. [✔] Red\n         Warm\n  2. [ ] Green\n  3. [ ] Type something\n     Submit\n{rule}\n  4. Chat about this\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n");
+    let d = dialog_on_screen(&screen).unwrap();
+    assert!(d.multi);
+    assert_eq!(d.options.iter().map(|o| o.checked).collect::<Vec<_>>(), vec![Some(true), Some(false), Some(false), None]);
+    assert_eq!((d.options[0].label.as_str(), d.options[0].detail.as_str(), d.options[2].detail.as_str()), ("Red", "Warm", ""));
+    // The review, and an approval.
+    let screen = format!("{rule}\n←  ☒ Fruit  ☒ Colors  ✔ Submit  →\nReview your answers\n ● Which fruit?\n   → Banana\nReady to submit your answers?\n❯ 1. Submit answers\n  2. Cancel\n");
+    let d = dialog_on_screen(&screen).unwrap();
+    assert_eq!(d.body, vec!["Review your answers", "Which fruit?", "→ Banana", "Ready to submit your answers?"]);
+    assert_eq!(d.options.len(), 2);
+    let screen = format!("⏺ earlier\n{rule}\n❯ old\n{rule}\n Bash command\n{}\n │ touch x\n{}\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and always allow access to /tmp/a\n      from this project\n   3. No\n Esc to cancel · Tab to amend\n", "╌".repeat(40), "╌".repeat(40));
+    let d = dialog_on_screen(&screen).unwrap();
+    assert_eq!(d.body, vec!["Bash command", "touch x", "Do you want to proceed?"]);
+    assert_eq!(d.options[1].detail, "from this project");
+    // The prompt is not a dialog.
+    assert_eq!(dialog_on_screen(&format!("⏺ 1. one\n  2. two\n{rule}\n❯ \n{rule}\n  Context 16%\n  ⏵⏵ auto mode on\n")), None);
+}
+
+#[test]
+fn suggestion_on_screen_is_the_dim_prompt() {
+    use emaki_core::driver::suggestion_on_screen;
+    let rule = format!("\x1b[38:2::136:136:136m{}\r", "─".repeat(60));
+    let foot = "\x1b[39m  Context 33%\r\n  ⏸ manual mode on\r\n";
+    // As Kaku hands it over, 2.1.289.
+    let screen = |prompt: &str| format!("✻ Churned for 5s\r\n{rule}\n{prompt}\n{rule}\n{foot}");
+    assert_eq!(suggestion_on_screen(&screen("\x1b[39m❯\u{a0}\x1b(B\x1b[0;2mbuild the app\r")).as_deref(), Some("build the app"));
+    // A path in it is a link, whose sequences run into the rule below.
+    let linked = format!("{rule}\n\x1b[39m❯\u{a0}\x1b(B\x1b[0;2mrun \x1b]8;;file://./x\x1b\\./x\r\n\x1b(B\x1b[0m\x1b[38:2::136:136:136m\x1b]8;;\x1b\\{}\r\n{foot}", "─".repeat(60));
+    assert_eq!(suggestion_on_screen(&linked).as_deref(), Some("run ./x"));
+    // Typed words, an empty prompt, and a plain screen are not one.
+    assert_eq!(suggestion_on_screen(&screen("\x1b[39m❯\u{a0}build the app\r")), None);
+    assert_eq!(suggestion_on_screen(&screen("\x1b[39m❯\u{a0}\r")), None);
+    assert_eq!(suggestion_on_screen("────────────────────────\n❯ build the app\n────────────────────────\n  Context\n"), None);
 }
 
 #[test]
 fn mode_on_screen_reads_the_footer_only() {
-    use emaki_core::driver::mode_on_screen;
+    use emaki_core::driver::{mode_on_screen, options_from};
+    let help = "  --permission-mode <mode>  Permission mode (choices: \"acceptEdits\", \"auto\", \"bypassPermissions\", \"manual\", \"dontAsk\", \"plan\")\n";
+    let modes = options_from(&json!({}), help).modes;
+    let seen = |text: &str| mode_on_screen(text, &modes);
     // The foot of a terminal session as Kaku hands it over, 2.1.288.
     let foot = |last: &str| format!("⏺ I left plan mode on for you.\n\n\n\n\n\n────\n❯ \n────\n  Context 0% | 5h: 14% (38m) | 7d: 49% (2d3h)\n  {last}\n\n");
-    assert_eq!(mode_on_screen(&foot("⏸ manual mode on · ← 1 agent")), Some("default"));
-    assert_eq!(mode_on_screen(&foot("⏵⏵ accept edits on (shift+tab to cycle)")), Some("acceptEdits"));
-    assert_eq!(mode_on_screen(&foot("⏸ plan mode on (shift+tab to cycle)")), Some("plan"));
-    assert_eq!(mode_on_screen(&foot("⏵⏵ auto mode on (shift+tab to cycle)")), Some("auto"));
+    assert_eq!(seen(&foot("⏸ manual mode on · ← 1 agent")).as_deref(), Some("default"));
+    assert_eq!(seen(&foot("⏵⏵ accept edits on (shift+tab to cycle)")).as_deref(), Some("acceptEdits"));
+    assert_eq!(seen(&foot("⏸ plan mode on (shift+tab to cycle)")).as_deref(), Some("plan"));
+    assert_eq!(seen(&foot("⏵⏵ auto mode on (shift+tab to cycle)")).as_deref(), Some("auto"));
+    assert_eq!(seen(&foot("⏵⏵ bypass permissions on (shift+tab to cycle)")).as_deref(), Some("bypassPermissions"));
+    assert_eq!(seen(&foot("⏵⏵ don't ask on (shift+tab to cycle)")).as_deref(), Some("dontAsk"));
     // A dialog over the prompt: no footer, and the reply's words are not one.
-    assert_eq!(mode_on_screen(&foot("Esc to cancel")), None);
-    assert_eq!(mode_on_screen(""), None);
+    assert_eq!(seen(&foot("Esc to cancel")), None);
+    assert_eq!(seen(""), None);
+    // With no list of modes there is nothing to look for.
+    assert_eq!(mode_on_screen(&foot("⏸ plan mode on"), &[]), None);
+}
+
+/// `/model` and `/effort` answer with a sentence; the conversation keeps
+/// what was set, in place of the command's chip. Rows as 2.1.289 writes
+/// them for a pick made in the terminal's own picker.
+#[test]
+fn a_setting_command_says_only_what_it_set() {
+    use emaki_core::model::NoticeVariant;
+    let said = |name: &str, out: &str| {
+        vec![
+            row(json!({"type": "user", "timestamp": "2026-01-01T10:01:00Z", "sessionId": "s1", "message": {"role": "user",
+                "content": format!("<command-name>/{name}</command-name>\n            <command-message>{name}</command-message>\n            <command-args></command-args>")}})),
+            row(json!({"type": "user", "timestamp": "2026-01-01T10:01:00Z", "sessionId": "s1", "message": {"role": "user",
+                "content": format!("<local-command-stdout>{out}</local-command-stdout>")}})),
+        ]
+    };
+    let mut rows = vec![
+        user("go", "2026-01-01T10:00:00Z"),
+        assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:02Z"),
+    ];
+    rows.extend(said("effort", "Set effort level to xhigh (saved as your default for new sessions): Comprehensive implementation with extensive testing and documentation"));
+    rows.extend(said("model", "Set model to `Fable 5.1` and saved as your default for new sessions"));
+    rows.extend(said("model", "Kept model as `Fable 5.1`"));
+    rows.extend(said("model", "Set model to `Opus 5 (1M context) (default)` for this session only"));
+    rows.extend(said("status", "Version 2.1.289"));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let notices: Vec<(NoticeVariant, &str)> = s.rounds[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Notice { text, variant, .. } => Some((*variant, text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        [
+            (NoticeVariant::Effort, "Extra high"),
+            // The picker closed with nothing changed leaves nothing, and of
+            // two models set one after the other the last is kept.
+            (NoticeVariant::Model, "Opus 5 (1M context) (default)"),
+            // Any other command keeps its chip and its words.
+            (NoticeVariant::Command, "/status"),
+            (NoticeVariant::Info, "Version 2.1.289"),
+        ]
+    );
+    assert_eq!(s.effort, "xhigh");
+    assert_eq!(NoticeVariant::Effort.said("Extra high"), "Effort Extra high");
+
+    // Toggled again and again, a setting keeps its last word only; one
+    // of another kind in between keeps both sides of it.
+    let mut rows = vec![user("go", "2026-01-01T10:00:00Z"), assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:02Z")];
+    for (name, out) in [
+        ("effort", "Set effort level to high (this session only): words"),
+        ("effort", "Set effort level to medium (this session only): words"),
+        ("effort", "Set effort level to high (this session only): words"),
+        ("model", "Set model to `Fable 5.1`"),
+        ("model", "Kept model as `Fable 5.1`"),
+        ("model", "Set model to `Opus 5.5`"),
+        ("effort", "Set effort level to low (this session only): words"),
+    ] {
+        rows.extend(said(name, out));
+    }
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let notices: Vec<String> = s.rounds[0].items.iter().filter_map(|i| if let Item::Notice { text, variant, .. } = i { Some(variant.said(text)) } else { None }).collect();
+    assert_eq!(notices, ["Effort High", "Model Opus 5.5", "Effort Low"]);
+    // The ones folded away are set aside in order, for the window.
+    let aside: Vec<String> = s.rounds[0].superseded.iter().filter_map(|i| if let Item::Notice { text, variant, .. } = i { Some(variant.said(text)) } else { None }).collect();
+    assert_eq!(aside, ["Effort High", "Effort Medium", "Model Fable 5.1"]);
+    assert_eq!(NoticeVariant::Info.said("Version 2.1.289"), "Version 2.1.289");
+}
+
+/// Claude Code writes nothing when the mode changes; the next prompt row
+/// names the new mode, and a `permission-mode` row restates it whenever
+/// rows are written. The change is said once, where the file first has it.
+#[test]
+fn a_change_of_mode_is_said_where_the_transcript_first_has_it() {
+    use emaki_core::model::NoticeVariant;
+    let prompt = |text: &str, mode: &str, ts: &str| {
+        let mut u = user(text, ts);
+        u["permissionMode"] = json!(mode);
+        u
+    };
+    let restated = |mode: &str| row(json!({"type": "permission-mode", "permissionMode": mode, "sessionId": "s1"}));
+    let rows = vec![
+        restated("auto"),
+        prompt("one", "auto", "2026-01-01T10:00:00Z"),
+        assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:02Z"),
+        restated("auto"),
+        prompt("two", "plan", "2026-01-01T10:05:00Z"),
+        assistant(vec![json!({"type": "text", "text": "A plan."})], "end_turn", "2026-01-01T10:05:02Z"),
+        restated("plan"),
+        restated("acceptEdits"),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let modes = |ix: usize| -> Vec<&str> {
+        s.rounds[ix]
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Notice { text, variant: NoticeVariant::Mode, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    };
+    // Where the session began is not a change; "plan" came with the
+    // second prompt, so it is said at the foot of the first round.
+    assert_eq!(modes(0), ["Plan"]);
+    assert_eq!(modes(1), ["Accept edits"]);
+    // Stepped through several before the next row: the last one.
+    let mut more = rows.clone();
+    more.extend([restated("plan"), restated("default")]);
+    let stepped = build(BuildInput { rows: &more, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let last: Vec<String> = stepped.rounds[1].items.iter().filter_map(|i| if let Item::Notice { text, variant: NoticeVariant::Mode, .. } = i { Some(text.clone()) } else { None }).collect();
+    assert_eq!(last, ["Manual"]);
+    assert_eq!(s.mode, "acceptEdits");
+    assert_eq!(s.rounds.len(), 2);
 }
 
 #[test]
@@ -601,8 +872,9 @@ fn limits_absorb_the_wire_and_size_a_context() {
     assert_eq!(until(1791205200.0, 1790660000.0), "6d7h");
     assert_eq!(until(1790660100.0, 1790660000.0), "1m");
     assert_eq!(until(1.0, 2.0), "");
-    assert_eq!(emaki_core::driver::effort_label("xhigh"), "Extra high effort");
-    assert_eq!(emaki_core::driver::effort_label(""), "Default effort");
+    assert_eq!(emaki_core::driver::effort_words("xhigh").0, "Extra high");
+    assert_eq!(emaki_core::driver::effort_words("medium").0, "Medium");
+    assert_eq!(emaki_core::driver::mode_words("default").0, "Manual");
 }
 
 #[test]

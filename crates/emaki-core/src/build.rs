@@ -597,11 +597,15 @@ struct RoundBuilder {
     command: String,
     /// The last prompt, stopped before anything was done with it.
     withdrawn: Option<Round>,
+    /// The permission mode as of the rows read so far.
+    mode: String,
+    /// The effort level a command last set, when one did.
+    effort: Option<String>,
 }
 
 impl RoundBuilder {
     fn new() -> Self {
-        Self { rounds: Vec::new(), current: None, calls: HashMap::new(), pending_notices: Vec::new(), last_ts: String::new(), command: String::new(), withdrawn: None }
+        Self { rounds: Vec::new(), current: None, calls: HashMap::new(), pending_notices: Vec::new(), last_ts: String::new(), command: String::new(), withdrawn: None, mode: String::new(), effort: None }
     }
 
     fn open_round(&mut self, ts: &str, uuid: &str, prompt: String, source: Source) -> &mut Round {
@@ -652,10 +656,77 @@ impl RoundBuilder {
 
     fn add_notice(&mut self, text: String, ts: &str, variant: NoticeVariant) {
         let notice = Item::Notice { ts: ts.into(), text, variant };
-        match self.current {
-            None => self.pending_notices.push(notice),
-            Some(i) => self.rounds[i].items.push(notice),
+        let (items, mut superseded) = match self.current {
+            None => (&mut self.pending_notices, None),
+            Some(i) => {
+                let rnd = &mut self.rounds[i];
+                (&mut rnd.items, Some(&mut rnd.superseded))
+            }
+        };
+        // A setting changed again straight after itself is one change, the
+        // last: effort to high, to medium, to high again reads "Effort
+        // High", once. Anything between two of them (another setting, a
+        // reply) keeps both. The one replaced is set aside, not lost.
+        if variant.setting().is_some() && matches!(items.last(), Some(Item::Notice { variant: v, .. }) if *v == variant) {
+            if let (Some(old), Some(kept)) = (items.pop(), superseded.as_mut()) {
+                kept.push(old);
+            }
         }
+        items.push(notice);
+    }
+
+    /// What the command just run printed. `/model` and `/effort` answer
+    /// with a sentence ("Set effort level to high (saved as your default
+    /// for new sessions): Comprehensive implementation with…"), of which
+    /// the conversation keeps what was set and nothing else, in place of
+    /// the command's chip: one line, "Effort High". A picker closed with
+    /// nothing changed ("Kept model as …") leaves no line at all.
+    fn add_output(&mut self, output: &str, ts: &str) {
+        let text = strip_ansi(output);
+        match setting_said(&self.command, &text) {
+            Some(Said::Set(variant, value)) => {
+                self.drop_chip();
+                let shown = if variant == NoticeVariant::Effort {
+                    self.effort = Some(value.clone());
+                    crate::driver::effort_words(&value).0
+                } else {
+                    value
+                };
+                self.add_notice(shown, ts, variant);
+            }
+            Some(Said::Kept) => self.drop_chip(),
+            None => self.add_notice(one_line(&text, 300), ts, NoticeVariant::Info),
+        }
+    }
+
+    /// Take back the chip of the command just run, when it is the last
+    /// thing said.
+    fn drop_chip(&mut self) {
+        let items = match self.current {
+            Some(i) => &mut self.rounds[i].items,
+            None => &mut self.pending_notices,
+        };
+        let chip = matches!(items.last(), Some(Item::Notice { variant: NoticeVariant::Command, text, .. }) if command_name(text) == self.command);
+        if chip {
+            items.pop();
+        }
+    }
+
+    /// The permission mode a row carries. A prompt row names the mode it
+    /// was sent in, and Claude Code restates the mode in a
+    /// `permission-mode` row whenever it writes; neither is written at the
+    /// moment the mode changes, so a change shows where the transcript
+    /// first has it. The first mode a session names is where it began, not
+    /// a change.
+    fn saw_mode(&mut self, mode: &str, ts: &str) {
+        if mode.is_empty() || mode == self.mode {
+            return;
+        }
+        if !self.mode.is_empty() {
+            let ts = if ts.is_empty() { self.last_ts.clone() } else { ts.to_string() };
+            self.add_notice(crate::driver::mode_words(mode).0, &ts, NoticeVariant::Mode);
+        }
+        self.mode = mode.into();
     }
 
     fn last_seen_ts(&self) -> String {
@@ -668,6 +739,46 @@ impl RoundBuilder {
             return rnd.ts.clone();
         }
         self.last_ts.clone()
+    }
+}
+
+/// What a settings command said it did.
+enum Said {
+    Set(NoticeVariant, String),
+    /// The picker was closed with nothing changed.
+    Kept,
+}
+
+/// What `/model` or `/effort` printed, read for what was set: the model
+/// by the name Claude Code gives it, between backticks since 2.1.28x
+/// ("Set model to `Opus 5.5` and saved as your default for new sessions"),
+/// the effort by its level ("Set effort level to high (…): …"). None for
+/// any other command and for anything else these two say ("Current
+/// model: …", a refusal), which is shown as it is.
+fn setting_said(command: &str, output: &str) -> Option<Said> {
+    let output = output.trim();
+    match command {
+        "model" => {
+            if output.starts_with("Kept model as ") {
+                return Some(Said::Kept);
+            }
+            let rest = output.strip_prefix("Set model to ")?;
+            let name = match rest.strip_prefix('`') {
+                Some(quoted) => quoted.split('`').next().unwrap_or(""),
+                None => rest.split(" and saved").next().unwrap_or("").split(" for this session").next().unwrap_or(""),
+            };
+            let name = name.trim();
+            (!name.is_empty()).then(|| Said::Set(NoticeVariant::Model, name.to_string()))
+        }
+        "effort" => {
+            if output.starts_with("Kept effort level as ") {
+                return Some(Said::Kept);
+            }
+            let rest = output.strip_prefix("Set effort level to ")?;
+            let level: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
+            (!level.is_empty()).then(|| Said::Set(NoticeVariant::Effort, level.to_lowercase()))
+        }
+        _ => None,
     }
 }
 
@@ -709,13 +820,6 @@ pub fn build(input: BuildInput) -> Session {
         if !str_of(row, "slug").is_empty() {
             session.slug = str_of(row, "slug").into();
         }
-        // `/effort <level>` lands as a `system/local_command` row whose
-        // `commandRun` names the command; the last one is the level in force.
-        if let Some(run) = row.get("commandRun") {
-            if str_of(run, "command") == "effort" && !str_of(run, "args").trim().is_empty() {
-                session.effort = str_of(run, "args").trim().to_string();
-            }
-        }
     }
     session.title = pick_title(rows);
     if session.cwd.is_empty() {
@@ -737,6 +841,9 @@ pub fn build(input: BuildInput) -> Session {
         }
         if rtype == "queue-operation" {
             queue.apply(row);
+        }
+        if rtype == "permission-mode" || rtype == "user" {
+            b.saw_mode(str_of(row, "permissionMode"), ts);
         }
         if IGNORED_TYPES.contains(&rtype) {
             continue;
@@ -767,6 +874,10 @@ pub fn build(input: BuildInput) -> Session {
         if b.rounds.len() > before {
             b.rounds.last_mut().unwrap().queued = true;
         }
+    }
+    session.mode = b.mode.clone();
+    if let Some(effort) = b.effort.take() {
+        session.effort = effort;
     }
     finalize(b, &mut session);
     session
@@ -883,6 +994,13 @@ fn handle_system(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut Sess
         }
         "away_summary" => {}
         _ => {
+            // `/effort <level>` lands as a `system/local_command` row whose
+            // `commandRun` names the command and the level asked for; the
+            // output below says what it was set to, and is believed over it.
+            let run = row.get("commandRun");
+            if let Some(run) = run.filter(|r| str_of(r, "command") == "effort" && !str_of(r, "args").trim().is_empty()) {
+                b.effort = Some(str_of(run, "args").trim().to_string());
+            }
             let content = str_of(row, "content");
             if content.trim().is_empty() || bool_of(row, "isMeta") {
                 return;
@@ -892,9 +1010,13 @@ fn handle_system(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut Sess
                 b.command = command_name(&format!("/{}", c.trim_start_matches('/')));
                 b.add_notice(format!("/{}", c.trim_start_matches('/')), ts, NoticeVariant::Command);
             }
+            // The row names its command even when its content does not.
+            if let Some(name) = run.map(|r| str_of(r, "command").trim_start_matches('/')).filter(|n| !n.is_empty()) {
+                b.command = name.to_string();
+            }
             if b.command != "compact" {
                 for o in outputs {
-                    b.add_notice(one_line(&strip_ansi(&o), 300), ts, NoticeVariant::Info);
+                    b.add_output(&o, ts);
                 }
             }
             if !text.is_empty() {
@@ -966,10 +1088,12 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
         rnd.images = images;
         rnd.attachments = attached;
         for c in commands {
-            rnd.items.push(Item::Notice { ts: ts.into(), text: format!("/{}", c.trim_start_matches('/')), variant: NoticeVariant::Command });
+            let name = format!("/{}", c.trim_start_matches('/'));
+            b.command = command_name(&name);
+            b.add_notice(name, ts, NoticeVariant::Command);
         }
         for o in outputs {
-            rnd.items.push(Item::Notice { ts: ts.into(), text: one_line(&strip_ansi(&o), 300), variant: NoticeVariant::Info });
+            b.add_output(&o, ts);
         }
         return;
     }
@@ -994,7 +1118,7 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
         return;
     }
     for o in outputs {
-        b.add_notice(one_line(&strip_ansi(&o), 300), ts, NoticeVariant::Info);
+        b.add_output(&o, ts);
     }
 }
 
