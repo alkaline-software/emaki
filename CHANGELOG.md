@@ -8,20 +8,17 @@ grouped into one. The reasoning belongs in AGENTS.md.
 ## v0.1.5
 
 - A new icon: the scroll on cream, with a conversation on its sheet.
-- A change of mode, model or effort is one short line in the conversation, and a mode change shows at all.
-- The mode pill follows ⇧Tab in the terminal as it is pressed.
-- Modes and effort levels are coloured as Claude Code colours them.
-- ⇧Tab in the composer steps a terminal session's mode without leaving the window.
-- Toggling a setting several times in a row leaves one line, the last.
-- The effort and model pills open the session's terminal when it has none, then open the picker there.
-- In the composer, ⇧↑ and ⇧↓ select one line at a time, and a paste or dictation scrolls to the caret.
-- Modes, models and effort levels are read from Claude Code, so the lists match what it offers.
-- Stop gives your message back only when Claude had not started on it, as Escape does in the terminal.
-- Escape in the window stops the running turn, like the Stop button.
-- A message sent again right after a stop is no longer dropped by Claude Code.
-- A question or approval waiting in a terminal shows as a card in the window, and is answered from it.
-- The prompt Claude Code suggests after a turn shows in the composer; → or Tab takes it.
+- A question or approval waiting in a terminal shows as a card in the window; answer it and move between its questions there.
 - While Claude works in a terminal, the row under the conversation shows the terminal's own line ("Embellishing… (13s · ↓ 1.0k tokens)") in its colours.
+- The prompt Claude Code suggests after a turn shows in the composer; → or Tab takes it.
+- A session started in Emaki shows in the terminal's resume list.
+- Modes, models and effort levels are read from Claude Code and coloured as it colours them.
+- A change of mode, model or effort is one short line in the conversation.
+- ⇧Tab in the composer steps a terminal session's mode, and the pill follows.
+- The effort and model pills open the session's terminal when it has none, then the picker there.
+- Stop, or Escape, gives your message back only when Claude had not started on it, and sending it again works.
+- In the composer, ⇧↑ and ⇧↓ select one line at a time, and a paste or dictation scrolls to the caret.
+- Durations read in whole seconds.
 
 ## v0.1.4
 

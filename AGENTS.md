@@ -1442,6 +1442,25 @@ session, `reap_drivers` stops the child once idle and the channel flips to
 top of `driver.rs` records what each Claude Code release actually does on
 the wire.
 
+**A session begun in the window is listed in the terminal like any
+other.** Claude Code stamps every row with its entry point, a `-p`
+child's being `sdk-cli`, and the terminal's resume list (`claude
+--resume`, `/resume`) leaves out every session whose first rows say
+`sdk-cli`, `sdk-ts` or `sdk-py` (2.1.289; the picker reads `entrypoint`
+from the head of the file). So a session started here could be resumed
+by its id, which is what the terminal button does, and never found from
+the terminal itself. The entry point is the environment's to name
+(`CLAUDE_CODE_ENTRYPOINT`, as the IDE extension and the desktop app name
+theirs; only `cli` is rewritten to `sdk-cli` on a headless run), so the
+driver's child is started with `emaki` (`driver::ENTRYPOINT`), its rows
+say so, and the picker lists it. The explainer's children keep
+`sdk-cli`: they are not conversations. Checked on a pty: a `-p` session
+with the variable set was offered in the picker, one without was not,
+and `emaki-core drive` ran a turn through the driver unchanged. A
+session whose first rows already say `sdk-cli` stays out of the list,
+since nothing here writes to a transcript; the terminal button still
+opens it.
+
 **The app updates itself from the GitHub release.** `update.rs` in the
 core: the newest version is the tag `releases/latest` redirects to (no API,
 no rate limit), the installer is `releases/download/v<version>/<asset>`

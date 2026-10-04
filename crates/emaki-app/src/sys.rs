@@ -567,7 +567,19 @@ pub fn open_in_terminal(session_id: &str, cwd: &str, argv: &[String]) -> Result<
     let script = emaki_core::terminal::write_script(session_id, cwd, argv).map_err(|e| format!("could not write the script: {e}"))?;
     #[cfg(target_os = "macos")]
     {
-        let status = std::process::Command::new("open").arg(&script).status().map_err(|e| format!("could not run open: {e}"))?;
+        // `open` hands a terminal app it has to launch its own
+        // environment, and every shell in that app then carries it: an
+        // Emaki started from inside a Claude Code session gave the
+        // terminal that session's markers, and Claude Code typed there
+        // by hand said "Transcript saving is off, inherited
+        // CLAUDE_CODE_CHILD_SESSION marker". The script clears them for
+        // the session it resumes; this clears them for the app.
+        let status = std::process::Command::new("open")
+            .arg(&script)
+            .env_clear()
+            .envs(emaki_core::driver::child_env())
+            .status()
+            .map_err(|e| format!("could not run open: {e}"))?;
         if !status.success() {
             return Err("no app on this Mac opens shell scripts".into());
         }
