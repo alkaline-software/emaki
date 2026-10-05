@@ -174,8 +174,11 @@ impl Hub {
                         let cfg = hub.cfg.read().unwrap();
                         (cfg.scan_interval_ms, cfg.agents.clone())
                     };
-                    let mut refs = adapters::index_all(200, &agents);
+                    // The registry first, the transcripts after: an idle
+                    // read before the rows it follows would settle a turn
+                    // that ended by itself as a stopped one.
                     hub.refresh_peers();
+                    let mut refs = adapters::index_all(200, &agents);
                     hub.settle_stopped(&mut refs);
                     let sig: Vec<(String, u64, f64)> =
                         refs.iter().map(|r| (format!("{}:{}", r.agent.as_str(), r.session_id), r.size, r.mtime)).collect();
