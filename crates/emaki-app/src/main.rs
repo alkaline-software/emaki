@@ -15,11 +15,11 @@ mod workbench;
 
 use gpui::*;
 use gpui_component::Root;
-use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_CONTEXT};
+use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_CONTEXT, TERMINAL_CONTEXT};
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, TermBackTab, TermTab, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -38,6 +38,10 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-g", FindNext, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-g", FindPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-enter", Send, Some(COMPOSER_CONTEXT)),
+        // On the terminal card Tab is Claude Code's, not the toolkit's
+        // move to the next field.
+        KeyBinding::new("tab", TermTab, Some(TERMINAL_CONTEXT)),
+        KeyBinding::new("shift-tab", TermBackTab, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("secondary-q", Quit, None),
         // ⌘, on macOS, Ctrl+, elsewhere; Win+, as well where there is a
         // Win key, though Windows itself may take it first (desktop peek).

@@ -35,11 +35,15 @@ pub struct Driver {
     /// Where `claude` is, when `PATH` and the installers' folders do not
     /// say. "" = search.
     pub claude_path: String,
+    /// A session the window starts or continues runs as an interactive
+    /// Claude Code on a terminal of Emaki's own, with no window (`pty`).
+    /// Off, it is the headless `claude -p` child it was before.
+    pub hidden_terminal: bool,
 }
 
 impl Default for Driver {
     fn default() -> Self {
-        Self { enabled: true, idle_min: 30, default_mode: String::new(), default_model: String::new(), allow_bypass: false, claude_path: String::new() }
+        Self { enabled: true, idle_min: 30, default_mode: String::new(), default_model: String::new(), allow_bypass: false, claude_path: String::new(), hidden_terminal: true }
     }
 }
 
