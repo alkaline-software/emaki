@@ -251,6 +251,60 @@ fn main() {
                 Err(e) => println!("could not check: {e}"),
             }
         }
+        "pty" => {
+            // emaki-core pty <cwd> [--resume <id>] [--secs <n>] [--keys <text>]... :
+            // run an interactive Claude Code on a pty with no window,
+            // send each `--keys` once the prompt is up (\r, \t, \e and
+            // \Z for ⇧Tab are read), and print what the screen and the
+            // registry say. A probe of the hidden terminal.
+            let cwd = args.get(1).expect("pty <cwd> [--resume <id>] [--secs <n>] [--keys <text>]").clone();
+            let mut resume = None;
+            let mut secs = 12.0;
+            let mut keys: Vec<String> = Vec::new();
+            let mut it = args[2..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--resume" => resume = it.next().cloned(),
+                    "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(secs),
+                    "--keys" => keys.extend(it.next().map(|k| k.replace("\\r", "\r").replace("\\t", "\t").replace("\\Z", "\x1b[Z").replace("\\e", "\x1b"))),
+                    _ => {}
+                }
+            }
+            let id = resume.clone().unwrap_or_else(uuid_v4);
+            let argv = emaki_core::pty::claude_argv(&id, resume.is_some(), "", "");
+            let started = std::time::Instant::now();
+            let pty = emaki_core::pty::Pty::spawn(&argv, &cwd, std::sync::Arc::new(|| {})).expect("spawn");
+            println!("session {id} pid {}", pty.pid);
+            let modes = emaki_core::options::Options::cached(emaki_core::model::AgentId::ClaudeCode).modes;
+            let mut said = String::new();
+            let mut up = false;
+            let mut sent_at = std::time::Instant::now();
+            let mut keys = keys.into_iter();
+            while started.elapsed().as_secs_f64() < secs && pty.alive() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let peer = emaki_core::peer::registry_all().into_iter().find(|p| p.pid == pty.pid);
+                let mode = emaki_core::driver::mode_on_screen(&pty.text(), &modes);
+                let line = format!("registry {:?} mode {:?}", peer.as_ref().map(|p| p.status.clone()), mode);
+                if line != said {
+                    println!("{:>5.1}s {line}", started.elapsed().as_secs_f64());
+                    said = line;
+                }
+                up |= mode.is_some() && peer.is_some();
+                if up && sent_at.elapsed().as_millis() > 1500 {
+                    if let Some(k) = keys.next() {
+                        println!("{:>5.1}s keys {k:?}", started.elapsed().as_secs_f64());
+                        pty.write(k.as_bytes());
+                        sent_at = std::time::Instant::now();
+                    }
+                }
+            }
+            let styled = pty.styled();
+            println!("---\n{}\n---", pty.text());
+            println!("working: {:?}", emaki_core::driver::working_on_screen(&styled));
+            println!("suggestion: {:?}", emaki_core::driver::suggestion_on_screen(&styled));
+            println!("dialog: {:?}", emaki_core::driver::dialog_on_screen(&styled));
+            pty.kill();
+        }
         "drive" => {
             // emaki-core drive <cwd> <message...>: start a fresh headless
             // session, send one message, print events until the turn ends.
@@ -308,7 +362,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | explain <command> | update | statusline [install|restore] | drive <cwd> <text>");
+            eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | explain <command> | update | statusline [install|restore] | drive <cwd> <text> | pty <cwd> [--resume <id>] [--secs <n>] [--keys <text>]");
         }
     }
 }

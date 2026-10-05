@@ -73,8 +73,9 @@ crates/emaki-core/        everything without a window
   src/update.rs              the newest release, its installer, and putting it in place
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
   src/terminal.rs            the agent's resume command as a script a terminal can be handed
+  src/pty.rs                 a terminal of our own with no window: an interactive `claude` on a pty, its screen kept in memory
   src/watcher.rs             notify over every agent's data roots
-  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | options | explain | update | statusline | drive
+  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | options | explain | update | statusline | drive | pty
   tests/core.rs
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
@@ -113,9 +114,12 @@ EMAKI_QUESTION=1 EMAKI_OPEN=<id> ./target/debug/Emaki  # hold a sample question 
 EMAKI_GO=terminal EMAKI_OPEN=<id> ./target/debug/Emaki  # press "go to the terminal" on it
 EMAKI_GO=type:/status EMAKI_OPEN=<id> ./target/debug/Emaki  # type that into its terminal and send
 EMAKI_GO=pill:effort EMAKI_OPEN=<id> ./target/debug/Emaki  # click a pill: pill:mode, pill:model, pill:effort; step:mode is ⇧Tab
+EMAKI_GO="step:mode;button:terminal" EMAKI_OPEN=<id> ./target/debug/Emaki  # several steps, five seconds apart; button:terminal is the top-right button
 EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value without the picker: effort:, model:
 EMAKI_GO=dialog:2 EMAKI_OPEN=<id> ./target/debug/Emaki  # press that in the terminal's dialog (a digit, or tab); answer:<words> types an answer, goto:<n> goes to that tab
 EMAKI_KEYS=down,down,tab EMAKI_TYPE=/mod ./target/debug/Emaki  # press the slash list's keys (up, down, tab, esc)
+EMAKI_GO=send:hello EMAKI_OPEN=<id> ./target/debug/Emaki  # send that message once the session is open (or with EMAKI_PAGE=new, start one)
+EMAKI_TERM_KEYS=left,s EMAKI_GO=pill:effort EMAKI_OPEN=<id> ./target/debug/Emaki  # press keys on the terminal card (left, right, up, down, enter, esc, tab, or a letter)
 EMAKI_SHOT=/tmp/shot.png EMAKI_OPEN=<id> ./target/debug/Emaki  # write a picture of the window there after EMAKI_SHOT_AFTER seconds (5) and quit
 ```
 
@@ -1118,9 +1122,170 @@ Coming back: when the session was waiting or idle at the hand-off, the
 next change to its transcript is the interaction done, and the window
 activates itself (`come_back`, forgotten after fifteen minutes); when the
 agent was working, the next change would be its own, so nothing is
-armed. Considered and set aside: a terminal of Emaki's own (gpui-terminal
-on alacritty, or Ghostty) and a tmux bridge, both of which would own
-sessions rather than follow the terminal, and both far larger.
+armed. Set aside at the time: a terminal of Emaki's own
+(gpui-terminal on alacritty, or Ghostty) and a tmux bridge, as owning
+sessions rather than following the terminal. A session with no terminal
+at all now does run on one of our own, with no window (the hidden
+terminal, below), and so does one that is idle in a terminal of the
+person's.
+
+**The window's terminal is a hidden one.** Everything above
+that "opens the terminal" used to open the person's terminal app, do
+its work there and come back. Since 2026-10-05 the terminal is one of
+our own with no window (`pty.rs` in the core): the interactive `claude
+--resume <id>` on a pty this process owns (`portable-pty`), its output
+fed to a screen model that draws nothing (`vt100`). The child is an
+ordinary interactive session: it registers in Claude Code's registry
+with an inbox, runs the status line and writes the same transcript, so
+it is one more terminal session and the code that follows a terminal
+follows it unchanged. What differs is the backend: every `sys` function
+that takes a session's pid (`terminal_text`, `terminal_styled`,
+`type_in_terminal`, `key_in_terminal`, `text_in_terminal`) asks
+`pty::for_pid` first, where the screen is in memory (`Pty::styled`
+writes it out one sequence an attribute, the form the readers in
+`driver` take) and a key is a write, on every platform, with no app
+coming forward and no Accessibility access. The channel is `pty` in
+`reply_via_for`, asked after the driver and before the inbox, and
+`in_terminal` is either. Checked with `emaki-core pty <cwd>` on
+2.1.289: up and registered in 0.7 to 1.4 s, ⇧Tab read back off the
+footer 100 ms later, `/effort` and `/model` drawn with the registry
+saying `waiting`.
+
+*When it starts.* `Hub::start_terminal`, from three places: a message
+sent to a session with no process, or from the new-session page (begun
+with `--session-id`, in the mode and model chosen); anything
+`via_terminal` is asked for (a pill, ⇧Tab, a command); and the first
+character typed in the composer of such a session
+(`Workbench::warm_terminal`), so it is up before the message is
+finished. Not on opening a session: a resumed Claude Code writes to the
+transcript (the file grew on a resume that was given no input), and a
+conversation only read would move to the top of every list and read as
+live. The person asked for it to be loaded on entering the
+conversation; with a start under a second and a half the first
+keystroke was chosen instead, for that reason. The headless `claude -p`
+driver remains as what a session falls back to when the pty cannot be
+started or `driver.hidden_terminal` is false, and for the catalogue and
+the explainer.
+
+*A message is typed.* `Hub::send_to_terminal` waits for Claude Code to
+have registered and its prompt to be on the screen
+(`driver::prompt_on_screen`), pastes each picture's path by itself
+(bracketed paste; Claude Code turns the path into the picture, "[Image
+#1]", checked: the user row carries an image block), pastes the words,
+waits for the prompt to show them and presses Return. So the row is the
+person's own, not a peer's: no envelope, no held message under bypass,
+no thirty-second repeat drop, and a slash command runs. A terminal that
+shows something else for five seconds is put in front of the person
+(`HubEvent::TerminalNeeded`). Not typed while the registry says
+`waiting`: the words would answer the dialog.
+
+*When it is seen.* `Workbench::render_terminal` draws the screen on a
+card where the dialog cards sit (`pty::panel_rows`: what is under the
+line of "▔" Claude Code opens a picker beneath, else the screen without
+its blank edges), each row one `StyledText` in the mono face with the
+terminal's colours, on a dark ground or a light one by Claude Code's
+own `theme`. The card holds the focus (`term_focus`, key context
+`Terminal`): `term_bytes` turns each key into what a terminal sends,
+Tab and ⇧Tab are bound there so the toolkit's focus traversal does not
+take them, and Escape is Claude Code's while the card has the keyboard.
+The pointer works on it too, though Claude Code's interface takes no
+mouse: `pty::hits` finds what a click can mean on the screen and the
+keys that do it, and the card draws each such stretch as an element of
+its own, lit under the pointer. Three things: a numbered choice, reached
+from the one "❯" is on with that many arrows; a level under a slider,
+reached from the one under "▲" with arrows left or right; and a key the
+screen names ("Enter to confirm", "s for this session only", "Esc to
+cancel", "Tab to toggle"), which is that key. A click on a choice or a
+level confirms it too, with Return after the arrows (Return alone on
+the one already chosen): at first it only moved there, and the person
+asked not to have to press Enter after. Return saves the choice as the
+default for new sessions, as it does in the terminal; `s`, for this
+session only, is the key named at the foot. The arrows and Return go in
+one write, which 2.1.289 takes whole (two lefts and Return set the
+effort to low and closed the slider). The mapping is covered by a test; the
+click itself was not pressed from a script.
+Escape is Claude Code's whenever the card is up, wherever the keyboard
+is in the window. The card is asked for at the click, before the picker
+is drawn, and is still asked for an instant after it closes; drawn
+then, it showed the whole conversation's screen and jumped from tall to
+small. So nothing is drawn until a picker is on the screen
+(`pty::picker_up`) or the registry says the terminal is waiting.
+It shows for the model and effort pills at once, for a typed command
+once the registry says `waiting` (`/status`, `/config`), and by itself
+for a waiting screen `dialog_on_screen` cannot read (`term_auto`); it
+goes when `watch_terminal` sees the wait over, or by its close button,
+which sends Escape. ⇧Tab and Stop never show it. A click on the mode
+pill is one ⇧Tab (`pill_clicked` to `cycle_mode`): the pill only said
+which key to use while the key meant a trip to the person's terminal.
+
+*A terminal of the person's is left alone.* The person's rule: what is
+done in the window has nothing to do with any terminal of theirs, and
+the hidden terminal is what the window uses, always. Two versions got
+this wrong on the same day. The first followed a session into the
+terminal it was open in, which for an IDE's terminal is the switch, the
+command palette and a mode pill that cannot name its mode. The second
+ended the Claude Code in that terminal and resumed the session hidden;
+the person's VS Code terminal fell back to its shell, which is the app
+reaching into their terminal all the same. Now `reply_via_for` answers
+`inbox` for a session in a terminal of theirs only while a turn is
+running there; between turns it answers `spawn`, as for a session with
+no process, so a typed character, a message, ⇧Tab, a pill or a command
+starts a hidden terminal on it beside theirs, and nothing is sent to,
+typed in or ended in theirs. `Hub::peer_for` answers with the hidden
+terminal's own record once there is one, never the other terminal's,
+and `refresh_peers` keeps ours of the two. Mid-turn the window starts
+no second Claude Code on the running turn: a message goes to that
+terminal's inbox, which queues it, Stop and a dialog's answer go where
+the turn is, and a mode, a pick or a command says to wait
+(`theirs_busy`). This gives up one writer per transcript when the
+person has the session open in a terminal and uses it from the window
+too: both processes append to the one file, and the one in their
+terminal does not know what was said here until it is resumed. That is
+theirs to decide, and they did. Checked with a second copy
+(`EMAKI_HOME`), `emaki-core pty --resume` standing in for their
+terminal and `EMAKI_GO=step:mode`: the mode stepped on the hidden
+terminal, the pill named it, and the other process was still running.
+
+*The terminal button means the default terminal.* "Your terminal" is
+the app the system keeps for shell scripts, the one `open` hands the
+`.command` file to (`sys::in_default_terminal`: the host app of a
+process, by `host_of`, against `NSWorkspace`'s app for the script). The
+button looks at every record the registry has for the session
+(`peer::registry_all`), ours left out: one in the default terminal,
+however it got there, is brought forward and nothing is opened; one in
+any other terminal (VS Code's, Positron's) counts as not open, and the
+session is opened in the default terminal beside it. Refused onto a
+running turn. The hidden terminal is left running: it was let go on
+the way at first, and the next ⇧Tab then waited for a new one to come
+up, which the person read, rightly, as the button having killed it.
+There was a guard here for a minute after the click
+(`handed`) under which nothing hidden was started on the session; with
+it a ⇧Tab or a pill in that minute ran the terminal's script a second
+time, and a message started the headless driver, both on a session the
+person had just opened in their terminal. It is gone: with the hidden
+terminal on, `via_terminal` never opens the person's terminal. Checked
+with a second copy and `EMAKI_GO="step:mode;button:terminal;step:mode;step:mode"`
+against a real Kaku: with the session in Kaku the button opened nothing
+and Kaku's process outlived every key; with the session only in another
+process the button opened it in Kaku, and that process outlived the two
+⇧Tabs after it.
+
+*Letting go.* The hub keeps the terminals by session. One that
+is not showing and has been idle past `driver.idle_min` is let go, and
+all of them at quit; one that dies by itself is said once on the row
+under the composer with the last line of its screen. Probes:
+`EMAKI_GO=send:<words>` sends a message once the session (or the
+new-session page) is up, `EMAKI_TERM_KEYS=left,s` presses keys on the
+card a moment after it shows, and `EMAKI_PTY_LOG=<file>` keeps the
+child's raw output. Checked with those and `EMAKI_SHOT`: the effort
+slider on the card and gone after `s`, ⇧Tab moving the pill, a message
+to a session with no process, a new session, `/status` on the card and
+gone after Escape. The person ran the effort and model pickers on a
+real session. Not run from a script: the hand-over to a real terminal,
+a permission prompt through the hidden terminal (it goes through
+`read_dialog`, as for any terminal), and Windows beyond the type check.
+A probe run from a session that is itself in a hidden terminal must
+not quit the running Emaki, which is its parent: use a second copy.
 
 **A permission card answers to the keyboard.** ↩ on an empty composer
 allows the oldest card waiting on the session showing, ⇧↩ denies it, and

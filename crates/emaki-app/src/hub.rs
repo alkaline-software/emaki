@@ -22,6 +22,7 @@ use emaki_core::explain::Explainer;
 use emaki_core::model::AgentId;
 use emaki_core::options::Options;
 use emaki_core::peer::{self, Peer};
+use emaki_core::pty::Pty;
 use emaki_core::search::{self, SearchIndex};
 use emaki_core::transcript::SessionRef;
 use emaki_core::update::{self, UpdateState};
@@ -53,6 +54,11 @@ pub enum HubEvent {
     /// handed (`state/context/<session>.json`): the model, the effort or
     /// the mode there may have changed.
     Context(String),
+    /// The screen of this session's hidden terminal changed.
+    Screen(String),
+    /// A message waits on this session's hidden terminal, which is
+    /// showing something that is not its prompt: the person has to see it.
+    TerminalNeeded(String),
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +79,15 @@ pub struct Hub {
     wake: Mutex<mpsc::Sender<()>>,
     search_tx: Mutex<mpsc::Sender<Vec<SessionRef>>>,
     drivers: Mutex<HashMap<String, Arc<Driver>>>,
+    /// The terminals of our own, with no window, each running an
+    /// interactive Claude Code on one session (`emaki_core::pty`).
+    terminals: Mutex<HashMap<String, Arc<Pty>>>,
+    /// The session showing in the window: its hidden terminal is kept
+    /// for as long as it shows, however idle.
+    showing: Mutex<Option<String>>,
+    /// Hidden terminals whose child went away by itself, with the last
+    /// thing on its screen: said once to whoever is looking.
+    lost: Mutex<HashMap<String, String>>,
     /// Sessions whose driver exited; a fresh mtime alone must not count as a
     /// process for them.
     ended: Mutex<HashMap<String, Instant>>,
@@ -115,6 +130,9 @@ impl Hub {
             wake: Mutex::new(wake_tx),
             search_tx: Mutex::new(search_tx),
             drivers: Mutex::new(HashMap::new()),
+            terminals: Mutex::new(HashMap::new()),
+            showing: Mutex::new(None),
+            lost: Mutex::new(HashMap::new()),
             ended: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             inbox_last: Mutex::new(HashMap::new()),
@@ -176,6 +194,7 @@ impl Hub {
                         last_sig = sig;
                     }
                     hub.reap_drivers();
+                    hub.reap_terminals();
                     match wake_rx.recv_timeout(Duration::from_millis(interval.max(500))) {
                         Ok(()) | Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -255,7 +274,16 @@ impl Hub {
     }
 
     pub fn refresh_peers(&self) {
-        let fresh = peer::registry();
+        // A session may be in a hidden terminal of ours and in a terminal
+        // of the person's at once, which is theirs to do: ours is the
+        // record the window keeps.
+        let ours: Vec<i32> = self.terminals.lock().unwrap().values().map(|p| p.pid).collect();
+        let mut fresh: HashMap<String, Peer> = HashMap::new();
+        for p in peer::registry_all() {
+            if ours.contains(&p.pid) || !fresh.contains_key(&p.session_id) {
+                fresh.insert(p.session_id.clone(), p);
+            }
+        }
         *self.peers.lock().unwrap() = fresh;
     }
 
@@ -329,21 +357,190 @@ impl Hub {
         self.send(HubEvent::Note(text));
     }
 
+    /// The session's record in Claude Code's registry. With a hidden
+    /// terminal of ours behind the session it is that terminal's record
+    /// or none yet, never the record of a terminal of the person's on
+    /// the same session: nothing the window does goes there.
     pub fn peer_for(&self, session_id: &str) -> Option<Peer> {
-        self.peers.lock().unwrap().get(session_id).cloned()
+        let peer = self.peers.lock().unwrap().get(session_id).cloned();
+        match self.terminal_for(session_id) {
+            Some(pty) => peer.filter(|p| p.pid == pty.pid),
+            None => peer,
+        }
     }
 
     /// Whether something is behind this session: our driver, a registered
     /// inbox, or a transcript written recently enough that a process is the
     /// likely explanation.
     pub fn is_live(&self, r: &SessionRef, now: f64) -> bool {
-        if self.driver_for(&r.session_id).is_some() || self.peer_for(&r.session_id).is_some() {
+        if self.driver_for(&r.session_id).is_some() || self.terminal_for(&r.session_id).is_some() || self.peer_for(&r.session_id).is_some() {
             return true;
         }
         if self.has_ended(&r.session_id) {
             return false;
         }
         now - r.mtime < LIVE_GRACE_S
+    }
+
+    // -- hidden terminals ---------------------------------------------------
+
+    /// The hidden terminal behind a session, while its child lives.
+    pub fn terminal_for(&self, session_id: &str) -> Option<Arc<Pty>> {
+        self.terminals.lock().unwrap().get(session_id).filter(|p| p.alive()).cloned()
+    }
+
+    /// Which session the window shows, or none.
+    pub fn show(&self, session_id: Option<String>) {
+        *self.showing.lock().unwrap() = session_id;
+    }
+
+    /// Start an interactive Claude Code on the session, on a terminal
+    /// with no window: resumed, or begun under that id in `mode` with
+    /// `model`. Nothing happens when one is already there. The caller
+    /// has made sure no other process is behind the session. The screen
+    /// changing arrives as `HubEvent::Screen`, a moment after it does,
+    /// so a burst of drawing is one event.
+    pub fn start_terminal(self: &Arc<Self>, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str) -> Result<(), String> {
+        if self.terminal_for(session_id).is_some() {
+            return Ok(());
+        }
+        let (tx, rx) = mpsc::channel::<()>();
+        let tx = Mutex::new(tx);
+        let argv = emaki_core::pty::claude_argv(session_id, resume, mode, model);
+        let pty = Pty::spawn(&argv, cwd, Arc::new(move || {
+            let _ = tx.lock().map(|t| t.send(()));
+        }))?;
+        self.terminals.lock().unwrap().insert(session_id.to_string(), pty);
+        self.ended.lock().unwrap().remove(session_id);
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        thread::spawn(move || {
+            while rx.recv().is_ok() {
+                thread::sleep(Duration::from_millis(40));
+                while rx.try_recv().is_ok() {}
+                hub.send(HubEvent::Screen(sid.clone()));
+            }
+            // The child is gone. Still held here, nobody let it go: it
+            // went by itself, and the foot of its screen says why.
+            if let Some(pty) = hub.terminals.lock().unwrap().remove(&sid) {
+                let said = pty.text().lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+                hub.lost.lock().unwrap().insert(sid.clone(), said);
+            }
+            hub.ended.lock().unwrap().insert(sid.clone(), Instant::now());
+            hub.refresh_peers();
+            hub.send(HubEvent::Screen(sid));
+            hub.refresh();
+        });
+        self.refresh();
+        Ok(())
+    }
+
+    /// Put a message in the hidden terminal's prompt and send it, as the
+    /// person typing there would: each picture's path pasted first, which
+    /// Claude Code takes as the picture, then the words, then Return.
+    /// Nothing is typed before Claude Code has registered and its prompt
+    /// is on the screen, and each step waits on the screen showing the
+    /// one before it. A terminal that shows something else for a while
+    /// (a login, a folder to trust) is put in front of the person
+    /// (`HubEvent::TerminalNeeded`) and the message goes once they are
+    /// through it. A turn that is running takes the message into its
+    /// queue, as it does in any terminal.
+    pub fn send_to_terminal(self: &Arc<Self>, session_id: &str, text: String, images: Vec<PathBuf>) {
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        thread::spawn(move || {
+            let sent = hub.type_message(&sid, &text, &images);
+            hub.send(HubEvent::Sent { session_id: sid, queued: false, error: sent.err().unwrap_or_default() });
+            hub.refresh();
+        });
+    }
+
+    fn type_message(&self, sid: &str, text: &str, images: &[PathBuf]) -> Result<(), String> {
+        let Some(pty) = self.terminal_for(sid) else { return Err("claude is not running; try again".into()) };
+        let look = Duration::from_millis(60);
+        let started = Instant::now();
+        let mut asked = false;
+        loop {
+            if !pty.alive() {
+                return Err("claude exited before it took the message".into());
+            }
+            let registered = !peer::available() || peer::registry_all().iter().any(|p| p.pid == pty.pid);
+            if registered && driver::prompt_on_screen(&pty.styled()).is_some() {
+                break;
+            }
+            if !asked && started.elapsed() > Duration::from_secs(5) {
+                asked = true;
+                self.send(HubEvent::TerminalNeeded(sid.to_string()));
+            }
+            if started.elapsed() > Duration::from_secs(600) {
+                return Err("claude never came to its prompt".into());
+            }
+            thread::sleep(look);
+        }
+        // The screen follows a paste within a frame or two; looked at
+        // until it has, and gone on from when it never does.
+        let until = |shown: &dyn Fn(&str) -> bool| {
+            for _ in 0..80 {
+                if shown(&pty.styled()) || !pty.alive() {
+                    break;
+                }
+                thread::sleep(look);
+            }
+        };
+        for (ix, path) in images.iter().enumerate() {
+            pty.paste(&path.to_string_lossy());
+            until(&|screen| screen.matches("[Image #").count() > ix);
+        }
+        let words = text.trim();
+        if !words.is_empty() {
+            pty.paste(words);
+        }
+        until(&|screen| driver::prompt_on_screen(screen) == Some(false));
+        pty.write(b"\r");
+        Ok(())
+    }
+
+    /// Why the session's hidden terminal went away by itself, once.
+    pub fn take_lost(&self, session_id: &str) -> Option<String> {
+        self.lost.lock().unwrap().remove(session_id)
+    }
+
+    /// Whether the hidden terminal is how sessions run here.
+    pub fn hidden_terminals(&self) -> bool {
+        self.cfg.read().unwrap().driver.hidden_terminal
+    }
+
+    /// Let a session's hidden terminal go.
+    pub fn stop_terminal(&self, session_id: &str) {
+        if let Some(pty) = self.terminals.lock().unwrap().remove(session_id) {
+            let pid = pty.pid;
+            pty.kill();
+            self.peers.lock().unwrap().retain(|_, p| p.pid != pid);
+        }
+    }
+
+    /// Hidden terminals nobody needs: one whose child is gone, and one
+    /// that is not showing and has been idle past the driver's limit.
+    fn reap_terminals(&self) {
+        let limit = Duration::from_secs(self.cfg.read().unwrap().driver.idle_min.max(1) * 60);
+        let showing = self.showing.lock().unwrap().clone();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let stale: Vec<String> = {
+            let peers = self.peers.lock().unwrap();
+            self.terminals
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(sid, pty)| {
+                    let idle = peers.get(*sid).is_some_and(|p| p.pid == pty.pid && p.status == "idle" && now - p.status_at > limit.as_secs_f64());
+                    !pty.alive() || (idle && showing.as_ref() != Some(*sid) && pty.quiet_for() > limit)
+                })
+                .map(|(sid, _)| sid.clone())
+                .collect()
+        };
+        for sid in stale {
+            self.stop_terminal(&sid);
+        }
     }
 
     // -- drivers ----------------------------------------------------------
@@ -556,6 +753,9 @@ impl Hub {
         let all: Vec<Arc<Driver>> = self.drivers.lock().unwrap().drain().map(|(_, d)| d).collect();
         for d in all {
             d.stop();
+        }
+        for (_, pty) in self.terminals.lock().unwrap().drain() {
+            pty.kill();
         }
     }
 

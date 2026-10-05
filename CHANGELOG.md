@@ -5,6 +5,16 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.1.6
+
+- A session started or continued in Emaki runs in a terminal of Emaki's own, with no window. Your terminal app is no longer opened for it.
+- ⇧Tab changes the mode without leaving the window, and so does a click on the mode pill.
+- The model and effort pills show Claude Code's own picker on a small card over the composer; it closes when you have chosen.
+- The picker takes the mouse: click a model, an effort level, or a key named at its foot.
+- A slash command that has an interface (`/status`, `/config`) shows on the same card.
+- Nothing done in Emaki touches a terminal of yours: a session open there is used through the hidden terminal as well.
+- The terminal button opens the session in your default terminal, or brings it forward when it is already open there; a session open in an IDE's terminal counts as not open.
+
 ## v0.1.5
 
 - A new icon: the scroll on cream, with a conversation on its sheet.

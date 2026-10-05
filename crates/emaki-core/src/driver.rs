@@ -569,7 +569,31 @@ pub fn suggestion_on_screen(text: &str) -> Option<String> {
             words.push_str(dim);
         }
     }
-    (!words.is_empty()).then_some(words)
+    // A session nothing has been said in shows a hint the same way
+    // ("Try \"write a test for <filepath>\""): Claude Code's, not a
+    // prompt it suggests.
+    (!words.is_empty() && !words.starts_with("Try \"")).then_some(words)
+}
+
+/// Whether Claude Code's prompt is on the screen and empty: the line
+/// between its two rules, after "❯", with nothing typed on it (a
+/// suggestion or a hint, written dim, is not typing). `text` is the
+/// screen with its colours. This is when keys sent there are words for
+/// the prompt, not answers to a dialog or a screen still being drawn.
+pub fn prompt_on_screen(text: &str) -> Option<bool> {
+    let lines: Vec<&str> = text.lines().collect();
+    let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
+    let is_rule = |l: &str| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
+    let below = (0..plain.len()).rev().find(|i| is_rule(&plain[*i]))?;
+    let above = (0..below).rev().find(|i| is_rule(&plain[*i]))?;
+    if below - above < 2 || !plain[above + 1].trim_start().starts_with('❯') {
+        return None;
+    }
+    let typed: String = lines[above + 1..below].iter().enumerate().map(|(ix, l)| {
+        let lit = dim_text(l).1;
+        if ix == 0 { lit.trim_start().trim_start_matches('❯').to_string() } else { lit }
+    }).collect();
+    Some(typed.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}').is_empty())
 }
 
 /// A line's text in two: what was written dim, and what was not.

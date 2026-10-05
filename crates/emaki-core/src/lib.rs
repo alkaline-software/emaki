@@ -18,6 +18,7 @@ pub mod model;
 pub mod options;
 pub mod paths;
 pub mod peer;
+pub mod pty;
 pub mod redact;
 pub mod render_md;
 pub mod search;

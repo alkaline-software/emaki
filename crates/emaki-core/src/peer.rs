@@ -125,8 +125,14 @@ fn alive(_pid: i32) -> bool {
 /// file's `procStart` disagrees with the record (a reused pid) is skipped:
 /// delivering to the wrong process is worse than not delivering.
 pub fn registry() -> HashMap<String, Peer> {
+    registry_all().into_iter().map(|p| (p.session_id.clone(), p)).collect()
+}
+
+/// The same records one by one: a session resumed in a second process
+/// while the first still runs has two, and `registry` keeps one of them.
+pub fn registry_all() -> Vec<Peer> {
     let folder = sessions_dir();
-    let mut peers = HashMap::new();
+    let mut peers = Vec::new();
     let Ok(entries) = std::fs::read_dir(&folder) else { return peers };
     let names: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
     let mut keys: HashMap<i32, String> = HashMap::new();
@@ -152,8 +158,7 @@ pub fn registry() -> HashMap<String, Peer> {
             continue;
         }
         let s = |k: &str| obj.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        peers.insert(
-            sid.clone(),
+        peers.push(
             Peer { session_id: sid, pid, socket_path: sock, cwd: s("cwd"), kind: s("kind"), name: s("name"), status: s("status"), status_at: obj.get("statusUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, proc_start: s("procStart"), key_path: keys.get(&pid).cloned().unwrap_or_default() },
         );
     }

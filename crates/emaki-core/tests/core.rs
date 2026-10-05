@@ -1337,3 +1337,67 @@ fn terminal_script_quotes_and_resumes() {
         assert_ne!(fs::metadata(&path).unwrap().permissions().mode() & 0o111, 0);
     }
 }
+
+/// The hidden terminal's screen, written out, is what the screen readers
+/// take: the mode's footer, an empty prompt, a suggestion in dim, the
+/// working line with its colour, and a picker cut out for the card.
+#[test]
+fn hidden_terminal_screen_feeds_the_readers() {
+    use emaki_core::{driver, pty};
+    let rule = "─".repeat(40);
+    let idle = format!("\x1b[38;2;215;119;87m✻\x1b[0m Worked for 2s\r\n{rule}\r\n❯\u{a0}\x1b[2mrun the tests\x1b[0m\r\n{rule}\r\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+    let styled = pty::styled(&pty::rows_after(idle.as_bytes(), 12, 60));
+    assert_eq!(driver::suggestion_on_screen(&styled).as_deref(), Some("run the tests"));
+    assert_eq!(driver::prompt_on_screen(&styled), Some(true));
+    assert_eq!(driver::working_on_screen(&styled), None);
+    let modes = vec![emaki_core::options::Choice { key: "acceptEdits".into(), label: "Accept edits".into(), ..Default::default() }];
+    assert_eq!(driver::mode_on_screen(&pty::plain(&pty::rows_after(idle.as_bytes(), 12, 60)), &modes).as_deref(), Some("acceptEdits"));
+
+    let typed = format!("{rule}\r\n❯ half a thought\r\n{rule}");
+    assert_eq!(driver::prompt_on_screen(&pty::styled(&pty::rows_after(typed.as_bytes(), 8, 60))), Some(false));
+
+    let busy = format!("\x1b[38;2;215;119;87m✳ Brewing…\x1b[0m \x1b[38;2;153;153;153m(3s)\x1b[0m\r\n{rule}\r\n❯ \r\n{rule}");
+    let w = driver::working_on_screen(&pty::styled(&pty::rows_after(busy.as_bytes(), 8, 60))).expect("the working line");
+    assert_eq!((w.verb.as_str(), w.color), ("Brewing…", Some(0xd77757)));
+
+    // A picker opens under a line of "▔": the card shows it alone.
+    let picker = format!("❯ earlier words\r\n\r\n\r\n{}\r\n   Effort\r\n\r\n\r\n   low  medium  high\r\n", "▔".repeat(40));
+    let rows = pty::panel_rows(pty::rows_after(picker.as_bytes(), 12, 60));
+    assert_eq!(pty::plain(&rows), "   Effort\n\n   low  medium  high");
+    // No picker: a dialog is not the prompt.
+    assert_eq!(driver::prompt_on_screen(&pty::styled(&pty::rows_after(picker.as_bytes(), 12, 60))), None);
+}
+
+/// A click on the hidden terminal's card becomes the keys that do the
+/// same in Claude Code's pickers.
+#[test]
+fn hidden_terminal_clicks_become_keys() {
+    use emaki_core::pty;
+    let at = |screen: &str, word: &str| -> Option<Vec<u8>> {
+        let rows = pty::rows_after(screen.replace('\n', "\r\n").as_bytes(), 16, 100);
+        let lines: Vec<String> = pty::plain(&rows).lines().map(str::to_string).collect();
+        let said = |h: &pty::Hit| lines[h.row].chars().skip(h.start).take(h.end - h.start).collect::<String>();
+        let hits = pty::hits(&rows);
+        // A level is its whole word ("high" is not "xhigh"); a row or a hint is found by a part of it.
+        if matches!(word, "low" | "high" | "max") {
+            return hits.into_iter().find(|h| said(h) == word).map(|h| h.keys);
+        }
+        hits.into_iter().find(|h| said(h).contains(word)).map(|h| h.keys)
+    };
+    let effort = "   Effort\n\n      Faster                Smarter\n      ───────────────▲─────────────      Ultracode  off\n      low  medium  high  xhigh  max      Tab to toggle\n\n   ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel";
+    assert_eq!(at(effort, "low"), Some(b"\x1b[D\x1b[D\r".to_vec()));
+    assert_eq!(at(effort, "max"), Some(b"\x1b[C\x1b[C\r".to_vec()));
+    assert_eq!(at(effort, "high"), Some(b"\r".to_vec()));
+    assert_eq!(at(effort, "Tab to toggle"), Some(b"\t".to_vec()));
+    assert_eq!(at(effort, "Enter to confirm"), Some(b"\r".to_vec()));
+    assert_eq!(at(effort, "session only"), Some(b"s".to_vec()));
+    assert_eq!(at(effort, "Esc to cancel"), Some(b"\x1b".to_vec()));
+    assert_eq!(at(effort, "adjust"), None);
+    assert_eq!(at(effort, "Ultracode"), None);
+
+    let model = "   Select model\n\n     1.  Default (recommended)  Opus 5.5 · Best for everyday tasks\n   ❯ 2.  Opus 5.5 ✔             For complex work\n     3.  Fable 5.1              For your toughest challenges\n   ↓ 4.  Sonnet 5.5             Most efficient\n\n   Enter to set as default · s to use this session only · Esc to cancel";
+    assert_eq!(at(model, "Default"), Some(b"\x1b[A\r".to_vec()));
+    assert_eq!(at(model, "Sonnet"), Some(b"\x1b[B\x1b[B\r".to_vec()));
+    assert_eq!(at(model, "Opus 5.5 ✔"), Some(b"\r".to_vec()));
+    assert_eq!(at(model, "use this session"), Some(b"s".to_vec()));
+}

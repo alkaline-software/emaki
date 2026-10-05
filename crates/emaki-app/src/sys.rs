@@ -5,6 +5,11 @@
 
 use std::path::Path;
 
+// Every function here that takes a session's pid asks first whether the
+// process is on a hidden terminal of our own (`emaki_core::pty`), whose
+// screen is in memory and whose keyboard is a write, on every platform.
+// Only a session in a terminal of the person's goes on to that app.
+
 /// Bring the terminal a session runs in to the front: the application
 /// that owns the process `pid`, found by walking up its parents until one
 /// is an application the system knows (the terminal app, or an IDE with a
@@ -16,6 +21,9 @@ use std::path::Path;
 /// forward as an app and left as it was.
 #[cfg(target_os = "macos")]
 pub fn focus_terminal(pid: i32) -> Result<String, String> {
+    if emaki_core::pty::for_pid(pid).is_some() {
+        return Ok("Emaki".into());
+    }
     let host = host_of(pid)?;
     host.focus();
     Ok(host.name)
@@ -27,6 +35,9 @@ pub fn focus_terminal(pid: i32) -> Result<String, String> {
 /// terminal, which no one outside the IDE can read.
 #[cfg(target_os = "macos")]
 pub fn terminal_text(pid: i32) -> Option<String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        return Some(pty.text());
+    }
     terminal_read(pid, false)
 }
 
@@ -35,6 +46,9 @@ pub fn terminal_text(pid: i32) -> Option<String> {
 /// Terminal and iTerm2 hand over plain text.
 #[cfg(target_os = "macos")]
 pub fn terminal_styled(pid: i32) -> Option<String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        return Some(pty.styled());
+    }
     terminal_read(pid, true)
 }
 
@@ -96,6 +110,10 @@ end tell"#,
 /// says so. Returns the host's name.
 #[cfg(target_os = "macos")]
 pub fn type_in_terminal(pid: i32, text: &str) -> Result<String, String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        pty.write(format!("{text}\r").as_bytes());
+        return Ok("Emaki".into());
+    }
     let host = host_of(pid)?;
     host.focus();
     let typed = match host.bundle.as_str() {
@@ -168,6 +186,17 @@ pub enum TerminalKey {
     ShiftTab,
 }
 
+impl TerminalKey {
+    /// The key as a terminal sends it.
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            TerminalKey::Escape => b"\x1b",
+            // Back-tab: ESC [ Z.
+            TerminalKey::ShiftTab => b"\x1b[Z",
+        }
+    }
+}
+
 /// Press `key` in the terminal a session runs in. WezTerm and Kaku take
 /// it for the pane and iTerm2 for the session, without coming to the
 /// front; Terminal and any other host have to be in front for System
@@ -178,6 +207,10 @@ pub enum TerminalKey {
 /// name.
 #[cfg(target_os = "macos")]
 pub fn key_in_terminal(pid: i32, key: TerminalKey) -> Result<String, String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        pty.write(key.bytes());
+        return Ok("Emaki".into());
+    }
     let host = host_of(pid)?;
     // What the key is on the wire, as iTerm2 is told it, and as System
     // Events presses it.
@@ -234,6 +267,10 @@ end tell"#,
 /// not, and the dialog is answered in the terminal.
 #[cfg(target_os = "macos")]
 pub fn text_in_terminal(pid: i32, text: &str) -> Result<(), String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        pty.write(text.as_bytes());
+        return Ok(());
+    }
     let host = host_of(pid)?;
     if host.bundle == "com.googlecode.iterm2" {
         // AppleScript has no escapes for control characters: the text
@@ -279,7 +316,11 @@ end tell"#,
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn text_in_terminal(_pid: i32, _text: &str) -> Result<(), String> {
+pub fn text_in_terminal(pid: i32, text: &str) -> Result<(), String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        pty.write(text.as_bytes());
+        return Ok(());
+    }
     Err("reaching the terminal's keys from here is not done on this platform yet: answer it in the terminal".into())
 }
 
@@ -292,28 +333,68 @@ fn activate_self() {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn key_in_terminal(_pid: i32, _key: TerminalKey) -> Result<String, String> {
+pub fn key_in_terminal(pid: i32, key: TerminalKey) -> Result<String, String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        pty.write(key.bytes());
+        return Ok("Emaki".into());
+    }
     Err("reaching the terminal's keys from here is not done on this platform yet: press it in the terminal".into())
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn focus_terminal(_pid: i32) -> Result<String, String> {
+pub fn focus_terminal(pid: i32) -> Result<String, String> {
+    if emaki_core::pty::for_pid(pid).is_some() {
+        return Ok("Emaki".into());
+    }
     Err("finding the terminal's window is not done on this platform yet".into())
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn terminal_text(_pid: i32) -> Option<String> {
+pub fn terminal_text(pid: i32) -> Option<String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        return Some(pty.text());
+    }
     None
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn terminal_styled(_pid: i32) -> Option<String> {
+pub fn terminal_styled(pid: i32) -> Option<String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        return Some(pty.styled());
+    }
     None
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn type_in_terminal(_pid: i32, _text: &str) -> Result<String, String> {
+pub fn type_in_terminal(pid: i32, text: &str) -> Result<String, String> {
+    if let Some(pty) = emaki_core::pty::for_pid(pid) {
+        pty.write(format!("{text}\r").as_bytes());
+        return Ok("Emaki".into());
+    }
     Err("typing into the terminal is not done on this platform yet".into())
+}
+
+/// Whether the process runs in the person's default terminal: the app
+/// the system keeps for shell scripts, which is the one the terminal
+/// button opens a session in. A terminal inside an IDE is another app,
+/// and so is any terminal the person did not make their default.
+#[cfg(target_os = "macos")]
+pub fn in_default_terminal(pid: i32) -> bool {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+    let Ok(host) = host_of(pid) else { return false };
+    // Asked of a script that is there: the answer goes by the file.
+    let Ok(script) = emaki_core::terminal::write_script("default-terminal", "/", &["true".to_string()]) else { return false };
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&script.to_string_lossy()));
+    let Some(app) = NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&url).and_then(|u| u.path()).map(|p| p.to_string()) else { return false };
+    app.trim_end_matches('/') == host.path.trim_end_matches('/')
+}
+
+/// Elsewhere the app a process runs under is not looked for: a session
+/// with a terminal counts as open in it.
+#[cfg(not(target_os = "macos"))]
+pub fn in_default_terminal(_pid: i32) -> bool {
+    true
 }
 
 /// The application a session's process runs under, and the tty it is on.
