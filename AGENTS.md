@@ -714,7 +714,13 @@ and the composer is left empty for what comes next. The test is the
 withdrawal's own (no item in the round but notices), applied to
 `Session::withdrawn` or, while the stop's marker is not yet in the
 transcript, to the last round. Until 2026-10-04 any stop brought the
-last prompt back, started on or not. The conversation lets
+last prompt back, started on or not. A command that acts by itself
+(`/compact`) is never handed back: typed through the hidden terminal it
+ran to its end, the registry said idle a moment before the boundary's
+rows were in the file, the turn read as stopped for one scan, and
+"/compact" came back into the box. The scan now reads the registry
+before the transcripts as well, which narrows that moment without
+closing it (Claude Code writes its rows late). The conversation lets
 go of what the composer got back: "[Request interrupted by user]" is
 Claude Code's marker, not something the person said, and is never drawn,
 and a prompt stopped before the agent wrote or ran anything is taken out

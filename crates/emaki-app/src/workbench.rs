@@ -3571,6 +3571,13 @@ impl Workbench {
             return;
         }
         let prompt = rnd.prompt.trim().to_string();
+        // A command that acts by itself (`/compact`) is not a message to
+        // hand back: it has no reply, so its round is only ever a prompt,
+        // and one that ran to its end read as stopped for a scan whenever
+        // the registry said idle before its rows were in the file.
+        if prompt.strip_prefix('/').is_some_and(|rest| acts_alone(rest.split_whitespace().next().unwrap_or(""))) {
+            return;
+        }
         let from_round: Vec<PathBuf> = rnd.attachments.iter().filter(|a| !a.path.is_empty()).map(|a| PathBuf::from(&a.path)).collect();
         let sent = self.last_sent.clone().filter(|(key, text, _)| Some(key) == self.selected.as_ref() && *text == prompt);
         match sent {
