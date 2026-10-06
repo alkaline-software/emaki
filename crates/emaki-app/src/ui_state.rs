@@ -1,5 +1,5 @@
 //! What the window remembers between launches: its bounds, whether the
-//! sidebar was open, the page and the open tabs.
+//! sidebar was open, the page, the open tabs and the open folders.
 //! `~/.emaki/state/ui.json`, written when any of that changes and again at
 //! quit. An unreadable file means defaults, never a refusal to start.
 
@@ -26,6 +26,9 @@ pub struct UiState {
     pub tabs: Vec<String>,
     /// The tab that was showing, when the page was a session.
     pub active: Option<String>,
+    /// The sidebar's folders showing their sessions; absent until one
+    /// has been opened or closed.
+    pub folders_open: Option<Vec<String>>,
 }
 
 fn file() -> std::path::PathBuf {

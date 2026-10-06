@@ -705,6 +705,15 @@ pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Show in folder"
 };
 
+/// What opening a folder in the file manager is called where we are.
+pub const OPEN_FOLDER_LABEL: &str = if cfg!(target_os = "macos") {
+    "Open in Finder"
+} else if cfg!(target_os = "windows") {
+    "Open in Explorer"
+} else {
+    "Open folder"
+};
+
 /// The same action on the button that shows a session's transcript file.
 pub const REVEAL_TRANSCRIPT_LABEL: &str = if cfg!(target_os = "macos") {
     "Reveal the transcript in Finder"

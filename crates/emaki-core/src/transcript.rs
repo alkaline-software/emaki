@@ -233,6 +233,10 @@ pub struct SessionRef {
     /// True when the agent has already deleted the original and this session
     /// exists only because emaki archived it.
     pub archived: bool,
+    /// True when nothing has been said in it: no prompt, no reply, nothing
+    /// queued. `/clear` leaves one behind, named after the session it
+    /// cleared. It is archived like any other and listed nowhere.
+    pub blank: bool,
     pub state: TurnState,
 }
 
@@ -331,13 +335,18 @@ fn peek_into(r: &mut SessionRef, st: &fs::Metadata) {
         return;
     };
     let mut head: Vec<Value> = Vec::new();
+    let mut whole = false;
     {
         let mut reader = BufReader::new(&mut fh);
         let mut buf = Vec::new();
         for _ in 0..HEAD_LINES {
             buf.clear();
             match reader.read_until(b'\n', &mut buf) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    whole = true;
+                    break;
+                }
+                Err(_) => break,
                 Ok(_) => {
                     if let Some(row) = parse_row(&buf) {
                         head.push(row);
@@ -388,14 +397,46 @@ fn peek_into(r: &mut SessionRef, st: &fs::Metadata) {
         r.title = if r.slug.is_empty() { "Untitled session".into() } else { r.slug.clone() };
     }
     r.state = turn_state(state_rows, &r.cwd);
+    r.blank = whole && !head.iter().any(says_something);
+}
+
+/// Whether a row is part of a conversation: a reply, a message queued, a
+/// prompt, or a command that is itself a prompt (a skill). A command that
+/// acts by itself (`/clear`, `/resume`) and the rows Claude Code writes
+/// around it say nothing.
+fn says_something(row: &Value) -> bool {
+    match str_of(row, "type") {
+        "assistant" | "attachment" | "queue-operation" => true,
+        "user" if !crate::build::machine_authored(row) => {
+            if crate::build::peer_message(row).is_some() {
+                return true;
+            }
+            let blocks = crate::json::blocks(row);
+            if blocks.iter().any(|b| str_of(b, "type") != "text") {
+                return true;
+            }
+            let (prompt, commands, _) = crate::build::strip_wrappers(&crate::build::text_blocks_joined(&blocks));
+            !prompt.is_empty()
+                || commands.iter().any(|c| !crate::driver::acts_alone(c.split_whitespace().next().unwrap_or("").trim_start_matches('/')))
+        }
+        _ => false,
+    }
 }
 
 static SLUG_SHAPED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)+$").unwrap());
 
-/// The best AI-written title in a set of rows: the newest `ai-title` that is
+/// A session's title from a set of rows: the person's own name for it when
+/// they gave one, else the best AI-written one, the newest `ai-title` that is
 /// neither a known agent name nor slug-shaped (when a session runs under a
 /// named agent, Claude Code writes the agent's name into that field).
 pub fn pick_title(rows: &[Value]) -> String {
+    // A name the person gave (`/rename`, or Ctrl+R in the resume list) is
+    // a `custom-title` row and beats anything written for them. Claude
+    // Code writes the same words as an `agent-name` row beside it, which
+    // must not disqualify them the way an agent's name does an AI title.
+    if let Some(named) = rows.iter().rev().filter(|r| str_of(r, "type") == "custom-title").map(|r| str_of(r, "customTitle").trim().to_string()).find(|s| !s.is_empty()) {
+        return named;
+    }
     let agent_names: std::collections::HashSet<String> =
         rows.iter().map(|r| str_of(r, "agentName").trim().to_string()).filter(|s| !s.is_empty()).collect();
     let titles: Vec<String> = rows

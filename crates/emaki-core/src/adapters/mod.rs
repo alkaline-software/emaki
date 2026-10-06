@@ -140,6 +140,14 @@ pub fn turn_state_from_session(s: &Session) -> TurnState {
         st.tool = call.name.clone();
         return st;
     }
+    // Stopped by the person, as the transcript says at the round's foot:
+    // a prompt with no reply under it would read as working for ever.
+    if matches!(last.items.last(), Some(crate::model::Item::Notice { variant: crate::model::NoticeVariant::Interrupted, .. })) {
+        st.phase = Phase::YourTurn;
+        st.activity = "interrupted".into();
+        st.activity_kind = "stop".into();
+        return st;
+    }
     if let Some(text) = last.items.iter().rev().find_map(|i| match i {
         crate::model::Item::Text { md, .. } => Some(md),
         _ => None,

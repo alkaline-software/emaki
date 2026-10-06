@@ -13,7 +13,7 @@ fn main() {
     match cmd {
         "list" => {
             let refs = adapters::index_all(200, &cfg.agents);
-            for r in &refs {
+            for r in refs.iter().filter(|r| !r.blank) {
                 println!(
                     "{:<12} {:<38} {:<9} {:>8} {:<10} {}",
                     r.agent.as_str(),
@@ -302,6 +302,7 @@ fn main() {
             println!("---\n{}\n---", pty.text());
             println!("working: {:?}", emaki_core::driver::working_on_screen(&styled));
             println!("suggestion: {:?}", emaki_core::driver::suggestion_on_screen(&styled));
+            println!("prompt: {:?}", emaki_core::driver::prompt_on_screen(&styled));
             println!("dialog: {:?}", emaki_core::driver::dialog_on_screen(&styled));
             pty.kill();
         }

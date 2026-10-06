@@ -93,6 +93,7 @@ scripts/release-notes.sh   one version's section of CHANGELOG.md, the release no
 scripts/release-check.sh   before a tag: version, lock, changelog, tests, build, Windows type check
 scripts/release-publish.sh after CI: the notarized Mac images onto the draft release, then publish
 scripts/statusline.sh      Claude Code's status line, ours: prints the line, leaves the rate limits
+scripts/relaunch.sh        quit the running Emaki and start the new build, once the agent's turn is over
 scripts/anthropic-mono.py  the Claude app's code font into ~/.emaki/fonts, plus its 0.9 copy for inline code
 WORKFLOW.md                how to cut a release, step by step
 CHANGELOG.md               one section per release; the release job reads it
@@ -116,6 +117,9 @@ EMAKI_GO=type:/status EMAKI_OPEN=<id> ./target/debug/Emaki  # type that into its
 EMAKI_GO=pill:effort EMAKI_OPEN=<id> ./target/debug/Emaki  # click a pill: pill:mode, pill:model, pill:effort; step:mode is ⇧Tab
 EMAKI_GO="step:mode;button:terminal" EMAKI_OPEN=<id> ./target/debug/Emaki  # several steps, five seconds apart; button:terminal is the top-right button
 EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value without the picker: effort:, model:
+EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to another session, or to the new-session page
+EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar
+EMAKI_GO=menu EMAKI_OPEN=<id> ./target/debug/Emaki  # the session's right-click menu; renaming shows the rename field, name:<words> names it
 EMAKI_GO=dialog:2 EMAKI_OPEN=<id> ./target/debug/Emaki  # press that in the terminal's dialog (a digit, or tab); answer:<words> types an answer, goto:<n> goes to that tab
 EMAKI_KEYS=down,down,tab EMAKI_TYPE=/mod ./target/debug/Emaki  # press the slash list's keys (up, down, tab, esc)
 EMAKI_GO=send:hello EMAKI_OPEN=<id> ./target/debug/Emaki  # send that message once the session is open (or with EMAKI_PAGE=new, start one)
@@ -149,6 +153,28 @@ README.md how to use the app and how it is built.
 person looks at is usually the old build, so the change "is not there".
 Relaunch, then check `pgrep -fl Emaki` lists one process.
 
+**After a change to the app, relaunch it with `scripts/relaunch.sh`.**
+The person develops Emaki in Emaki, so at the end of any task that
+changed the app, build it (`cargo build -p emaki-app`) and run
+`scripts/relaunch.sh` as the last command before the final reply, without
+being asked; a change to documents alone needs no relaunch. The script
+returns at once, and fifteen seconds later quits the running Emaki and
+starts `target/debug/Emaki`. The agent's session is a child of the app
+(the hidden terminal), so quitting the app ends the session: the script
+therefore also waits for the turn to be over, which is a state and not a
+longer time. It finds the session's registry record
+(`~/.claude/sessions/<pid>.json`, the nearest ancestor that has one) and
+quits nothing while that says `busy`, then gives Claude Code two seconds
+to write the turn's last rows. So the countdown is fifteen seconds or
+the end of the reply, whichever is later. It was a fixed fifteen seconds
+typed out by hand each time (`nohup sh -c 'sleep 15; pkill -x Emaki;
+sleep 2; ./target/debug/Emaki'`), long enough for most replies and too
+short for a long one. Five was tried with the guard and the person went
+back to fifteen, keeping the guard: time to read the reply before the
+window goes. A second
+copy for a probe (`EMAKI_HOME`) is still the way to look at a change
+before the relaunch, and never `pkill` by hand from inside the app.
+
 **The board is the home of what needs you.** Four columns (needs you,
 planning, working, your turn), a card per live session (project, branch,
 title, a status chip with a clock, "since", the one or two actions that make
@@ -169,7 +195,10 @@ the machine costs nothing.
 **The rest of the window is laid out like the Claude desktop app.** One
 collapsible sidebar (⌘⇧S): the app's icon and the wordmark (the Dock
 icon from `assets/icon/icon-128.png`, served as `icon/app.png`, beside
-"Emaki" at 22px, regular weight, in an elegant sans,
+"Emaki" at 22px, at a weight between regular and bold (Optima has
+only those two: regular read as too thin once the name took the accent's
+colour and bold as too thick, so the regular is drawn twice, half a
+pixel apart), in an elegant sans,
 `fonts::wordmark_family`: Optima, else Avenir Next, else Avenir, else the
 window's own face; on macOS the pair has a row of its own under the
 traffic lights, lined up with the entries below, and elsewhere it sits in
@@ -177,13 +206,46 @@ the top strip. Tried and dropped on the way: the plain asterisk with a
 15px Georgia name, which did not stand out, a 20px bold italic Georgia,
 the window's sans at 17px semibold, clean and still too quiet, Didot Bold
 (the person wants a sans), and Avenir Next Bold, too thick),
+set in the accent (`theme.primary`), so it follows the colour chosen
+in Settings (a fixed gold was tried on 2026-10-05, and the person
+preferred the accent),
 an accent "New session" entry,
 Board, Sessions and Search, then Agents (one row per agent with its count
-and a live dot, plus Kept only), Projects and Recents headed by when
+and a live dot, plus Kept only), then Folders: every project as a row,
+newest first, with its session count, which a click opens onto its
+sessions and closes again, the ten newest (`SIDE_FOLDERS`) and then "N more",
+which goes to the sessions page (`folders_open`, kept in `ui.json`). A folder with a live session is
+open without being asked (`sync_folders`): it opens when one of its
+sessions goes live, and closes when the last stops if it was opened
+that way and not clicked since; a click is the person's own choice and
+stays until the folder next goes live or quiet. At first the newest
+folder was the one open by default, which the person took for this rule
+and asked for it. The sessions
+under a folder are headed by when
 (`format::bucket`: today, yesterday, this week, this month, earlier; the
-sessions page uses the same heads), with the agent's mark in the muted
-ink unless the session is live, so forty rows do not read as forty
-accents, and an account-style
+sessions page uses the same heads), `FOLDER_ROWS` of them (5; 15 at first,
+and the person asked for less) and then
+"N more", which goes to the sessions page on that project. A session
+has the agent's mark in the muted
+ink unless it is live, so forty rows do not read as forty
+accents, and a dot at its right in its board column's colour; a folder
+wears what its sessions wear, its icon in the agent's colour while one
+of them is live and its dot the most pressing of theirs (needs you,
+then working, then your turn). Until 2026-10-06 there were two lists,
+Projects (eight rows, each a filter on the sessions page) and Recents
+(forty sessions of every folder together), A folder's sessions unfold and
+fold away over `FOLDER_ANIM` (200ms): they sit in a box whose height is
+the sum of its rows, every one of a fixed height, and `folder_anim`
+(which folder, opened or closed, when, the click's number) runs that
+height and the opacity up or down; a closing folder is still drawn
+until the time is up. The rows are in a column of their own inside the
+scroller and never shrink (`SIDE_ROW_H` 26, `SIDE_SESSION_H` 24): as
+direct children of the scrolling flex column each gave up height when
+the list was longer than the sidebar, down to its text, so 30px rows
+drew at about 21 with a folder open and 24 with it closed, and the
+whole list changed its spacing at a click. `EMAKI_GO=folder:<name>` is
+that click; the end states were checked with it, the moving frames were
+not captured. and an account-style
 footer with the person's name and a settings gear, nothing else: no
 version, no status. The content pane has a 48px top strip
 with the title centred and actions on the right; when the sidebar is hidden
@@ -191,7 +253,9 @@ the strip makes room for the traffic lights. Everything readable sits in one
 column of `CONTENT_W` (768px), centred in whatever is left of the window:
 the conversation, the sessions page (a serif title, filter pills, rows
 headed by when, a state chip at the right of a live row), and the home
-page, which is a serif greeting (the display face is
+page, which is a serif greeting behind the app's icon at 44px (the
+same `icon/app.png` the sidebar has; until 2026-10-06 it was a plain
+terracotta asterisk, `mark.svg`, which nothing draws now; the display face is
 `fonts::display_family`, the Claude app's serif when it is here, so
 titles and the conversation agree) with the date and the counts under it,
 over the composer, with the six most recent folders as a grid of cards
@@ -454,8 +518,7 @@ write"), and a subagent's calls are drawn the same way.
 
 **The agent's mark moves while it works.** Claude's glyph is Claude's own
 starburst (`assets/icons/claude.svg`, the brand mark as simple-icons
-carries it; Emaki's plain asterisk `mark.svg` stays on
-the greeting). `agent_glyph` turns it once every 2.8 s while it breathes
+carries it; the greeting has the app's icon, below). `agent_glyph` turns it once every 2.8 s while it breathes
 twice a turn, to 82% of its size and 55% opacity, inside a fixed box so
 nothing around it moves; that is the Python viewer's `spark` animation,
 which is what the person remembered. Codex's glyph breathes. It moves
@@ -577,13 +640,24 @@ then dark): Claude Code names each mode in a theme colour at the foot of
 its prompt, read out of the 2.1.289 binary into `driver::mode_color`
 (grey for manual, teal for plan, purple for accept edits, amber for
 auto, red for bypass and don't ask). A mode with none, and any agent
-that gives none, gets one by its place on the list (`workbench::ramp`,
-the status row's colours from low to high). An effort level is Claude
+that gives none, gets one by its place on the list (`workbench::ramp`:
+blue, green, amber, purple, red from low to high, `RAMP`, each a light
+and dark pair in the shades Claude Code's two themes use). Every colour
+here is a pair, and the window's own appearance picks: a light window
+takes the light theme's shade whatever theme the person's terminal is
+on. On 2026-10-06 the colour was read off the terminal instead
+(`#FFC107` for "Auto", from a terminal on the dark theme) and used in
+both appearances; the person took that back the same day: the dark
+gold in a light window was right, and the bright one is the dark
+window's. An effort level is Claude
 Code's too: its `/effort` slider keeps a table of levels with a theme
 colour each (`driver::effort_color`: amber for low, green for medium,
 periwinkle for high, purple for xhigh), and draws max as a moving
 rainbow, which here is the rainbow's seven colours run through the
-letters, still (`Choice::spectrum`, `workbench::tinted`). The first
+letters, still (`Choice::spectrum`, `workbench::tinted`). Those
+seven are pastels for a dark ground; a light window takes
+`SPECTRUM_LIGHT`, the same seven taken down to shades that read on
+cream. The first
 version coloured the levels by their place alone, which was not what
 the terminal shows. The model is bold and uncoloured.
 
@@ -722,12 +796,30 @@ rows were in the file, the turn read as stopped for one scan, and
 before the transcripts as well, which narrows that moment without
 closing it (Claude Code writes its rows late). The conversation lets
 go of what the composer got back: "[Request interrupted by user]" is
-Claude Code's marker, not something the person said, and is never drawn,
-and a prompt stopped before the agent wrote or ran anything is taken out
+Claude Code's marker, not something the person said, and is never a
+round of theirs: a turn the agent had started on ends on it as a line of
+its own, below, and a prompt stopped before the agent wrote or ran anything is taken out
 of `rounds` and kept as `Session::withdrawn` (`handle_user` in `build`),
 which is what `restore_prompt` reads first; left in, the message showed
 twice once it was sent again. A prompt the agent had started on stays
-where it is. The Stop click and the restore were checked by the person
+where it is. That round ends on the stop, said in the agent's own
+words (`NoticeVariant::Interrupted`, a warm plate at the round's foot):
+the text is read out of the transcript, never written here, so it is
+"Request interrupted by user" for Claude Code (the marker with its
+brackets off; "…for tool use" when that is what it wrote) and for Codex
+the reason of its `turn_aborted` event ("Interrupted") or, where only
+the next user row says it, the first sentence inside `<turn_aborted>`.
+`build::push_interrupted` is the one way in for every adapter and says
+a stop once however many rows record it; a new agent's builder calls it
+with whatever that agent writes. The terminal's own line on the screen
+("Interrupted · What should Claude do instead?") is not what is shown:
+it is in no transcript, and is gone at the next prompt. A withdrawn
+prompt gets no line, as the round it would sit in is gone and the words
+are back in the composer. For Codex the line is also the state:
+`turn_state_from_session` reads a round ending on it as your turn,
+where a prompt with no reply read as working for ever. No Codex session
+on this machine had been stopped, so its two shapes are covered by a
+test written from Codex's source, not from a real rollout. The Stop click and the restore were checked by the person
 on a session in Positron's terminal; the withdrawal is covered by a
 test.
 
@@ -1177,10 +1269,21 @@ the explainer.
 have registered and its prompt to be on the screen
 (`driver::prompt_on_screen`), pastes each picture's path by itself
 (bracketed paste; Claude Code turns the path into the picture, "[Image
-#1]", checked: the user row carries an image block), pastes the words,
+#1]", checked: the user row carries an image block) and waits for the
+screen to show one more "[Image #" than it did before going on, since
+Claude Code reads the file and sets the mark in a moment later, a large
+picture later than a small one; it pastes the words,
 waits for the prompt to show them and presses Return. So the row is the
 person's own, not a peer's: no envelope, no held message under bypass,
-no thirty-second repeat drop, and a slash command runs. A terminal that
+no thirty-second repeat drop, and a slash command runs. The wait
+for a picture counted the marks on the whole screen from nothing, and
+the conversation above the prompt shows the marks of earlier messages:
+with one in view the wait was over before it began, Return was pressed
+while a 714 KB screenshot was still being read, and the message went
+with the smaller of its two pictures (2026-10-06; on a pty the words
+pasted straight after two paths came out in front of both marks). It
+counts from what the screen showed before each paste now. Not run end
+to end from a script: `EMAKI_GO=send:` carries no attachment. A terminal that
 shows something else for five seconds is put in front of the person
 (`HubEvent::TerminalNeeded`). Not typed while the registry says
 `waiting`: the words would answer the dialog.
@@ -1332,6 +1435,59 @@ in-toolkit rich editor. What the composer does keep: attachments by paste
 (`paste_attachments` captures the input's own `Paste`), by drop and by the
 "+" picker, thumbnails and typed icons on the chips, and the accessibility
 wrapper below.
+
+**Every session has a composer of its own, and so has the new-session
+page.** There is one textarea, so `Workbench::sync_draft` makes it
+stand for whichever is showing: on arriving somewhere else (`draft_key`:
+the session, or the new-session page) the words and the attachment
+chips are put away under where they were typed (`drafts`) and what was
+left here is brought back with the caret at its end. It runs at every
+draw and before `restore_prompt`, which asks whether the box is empty
+on a session's behalf. Setting the value is not a change event, so
+bringing a draft back starts no hidden terminal. The board and the
+sessions page draw no composer and change nothing. Drafts are in
+memory and go with the process. Until 2026-10-06 it was one box for the
+window, and words typed for one session followed the person into the
+next. Checked with `EMAKI_TYPE` and `EMAKI_GO="open:<id>;page:new"`:
+the new-session page's words were gone on two sessions and back on the
+page; two sessions each holding words was not driven from a script,
+since nothing types into the box mid-run.
+
+**A right click opens a menu of our own.** `Workbench::open_menu`
+puts a small card where the pointer is (`render_menu`, kept inside the
+window, over a clear sheet any click or Escape puts away), and
+`menu_pick` does what was chosen (`MenuDo`). A folder, in the sidebar
+or on the new-session page's cards, offers "Open in Finder"
+(`sys::OPEN_FOLDER_LABEL`; the sidebar's folder is a project, so its
+path is the newest session's `cwd` that is still a directory, and one
+with none says the folder is gone). A session in the sidebar offers
+Rename and "Reveal in Finder", which shows its transcript. The toolkit
+has a context menu too, built on actions; three choices did not need
+that. **Renaming a session renames it, for Claude Code too.** Rename opens a
+field over a scrim (`render_rename`, `rename_input`; ↩ keeps the name,
+Escape or a click outside leaves it, an empty field changes nothing).
+Nothing here writes to a transcript, so the rename is Claude Code's to
+make: `try_renames` types its own `/rename <name>` into the session's
+hidden terminal (starting one when the session has none), and Claude
+Code writes a `custom-title` row, which its resume list reads and
+`transcript::pick_title` now puts before any AI title (it writes the
+same words as an `agent-name` row, which must not disqualify them).
+Not typed into a running turn: the name waits in `renames` and goes
+when the turn is over. Meanwhile, and for a session that cannot be
+asked (another agent, one kept only, a folder that is gone), the name
+is ours: `~/.emaki/state/titles.json` by session key, laid over
+`SessionRef::title` as each index arrives (`HubEvent::Index`), and
+dropped from there once the transcript says the same. Whatever is
+still in that file at launch is asked for again. The first version
+(2026-10-06, an hour earlier) kept the name in that file only, and the
+person, looking at the terminal's resume list still saying the old
+title, said a rename means a rename. Checked: `/rename`, typed and
+pasted, on a pty writes the `custom-title` row and `emaki-core list`
+shows the name; the menu, the field and the name on the row and the
+tab with `EMAKI_GO=menu`, `renaming`, `name:<words>` and `EMAKI_SHOT`.
+Not driven from a script: a real right click, the ↩ in the field, the
+two Finder actions, and the rename from the window end to end (a probe
+copy's Claude Code is not logged in).
 
 **Own inputs get a focus wrapper.** The toolkit's input frame tracks a
 focus handle of its own, so focusing an `InputState` from code (⌘K) lands
@@ -1743,6 +1899,50 @@ output belongs to): a `/model` run later, still in the `/compact`
 round because no prompt came between, keeps its "Set model to …" line.
 The first version dropped every output in a round that began with
 `/compact`.
+
+**The rule over the prompt may carry the session's name.** Once a
+session has a name (`/rename`), Claude Code writes it on the rule above
+its prompt ("──── My session ─"). The screen readers took a rule to be
+a line of "─" and nothing else, so on a renamed session no prompt was
+found: `type_message` waited for one that was already there, and a
+message sent from the window left the composer and went nowhere (the
+day the rename was built, 2026-10-06). `driver::is_rule` is the one
+test now, for the prompt, the suggestion and the dialog: a line that
+begins and ends as a rule and is mostly one. Covered by a test; found
+by resuming the renamed session with `emaki-core pty`.
+
+**A session nothing was said in is listed nowhere.** `/clear` starts a
+new transcript under a new id and carries the session's name into it
+(`custom-title` and `agent-name` rows, then the `/clear` rows), so the
+sidebar showed two sessions of one name, the second empty. `peek` marks
+a transcript `blank` (`SessionRef::blank`, `transcript::says_something`)
+when the whole file fits in the head it reads and holds no reply,
+nothing queued and no prompt; a command that acts by itself (`/clear`,
+`/resume`) is not a prompt, a skill is. The index keeps such a session,
+so the archive copies it like any other; the window drops it as the
+index arrives (`HubEvent::Index`) unless it is the one showing or a
+process of ours is behind it (a session begun here is blank for a
+moment), and drops its tab with it; `emaki-core list` leaves it out.
+Once something is said there it is a session like any other, under the
+name Claude Code gave it. Covered by a test; the window itself was not driven from a script.
+
+**A change that lands during a read is read again.** The conversation
+showing is reloaded when its file changes (`HubEvent::Changed`), and a
+change that came while a load was under way was dropped. A prompt with
+a pasted picture is one long row: the load began as it was being
+written, read the file without it, the small rows 8 ms later were
+dropped, and nothing else was written until the agent's first words
+fifteen seconds on, so the person's own message was missing from the
+window while "thinking" ran under it. `reload_wanted` now marks such a
+change and the load, once back, runs again. Found from the rows' times
+in the transcript; not reproduced on purpose.
+
+**A queued message keeps its pictures.** The queue's `enqueue` row has
+the words only ("[Image #23]…"), and the picture is in no row until the
+message is taken up, so the round at the foot showed no thumbnail.
+`Workbench::dress_queued` puts the attachments of the message as it
+left the window (`last_sent`) on the queued round when the words match;
+a message queued from a terminal still shows without them.
 
 **A message sent mid-turn is never a user row.** Typed in the terminal
 or sent from the window while the agent is working, it is absorbed into

@@ -132,7 +132,7 @@ pub fn strip_ansi(text: &str) -> String {
     RE_ANSI.replace_all(text, "").into_owned()
 }
 
-fn text_blocks_joined(blocks: &[Value]) -> String {
+pub fn text_blocks_joined(blocks: &[Value]) -> String {
     blocks
         .iter()
         .filter(|b| block_type(b) == "text")
@@ -344,6 +344,17 @@ pub fn tool_subject(name: &str, data: &Map<String, Value>, cwd: &str) -> String 
             String::new()
         }
     }
+}
+
+/// "The turn was stopped", in the agent's own words, as the last thing a
+/// round says. Every adapter's builder ends a stopped round with this, so
+/// the conversation shows a stop the same way whichever agent wrote it.
+/// Said once: an agent may record one stop in two rows.
+pub fn push_interrupted(items: &mut Vec<Item>, said: &str, ts: &str) {
+    if said.is_empty() || matches!(items.last(), Some(Item::Notice { variant: NoticeVariant::Interrupted, .. })) {
+        return;
+    }
+    items.push(Item::Notice { ts: ts.into(), text: said.into(), variant: NoticeVariant::Interrupted });
 }
 
 // ---------------------------------------------------------------- turn state
@@ -652,6 +663,13 @@ impl RoundBuilder {
     fn call_mut(&mut self, id: &str) -> Option<&mut ToolCall> {
         let (ri, ii) = *self.calls.get(id)?;
         self.rounds.get_mut(ri)?.items.get_mut(ii)?.as_tool_mut()
+    }
+
+    /// The turn was stopped: one line at the round's foot, once however
+    /// many rows say so.
+    fn add_interrupted(&mut self, said: &str, ts: &str) {
+        let Some(i) = self.current else { return };
+        push_interrupted(&mut self.rounds[i].items, said, ts);
     }
 
     fn add_notice(&mut self, text: String, ts: &str, variant: NoticeVariant) {
@@ -1078,7 +1096,14 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
             if untouched && !b.rounds[i].prompt.is_empty() {
                 b.withdrawn = b.rounds.pop();
                 b.current = b.rounds.len().checked_sub(1);
+                return;
             }
+        }
+        // A turn the agent had started on keeps its round, and the stop
+        // is said at its foot in the marker's own words, brackets off.
+        if b.current.is_some() {
+            let said = prompt.lines().next().unwrap_or("").trim().trim_start_matches('[').trim_end_matches(']').trim();
+            b.add_interrupted(said, ts);
         }
         return;
     }

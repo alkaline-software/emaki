@@ -127,6 +127,15 @@ static RE_WRAPPERS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<environment_context>.*?</environment_context>\s*|<user_instructions>.*?</user_instructions>\s*|<INSTRUCTIONS>.*?</INSTRUCTIONS>\s*|<permissions instructions>.*?</permissions instructions>\s*|<collaboration_mode>.*?</collaboration_mode>\s*|<turn_aborted>.*?</turn_aborted>\s*|<app_context>.*?</app_context>\s*|<system_reminder>.*?</system_reminder>\s*|<developer_instructions>.*?</developer_instructions>\s*|<command-name>.*?</command-name>\s*|<command-message>.*?</command-message>\s*|<command-args>.*?</command-args>\s*|<local-command-stdout>.*?</local-command-stdout>\s*|# AGENTS\.md instructions[^\n]*\s*").unwrap()
 });
 
+/// What Codex wrote of a stopped turn: the first sentence inside
+/// `<turn_aborted>`, the rest being advice to the model.
+fn aborted_said(text: &str) -> Option<String> {
+    let inner = text.split_once("<turn_aborted>")?.1.split_once("</turn_aborted>")?.0.trim();
+    let first = inner.lines().next().unwrap_or("");
+    let first = first.split_inclusive(". ").next().unwrap_or(first).trim();
+    (!first.is_empty()).then(|| first.to_string())
+}
+
 fn clean_user_text(text: &str) -> String {
     RE_WRAPPERS.replace_all(text, "").trim().to_string()
 }
@@ -233,6 +242,12 @@ pub fn build_codex(rows: &[Value], cwd_hint: &str) -> Session {
                     let (text, images) = content_text(payload.get("content"));
                     match role {
                         "user" => {
+                            // A stopped turn is told to the model inside
+                            // the next user row; its first sentence is
+                            // what the conversation says of the stop.
+                            if let (Some(said), Some(rnd)) = (aborted_said(&text), rounds.last_mut()) {
+                                crate::build::push_interrupted(&mut rnd.items, &said, ts);
+                            }
                             let text = clean_user_text(&text);
                             if text.is_empty() && images == 0 {
                                 continue;
@@ -311,6 +326,12 @@ pub fn build_codex(rows: &[Value], cwd_hint: &str) -> Session {
                 _ => {}
             },
             "event_msg" => {
+                // The stop as an event of its own, with why: "interrupted".
+                if str_of(payload, "type") == "turn_aborted" {
+                    if let Some(rnd) = rounds.last_mut() {
+                        crate::build::push_interrupted(&mut rnd.items, &crate::options::humanize(str_of(payload, "reason")), ts);
+                    }
+                }
                 if str_of(payload, "type") == "token_count" {
                     // Cumulative totals; keep the latest and diff into the session at the end.
                     if let Some(u) = payload.get("info").and_then(|i| i.get("total_token_usage")) {
