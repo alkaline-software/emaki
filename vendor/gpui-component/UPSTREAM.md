@@ -36,7 +36,11 @@ upstream revision finds them.
    inputs generally do; `display_row_of_cursor` is the helper.
 5. `crates/base/src/scrollbar.rs`: `FADE_OUT_DELAY` 1.0 and
    `FADE_OUT_DURATION` 1.5 (upstream 2.0 and 3.0), so the scrollbar goes a
-   second after the last scroll instead of two.
+   second after the last scroll instead of two. The fade's opacity is
+   taken over its own length (`1 - t²`, `t` from 0 to 1 across the half
+   second): upstream's `1 - (seconds past the delay)^10` only fades when
+   the fade is a second long, and over half a second held the bar at
+   full strength and then cut it.
 
 6. `crates/ui/src/text/style.rs`, `inline.rs`, `node.rs`,
    `format/markdown.rs`, `text_view.rs`: the rounded plate behind inline
@@ -82,6 +86,11 @@ upstream revision finds them.
     sent the next Up to the start of the row above. The column is left
     unknown at an edit and measured when a vertical move needs it
     (`ensure_preferred_column`).
+
+11. `crates/base/src/input/base/state.rs`, `movement.rs`: Up and Down in
+    a single-line input go to the start and the end of the text. Upstream
+    registers the two actions only on a textarea and returns early for a
+    single line, so the keys did nothing in a field.
 
 ## Updating
 

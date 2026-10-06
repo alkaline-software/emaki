@@ -179,7 +179,12 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
+        // One line is the first line and the last: up goes to its start
+        // and down to its end, as in a field anywhere else (upstream
+        // did nothing). (Emaki addition.)
         if self.is_single_line() {
+            self.pause_blink_cursor(cx);
+            self.move_to(0, Some(MoveDirection::Up), cx);
             return;
         }
 
@@ -206,6 +211,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
 
         if self.is_single_line() {
+            self.pause_blink_cursor(cx);
+            self.move_to(self.text.len(), Some(MoveDirection::Down), cx);
             return;
         }
 

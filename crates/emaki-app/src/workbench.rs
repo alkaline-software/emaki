@@ -52,6 +52,17 @@ pub const FIND_CONTEXT: &str = "FindBar";
 pub const TERMINAL_CONTEXT: &str = "Terminal";
 
 pub const SIDEBAR_W: Pixels = px(268.);
+/// The sidebar is dragged between these. The least still has room for
+/// the window's buttons and the name beside them.
+const SIDEBAR_MIN: Pixels = px(248.);
+const SIDEBAR_MAX: Pixels = px(440.);
+/// The most a double click on the edge asks for; a drag may go on to
+/// `SIDEBAR_MAX`.
+const SIDEBAR_FIT_MAX: Pixels = px(320.);
+/// Dragged left of this, the sidebar folds away.
+const SIDEBAR_FOLD_AT: Pixels = px(170.);
+/// How wide the strip at the sidebar's edge that takes the drag is.
+const SIDEBAR_GRIP: Pixels = px(8.);
 /// What a right click offers: where it was made, and the choices.
 #[derive(Clone)]
 struct Menu {
@@ -142,7 +153,7 @@ pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearanc
 /// height so it reads as a sheet, not a second window (capped by the
 /// window when that is smaller).
 pub const SETTINGS_W: Pixels = px(720.);
-pub const SETTINGS_H: Pixels = px(520.);
+pub const SETTINGS_H: Pixels = px(580.);
 pub const SETTINGS_RAIL_W: Pixels = px(180.);
 /// What the composer says when empty: on the home page, and on a session.
 pub const PLACEHOLDER_NEW: &str = "Start a session…  (⌘↩ to send)";
@@ -528,6 +539,8 @@ pub struct Workbench {
     /// The session being renamed, by its key, and the field for its name.
     renaming: Option<String>,
     rename_input: Entity<InputState>,
+    /// The name field in Settings.
+    name_input: Entity<InputState>,
     /// The person's own names for sessions, by session key
     /// (`state/titles.json`); each stands in for the agent's title.
     titles: HashMap<String, String>,
@@ -612,6 +625,11 @@ pub struct Workbench {
     /// something only its own interface can take: the `/model` list, the
     /// `/effort` slider, a screen no card stands for.
     term_open: Option<String>,
+    /// The session whose background commands are opened out over the
+    /// composer, and the last lines of each one's output as last read
+    /// (by the command's id).
+    shells_open: Option<String>,
+    shell_tails: HashMap<String, String>,
     /// It was put there by the window, for a screen it could not read,
     /// and goes when the terminal stops waiting.
     term_auto: bool,
@@ -641,6 +659,10 @@ pub struct Workbench {
     pub slash_sel: usize,
     /// Escape put the list away; typing brings it back.
     pub slash_closed: bool,
+    /// What "@" offers, by folder: its files and folders with when they
+    /// were listed (`want_files`), and the folders being listed now.
+    files: HashMap<String, (Instant, Rc<Vec<emaki_core::files::Entry>>)>,
+    files_loading: HashSet<String>,
     pub drivers: HashMap<String, DriverView>,
     /// Explanations that landed since the session showing was loaded, by
     /// call id; a reload folds them into the model from the cache.
@@ -708,6 +730,12 @@ pub struct Workbench {
     /// The settings body's scroll position, for its scrollbar.
     settings_scroll: ScrollHandle,
     sidebar_peek: bool,
+    /// How wide the sidebar is, as dragged; kept in `ui.json`.
+    sidebar_w: Pixels,
+    /// The sidebar's edge is being dragged.
+    side_drag: bool,
+    /// `EMAKI_GO=sidefit` asked for the fitted width at the next draw.
+    fit_wanted: bool,
     /// The sidebar is folded away and showing over the content because the
     /// pointer is on its button, until the pointer leaves it.
     sidebar_float: bool,
@@ -750,6 +778,85 @@ pub fn swallow_click(window: &mut Window, cx: &mut App) {
     cx.stop_propagation();
 }
 
+/// The sizes the person's picture is drawn at, in points: the sidebar's
+/// footer and the settings row.
+const AVATAR_SIZES: [u32; 2] = [28, 40];
+
+/// Where the copy of the picture made for one of those sizes is kept:
+/// beside the picture, `<name>@<size>.png`.
+fn avatar_sized(master: &std::path::Path, size: u32) -> PathBuf {
+    let stem = master.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    master.with_file_name(format!("{stem}@{size}.png"))
+}
+
+/// Keep `from` as the person's picture at `to`: turned the way its
+/// camera says, cut to the square at its middle, 512 pixels a side, and
+/// with it a copy for each size it is drawn at.
+fn avatar_keep(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    use image::ImageDecoder as _;
+    let err = |e: image::ImageError| e.to_string();
+    let mut decoder = image::ImageReader::open(from).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?.into_decoder().map_err(err)?;
+    let turn = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut picture = image::DynamicImage::from_decoder(decoder).map_err(err)?;
+    picture.apply_orientation(turn);
+    let side = picture.width().min(picture.height());
+    let square = picture.crop_imm((picture.width() - side) / 2, (picture.height() - side) / 2, side, side);
+    let master = if side > 512 { square.resize_exact(512, 512, image::imageops::FilterType::Lanczos3) } else { square };
+    master.save(to).map_err(err)?;
+    avatar_sizes(to)
+}
+
+/// The copies of the picture at the sizes it is drawn at, each twice the
+/// points across for a dense screen and scaled down with a filter that
+/// averages. Handed the whole picture, the GPU samples a few of its
+/// pixels for each one it draws, and a large photograph came out harsh
+/// and jagged on a 28-point disc.
+fn avatar_sizes(master: &std::path::Path) -> Result<(), String> {
+    let picture = image::open(master).map_err(|e| e.to_string())?;
+    for size in AVATAR_SIZES {
+        let px = size * 2;
+        picture.resize_to_fill(px, px, image::imageops::FilterType::Lanczos3).save(avatar_sized(master, size)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// How many lines of a background command's output its card shows.
+const SHELL_TAIL_LINES: usize = 10;
+
+/// The last `lines` lines of a file, reading no more than its last
+/// `bytes`, with terminal colour sequences taken out.
+fn file_tail(path: &str, bytes: u64, lines: usize) -> Option<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(bytes))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else if c == '\r' {
+            // A progress line rewrites itself: keep what it last said.
+            if chars.peek() != Some(&'\n') {
+                let cut = plain.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                plain.truncate(cut);
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    let all: Vec<&str> = plain.trim_end().lines().collect();
+    Some(all[all.len().saturating_sub(lines)..].join("\n"))
+}
+
 /// Narrower than this, the sidebar no longer sits beside the content.
 const NARROW_W: Pixels = px(880.);
 
@@ -772,6 +879,102 @@ impl Workbench {
             self.sidebar_open = false;
             self.save_ui(true);
         }
+    }
+
+    /// The pointer moved with the sidebar's edge held: the sidebar is as
+    /// wide as where the pointer is, between its least and most, and
+    /// folds away once the pointer is well left of the least. Brought
+    /// back out in the same drag, it is there again.
+    fn side_drag_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if e.pressed_button != Some(MouseButton::Left) {
+            self.side_drag_end();
+            return;
+        }
+        let x = e.position.x;
+        let open = x >= SIDEBAR_FOLD_AT;
+        let w = if open { x.clamp(SIDEBAR_MIN, SIDEBAR_MAX) } else { self.sidebar_w };
+        if open != self.sidebar_open || w != self.sidebar_w {
+            self.sidebar_open = open;
+            self.sidebar_w = w;
+            cx.notify();
+        }
+    }
+
+    fn side_drag_end(&mut self) {
+        if std::mem::take(&mut self.side_drag) {
+            self.save_ui(true);
+        }
+    }
+
+    /// The width at which the sidebar's ordinary rows are not cut short:
+    /// its widest folder or session row as it would be laid out, long
+    /// outliers left out. A double click on the edge goes there.
+    fn sidebar_fit(&self, window: &Window, cx: &App) -> Pixels {
+        let font = font(cx.theme().font_family.clone());
+        let measure = |text: &str, size: f32| {
+            let text: String = text.chars().filter(|c| *c != '\n').collect();
+            let run = TextRun { len: text.len(), font: font.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(text.into(), px(size), &[run], None).width)
+        };
+        // Around the words: the card's margin, outline and padding on
+        // both sides (26), then each row's own indent, icon, gaps, dot
+        // and count.
+        const FOLDER_CHROME: f32 = 26. + 20. + 22. + 10. + 17. + 10.;
+        const SESSION_CHROME: f32 = 26. + 18. + 20. + 18. + 8. + 15.;
+        let mut folders: Vec<(String, Vec<&SessionRef>)> = Vec::new();
+        for r in &self.refs {
+            let p = r.project();
+            match folders.iter_mut().find(|(name, _)| *name == p) {
+                Some((_, list)) => list.push(r),
+                None => folders.push((p, vec![r])),
+            }
+        }
+        // Held to `SIDEBAR_FIT_MAX`: a prompt standing in for a title is
+        // cut short at any width, and one such row would otherwise
+        // always ask for the most.
+        let mut widest = 0f32;
+        let mut take = |need: f32| widest = widest.max(need);
+        for (p, list) in folders.into_iter().take(SIDE_FOLDERS) {
+            take(FOLDER_CHROME + measure(&p, 13.) + measure(&list.len().to_string(), 11.));
+            if self.folder_open(&p) {
+                for r in list.into_iter().take(FOLDER_ROWS) {
+                    take(SESSION_CHROME + measure(&r.title, 13.));
+                }
+            }
+        }
+        px(widest.ceil()).clamp(SIDEBAR_MIN, SIDEBAR_FIT_MAX)
+    }
+
+    /// The strip over the sidebar's edge that takes the drag and the
+    /// double click. It lights a line on the edge under the pointer.
+    fn render_side_grip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let line = cx.theme().primary.opacity(0.55);
+        let held = self.side_drag;
+        div()
+            .id("side-grip")
+            .group("side-grip")
+            .absolute()
+            .top_0()
+            .h_full()
+            .left(self.sidebar_w - SIDEBAR_GRIP / 2.)
+            .w(SIDEBAR_GRIP)
+            .occlude()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    if ev.click_count == 2 {
+                        this.side_drag = false;
+                        this.sidebar_w = this.sidebar_fit(window, cx);
+                        this.save_ui(true);
+                    } else {
+                        this.side_drag = true;
+                    }
+                    swallow_click(window, cx);
+                    cx.notify();
+                }),
+            )
+            .child(div().absolute().top_0().h_full().left(SIDEBAR_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("side-grip", move |s| s.bg(line)))
     }
 
     /// The sidebar is beside the content, or over it because it was asked
@@ -822,7 +1025,7 @@ impl Workbench {
         }
         let view = window.viewport_size();
         let p = e.position;
-        if p.x < px(0.) || p.x > SIDEBAR_W || p.y < px(0.) || p.y > view.height {
+        if p.x < px(0.) || p.x > self.sidebar_w || p.y < px(0.) || p.y > view.height {
             self.set_float(false, cx);
         }
     }
@@ -843,13 +1046,16 @@ impl Workbench {
                 .absolute()
                 .top_0()
                 .h_full()
-                .w(SIDEBAR_W)
+                .w(self.sidebar_w)
                 .occlude()
                 .shadow(shadow)
                 .child(self.render_sidebar(cx))
-                .with_animation(ElementId::Name(format!("sidebar-float-{serial}").into()), Animation::new(FLOAT_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                .with_animation(ElementId::Name(format!("sidebar-float-{serial}").into()), Animation::new(FLOAT_ANIM).with_easing(ease_out_quint()), {
+                    let w = self.sidebar_w;
+                    move |d, t| {
                     let shown = if opening { t } else { 1. - t };
-                    d.left(SIDEBAR_W * (shown - 1.)).opacity(0.4 + 0.6 * shown)
+                    d.left(w * (shown - 1.)).opacity(0.4 + 0.6 * shown)
+                }
                 })
                 .into_any_element(),
         )
@@ -1025,7 +1231,7 @@ impl Workbench {
                 this.sidebar_peek = false;
                 cx.notify();
             }))
-            .child(div().absolute().left_0().top_0().h_full().w(SIDEBAR_W).shadow_lg().child(self.render_sidebar(cx)))
+            .child(div().absolute().left_0().top_0().h_full().w(self.sidebar_w).shadow_lg().child(self.render_sidebar(cx)))
     }
 }
 
@@ -1219,6 +1425,7 @@ impl Workbench {
             if this
                 .update(cx, |this, cx| {
                     this.now = now_secs();
+                    this.read_shell_tails();
                     // The status line's files once a minute, which is the
                     // countdown's own resolution; a session's load reads
                     // them too, and that is when they change.
@@ -1264,6 +1471,34 @@ impl Workbench {
         cx.subscribe_in(&rename_input, window, |this, _, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = ev {
                 this.commit_rename(window, cx);
+            }
+        })
+        .detach();
+        let machine_name = crate::sys::user_first_name();
+        let name_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx).placeholder(if machine_name.is_empty() { "Your name".to_string() } else { machine_name.clone() });
+            s.set_value(cfg.app.user_name.clone(), window, cx);
+            s
+        });
+        // A picture kept before the sized copies were made gets them now.
+        if !cfg.app.avatar.is_empty() {
+            let master = PathBuf::from(&cfg.app.avatar);
+            if master.is_file() && AVATAR_SIZES.iter().any(|s| !avatar_sized(&master, *s).is_file()) {
+                std::thread::spawn(move || {
+                    let _ = avatar_sizes(&master);
+                });
+            }
+        }
+        let user_name = if cfg.app.user_name.trim().is_empty() { machine_name } else { cfg.app.user_name.trim().to_string() };
+        cx.subscribe_in(&name_input, window, |this, input, ev: &InputEvent, _, cx| {
+            if let InputEvent::Change = ev {
+                let name = input.read(cx).value().trim().to_string();
+                if name != this.cfg.app.user_name {
+                    this.user_name = if name.is_empty() { crate::sys::user_first_name() } else { name.clone() };
+                    this.cfg.app.user_name = name;
+                    this.save_app_config();
+                    cx.notify();
+                }
             }
         })
         .detach();
@@ -1335,12 +1570,35 @@ impl Workbench {
         // extend the selection), as actions through the focus.
         if let Some(keys) = std::env::var("EMAKI_KEYS").ok().filter(|s| !s.is_empty()) {
             let composer = composer.clone();
-            cx.spawn_in(window, async move |_, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs(4)).await;
                 let _ = cx.update(|window, cx| composer.update(cx, |s, cx| s.focus(window, cx)));
                 for key in keys.split(',') {
                     cx.background_executor().timer(Duration::from_millis(200)).await;
                     let _ = cx.update(|window, cx| match key {
+                        // The menu's Rename on the session showing: the
+                        // field, holding its title, with the caret in it.
+                        "rename" => {
+                            let _ = this.update(cx, |w, cx| {
+                                if let Some(key) = w.selected.clone() {
+                                    w.menu_pick(MenuDo::Rename(key), window, cx);
+                                }
+                            });
+                        }
+                        // Words put in the composer of whatever is
+                        // showing, the caret after them, and what the
+                        // composer holds, printed.
+                        t if t.starts_with("type:") => {
+                            let text = t["type:".len()..].to_string();
+                            let _ = this.update(cx, |w, cx| w.set_composer(text.clone(), text.len(), window, cx));
+                        }
+                        "text" => {
+                            let _ = this.update(cx, |w, cx| eprintln!("emaki: composer {:?}", w.composer.read(cx).value()));
+                        }
+                        // Where the caret is in the rename field, printed.
+                        "caret" => {
+                            let _ = this.update(cx, |w, cx| eprintln!("emaki: caret {} of {}", w.rename_input.read(cx).cursor(), w.rename_input.read(cx).value().len()));
+                        }
                         "up" => window.dispatch_action(Box::new(gpui_component::input::MoveUp), cx),
                         "down" => window.dispatch_action(Box::new(gpui_component::input::MoveDown), cx),
                         "tab" => window.dispatch_action(Box::new(gpui_component::input::IndentInline), cx),
@@ -1401,6 +1659,7 @@ impl Workbench {
             menu: None,
             renaming: None,
             rename_input,
+            name_input,
             titles: titles.clone(),
             // A name still in our record is one its transcript does not
             // say yet: asked for again at launch.
@@ -1437,6 +1696,8 @@ impl Workbench {
             terminal_up: None,
             terminal_probing: false,
             term_open: None,
+            shells_open: None,
+            shell_tails: HashMap::new(),
             term_auto: false,
             term_dismissed: None,
             term_focus: cx.focus_handle(),
@@ -1450,6 +1711,8 @@ impl Workbench {
             mode_touched: None,
             slash_sel: 0,
             slash_closed: false,
+            files: HashMap::new(),
+            files_loading: HashSet::new(),
             drivers: HashMap::new(),
             explanations: HashMap::new(),
             explaining: HashSet::new(),
@@ -1477,7 +1740,7 @@ impl Workbench {
             },
             notice: None,
             now: now_secs(),
-            user_name: crate::sys::user_first_name(),
+            user_name,
             tabs: ui.tabs.clone(),
             window_rect: Some(rect_of(window.bounds())),
             last_ui_save: std::time::Instant::now(),
@@ -1494,6 +1757,9 @@ impl Workbench {
             sessions_scroll: ScrollHandle::new(),
             home_scroll: ScrollHandle::new(),
             sidebar_peek: false,
+            sidebar_w: ui.sidebar_w.map(px).unwrap_or(SIDEBAR_W).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            side_drag: false,
+            fit_wanted: false,
             sidebar_float: false,
             float_block: false,
             float_anim: None,
@@ -1998,6 +2264,25 @@ impl Workbench {
             }
             // The sidebar button, and the pointer on it.
             Some("sidebar") => self.toggle_sidebar(false, cx),
+            // The sidebar's edge dragged to that x and let go, and the
+            // double click on it.
+            Some(t) if t.starts_with("side:") => {
+                if let Ok(x) = t["side:".len()..].parse::<f32>() {
+                    self.side_drag = true;
+                    self.side_drag_to(&MouseMoveEvent { position: point(px(x), px(300.)), pressed_button: Some(MouseButton::Left), modifiers: Modifiers::default() }, cx);
+                    self.side_drag_end();
+                }
+            }
+// A click on the row of background commands.
+            Some("shells") => {
+                self.shells_open = self.selected_ref().map(|r| r.session_id.clone());
+                self.read_shell_tails();
+                cx.notify();
+            }
+                        Some("sidefit") => {
+                self.fit_wanted = true;
+                cx.notify();
+            }
             Some("float") => self.set_float(true, cx),
             Some("page:sessions") => self.show_sessions(Scope::All, cx),
             Some(t) if t.starts_with("sessions:") => self.show_sessions_in(Scope::All, Some(t["sessions:".len()..].to_string()), cx),
@@ -2061,6 +2346,7 @@ impl Workbench {
         UiState {
             window: self.window_rect,
             sidebar_open: Some(self.sidebar_open),
+            sidebar_w: Some(f32::from(self.sidebar_w)),
             page: page.into(),
             tabs: self.tabs.clone(),
             active: self.selected.clone().filter(|_| self.page == Page::Session),
@@ -2254,6 +2540,61 @@ impl Workbench {
     }
 
     // -- settings ----------------------------------------------------------
+
+    /// The person's picture on a disc of that size, or the first letter
+    /// of their name on the accent when there is none (or its file is
+    /// gone).
+    fn avatar(&self, size: f32, cx: &App) -> Div {
+        let theme = cx.theme();
+        // The copy made for this size, so the picture is drawn pixel for
+        // pixel; the whole picture until that copy is there.
+        let master = PathBuf::from(&self.cfg.app.avatar);
+        let sized = avatar_sized(&master, size as u32);
+        let path = if sized.is_file() { sized } else { master };
+        let disc = div().size(px(size)).rounded_full().flex_shrink_0().overflow_hidden();
+        if !self.cfg.app.avatar.is_empty() && path.is_file() {
+            return disc.child(img(path).size(px(size)).rounded_full().object_fit(ObjectFit::Cover));
+        }
+        let initial = self.user_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "E".into());
+        disc.bg(theme.primary).flex().items_center().justify_center().text_size(px(size * 0.46)).font_weight(FontWeight::SEMIBOLD).text_color(theme.primary_foreground).child(initial)
+    }
+
+    /// Ask for a picture and keep a copy of it as the person's own. The
+    /// copy has a name of its own each time, so the old picture is not
+    /// what the image cache answers with.
+    fn pick_avatar(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Choose".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(from) = paths.into_iter().next() else { return };
+            this.update(cx, |this, cx| {
+                let dir = emaki_core::paths::root().join("avatar");
+                let to = dir.join(format!("{}.png", now_secs() as u64));
+                if let Err(e) = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|_| avatar_keep(&from, &to)) {
+                    this.notice = Some(Notice::error(format!("could not use that picture: {e}")));
+                    cx.notify();
+                    return;
+                }
+                this.set_avatar(to.to_string_lossy().to_string(), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Take that file as the picture, or none; the copy kept before goes.
+    fn set_avatar(&mut self, path: String, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.cfg.app.avatar, path);
+        if !old.is_empty() && old != self.cfg.app.avatar && PathBuf::from(&old).starts_with(emaki_core::paths::root().join("avatar")) {
+            let old = PathBuf::from(old);
+            for size in AVATAR_SIZES {
+                let _ = std::fs::remove_file(avatar_sized(&old, size));
+            }
+            let _ = std::fs::remove_file(&old);
+        }
+        self.save_app_config();
+        cx.notify();
+    }
 
     /// Write the look section of `config.json` as this window now has it.
     fn save_app_config(&mut self) {
@@ -2516,6 +2857,65 @@ impl Workbench {
                 h_flex().items_center().gap(px(12.)).child(div().flex_1().text_size(px(13.5)).child("Check for updates automatically")).child(auto_check).into_any_element(),
             ],
             _ => vec![
+                row(
+                    "Picture",
+                    "Shown beside your name.",
+                    h_flex()
+                        .gap(px(10.))
+                        .items_center()
+                        .child(self.avatar(40., cx).id("settings-avatar").cursor_pointer().hover(|s| s.opacity(0.85)).on_click(cx.listener(|this, _, _, cx| this.pick_avatar(cx))))
+                        .child(Button::new("avatar-choose").outline().small().label("Choose…").on_click(cx.listener(|this, _, _, cx| this.pick_avatar(cx))))
+                        // Remove is a pill of our own, the size of the toolkit's
+                        // small button beside it: the toolkit's outline
+                        // button sets its own ink under the pointer, so
+                        // the red went black on hover. It stays red, on
+                        // a wash of the red under the pointer and a
+                        // stronger one while pressed, as Stop does.
+                        .when(!app.avatar.is_empty(), |d| {
+                            d.child(
+                                h_flex()
+                                    .id("avatar-remove")
+                                    .h(px(24.))
+                                    .px(px(8.))
+                                    .items_center()
+                                    .rounded(theme.radius)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .text_size(px(14.))
+                                    .text_color(theme.danger)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)))
+                                    .active(|s| s.bg(theme.danger.opacity(0.18)).border_color(theme.danger.opacity(0.6)))
+                                    .on_click(cx.listener(|this, _, _, cx| this.set_avatar(String::new(), cx)))
+                                    .child("Remove"),
+                            )
+                        })
+                        .into_any_element(),
+                    &theme,
+                )
+                .into_any_element(),
+                row(
+                    "Name",
+                    "What Emaki calls you.",
+                    div()
+                        .id("name-field")
+                        .track_focus(&self.name_input.read(cx).focus_handle(cx))
+                        .role(Role::TextInput)
+                        .aria_label("Your name")
+                        .aria_value(self.name_input.read(cx).value().to_string())
+                        .w(px(200.))
+                        .h(px(32.))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(8.))
+                        .bg(theme.muted)
+                        .text_size(px(13.5))
+                        .child(Input::new(&self.name_input).appearance(false).bordered(false))
+                        .into_any_element(),
+                    &theme,
+                )
+                .into_any_element(),
                 row("Theme", "Follow the system, or keep one look.", appearance.into_any_element(), &theme).into_any_element(),
                 row("Accent", "The colour of the send button, links and the mark.", accents.into_any_element(), &theme).into_any_element(),
                 row("Chat font", "The face the conversation is set in.", font.into_any_element(), &theme).into_any_element(),
@@ -3893,7 +4293,7 @@ impl Workbench {
         let fresh = now.duration_since(self.last_scroll) > SCROLL_GAP;
         self.last_scroll = now;
         let inline_sidebar = (self.sidebar_open && !self.narrow) || self.sidebar_float;
-        let here = if !inline_sidebar || e.position.x >= SIDEBAR_W {
+        let here = if !inline_sidebar || e.position.x >= self.sidebar_w {
             Pane::Content
         } else if self.agents_scroll.bounds().contains(&e.position) {
             Pane::Agents
@@ -5026,14 +5426,13 @@ impl Workbench {
 
         // The app's own icon, the one in the Dock, and its name in a light,
         // elegant sans at regular weight (`fonts::wordmark_family`). The PNG keeps Apple's margin
-        // around the plate, so the box is larger than what shows. On macOS the pair has a row of
-        // its own under the traffic lights, in line with the entries below
-        // it; elsewhere nothing holds the corner, so it sits in the strip.
+        // around the plate, so the box is larger than what shows. The pair sits in the sidebar's
+        // strip, right of the window's buttons, ending where the entries'
+        // key hints end.
         let brand = h_flex()
-            .h(px(36.))
-            .gap(px(5.))
+            .gap(px(4.))
             .items_center()
-            .child(img("icon/app.png").size(px(30.)).flex_shrink_0())
+            .child(img("icon/app.png").size(px(26.)).flex_shrink_0())
             // Optima has a regular and a bold and nothing between: the
             // regular read as thin in the accent's colour and the bold as
             // thick. The name is drawn twice, half a pixel apart, which
@@ -5041,18 +5440,22 @@ impl Workbench {
             .child(
                 div()
                     .relative()
-                    .text_size(px(22.))
+                    .text_size(px(20.))
                     .text_color(theme.primary)
                     .when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f))
                     .child("Emaki")
                     .child(div().absolute().top_0().left(px(0.5)).child("Emaki")),
             );
 
-        // The strip above the brand is the window's buttons (`render_strip`),
-        // drawn over this, so here it is only room.
-        let header = Self::drag_region(div().h(TITLEBAR_H).flex_shrink_0(), cx);
-        // The name, a hairline, then the three places to go.
-        let top = v_flex().px(px(10.)).pt(px(2.)).gap(px(2.)).child(brand.pl(px(7.)).mb(px(8.))).child(div().h(px(1.)).mx(px(4.)).mb(px(8.)).flex_shrink_0().bg(theme.sidebar_border));
+        // The window's buttons (`render_strip`) are drawn over the left of
+        // this strip, and the name takes the room to their right, centred
+        // on the traffic lights as they are. The hairline under it is at
+        // the foot of the content's strip, where the folder's band begins.
+        let header = Self::drag_region(h_flex().h(TITLEBAR_H).flex_shrink_0().pt(px(2.)).pr(px(20.)).justify_end().items_center().child(brand), cx);
+        // The hairline runs the sidebar's whole width, into the line over
+        // the folder's band, so one line crosses the window.
+        let header = v_flex().flex_shrink_0().child(header).child(div().h(px(1.)).flex_shrink_0().bg(theme.sidebar_border));
+        let top = v_flex().px(px(10.)).pt(px(8.)).gap(px(2.));
 
         let new_row = h_flex()
             .id("nav-new")
@@ -5288,7 +5691,6 @@ impl Workbench {
             );
         }
 
-        let initial = self.user_name.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "S".into());
         let footer = h_flex()
             .flex_shrink_0()
             .px(px(14.))
@@ -5297,12 +5699,38 @@ impl Workbench {
             .items_center()
             .border_t_1()
             .border_color(theme.sidebar_border)
-            .child(div().size(px(28.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.primary_foreground).child(initial))
+            // The picture opens Settings on Appearance, where it and the
+            // name are set; the name beside it is not a button.
+            .child(
+                self.avatar(28., cx)
+                    .id("side-avatar")
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Your picture and name").build(window, cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.settings_section = "appearance";
+                        this.settings_open = true;
+                        window.focus(&this.focus_handle, cx);
+                        cx.notify();
+                    })),
+            )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if self.user_name.is_empty() { "Emaki".to_string() } else { self.user_name.clone() })),
+                    // The wordmark's face and weight (the regular drawn
+                    // twice, half a pixel apart), smaller and in the ink.
+                    .child({
+                        let name = if self.user_name.is_empty() { "Emaki".to_string() } else { self.user_name.clone() };
+                        div()
+                            .relative()
+                            .text_size(px(16.))
+                            .text_color(theme.foreground)
+                            .when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f))
+                            .child(div().truncate().child(name.clone()))
+                            .child(div().absolute().top_0().left(px(0.5)).right(px(-0.5)).truncate().child(name))
+                    }),
             )
             // Settings live behind ⌘, and the app menu; the gear says so
             // for anyone who looks for them where every app keeps them.
@@ -5343,7 +5771,7 @@ impl Workbench {
                 .vertical_scrollbar(&self.side_scroll),
         );
 
-        v_flex().w(SIDEBAR_W).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(agents_card).child(folders_card).child(footer)
+        v_flex().w(self.sidebar_w).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(agents_card).child(folders_card).child(footer)
     }
 
     /// Whether a folder in the sidebar shows its sessions: the person's
@@ -5998,7 +6426,7 @@ impl Workbench {
         let (parents, name) = cwd.split_at(cwd.len() - name_len);
         let path_line = (!cwd.is_empty()).then(|| {
             let hover_bg = theme.muted;
-            h_flex().w_full().h(px(30.)).px(px(24.)).justify_center().items_center().bg(theme.muted.opacity(0.3)).border_b_1().border_color(theme.border).child(
+            h_flex().w_full().h(px(31.)).px(px(24.)).justify_center().items_center().bg(theme.muted.opacity(0.3)).border_t_1().border_b_1().border_color(theme.border).child(
                 h_flex()
                     .id("path-bar")
                     .max_w_full()
@@ -6152,6 +6580,7 @@ impl Workbench {
 
         // The hidden terminal's own screen, when it has to be seen, takes
         // the place of any card: it is the same dialog, as it is.
+        let shells = self.render_shells(&r, &self.shells_running(&r, &session), cx);
         let terminal = self.render_terminal(&r, cx);
         let dialog = if terminal.is_some() { None } else { self.render_dialog(&r, cx) };
         let covered = dialog.is_some() || terminal.is_some();
@@ -6172,9 +6601,10 @@ impl Workbench {
                     .w_full()
                     .items_center()
                     .px(px(24.))
-                    .when(status.is_some() || waiting.is_some(), |d| d.pt(px(12.)))
+                    .when(status.is_some() || waiting.is_some() || shells.is_some(), |d| d.pt(px(12.)))
                     .pb(px(14.))
                     .gap(px(8.))
+                    .children(shells)
                     .children(status.filter(|_| !covered))
                     .children(waiting.filter(|_| !covered))
                     .children(terminal)
@@ -6183,6 +6613,116 @@ impl Workbench {
                     .child(self.render_composer(cx)),
             )
             .into_any_element()
+    }
+
+    /// The commands the agent left running in the background on this
+    /// session. The transcript says when one started and when it ended;
+    /// one that never ended is running only while the Claude Code that
+    /// started it is: a command dies with its process and no row says so.
+    fn shells_running(&self, r: &SessionRef, session: &Session) -> Vec<emaki_core::model::Shell> {
+        let open: Vec<_> = session.shells.iter().filter(|sh| sh.ended.is_empty()).cloned().collect();
+        if open.is_empty() {
+            return open;
+        }
+        let Some(peer) = self.hub.peer_for(&r.session_id) else { return Vec::new() };
+        open.into_iter()
+            .filter(|sh| {
+                let began = emaki_core::build::parse_ts(&sh.started).map(|t| t.timestamp() as f64).unwrap_or(0.);
+                peer.started_at <= 0. || began + 1. >= peer.started_at
+            })
+            .collect()
+    }
+
+    /// The end of each running command's output, read again on the
+    /// clock while the list is open: Claude Code writes it to a file as
+    /// the command runs.
+    fn read_shell_tails(&mut self) {
+        let Some(sid) = self.shells_open.clone() else { return };
+        let Some(detail) = self.detail.as_ref().filter(|d| d.session.id == sid) else { return };
+        let mut tails = HashMap::new();
+        for sh in detail.session.shells.iter().filter(|sh| sh.ended.is_empty() && !sh.output_path.is_empty()) {
+            if let Some(tail) = file_tail(&sh.output_path, 6000, SHELL_TAIL_LINES) {
+                tails.insert(sh.id.clone(), tail);
+            }
+        }
+        self.shell_tails = tails;
+    }
+
+    /// The row over the composer that says commands are running in the
+    /// background, and, opened with a click, what each one is and the
+    /// last of what it has printed.
+    fn render_shells(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], cx: &mut Context<Self>) -> Option<AnyElement> {
+        if shells.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let open = self.shells_open.as_deref() == Some(r.session_id.as_str());
+        let label = |sh: &emaki_core::model::Shell| if sh.description.is_empty() { sh.command.lines().next().unwrap_or("").to_string() } else { sh.description.clone() };
+        let first = &shells[0];
+        let sid = r.session_id.clone();
+        let row = h_flex()
+            .id("shells-row")
+            .w_full()
+            .h(px(26.))
+            .px(px(6.))
+            .gap(px(8.))
+            .items_center()
+            .rounded(px(7.))
+            .cursor_pointer()
+            .text_size(px(12.))
+            .text_color(theme.muted_foreground)
+            .hover(|s| s.bg(theme.muted.opacity(0.5)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                swallow_click(window, cx);
+                this.shells_open = if this.shells_open.as_deref() == Some(sid.as_str()) { None } else { Some(sid.clone()) };
+                this.shell_tails.clear();
+                this.read_shell_tails();
+                cx.notify();
+            }))
+            .child(div().size(px(7.)).rounded_full().bg(theme.blue).flex_shrink_0().with_animation("shells-dot", Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.opacity(0.35 + 0.65 * (1. - (2. * t - 1.).abs()))))
+            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} running in the background", plural(shells.len(), "command", "commands"))))
+            .child(div().flex_1().min_w_0().truncate().child(if shells.len() == 1 { label(first) } else { String::new() }))
+            .when(shells.len() == 1, |d| d.child(div().flex_shrink_0().child(elapsed_since(&first.started, self.now))))
+            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronUp }).with_size(px(13.)).flex_shrink_0());
+        let mut card = v_flex().w_full().max_w(CONTENT_W);
+        if open {
+            let mut list = v_flex().w_full().gap(px(10.)).p(px(12.)).mb(px(4.)).rounded(px(10.)).border_1().border_color(theme.border).bg(theme.muted.opacity(0.25));
+            for sh in shells {
+                let tail = self.shell_tails.get(&sh.id).cloned().unwrap_or_default();
+                list = list.child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(5.))
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .items_center()
+                                .text_size(px(12.5))
+                                .child(Icon::new(IconName::SquareTerminal).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
+                                .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(label(sh)))
+                                .child(div().flex_shrink_0().text_size(px(11.5)).text_color(theme.muted_foreground).child(elapsed_since(&sh.started, self.now))),
+                        )
+                        .child(div().w_full().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(theme.muted_foreground).child(sh.command.lines().next().unwrap_or("").to_string()))
+                        .child(
+                            div()
+                                .w_full()
+                                .px(px(10.))
+                                .py(px(8.))
+                                .rounded(px(7.))
+                                .bg(theme.background)
+                                .border_1()
+                                .border_color(theme.border.opacity(0.6))
+                                .font_family(theme.mono_font_family.clone())
+                                .text_size(px(11.))
+                                .line_height(px(16.))
+                                .overflow_hidden()
+                                .map(|d| if tail.trim().is_empty() { d.text_color(theme.muted_foreground.opacity(0.7)).child("nothing printed yet") } else { d.children(tail.lines().map(|l| div().w_full().truncate().child(if l.is_empty() { " ".to_string() } else { l.to_string() }))) }),
+                        ),
+                );
+            }
+            card = card.child(list);
+        }
+        Some(card.child(row).into_any_element())
     }
 
     /// The hidden terminal's screen, drawn where the cards sit, when the
@@ -6730,9 +7270,93 @@ impl Workbench {
         }
         let state = self.composer.read(cx);
         let text = state.value().to_string();
-        let (start, end, prefix) = slash_token_at(&text, state.cursor())?;
-        let whole = text[..start].trim().is_empty() && text[end..].trim().is_empty();
-        Some(SlashAt { via, start, end, prefix, whole, text })
+        if let Some((start, end, prefix)) = slash_token_at(&text, state.cursor()) {
+            let whole = text[..start].trim().is_empty() && text[end..].trim().is_empty();
+            return Some(SlashAt { via, start, end, prefix, whole, file: false, text });
+        }
+        // "@" and a path under the folder, as the terminal's prompt takes.
+        let (start, end, prefix) = emaki_core::files::at_token_at(&text, state.cursor())?;
+        (!self.composer_cwd().is_empty()).then(|| SlashAt { via, start, end, prefix, whole: false, file: true, text })
+    }
+
+    /// The folder a message from the composer would be about: the
+    /// session's, or on the new-session page the one chosen there.
+    fn composer_cwd(&self) -> String {
+        if self.page == Page::New {
+            self.new_cwd.clone()
+        } else {
+            self.selected_ref().map(|r| r.cwd.clone()).unwrap_or_default()
+        }
+    }
+
+    /// Lists the composer's folder off the main thread while an "@" is
+    /// being typed there, and again once the list is `FILES_FRESH` old,
+    /// so a file made a moment ago is offered.
+    fn want_files(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.composer_cwd();
+        let typing = {
+            let state = self.composer.read(cx);
+            let text = state.value();
+            text.contains('@') && emaki_core::files::at_token_at(&text, state.cursor()).is_some()
+        };
+        if !typing || cwd.is_empty() || self.files_loading.contains(&cwd) || self.files.get(&cwd).is_some_and(|(at, _)| at.elapsed() < FILES_FRESH) {
+            return;
+        }
+        self.files_loading.insert(cwd.clone());
+        cx.spawn(async move |this, cx| {
+            let folder = cwd.clone();
+            let list = cx.background_executor().spawn(async move { emaki_core::files::list(&folder) }).await;
+            this.update(cx, |this, cx| {
+                this.files_loading.remove(&cwd);
+                this.files.insert(cwd, (Instant::now(), Rc::new(list)));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The rows the list over the composer shows for what is typed:
+    /// commands after "/", the folder's files after "@" (the path, and
+    /// the folder it is in where a command has what it does).
+    fn list_rows(&self, at: &SlashAt) -> (Vec<(String, String, String)>, bool) {
+        if !at.file {
+            return self.slash_rows(&at.prefix, at.via, at.whole);
+        }
+        let cwd = self.composer_cwd();
+        match self.files.get(&cwd) {
+            Some((_, all)) => (emaki_core::files::matches(all, &at.prefix, FILE_ROWS).into_iter().map(|e| (e.path.clone(), e.parent().to_string(), String::new())).collect(), false),
+            None => (Vec::new(), true),
+        }
+    }
+
+    /// Puts a path chosen from the list where the "@" being typed is. A
+    /// file gets a space after it; a folder does not, so the list goes on
+    /// into it, as the terminal's does.
+    fn file_insert(&mut self, path: &str, at: &SlashAt, window: &mut Window, cx: &mut Context<Self>) {
+        let tail = &at.text[at.end..];
+        let mut word = emaki_core::files::written(path);
+        if !path.ends_with('/') && !tail.starts_with(' ') {
+            word.push(' ');
+        }
+        let caret = at.start + word.len() + usize::from(!path.ends_with('/') && tail.starts_with(' '));
+        let text = format!("{}{word}{tail}", &at.text[..at.start]);
+        self.set_composer(text, caret, window, cx);
+    }
+
+    /// Sets the composer's text with the caret at that byte of it. A
+    /// value set from code reports no change, so what a change does is
+    /// done here.
+    fn set_composer(&mut self, text: String, caret: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let before = &text[..caret.min(text.len())];
+        let line = before.matches('\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap_or("").encode_utf16().count() as u32;
+        self.composer.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.set_cursor_position(gpui_component::input::Position::new(line, column), window, cx);
+        });
+        self.slash_sel = 0;
+        self.mark_slash(cx);
     }
 
     /// Runs a command chosen from the list: typed into the terminal on a
@@ -6755,16 +7379,7 @@ impl Workbench {
         let word = format!("/{name}{}", if tail.starts_with(' ') { "" } else { " " });
         let caret = at.start + name.len() + 2;
         let text = format!("{}{word}{tail}", &at.text[..at.start]);
-        let before = &text[..caret.min(text.len())];
-        let line = before.matches('\n').count() as u32;
-        let column = before.rsplit('\n').next().unwrap_or("").encode_utf16().count() as u32;
-        self.composer.update(cx, |s, cx| {
-            s.set_value(text, window, cx);
-            s.set_cursor_position(gpui_component::input::Position::new(line, column), window, cx);
-        });
-        // A value set from code reports no change.
-        self.slash_sel = 0;
-        self.mark_slash(cx);
+        self.set_composer(text, caret, window, cx);
     }
 
     /// A row of the list was chosen, by ↩ or a click. A command that acts
@@ -6775,7 +7390,9 @@ impl Workbench {
     /// cannot be taken back. ⌘↩ still sends a message that is only a
     /// command as that command.
     fn slash_pick(&mut self, name: &str, at: &SlashAt, window: &mut Window, cx: &mut Context<Self>) {
-        if at.whole && acts_alone(name) {
+        if at.file {
+            self.file_insert(name, at, window, cx);
+        } else if at.whole && acts_alone(name) {
             self.slash_run(format!("/{name}"), at.via, window, cx);
         } else {
             self.slash_insert(name, at, window, cx);
@@ -6788,7 +7405,7 @@ impl Workbench {
     /// list is not showing, and the key is the textarea's.
     fn slash_key(&mut self, key: SlashKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(at) = self.slash_open(cx) else { return false };
-        let (rows, _) = self.slash_rows(&at.prefix, at.via, at.whole);
+        let (rows, _) = self.list_rows(&at);
         if rows.is_empty() {
             return false;
         }
@@ -6798,6 +7415,7 @@ impl Workbench {
             SlashKey::Up => self.slash_sel = (sel + n - 1) % n,
             SlashKey::Down => self.slash_sel = (sel + 1) % n,
             SlashKey::Run => self.slash_pick(&rows[sel].0, &at, window, cx),
+            SlashKey::Complete if at.file => self.file_insert(&rows[sel].0, &at, window, cx),
             SlashKey::Complete => self.slash_insert(&rows[sel].0, &at, window, cx),
             SlashKey::Close => self.slash_closed = true,
         }
@@ -6823,7 +7441,24 @@ impl Workbench {
                 }
             }
         }
+        // And every "@" that names a file or folder that is there.
+        if text.contains('@') {
+            let cwd = self.composer_cwd();
+            let style = HighlightStyle { color: Some(cx.theme().link), ..Default::default() };
+            for (a, b, path) in emaki_core::files::at_tokens(&text) {
+                let end = if text[a + 1..].starts_with('"') {
+                    (!cwd.is_empty() && emaki_core::files::resolve(&cwd, &path).exists()).then_some(b)
+                } else {
+                    emaki_core::files::named(&cwd, &path).map(|p| a + 1 + p.len())
+                };
+                if let Some(end) = end {
+                    marks.push(gpui_component::input::TextDecoration::new(a..end, style));
+                }
+            }
+            marks.sort_by_key(|m| m.range.start);
+        }
         self.composer.update(cx, |s, cx| s.set_marks(marks, cx));
+        self.want_files(cx);
     }
 
     /// The list that opens over the composer while a message is a slash
@@ -6835,17 +7470,18 @@ impl Workbench {
     fn render_slash_help(&self, at: SlashAt, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let via = at.via;
-        let (rows, loading) = self.slash_rows(&at.prefix, via, at.whole);
+        let (rows, loading) = self.list_rows(&at);
         if rows.is_empty() && !loading {
             return div().into_any_element();
         }
+        let file = at.file;
         let total = rows.len();
         let sel = self.slash_sel.min(total.saturating_sub(1));
         // Eight rows show; the window slides once the choice passes them.
         let start = (sel + 1).saturating_sub(SLASH_ROWS);
         // What ↩ does to the row the keys are on: run it, or put it in
         // the message.
-        let runs = at.whole && rows.get(sel).is_some_and(|row| acts_alone(&row.0));
+        let runs = !file && at.whole && rows.get(sel).is_some_and(|row| acts_alone(&row.0));
         let to_terminal = via == "inbox" && runs;
         let at = Rc::new(at);
         let mono = theme.mono_font_family.clone();
@@ -6868,8 +7504,17 @@ impl Workbench {
         let key = |cap: &'static str, does: &'static str| h_flex().flex_shrink_0().gap(px(5.)).items_center().child(keycap(cap)).child(does);
         let wash = theme.primary.opacity(if theme.is_dark() { 0.16 } else { 0.10 });
         let list = v_flex().p(px(6.)).gap(px(1.)).children(rows.into_iter().enumerate().skip(start).take(SLASH_ROWS).map(|(i, (name, description, hint))| {
-            let command = format!("/{name}");
+            // A file reads as its own name, with the folder it is in
+            // where a command has what it does.
+            let command = if file {
+                let body = name.trim_end_matches('/');
+                name[body.rfind('/').map(|i| i + 1).unwrap_or(0)..].to_string()
+            } else {
+                format!("/{name}")
+            };
+            let description = if file && description.is_empty() { "./".to_string() } else if file { format!("{description}/") } else { description };
             let chosen = i == sel;
+            let folder = name.ends_with('/');
             h_flex()
                 .id(SharedString::from(format!("slash-{i}")))
                 .w_full()
@@ -6890,17 +7535,18 @@ impl Workbench {
                 }))
                 .child(
                     h_flex()
-                        .w(gpui::relative(0.36))
+                        .w(gpui::relative(if file { 0.44 } else { 0.36 }))
                         .flex_shrink_0()
                         .min_w_0()
                         .overflow_hidden()
                         .gap(px(8.))
                         .items_baseline()
                         .font_family(mono.clone())
+                        .when(file, |d| d.items_center().child(Icon::new(if folder { IconName::Folder } else { IconName::File }).with_size(px(13.)).flex_shrink_0().text_color(theme.muted_foreground)))
                         .child(div().flex_shrink_0().max_w_full().truncate().text_size(px(12.5)).text_color(if chosen { theme.link } else { theme.foreground }).child(command))
                         .when(!hint.is_empty(), |d| d.child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(hint))),
                 )
-                .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(if chosen { theme.foreground } else { theme.muted_foreground }).child(description))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).when(file, |d| d.font_family(mono.clone())).text_color(if chosen { theme.foreground } else { theme.muted_foreground }).child(description))
                 .when(chosen, |d| d.child(keycap("↩")))
         }));
         let foot = h_flex()
@@ -6918,7 +7564,7 @@ impl Workbench {
             .child(key("esc", "close"))
             .child(div().flex_1())
             .child(div().min_w_0().truncate().child(if loading {
-                "reading this folder's commands…".to_string()
+                if file { "reading this folder's files…" } else { "reading this folder's commands…" }.to_string()
             } else if total > SLASH_ROWS {
                 format!("{} of {total}", sel + 1)
             } else {
@@ -8042,8 +8688,15 @@ struct SlashAt {
     end: usize,
     prefix: String,
     whole: bool,
+    /// An "@" and a path, not a command.
+    file: bool,
     text: String,
 }
+
+/// How many of the folder's files "@" offers for what is typed, and how
+/// old the folder's list may be before it is read again.
+const FILE_ROWS: usize = 40;
+const FILES_FRESH: Duration = Duration::from_secs(10);
 
 /// A key the slash-command list takes from the composer.
 #[derive(Clone, Copy)]
@@ -8317,10 +8970,13 @@ impl Render for Workbench {
         if !self.narrow {
             self.sidebar_peek = false;
         }
+        if std::mem::take(&mut self.fit_wanted) {
+            self.sidebar_w = self.sidebar_fit(window, cx);
+        }
         let sidebar_open = self.sidebar_open && !self.narrow;
         let sidebar_peek = self.narrow && self.sidebar_peek;
         self.sync_tab_widths(cx);
-        self.pane_w = window.viewport_size().width - if sidebar_open { SIDEBAR_W } else { px(0.) };
+        self.pane_w = window.viewport_size().width - if sidebar_open { self.sidebar_w } else { px(0.) };
         // `EMAKI_A11Y=1` prints gpui's own view of the accessibility tree on
         // every draw, for checking what assistive apps are handed.
         if std::env::var("EMAKI_A11Y").is_ok() {
@@ -8348,9 +9004,23 @@ impl Render for Workbench {
                             }
                         });
                         // A floating sidebar goes when the pointer leaves it.
+                        let (mover, lifter) = (this.clone(), this.clone());
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = this.update(cx, |w, cx| w.float_follow(e, window, cx));
+                            }
+                        });
+                        // The sidebar's edge, once held, follows the
+                        // pointer wherever it goes, and nothing under
+                        // it hears the move.
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture && mover.update(cx, |w, cx| w.side_drag.then(|| w.side_drag_to(e, cx)).is_some()).unwrap_or(false) {
+                                cx.stop_propagation();
+                            }
+                        });
+                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = lifter.update(cx, |w, _| w.side_drag_end());
                             }
                         });
                     },
@@ -8420,6 +9090,7 @@ impl Render for Workbench {
                     Page::Session => this.child(self.render_detail(window, cx)),
                 }),
             )
+            .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
             .children(self.render_sidebar_float(cx))
             .child(self.render_strip(cx))

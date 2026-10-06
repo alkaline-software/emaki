@@ -473,8 +473,34 @@ pub struct Session {
     /// back to the composer. Cleared by the next prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withdrawn: Option<Round>,
+    /// The commands the agent set running in the background, in the
+    /// order it started them, each with how it ended once it has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shells: Vec<Shell>,
     pub transcript_path: String,
     pub log_path: String,
+}
+
+/// A command the agent started in the background (`Bash` with
+/// `run_in_background`): the turn goes on, or ends, while it runs, and
+/// Claude Code tells the agent when it is over.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Shell {
+    /// Claude Code's id for the task.
+    pub id: String,
+    pub command: String,
+    /// The agent's own line on what the command is for.
+    pub description: String,
+    /// The file Claude Code writes the command's output to as it runs.
+    pub output_path: String,
+    pub started: String,
+    /// When it was over; empty while it runs.
+    pub ended: String,
+    /// `completed`, `failed`, `killed`, as Claude Code says it; empty
+    /// while it runs.
+    pub status: String,
+    /// Claude Code's sentence on how it ended.
+    pub summary: String,
 }
 
 impl Session {

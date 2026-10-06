@@ -48,6 +48,22 @@ fn main() {
             let (session, written) = store::build_one(&path, &cfg, &redactor);
             println!("{} rounds -> {:?}", session.rounds.len(), written);
         }
+        "shells" => {
+            let target = args.get(1).expect("shells <session-id|path>");
+            let session = emaki_core::build::build_from_path(&resolve(target, &cfg), "");
+            for sh in &session.shells {
+                println!("{}  {}  {}  {}  {}", sh.id, sh.started, if sh.ended.is_empty() { "running" } else { &sh.status }, sh.ended, if sh.description.is_empty() { &sh.command } else { &sh.description });
+            }
+        }
+        "files" => {
+            let folder = args.get(1).expect("files <folder> [typed]");
+            let all = emaki_core::files::list(folder);
+            let typed = args.get(2).map(String::as_str).unwrap_or("");
+            for e in emaki_core::files::matches(&all, typed, 20) {
+                println!("{}", e.path);
+            }
+            eprintln!("{} in all", all.len());
+        }
         "archive" => {
             let refs = adapters::index_all(200, &cfg.agents);
             let stats = archive::sweep(&refs);

@@ -997,7 +997,14 @@ impl Element for Scrollbar {
                                     .detach();
                             }
                         } else if elapsed < FADE_OUT_DURATION {
-                            let opacity = 1.0 - (elapsed - FADE_OUT_DELAY).powi(10);
+                            // The fade runs over its own length. Upstream
+                            // raises the seconds past the delay to the
+                            // tenth power, which is a fade only when the
+                            // fade lasts one second: over half a second
+                            // it left the bar at full strength and then
+                            // cut it. (Emaki addition.)
+                            let t = (elapsed - FADE_OUT_DELAY) / (FADE_OUT_DURATION - FADE_OUT_DELAY);
+                            let opacity = 1.0 - t * t;
                             idle_state.0 = self.normal_thumb_background(cx).opacity(opacity);
 
                             window.request_animation_frame();

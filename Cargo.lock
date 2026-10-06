@@ -1577,6 +1577,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "image",
  "markdown",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

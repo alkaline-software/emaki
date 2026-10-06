@@ -253,6 +253,8 @@ impl Workbench {
                 // sentence) is set as inline code, so it wears the accent.
                 let cwd = &session.cwd;
                 let prompt = if rnd.prompt.contains('/') { emaki_core::driver::mark_commands(&rnd.prompt, |name| self.hub.knows_command(cwd, name)) } else { rnd.prompt.clone() };
+                // And an "@" that names a file under the folder.
+                let prompt = if prompt.contains('@') { emaki_core::files::mark_mentions(&prompt, cwd) } else { prompt };
                 bubble = bubble.child(md_view(format!("p-{ix}"), prompt, cx));
             }
             // The time and the copy button show while the pointer is over
