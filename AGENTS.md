@@ -2257,25 +2257,89 @@ taken is refused with the field left up. The trash is the system's
 manager's own call, since the crate's default asks Finder by
 AppleScript), so it can be put back; nothing here deletes.
 
-*The outline* is `emaki_core::outline`, a pure function of the model
-and no model's summary: an entry a round, its title the prompt's first
-line that says something, its gist the first line of the last thing
-the agent wrote that round (where a reply states its outcome), else
-what it did instead ("3 tool calls", "Conversation compacted"),
-markdown marks and "[Image #n]" taken out. Made once per load
-(`Detail::outline`). Drawn under a head for each day, on a rail with a
-dot each; the entry in view wears the accent: the round at the top of
+*The outline* is `emaki_core::outline`: an entry a round, saying what
+the person asked there and nothing of the reply. Each is the time it
+was said, on a small plate in the mono face, and then the words, two
+lines at most. A command (`/compact`) is shown as it is, and so is a
+message of `SHORT_MAX` (48) characters or less, since neither has
+anything to shorten. A longer message is shown by a label a small
+model writes for it (`outline::summarize`, asked for on 2026-10-06):
+the explainer's model and isolation (`explain::run_child`, Haiku, no
+settings, no tools, the scratch folder whose transcripts are swept),
+`BATCH` (6) messages to a child and the children side by side, each
+message inside `<message n>` tags and cut to 900 characters, the reply
+a line a message, "n: label". Labels are kept for good in
+`cache/outline.json` by a hash of the words they were made from
+(`key_for`), so a conversation is asked about once, and after that
+only its new messages are. The window asks only for what the person is looking at (`ask_labels`,
+off the main thread): the entries in the outline's own view and
+`LABEL_AHEAD` (320px) above and below it, by each row's place in the
+scroller, once the scroller has rested `LABEL_REST` (300ms) and nothing
+is being asked already, so a scroll through a long conversation asks
+about where it stops and not what it passes, and what a conversation
+costs is what is looked at, whatever its length. The first version
+(the same day) asked about every message of the conversation at once;
+the person asked for this, to spare tokens on a very long session.
+Meanwhile an entry with no label is two bars that
+breathe behind its time, the head says "Summarizing…" beside the
+turning mark while a call is out, and a label fades in as it lands
+(`outline_fresh`). Checked on the 62-prompt session from an empty
+cache: 21 labels asked for where the first version asked for 51.
+A row's place is its laid-out bounds plus the scroller's offset
+(`ScrollHandle::bounds_for_item` answers before the offset is taken):
+without the offset, an outline scrolled down asked about the rows at
+its top and left the ones in sight as bars for good, which the person
+saw on a session opened at its end. Checked with `outline:60` on that
+session from an empty cache: the entries in sight got their labels.
+Nothing is asked while the outline is not showing. A line that does
+not read as a label (markdown in it, more than sixteen words) is
+dropped and asked for once more; what still has none shows the
+message's own first words and is asked again at the next launch
+(`outline_failed`). Measured with `emaki-core outline <id>
+--summarize` on this machine: thinking has to be off
+(`MAX_THINKING_TOKENS=0`), since with it on nineteen labels in one
+child took 24.6 s and a batch of twenty-four did not finish in thirty;
+with it off and six to a child, 19 labels took 8.4 s, 29 took 4.2 s
+and 52 took 5.6 s. One child answered its six messages instead of
+labelling them, which is what the tags, the wording of the prompt and
+the retry are for. Before this an entry was the prompt's first line
+with the first line of the agent's last reply under it; the entry
+still carries those (`title`, `gist`) and the CLI prints them. Each
+child is a real Claude Code call on the person's account. Checked
+with `EMAKI_SHOT` in a second copy on the 62-prompt session: the bars
+and "Summarizing…" three seconds in, the labels at the next launch
+from the cache. Covered by a test: which entries are asked about, the
+reply's parsing, the command line. Not driven from a script: a label
+landing while the panel is watched, and a new message in a live
+session getting its label.
+
+The entries are made once per load
+(`Detail::outline`). Drawn under a head for each day, which stays at the
+panel's top once its own head has scrolled away (the last head above
+the view, drawn over the scroller on the panel's ground with a
+hairline under it), so a time is always under its day. The change is
+made when the head's own words are where the pinned ones are drawn
+(`PIN_LEAD` under the view's top): made when the head's box left the
+view, the words stood a few pixels apart and jumped at each change,
+which the person saw as a bounce. With nothing in
+front of the time (a rail down each day with a dot an entry was there
+until 2026-10-06; the person took it out, the time's plate being
+anchor enough); the entry in view wears the accent: the round at the top of
 the list, or the last once the list is at its end (a short last round
 never reaches the top), and an entry just clicked for as long as the
 view is where the click put it (`outline_pick`). A click on an entry
-chooses it, and so does the wheel over the outline (`outline_wheel`,
-from `route_scroll`, which hands it every wheel event of a gesture
-that began there and stops it, so the outline's own scroller never
-takes one): the mark moves an entry at a time, one for a notch of a
-mouse wheel, one for every `WHEEL_STEP` of a trackpad's travel, and
-never faster than one each `WHEEL_PACE`, so a flick's momentum walks
-the entries. The outline keeps the marked entry in sight when it
-changes (`outline_at`), which is all the scrolling it does now.
+chooses it. The wheel over the outline scrolls the outline and nothing
+else, as in any pane. For an hour on 2026-10-06 the wheel moved the
+mark instead, an entry at a time with the conversation following
+(`outline_wheel`); the person took that back: scrolling looks, a click
+goes. The outline brings the marked entry into sight when the mark
+changes (`outline_at`).
+An outline at its foot stays at its foot as it grows, and the last
+entry is gone to by the foot (`scroll_to_bottom`, which the scroller
+does at its next layout): going to the last row by its place used the
+layout from before the row was there, or before its label took a
+second line, and left it cut by the panel's edge, which the person saw
+after sending a message.
 Choosing an entry moves the conversation to its round, and the move is
 drawn (`outline_go`, `Glide`): a task steps the list every
 `GLIDE_TICK` until the round is at the top. The list knows where a
@@ -2293,13 +2357,25 @@ is left, when the list's end holds it short (no nearer for four ticks,
 or the view back on the end's own anchor), or after `GLIDE_MOST`; a
 newer choice takes it over (`outline_glide`, its number), and a wheel
 in the conversation ends it. While it runs the mark stays on the entry
-chosen (`outline_gliding`). The click used to set the list's place in
+chosen (`outline_gliding`). A round the list's end holds short of the
+top keeps its mark too (`outline_pick_end`): at its end the list says
+its top is past the last round (`logical_scroll_top` is the item
+count, and `bounds_for_item` answers for nothing), so the test "the
+top is the round chosen, or one above it" never held there, the mark
+fell back to the last entry when the move ended (with the wheel then
+moving the mark, going up from the end bounced between the last two
+entries). A move that ends
+with the list on its end now says so, with the count of rounds, and
+the mark is kept while the list is still there with that many; a wheel
+in the conversation lets it go. Checked on a hand-written transcript
+whose last four rounds are short, with `outline:13`, `12`, `10` and
+back to `13` from the end: the mark stayed on each. The click used to set the list's place in
 one step, which the person called abrupt. Checked with
 `EMAKI_GLIDE_DEBUG=1`, which prints the list's place and what is left
 at every tick, and `EMAKI_GO=outline:<n>` to a near round, a far one,
 one above and one below, and from the list's end: each came to rest on
 its round within 36 ticks, what was left shrinking at every one. Not
-driven from a script: the wheel itself, and how the move looks. Both panels' scrollers are panes of their own to
+driven from a script: a wheel over the outline, and how the move looks. Both panels' scrollers are panes of their own to
 `route_scroll`. `emaki-core outline <id>` prints one.
 
 Checked with `EMAKI_SHOT` in a second copy: the tree with two folders
