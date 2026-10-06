@@ -42,7 +42,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -81,12 +81,53 @@ const FOLDER_ROWS: usize = 5;
 const SIDE_FOLDERS: usize = 10;
 /// How long a folder takes to unfold or fold away.
 const FOLDER_ANIM: Duration = Duration::from_millis(200);
+/// The sidebar floating in over the content, or back out.
+const FLOAT_ANIM: Duration = Duration::from_millis(220);
+/// A tab's width when there is room, the least it shrinks to, the gap
+/// between two, and how long a width takes to change.
+const TAB_MAX: f32 = 200.;
+const TAB_MIN: f32 = 56.;
+const TAB_GAP: f32 = 4.;
+const TAB_ANIM: Duration = Duration::from_millis(220);
+
+/// A tab being dragged along the row, by its key.
+#[derive(Clone)]
+struct DragTab(String);
+
+/// What follows the pointer while a tab is dragged: its title on a plate.
+struct TabGhost(String);
+
+impl Render for TabGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div().h(px(30.)).max_w(px(TAB_MAX)).px(px(10.)).flex().items_center().rounded(px(8.)).bg(theme.muted).border_1().border_color(theme.border).text_size(px(12.5)).text_color(theme.foreground).truncate().opacity(0.9).child(self.0.clone())
+    }
+}
+
+/// One tab's width on its way from one size to another.
+#[derive(Clone, Copy)]
+struct TabWidth {
+    from: f32,
+    to: f32,
+    at: Instant,
+    serial: u32,
+}
+
+impl TabWidth {
+    fn now(&self) -> f32 {
+        let t = (self.at.elapsed().as_secs_f32() / TAB_ANIM.as_secs_f32()).min(1.);
+        self.from + (self.to - self.from) * ease_out_quint()(t)
+    }
+}
+
+/// The buttons beside the traffic lights: each one's box.
+const STRIP_BTN: Pixels = px(26.);
 /// The sidebar's rows: an agent or a folder, and a session under a folder.
 const SIDE_ROW_H: Pixels = px(26.);
 const SIDE_SESSION_H: Pixels = px(24.);
 pub const TITLEBAR_H: Pixels = px(48.);
 /// Room for the traffic lights on a transparent title bar.
-pub const TRAFFIC_W: Pixels = px(80.);
+pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// A board column never gets narrower than this; past that the board scrolls.
@@ -659,6 +700,29 @@ pub struct Workbench {
     /// The settings body's scroll position, for its scrollbar.
     settings_scroll: ScrollHandle,
     sidebar_peek: bool,
+    /// The sidebar is folded away and showing over the content because the
+    /// pointer is on its button, until the pointer leaves it.
+    sidebar_float: bool,
+    /// The click that folded the sidebar away left the pointer on the
+    /// button: that is not a hover, and floats nothing until it has left.
+    float_block: bool,
+    /// The float last coming or going: which, when, and its number.
+    float_anim: Option<(bool, Instant, u32)>,
+    /// The tab row's width as last laid out, each tab's width (see
+    /// `sync_tab_widths`), and how many tabs those were worked out for.
+    tabs_row_w: Rc<std::cell::Cell<f32>>,
+    tab_widths: HashMap<String, TabWidth>,
+    tabs_n: usize,
+    /// The tab being dragged along the row.
+    drag_tab: Option<String>,
+    /// A press on the top strip that may become a drag of the window, and
+    /// a press something on the strip (a tab, a button) took for itself;
+    /// see `drag_region`.
+    win_move: bool,
+    press_taken: bool,
+    /// The conversations of the other open tabs, kept as they were left
+    /// so that going back to one draws it at once; see `open_session`.
+    stashed: HashMap<String, Detail>,
     startup_open: Option<String>,
     focus_handle: FocusHandle,
     _tasks: Vec<Task<()>>,
@@ -700,6 +764,244 @@ impl Workbench {
             self.sidebar_open = false;
             self.save_ui(true);
         }
+    }
+
+    /// The sidebar is beside the content, or over it because it was asked
+    /// for with a click or the key (not only floating under the pointer).
+    fn sidebar_pinned(&self) -> bool {
+        if self.narrow { self.sidebar_peek } else { self.sidebar_open }
+    }
+
+    /// The sidebar button, or its key. On a floating sidebar it keeps the
+    /// sidebar; otherwise it shows or hides it.
+    fn toggle_sidebar(&mut self, clicked: bool, cx: &mut Context<Self>) {
+        if self.sidebar_float {
+            self.sidebar_float = false;
+            self.float_anim = None;
+            self.show_sidebar();
+        } else if self.sidebar_pinned() {
+            self.hide_sidebar();
+            self.float_block = clicked;
+        } else {
+            self.show_sidebar();
+        }
+        cx.notify();
+    }
+
+    /// Float the folded sidebar in over the content, or let it go.
+    fn set_float(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.sidebar_float == on || (on && self.sidebar_pinned()) {
+            return;
+        }
+        self.sidebar_float = on;
+        let serial = self.float_anim.map(|(_, _, n)| n + 1).unwrap_or(0);
+        self.float_anim = Some((on, Instant::now(), serial));
+        if !on {
+            // Drawn until it has slid out, then dropped.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(FLOAT_ANIM).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The pointer moved while the sidebar floats: off the sidebar, it goes.
+    fn float_follow(&mut self, e: &MouseMoveEvent, window: &Window, cx: &mut Context<Self>) {
+        if !self.sidebar_float {
+            return;
+        }
+        let view = window.viewport_size();
+        let p = e.position;
+        if p.x < px(0.) || p.x > SIDEBAR_W || p.y < px(0.) || p.y > view.height {
+            self.set_float(false, cx);
+        }
+    }
+
+    /// The floating sidebar: no scrim, the content stays as it is, and it
+    /// slides in from the edge. `None` once it is neither up nor on its
+    /// way out.
+    fn render_sidebar_float(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (opening, at, serial) = self.float_anim?;
+        if self.sidebar_pinned() || (!self.sidebar_float && at.elapsed() >= FLOAT_ANIM) {
+            return None;
+        }
+        let dark = cx.theme().mode.is_dark();
+        let shadow = vec![BoxShadow { color: gpui::black().opacity(if dark { 0.5 } else { 0.14 }), offset: point(px(6.), px(0.)), blur_radius: px(28.), spread_radius: px(-6.), inset: false }];
+        Some(
+            div()
+                .id("sidebar-float")
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(SIDEBAR_W)
+                .occlude()
+                .shadow(shadow)
+                .child(self.render_sidebar(cx))
+                .with_animation(ElementId::Name(format!("sidebar-float-{serial}").into()), Animation::new(FLOAT_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    let shown = if opening { t } else { 1. - t };
+                    d.left(SIDEBAR_W * (shown - 1.)).opacity(0.4 + 0.6 * shown)
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Where the strip of buttons starts: past the traffic lights on
+    /// macOS, at the edge elsewhere.
+    fn strip_left() -> Pixels {
+        if cfg!(target_os = "macos") { TRAFFIC_W + px(2.) } else { px(10.) }
+    }
+
+    /// Where the strip ends: the sidebar button and search.
+    fn strip_right() -> Pixels {
+        Self::strip_left() + STRIP_BTN * 2.
+    }
+
+    /// The buttons at the window's top left, over the sidebar when it is
+    /// there and over the top strip when it is not, so the sidebar button
+    /// never moves: the sidebar and search.
+    fn render_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let button = |id: &'static str, icon: IconName, tip: &'static str, lit: bool| {
+            let hover = theme.foreground.opacity(0.07);
+            div()
+                .id(id)
+                .size(STRIP_BTN)
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                .when(lit, |d| d.bg(hover))
+                .hover(move |s| s.bg(hover))
+                .when(!tip.is_empty(), |d| d.tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx)))
+                .child(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground))
+        };
+        h_flex()
+            .absolute()
+            // A pixel down: the lights' centres are at 24.75, measured.
+            .top(px(1.))
+            .left(Self::strip_left())
+            .h(TITLEBAR_H)
+            .items_center()
+            // No tooltip on this one: it would sit on the sidebar it floats.
+            .child(
+                button("strip-sidebar", IconName::PanelLeft, "", self.sidebar_float)
+                    .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                        if !*over {
+                            this.float_block = false;
+                        } else if !this.float_block {
+                            this.set_float(true, cx);
+                        }
+                    }))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.toggle_sidebar(true, cx);
+                    })),
+            )
+            .child(button("strip-search", IconName::Search, "Search (⌘K)", false).on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.open_search(window, cx);
+            })))
+    }
+
+    /// Empty space along the top of the window moves the window. The app
+    /// owns that drag (`app_owns_titlebar_drag`): left to AppKit, the whole
+    /// strip under the title bar moved the window, tabs included, so a tab
+    /// could not be dragged along the row. A press here becomes a move
+    /// once the pointer moves with the button down, unless something on
+    /// the strip took the press first (`press_taken`: a child's listener
+    /// runs before its parent's), and a double click is the title bar's.
+    fn drag_region(el: Div, cx: &mut Context<Self>) -> Div {
+        el.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, ev: &MouseDownEvent, window, _| {
+                this.win_move = !std::mem::take(&mut this.press_taken);
+                if this.win_move && ev.click_count == 2 {
+                    this.win_move = false;
+                    window.titlebar_double_click();
+                }
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, _| {
+            if !this.win_move {
+                return;
+            }
+            this.win_move = false;
+            if ev.pressed_button == Some(MouseButton::Left) {
+                window.start_window_move();
+            }
+        }))
+    }
+
+    /// Give every tab its width. They share the row equally, `TAB_MAX`
+    /// each while there is room and less once there is not, and a change
+    /// in how many there are is a move, not a jump: a new tab grows in
+    /// from nothing while the others give way, and a closed one's room is
+    /// taken up the same way. A change in the row's own width (the window
+    /// resized, the sidebar folded) is followed at once. Left to the flex
+    /// row, a new tab was drawn at full width for a frame and the whole
+    /// row then snapped narrower.
+    fn sync_tab_widths(&mut self, cx: &mut Context<Self>) {
+        if !cx.has_active_drag() {
+            self.drag_tab = None;
+        }
+        let n = self.tabs.len();
+        let first = self.tab_widths.is_empty();
+        let tabs = &self.tabs;
+        self.tab_widths.retain(|k, _| tabs.contains(k));
+        if n == 0 {
+            self.tabs_n = 0;
+            return;
+        }
+        let row = self.tabs_row_w.get();
+        let target = if row <= 0. { TAB_MAX } else { ((row - TAB_GAP * (n as f32 - 1.)) / n as f32).clamp(TAB_MIN, TAB_MAX) };
+        let moved = n != self.tabs_n && !first;
+        self.tabs_n = n;
+        let now = Instant::now();
+        for key in self.tabs.iter() {
+            match self.tab_widths.get_mut(key) {
+                None => {
+                    self.tab_widths.insert(key.clone(), TabWidth { from: if moved { 0. } else { target }, to: target, at: now, serial: 0 });
+                }
+                Some(w) if (w.to - target).abs() > 0.5 => {
+                    let running = w.at.elapsed() < TAB_ANIM;
+                    w.from = if moved || running { w.now() } else { target };
+                    w.to = target;
+                    w.at = now;
+                    w.serial += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A tab dragged along the row takes the place the pointer is over.
+    fn drag_tab_to(&mut self, key: &str, x: Pixels, row: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let n = self.tabs.len();
+        let Some(from) = self.tabs.iter().position(|t| t == key) else { return };
+        let w = self.tab_widths.get(key).map(|w| w.to).unwrap_or(TAB_MAX);
+        let total = w * n as f32 + TAB_GAP * (n as f32 - 1.);
+        let start = f32::from(row.left()) + ((f32::from(row.size.width) - total) / 2.).max(0.);
+        let to = (((f32::from(x) - start) / (w + TAB_GAP)).floor().max(0.) as usize).min(n - 1);
+        if self.drag_tab.as_deref() != Some(key) {
+            self.drag_tab = Some(key.to_string());
+            cx.notify();
+        }
+        if to != from {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(to, tab);
+            self.save_ui(true);
+            cx.notify();
+        }
+    }
+
+    /// ⌘1 to ⌘9: that tab, or the last one when there are fewer.
+    fn go_tab(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.tabs.get(n - 1).or(self.tabs.last()).cloned() else { return };
+        self.open_and_focus(&key, window, cx);
     }
 
     /// The sidebar over the content, for a narrow window: a scrim that any
@@ -1182,6 +1484,16 @@ impl Workbench {
             sessions_scroll: ScrollHandle::new(),
             home_scroll: ScrollHandle::new(),
             sidebar_peek: false,
+            sidebar_float: false,
+            float_block: false,
+            float_anim: None,
+            stashed: HashMap::new(),
+            tabs_row_w: Rc::new(std::cell::Cell::new(0.)),
+            tab_widths: HashMap::new(),
+            tabs_n: 0,
+            drag_tab: None,
+            win_move: false,
+            press_taken: false,
             startup_open,
             focus_handle: cx.focus_handle(),
             _tasks: tasks,
@@ -1600,8 +1912,20 @@ impl Workbench {
         self.sidebar_peek = false;
         self.save_ui(true);
         if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).cloned() {
+            // Another tab: the conversation left is put away as it is
+            // (where it was scrolled, what was unfolded) and the one
+            // arrived at is taken out again and drawn at once, as a
+            // browser's tab is; the load below then brings it up to date
+            // in place. Only a tab never shown before has to wait for its
+            // load. It was dropped and read again at every switch, and the
+            // pane drew "loading…" in between, a blink at each click.
             if self.detail.as_ref().map(|d| d.key != key).unwrap_or(true) {
-                self.detail = None;
+                if let Some(left) = self.detail.take() {
+                    self.stashed.insert(left.key.clone(), left);
+                }
+                self.detail = self.stashed.remove(key);
+                let tabs = &self.tabs;
+                self.stashed.retain(|k, _| tabs.contains(k));
             }
             if std::env::var_os("EMAKI_QUESTION").is_some() && self.permissions.is_empty() {
                 self.permissions.push((r.session_id.clone(), sample_question()));
@@ -1661,6 +1985,13 @@ impl Workbench {
                     self.set_title(&key, &t["name:".len()..]);
                     cx.notify();
                 }
+            }
+            // The sidebar button, and the pointer on it.
+            Some("sidebar") => self.toggle_sidebar(false, cx),
+            Some("float") => self.set_float(true, cx),
+            Some("page:board") => {
+                self.page = Page::Board;
+                cx.notify();
             }
             Some("page:new") => {
                 self.page = Page::New;
@@ -3539,7 +3870,7 @@ impl Workbench {
         let now = Instant::now();
         let fresh = now.duration_since(self.last_scroll) > SCROLL_GAP;
         self.last_scroll = now;
-        let inline_sidebar = self.sidebar_open && !self.narrow;
+        let inline_sidebar = (self.sidebar_open && !self.narrow) || self.sidebar_float;
         let here = if inline_sidebar && e.position.x < SIDEBAR_W { Pane::Sidebar } else { Pane::Content };
         match e.touch_phase {
             TouchPhase::Started => self.scroll_owner = Some(here),
@@ -4664,7 +4995,6 @@ impl Workbench {
         // around the plate, so the box is larger than what shows. On macOS the pair has a row of
         // its own under the traffic lights, in line with the entries below
         // it; elsewhere nothing holds the corner, so it sits in the strip.
-        let mac = cfg!(target_os = "macos");
         let brand = h_flex()
             .h(px(36.))
             .gap(px(5.))
@@ -4684,19 +5014,10 @@ impl Workbench {
                     .child(div().absolute().top_0().left(px(0.5)).child("Emaki")),
             );
 
-        let mut header = h_flex().h(TITLEBAR_H).flex_shrink_0().pl(px(16.)).pr(px(10.)).items_center();
-        let mut top = v_flex().px(px(10.)).pt(px(2.)).gap(px(2.));
-        if mac {
-            top = top.child(brand.pl(px(7.)).mb(px(6.)));
-        } else {
-            header = header.child(brand);
-        }
-        let header = header
-            .child(div().flex_1())
-            .child(icon_button("sidebar-close", IconName::PanelLeftClose, "Hide sidebar (⌘⇧S)", cx, |this, _, cx| {
-                this.hide_sidebar();
-                cx.notify();
-            }));
+        // The strip above the brand is the window's buttons (`render_strip`),
+        // drawn over this, so here it is only room.
+        let header = Self::drag_region(div().h(TITLEBAR_H).flex_shrink_0(), cx);
+        let top = v_flex().px(px(10.)).pt(px(2.)).gap(px(2.)).child(brand.pl(px(7.)).mb(px(6.)));
 
         let new_row = h_flex()
             .id("nav-new")
@@ -4736,8 +5057,7 @@ impl Workbench {
                 this.page = Page::Board;
                 cx.notify();
             })))
-            .child(nav("nav-sessions", IconName::Inbox, "Sessions", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
-            .child(nav("nav-search", IconName::Search, "Search", "⌘K", false, cx, Box::new(|this, window, cx| this.open_search(window, cx))));
+            .child(nav("nav-sessions", IconName::Inbox, "Sessions", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))));
 
         let mut agents: Vec<(AgentId, usize)> = Vec::new();
         for a in AgentId::ALL {
@@ -5212,79 +5532,121 @@ impl Workbench {
     /// that session; ⌘W closes the one showing.
     fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let mut row = h_flex().flex_1().min_w_0().justify_center().items_center().gap(px(4.)).overflow_hidden();
+        let row_w = self.tabs_row_w.clone();
+        let entity = cx.entity().downgrade();
+        let mut row = h_flex()
+            .id("tabs")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .justify_center()
+            .items_center()
+            .gap(px(TAB_GAP))
+            .overflow_hidden()
+            .on_drag_move::<DragTab>(cx.listener(|this, e: &DragMoveEvent<DragTab>, _, cx| {
+                let key = e.drag(cx).0.clone();
+                this.drag_tab_to(&key, e.event.position.x, e.bounds, cx);
+            }))
+            // The row's width, for `sync_tab_widths` at the next draw.
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let w = f32::from(bounds.size.width);
+                        if (row_w.get() - w).abs() > 0.5 {
+                            row_w.set(w);
+                            let _ = entity.update(cx, |_, cx| cx.notify());
+                        }
+                    },
+                    |_, _, _, _| (),
+                )
+                .absolute()
+                .size_full(),
+            );
         for (ix, key) in self.tabs.clone().into_iter().enumerate() {
             let r = self.refs.iter().find(|r| key_of(r) == key).cloned();
             let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "untitled".into());
             let agent = r.as_ref().map(|r| r.agent).unwrap_or(AgentId::ClaudeCode);
             let working = r.as_ref().map(|r| self.is_working(r)).unwrap_or(false);
             let active = self.selected.as_deref() == Some(key.as_str());
+            let dragged = self.drag_tab.as_deref() == Some(key.as_str());
             let open_key = key.clone();
             let close_key = key.clone();
             let hover_bg = theme.muted.opacity(0.6);
             let close_bg = theme.border;
-            row = row.child(
-                h_flex()
-                    .id(("tab", ix))
-                    .h(px(30.))
-                    .pl(px(10.))
-                    .pr(px(6.))
-                    .gap(px(6.))
-                    .items_center()
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .min_w_0()
-                    .max_w(px(220.))
-                    .flex_shrink(1.)
-                    .when(active, |d| d.bg(theme.muted))
-                    .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_session(&open_key, cx)))
-                    .child(agent_glyph(agent, px(14.), agent_color(agent, &theme), working, format!("tab-glyph-{ix}")))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.5))
-                            .font_weight(if active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                            .text_color(if active { theme.foreground } else { theme.muted_foreground })
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .id(("tab-close", ix))
-                            .size(px(18.))
-                            .rounded(px(4.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(close_bg))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                swallow_click(window, cx);
-                                this.close_tab(&close_key, window, cx);
-                            }))
-                            .child(Icon::new(IconName::Close).xsmall().text_color(theme.muted_foreground)),
-                    ),
-            );
+            let ghost = title.clone();
+            // The same menu the session has in the sidebar.
+            let menu: Vec<(&'static str, MenuDo)> = match &r {
+                Some(r) => vec![("Rename", MenuDo::Rename(key.clone())), (crate::sys::REVEAL_LABEL, MenuDo::Reveal(r.path.clone()))],
+                None => Vec::new(),
+            };
+            // A width that is over is drawn as it ended, so that a row
+            // drawn afresh does not play it again.
+            let width = self.tab_widths.get(&key).copied().unwrap_or(TabWidth { from: TAB_MAX, to: TAB_MAX, at: Instant::now(), serial: 0 });
+            let (from, to) = if width.at.elapsed() < TAB_ANIM { (width.from, width.to) } else { (width.to, width.to) };
+            let tab = h_flex()
+                .id(ElementId::Name(format!("tab-{key}").into()))
+                .h(px(30.))
+                .pl(px(10.))
+                .pr(px(6.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(8.))
+                .cursor_pointer()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .when(active, |d| d.bg(theme.muted))
+                .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
+                .when(dragged, |d| d.opacity(0.45))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                .when(!menu.is_empty(), |d| d.on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, menu.clone(), cx))))
+                .on_drag(DragTab(key.clone()), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone())))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_session(&open_key, cx)))
+                .child(agent_glyph(agent, px(14.), agent_color(agent, &theme), working, format!("tab-glyph-{ix}")))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .font_weight(if active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .text_color(if active { theme.foreground } else { theme.muted_foreground })
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .id(("tab-close", ix))
+                        .size(px(18.))
+                        .flex_shrink_0()
+                        .rounded(px(4.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(close_bg))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.close_tab(&close_key, window, cx);
+                        }))
+                        .child(Icon::new(IconName::Close).xsmall().text_color(theme.muted_foreground)),
+                );
+            row = row.child(tab.with_animation(ElementId::Name(format!("tab-w-{key}-{}", width.serial).into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                let d = d.w(px(from + (to - from) * t));
+                if from == 0. { d.opacity(t) } else { d }
+            }));
         }
         row.into_any_element()
     }
 
-    /// The left end holds the sidebar button (and the traffic lights) when
-    /// the sidebar is hidden; `right` is the page's actions. Both ends
-    /// are at least 120px so the centre stays centred when they are short.
+    /// The left end is room for the window's buttons (`render_strip`, and
+    /// the traffic lights) when the sidebar is not beside the content;
+    /// `right` is the page's actions. Both ends are at least 120px so the
+    /// centre stays centred when they are short.
     fn render_topbar_with(&self, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
-        let mac = cfg!(target_os = "macos");
-        let mut left_end = h_flex().min_w(px(120.)).flex_shrink_0().items_center().gap(px(4.));
+        let mut left_end = h_flex().min_w(px(120.)).flex_shrink_0();
         if !self.sidebar_open || self.narrow {
-            left_end = left_end
-                .when(mac, |d| d.pl(TRAFFIC_W - px(12.)))
-                .child(icon_button("sidebar-open", IconName::PanelLeftOpen, "Show sidebar (⌘⇧S)", cx, |this, _, cx| {
-                    this.show_sidebar();
-                    cx.notify();
-                }));
+            left_end = left_end.w(Self::strip_right() - px(4.));
         }
-        h_flex()
+        Self::drag_region(h_flex(), cx)
             .h(TITLEBAR_H)
             .flex_shrink_0()
             .px(px(12.))
@@ -5430,8 +5792,12 @@ impl Workbench {
                 .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child("Pick a session, or press ⌘K to search everything."))
                 .into_any_element();
         };
+        // A tab shown for the first time, for as long as its read takes:
+        // the tabs stay where they are and the pane is empty, with no
+        // word to flash by.
         let Some(detail) = &self.detail else {
-            return v_flex().flex_1().h_full().child(self.render_topbar(r.title.clone(), Vec::new(), cx)).child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child("loading…")).into_any_element();
+            let tabs = self.render_tabs(cx);
+            return v_flex().flex_1().h_full().child(self.render_topbar_with(tabs, Vec::new(), cx)).into_any_element();
         };
         let session = detail.session.clone();
         let list = detail.list.clone();
@@ -5520,16 +5886,31 @@ impl Workbench {
             let from = if !st.turn_started.is_empty() { &st.turn_started } else if !st.since.is_empty() { &st.since } else { &r.updated };
             let card = self.card_for(&r);
             let what = if card.text.is_empty() { "working".to_string() } else { card.text.clone() };
-            // The terminal's own line when it could be read, in its own
-            // colours: the word in the colour of its mark, the figures
-            // as written (its grey is the muted ink here). Its bracket
-            // carries the turn's time, so ours is left out.
+            // The terminal's own line when it could be read, in the
+            // terminal's colours as the window's appearance has them:
+            // the screen is in whichever theme Claude Code is set to, so
+            // each colour is looked up in its two themes
+            // (`driver::theme_pair`) and the window takes its own side.
+            // The word is in the colour of the terminal's mark, which is
+            // one colour while the agent writes and another while it
+            // thinks. Read as written, a dark theme's bright yellow sat
+            // on a light window. Grey is the muted ink, and a colour in
+            // neither theme is only kept readable. The bracket carries
+            // the turn's time, so ours is left out.
             let seen = self.working_seen.as_ref().filter(|(sid, _, _)| *sid == r.session_id).map(|(_, w, _)| w.clone());
             let ink = |c: Option<u32>| match c {
                 Some(v) if (v >> 16) & 0xff == (v >> 8) & 0xff && (v >> 8) & 0xff == v & 0xff => theme.muted_foreground,
-                Some(v) => rgb(v).into(),
+                Some(v) => match driver::theme_pair(v) {
+                    Some(pair) => shade(pair, &theme),
+                    None => {
+                        let mut c: Hsla = rgb(v).into();
+                        c.l = if theme.mode.is_dark() { c.l.max(0.6) } else { c.l.min(0.36) };
+                        c
+                    }
+                },
                 None => theme.muted_foreground,
             };
+            let word = |c: Option<u32>| c.map(|v| ink(Some(v))).unwrap_or_else(|| agent_color(r.agent, &theme));
             h_flex()
                 .w_full()
                 .max_w(CONTENT_W)
@@ -5541,7 +5922,7 @@ impl Workbench {
                 .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), true, "status-glyph"))
                 .map(|d| match seen {
                     Some(w) => d
-                        .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(w.color.map(|c| rgb(c).into()).unwrap_or_else(|| agent_color(r.agent, &theme))).child(w.verb))
+                        .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(word(w.color)).child(w.verb))
                         .child(h_flex().flex_1().min_w_0().overflow_hidden().gap(px(4.)).children(w.detail.into_iter().map(|(t, c)| div().flex_shrink_0().text_color(ink(c)).child(t)))),
                     None => d
                         .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} is working…", r.agent.speaker())))
@@ -7778,6 +8159,7 @@ impl Render for Workbench {
         }
         let sidebar_open = self.sidebar_open && !self.narrow;
         let sidebar_peek = self.narrow && self.sidebar_peek;
+        self.sync_tab_widths(cx);
         self.pane_w = window.viewport_size().width - if sidebar_open { SIDEBAR_W } else { px(0.) };
         // `EMAKI_A11Y=1` prints gpui's own view of the accessibility tree on
         // every draw, for checking what assistive apps are handed.
@@ -7799,9 +8181,16 @@ impl Render for Workbench {
                 canvas(
                     |_, _, _| (),
                     move |_, _, window, _| {
+                        let scroll = this.clone();
                         window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
-                                let _ = this.update(cx, |w, cx| w.route_scroll(e, cx));
+                                let _ = scroll.update(cx, |w, cx| w.route_scroll(e, cx));
+                            }
+                        });
+                        // A floating sidebar goes when the pointer leaves it.
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = this.update(cx, |w, cx| w.float_follow(e, window, cx));
                             }
                         });
                     },
@@ -7830,15 +8219,16 @@ impl Render for Workbench {
                 _ => window.remove_window(),
             }))
             .on_action(cx.listener(|this, _: &GoSessions, _, cx| this.show_sessions(Scope::All, cx)))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                if this.narrow {
-                    this.sidebar_peek = !this.sidebar_peek;
-                } else {
-                    this.sidebar_open = !this.sidebar_open;
-                    this.save_ui(true);
-                }
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(false, cx)))
+            .on_action(cx.listener(|this, _: &Tab1, window, cx| this.go_tab(1, window, cx)))
+            .on_action(cx.listener(|this, _: &Tab2, window, cx| this.go_tab(2, window, cx)))
+            .on_action(cx.listener(|this, _: &Tab3, window, cx| this.go_tab(3, window, cx)))
+            .on_action(cx.listener(|this, _: &Tab4, window, cx| this.go_tab(4, window, cx)))
+            .on_action(cx.listener(|this, _: &Tab5, window, cx| this.go_tab(5, window, cx)))
+            .on_action(cx.listener(|this, _: &Tab6, window, cx| this.go_tab(6, window, cx)))
+            .on_action(cx.listener(|this, _: &Tab7, window, cx| this.go_tab(7, window, cx)))
+            .on_action(cx.listener(|this, _: &Tab8, window, cx| this.go_tab(8, window, cx)))
+            .on_action(cx.listener(|this, _: &Tab9, window, cx| this.go_tab(9, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.settings_open = !this.settings_open;
                 if this.settings_open {
@@ -7871,6 +8261,8 @@ impl Render for Workbench {
                 }),
             )
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
+            .children(self.render_sidebar_float(cx))
+            .child(self.render_strip(cx))
             .when(search_open, |d| d.child(self.render_search(cx)))
             .when(self.settings_open, |d| d.child(self.render_settings(cx)))
             .when_some(self.lightbox.clone(), |d, lb| d.child(self.render_lightbox(lb, cx)))

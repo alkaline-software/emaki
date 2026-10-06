@@ -175,6 +175,76 @@ pub fn effort_color(key: &str) -> Option<[u32; 2]> {
     })
 }
 
+/// Claude Code's light theme and its dark one, side by side: every named
+/// colour the two give different or equal shades of, light then dark,
+/// read out of the 2.1.290 binary (the `light` and `dark` tables; the
+/// daltonized and ANSI themes are left out).
+const THEME_PAIRS: &[[u32; 2]] = &[
+    [0xD77757, 0xD77757], // claude
+    [0xF59575, 0xEB9F7F], // claudeShimmer
+    [0x5769F7, 0x93A5FF], // claudeBlue_FOR_SYSTEM_SPINNER
+    [0x7587FF, 0xB1C3FF], // claudeBlueShimmer_FOR_SYSTEM_SPINNER
+    [0x5769F7, 0xB1B9F9], // permission
+    [0x899BFF, 0xCFD7FF], // permissionShimmer
+    [0x006666, 0x48968C], // planMode
+    [0x4782C8, 0x4782C8], // ide
+    [0x8A8A8A, 0x888888], // promptBorder
+    [0xB7B7B7, 0xA6A6A6], // promptBorderShimmer
+    [0x666666, 0x999999], // inactive
+    [0x8E8E8E, 0xC1C1C1], // inactiveShimmer
+    [0xAFAFAF, 0x505050], // subtle
+    [0x0000FF, 0xB1B9F9], // remember
+    [0x009999, 0x00CCCC], // background
+    [0x2C7A39, 0x4EBA65], // success
+    [0xAB2B3F, 0xFF6B80], // error
+    [0x966C1E, 0xFFC107], // warning
+    [0x8700FF, 0xAF87FF], // merged
+    [0xC89E50, 0xFFDF39], // warningShimmer
+    [0x69DB7C, 0x225C2B], // diffAdded
+    [0xFFA8B4, 0x7A2936], // diffRemoved
+    [0xC7E1CB, 0x47584A], // diffAddedDimmed
+    [0xFDD2D8, 0x69484D], // diffRemovedDimmed
+    [0x2F9D44, 0x38A660], // diffAddedWord
+    [0xD1454B, 0xB3596B], // diffRemovedWord
+    [0xDC2626, 0xDC2626], // red_FOR_SUBAGENTS_ONLY
+    [0x6A9BCC, 0x6A9BCC], // blue_FOR_SUBAGENTS_ONLY
+    [0x16A34A, 0x16A34A], // green_FOR_SUBAGENTS_ONLY
+    [0xCA8A04, 0xCA8A04], // yellow_FOR_SUBAGENTS_ONLY
+    [0x827DBD, 0x827DBD], // purple_FOR_SUBAGENTS_ONLY
+    [0xD97757, 0xD97757], // orange_FOR_SUBAGENTS_ONLY
+    [0xC46686, 0xC46686], // pink_FOR_SUBAGENTS_ONLY
+    [0x0891B2, 0x0891B2], // cyan_FOR_SUBAGENTS_ONLY
+    [0xFBBC04, 0xFBBC04], // chromeYellow
+    [0x272F6F, 0x505370], // rate_limit_empty
+    [0xFF6A00, 0xFF7814], // fastMode
+    [0xFF9632, 0xFFA546], // fastModeShimmer
+    [0x2563EB, 0x7AB4E8], // briefLabelYou
+    [0xEB5F57, 0xEB5F57], // rainbow_red
+    [0xF58B57, 0xF58B57], // rainbow_orange
+    [0xFAC35F, 0xFAC35F], // rainbow_yellow
+    [0x91C882, 0x91C882], // rainbow_green
+    [0x82AADC, 0x82AADC], // rainbow_blue
+    [0x9B82C8, 0x9B82C8], // rainbow_indigo
+    [0xC882B4, 0xC882B4], // rainbow_violet
+    [0xFA9B93, 0xFA9B93], // rainbow_red_shimmer
+    [0xFFB989, 0xFFB989], // rainbow_orange_shimmer
+    [0xFFE19B, 0xFFE19B], // rainbow_yellow_shimmer
+    [0xB9E6B4, 0xB9E6B4], // rainbow_green_shimmer
+    [0xB4CDF0, 0xB4CDF0], // rainbow_blue_shimmer
+    [0xC3B4E6, 0xC3B4E6], // rainbow_indigo_shimmer
+    [0xE6B4D2, 0xE6B4D2], // rainbow_violet_shimmer
+];
+
+/// A colour read off a terminal's screen, as Claude Code's two themes
+/// have it: light, then dark. The screen is in whichever theme that
+/// Claude Code is set to, which need not be the window's appearance, so
+/// a colour found on either side of a pair is answered with the pair and
+/// the window takes its own side. Where a shade is on more than one
+/// pair, the first listed wins.
+pub fn theme_pair(color: u32) -> Option<[u32; 2]> {
+    THEME_PAIRS.iter().find(|p| p[1] == color).or_else(|| THEME_PAIRS.iter().find(|p| p[0] == color)).copied()
+}
+
 /// The rainbow Claude Code draws "max" in, as its theme lists it.
 pub fn effort_spectrum(key: &str) -> Vec<u32> {
     if key == "max" { vec![0xEB5F57, 0xF58B57, 0xFAC35F, 0x91C882, 0x82AADC, 0x9B82C8, 0xC882B4] } else { Vec::new() }

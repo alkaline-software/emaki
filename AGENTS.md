@@ -119,6 +119,7 @@ EMAKI_GO="step:mode;button:terminal" EMAKI_OPEN=<id> ./target/debug/Emaki  # sev
 EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value without the picker: effort:, model:
 EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to another session, or to the new-session page
 EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar
+EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it; page:board is the board
 EMAKI_GO=menu EMAKI_OPEN=<id> ./target/debug/Emaki  # the session's right-click menu; renaming shows the rename field, name:<words> names it
 EMAKI_GO=dialog:2 EMAKI_OPEN=<id> ./target/debug/Emaki  # press that in the terminal's dialog (a digit, or tab); answer:<words> types an answer, goto:<n> goes to that tab
 EMAKI_KEYS=down,down,tab EMAKI_TYPE=/mod ./target/debug/Emaki  # press the slash list's keys (up, down, tab, esc)
@@ -175,6 +176,56 @@ window goes. A second
 copy for a probe (`EMAKI_HOME`) is still the way to look at a change
 before the relaunch, and never `pkill` by hand from inside the app.
 
+**Two buttons sit beside the traffic lights, as in the Claude app.**
+The sidebar and search (`Workbench::render_strip`), drawn
+once over the window's top left corner and not inside the sidebar or the
+top strip, so the sidebar button is in one place whether the sidebar is
+there or not; the sidebar's own header is only room for them, and the
+top strip leaves room when the sidebar is away (`strip_right`). The
+traffic lights are set at (17, 18), the red one as far from the left
+edge as from the top (17px each, measured on a window capture; 12 at
+first, which the person saw sat left of the Claude app's), and the
+strip is set a pixel down so the buttons' centres are on the lights'
+(49.5px of a 2x capture for both, measured; the buttons sat 1px high),
+starting 17px after the green light (11 at first, which read as
+crowded). Search took the place of the sidebar's Search entry on
+2026-10-06 and is there whether the sidebar is or not, so neither
+button ever moves. There were back and forward arrows after it for an
+hour, through a history of where the window had been (a list of stops
+kept up to date at every draw); the person took them out, since the
+tabs already are the way between sessions. With the sidebar folded away, the
+pointer on its button floats it in over the content (`set_float`,
+`render_sidebar_float`: no scrim, a shadow at its edge, sliding in and
+out over `FLOAT_ANIM`), and it goes when the pointer leaves it
+(`float_follow`, a mouse-move listener beside the scroll one, which asks
+where the pointer is and not what is hovered); a click on the button
+while it floats keeps it. The click that folds the sidebar away leaves
+the pointer on the button, which is not a hover: `float_block` holds
+until the pointer has left the button once. Checked with `EMAKI_SHOT`:
+the float with a
+`mouseMoved` `CGEvent` posted to the pid onto the button, and its going
+with one posted off the sidebar. A real click on the button, and so the
+hover it must not count, was not driven from a script.
+
+**Every icon is Phosphor's, regular weight.** The toolkit ships
+Lucide's and asks for each by a file name (`IconName::Close` is
+`icons/close.svg`), and `assets.rs` answers for a path before the
+toolkit's own set does. So `crates/emaki-app/assets/icons/` holds a
+Phosphor icon under each of those names (`close.svg` is Phosphor's `x`,
+`inbox.svg` its `tray`, `search.svg` its `magnifying-glass`,
+`settings.svg` its `gear`, `square-terminal.svg` its `terminal-window`,
+`box.svg` its `cube`, `shield.svg` its `shield-check`), 97 of them, and
+the icons the toolkit draws by itself (a close button, a caret) change
+with the app's. No call site names Phosphor. The files are from
+`phosphor-icons/core` (`assets/regular/<name>.svg`; `star-fill` from
+`fill`), MIT, with `PHOSPHOR-LICENSE` beside them; a new icon is a file
+there and a line in `OWN`. Not Phosphor: `claude.svg`, Claude's own
+mark, and eleven toolkit icons Phosphor has no match for (the window
+controls, the right and bottom panels, `inspector`, `resize-corner`,
+`star-off`), none of which the window draws. Phosphor's regular line is
+a little thinner than Lucide's at 16px. Changed on 2026-10-06 at the
+person's asking; checked with `EMAKI_SHOT` on a session and on Settings.
+
 **The board is the home of what needs you.** Four columns (needs you,
 planning, working, your turn), a card per live session (project, branch,
 title, a status chip with a clock, "since", the one or two actions that make
@@ -210,7 +261,7 @@ set in the accent (`theme.primary`), so it follows the colour chosen
 in Settings (a fixed gold was tried on 2026-10-05, and the person
 preferred the accent),
 an accent "New session" entry,
-Board, Sessions and Search, then Agents (one row per agent with its count
+Board and Sessions, then Agents (one row per agent with its count
 and a live dot, plus Kept only), then Folders: every project as a row,
 newest first, with its session count, which a click opens onto its
 sessions and closes again, the ten newest (`SIDE_FOLDERS`) and then "N more",
@@ -727,9 +778,21 @@ turn runs, Claude Code draws a line over its prompt: a mark that turns, a
 word that changes ("Embellishing…", or the task in hand), and the turn's
 figures in a bracket ("(13s · ↓ 1.0k tokens)", "(3s · thinking with
 medium effort)"). The row shows that line as written and in its colours:
-the word in the colour of the terminal's mark (215, 119, 87 on 2.1.289;
-the word itself shimmers a shade lighter and back, so the mark's is the
-steady one), the bracket in the muted ink where the terminal has grey.
+the word in the colour of the terminal's mark, the bracket in the muted
+ink where the terminal has grey, and every colour as the window's
+appearance has it. The screen is in whichever theme that Claude Code is
+set to, which need not be the window's: `driver::theme_pair` holds
+Claude Code's light and dark themes side by side (`THEME_PAIRS`, 53
+named colours read out of the 2.1.290 binary), a colour found on either
+side is answered with the pair, and the window takes its own side
+(`workbench::shade`). So the mark's yellow while the agent thinks
+(`warning`: 255, 193, 7 in the dark theme) is the light theme's dark
+gold (150, 108, 30) in a light window, and the terracotta it has while
+writing (215, 119, 87) is the same in both. A colour in neither theme
+is only kept readable, and plain text takes the agent's colour. Until
+2026-10-06 the colours were drawn as read: a dark theme's bright yellow
+on cream, which the person called wrong, asking for the terminal's real
+colours in the theme the window is in.
 `Workbench::read_working` reads the screen of the session showing once a
 second and whenever its status line runs, one read at a time off the main
 thread (`sys::terminal_styled`: WezTerm and Kaku write the colour
@@ -1732,9 +1795,59 @@ the bounds are reused only when their centre is still on a screen.
 The page is saved but not restored: the window opens on the new-session
 page, as the Claude app opens on a new chat, and the tabs come back in the
 sidebar; `EMAKI_PAGE` and `EMAKI_OPEN` pick something else. Tabs are keys
-in `Workbench::tabs`; there is one `Detail` at a time and switching tabs
-reloads from disk, which the numbers below say costs nothing a person can
-see. ⌘W is one global `CloseTab` binding that closes the showing tab, then
+in `Workbench::tabs`, and going from one to another is a browser's
+switch: the `Detail` left is put away whole (`stashed`: the session,
+the list with where it was scrolled, what was unfolded) and the one
+arrived at is taken out and drawn in the same frame, then read again
+from disk and brought up to date in place. Only a tab never shown since
+launch waits for its read, and the pane is empty meanwhile under tabs
+that stay put. Until 2026-10-06 there was one `Detail` and every switch
+dropped it and read the file again; the read is fast, but the pane drew
+"loading…" under a top strip with a title where the tabs were, so the
+whole pane and its tabs blinked at each click. A closed tab's `Detail`
+is let go. Checked with a line printed for every frame drawn with no
+`Detail`, in a second copy switching between two sessions four times:
+one such frame per session, at its first open, and none after.
+
+**The tabs share the row, and a change in their number is a move.**
+Every tab has the same width (`sync_tab_widths`, at every draw):
+`TAB_MAX` (200) while the row has room, the row divided among them once
+it has not, down to `TAB_MIN`. A new tab grows in from nothing while the
+others give way, and a closed one's room is taken up the same way, over
+`TAB_ANIM` (`tab_widths`: from, to, when, a number that is the
+animation's id); a change in the row's own width (the window resized,
+the sidebar folded) is followed at once. The row's width is measured as
+it is painted (`tabs_row_w`, a `canvas` laid over it) and used at the
+next draw. Before, each tab was as wide as its title up to 220 and the
+flex row did the shrinking: a new tab was drawn at full width for a
+frame and the row then snapped narrower, which the person saw as a
+blink. A tab is dragged along the row to another place (`on_drag` with
+a `DragTab`, the row's `on_drag_move` to `drag_tab_to`, which takes the
+place under the pointer as the pointer moves; the order is kept in
+`ui.json`): its title follows the pointer on a plate (`TabGhost`) and
+its own tab is dimmed meanwhile. The others change places at once, with
+no slide. ⌘1 to ⌘9 (Ctrl elsewhere) go to that tab, or to the last one
+when there are fewer, as Safari does (`go_tab`). A right click on a tab
+is the session's menu from the sidebar, Rename and Reveal. Checked with
+`EMAKI_SHOT`: eight tabs sharing the row, and a third tab caught
+part-grown and part-faded a moment after `EMAKI_GO="open:<id>;open:<id3>"`
+opened it. Not driven from a script: the drag, the keys, the right
+click (a synthetic press does not reach a handler in a background
+window).
+
+**Empty space along the top moves the window, and the app says which.**
+The window is opened with `app_owns_titlebar_drag`, and
+`Workbench::drag_region` wraps the top strip and the sidebar's header:
+a press there becomes `start_window_move` once the pointer moves with
+the button down, and a double click is `titlebar_double_click`. Left to
+AppKit, the whole strip under the transparent title bar moved the
+window, tabs included, so a tab could not be dragged. A tab and the two
+buttons beside the lights take their press first (`press_taken`: in
+gpui's bubble phase a child's listener runs before its parent's), so a
+press on them never moves the window. Read from gpui's source, as Zed's
+own title bar does it; not pressed from a script.
+
+⌘W is one global `CloseTab` binding that closes the showing tab, then
 the last tab (which lands on the new-session page with the caret in its
 composer), then the window: a context-bound binding would lose to a
 global one whenever the focus sits in the composer. The app stays running
