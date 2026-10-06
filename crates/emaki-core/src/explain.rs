@@ -258,6 +258,52 @@ pub fn prune_transcripts(max_age: Duration) -> usize {
     removed
 }
 
+/// Run one small-model child with that command line and answer what it
+/// printed, or nothing when it failed or took longer than `timeout`. The
+/// child is isolated as every explainer child is: our scratch folder, no
+/// `CLAUDE*` variable of a parent session, `EMAKI_DISABLE` set, and
+/// whatever `env` adds.
+pub fn run_child(argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
+    let claude = driver::claude_binary()?;
+    let mut cmd = Command::new(claude);
+    cmd.args(argv).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.env_clear();
+    cmd.envs(driver::child_env());
+    cmd.env("EMAKI_DISABLE", "1");
+    cmd.envs(env.iter().copied());
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Read on a thread so the timeout can kill a child that never answers.
+    let reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let out = reader.join().unwrap_or_default();
+    match status {
+        Some(s) if s.success() => Some(String::from_utf8_lossy(&out).to_string()),
+        _ => None,
+    }
+}
+
+/// Whether what a child printed is Claude Code refusing to run, not an answer.
+pub fn is_refusal(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    ERROR_HINTS.iter().any(|h| lowered.contains(h))
+}
+
 /// Locate a tool call anywhere in a session, subagents included.
 pub fn find_call<'a>(rounds: &'a [Round], call_id: &str) -> Option<&'a crate::model::ToolCall> {
     for rnd in rounds {
@@ -396,39 +442,9 @@ impl Explainer {
     }
 
     fn ask_model(&self, tool_name: &str, input: &Map<String, Value>) -> String {
-        let Some(claude) = driver::claude_binary() else { return String::new() };
         let cfg = self.cfg();
         let argv = build_argv(&cfg, tool_name, input);
-        let mut cmd = Command::new(claude);
-        cmd.args(&argv).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        cmd.env_clear();
-        cmd.envs(driver::child_env());
-        cmd.env("EMAKI_DISABLE", "1");
-        let Ok(mut child) = cmd.spawn() else { return String::new() };
-        let Some(mut stdout) = child.stdout.take() else { return String::new() };
-        // Read on a thread so the timeout can kill a child that never answers.
-        let reader = thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
-            buf
-        });
-        let deadline = Instant::now() + Duration::from_secs(cfg.timeout_s.max(1));
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(s)) => break Some(s),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
-        let out = reader.join().unwrap_or_default();
-        match status {
-            Some(s) if s.success() => clean(&String::from_utf8_lossy(&out)),
-            _ => String::new(),
-        }
+        run_child(&argv, &[], Duration::from_secs(cfg.timeout_s.max(1))).map(|out| clean(&out)).unwrap_or_default()
     }
 
     /// Fill in every tool call in a session that has a cached explanation.

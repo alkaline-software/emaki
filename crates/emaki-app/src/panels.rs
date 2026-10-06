@@ -40,6 +40,12 @@ const PANEL_FOLD_AT: Pixels = px(130.);
 /// The outline's width at a double click: its lines are sentences, cut
 /// at any width, so this is a width they read well at.
 const OUTLINE_FIT: Pixels = px(300.);
+/// How far past the outline's view, above and below, labels are asked
+/// for, and how long its scroller rests before they are.
+const LABEL_AHEAD: Pixels = px(320.);
+const LABEL_REST: Duration = Duration::from_millis(300);
+/// The room over the pinned day's words.
+const PIN_LEAD: Pixels = px(10.);
 /// The least the conversation keeps beside a dragged panel.
 const CONVERSATION_MIN: Pixels = px(360.);
 /// How wide the strip at the panel's edge that takes the drag is.
@@ -77,10 +83,6 @@ const GLIDE_RUN_TICKS: u32 = 14;
 const GLIDE_CAP: f32 = 700.;
 const GLIDE_FROM: f32 = 260.;
 const GLIDE_EASE: f32 = 0.07;
-/// The trackpad travel that moves the outline's mark one entry, and the
-/// least time between two moves of it.
-const WHEEL_STEP: f32 = 34.;
-const WHEEL_PACE: Duration = Duration::from_millis(70);
 
 /// A move of the conversation's list toward a round, a tick at a time.
 /// The list knows where a round is only once it has been laid out, so
@@ -1640,13 +1642,14 @@ impl Workbench {
 
     // -- the outline ----------------------------------------------------------
 
-    /// An entry was chosen, by a click or by the wheel: it is the one
+    /// An entry was chosen, by a click: it is the one
     /// marked, and the conversation moves to its round, which ends at
     /// the top of the view. The move is drawn (`glide`), a step each
     /// tick until it is there; choosing another entry meanwhile takes
     /// the move over, and a wheel in the conversation ends it.
     pub(crate) fn outline_go(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.outline_pick = Some(ix);
+        self.outline_pick_end = None;
         self.outline_glide += 1;
         let turn = self.outline_glide;
         cx.notify();
@@ -1672,7 +1675,13 @@ impl Workbench {
                         let done = glide.step(&list, ix, (now - last).as_secs_f32()) || began.elapsed() > GLIDE_MOST;
                         last = now;
                         if done {
-                            if !list.is_following_tail() {
+                            // Ended on the list's end, the round is as near
+                            // the top as it gets, and the list says its top
+                            // is past the last round: the entry is kept on
+                            // that word, and the list is left to follow.
+                            if list.logical_scroll_top().item_ix >= list.item_count() {
+                                this.outline_pick_end = Some(list.item_count());
+                            } else if !list.is_following_tail() {
                                 list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
                             }
                             this.outline_gliding = false;
@@ -1689,33 +1698,41 @@ impl Workbench {
         .detach();
     }
 
-    /// The wheel over the outline moves the mark, an entry at a time,
-    /// and the conversation follows it: a notch of a mouse wheel is one
-    /// entry, a trackpad one for every `WHEEL_STEP` of travel, and never
-    /// faster than one each `WHEEL_PACE`, so a flick's momentum walks
-    /// the entries and does not fly through them.
-    pub(crate) fn outline_wheel(&mut self, e: &ScrollWheelEvent, fresh: bool, cx: &mut Context<Self>) {
-        let Some(n) = self.detail.as_ref().map(|d| d.session.rounds.len()).filter(|n| *n > 0) else { return };
-        if fresh || e.touch_phase == TouchPhase::Started {
-            self.outline_wheel_acc = 0.;
+    /// Ask a small model for a label on each of those entries, off the
+    /// main thread. What comes back is
+    /// kept for good; what does not is left as the message's own words
+    /// until the next launch.
+    fn ask_labels(&mut self, asked: Vec<(String, String)>, cx: &mut Context<Self>) {
+        for (key, _) in &asked {
+            self.outline_asking.insert(key.clone());
         }
-        let step = match e.delta {
-            ScrollDelta::Lines(l) => -l.y.signum() as i32 * i32::from(l.y != 0.),
-            ScrollDelta::Pixels(p) => {
-                self.outline_wheel_acc = (self.outline_wheel_acc - f32::from(p.y)).clamp(-WHEEL_STEP, WHEEL_STEP);
-                (self.outline_wheel_acc / WHEEL_STEP) as i32
+        let cfg = self.hub.explainer.cfg();
+        cx.spawn(async move |this, cx| {
+            let prompts: Vec<String> = asked.iter().map(|(_, p)| p.clone()).collect();
+            let lines = cx.background_executor().spawn(async move { outline::summarize(&cfg, &prompts) }).await;
+            let saved = this
+                .update(cx, |this, cx| {
+                    for ((key, _), line) in asked.into_iter().zip(lines) {
+                        this.outline_asking.remove(&key);
+                        match line {
+                            Some(line) => {
+                                this.outline_fresh.insert(key.clone());
+                                this.outline_labels.insert(key, line.into());
+                            }
+                            None => {
+                                this.outline_failed.insert(key);
+                            }
+                        }
+                    }
+                    cx.notify();
+                    this.outline_labels.clone()
+                })
+                .ok();
+            if let Some(mut labels) = saved {
+                cx.background_executor().spawn(async move { outline::save_labels(&mut labels) }).await;
             }
-        };
-        if step == 0 || self.outline_stepped.elapsed() < WHEEL_PACE {
-            return;
-        }
-        self.outline_wheel_acc = 0.;
-        self.outline_stepped = std::time::Instant::now();
-        let at = self.outline_pick.or(self.outline_at.as_ref().map(|(_, at)| *at)).unwrap_or(n - 1);
-        let to = (at as i64 + step as i64).clamp(0, n as i64 - 1) as usize;
-        if to != at {
-            self.outline_go(to, cx);
-        }
+        })
+        .detach();
     }
 
     pub(crate) fn render_outline_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1729,39 +1746,95 @@ impl Workbench {
         // long as the view is where the click put it.
         let top = d.list.logical_scroll_top().item_ix;
         let at_end = d.list.is_scrolled_to_end() != Some(false);
-        if !self.outline_gliding && self.outline_pick.is_some_and(|ix| !(top == ix || (at_end && top <= ix))) {
+        let count = d.list.item_count();
+        let held = top >= count && self.outline_pick_end == Some(count);
+        if !self.outline_gliding && !held && self.outline_pick.is_some_and(|ix| !(top == ix || (at_end && top <= ix))) {
             self.outline_pick = None;
+            self.outline_pick_end = None;
         }
         let current = self.outline_pick.unwrap_or(if at_end { entries.len().saturating_sub(1) } else { top }).min(entries.len().saturating_sub(1));
 
-        let rail = theme.muted_foreground.opacity(0.28);
+        let waiting = self.outline_asking.len();
+        // The entries with no label yet, and which child of the scroller
+        // each is, for asking about the ones in sight.
+        let mut unlabelled: Vec<(usize, usize, String, String)> = Vec::new();
+        // The day heads, and which child of the scroller each is.
+        // with the room over its words.
+        let mut heads: Vec<(usize, f32, String)> = Vec::new();
+
+        let dark = theme.mode.is_dark();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut current_child = 0;
         let mut day = String::new();
-        for (n, e) in entries.iter().enumerate() {
+        for e in entries.iter() {
             let this_day = day_label(&e.ts);
-            let first = this_day != day;
-            if first {
+            if this_day != day {
                 day = this_day.clone();
                 if !this_day.is_empty() {
-                    rows.push(div().flex_shrink_0().px(px(10.)).pt(px(if rows.is_empty() { 4. } else { 14. })).pb(px(4.)).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground.opacity(0.8)).child(this_day.to_uppercase()).into_any_element());
+                    let lead = if rows.is_empty() { 4. } else { 14. };
+                    heads.push((rows.len(), lead, this_day.to_uppercase()));
+                    rows.push(div().flex_shrink_0().px(px(10.)).pt(px(lead)).pb(px(4.)).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground.opacity(0.8)).child(this_day.to_uppercase()).into_any_element());
                 }
             }
-            let last = entries.get(n + 1).is_none_or(|next| day_label(&next.ts) != day);
             let is_current = e.round == current;
             if is_current {
                 current_child = rows.len();
             }
             let quiet = matches!(e.kind, Kind::Command | Kind::Compact);
-            let dot = div().size(px(7.)).flex_shrink_0().rounded_full().map(|d| match (is_current, e.kind) {
-                (true, _) => d.bg(theme.primary),
-                (_, Kind::Compact | Kind::Queued) => d.border_1().border_color(theme.muted_foreground.opacity(0.6)),
-                _ => d.bg(theme.muted_foreground.opacity(0.45)),
-            });
-            let gist = match e.kind {
-                Kind::Queued => "Queued".to_string(),
-                _ => e.gist.clone(),
+            // What the entry says: a command as it is, a short message
+            // as it is, a long one by its label, or while that is being
+            // made, two bars that breathe.
+            let label = e.wants_summary().then(|| self.outline_labels.get(&e.key).and_then(|v| v.as_str()).map(str::to_string)).flatten();
+            let pending = e.wants_summary() && label.is_none() && !self.outline_failed.contains(&e.key);
+            if pending && !self.outline_asking.contains(&e.key) {
+                unlabelled.push((rows.len(), e.round, e.key.clone(), e.prompt.clone()));
+            }
+            let fresh = label.is_some() && self.outline_fresh.contains(&e.key);
+            let words = label.unwrap_or_else(|| e.title.clone());
+            let said: AnyElement = if pending {
+                let bar = |w: f32| div().h(px(8.)).w(relative(w)).rounded_full().bg(theme.muted_foreground.opacity(0.22));
+                v_flex()
+                    .py(px(4.))
+                    .gap(px(7.))
+                    .child(bar(0.92))
+                    .child(bar(0.58))
+                    .with_animation(("outline-wait", e.round), Animation::new(Duration::from_millis(1100)).repeat().with_easing(pulsating_between(0.35, 1.0)), |d, t| d.opacity(t))
+                    .into_any_element()
+            } else {
+                let text = div()
+                    .text_size(px(12.5))
+                    .line_height(relative(1.35))
+                    .line_clamp(2)
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .when(is_current, |d| d.font_weight(FontWeight::MEDIUM))
+                    .text_color(if quiet { theme.muted_foreground } else { theme.foreground })
+                    .when(quiet, |d| d.font_family(theme.mono_font_family.clone()).text_size(px(11.5)))
+                    .child(words);
+                if fresh {
+                    text.with_animation(("outline-label", e.round), Animation::new(Duration::from_millis(320)).with_easing(ease_out_quint()), |d, t| d.opacity(t)).into_any_element()
+                } else {
+                    text.into_any_element()
+                }
             };
+            // When it was said, on a small plate in front of the words.
+            let when = clock(&e.ts);
+            let stamp = div()
+                .flex_shrink_0()
+                .mt(px(1.))
+                .h(px(16.))
+                .px(px(5.))
+                .rounded(px(5.))
+                .flex()
+                .items_center()
+                .font_family(theme.mono_font_family.clone())
+                .text_size(px(10.))
+                .map(|d| match (is_current, e.kind) {
+                    (true, _) => d.bg(theme.primary.opacity(if dark { 0.26 } else { 0.16 })).text_color(theme.link),
+                    (_, Kind::Queued) => d.border_1().border_color(theme.muted_foreground.opacity(0.4)).text_color(theme.muted_foreground),
+                    _ => d.bg(theme.muted_foreground.opacity(if dark { 0.16 } else { 0.11 })).text_color(theme.muted_foreground),
+                })
+                .child(if e.kind == Kind::Queued && when.is_empty() { "queued".to_string() } else { when });
             let round = e.round;
             rows.push(
                 h_flex()
@@ -1773,57 +1846,80 @@ impl Workbench {
                     .px(px(10.))
                     .rounded(px(8.))
                     .cursor_pointer()
-                    .when(is_current, |d| d.bg(theme.primary.opacity(if theme.mode.is_dark() { 0.16 } else { 0.10 })))
+                    .when(is_current, |d| d.bg(theme.primary.opacity(if dark { 0.16 } else { 0.10 })))
                     .when(!is_current, |d| d.hover(|s| s.bg(theme.muted.opacity(0.7))))
                     .on_click(cx.listener(move |this, _, _, cx| this.outline_go(round, cx)))
-                    // The rail: a line down the entries of one day, a dot
-                    // on it for each.
-                    .child(
-                        div()
-                            .relative()
-                            .w(px(7.))
-                            .flex_shrink_0()
-                            .pt(px(11.))
-                            .when(!first, |d| d.child(div().absolute().left(px(3.)).top_0().w(px(1.)).h(px(11.)).bg(rail)))
-                            .when(!last, |d| d.child(div().absolute().left(px(3.)).top(px(18.)).bottom_0().w(px(1.)).bg(rail)))
-                            .child(dot),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .py(px(6.))
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .line_height(relative(1.35))
-                                    .line_clamp(2)
-                                    .text_ellipsis()
-                                    .overflow_hidden()
-                                    .when(is_current, |d| d.font_weight(FontWeight::MEDIUM))
-                                    .text_color(if quiet { theme.muted_foreground } else { theme.foreground })
-                                    .when(quiet, |d| d.font_family(theme.mono_font_family.clone()).text_size(px(11.5)))
-                                    .child(e.title.clone()),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap(px(5.))
-                                    .text_size(px(11.))
-                                    .text_color(theme.muted_foreground)
-                                    .child(div().flex_shrink_0().opacity(0.8).child(clock(&e.ts)))
-                                    .when(!gist.is_empty(), |d| d.child(div().flex_1().min_w_0().truncate().child(gist))),
-                            ),
-                    )
+                    .child(h_flex().flex_1().min_w_0().py(px(7.)).gap(px(8.)).items_start().child(stamp).child(div().flex_1().min_w_0().child(said)))
                     .into_any_element(),
             );
         }
         // The entry in view is kept in sight as the conversation moves.
-        let at = Some((key, current));
-        if self.outline_at != at && !rows.is_empty() {
+        let at = Some((key.clone(), current));
+        // An outline at its foot stays there as it grows: a new entry, or
+        // a label that takes a second line, would leave the last row cut
+        // by the panel's edge, since the row is not laid out when the
+        // scroller is asked to show it. The last entry is gone to the
+        // same way, by the foot and not by its row.
+        let (off, most) = (self.outline_scroll.offset().y, self.outline_scroll.max_offset().y);
+        let at_foot = most > px(0.) && off <= px(1.) - most;
+        let moved = self.outline_at != at && !rows.is_empty();
+        if moved {
             self.outline_at = at;
+        }
+        if at_foot || (moved && current + 1 >= entries.len()) {
+            self.outline_scroll.scroll_to_bottom();
+        } else if moved {
             self.outline_scroll.scroll_to_item(current_child);
         }
+        // Labels are asked for where the person is looking and no
+        // further: the entries in the scroller's view and `LABEL_AHEAD`
+        // above and below it, once the scroller has rested `LABEL_REST`
+        // and nothing is being asked already, so a scroll through a long
+        // conversation asks about where it stops and not what it passes.
+        if !unlabelled.is_empty() {
+            let y = f32::from(self.outline_scroll.offset().y);
+            let rested = match &self.outline_rest {
+                Some((k, at, since)) if *k == key && (*at - y).abs() < 0.5 => since.elapsed() >= LABEL_REST,
+                _ => {
+                    self.outline_rest = Some((key.clone(), y, std::time::Instant::now()));
+                    false
+                }
+            };
+            if !rested {
+                // Look again once it has had the time to rest.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(LABEL_REST + Duration::from_millis(30)).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            } else if self.outline_asking.is_empty() {
+                // A child's bounds are where it was laid out, before the
+                // scroller's offset is taken: the offset is added here.
+                let (view, off) = (self.outline_scroll.bounds(), self.outline_scroll.offset().y);
+                let (top, bottom) = (view.top() - LABEL_AHEAD, view.bottom() + LABEL_AHEAD);
+                let wanted: Vec<(String, String)> = unlabelled
+                    .into_iter()
+                    .filter(|(child, round, _, _)| match self.outline_scroll.bounds_for_item(*child) {
+                        Some(b) => b.bottom() + off >= top && b.top() + off <= bottom,
+                        // Not laid out yet: the ones about the marked entry.
+                        None => round.abs_diff(current) <= 8,
+                    })
+                    .map(|(_, _, key, prompt)| (key, prompt))
+                    .collect();
+                if !wanted.is_empty() {
+                    self.ask_labels(wanted, cx);
+                }
+            }
+        }
+        // The day the entries at the top belong to stays at the top once
+        // its own head has scrolled up to there: the last head whose
+        // words have reached the place the pinned ones are drawn at
+        // (`PIN_LEAD` under the view's top), so the two are in one place
+        // at the change and nothing jumps.
+        let pinned = {
+            let (view, off) = (self.outline_scroll.bounds(), self.outline_scroll.offset().y);
+            heads.iter().rev().find(|(child, lead, _)| self.outline_scroll.bounds_for_item(*child).is_some_and(|b| b.top() + off + px(*lead) < view.top() + PIN_LEAD - px(0.5))).map(|(_, _, day)| day.clone())
+        };
         let body = if rows.is_empty() {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("Nothing said yet.").into_any_element()
         } else {
@@ -1833,9 +1929,39 @@ impl Workbench {
                 .min_h_0()
                 .child(v_flex().id("outline-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.outline_scroll).px(px(6.)).py(px(6.)).children(rows))
                 .vertical_scrollbar(&self.outline_scroll)
+                .when_some(pinned, |d, day| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .px(px(16.))
+                            .pt(PIN_LEAD)
+                            .pb(px(6.))
+                            .bg(theme.sidebar)
+                            .border_b_1()
+                            .border_color(theme.border.opacity(0.6))
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground.opacity(0.8))
+                            .child(day),
+                    )
+                })
                 .into_any_element()
         };
-        let el = v_flex().w(self.panel_w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Outline", None, Some(div().text_color(theme.muted_foreground.opacity(0.8)).child(plural(entries.len(), "prompt", "prompts")).into_any_element()), &theme)).child(body);
+        let el = v_flex().w(self.panel_w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Outline", None, Some(if waiting > 0 {
+            // The labels are on their way.
+            h_flex()
+                .gap(px(6.))
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child(crate::workbench::agent_glyph(emaki_core::model::AgentId::ClaudeCode, px(11.), theme.primary, true, "outline-summing"))
+                .child("Summarizing…")
+                .into_any_element()
+        } else {
+            div().text_color(theme.muted_foreground.opacity(0.8)).child(plural(entries.len(), "prompt", "prompts")).into_any_element()
+        }), &theme)).child(body);
         self.panel_in(false, el)
     }
 

@@ -58,7 +58,22 @@ fn main() {
         "outline" => {
             let target = args.get(1).expect("outline <session-id|path>");
             let session = emaki_core::build::build_from_path(&resolve(target, &cfg), "");
-            for e in emaki_core::outline::of(&session) {
+            let entries = emaki_core::outline::of(&session);
+            if args.get(2).map(String::as_str) == Some("--summarize") {
+                // What the window would ask a small model, and how long it takes.
+                let asked: Vec<String> = entries.iter().filter(|e| e.wants_summary()).map(|e| e.prompt.clone()).collect();
+                let began = std::time::Instant::now();
+                let lines = emaki_core::outline::summarize(&cfg.explain, &asked);
+                let took = began.elapsed();
+                let mut lines = lines.into_iter();
+                for e in &entries {
+                    let line = if e.wants_summary() { lines.next().flatten().unwrap_or_else(|| format!("(nothing came back) {}", e.title)) } else { e.title.clone() };
+                    println!("{:>4}  {}  {}", e.round + 1, if e.wants_summary() { "*" } else { " " }, line);
+                }
+                println!("{} of {} entries asked about, {:.1}s", asked.len(), entries.len(), took.as_secs_f32());
+                return;
+            }
+            for e in entries {
                 println!("{:>4}  {:?}  {}\n      {}", e.round + 1, e.kind, e.title, e.gist);
             }
         }

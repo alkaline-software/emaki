@@ -835,15 +835,27 @@ pub struct Workbench {
     /// outline follows the conversation only when that changes; and the
     /// entry just clicked.
     pub(crate) outline_at: Option<(String, usize)>,
+    /// The outline's labels, a small model's line on each long message,
+    /// by `outline::key_for`; those being asked for; those nothing came
+    /// back for, not asked again this run; and those that came in while
+    /// the outline showed, which fade in.
+    pub(crate) outline_labels: serde_json::Map<String, serde_json::Value>,
+    pub(crate) outline_asking: HashSet<String>,
+    /// Where the outline's own scroller was last seen, for which
+    /// conversation, and since when: labels are asked for once it rests.
+    pub(crate) outline_rest: Option<(String, f32, Instant)>,
+    pub(crate) outline_failed: HashSet<String>,
+    pub(crate) outline_fresh: HashSet<String>,
     pub(crate) outline_pick: Option<usize>,
+    /// The entry chosen is a round the list's end holds short of the top:
+    /// how many rounds there were when the move to it ended there.
+    pub(crate) outline_pick_end: Option<usize>,
     /// The conversation is being moved to the entry chosen (`outline_go`):
     /// whether, and the move's number, so a newer one takes it over. And
     /// the wheel over the outline: its travel not yet spent on a step, and
     /// when the mark last moved by it.
     pub(crate) outline_gliding: bool,
     pub(crate) outline_glide: u32,
-    pub(crate) outline_wheel_acc: f32,
-    pub(crate) outline_stepped: Instant,
     /// A file shown over the window, and where it is scrolled.
     pub(crate) file_view: Option<crate::panels::FileView>,
     pub(crate) file_view_scroll: ScrollHandle,
@@ -1909,11 +1921,15 @@ impl Workbench {
             files_scroll: ScrollHandle::new(),
             outline_scroll: ScrollHandle::new(),
             outline_at: None,
+            outline_labels: emaki_core::outline::load_labels(),
+            outline_asking: HashSet::new(),
+            outline_rest: None,
+            outline_failed: HashSet::new(),
+            outline_fresh: HashSet::new(),
             outline_pick: None,
+            outline_pick_end: None,
             outline_gliding: false,
             outline_glide: 0,
-            outline_wheel_acc: 0.,
-            outline_stepped: Instant::now(),
             file_view: None,
             file_view_scroll: ScrollHandle::new(),
             file_prompt: None,
@@ -4528,17 +4544,13 @@ impl Workbench {
             _ => {}
         }
         let Some(owner) = self.scroll_owner else { return };
-        // A wheel that began over the outline moves its mark, wherever
-        // the pointer is by now; one in the conversation ends a move the
-        // outline began.
-        if owner == Pane::Outline && outline {
-            self.outline_wheel(e, fresh, cx);
-            cx.stop_propagation();
-            return;
-        }
-        if owner == Pane::Content && self.outline_gliding {
-            self.outline_glide += 1;
-            self.outline_gliding = false;
+        // A wheel in the conversation ends a move the outline began.
+        if owner == Pane::Content {
+            self.outline_pick_end = None;
+            if self.outline_gliding {
+                self.outline_glide += 1;
+                self.outline_gliding = false;
+            }
         }
         if owner == here || !(inline_sidebar || files || outline) {
             return;

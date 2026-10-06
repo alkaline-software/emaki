@@ -1580,9 +1580,27 @@ fn outline_says_what_was_asked_and_what_came_of_it() {
     let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
     let o = emaki_core::outline::of(&s);
     assert_eq!(o.len(), 2);
-    assert_eq!((o[0].round, o[0].title.as_str(), o[0].gist.as_str(), o[0].tools), (0, "fix the tabs please", "Done", 1));
+    assert_eq!((o[0].round, o[0].title.as_str(), o[0].gist.as_str(), o[0].tools), (0, "fix the tabs please they blink", "Done", 1));
     assert_eq!((o[1].title.as_str(), o[1].gist.as_str()), ("and the sidebar?", "1 tool call"));
     assert_eq!(emaki_core::outline::first_line("```\ncode\n```\n---\n- see [the note](https://x.y) now"), "see the note now");
+    // A short message is its own line and is not put to a model; a long
+    // one is, under a name made from its words; a command never is.
+    assert!(!o[0].wants_summary() && o[0].key.is_empty());
+    let long = "please look at the sidebar again, the two cards scroll together and I would like each to scroll by itself\nAttached file: /x/a.png";
+    let rows = vec![user(long, "2026-10-06T03:00:00.000Z"), user("/compact", "2026-10-06T03:01:00.000Z")];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s2.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let o = emaki_core::outline::of(&s);
+    assert!(o[0].wants_summary() && !o[0].prompt.contains("Attached file") && o[0].key == emaki_core::outline::key_for(&o[0].prompt));
+    assert!(!o[1].wants_summary());
+    // The child's reply: a line a message behind its number. A line that
+    // answers a message instead of labelling it is not a label.
+    let said = "1: Fix the sidebar's scrolling\n2. \"Rename the tabs.\"\n3: **If you have code to review**, I can help with that\n9: out of range\nno number";
+    let got = emaki_core::outline::parse_summaries(said, 3);
+    assert_eq!(got, vec![Some("Fix the sidebar's scrolling".to_string()), Some("Rename the tabs".to_string()), None]);
+    assert_eq!(emaki_core::outline::parse_summaries("Please run /login", 2), vec![None, None]);
+    let argv = emaki_core::outline::summary_argv("", &["one", "two"]);
+    assert!(argv.contains(&"claude-haiku-4-5".to_string()) && argv.contains(&"--strict-mcp-config".to_string()));
+    assert!(argv.last().unwrap().contains("<message n=\"2\">two</message>"));
 }
 
 #[test]
