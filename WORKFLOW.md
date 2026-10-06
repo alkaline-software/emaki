@@ -93,15 +93,16 @@ minute.
 ### 4. Push, wait for the tests, then tag
 
 Work happens on a branch; `main` is fast-forwarded to it at release.
-Push the branch first and let `rust.yml` finish on it: that is the only
-place the tests run on Windows and Linux (the check in step 3 type-checks
-Windows and runs nothing there). Tag only once it is green on all three:
+`rust.yml` runs on a push to `main`, and it is the only place the tests
+run on Windows and Linux (the check in step 3 type-checks Windows and
+runs nothing there). So push, let that run finish, and tag only once it
+is green on all three:
 
 ```
 git push origin HEAD                 # the branch
+git push origin HEAD:main            # fast-forward main; starts rust.yml
 gh run list --repo alkaline-software/emaki --workflow rust --limit 1
 gh run watch <run-id> --repo alkaline-software/emaki --exit-status
-git push origin HEAD:main            # fast-forward main
 git tag -a vX.Y.Z -m "Emaki vX.Y.Z"
 git push origin vX.Y.Z
 ```
