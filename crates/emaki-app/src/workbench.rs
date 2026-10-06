@@ -79,6 +79,8 @@ fn titles_file() -> PathBuf {
 const FOLDER_ROWS: usize = 5;
 /// How many folders the sidebar lists before "N more".
 const SIDE_FOLDERS: usize = 10;
+/// How many agents the sidebar's card shows before it scrolls.
+const SIDE_AGENTS: usize = 4;
 /// How long a folder takes to unfold or fold away.
 const FOLDER_ANIM: Duration = Duration::from_millis(200);
 /// The sidebar floating in over the content, or back out.
@@ -170,7 +172,6 @@ pub const COMPOSER_MAX_ROWS: usize = 12;
 pub enum Scope {
     All,
     Agent(AgentId),
-    Project(String),
     Kept,
 }
 
@@ -226,6 +227,9 @@ pub struct Notice {
 /// then; they belong to the pane the gesture began in. See `route_scroll`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
+    /// The sidebar's agents card, which scrolls by itself.
+    Agents,
+    /// The rest of the sidebar: the folders card is what scrolls there.
     Sidebar,
     Content,
 }
@@ -483,6 +487,9 @@ pub struct Workbench {
     pub cfg: Config,
     pub refs: Vec<SessionRef>,
     pub scope: Scope,
+    /// The folder the sessions page is inside; none is its top level,
+    /// the folders themselves.
+    sessions_folder: Option<String>,
     pub page: Page,
     pub sidebar_open: bool,
     pub selected: Option<String>,
@@ -695,6 +702,7 @@ pub struct Workbench {
     last_scroll: Instant,
     /// The scroll positions momentum may be forwarded to.
     side_scroll: ScrollHandle,
+    agents_scroll: ScrollHandle,
     sessions_scroll: ScrollHandle,
     home_scroll: ScrollHandle,
     /// The settings body's scroll position, for its scrollbar.
@@ -1375,6 +1383,7 @@ impl Workbench {
             cfg,
             refs: Vec::new(),
             scope: Scope::All,
+            sessions_folder: None,
             page,
             sidebar_open: ui.sidebar_open.unwrap_or(true),
             selected: None,
@@ -1481,6 +1490,7 @@ impl Workbench {
             scroll_owner: None,
             last_scroll: Instant::now(),
             side_scroll: ScrollHandle::new(),
+            agents_scroll: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
             home_scroll: ScrollHandle::new(),
             sidebar_peek: false,
@@ -1989,6 +1999,8 @@ impl Workbench {
             // The sidebar button, and the pointer on it.
             Some("sidebar") => self.toggle_sidebar(false, cx),
             Some("float") => self.set_float(true, cx),
+            Some("page:sessions") => self.show_sessions(Scope::All, cx),
+            Some(t) if t.starts_with("sessions:") => self.show_sessions_in(Scope::All, Some(t["sessions:".len()..].to_string()), cx),
             Some("page:board") => {
                 self.page = Page::Board;
                 cx.notify();
@@ -2074,7 +2086,17 @@ impl Workbench {
     }
 
     fn show_sessions(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        self.show_sessions_in(scope, None, cx);
+    }
+
+    /// The sessions page has two levels: the folders, and one folder's
+    /// sessions. `scope` narrows either.
+    fn show_sessions_in(&mut self, scope: Scope, folder: Option<String>, cx: &mut Context<Self>) {
+        if self.sessions_folder != folder {
+            self.sessions_scroll.set_offset(point(px(0.), px(0.)));
+        }
         self.scope = scope;
+        self.sessions_folder = folder;
         self.page = Page::Sessions;
         self.sidebar_peek = false;
         self.save_ui(true);
@@ -3871,7 +3893,13 @@ impl Workbench {
         let fresh = now.duration_since(self.last_scroll) > SCROLL_GAP;
         self.last_scroll = now;
         let inline_sidebar = (self.sidebar_open && !self.narrow) || self.sidebar_float;
-        let here = if inline_sidebar && e.position.x < SIDEBAR_W { Pane::Sidebar } else { Pane::Content };
+        let here = if !inline_sidebar || e.position.x >= SIDEBAR_W {
+            Pane::Content
+        } else if self.agents_scroll.bounds().contains(&e.position) {
+            Pane::Agents
+        } else {
+            Pane::Sidebar
+        };
         match e.touch_phase {
             TouchPhase::Started => self.scroll_owner = Some(here),
             TouchPhase::Moved if fresh || self.scroll_owner.is_none() => self.scroll_owner = Some(here),
@@ -3883,7 +3911,13 @@ impl Workbench {
         }
         let delta = e.delta.pixel_delta(px(20.));
         match owner {
-            Pane::Sidebar => self.side_scroll.set_offset(self.side_scroll.offset() + delta),
+            // A handle takes any offset it is given, so each is held to
+            // what its list has.
+            Pane::Agents | Pane::Sidebar => {
+                let handle = if owner == Pane::Agents { &self.agents_scroll } else { &self.side_scroll };
+                let at = handle.offset() + delta;
+                handle.set_offset(point(at.x, at.y.clamp(-handle.max_offset().y, px(0.))));
+            }
             Pane::Content => match self.page {
                 Page::Session => {
                     if let Some(d) = &self.detail {
@@ -4941,10 +4975,10 @@ impl Workbench {
     fn scoped_refs(&self) -> Vec<&SessionRef> {
         self.refs
             .iter()
+            .filter(|r| self.sessions_folder.as_ref().is_none_or(|p| r.project() == *p))
             .filter(|r| match &self.scope {
                 Scope::All => true,
                 Scope::Agent(a) => r.agent == *a,
-                Scope::Project(p) => r.project() == *p,
                 Scope::Kept => r.archived,
             })
             .collect()
@@ -5017,7 +5051,8 @@ impl Workbench {
         // The strip above the brand is the window's buttons (`render_strip`),
         // drawn over this, so here it is only room.
         let header = Self::drag_region(div().h(TITLEBAR_H).flex_shrink_0(), cx);
-        let top = v_flex().px(px(10.)).pt(px(2.)).gap(px(2.)).child(brand.pl(px(7.)).mb(px(6.)));
+        // The name, a hairline, then the three places to go.
+        let top = v_flex().px(px(10.)).pt(px(2.)).gap(px(2.)).child(brand.pl(px(7.)).mb(px(8.))).child(div().h(px(1.)).mx(px(4.)).mb(px(8.)).flex_shrink_0().bg(theme.sidebar_border));
 
         let new_row = h_flex()
             .id("nav-new")
@@ -5033,7 +5068,7 @@ impl Workbench {
             .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child("New session"))
             .child(kbd_hint("⌘N", &theme));
 
-        let nav = |id: &'static str, icon: IconName, label: &'static str, hint: &'static str, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
+        let nav = |id: &'static str, icon: Icon, label: &'static str, hint: &'static str, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
             let theme = cx.theme().clone();
             h_flex()
                 .id(id)
@@ -5053,11 +5088,11 @@ impl Workbench {
         let sessions_active = page == Page::Sessions;
         let top = top
             .child(new_row)
-            .child(nav("nav-board", IconName::LayoutDashboard, "Board", "⌘B", page == Page::Board, cx, Box::new(|this, _, cx| {
+            .child(nav("nav-board", Icon::new(IconName::LayoutDashboard), "Board", "⌘B", page == Page::Board, cx, Box::new(|this, _, cx| {
                 this.page = Page::Board;
                 cx.notify();
             })))
-            .child(nav("nav-sessions", IconName::Inbox, "Sessions", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))));
+            .child(nav("nav-sessions", Icon::default().path("icons/briefcase.svg"), "Projects", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))));
 
         let mut agents: Vec<(AgentId, usize)> = Vec::new();
         for a in AgentId::ALL {
@@ -5071,9 +5106,9 @@ impl Workbench {
         // short for them, and every row gave up height to fit, down to
         // its text: 30px rows drew at about 21, and at 24 with a folder
         // closed, so the list changed its spacing as a folder opened.
+        let mut agent_rows = v_flex().flex_shrink_0();
         let mut scroll = v_flex().flex_shrink_0();
-        scroll = scroll.child(self.group_label("Agents", cx));
-        scroll = scroll.children(agents.into_iter().map(|(a, n)| {
+        agent_rows = agent_rows.children(agents.into_iter().map(|(a, n)| {
             let active = sessions_active && scope == Scope::Agent(a);
             let theme = cx.theme().clone();
             let live = self.refs.iter().filter(|r| r.agent == a && self.live_color(r, cx).is_some()).count();
@@ -5095,7 +5130,7 @@ impl Workbench {
         let kept = self.refs.iter().filter(|r| r.archived).count();
         if kept > 0 {
             let active = sessions_active && scope == Scope::Kept;
-            scroll = scroll.child(
+            agent_rows = agent_rows.child(
                 h_flex()
                     .id("agent-kept")
                     .h(SIDE_ROW_H)
@@ -5127,9 +5162,6 @@ impl Workbench {
                 Some((_, list)) => list.push(r.clone()),
                 None => folders.push((p, vec![r.clone()])),
             }
-        }
-        if !folders.is_empty() {
-            scroll = scroll.child(self.group_label("Folders", cx));
         }
         let more_folders = folders.len().saturating_sub(SIDE_FOLDERS);
         for (p, list) in folders.into_iter().take(SIDE_FOLDERS) {
@@ -5220,7 +5252,7 @@ impl Workbench {
                         .text_size(px(12.))
                         .text_color(theme.muted_foreground)
                         .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.show_sessions(Scope::Project(all.clone()), cx)))
+                        .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(Scope::All, Some(all.clone()), cx)))
                         .child(format!("{more} more")),
                 );
                 body_h += f32::from(SIDE_SESSION_H);
@@ -5280,7 +5312,38 @@ impl Workbench {
                 cx.notify();
             }));
 
-        v_flex().w(SIDEBAR_W).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(10.)).pb(px(8.)).child(scroll)).child(footer)
+        // Agents and Folders each sit on a card of their own, a shade off
+        // the sidebar's ground, and each scrolls by itself under its
+        // name with the toolkit's fading scrollbar at its edge, as the
+        // conversation has. The agents' card shows `SIDE_AGENTS` rows
+        // and scrolls for the rest; the folders' takes what height is
+        // left.
+        let card = |label: &'static str| {
+            v_flex()
+                .mx(px(8.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme.sidebar_border)
+                .bg(theme.background.opacity(0.55))
+                .overflow_hidden()
+                .child(h_flex().h(px(28.)).flex_shrink_0().px(px(14.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(label))
+        };
+        let agents_card = card("Agents").flex_shrink_0().mt(px(10.)).child(
+            v_flex()
+                .relative()
+                .child(v_flex().id("side-agents").max_h(SIDE_ROW_H * SIDE_AGENTS as f32 + px(4.)).overflow_y_scroll().track_scroll(&self.agents_scroll).px(px(4.)).pb(px(4.)).child(agent_rows))
+                .vertical_scrollbar(&self.agents_scroll),
+        );
+        let folders_card = card("Projects").flex_1().min_h_0().mt(px(8.)).mb(px(8.)).child(
+            v_flex()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(4.)).pb(px(4.)).child(scroll))
+                .vertical_scrollbar(&self.side_scroll),
+        );
+
+        v_flex().w(SIDEBAR_W).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(agents_card).child(folders_card).child(footer)
     }
 
     /// Whether a folder in the sidebar shows its sessions: the person's
@@ -5513,11 +5576,6 @@ impl Workbench {
             )
     }
 
-    fn group_label(&self, text: &'static str, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        div().pt(px(18.)).pb(px(5.)).px(px(10.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(text)
-    }
-
     /// The strip along the top of the content pane: room for the traffic
     /// lights when the sidebar is hidden, a title in the middle, actions on
     /// the right.
@@ -5658,17 +5716,23 @@ impl Workbench {
 
     // -- the sessions page ----------------------------------------------------
 
+    /// Two levels, as the sidebar has: the folders, newest first, and
+    /// inside one, its sessions headed by when. The pills narrow either
+    /// level to an agent or to what is kept only, and stay as the level
+    /// changes.
     fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let refs: Vec<SessionRef> = self.scoped_refs().into_iter().cloned().collect();
         let now = self.now;
         let scope = self.scope.clone();
-        let kept = self.refs.iter().filter(|r| r.archived).count();
-        let claude = self.refs.iter().filter(|r| r.agent == AgentId::ClaudeCode).count();
-        let codex = self.refs.iter().filter(|r| r.agent == AgentId::Codex).count();
+        let folder = self.sessions_folder.clone();
+        // What the pills count: everything at the top, the folder's own
+        // inside one.
+        let base: Vec<&SessionRef> = self.refs.iter().filter(|r| folder.as_ref().is_none_or(|p| r.project() == *p)).collect();
+        let kept = base.iter().filter(|r| r.archived).count();
 
-        let filter = |id: &'static str, label: String, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Context<Self>)>| {
+        let filter = |id: SharedString, label: String, to: Scope, cx: &mut Context<Self>| {
             let theme = cx.theme().clone();
+            let active = self.scope == to;
             div()
                 .id(id)
                 .h(px(28.))
@@ -5682,100 +5746,196 @@ impl Workbench {
                 .border_color(if active { theme.foreground } else { theme.border })
                 .when(active, |d| d.bg(theme.foreground).text_color(theme.background))
                 .when(!active, |d| d.hover(|s| s.bg(theme.muted)))
-                .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
+                .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(to.clone(), this.sessions_folder.clone(), cx)))
                 .child(label)
         };
-        let mut filters = h_flex()
-            .gap(px(6.))
-            .flex_wrap()
-            .child(filter("f-all", format!("All · {}", self.refs.len()), scope == Scope::All, cx, Box::new(|this, cx| this.show_sessions(Scope::All, cx))))
-            .child(filter("f-claude", format!("Claude Code · {claude}"), scope == Scope::Agent(AgentId::ClaudeCode), cx, Box::new(|this, cx| this.show_sessions(Scope::Agent(AgentId::ClaudeCode), cx))));
-        if codex > 0 {
-            filters = filters.child(filter("f-codex", format!("Codex · {codex}"), scope == Scope::Agent(AgentId::Codex), cx, Box::new(|this, cx| this.show_sessions(Scope::Agent(AgentId::Codex), cx))));
+        let mut filters = h_flex().gap(px(6.)).flex_wrap().child(filter("f-all".into(), format!("All · {}", base.len()), Scope::All, cx));
+        for a in AgentId::ALL {
+            let n = base.iter().filter(|r| r.agent == a).count();
+            if n > 0 || scope == Scope::Agent(a) {
+                filters = filters.child(filter(format!("f-{}", a.as_str()).into(), format!("{} · {n}", a.display_name()), Scope::Agent(a), cx));
+            }
         }
-        filters = filters.child(filter("f-kept", format!("Kept only · {kept}"), scope == Scope::Kept, cx, Box::new(|this, cx| this.show_sessions(Scope::Kept, cx))));
-        if let Scope::Project(p) = &scope {
-            filters = filters.child(filter("f-project", format!("{p}  ×"), true, cx, Box::new(|this, cx| this.show_sessions(Scope::All, cx))));
+        if kept > 0 || scope == Scope::Kept {
+            filters = filters.child(filter("f-kept".into(), format!("Kept only · {kept}"), Scope::Kept, cx));
         }
 
-        // Rows headed by when, newest first. A live row carries its state
-        // as a chip at the right (the column it is on, in that colour); the
-        // snippet of its last message that used to sit there was cut to a
-        // few words and read as noise.
+        let refs: Vec<SessionRef> = self.scoped_refs().into_iter().cloned().collect();
+        let count = refs.len();
+        let head = |b: &'static str, first: bool| div().pt(if first { px(4.) } else { px(18.) }).pb(px(6.)).px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(b).into_any_element();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut last_bucket = "";
-        for r in refs {
-            let b = bucket(r.mtime);
-            if b != last_bucket {
-                rows.push(div().pt(if last_bucket.is_empty() { px(4.) } else { px(18.) }).pb(px(6.)).px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(b).into_any_element());
-                last_bucket = b;
+        let mut folders_n = 0;
+        if folder.is_none() {
+            // The top level: a row per folder, headed by when it was last
+            // worked in. A folder wears what the sidebar's does: its icon
+            // in the agent's colour while a session of its is live, and
+            // the most pressing of their states as a chip.
+            let mut folders: Vec<(String, Vec<SessionRef>)> = Vec::new();
+            for r in refs {
+                let p = r.project();
+                match folders.iter_mut().find(|(name, _)| *name == p) {
+                    Some((_, list)) => list.push(r),
+                    None => folders.push((p, vec![r])),
+                }
             }
-            let key = key_of(&r);
-            let theme = cx.theme().clone();
-            let card = self.card_for(&r);
-            let dot = self.live_color(&r, cx);
-            let working = self.is_working(&r);
-            let glyph_id = SharedString::from(format!("row-glyph-{key}"));
-            let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
-            let mut sub = vec![r.project()];
-            if !r.git_branch.is_empty() {
-                sub.push(format!("⎇ {}", r.git_branch));
+            folders_n = folders.len();
+            let home = std::env::var("HOME").unwrap_or_default();
+            for (p, list) in folders {
+                let newest = list.iter().map(|r| r.mtime).fold(0., f64::max);
+                let b = bucket(newest);
+                if b != last_bucket {
+                    rows.push(head(b, last_bucket.is_empty()));
+                    last_bucket = b;
+                }
+                let theme = cx.theme().clone();
+                let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
+                let chip = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| (*c, self.column_color(*c, cx)));
+                let tint = live.first().map(|(r, _)| agent_color(r.agent, &theme)).unwrap_or(theme.muted_foreground);
+                let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
+                let mut sub = vec![plural(list.len(), "session", "sessions")];
+                if let Some(c) = list.iter().map(|r| r.cwd.as_str()).find(|c| !c.is_empty()) {
+                    sub.push(match c.strip_prefix(home.as_str()) {
+                        Some(rest) if !home.is_empty() => format!("~{rest}"),
+                        _ => c.to_string(),
+                    });
+                }
+                sub.push(relative(newest, now));
+                let (name, to) = (p.clone(), scope.clone());
+                rows.push(
+                    h_flex()
+                        .id(SharedString::from(format!("srow-folder-{p}")))
+                        .w_full()
+                        .px(px(12.))
+                        .py(px(9.))
+                        .gap(px(12.))
+                        .items_center()
+                        .rounded(px(10.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.muted))
+                        .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(to.clone(), Some(name.clone()), cx)))
+                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))], cx)))
+                        .child(div().w(px(24.)).flex().justify_center().child(Icon::new(IconName::Folder).with_size(px(17.)).text_color(tint)))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(2.))
+                                .child(div().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(p.clone()))
+                                .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
+                        )
+                        .when_some(chip, |d, (col, c)| d.child(state_chip(col, c, &theme)))
+                        .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(theme.muted_foreground.opacity(0.7)))
+                        .into_any_element(),
+                );
             }
-            sub.push(relative(r.mtime, now));
-            rows.push(
-                h_flex()
-                    .id(SharedString::from(format!("row-{key}")))
-                    .w_full()
-                    .px(px(12.))
-                    .py(px(9.))
-                    .gap(px(12.))
-                    .items_center()
-                    .rounded(px(10.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.muted))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
-                    .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working, glyph_id)))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(2.))
-                            .child(
-                                h_flex()
-                                    .gap(px(8.))
-                                    .items_center()
-                                    .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
-                                    .when(r.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground)))
-                                    .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
-                            )
-                            .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
-                    )
-                    .when_some(dot, |d, c| d.child(state_chip(card.column, c, &theme)))
-                    .into_any_element(),
-            );
+        } else {
+            // Inside a folder: its sessions, newest first. A live row
+            // carries its state as a chip at the right (the column it is
+            // on, in that colour).
+            for r in refs {
+                let b = bucket(r.mtime);
+                if b != last_bucket {
+                    rows.push(head(b, last_bucket.is_empty()));
+                    last_bucket = b;
+                }
+                let key = key_of(&r);
+                let theme = cx.theme().clone();
+                let card = self.card_for(&r);
+                let dot = self.live_color(&r, cx);
+                let working = self.is_working(&r);
+                let glyph_id = SharedString::from(format!("row-glyph-{key}"));
+                let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
+                let mut sub = Vec::new();
+                if !r.git_branch.is_empty() {
+                    sub.push(format!("⎇ {}", r.git_branch));
+                }
+                sub.push(relative(r.mtime, now));
+                let (menu_key, menu_path) = (key.clone(), r.path.clone());
+                rows.push(
+                    h_flex()
+                        .id(SharedString::from(format!("row-{key}")))
+                        .w_full()
+                        .px(px(12.))
+                        .py(px(9.))
+                        .gap(px(12.))
+                        .items_center()
+                        .rounded(px(10.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.muted))
+                        .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![("Rename", MenuDo::Rename(menu_key.clone())), (crate::sys::REVEAL_LABEL, MenuDo::Reveal(menu_path.clone()))], cx)),
+                        )
+                        .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working, glyph_id)))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(2.))
+                                .child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .items_center()
+                                        .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
+                                        .when(r.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground)))
+                                        .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
+                                )
+                                .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
+                        )
+                        .when_some(dot, |d, c| d.child(state_chip(card.column, c, &theme)))
+                        .into_any_element(),
+                );
+            }
+        }
+        if rows.is_empty() {
+            rows.push(div().px(px(12.)).py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child("Nothing here.").into_any_element());
         }
 
-        let title = match &scope {
-            Scope::All => "Your sessions".to_string(),
-            Scope::Agent(a) => format!("{} sessions", a.display_name()),
-            Scope::Project(p) => p.clone(),
-            Scope::Kept => "Kept sessions".to_string(),
+        let title = match (&folder, &scope) {
+            (Some(p), _) => p.clone(),
+            (None, Scope::All) => "Your projects".to_string(),
+            (None, Scope::Agent(a)) => format!("{} projects", a.display_name()),
+            (None, Scope::Kept) => "Kept projects".to_string(),
         };
-        let count = self.scoped_refs().len();
+        let line = match &folder {
+            Some(_) => format!("{} in this project.", plural(count, "session", "sessions")),
+            None => format!("{} in {} on this machine, every one of them kept.", plural(count, "session", "sessions"), plural(folders_n, "project", "projects")),
+        };
         let display = crate::fonts::display_family(cx);
+        // Inside a folder, the way back up sits over its name.
+        let crumb = folder.is_some().then(|| {
+            let hover = theme.foreground;
+            h_flex()
+                .gap(px(6.))
+                .items_center()
+                .text_size(px(12.5))
+                .text_color(theme.muted_foreground)
+                .child(
+                    div()
+                        .id("sessions-up")
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(hover))
+                        .on_click(cx.listener(|this, _, _, cx| this.show_sessions_in(this.scope.clone(), None, cx)))
+                        .child("Projects"),
+                )
+                .child(Icon::new(IconName::ChevronRight).with_size(px(11.)))
+                .child(div().min_w_0().truncate().child(title.clone()))
+        });
 
         v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
             v_flex().id("sessions").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.sessions_scroll).px(px(24.)).items_center().child(page_in(
-                "page-sessions",
+                if folder.is_some() { "page-sessions-folder" } else { "page-sessions" },
                 v_flex()
                     .w_full()
                     .max_w(CONTENT_W)
                     .pt(px(20.))
                     .pb(px(40.))
                     .gap(px(14.))
-                    .child(div().text_size(px(30.)).font_family(display).child(title))
+                    .child(v_flex().gap(px(6.)).children(crumb).child(div().text_size(px(30.)).font_family(display).child(title)))
                     .child(filters)
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(format!("{} on this machine, every one of them kept.", plural(count, "session", "sessions"))))
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(line))
                     .child(v_flex().w_full().gap(px(2.)).children(rows)),
             )),
         )

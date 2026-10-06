@@ -7,18 +7,18 @@ grouped into one. The reasoning belongs in AGENTS.md.
 
 ## v0.1.6
 
-- A session started or continued in Emaki runs in a terminal of Emaki's own, with no window. Your terminal app is no longer opened for it.
-- ⇧Tab changes the mode without leaving the window, and so does a click on the mode pill.
-- The model and effort pills show Claude Code's own picker on a small card over the composer; it closes when you have chosen.
-- The picker takes the mouse: click a model, an effort level, or a key named at its foot.
-- A slash command that has an interface (`/status`, `/config`) shows on the same card.
-- Nothing done in Emaki touches a terminal of yours: a session open there is used through the hidden terminal as well.
-- The terminal button opens the session in your default terminal, or brings it forward when it is already open there; a session open in an IDE's terminal counts as not open.
+- A session started or continued in Emaki runs in a terminal of Emaki's own, with no window. Your terminal app is no longer opened for it, and nothing done in Emaki touches a terminal of yours.
+- ⇧Tab, or a click on the mode pill, changes the mode without leaving the window.
+- The model and effort pills show Claude Code's own picker on a small card over the composer, and it takes the mouse. A slash command with an interface (`/status`, `/config`) shows on the same card.
+- The terminal button opens the session in your default terminal, or brings it forward when it is already open there.
 - Beside the traffic lights: the sidebar button and search. With the sidebar hidden, pointing at its button floats it in.
-- Switching tabs is instant: the conversation and the tab bar no longer blink, and each tab stays where you left it.
-- Tabs share the row evenly and resize smoothly as one opens or closes. Drag a tab to move it, press ⌘1 to ⌘9 to go to one (a number past the last goes to the last), and right-click one to rename it or reveal it in Finder.
+- Switching tabs is instant: nothing blinks, and each tab stays where you left it.
+- Tabs share the row evenly and resize smoothly. Drag one to move it, press ⌘1 to ⌘9 to go to one, and right-click one to rename it or reveal it in Finder.
 - Dragging a tab no longer moves the window; empty space along the top still does.
-- The word beside "Claude is working" keeps one colour through a turn.
+- The sidebar lists Agents and Projects on cards that scroll by themselves. A project opens onto its sessions, and one with a live session opens by itself.
+- The Sessions entry is now Projects: its page lists your projects first; click one for its sessions.
+- Renaming a session renames it for Claude Code too, and every session keeps its own draft in the composer.
+- New icons throughout (Phosphor), and the word beside "Claude is working" follows the window's light or dark theme.
 
 ## v0.1.5
 
