@@ -1496,3 +1496,72 @@ fn a_cleared_session_is_blank_until_something_is_said() {
     write(&rows);
     assert!(!emaki_core::transcript::peek(&path).blank);
 }
+
+/// A command started in the background runs until Claude Code's
+/// notification for its id, which is in the queue the moment it exits.
+#[test]
+fn background_shells_start_and_end() {
+    let start = |id: &str, call: &str| {
+        json!({"type": "user", "uuid": format!("r-{id}"), "timestamp": "2026-10-06T03:37:44.000Z", "sessionId": "s1",
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call,
+                "content": format!("Command running in background with ID: {id}. Output is being written to: /tmp/tasks/{id}.output. You will be notified when it completes.")}]},
+            "toolUseResult": {"stdout": "", "backgroundTaskId": id}})
+    };
+    let call = |call: &str, cmd: &str, what: &str| {
+        json!({"type": "assistant", "uuid": format!("a-{call}"), "timestamp": "2026-10-06T03:37:43.000Z", "sessionId": "s1",
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": call, "name": "Bash", "input": {"command": cmd, "description": what, "run_in_background": true}}]}})
+    };
+    let rows = vec![
+        json!({"type": "user", "uuid": "u1", "timestamp": "2026-10-06T03:37:40.000Z", "sessionId": "s1", "message": {"role": "user", "content": "build it"}}),
+        call("t1", "cargo build --release", "Build the release"),
+        start("bg1", "t1"),
+        call("t2", "sleep 600", "Wait"),
+        start("bg2", "t2"),
+        json!({"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-06T03:39:15.000Z", "sessionId": "s1",
+            "content": "<task-notification>\n<task-id>bg1</task-id>\n<status>completed</status>\n<summary>Background command \"Build the release\" completed (exit code 0)</summary>\n</task-notification>"}),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.shells.len(), 2);
+    assert_eq!((s.shells[0].id.as_str(), s.shells[0].status.as_str(), s.shells[0].ended.as_str()), ("bg1", "completed", "2026-10-06T03:39:15.000Z"));
+    assert_eq!(s.shells[0].description, "Build the release");
+    assert_eq!(s.shells[0].output_path, "/tmp/tasks/bg1.output");
+    assert!(s.shells[0].summary.contains("exit code 0"));
+    assert_eq!((s.shells[1].command.as_str(), s.shells[1].ended.as_str()), ("sleep 600", ""));
+}
+
+/// "@" in the composer: the folder's files, what answers the words typed,
+/// and which "@" in a message names something that is there.
+#[test]
+fn at_names_files_under_the_folder() {
+    use emaki_core::files;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src/deep")).unwrap();
+    std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+    for f in ["README.md", "src/main.rs", "src/deep/mainframe.rs", "my file.txt", "node_modules/x/main.js"] {
+        std::fs::write(root.join(f), "x").unwrap();
+    }
+    let cwd = root.to_string_lossy().to_string();
+    let all = files::list(&cwd);
+    let paths: Vec<&str> = all.iter().map(|e| e.path.as_str()).collect();
+    assert!(paths.contains(&"src/") && paths.contains(&"src/deep/") && paths.contains(&"src/main.rs"));
+    assert!(!paths.iter().any(|p| p.starts_with("node_modules")));
+    let top: Vec<&str> = files::matches(&all, "", 20).iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(top, ["src/", "my file.txt", "README.md"]);
+    let hit: Vec<&str> = files::matches(&all, "main", 20).iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(hit, ["src/main.rs", "src/deep/mainframe.rs"]);
+    let inside: Vec<&str> = files::matches(&all, "src/", 20).iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(inside, ["src/deep/", "src/main.rs", "src/deep/mainframe.rs"]);
+    assert_eq!(files::matches(&all, "smr", 20)[0].path, "src/main.rs");
+
+    let text = "see @src/main.rs. and (@README.md) not a@b.com or @nope, @\"my file.txt\"";
+    let toks: Vec<String> = files::at_tokens(text).into_iter().map(|(_, _, p)| p).collect();
+    assert_eq!(toks, ["src/main.rs.", "README.md)", "nope,", "my file.txt"]);
+    assert_eq!(files::named(&cwd, "src/main.rs."), Some("src/main.rs"));
+    assert_eq!(files::named(&cwd, "nope,"), None);
+    assert_eq!(files::mark_mentions(text, &cwd), "see `@src/main.rs`. and (`@README.md`) not a@b.com or @nope, `@\"my file.txt\"`");
+    assert_eq!(files::at_token_at("look at @src/ma", 15), Some((8, 15, "src/ma".to_string())));
+    assert_eq!(files::at_token_at("mail a@b", 8), None);
+    assert_eq!(files::at_token_at("(@RE", 4), Some((1, 4, "RE".to_string())));
+    assert_eq!(files::written("my file.txt"), "@\"my file.txt\"");
+}

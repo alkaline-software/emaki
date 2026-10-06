@@ -40,6 +40,10 @@ macro_rules! re {
 re!(RE_SYSTEM_REMINDER, r"(?s)<system-reminder>.*?</system-reminder>\s*");
 re!(RE_CAVEAT, r"(?s)<local-command-caveat>.*?</local-command-caveat>\s*");
 re!(RE_TASK_NOTIFICATION, r"(?s)<task-notification>.*?</task-notification>\s*");
+re!(RE_TASK_ID, r"<task-id>(.*?)</task-id>");
+re!(RE_TASK_STATUS, r"<status>(.*?)</status>");
+re!(RE_TASK_SUMMARY, r"(?s)<summary>(.*?)</summary>");
+re!(RE_TASK_OUTPUT, r"written to: (\S+\.output)");
 re!(RE_HOOK_OUTPUT, r"(?s)<[a-z-]*hook[a-z-]*>.*?</[a-z-]*hook[a-z-]*>\s*");
 re!(RE_COMMAND_NAME, r"(?s)<command-name>(.*?)</command-name>");
 re!(RE_COMMAND_ARGS, r"(?s)<command-args>(.*?)</command-args>");
@@ -850,6 +854,9 @@ pub fn build(input: BuildInput) -> Session {
     let cwd = session.cwd.clone();
     let mut b = RoundBuilder::new();
     let mut queue = Queue::default();
+    if !input.nested {
+        session.shells = shells_of(&main_rows);
+    }
 
     for row in &main_rows {
         let rtype = str_of(row, "type");
@@ -899,6 +906,76 @@ pub fn build(input: BuildInput) -> Session {
     }
     finalize(b, &mut session);
     session
+}
+
+/// The commands the agent set running in the background, and how each
+/// ended. One starts where a `Bash` result's sidecar carries
+/// `backgroundTaskId` (the result's words name the file its output goes
+/// to), and is over at the first `<task-notification>` for that id:
+/// Claude Code writes it into the queue the moment the command exits,
+/// and again as the prompt of the turn it starts. A stop the agent asks
+/// for (`KillShell`, `TaskStop`) ends it too. A command still running
+/// when its Claude Code went away gets no row at all, so whether one
+/// without an end is running is for the caller to say, from the process.
+fn shells_of(rows: &[&Value]) -> Vec<Shell> {
+    let mut calls: HashMap<String, (String, String)> = HashMap::new();
+    let mut shells: Vec<Shell> = Vec::new();
+    let end = |shells: &mut Vec<Shell>, id: &str, status: &str, summary: &str, ts: &str| {
+        if let Some(sh) = shells.iter_mut().find(|sh| sh.id == id && sh.ended.is_empty()) {
+            sh.ended = ts.into();
+            sh.status = status.into();
+            sh.summary = summary.trim().into();
+        }
+    };
+    for row in rows {
+        let ts = str_of(row, "timestamp");
+        match str_of(row, "type") {
+            "assistant" => {
+                for block in blocks(row).iter().filter(|x| block_type(x) == "tool_use") {
+                    let input = block.get("input");
+                    let field = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str).unwrap_or("").to_string();
+                    match str_of(block, "name") {
+                        "Bash" => {
+                            calls.insert(str_of(block, "id").into(), (field("command"), field("description")));
+                        }
+                        "KillShell" | "TaskStop" | "KillBash" => {
+                            let id = [field("shell_id"), field("task_id"), field("bash_id")].into_iter().find(|v| !v.is_empty()).unwrap_or_default();
+                            end(&mut shells, &id, "killed", "", ts);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "user" | "queue-operation" | "attachment" => {
+                if let Some(id) = row.get("toolUseResult").and_then(|r| r.get("backgroundTaskId")).and_then(Value::as_str) {
+                    let result = blocks(row).into_iter().find(|x| block_type(x) == "tool_result");
+                    let call = result.as_ref().map(|x| str_of(x, "tool_use_id")).unwrap_or("");
+                    let said = result.as_ref().and_then(|x| x.get("content")).map(Value::to_string).unwrap_or_default();
+                    let (command, description) = calls.get(call).cloned().unwrap_or_default();
+                    if !shells.iter().any(|sh| sh.id == id) {
+                        shells.push(Shell { id: id.into(), command, description, output_path: RE_TASK_OUTPUT.captures(&said).map(|c| c[1].to_string()).unwrap_or_default(), started: ts.into(), ..Default::default() });
+                    }
+                    continue;
+                }
+                let text = row
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .or_else(|| row.get("message").and_then(|m| m.get("content")).and_then(Value::as_str))
+                    .or_else(|| row.get("attachment").and_then(|a| a.get("prompt")).and_then(Value::as_str))
+                    .unwrap_or("");
+                if !text.contains("<task-notification>") {
+                    continue;
+                }
+                for note in RE_TASK_NOTIFICATION.find_iter(text) {
+                    let note = note.as_str();
+                    let part = |re: &Regex| re.captures(note).map(|c| c[1].to_string()).unwrap_or_default();
+                    end(&mut shells, &part(&RE_TASK_ID), &part(&RE_TASK_STATUS), &part(&RE_TASK_SUMMARY), ts);
+                }
+            }
+            _ => {}
+        }
+    }
+    shells
 }
 
 /// Claude Code's queue of messages sent while a turn runs, replayed from

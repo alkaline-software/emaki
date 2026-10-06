@@ -3064,10 +3064,13 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
             .on_action(window.listener_for(&entity, InputBaseState::right))
             .on_action(window.listener_for(&entity, InputBaseState::select_left))
             .on_action(window.listener_for(&entity, InputBaseState::select_right))
+            // Up and down are a single line's too: to its start and its
+            // end (see `up`). Upstream listened only on a textarea.
+            // (Emaki addition.)
+            .on_action(window.listener_for(&entity, InputBaseState::up))
+            .on_action(window.listener_for(&entity, InputBaseState::down))
             .when(self.is_multi_line(), |this| {
-                this.on_action(window.listener_for(&entity, InputBaseState::up))
-                    .on_action(window.listener_for(&entity, InputBaseState::down))
-                    .on_action(window.listener_for(&entity, InputBaseState::select_up))
+                this.on_action(window.listener_for(&entity, InputBaseState::select_up))
                     .on_action(window.listener_for(&entity, InputBaseState::select_down))
                     .on_action(window.listener_for(&entity, InputBaseState::page_up))
                     .on_action(window.listener_for(&entity, InputBaseState::page_down))

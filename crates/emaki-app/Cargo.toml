@@ -32,6 +32,10 @@ markdown = "1.0.0"
 # Open-with and the person's name, without shelling out to macOS commands.
 opener = "0.7"
 whoami = "1"
+# The person's picture, cut square and scaled down once to the sizes it
+# is drawn at. gpui already builds this crate; the features are the
+# formats the file picker takes.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 
 # The .exe carries the icon as a resource; nothing to do elsewhere.
 [target.'cfg(windows)'.build-dependencies]

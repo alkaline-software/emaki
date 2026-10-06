@@ -20,6 +20,8 @@ pub struct Rect {
 pub struct UiState {
     pub window: Option<Rect>,
     pub sidebar_open: Option<bool>,
+    /// How wide the sidebar was dragged to.
+    pub sidebar_w: Option<f32>,
     /// `board`, `sessions`, `session` or `new`.
     pub page: String,
     /// Session keys (`<agent>:<id>`) with a tab, in tab order.

@@ -64,11 +64,17 @@ pub struct AppConfig {
     /// Ask GitHub for the newest release once a day and say so in the
     /// settings panel when there is one. Nothing is installed unasked.
     pub check_updates: bool,
+    /// What the window calls the person; empty for the machine's own
+    /// account name.
+    pub user_name: String,
+    /// The person's picture, a file the app keeps a copy of; empty for
+    /// the first letter of the name on a disc.
+    pub avatar: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "serif".into(), chat_size: "medium".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true }
+        Self { chat_font: "serif".into(), chat_size: "medium".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new() }
     }
 }
 

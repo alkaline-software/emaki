@@ -78,6 +78,8 @@ pub struct Peer {
     pub status: String,
     /// When the status last changed, Unix seconds; 0 when the record has none.
     pub status_at: f64,
+    /// When the process registered, Unix seconds; 0 when the record has none.
+    pub started_at: f64,
     pub proc_start: String,
     pub key_path: String,
 }
@@ -159,7 +161,7 @@ pub fn registry_all() -> Vec<Peer> {
         }
         let s = |k: &str| obj.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         peers.push(
-            Peer { session_id: sid, pid, socket_path: sock, cwd: s("cwd"), kind: s("kind"), name: s("name"), status: s("status"), status_at: obj.get("statusUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, proc_start: s("procStart"), key_path: keys.get(&pid).cloned().unwrap_or_default() },
+            Peer { session_id: sid, pid, socket_path: sock, cwd: s("cwd"), kind: s("kind"), name: s("name"), status: s("status"), status_at: obj.get("statusUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, started_at: obj.get("startedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, proc_start: s("procStart"), key_path: keys.get(&pid).cloned().unwrap_or_default() },
         );
     }
     peers
@@ -293,7 +295,7 @@ mod tests {
             stream.write_all(b"{\"status\":\"delivered\"}\n").unwrap();
             lines
         });
-        let peer = Peer { session_id: "sid".into(), pid: 1234, socket_path: sock.to_string_lossy().into(), cwd: String::new(), kind: String::new(), name: String::new(), status: String::new(), status_at: 0.0, proc_start: "s1".into(), key_path: key.to_string_lossy().into() };
+        let peer = Peer { session_id: "sid".into(), pid: 1234, socket_path: sock.to_string_lossy().into(), cwd: String::new(), kind: String::new(), name: String::new(), status: String::new(), status_at: 0.0, started_at: 0.0, proc_start: "s1".into(), key_path: key.to_string_lossy().into() };
         let d = send(&peer, "hello there", false).unwrap();
         assert_eq!(d.status, "delivered");
         let lines = server.join().unwrap();

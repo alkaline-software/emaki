@@ -70,12 +70,13 @@ crates/emaki-core/        everything without a window
   src/driver.rs              a headless `claude -p` child on stream-json
   src/options.rs             the modes, models and effort levels an agent offers, as it lists them
   src/explain.rs             opaque tool calls in plain words, via `claude -p`
+  src/files.rs               a folder's files for "@" in the composer: the list, the match, the tokens
   src/update.rs              the newest release, its installer, and putting it in place
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
   src/terminal.rs            the agent's resume command as a script a terminal can be handed
   src/pty.rs                 a terminal of our own with no window: an interactive `claude` on a pty, its screen kept in memory
   src/watcher.rs             notify over every agent's data roots
-  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | peers | inbox | options | explain | update | statusline | drive | pty
+  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | shells | files | peers | inbox | options | explain | update | statusline | drive | pty
   tests/core.rs
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
@@ -121,9 +122,13 @@ EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to ano
 EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar
 EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it; page:board is the board
 EMAKI_GO="page:sessions;sessions:<folder>" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sessions page's folders, then inside one
+EMAKI_GO="side:320;sidefit" EMAKI_OPEN=<id> ./target/debug/Emaki  # drag the sidebar's edge to that x; then the double click on it
+EMAKI_GO=shells EMAKI_OPEN=<id> ./target/debug/Emaki  # open the card of commands running in the background
 EMAKI_GO=menu EMAKI_OPEN=<id> ./target/debug/Emaki  # the session's right-click menu; renaming shows the rename field, name:<words> names it
 EMAKI_GO=dialog:2 EMAKI_OPEN=<id> ./target/debug/Emaki  # press that in the terminal's dialog (a digit, or tab); answer:<words> types an answer, goto:<n> goes to that tab
 EMAKI_KEYS=down,down,tab EMAKI_TYPE=/mod ./target/debug/Emaki  # press the slash list's keys (up, down, tab, esc)
+EMAKI_KEYS=rename,up,caret EMAKI_OPEN=<id> ./target/debug/Emaki  # open the rename field on that session, press keys in it, print where the caret is
+EMAKI_KEYS="type:see @cr,down,tab,text" EMAKI_OPEN=<id> ./target/debug/Emaki  # type into that session's composer (no commas), press the list's keys, print what it holds
 EMAKI_GO=send:hello EMAKI_OPEN=<id> ./target/debug/Emaki  # send that message once the session is open (or with EMAKI_PAGE=new, start one)
 EMAKI_TERM_KEYS=left,s EMAKI_GO=pill:effort EMAKI_OPEN=<id> ./target/debug/Emaki  # press keys on the terminal card (left, right, up, down, enter, esc, tab, or a letter)
 EMAKI_SHOT=/tmp/shot.png EMAKI_OPEN=<id> ./target/debug/Emaki  # write a picture of the window there after EMAKI_SHOT_AFTER seconds (5) and quit
@@ -227,8 +232,47 @@ rest of the sidebar), so a flick in one that the pointer carries into
 the other stays with the one it began in, as between the sidebar and
 the conversation; at first the sidebar was one pane, and momentum from
 the agents' card scrolled the folders. Not driven from a script.
+The wordmark is in the sidebar's own 48px strip, right of the two
+buttons beside the traffic lights and ending where the entries' key
+hints end (the icon at 26px, the name at 20), and the hairline is at
+the strip's foot, the sidebar's whole width, where it meets a hairline
+over the folder's band in the content pane: one line crosses the
+window 48px down (measured on a capture, the same two pixel rows on
+both sides). The band had a line under it only, and an inset hairline
+on the left at the level of its unmarked top read as aligned with
+nothing. It had a row of its own under the lights (icon 30, name
+22), which put the hairline at 96px down against the band's line at 77;
+lifting one to meet the other at 84 was tried first and the person
+asked for the empty room beside the buttons to be used instead.
+Checked with `EMAKI_SHOT`.
 Until 2026-10-06 the two were headed lists in one scroller under the
 three entries, with nothing between the name and the entries.
+
+**The sidebar's edge is dragged.** A strip `SIDEBAR_GRIP` (8px) wide
+over the edge (`render_side_grip`, drawn over the row and only while
+the sidebar is beside the content) shows the resize pointer and a line
+in the accent; a press there holds the edge (`side_drag`), and from
+then on a raw mouse-move listener in the capture phase, beside the
+float's, sets the width to where the pointer is (`side_drag_to`) and
+stops the event, so nothing under the pointer hovers or selects.
+The width (`sidebar_w`, kept in `ui.json`) stays between `SIDEBAR_MIN`
+(248, the least that holds the two buttons and the wordmark beside
+them) and `SIDEBAR_MAX` (440). Left of `SIDEBAR_FOLD_AT` (170) the
+sidebar folds away, as the button does it, and comes back in the same
+drag if the pointer does; the width it had is kept for the next time
+it is shown. A double click on the strip goes to the fitted width
+(`sidebar_fit`): the widest folder or session row the Projects card
+lists, measured with the text system and the rows' own paddings, and
+never more than `SIDEBAR_FIT_MAX` (320): a row that would need more is
+a prompt standing in for a title and is cut short at any width. At first every row counted, so one long
+title always asked for the most, 440, which the person called too
+wide. Everything that used the constant
+`SIDEBAR_W` (the float, the overlay, `route_scroll`, `pane_w`) reads
+`sidebar_w`; the constant is only the width before any drag. Checked
+with `EMAKI_GO=side:<x>` (the edge dragged to that x and let go:
+380 gave 380, 200 the least, 900 the most, 100 folded it) and
+`sidefit`, with `EMAKI_SHOT`. Not driven from a script: a real press
+and drag on the strip, the pointer's shape, the double click.
 
 **The sessions page has two levels, as the sidebar has.** A project is
 a folder, and the window says "project" for the list and keeps the
@@ -361,7 +405,7 @@ never animated. Floating cards (the composer, the search palette, the
 settings panel) lift off the page with `float_shadow`: a wide soft drop in
 the ink's own hue and a hairline of contact under it, not a grey halo.
 The settings panel is a fixed sheet (`SETTINGS_W` by `SETTINGS_H`, 720 by
-520, capped by the window) with a rail of sections on the left
+580, tall enough for Appearance without scrolling; capped by the window) with a rail of sections on the left
 (`SETTINGS_SECTIONS`: Appearance, New sessions, Explanations, Updates,
 each with an icon, the chosen one on a plate; `settings_section` is the
 one showing and `EMAKI_SETTINGS=<section>` opens the panel on it) and
@@ -371,7 +415,15 @@ toolkit's scrollbar at their edge (`settings_scroll`, the same fading bar
 the transcript and tool bodies have); the body is a flex column inside a
 flex column, because a block wrapper around it collapsed the panel to
 its header. Before the rail the panel was one long sheet of every
-setting at 90% of the window's height. Settings choices are segmented controls (`Workbench::segmented`: a muted
+setting at 90% of the window's height. **Every scrollbar in the window
+is the toolkit's one, and goes the same way:** it stays a second after
+the last scroll and fades over half a second (`FADE_OUT_DELAY` and
+`FADE_OUT_DURATION` in the vendored `scrollbar.rs`); a new scroller
+takes `vertical_scrollbar` and nothing else, so it has the same timing.
+Until 2026-10-06 the fade was no fade: the vendored curve was upstream's,
+made for a one-second fade, and over half a second it held the bar at
+full strength for all 1.5 seconds and then cut it, which the person saw
+in Settings as a bar that stayed too long. Settings choices are segmented controls (`Workbench::segmented`: a muted
 track, the choice on a raised plate), where a row of outlined pills was
 heavier than the panel needed. The plate is one element under the row
 and slides from the old choice to the new one over 220ms: each
@@ -464,7 +516,7 @@ could be changed from outside; a fork on GitHub was the alternative and
 one repository was preferred. Every change is marked `(Emaki addition.)`
 in the source and listed in `vendor/gpui-component/UPSTREAM.md`, which
 also says how to move to a newer upstream revision: copy the crates over,
-re-apply the list, build. Ten changes so far: the strong weight and the
+re-apply the list, build. Eleven changes so far (the fifth now with the fade's curve made to fit its length; the eleventh is Up and Down in a single-line field, the rename field among them, going to the start and the end of its text, where upstream did nothing: checked with `EMAKI_KEYS=rename,caret,up,caret,down,caret`, which printed 41, 0, 41 of 41): the strong weight and the
 inline-code family as `TextViewStyle` settings (`md_view` sets 600 and the
 theme's mono face, as the Claude app does), the input's Up on the first
 line going to the start of the text, Down on the last to the end, the
@@ -695,6 +747,44 @@ draws the appearance config asks for and replaces every direct
 observer, which is what keeps a pinned appearance pinned when the system
 flips. The settings panel (⌘,) also sets `driver.default_mode` and
 `driver.default_model`, what a session started from the window begins in.
+
+**The person has a picture and a name, both theirs to set.**
+`app.avatar` and `app.user_name` in `config.json`, the first two rows
+of Settings, Appearance. The picture is chosen with the file picker
+(`Workbench::pick_avatar`; PNG, JPEG, GIF, WebP and the like) and
+kept as `~/.emaki/avatar/<time>.png` (`avatar_keep`, with the `image`
+crate gpui already builds): turned the way its camera says, cut to the
+square at its middle, 512 pixels a side at most, under a new name each
+time so the image cache does not answer with the old one. Beside it go
+a copy for each size it is drawn at (`AVATAR_SIZES`, 28 and 40 points;
+`<time>@28.png` at twice the points across), scaled down with Lanczos,
+and `Workbench::avatar` draws the copy for its size. Handed the whole
+picture, the GPU samples a few of its pixels for each one drawn, and
+the person's 1000-pixel picture came out harsh and jagged on a
+28-point disc. A picture kept before the copies existed gets them at
+launch. The copies
+before it deleted (`set_avatar`); Remove goes back to none. Remove is
+a pill of our own in the danger colour, not the toolkit's outline
+button, which sets its own ink under the pointer and turned the red
+black on hover: it stays red on a wash of the red, stronger while
+pressed (checked with a `mouseMoved` posted to the pid and
+`EMAKI_SHOT`). The name
+is a field (`name_input`, in the focus wrapper every own input has)
+saved at each change. Both have a fallback, which is what there was
+before: the first letter of the name on a disc of the accent
+(`Workbench::avatar`, also when the picture's file is gone), and the
+machine's account name (`sys::user_first_name`, the field's
+placeholder) when the name is empty. The name is the sidebar footer's
+and the greeting's. In the footer it is set as the wordmark is, in
+`fonts::wordmark_family` with the regular drawn twice half a pixel
+apart, at 16px and in the ink, not the accent (it was the window's
+face at 13px medium). In the footer the picture is a button that opens
+Settings on Appearance whatever section was last showing; the name
+beside it is not one, and the gear still opens Settings where it was
+left. Checked with `EMAKI_SETTINGS=appearance` and `EMAKI_SHOT`, with
+neither set and with both written into a scratch `config.json`. Not
+driven from a script: the file picker, typing in the field, the click
+on the footer's picture.
 
 **The modes, models and effort levels are the agent's own lists.**
 Nothing in the window names one. `options.rs` in the core holds what an
@@ -1321,6 +1411,43 @@ or is in the folder's catalogue (`Hub::knows_command`, cache only; the
 catalogue is read when a Claude session of that folder is opened).
 `EMAKI_KEYS` dispatches those actions through the focus, since a
 synthetic key does not reach a background window.
+
+**"@" names a file under the folder, in the same list.** As Claude
+Code's own prompt does it: "@" at the start of a word, and the list over
+the composer (`render_slash_help`, the slash list's card and keys) shows
+the folder's files and folders for what is typed after it, each as its
+name with the folder it is in beside it. `files.rs` in the core is all
+of it: `list` is git's own (`ls-files`, tracked and untracked, ignored
+left out) or, outside a repository, a walk that skips hidden folders
+and build output, with every folder added behind a slash, 30,000 paths
+at most; `matches` puts a name that starts with the words first, then a
+name holding them, a path holding them, and letters in order, with
+"dir/" listing what is in it and nothing typed showing the top;
+`at_token_at` and `at_tokens` find the token (`a@b.com` is not one, and
+a path with a space is `@"my file.txt"`, as Claude Code writes it). The
+window keeps a list per folder (`Workbench::files`), read off the main
+thread when an "@" is first typed (`want_files`, from `mark_slash`, the
+one place every change of the text goes through) and again once it is
+ten seconds old. ↩, ⇥ or a click puts the path in (`file_insert`): a
+file with a space after it, a folder without, so the list goes on into
+it. The folder is the session's, or the one chosen on the new-session
+page (`composer_cwd`). An "@" whose path is there on disk wears the
+accent, as a command does: in the composer by the same marks, and in a
+sent prompt as inline code (`files::mark_mentions`, after
+`mark_commands`); the sentence's punctuation after a path is left out
+of it, and a path that is not there stays plain. Nothing is done to the
+message: Claude Code reads "@path" out of a prompt itself, typed or
+pasted. Checked on a pty with 2.1.291: a message pasted with "@notes.txt"
+at its very end has Claude Code's own list open under it, and Return
+still sent it and the file was read ("Read notes.txt (2 lines)"). Not
+checked: Return on a pasted message ending in half a name ("@note"),
+which the terminal's list may complete instead of sending. Checked with
+`EMAKI_KEYS="type:see @cr,down,tab,text"` and `EMAKI_SHOT` on a scratch
+session whose folder is this repository: the list, the keys, a folder
+gone into, the colours in the composer and in a sent prompt. Covered by
+a test; a real keystroke and a click on a row were not driven from a
+script. `emaki-core files <folder> [typed]` prints what would be
+offered.
 Coming back: when the session was waiting or idle at the hand-off, the
 next change to its transcript is the interaction done, and the window
 activates itself (`come_back`, forgotten after fifteen minutes); when the
@@ -1500,6 +1627,38 @@ a permission prompt through the hidden terminal (it goes through
 `read_dialog`, as for any terminal), and Windows beyond the type check.
 A probe run from a session that is itself in a hidden terminal must
 not quit the running Emaki, which is its parent: use a second copy.
+
+**A command left running in the background has a row over the
+composer.** The agent may start a command and go on, or end its turn,
+while it runs (`Bash` with `run_in_background`, which is how a release
+build is waited for); the terminal says "1 shell" at its foot, and the
+window said nothing, with the turn over and the board on "your turn".
+The transcript has both ends (`build::shells_of`, into
+`Session::shells`): a command starts where a `Bash` result's sidecar
+carries `backgroundTaskId`, its words naming the file its output is
+written to, and it is over at the first `<task-notification>` for that
+id, which Claude Code writes into the queue (`queue-operation`
+`enqueue`) the moment the command exits and again as the prompt of the
+turn that starts; a stop the agent asks for (`KillShell`, `TaskStop`)
+ends it too. A command that was running when its Claude Code went away
+gets no row, so one without an end counts as running only while a
+process is behind the session that registered before the command began
+(`Workbench::shells_running`, `Peer::started_at`): the relaunch that
+ends a hidden terminal ends its commands with it. The row
+(`render_shells`) sits where the working line does, above it when both
+are there: a breathing dot, "1 command running in the background", the
+agent's own line on what it is for, how long it has run. A click opens
+a card over it with each command: its line, the command in the mono
+face, and the last `SHELL_TAIL_LINES` (10) of its output, read from
+the output file on the clock while the card is open (`file_tail`,
+colour sequences taken out, a progress line that rewrites itself kept
+as it last read). Nothing here stops a command: that is the agent's or
+the terminal's to do. `emaki-core shells <id>` lists a session's.
+Checked on real transcripts with that (fifteen commands in five
+sessions, every one with its end) and with `EMAKI_SHOT` on a
+hand-written transcript beside a registry record made by hand, the row
+and, with `EMAKI_GO=shells`, the card. Not driven from a script: the
+click, and a real command from its start to the row going away.
 
 **A permission card answers to the keyboard.** ↩ on an empty composer
 allows the oldest card waiting on the session showing, ⇧↩ denies it, and
