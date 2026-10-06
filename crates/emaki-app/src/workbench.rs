@@ -94,6 +94,30 @@ const SIDE_FOLDERS: usize = 10;
 const SIDE_AGENTS: usize = 4;
 /// How long a folder takes to unfold or fold away.
 const FOLDER_ANIM: Duration = Duration::from_millis(200);
+/// How long the terminal card takes to come, and to go.
+const TERM_ANIM: Duration = Duration::from_millis(200);
+
+/// The terminal card as it was last drawn. Whether it shows is decided
+/// at each draw, from the screen, so its coming and going are seen
+/// there: `serial` counts them and names each one's animation, and the
+/// rows are kept so the card can still be drawn, fading, once the screen
+/// has nothing for it.
+struct TermShown {
+    sid: String,
+    rows: Vec<Vec<emaki_core::pty::Span>>,
+    on: bool,
+    /// When it came or went, and when it was last drawn from the screen.
+    at: std::time::Instant,
+    live: std::time::Instant,
+    serial: u32,
+}
+
+impl Default for TermShown {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        TermShown { sid: String::new(), rows: Vec::new(), on: false, at: now, live: now, serial: 0 }
+    }
+}
 /// The sidebar floating in over the content, or back out.
 const FLOAT_ANIM: Duration = Duration::from_millis(220);
 /// A tab's width when there is room, the least it shrinks to, the gap
@@ -102,6 +126,9 @@ const TAB_MAX: f32 = 200.;
 const TAB_MIN: f32 = 56.;
 const TAB_GAP: f32 = 4.;
 const TAB_ANIM: Duration = Duration::from_millis(220);
+/// How long ⌘ (Ctrl elsewhere) is held, alone, before every tab shows the
+/// number that goes to it.
+const TAB_HINT_HOLD: Duration = Duration::from_millis(500);
 
 /// A tab being dragged along the row, by its key.
 #[derive(Clone)]
@@ -636,6 +663,8 @@ pub struct Workbench {
     /// The person put it away while the terminal still waits: it is not
     /// brought back until that wait is over.
     term_dismissed: Option<String>,
+    /// The card as last drawn, for its coming and going (`TermShown`).
+    term_shown: std::cell::RefCell<TermShown>,
     term_focus: FocusHandle,
     /// The focus is owed to the terminal card, or back to the composer.
     term_focus_due: Option<bool>,
@@ -751,6 +780,14 @@ pub struct Workbench {
     tabs_n: usize,
     /// The tab being dragged along the row.
     drag_tab: Option<String>,
+    /// ⌘ (Ctrl elsewhere) is down by itself, as of this press (a count,
+    /// so the wait begun at an earlier press does not answer for it).
+    hint_press: Option<u32>,
+    hint_presses: u32,
+    /// The tabs show their numbers: the key has been held `TAB_HINT_HOLD`.
+    /// `tab_hints_probe` shows them with no key, for a picture.
+    tab_hints: bool,
+    tab_hints_probe: bool,
     /// A press on the top strip that may become a drag of the window, and
     /// a press something on the strip (a tab, a button) took for itself;
     /// see `drag_region`.
@@ -1210,6 +1247,38 @@ impl Workbench {
             self.save_ui(true);
             cx.notify();
         }
+    }
+
+    /// ⌘ (Ctrl elsewhere) held by itself for `TAB_HINT_HOLD` shows each
+    /// tab's number, the one ⌘ and a digit goes to, and they go when the
+    /// key is let go or another modifier joins it. A quick ⌘C never sees
+    /// them. The wait is a timer from the press, answered only if that
+    /// press is still the one held.
+    fn modifiers_changed(&mut self, m: &Modifiers, cx: &mut Context<Self>) {
+        let alone = m.secondary() && m.number_of_modifiers() == 1;
+        if alone == self.hint_press.is_some() {
+            return;
+        }
+        if !alone {
+            self.hint_press = None;
+            if std::mem::take(&mut self.tab_hints) {
+                cx.notify();
+            }
+            return;
+        }
+        self.hint_presses += 1;
+        let press = self.hint_presses;
+        self.hint_press = Some(press);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TAB_HINT_HOLD).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.hint_press == Some(press) && !this.tabs.is_empty() {
+                    this.tab_hints = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// ⌘1 to ⌘9: that tab, or the last one when there are fewer.
@@ -1699,6 +1768,7 @@ impl Workbench {
             shells_open: None,
             shell_tails: HashMap::new(),
             term_auto: false,
+            term_shown: std::cell::RefCell::new(TermShown::default()),
             term_dismissed: None,
             term_focus: cx.focus_handle(),
             term_focus_due: None,
@@ -1768,6 +1838,10 @@ impl Workbench {
             tab_widths: HashMap::new(),
             tabs_n: 0,
             drag_tab: None,
+            hint_press: None,
+            hint_presses: 0,
+            tab_hints: false,
+            tab_hints_probe: false,
             win_move: false,
             press_taken: false,
             startup_open,
@@ -2284,6 +2358,11 @@ impl Workbench {
                 cx.notify();
             }
             Some("float") => self.set_float(true, cx),
+            // The tabs' numbers, as ⌘ held shows them.
+            Some("tabhints") => {
+                self.tab_hints_probe = true;
+                cx.notify();
+            }
             Some("page:sessions") => self.show_sessions(Scope::All, cx),
             Some(t) if t.starts_with("sessions:") => self.show_sessions_in(Scope::All, Some(t["sessions:".len()..].to_string()), cx),
             Some("page:board") => {
@@ -6048,6 +6127,8 @@ impl Workbench {
                 .absolute()
                 .size_full(),
             );
+        let hints = self.tab_hints || self.tab_hints_probe;
+        let last = self.tabs.len().saturating_sub(1);
         for (ix, key) in self.tabs.clone().into_iter().enumerate() {
             let r = self.refs.iter().find(|r| key_of(r) == key).cloned();
             let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "untitled".into());
@@ -6071,14 +6152,17 @@ impl Workbench {
             let (from, to) = if width.at.elapsed() < TAB_ANIM { (width.from, width.to) } else { (width.to, width.to) };
             let tab = h_flex()
                 .id(ElementId::Name(format!("tab-{key}").into()))
-                .h(px(30.))
-                .pl(px(10.))
-                .pr(px(6.))
+                .size_full()
+                .pl(px(9.))
+                .pr(px(5.))
                 .gap(px(6.))
                 .items_center()
                 .rounded(px(8.))
+                // Always there, so nothing moves when it shows: the
+                // outline every tab wears while the numbers are up.
+                .border_1()
+                .border_color(if hints { theme.border } else { gpui::transparent_black() })
                 .cursor_pointer()
-                .flex_shrink_0()
                 .overflow_hidden()
                 .when(active, |d| d.bg(theme.muted))
                 .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
@@ -6115,7 +6199,36 @@ impl Workbench {
                         }))
                         .child(Icon::new(IconName::Close).xsmall().text_color(theme.muted_foreground)),
                 );
-            row = row.child(tab.with_animation(ElementId::Name(format!("tab-w-{key}-{}", width.serial).into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, t| {
+            // The number ⌘ goes to this tab with, on a small plate set
+            // on the tab's lower edge, half over it. ⌘9 is the last tab,
+            // whichever it is, and a tab past the eighth that is not the
+            // last has no key. The tab clips what it holds, so the plate
+            // is beside it in a box of the tab's size, which is what the
+            // row lays out and what a change of width moves.
+            let digit = if ix < 8 { Some(ix + 1) } else if ix == last { Some(9) } else { None };
+            let plate = digit.filter(|_| hints).map(|n| {
+                div().absolute().left_0().right_0().bottom(px(-8.)).flex().justify_center().child(
+                    div()
+                        .h(px(16.))
+                        .min_w(px(18.))
+                        .px(px(5.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow_sm()
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground)
+                        .child(n.to_string())
+                        .with_animation("tab-hint", Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
+                )
+            });
+            let slot = div().relative().h(px(30.)).flex_shrink_0().child(tab).children(plate);
+            row = row.child(slot.with_animation(ElementId::Name(format!("tab-w-{key}-{}", width.serial).into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, t| {
                 let d = d.w(px(from + (to - from) * t));
                 if from == 0. { d.opacity(t) } else { d }
             }));
@@ -6607,10 +6720,14 @@ impl Workbench {
                     .children(shells)
                     .children(status.filter(|_| !covered))
                     .children(waiting.filter(|_| !covered))
-                    .children(terminal)
-                    .children(dialog)
-                    .child(self.render_permissions(cx))
-                    .child(self.render_composer(cx)),
+                    // The terminal card brings its own gap (see
+                    // `render_terminal`), so it sits in a column with
+                    // none, over the rest.
+                    .child(
+                        v_flex().w_full().items_center().children(terminal).child(
+                            v_flex().w_full().items_center().gap(px(8.)).children(dialog).child(self.render_permissions(cx)).child(self.render_composer(cx)),
+                        ),
+                    ),
             )
             .into_any_element()
     }
@@ -6732,8 +6849,65 @@ impl Workbench {
     /// theme was made for; the keys pressed on it go to Claude Code, and
     /// it leaves when what it showed is done (`back_from_terminal`).
     fn render_terminal(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sid = self.term_open.as_ref().filter(|s| **s == r.session_id)?;
-        let pty = self.hub.terminal_for(sid)?;
+        // Asked for before the picker is drawn, and still up for a moment
+        // after it closes: the screen is then the whole conversation, and
+        // drawing that made the card jump from tall to small and back.
+        // Nothing is drawn until there is something to show: a picker, or
+        // a screen the terminal is waiting on.
+        // "Waiting" is the registry's word as last read, a second old at
+        // most: for that long after a pick it still says so, with the
+        // picker gone and the conversation back on the screen. A screen
+        // with Claude Code's prompt on it is waiting on nothing.
+        let live = self.term_open.as_ref().filter(|s| **s == r.session_id).and_then(|sid| {
+            let screen = self.hub.terminal_for(sid)?.rows();
+            let waiting = self.term_auto || self.hub.peer_for(sid).is_some_and(|p| p.status == "waiting");
+            if !emaki_core::pty::picker_up(&screen) && (!waiting || driver::prompt_on_screen(&emaki_core::pty::styled(&screen)).is_some()) {
+                return None;
+            }
+            Some(emaki_core::pty::panel_rows(screen))
+        });
+        // The card comes and goes over a moment (`TERM_ANIM`): once the
+        // screen has nothing for it, it is drawn that long again from the
+        // rows it last had, fading, and takes no click meanwhile.
+        let (rows, leaving, serial) = {
+            let mut shown = self.term_shown.borrow_mut();
+            let now = std::time::Instant::now();
+            match live {
+                Some(rows) => {
+                    if !shown.on || shown.sid != r.session_id {
+                        shown.on = true;
+                        shown.sid = r.session_id.clone();
+                        shown.at = now;
+                        shown.serial += 1;
+                    }
+                    shown.live = now;
+                    shown.rows = rows.clone();
+                    (rows, false, shown.serial)
+                }
+                None => {
+                    if shown.on {
+                        shown.on = false;
+                        shown.serial += 1;
+                        // A card last drawn a while ago (the person was
+                        // on another page) does not go: it is gone.
+                        if shown.sid == r.session_id && now.duration_since(shown.live) < Duration::from_millis(500) {
+                            shown.at = now;
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(TERM_ANIM).await;
+                                let _ = this.update(cx, |_, cx| cx.notify());
+                            })
+                            .detach();
+                        } else {
+                            shown.rows.clear();
+                        }
+                    }
+                    if shown.sid != r.session_id || shown.rows.is_empty() || now.duration_since(shown.at) >= TERM_ANIM {
+                        return None;
+                    }
+                    (shown.rows.clone(), true, shown.serial)
+                }
+            }
+        };
         let theme = cx.theme().clone();
         let (ground, ink): (u32, u32) = if claude_theme_light() { (0xfaf9f5, 0x1f1e1d) } else { (0x1f1e1d, 0xe8e6dc) };
         let hsla = |c: u32| -> Hsla { rgb(c).into() };
@@ -6743,18 +6917,7 @@ impl Workbench {
         };
         // What the pointer can press, as the keys that do it: Claude
         // Code's own interface takes no mouse (`pty::hits`).
-        let screen = pty.rows();
-        // Asked for before the picker is drawn, and still up for a moment
-        // after it closes: the screen is then the whole conversation, and
-        // drawing that made the card jump from tall to small and back.
-        // Nothing is drawn until there is something to show: a picker, or
-        // a screen the terminal is waiting on.
-        let waiting = self.term_auto || self.hub.peer_for(sid).is_some_and(|p| p.status == "waiting");
-        if !emaki_core::pty::picker_up(&screen) && !waiting {
-            return None;
-        }
-        let rows = emaki_core::pty::panel_rows(screen);
-        let hits = emaki_core::pty::hits(&rows);
+        let hits = if leaving { Vec::new() } else { emaki_core::pty::hits(&rows) };
         let mut lines: Vec<AnyElement> = Vec::new();
         for (rix, row) in rows.iter().enumerate() {
             let mut text = String::new();
@@ -6837,13 +7000,16 @@ impl Workbench {
             lines.push(h_flex().items_start().h(px(17.)).whitespace_nowrap().children(kids).into_any_element());
         }
         let quiet = hsla(mix(ink, ground, 0.45));
-        Some(
+        // The card's height, which the animation runs: its head (35), a
+        // row each (17), the foot's padding (12) and the border (2).
+        let tall = 49. + 17. * lines.len() as f32;
+        let card =
             v_flex()
                 .id("terminal-card")
                 .key_context(TERMINAL_CONTEXT)
                 .track_focus(&self.term_focus)
                 .w_full()
-                .max_w(CONTENT_W)
+                .flex_shrink_0()
                 .rounded(px(14.))
                 .border_1()
                 .border_color(theme.primary)
@@ -6892,7 +7058,31 @@ impl Workbench {
                                 .child(Icon::new(IconName::Close).with_size(px(12.)).text_color(quiet)),
                         ),
                 )
-                .child(div().px(px(12.)).pb(px(12.)).font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(hsla(ink)).children(lines))
+                .child(div().px(px(12.)).pb(px(12.)).font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(hsla(ink)).children(lines));
+        // It opens upward from the composer and closes back down onto
+        // it, fading: the card stays where it is, held by its foot, and
+        // the room it is given grows or shrinks over it.
+        // The gap between the card and the composer is part of what grows
+        // and shrinks: the card carries it as a foot of its own, in a
+        // column that sets none. Set by the column, the gap came and went
+        // whole with the card, a jump of its 8px at the end of the
+        // closing. (A negative margin to take the column's gap back was
+        // tried: at a height of nothing the margin was not applied, and
+        // as padding the foot kept the room from going under 8px, so
+        // either way everything stood 8px off for the last frames.)
+        let gap = 8.;
+        Some(
+            v_flex()
+                .w_full()
+                .max_w(CONTENT_W)
+                .justify_end()
+                .overflow_hidden()
+                .child(card)
+                .child(div().h(px(gap)).flex_shrink_0())
+                .with_animation(ElementId::Name(format!("terminal-card-{serial}").into()), Animation::new(TERM_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    let t = if leaving { 1. - t } else { t };
+                    d.h(px(((tall + gap) * t).round())).opacity(t)
+                })
                 .into_any_element(),
         )
     }
@@ -7846,10 +8036,10 @@ impl Workbench {
                         // A mode changed in a terminal that cannot be read
                         // is not known until the next turn.
                         let mode_text = if mode.is_empty() { PillText { value: String::new(), tint: Tint::Plain, tail: "Mode" } } else { mode_pill(&options, &mode, &theme) };
-                        d.child(composer_pill("mode", "icons/shield.svg", mode_text, cx).on_click(to(Pill::Mode)))
-                            .when(on_session, |d| d.child(composer_pill("effort", "icons/gauge.svg", effort_text.clone(), cx).on_click(to(Pill::Effort))))
+                        d.child(arrow_over(composer_pill("mode", "icons/shield.svg", mode_text, cx).on_click(to(Pill::Mode))))
+                            .when(on_session, |d| d.child(arrow_over(composer_pill("effort", "icons/gauge.svg", effort_text.clone(), cx).on_click(to(Pill::Effort)))))
                             .child(div().flex_1())
-                            .child(composer_pill("model", "icons/box.svg", PillText::plain(model_name(&options, &model)), cx).on_click(to(Pill::Model)))
+                            .child(arrow_over(composer_pill("model", "icons/box.svg", PillText::plain(model_name(&options, &model)), cx).on_click(to(Pill::Model))))
                     })
                     .when(!settable, |d| d.child(div().flex_1()))
                     .child(send),
@@ -8860,6 +9050,35 @@ fn composer_pill(id: &'static str, icon: &'static str, label: PillText, cx: &App
         )
 }
 
+/// A button under which the pointer is the arrow and nothing else. The
+/// window's cursor is the last one asked for by anything the pointer is
+/// over, and over the pills that was at times the text cursor, flickering
+/// against the button's arrow. A cursor asked for the whole window is
+/// taken before any of those, so while the pointer is on the button the
+/// arrow is asked for that way.
+fn arrow_over(button: impl IntoElement) -> Div {
+    div().relative().flex_shrink_0().child(button).child(
+        canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            |_, hitbox, window, _| {
+                let over = hitbox.is_hovered(window);
+                if over {
+                    window.set_window_cursor_style(CursorStyle::Arrow);
+                }
+                // Painted again as the pointer comes and goes, whatever
+                // else would or would not have drawn the frame.
+                window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
+                    if phase.capture() && hitbox.is_hovered(window) != over {
+                        window.refresh();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0(),
+    )
+}
+
 /// A pill that opens a list of choices, in the settings panel: the mode
 /// and the model a new session starts in. (The pills under the composer
 /// had these lists too, until every choice on a session came to be made
@@ -8918,6 +9137,12 @@ impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_draft(window, cx);
         self.sync_folders(cx);
+        // The key let go while the window was not looking (⌘Tab to
+        // another app sends no release here) takes the numbers with it.
+        if self.hint_press.is_some() && !(window.is_window_active() && window.modifiers().secondary()) {
+            self.hint_press = None;
+            self.tab_hints = false;
+        }
         // The focused element must be one this page draws. gpui dispatches a
         // keystroke from the focused node, or from the window root when that
         // node is not in the frame, and the root is above every handler here:
@@ -8990,6 +9215,7 @@ impl Render for Workbench {
             .id("workbench")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, _, cx| this.modifiers_changed(&e.modifiers, cx)))
             // A raw wheel listener in the capture phase, registered at paint
             // (nothing is drawn): see `route_scroll`.
             .child({

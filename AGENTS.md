@@ -121,6 +121,7 @@ EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value withou
 EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to another session, or to the new-session page
 EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar
 EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it; page:board is the board
+EMAKI_GO="open:<id2>;tabhints" EMAKI_OPEN=<id> ./target/debug/Emaki  # the tabs' numbers, as holding ⌘ shows them
 EMAKI_GO="page:sessions;sessions:<folder>" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sessions page's folders, then inside one
 EMAKI_GO="side:320;sidefit" EMAKI_OPEN=<id> ./target/debug/Emaki  # drag the sidebar's edge to that x; then the double click on it
 EMAKI_GO=shells EMAKI_OPEN=<id> ./target/debug/Emaki  # open the card of commands running in the background
@@ -1045,7 +1046,13 @@ A light grey pill with an icon in front (`icons/shield.svg`, `gauge.svg`,
 `box.svg`), darker under the pointer, darker again while pressed,
 no tooltip and no caret (`composer_pill`; the toolkit draws a custom
 button colour at a fifth of its strength, so the resting grey is the
-muted ink thinned). A pill is a button, and the choice is made in the
+muted ink thinned). The pointer over a pill is the arrow and nothing
+else (`arrow_over`): the window's cursor is the last one asked for by
+anything under the pointer, and over the pills it flickered at times
+between the text cursor and the arrow; a cursor asked for the whole
+window (`set_window_cursor_style`) is taken before any of those, so
+the pill asks that way while the pointer is on it. What asked for the
+text cursor there was not found. A pill is a button, and the choice is made in the
 session's terminal with Claude Code's own picker
 (`Workbench::pick_in_terminal`, through `via_terminal`, which opens the
 terminal when the session has none):
@@ -1550,7 +1557,33 @@ is in the window. The card is asked for at the click, before the picker
 is drawn, and is still asked for an instant after it closes; drawn
 then, it showed the whole conversation's screen and jumped from tall to
 small. So nothing is drawn until a picker is on the screen
-(`pty::picker_up`) or the registry says the terminal is waiting.
+(`pty::picker_up`) or the registry says the terminal is waiting, and
+never a screen with Claude Code's prompt on it
+(`driver::prompt_on_screen`): the registry's word is as last read, up
+to a second old, and for that long after a pick it still said
+`waiting` over the whole conversation, which flashed tall on the card
+(2026-10-06). A picker's screen has no prompt, checked with
+`emaki-core pty` on 2.1.291 for `/effort` and `/model`.
+The card comes and goes over `TERM_ANIM` (200ms): it opens upward
+from the composer and closes back down onto it, fading, held by its
+foot while the room it is given grows or shrinks (its height is known,
+a head and 17px a row). Whether it shows is decided at each draw, so
+the coming and going are seen there (`TermShown`, behind a `RefCell`):
+once the screen has nothing for it, it is drawn that long again from
+the rows it last had, taking no click. The 8px between the card and
+the composer is part of the height that runs: the card carries it as a
+foot of its own (an element, 8px) and sits in a column that sets no
+gap, over the rest (`render_detail`). Set by the column, the gap went
+whole when the card did, which the person saw as a small stop at the
+end of the closing. A negative margin to take the column's gap back
+made it worse, a shake: with the foot as padding the room could not go
+under 8px, and at a height of nothing the margin was not applied, so
+either way everything stood 8px off for the last frames. The height is
+whole pixels. Checked by printing the card's top and bottom at every
+frame in a second copy: the bottom stayed at 576 through both
+animations and the top went 196 to 576 without turning back. Checked with `EMAKI_SHOT` on
+the two end states (`EMAKI_GO=pill:effort`, and `pill:model` with
+`EMAKI_TERM_KEYS=esc`); the moving frames were not captured.
 It shows for the model and effort pills at once, for a typed command
 once the registry says `waiting` (`/status`, `/config`), and by itself
 for a waiting screen `dialog_on_screen` cannot read (`term_auto`); it
@@ -2028,11 +2061,25 @@ place under the pointer as the pointer moves; the order is kept in
 `ui.json`): its title follows the pointer on a plate (`TabGhost`) and
 its own tab is dimmed meanwhile. The others change places at once, with
 no slide. ⌘1 to ⌘9 (Ctrl elsewhere) go to that tab, or to the last one
-when there are fewer, as Safari does (`go_tab`). A right click on a tab
+when there are fewer, as Safari does (`go_tab`). ⌘ (Ctrl elsewhere)
+held by itself for `TAB_HINT_HOLD` (half a second) shows which digit
+that is: each tab wears an outline and its number on a small plate set
+on its lower edge, half over it, and they go when the key is let go or
+another modifier joins it (`modifiers_changed`, from the workbench's
+`on_modifiers_changed`; a timer from the press, answered only if that
+press is still the one held, so a quick ⌘C never shows them). The last
+tab says 9 once there are more than eight, and one between has no
+number. A release the window never hears (⌘Tab away) is caught at the
+next draw, which asks the window what is held. The tab clips what it
+holds, so the plate is beside it in a box of the tab's size (the slot
+the row lays out and a change of width moves), and the outline is
+always there, clear until then, so nothing shifts. A right click on a tab
 is the session's menu from the sidebar, Rename and Reveal. Checked with
 `EMAKI_SHOT`: eight tabs sharing the row, and a third tab caught
 part-grown and part-faded a moment after `EMAKI_GO="open:<id>;open:<id3>"`
-opened it. Not driven from a script: the drag, the keys, the right
+opened it, and the numbers and outlines on four tabs with
+`EMAKI_GO=tabhints`, which shows them with no key held. Not driven
+from a script: the drag, the keys, the held ⌘ and its release, the right
 click (a synthetic press does not reach a handler in a background
 window).
 
