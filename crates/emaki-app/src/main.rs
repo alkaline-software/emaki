@@ -119,7 +119,7 @@ fn app_menus() -> Vec<Menu> {
         disabled: false,
         items: vec![
             MenuItem::action("Board", GoBoard),
-            MenuItem::action("Sessions", GoSessions),
+            MenuItem::action("Projects", GoSessions),
             MenuItem::action("Search", ToggleSearch),
             MenuItem::separator(),
             MenuItem::action("Find in Conversation", FindInPage),

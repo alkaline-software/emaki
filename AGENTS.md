@@ -120,6 +120,7 @@ EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value withou
 EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to another session, or to the new-session page
 EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar
 EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it; page:board is the board
+EMAKI_GO="page:sessions;sessions:<folder>" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sessions page's folders, then inside one
 EMAKI_GO=menu EMAKI_OPEN=<id> ./target/debug/Emaki  # the session's right-click menu; renaming shows the rename field, name:<words> names it
 EMAKI_GO=dialog:2 EMAKI_OPEN=<id> ./target/debug/Emaki  # press that in the terminal's dialog (a digit, or tab); answer:<words> types an answer, goto:<n> goes to that tab
 EMAKI_KEYS=down,down,tab EMAKI_TYPE=/mod ./target/debug/Emaki  # press the slash list's keys (up, down, tab, esc)
@@ -206,6 +207,47 @@ the float with a
 `mouseMoved` `CGEvent` posted to the pid onto the button, and its going
 with one posted off the sidebar. A real click on the button, and so the
 hover it must not count, was not driven from a script.
+
+**The sidebar is a name, three places, and two cards.** Under the
+wordmark a hairline, then New session, Board and Projects (the entry
+was "Sessions" until the page behind it listed folders first, then
+"Folders" for an hour; ⌘L and `GoSessions` are unchanged; its icon is
+Phosphor's `briefcase`, so it is not the folder the rows below wear);
+then Agents
+and Projects, each on a card of its own (`card` in `render_sidebar`: a
+rounded outline in the sidebar's border colour on a ground a shade
+toward the page's, its name at the top, which does not scroll). Each
+card scrolls by itself with the toolkit's fading scrollbar at its edge
+(`vertical_scrollbar`, as the settings panel and the conversation have):
+the agents' shows `SIDE_AGENTS` rows (4) and scrolls for the rest
+(`agents_scroll`), the folders' takes the height that is left
+(`side_scroll`). The two are panes of their own to `route_scroll`
+(`Pane::Agents`, by the scroller's bounds, and `Pane::Sidebar` for the
+rest of the sidebar), so a flick in one that the pointer carries into
+the other stays with the one it began in, as between the sidebar and
+the conversation; at first the sidebar was one pane, and momentum from
+the agents' card scrolled the folders. Not driven from a script.
+Until 2026-10-06 the two were headed lists in one scroller under the
+three entries, with nothing between the name and the entries.
+
+**The sessions page has two levels, as the sidebar has.** A project is
+a folder, and the window says "project" for the list and keeps the
+folder icon on each row: the page is "Your projects" (or "Claude Code
+projects", "Kept projects"), the card "Projects". The top is
+the folders (`sessions_folder` none): a row each, headed by when it was
+last worked in, with its count, its path and a chip for the most
+pressing of its live sessions; a click goes inside
+(`show_sessions_in`), where the sessions are headed by when under a
+"Projects › folder" line that goes back up. The pills (All, one per
+agent, Kept only) narrow either level and stay as the level changes;
+inside a folder they count that folder's own. "N more" under a folder
+in the sidebar goes inside that folder, "N more" at the foot of the
+folders and the Projects entry go to the top, and an agent's row goes
+to the top narrowed to that agent. A right click is Open in Finder on a
+folder and the session's menu on a session. Before, the page was one
+flat list of every session with the folder as a fourth pill. Checked
+with `EMAKI_SHOT` on both levels and on the sidebar; a click on a row
+and a real scroll inside either card were not driven from a script.
 
 **Every icon is Phosphor's, regular weight.** The toolkit ships
 Lucide's and asks for each by a file name (`IconName::Close` is
