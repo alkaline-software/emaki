@@ -204,14 +204,16 @@ pub fn at_tokens(text: &str) -> Vec<(usize, usize, String)> {
 }
 
 /// The part of an "@" token that names something on disk under `cwd`:
-/// the whole of it, or what is left once the sentence's own punctuation
-/// is taken off its end ("see @src/main.rs."). None when neither is there.
+/// what is left once the sentence's own punctuation is taken off its end
+/// ("see @src/main.rs."), or the whole of it. The shorter is asked first:
+/// Windows answers for "main.rs." with "main.rs", so the whole would take
+/// the sentence's full stop with it. None when neither is there.
 pub fn named<'a>(cwd: &str, path: &'a str) -> Option<&'a str> {
     if cwd.is_empty() || path.is_empty() {
         return None;
     }
     let bare = path.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
-    [path, bare].into_iter().find(|p| !p.is_empty() && resolve(cwd, p).exists())
+    [bare, path].into_iter().find(|p| !p.is_empty() && resolve(cwd, p).exists())
 }
 
 /// The "@" token the caret is in or just after, while one is being typed:
