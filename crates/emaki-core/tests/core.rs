@@ -1565,3 +1565,182 @@ fn at_names_files_under_the_folder() {
     assert_eq!(files::at_token_at("(@RE", 4), Some((1, 4, "RE".to_string())));
     assert_eq!(files::written("my file.txt"), "@\"my file.txt\"");
 }
+
+#[test]
+fn outline_says_what_was_asked_and_what_came_of_it() {
+    let rows = vec![
+        user("[Image #1] **fix** the `tabs` please\nthey blink", "2026-10-06T03:00:00.000Z"),
+        assistant(vec![json!({"type": "text", "text": "Looking."})], "tool_use", "2026-10-06T03:00:01.000Z"),
+        assistant(vec![json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}})], "tool_use", "2026-10-06T03:00:02.000Z"),
+        tool_result("t1", "ok", "2026-10-06T03:00:03.000Z"),
+        assistant(vec![json!({"type": "text", "text": "## Done\n\nThe tabs no longer blink, see [the note](https://x.y).\n\nMore."})], "end_turn", "2026-10-06T03:00:04.000Z"),
+        user("and the sidebar?", "2026-10-06T03:01:00.000Z"),
+        assistant(vec![json!({"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}})], "tool_use", "2026-10-06T03:01:02.000Z"),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let o = emaki_core::outline::of(&s);
+    assert_eq!(o.len(), 2);
+    assert_eq!((o[0].round, o[0].title.as_str(), o[0].gist.as_str(), o[0].tools), (0, "fix the tabs please", "Done", 1));
+    assert_eq!((o[1].title.as_str(), o[1].gist.as_str()), ("and the sidebar?", "1 tool call"));
+    assert_eq!(emaki_core::outline::first_line("```\ncode\n```\n---\n- see [the note](https://x.y) now"), "see the note now");
+}
+
+#[test]
+fn git_marks_files_and_the_folders_that_hold_them() {
+    use emaki_core::git::{self, State};
+    let dir = tempfile::tempdir().unwrap();
+    // Not canonical on purpose: on macOS the temp folder is behind a symlink.
+    let root = dir.path().to_path_buf();
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(&root).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+        assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+    };
+    assert!(git::status(&root).is_none(), "a folder in no repository has no status");
+    run(&["init", "-q"]);
+    std::fs::create_dir_all(root.join("src/deep")).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("src/deep/a.rs"), "a").unwrap();
+    std::fs::write(root.join("src/b.rs"), "b").unwrap();
+    std::fs::write(root.join("docs/gone.md"), "x").unwrap();
+    std::fs::write(root.join("same.txt"), "same").unwrap();
+    std::fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "first"]);
+
+    std::fs::write(root.join("src/deep/a.rs"), "changed").unwrap();
+    std::fs::write(root.join("src/new.rs"), "new").unwrap();
+    std::fs::create_dir_all(root.join("fresh/inner")).unwrap();
+    std::fs::write(root.join("fresh/inner/f.txt"), "f").unwrap();
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::write(root.join("target/debug/bin"), "x").unwrap();
+    std::fs::write(root.join("out.log"), "x").unwrap();
+    std::fs::remove_file(root.join("docs/gone.md")).unwrap();
+    std::fs::write(root.join("staged.txt"), "s").unwrap();
+    run(&["add", "staged.txt"]);
+
+    // Asked from a folder inside, the answer is still the repository's.
+    let st = git::status(&root.join("src")).unwrap();
+    let state = |p: &str, dir: bool| st.mark(&root.join(p), dir).map(|m| (m.state, m.folder));
+    assert_eq!(state("src/deep/a.rs", false), Some((State::Modified, false)));
+    assert_eq!(state("src/new.rs", false), Some((State::Untracked, false)));
+    assert_eq!(state("staged.txt", false), Some((State::Added, false)));
+    assert_eq!(state("src/b.rs", false), None);
+    assert_eq!(state("same.txt", false), None);
+    // A folder wears the most pressing thing under it: new before changed.
+    assert_eq!(state("src/deep", true), Some((State::Modified, true)));
+    assert_eq!(state("src", true), Some((State::Untracked, true)));
+    // A file that is gone still marks the folder it was in.
+    assert_eq!(state("docs", true), Some((State::Deleted, true)));
+    // Git names an untracked or ignored folder once; what is inside takes its state.
+    assert_eq!(state("fresh", true), Some((State::Untracked, true)));
+    assert_eq!(state("fresh/inner", true), Some((State::Untracked, true)));
+    assert_eq!(state("fresh/inner/f.txt", false), Some((State::Untracked, false)));
+    assert_eq!(state("target", true), Some((State::Ignored, true)));
+    assert_eq!(state("target/debug/bin", false), Some((State::Ignored, false)));
+    assert_eq!(state("out.log", false), Some((State::Ignored, false)));
+    assert_eq!(State::Ignored.letter(), None);
+    assert_eq!(State::Untracked.letter(), Some("U"));
+
+    // What a commit would be asked about: every file by itself, nothing ignored.
+    let changed: Vec<String> = st.changed().iter().map(|(p, _)| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")).collect();
+    assert_eq!(changed, ["docs/gone.md", "fresh/inner/f.txt", "src/deep/a.rs", "src/new.rs", "staged.txt"]);
+    assert_eq!(st.changed_count(), 5);
+
+    // A changed file against the last commit, a new one as all new lines.
+    use emaki_core::git::Row;
+    let d = git::diff(&root, &root.join("src/deep/a.rs"), State::Modified);
+    assert_eq!((d.added, d.removed), (1, 1));
+    assert_eq!(d.rows[1], Row::Changed { left: Some((1, "a".into())), right: Some((1, "changed".into())) });
+    let d = git::diff(&root, &root.join("src/new.rs"), State::Untracked);
+    assert_eq!(d.rows, [Row::Changed { left: None, right: Some((1, "new".into())) }]);
+    let d = git::diff(&root, &root.join("docs/gone.md"), State::Deleted);
+    assert_eq!(d.rows[1], Row::Changed { left: Some((1, "x".into())), right: None });
+    let d = git::diff(&root, &root.join("staged.txt"), State::Added);
+    assert_eq!((d.added, d.removed), (1, 0));
+
+    // Lines taken out and the lines put in after them sit side by side.
+    let d = git::parse_diff("diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -3,5 +3,6 @@ fn main() {\n keep\n-one\n-two\n+uno\n+dos\n+tres\n same\n-gone\n\\ No newline at end of file\n");
+    assert_eq!(
+        d.rows,
+        [
+            Row::Hunk("@@ -3,5 +3,6 @@ fn main() {".into()),
+            Row::Same { old: 3, new: 3, text: "keep".into() },
+            Row::Changed { left: Some((4, "one".into())), right: Some((4, "uno".into())) },
+            Row::Changed { left: Some((5, "two".into())), right: Some((5, "dos".into())) },
+            Row::Changed { left: None, right: Some((6, "tres".into())) },
+            Row::Same { old: 6, new: 7, text: "same".into() },
+            Row::Changed { left: Some((7, "gone".into())), right: None },
+        ]
+    );
+    assert!(git::parse_diff("diff --git a/p.png b/p.png\nBinary files a/p.png and b/p.png differ\n").binary);
+
+    // A rename is followed by the path it came from, which is not an entry.
+    let st = git::parse(std::path::Path::new("/r"), "R  new.txt\0old.txt\0 M old.txt\0UU both.txt\0");
+    let at = |p: &str| st.mark(std::path::Path::new(p), false).map(|m| m.state);
+    assert_eq!(at("/r/new.txt"), Some(State::Renamed));
+    assert_eq!(at("/r/old.txt"), Some(State::Modified));
+    assert_eq!(at("/r/both.txt"), Some(State::Conflict));
+}
+
+#[test]
+fn git_lists_branches_and_switches_between_them() {
+    use emaki_core::git;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let run = |at: &std::path::Path, args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]).args(args).output().unwrap();
+        assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+    };
+    assert!(git::branches(&root).is_none(), "a folder in no repository has no branches");
+    let origin = root.join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    run(&origin, &["init", "-q"]);
+    // Before the first commit the branch is there by name alone.
+    let b = git::branches(&origin).unwrap();
+    assert_eq!((b.current.as_deref(), b.head.as_str(), b.local.as_slice()), (Some("main"), "", &["main".to_string()][..]));
+    std::fs::write(origin.join("a.txt"), "one").unwrap();
+    run(&origin, &["add", "."]);
+    run(&origin, &["commit", "-q", "-m", "first"]);
+    run(&origin, &["branch", "theirs"]);
+
+    let work = root.join("work");
+    run(&root, &["clone", "-q", "origin", "work"]);
+    run(&work, &["branch", "alpha"]);
+    run(&work, &["branch", "zeta"]);
+    let b = git::branches(&work).unwrap();
+    assert_eq!(b.current.as_deref(), Some("main"));
+    assert_eq!(b.default.as_deref(), Some("main"));
+    // The default first, then by name; a remote's branch only when it is not here too.
+    assert_eq!(b.local, ["main", "alpha", "zeta"]);
+    assert_eq!(b.remote, ["theirs"]);
+    assert_eq!(b.label(), "main");
+
+    git::switch(&work, "alpha").unwrap();
+    assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("alpha"));
+    // A branch only the remote has becomes a local one.
+    git::switch(&work, "theirs").unwrap();
+    let b = git::branches(&work).unwrap();
+    assert_eq!(b.current.as_deref(), Some("theirs"));
+    assert!(b.remote.is_empty() && b.local.contains(&"theirs".to_string()));
+    git::create(&work, "fresh/idea").unwrap();
+    assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("fresh/idea"));
+    assert!(git::create(&work, "fresh/idea").is_err(), "a name already taken is refused");
+    assert!(git::switch(&work, "no-such-branch").is_err());
+
+    // A change the switch would write over is refused, in git's words, and kept.
+    std::fs::write(work.join("a.txt"), "two").unwrap();
+    run(&work, &["commit", "-q", "-am", "second"]);
+    std::fs::write(work.join("a.txt"), "mine, not committed").unwrap();
+    let why = git::switch(&work, "main").unwrap_err();
+    assert!(why.contains("overwritten"), "{why}");
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "mine, not committed");
+    assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("fresh/idea"));
+
+    // Detached, the place is the commit.
+    run(&work, &["checkout", "-q", "--detach"]);
+    let b = git::branches(&work).unwrap();
+    assert!(b.current.is_none() && !b.head.is_empty() && b.label() == b.head);
+
+    assert!(git::valid_name("v0.1.8-next") && git::valid_name("feature/x"));
+    assert!(!git::valid_name("") && !git::valid_name("two words") && !git::valid_name("-b") && !git::valid_name("a..b"));
+}

@@ -16,6 +16,10 @@ pub struct Assets;
 const OWN: &[(&str, &[u8])] = &[
     ("icon/app.png", include_bytes!("../assets/icon/icon-128.png")),
     ("icons/briefcase.svg", include_bytes!("../assets/icons/briefcase.svg")),
+    ("icons/git-diff.svg", include_bytes!("../assets/icons/git-diff.svg")),
+    ("icons/git-branch.svg", include_bytes!("../assets/icons/git-branch.svg")),
+    ("icons/tree-view.svg", include_bytes!("../assets/icons/tree-view.svg")),
+    ("icons/list-bullets.svg", include_bytes!("../assets/icons/list-bullets.svg")),
     ("icons/a-large-small.svg", include_bytes!("../assets/icons/a-large-small.svg")),
     ("icons/arrow-down.svg", include_bytes!("../assets/icons/arrow-down.svg")),
     ("icons/arrow-left.svg", include_bytes!("../assets/icons/arrow-left.svg")),
@@ -136,6 +140,9 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if let Some((_, bytes)) = OWN.iter().find(|(p, _)| *p == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
+        }
+        if path.starts_with(crate::file_icons::PREFIX) {
+            return Ok(crate::file_icons::load(path));
         }
         gpui_component_assets::Assets.load(path)
     }

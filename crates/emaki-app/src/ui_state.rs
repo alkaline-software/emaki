@@ -22,6 +22,11 @@ pub struct UiState {
     pub sidebar_open: Option<bool>,
     /// How wide the sidebar was dragged to.
     pub sidebar_w: Option<f32>,
+    /// The files panel and the outline beside a conversation.
+    pub files_on: Option<bool>,
+    pub outline_on: Option<bool>,
+    /// How wide that panel was dragged to.
+    pub panel_w: Option<f32>,
     /// `board`, `sessions`, `session` or `new`.
     pub page: String,
     /// Session keys (`<agent>:<id>`) with a tab, in tab order.

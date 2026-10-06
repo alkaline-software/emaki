@@ -42,7 +42,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -65,20 +65,22 @@ const SIDEBAR_FOLD_AT: Pixels = px(170.);
 const SIDEBAR_GRIP: Pixels = px(8.);
 /// What a right click offers: where it was made, and the choices.
 #[derive(Clone)]
-struct Menu {
+pub(crate) struct Menu {
     at: Point<Pixels>,
     items: Vec<(&'static str, MenuDo)>,
 }
 
 /// One choice on a right-click menu.
 #[derive(Clone)]
-enum MenuDo {
+pub(crate) enum MenuDo {
     /// Open this folder in the file manager; none when it is gone.
     OpenFolder(Option<String>),
     /// Give the session, by its key, a name of the person's own.
     Rename(String),
     /// Show the session's transcript in the file manager.
     Reveal(PathBuf),
+    /// Something asked of a file or folder in the files panel.
+    File(crate::panels::FileDo, PathBuf),
 }
 
 /// Where the person's own names for sessions are kept, by session key.
@@ -96,6 +98,8 @@ const SIDE_AGENTS: usize = 4;
 const FOLDER_ANIM: Duration = Duration::from_millis(200);
 /// How long the terminal card takes to come, and to go.
 const TERM_ANIM: Duration = Duration::from_millis(200);
+/// How long a panel beside the conversation takes to come.
+pub(crate) const PANEL_ANIM: Duration = Duration::from_millis(200);
 
 /// The terminal card as it was last drawn. Whether it shows is decided
 /// at each draw, from the screen, so its coming and going are seen
@@ -270,6 +274,16 @@ pub enum Pane {
     /// The rest of the sidebar: the folders card is what scrolls there.
     Sidebar,
     Content,
+    /// The two panels beside a conversation.
+    Files,
+    Outline,
+    /// What scrolls on a card or a sheet over the window: the list of
+    /// branches, and the comparison's files and lines.
+    Branches,
+    ChangeFiles,
+    ChangeLines,
+    /// Over such a card or sheet, on nothing that scrolls.
+    Nowhere,
 }
 
 /// A wheel event this long after the previous one begins a new gesture: a
@@ -338,6 +352,9 @@ pub struct Detail {
     /// Everything in the session lowered for the find bar, built the first
     /// time it is needed and dropped whenever the session is reloaded.
     pub find: Option<Rc<FindIndex>>,
+    /// The outline's entries, made when the panel first draws them and
+    /// dropped with every reload.
+    pub outline: Option<Rc<Vec<emaki_core::outline::Entry>>>,
 }
 
 /// What the settings panel says about updates.
@@ -565,7 +582,7 @@ pub struct Workbench {
     menu: Option<Menu>,
     /// The session being renamed, by its key, and the field for its name.
     renaming: Option<String>,
-    rename_input: Entity<InputState>,
+    pub(crate) rename_input: Entity<InputState>,
     /// The name field in Settings.
     name_input: Entity<InputState>,
     /// The person's own names for sessions, by session key
@@ -743,10 +760,10 @@ pub struct Workbench {
     last_ui_save: std::time::Instant,
     /// The window is too narrow for the sidebar beside the content; it is
     /// hidden and only shows over the content, on request (`sidebar_peek`).
-    narrow: bool,
+    pub(crate) narrow: bool,
     /// The content pane's width as of the last draw, for layouts that
     /// choose their column count from it (the board).
-    pane_w: Pixels,
+    pub(crate) pane_w: Pixels,
     /// The pane the current scroll gesture began in, and when its last event
     /// came; see `route_scroll`.
     scroll_owner: Option<Pane>,
@@ -760,7 +777,7 @@ pub struct Workbench {
     settings_scroll: ScrollHandle,
     sidebar_peek: bool,
     /// How wide the sidebar is, as dragged; kept in `ui.json`.
-    sidebar_w: Pixels,
+    pub(crate) sidebar_w: Pixels,
     /// The sidebar's edge is being dragged.
     side_drag: bool,
     /// `EMAKI_GO=sidefit` asked for the fitted width at the next draw.
@@ -792,12 +809,58 @@ pub struct Workbench {
     /// a press something on the strip (a tab, a button) took for itself;
     /// see `drag_region`.
     win_move: bool,
-    press_taken: bool,
+    pub(crate) press_taken: bool,
     /// The conversations of the other open tabs, kept as they were left
     /// so that going back to one draws it at once; see `open_session`.
     stashed: HashMap<String, Detail>,
     startup_open: Option<String>,
-    focus_handle: FocusHandle,
+    pub(crate) focus_handle: FocusHandle,
+    /// The two panels beside a conversation, one on at most, as their
+    /// buttons left them (kept in `ui.json`), and the last press: what
+    /// showed before it, what after, when, and its number, for the
+    /// moment the change takes. See `panels.rs`.
+    pub(crate) files_on: bool,
+    pub(crate) outline_on: bool,
+    pub(crate) panel_anim: Option<(Option<bool>, Option<bool>, Instant, u32)>,
+    /// How wide the panel is, as dragged (kept in `ui.json`); the panel
+    /// whose edge is held; and `EMAKI_GO=panelfit` asking for the fitted
+    /// width at the next draw.
+    pub(crate) panel_w: Pixels,
+    pub(crate) panel_drag: Option<bool>,
+    pub(crate) panel_fit_wanted: bool,
+    pub(crate) tree: crate::panels::Tree,
+    pub(crate) files_scroll: ScrollHandle,
+    pub(crate) outline_scroll: ScrollHandle,
+    /// The outline's entry last marked as in view, by session, so the
+    /// outline follows the conversation only when that changes; and the
+    /// entry just clicked.
+    pub(crate) outline_at: Option<(String, usize)>,
+    pub(crate) outline_pick: Option<usize>,
+    /// The conversation is being moved to the entry chosen (`outline_go`):
+    /// whether, and the move's number, so a newer one takes it over. And
+    /// the wheel over the outline: its travel not yet spent on a step, and
+    /// when the mark last moved by it.
+    pub(crate) outline_gliding: bool,
+    pub(crate) outline_glide: u32,
+    pub(crate) outline_wheel_acc: f32,
+    pub(crate) outline_stepped: Instant,
+    /// A file shown over the window, and where it is scrolled.
+    pub(crate) file_view: Option<crate::panels::FileView>,
+    pub(crate) file_view_scroll: ScrollHandle,
+    /// The rename field is asking for a file's name, not a session's.
+    pub(crate) file_prompt: Option<crate::panels::FilePrompt>,
+    /// The list of branches, open under where its button was clicked.
+    pub(crate) branch_menu: Option<Point<Pixels>>,
+    pub(crate) branch_input: Entity<InputState>,
+    pub(crate) branch_scroll: ScrollHandle,
+    /// A switch is under way.
+    pub(crate) branch_busy: bool,
+    pub(crate) branch_probe: Option<String>,
+    /// The comparison of the folder's files against the last commit,
+    /// while it shows.
+    pub(crate) changes: Option<crate::panels::Changes>,
+    /// `EMAKI_GO=file:<path>`: shown at the next draw.
+    pub(crate) file_probe: Option<PathBuf>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -1495,6 +1558,7 @@ impl Workbench {
                 .update(cx, |this, cx| {
                     this.now = now_secs();
                     this.read_shell_tails();
+                    this.tick_files(cx);
                     // The status line's files once a minute, which is the
                     // countdown's own resolution; a session's load reads
                     // them too, and that is when they change.
@@ -1541,6 +1605,13 @@ impl Workbench {
             if let InputEvent::PressEnter { .. } = ev {
                 this.commit_rename(window, cx);
             }
+        })
+        .detach();
+        let branch_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find or create a branch…"));
+        cx.subscribe_in(&branch_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => this.branch_enter(window, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
         })
         .detach();
         let machine_name = crate::sys::user_first_name();
@@ -1828,6 +1899,31 @@ impl Workbench {
             home_scroll: ScrollHandle::new(),
             sidebar_peek: false,
             sidebar_w: ui.sidebar_w.map(px).unwrap_or(SIDEBAR_W).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            files_on: ui.files_on.unwrap_or(false),
+            outline_on: ui.outline_on.unwrap_or(true) && !ui.files_on.unwrap_or(false),
+            panel_anim: None,
+            panel_w: ui.panel_w.map(px).unwrap_or(crate::panels::PANEL_W),
+            panel_drag: None,
+            panel_fit_wanted: false,
+            tree: Default::default(),
+            files_scroll: ScrollHandle::new(),
+            outline_scroll: ScrollHandle::new(),
+            outline_at: None,
+            outline_pick: None,
+            outline_gliding: false,
+            outline_glide: 0,
+            outline_wheel_acc: 0.,
+            outline_stepped: Instant::now(),
+            file_view: None,
+            file_view_scroll: ScrollHandle::new(),
+            file_prompt: None,
+            branch_menu: None,
+            branch_input,
+            branch_scroll: ScrollHandle::new(),
+            branch_busy: false,
+            branch_probe: None,
+            changes: None,
+            file_probe: None,
             side_drag: false,
             fit_wanted: false,
             sidebar_float: false,
@@ -2309,6 +2405,9 @@ impl Workbench {
 
     /// One step of `EMAKI_GO`, on the session showing.
     fn probe_go(&mut self, step: &str, cx: &mut Context<Self>) {
+        if self.panel_probe(step, cx) {
+            return;
+        }
         match Some(step) {
             Some("terminal") => self.go_to_terminal(cx),
             Some("button:terminal") => self.open_in_terminal(cx),
@@ -2412,7 +2511,7 @@ impl Workbench {
     /// Write the window's state to `state/ui.json`. `now` forces it; otherwise
     /// writes are spaced two seconds apart, which is enough for a window being
     /// dragged.
-    fn save_ui(&mut self, now: bool) {
+    pub(crate) fn save_ui(&mut self, now: bool) {
         if !now && self.last_ui_save.elapsed() < Duration::from_secs(2) {
             return;
         }
@@ -2426,6 +2525,9 @@ impl Workbench {
             window: self.window_rect,
             sidebar_open: Some(self.sidebar_open),
             sidebar_w: Some(f32::from(self.sidebar_w)),
+            files_on: Some(self.files_on),
+            panel_w: Some(f32::from(self.panel_w)),
+            outline_on: Some(self.outline_on),
             page: page.into(),
             tabs: self.tabs.clone(),
             active: self.selected.clone().filter(|_| self.page == Page::Session),
@@ -2554,6 +2656,7 @@ impl Workbench {
                 d.session = Rc::new(session);
                 d.path = path;
                 d.find = None;
+                d.outline = None;
                 // A splice that covers the item the reader is scrolled into
                 // moves the scroll anchor to that item's top: for a live
                 // session whose last round is one tall item, that is a jump
@@ -2594,6 +2697,7 @@ impl Workbench {
                     open_explanations: HashSet::new(),
                     body_scrolls: HashMap::new(),
                     find: None,
+                    outline: None,
                 });
             }
         }
@@ -4371,8 +4475,47 @@ impl Workbench {
         let now = Instant::now();
         let fresh = now.duration_since(self.last_scroll) > SCROLL_GAP;
         self.last_scroll = now;
+        // A card or a sheet of ours is over the window: its scrollers are
+        // the only panes there are, and nothing under it moves. A flick
+        // carried off the list it began in stays with that list.
+        if self.branch_menu.is_some() || self.changes.is_some() {
+            let here = match &self.changes {
+                _ if self.branch_menu.is_some() && self.branch_scroll.bounds().contains(&e.position) => Pane::Branches,
+                Some(c) if self.branch_menu.is_none() && c.files.0.borrow().base_handle.bounds().contains(&e.position) => Pane::ChangeFiles,
+                Some(c) if self.branch_menu.is_none() && c.list.viewport_bounds().contains(&e.position) => Pane::ChangeLines,
+                _ => Pane::Nowhere,
+            };
+            match e.touch_phase {
+                TouchPhase::Started => self.scroll_owner = Some(here),
+                TouchPhase::Moved if fresh || self.scroll_owner.is_none() => self.scroll_owner = Some(here),
+                _ => {}
+            }
+            let owner = self.scroll_owner.unwrap_or(Pane::Nowhere);
+            if owner == here && owner != Pane::Nowhere {
+                return;
+            }
+            let delta = e.delta.pixel_delta(px(20.));
+            let held = |handle: &ScrollHandle| {
+                let at = handle.offset() + delta;
+                handle.set_offset(point(at.x, at.y.clamp(-handle.max_offset().y, px(0.))));
+            };
+            match (owner, &self.changes) {
+                (Pane::Branches, _) if self.branch_menu.is_some() => held(&self.branch_scroll),
+                (Pane::ChangeFiles, Some(c)) => held(&c.files.0.borrow().base_handle),
+                (Pane::ChangeLines, Some(c)) => c.list.scroll_by(-delta.y),
+                _ => {}
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let inline_sidebar = (self.sidebar_open && !self.narrow) || self.sidebar_float;
-        let here = if !inline_sidebar || e.position.x >= self.sidebar_w {
+        let (files, outline) = self.panels_shown();
+        let here = if files && self.files_scroll.bounds().contains(&e.position) {
+            Pane::Files
+        } else if outline && self.outline_scroll.bounds().contains(&e.position) {
+            Pane::Outline
+        } else if !inline_sidebar || e.position.x >= self.sidebar_w {
             Pane::Content
         } else if self.agents_scroll.bounds().contains(&e.position) {
             Pane::Agents
@@ -4385,15 +4528,32 @@ impl Workbench {
             _ => {}
         }
         let Some(owner) = self.scroll_owner else { return };
-        if owner == here || !inline_sidebar {
+        // A wheel that began over the outline moves its mark, wherever
+        // the pointer is by now; one in the conversation ends a move the
+        // outline began.
+        if owner == Pane::Outline && outline {
+            self.outline_wheel(e, fresh, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if owner == Pane::Content && self.outline_gliding {
+            self.outline_glide += 1;
+            self.outline_gliding = false;
+        }
+        if owner == here || !(inline_sidebar || files || outline) {
             return;
         }
         let delta = e.delta.pixel_delta(px(20.));
         match owner {
             // A handle takes any offset it is given, so each is held to
             // what its list has.
-            Pane::Agents | Pane::Sidebar => {
-                let handle = if owner == Pane::Agents { &self.agents_scroll } else { &self.side_scroll };
+            Pane::Agents | Pane::Sidebar | Pane::Files | Pane::Outline => {
+                let handle = match owner {
+                    Pane::Agents => &self.agents_scroll,
+                    Pane::Files => &self.files_scroll,
+                    Pane::Outline => &self.outline_scroll,
+                    _ => &self.side_scroll,
+                };
                 let at = handle.offset() + delta;
                 handle.set_offset(point(at.x, at.y.clamp(-handle.max_offset().y, px(0.))));
             }
@@ -4407,6 +4567,8 @@ impl Workbench {
                 Page::New => self.home_scroll.set_offset(self.home_scroll.offset() + delta),
                 Page::Board => {}
             },
+            // Momentum left over from a card or sheet that has gone.
+            Pane::Branches | Pane::ChangeFiles | Pane::ChangeLines | Pane::Nowhere => {}
         }
         cx.stop_propagation();
         cx.notify();
@@ -4724,7 +4886,9 @@ impl Workbench {
         if self.menu.is_some() {
             self.menu = None;
             cx.notify();
-        } else if self.renaming.is_some() {
+        } else if self.branch_menu.is_some() {
+            self.close_branch_menu(window, cx);
+        } else if self.renaming.is_some() || self.file_prompt.is_some() {
             self.close_rename(window, cx);
         } else if self.settings_open {
             self.settings_open = false;
@@ -4732,6 +4896,10 @@ impl Workbench {
         } else if self.lightbox.is_some() {
             self.lightbox = None;
             cx.notify();
+        } else if self.changes.is_some() {
+            self.close_changes(cx);
+        } else if self.file_view.is_some() {
+            self.close_file_view(cx);
         } else if self.search_open {
             self.close_search(window, cx);
         } else if self.find_open {
@@ -5899,7 +6067,7 @@ impl Workbench {
     }
 
     /// A right click: the menu opens where the pointer is.
-    fn open_menu(&mut self, at: Point<Pixels>, items: Vec<(&'static str, MenuDo)>, cx: &mut Context<Self>) {
+    pub(crate) fn open_menu(&mut self, at: Point<Pixels>, items: Vec<(&'static str, MenuDo)>, cx: &mut Context<Self>) {
         self.menu = Some(Menu { at, items });
         cx.notify();
     }
@@ -5910,6 +6078,7 @@ impl Workbench {
             MenuDo::OpenFolder(Some(cwd)) => crate::sys::open_path(std::path::Path::new(&cwd)),
             MenuDo::OpenFolder(None) => self.notice = Some(Notice::error(FOLDER_GONE)),
             MenuDo::Reveal(path) => crate::sys::reveal_path(&path),
+            MenuDo::File(what, path) => self.file_do(what, path, window, cx),
             MenuDo::Rename(key) => {
                 let now = self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default();
                 self.renaming = Some(key);
@@ -5925,6 +6094,9 @@ impl Workbench {
     /// The name in the field becomes the session's (`set_title`); an
     /// empty field changes nothing.
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_prompt.is_some() {
+            return self.commit_file_prompt(window, cx);
+        }
         let Some(key) = self.renaming.clone() else { return };
         let name = self.rename_input.read(cx).value().trim().to_string();
         self.set_title(&key, &name);
@@ -5981,8 +6153,9 @@ impl Workbench {
         }
     }
 
-    fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming = None;
+        self.file_prompt = None;
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -6062,7 +6235,7 @@ impl Workbench {
                     .border_1()
                     .border_color(theme.border)
                     .shadow(float_shadow(&theme))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Rename session"))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(self.file_prompt.as_ref().map(|p| p.title()).unwrap_or("Rename session")))
                     .child(
                         div()
                             .id("rename-field")
@@ -6241,10 +6414,19 @@ impl Workbench {
     /// `right` is the page's actions. Both ends are at least 120px so the
     /// centre stays centred when they are short.
     fn render_topbar_with(&self, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut left_end = h_flex().min_w(px(120.)).flex_shrink_0();
+        self.render_topbar_ends(Vec::new(), centre, right, cx)
+    }
+
+    /// The strip with something at its left end too: the buttons there
+    /// stand after the room kept for the traffic lights when the sidebar
+    /// is away.
+    fn render_topbar_ends(&self, left: Vec<AnyElement>, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut left_end = h_flex().min_w(px(120.)).flex_shrink_0().items_center().gap(px(6.));
         if !self.sidebar_open || self.narrow {
-            left_end = left_end.w(Self::strip_right() - px(4.));
+            let room = Self::strip_right() - px(4.);
+            left_end = if left.is_empty() { left_end.w(room) } else { left_end.pl(room) };
         }
+        let left_end = left_end.children(left);
         Self::drag_region(h_flex(), cx)
             .h(TITLEBAR_H)
             .flex_shrink_0()
@@ -6525,7 +6707,7 @@ impl Workbench {
             .into_any_element(),
         );
         let tabs = self.render_tabs(cx);
-        let topbar = self.render_topbar_with(tabs, right, cx);
+        let topbar = self.render_topbar_ends(self.panel_buttons(cx), tabs, right, cx);
 
         // Under the tabs, where the session lives and nothing else: a band
         // across the pane, as a file manager's path bar is, so it reads as
@@ -6697,12 +6879,15 @@ impl Workbench {
         let terminal = self.render_terminal(&r, cx);
         let dialog = if terminal.is_some() { None } else { self.render_dialog(&r, cx) };
         let covered = dialog.is_some() || terminal.is_some();
-        v_flex()
+        // At the conversation's left, under the top strip: the folder's
+        // files or the outline, one at a time (`panels.rs`).
+        let (files_shown, outline_shown) = self.panels_shown();
+        let files_panel = files_shown.then(|| self.render_files_panel(cx));
+        let outline_panel = outline_shown.then(|| self.render_outline_panel(cx));
+        let conversation = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(theme.background)
-            .child(topbar)
             .children(path_line)
             .when(self.find_open, |d| d.child(self.render_find_bar(cx)))
             .child(transcript)
@@ -6728,7 +6913,14 @@ impl Workbench {
                             v_flex().w_full().items_center().gap(px(8.)).children(dialog).child(self.render_permissions(cx)).child(self.render_composer(cx)),
                         ),
                     ),
-            )
+            );
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(topbar)
+            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().children(files_panel).children(outline_panel).child(conversation))
             .into_any_element()
     }
 
@@ -7537,7 +7729,7 @@ impl Workbench {
     /// Sets the composer's text with the caret at that byte of it. A
     /// value set from code reports no change, so what a change does is
     /// done here.
-    fn set_composer(&mut self, text: String, caret: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn set_composer(&mut self, text: String, caret: usize, window: &mut Window, cx: &mut Context<Self>) {
         let before = &text[..caret.min(text.len())];
         let line = before.matches('\n').count() as u32;
         let column = before.rsplit('\n').next().unwrap_or("").encode_utf16().count() as u32;
@@ -9163,6 +9355,17 @@ impl Render for Workbench {
             self.composer.update(cx, |s, cx| s.set_value(words, window, cx));
             self.send_message(window, cx);
         }
+        if let Some(path) = self.file_probe.take() {
+            self.file_preview(&path, window, cx);
+        }
+        if let Some(typed) = self.branch_probe.take() {
+            if self.branch_menu.is_none() {
+                self.branch_menu_toggle(point(px(230.), px(66.)), window, cx);
+            }
+            if !typed.is_empty() {
+                self.branch_input.update(cx, |s, cx| s.set_value(typed, window, cx));
+            }
+        }
         if std::mem::take(&mut self.restore_due) {
             let this = cx.entity();
             window.defer(cx, move |window, cx| this.update(cx, |this, cx| this.restore_prompt(window, cx)));
@@ -9202,6 +9405,9 @@ impl Render for Workbench {
         let sidebar_peek = self.narrow && self.sidebar_peek;
         self.sync_tab_widths(cx);
         self.pane_w = window.viewport_size().width - if sidebar_open { self.sidebar_w } else { px(0.) };
+        if std::mem::take(&mut self.panel_fit_wanted) {
+            self.panel_w = self.panel_fit(window, cx);
+        }
         // `EMAKI_A11Y=1` prints gpui's own view of the accessibility tree on
         // every draw, for checking what assistive apps are handed.
         if std::env::var("EMAKI_A11Y").is_ok() {
@@ -9240,13 +9446,29 @@ impl Render for Workbench {
                         // pointer wherever it goes, and nothing under
                         // it hears the move.
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture && mover.update(cx, |w, cx| w.side_drag.then(|| w.side_drag_to(e, cx)).is_some()).unwrap_or(false) {
+                            if phase == DispatchPhase::Capture
+                                && mover
+                                    .update(cx, |w, cx| {
+                                        if w.side_drag {
+                                            w.side_drag_to(e, cx);
+                                        } else if w.panel_drag.is_some() {
+                                            w.panel_drag_to(e, cx);
+                                        } else {
+                                            return false;
+                                        }
+                                        true
+                                    })
+                                    .unwrap_or(false)
+                            {
                                 cx.stop_propagation();
                             }
                         });
                         window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
-                                let _ = lifter.update(cx, |w, _| w.side_drag_end());
+                                let _ = lifter.update(cx, |w, _| {
+                                    w.side_drag_end();
+                                    w.panel_drag_end();
+                                });
                             }
                         });
                     },
@@ -9276,6 +9498,8 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &GoSessions, _, cx| this.show_sessions(Scope::All, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(false, cx)))
+            .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_panel(true, cx)))
+            .on_action(cx.listener(|this, _: &ToggleOutline, _, cx| this.toggle_panel(false, cx)))
             .on_action(cx.listener(|this, _: &Tab1, window, cx| this.go_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &Tab2, window, cx| this.go_tab(2, window, cx)))
             .on_action(cx.listener(|this, _: &Tab3, window, cx| this.go_tab(3, window, cx)))
@@ -9317,13 +9541,17 @@ impl Render for Workbench {
                 }),
             )
             .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))
+            .children(self.render_panel_grip(cx))
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
             .children(self.render_sidebar_float(cx))
             .child(self.render_strip(cx))
             .when(search_open, |d| d.child(self.render_search(cx)))
             .when(self.settings_open, |d| d.child(self.render_settings(cx)))
+            .when(self.file_view.is_some(), |d| d.child(self.render_file_view(cx)))
+            .when(self.changes.is_some(), |d| d.child(self.render_changes(cx)))
             .when_some(self.lightbox.clone(), |d, lb| d.child(self.render_lightbox(lb, cx)))
-            .when(self.renaming.is_some(), |d| d.child(self.render_rename(cx)))
+            .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(self.render_rename(cx)))
+            .when_some(self.branch_menu, |d, at| d.child(self.render_branch_menu(at, window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, window, cx)))
     }
 }

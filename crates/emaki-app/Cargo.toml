@@ -31,6 +31,8 @@ uuid = { version = "1", features = ["v4"] }
 markdown = "1.0.0"
 # Open-with and the person's name, without shelling out to macOS commands.
 opener = "0.7"
+trash = "5"
+rust-embed = { version = "8", features = ["debug-embed"] }
 whoami = "1"
 # The person's picture, cut square and scaled down once to the sizes it
 # is drawn at. gpui already builds this crate; the features are the

@@ -68,20 +68,24 @@ crates/emaki-core/        everything without a window
   src/render_md.rs store.rs  model -> CommonMark on disk
   src/search.rs              FTS5 over every item, ~/.emaki/search.db
   src/driver.rs              a headless `claude -p` child on stream-json
+  src/outline.rs             a conversation's outline: a line on what each round asked and a line on what came of it
   src/options.rs             the modes, models and effort levels an agent offers, as it lists them
   src/explain.rs             opaque tool calls in plain words, via `claude -p`
+  src/git.rs                 what git says of a folder's files, as VS Code's explorer shows it
   src/files.rs               a folder's files for "@" in the composer: the list, the match, the tokens
   src/update.rs              the newest release, its installer, and putting it in place
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
   src/terminal.rs            the agent's resume command as a script a terminal can be handed
   src/pty.rs                 a terminal of our own with no window: an interactive `claude` on a pty, its screen kept in memory
   src/watcher.rs             notify over every agent's data roots
-  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | shells | files | peers | inbox | options | explain | update | statusline | drive | pty
+  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | shells | outline | git | files | peers | inbox | options | explain | update | statusline | drive | pty
   tests/core.rs
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
   src/workbench.rs           sidebar, session list, board, search, composer
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
+  src/panels.rs              beside a conversation: the folder's files as a tree, and the outline
+  src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets
   src/main.rs                menus, key bindings, the window
   src/sys.rs                 open, reveal, open in a terminal, the person's name: per OS
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers
@@ -122,6 +126,7 @@ EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to ano
 EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar
 EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it; page:board is the board
 EMAKI_GO="open:<id2>;tabhints" EMAKI_OPEN=<id> ./target/debug/Emaki  # the tabs' numbers, as holding ⌘ shows them
+EMAKI_GO="x;tree:crates;file:README.md" EMAKI_OPEN=<id> ./target/debug/Emaki  # the files panel: open a folder, show a file; filemenu:<path> is its right click; files and outline are the two buttons; outline:<n> goes to that round; panelw:<w> drags the panel's edge, panelfit is the double click on it; branches opens the list of branches, branchq:<words> types in its field; changes opens the comparison, changes:<path> on that file
 EMAKI_GO="page:sessions;sessions:<folder>" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sessions page's folders, then inside one
 EMAKI_GO="side:320;sidefit" EMAKI_OPEN=<id> ./target/debug/Emaki  # drag the sidebar's edge to that x; then the double click on it
 EMAKI_GO=shells EMAKI_OPEN=<id> ./target/debug/Emaki  # open the card of commands running in the background
@@ -2082,6 +2087,237 @@ opened it, and the numbers and outlines on four tabs with
 from a script: the drag, the keys, the held ⌘ and its release, the right
 click (a synthetic press does not reach a handler in a background
 window).
+
+**Beside a conversation is one of two panels: the folder's files, or
+the outline.** Both in `panels.rs`. One shows at most, at the
+conversation's left (after the sidebar when that is there), the pane's
+whole height under the top strip and one width whichever it is
+(`panel_w`), so one takes the other's place without moving the
+conversation. They
+are chosen at the strip's left end, across from the three buttons that
+take a session elsewhere, with one control of two segments
+(`panel_buttons`, in the settings panel's segmented look: a track, an
+icon each, a raised plate under the one showing). A press on the other
+segment swaps the panel and slides the plate over; a press on the one
+showing puts the panel away and fades the plate; with none showing the
+plate comes in under the one pressed (`toggle_panel`, ⌘⇧E and ⌘⇧O;
+`panel_anim` keeps what showed before the press and what after; the
+choice is in `ui.json`, the outline at first). The segments are a fixed
+size, so the plate's place is known without measuring, unlike
+`segmented`. A panel that comes beside nothing widens from nothing and
+fades in over `PANEL_ANIM`; one that takes the other's place only fades
+in; one put away goes at once. A head as tall as the folder's band
+continues that band across the pane. The first version (2026-10-06, an
+hour earlier) had both at the conversation's right, side by side, with
+a plain button each; the person asked for the left, one at a time, and
+this control.
+
+The panel's edge is dragged, as the sidebar's is: a strip `PANEL_GRIP`
+wide over it (`render_panel_grip`, under the top strip only) holds the
+edge at a press (`panel_drag`, which panel), and the same raw
+mouse-move listener that follows the sidebar's edge sets the width to
+where the pointer is (`panel_drag_to`), between `PANEL_MIN` (200) and
+`PANEL_MAX` (520), and never so wide that the conversation has less
+than `CONVERSATION_MIN` (360). Narrower than `PANEL_FOLD_AT` (130) the
+panel is put away, as its segment does it, the plate fading with it,
+and it comes back in the same drag if the pointer does; the width it
+had is kept (`ui.json`). A double click goes to the fitted width
+(`panel_fit`): for the files, the widest row showing, measured with
+the text system and the row's own indent and paddings, `PANEL_FIT_MAX`
+(380) at most; for the outline `OUTLINE_FIT` (300), since its lines
+are sentences that are cut at any width. Checked with
+`EMAKI_GO=panelw:<w>` (the edge dragged to that width and let go: 420
+gave 420, 900 the most, 100 put the panel away and kept the width) and
+`panelfit` (200 on this repository's top level, no name cut), with
+`EMAKI_SHOT`. Not driven from a script: a real press and drag, the
+pointer's shape, the double click, the outline's fit.
+
+*The files* are the session's folder as a tree (`Tree`): a folder is
+read from disk when it is opened (`list_dir`: folders first, then by
+name, `.git` and `.DS_Store` left out, `DIR_MAX` entries and then "N
+more"), what is open is kept by absolute path, so two sessions of one
+folder share it, and the root and every open folder are read again
+every `TREE_SECS` on the clock while the panel shows, which is how a
+file the agent writes appears. This is not `files.rs`: that is git's
+list for "@", flat and without what is ignored; a tree shows what is
+on disk. A row is drawn as VS Code's explorer draws it, the person's
+own VS Code being the model for both halves (asked for on 2026-10-06
+with a capture of it). The icon is Catppuccin's (`file_icons.rs`):
+`assets/catppuccin/` holds the icons of the VS Code icon theme
+(`catppuccin.catppuccin-vsc-icons` 1.26.0, MIT, copied from the
+installed extension's `dist/`) in two flavours, Latte for a light
+window and Mocha for a dark one, and `theme.json`, the theme's own
+table cut down to what is used: a whole file name first, then the
+extensions from the longest, a folder by its name, open or closed. They
+are built in with `rust-embed` and served under `catppuccin/`; an icon
+has its own colours, so it is an `img` and not the one-colour `Icon`
+every other icon in the window is. A newer release of the theme is the
+same copy again. The colour and the mark at the row's right are git's
+(`emaki_core::git`): one `git status --porcelain=v1 -z
+--untracked-files=all --ignored=matching` (every untracked file by
+itself, as VS Code asks, an ignored folder still one entry) for
+the repository the folder is in, read off the main thread on the
+tree's clock (`read_git`, and at the first draw of a folder not asked
+about yet), into a state a path. A file wears its letter (M, U, A, D,
+R, T, "!" for a conflict), a folder a dot for the most pressing thing
+under it (a conflict, then what is new or gone, then what is changed:
+the capture has `crates`, holding both, in the untracked green), and
+what is ignored is dimmed with no mark. Git names an untracked or an
+ignored folder once and not what is in it, so a path under one takes
+its state. Paths are spelled as the folder is, not as git resolves it
+(a temp folder on macOS is behind a symlink). The colours are the
+GitHub theme's, which the person's VS Code is on, GitHub Light's in a
+light window (`git_rgb`: modified blue, untracked and added green,
+deleted red, ignored grey, a conflict orange), and VS Code's defaults
+for the three that theme leaves out (staged and changed, staged and
+deleted, renamed). A name beginning with a dot was dimmed before; it
+is not now, since dim means ignored. The head no longer counts the
+entries. `emaki-core git <folder> [path...]` prints what a path wears.
+
+The head of the files names the branch checked out, on a button
+straight after "Files" (`branch_pill`; at the head's right at first,
+which the person asked to be at the left; the commit when the head is detached, nothing in a
+folder that is in no repository), read with the status
+(`git::branches`). A click opens the list of branches
+(`render_branch_menu`), laid out as GitHub's is, which the person
+showed: a head, a field ("Find or create a branch…") that narrows the
+list as it is typed in, the local branches with the default first
+(what `origin/HEAD` names, else `main` or `master`) and a tick on the
+one checked out, then the branches only a remote has, each saying so.
+The list shows `BRANCH_ROWS` (10) rows and scrolls for the rest, with
+the toolkit's scrollbar. Words that name no branch add a row at the
+foot, "Create branch x from y". A click on a row, or ↩ in the field (the branch the words name,
+else the first left, else the new one), is `branch_go`: `git switch`,
+or `git switch -c`, off the main thread, and the row under the
+composer says what came of it, in git's own words when it refuses
+(a change here that the other branch would write over). Nothing is
+forced or stashed. Refused while a turn is running in the session
+showing, since the agent is writing to the files a switch would
+change; that guard is ours and was not asked for. No tags: GitHub's
+second tab was left out. Checked with `EMAKI_GO=branches` and
+`branchq:<words>` and `EMAKI_SHOT`: the button, the list of this
+repository's nine with the tick, and the create row. The switch
+itself is covered by a test on a repository made for it (a switch, a
+remote's branch, a new one, a refusal that keeps the change, a
+detached head); it was not run from the window, whose probe copy
+shows this repository.
+
+At the head's right is how many files have a change (`changes_pill`,
+`Status::changed`, kept as `Tree::changed`), on a button that opens
+the comparison (`render_changes`, `Changes`), as GitHub Desktop's
+Changes tab is laid out, which the person showed: a sheet over the
+window, the changed files at its left (a `uniform_list`, since a
+commit of icons is a thousand rows: the icon, the folders dimmed and
+cut before the name is, the state's letter) and the picked file's
+lines at its right, what the last commit has beside what is there now
+(`git::diff`: `git diff HEAD` for the file, `--cached` before a first
+commit, and a file git does not track read as all new lines;
+`git::parse_diff` sets a run of lines taken out beside the lines put
+in after it, first with first). Each side has its number in its own
+file on a stronger ground, a mark, and the words, wrapped, in GitHub's
+red and green; a hunk's "@@" line heads its stretch; a file that is
+all new or all gone has one side and the whole width. The lines are a
+gpui `list`, read off the main thread and again on the tree's clock
+while the sheet shows, replaced only when they differ so reading on
+does not move the reader; `DIFF_LINES` (5000) at most, and a file that
+is not text says so. "Show changes" in a changed file's right-click
+menu opens it on that file. It only shows: nothing is staged or
+committed from here, and the lines within a pair are not compared
+word by word, both of which GitHub Desktop does. Checked with
+`EMAKI_GO=changes` and `changes:<path>` and `EMAKI_SHOT`: the 1,259
+files of this working tree, AGENTS.md side by side, an untracked file
+at full width. Covered by a test: the list, a changed, a new, a
+deleted and a staged file, and the pairing. Not driven from a script:
+a click on a row, the menu's entry, a wheel in either list.
+
+A card or a sheet with scrollers of its own is a set of panes to
+`route_scroll` (`Pane::Branches`, `ChangeFiles`, `ChangeLines`,
+`Nowhere`): while the list of branches or the comparison is up, a
+flick carried off the list it began in stays with that list, and
+nothing under the card moves. Before, the panes under the card still
+owned the pointer's place, and momentum from the card would have
+scrolled the files or the conversation beneath. Not driven from a
+script.
+A click on a folder opens or closes it. A click on a file
+shows it (`file_preview`): a picture in the lightbox, anything else on
+a sheet over the window (`render_file_view`), markdown drawn as the
+conversation draws it and other text as a code block in the file's
+language, the first `PREVIEW_BYTES` and `PREVIEW_LINES` of it, read
+again when the file changes on disk; a file that is not text says so
+and offers Open. The sheet has Add to message, Open and Reveal. A
+right click is the window's own menu (`MenuDo::File`, `file_do`): Open,
+Reveal, Add to message (the path as "@path" at the end of the
+composer, as "@" writes it), Copy path, Copy relative path, Rename,
+Move to Trash, and on a folder or the panel's empty room New file and
+New folder. A name is asked for in the field a session is renamed in
+(`file_prompt`, `commit_file_prompt`): one name for a rename, a path
+under the folder for something new, never "..", and a name already
+taken is refused with the field left up. The trash is the system's
+(`sys::trash_path`, the `trash` crate; on macOS through the file
+manager's own call, since the crate's default asks Finder by
+AppleScript), so it can be put back; nothing here deletes.
+
+*The outline* is `emaki_core::outline`, a pure function of the model
+and no model's summary: an entry a round, its title the prompt's first
+line that says something, its gist the first line of the last thing
+the agent wrote that round (where a reply states its outcome), else
+what it did instead ("3 tool calls", "Conversation compacted"),
+markdown marks and "[Image #n]" taken out. Made once per load
+(`Detail::outline`). Drawn under a head for each day, on a rail with a
+dot each; the entry in view wears the accent: the round at the top of
+the list, or the last once the list is at its end (a short last round
+never reaches the top), and an entry just clicked for as long as the
+view is where the click put it (`outline_pick`). A click on an entry
+chooses it, and so does the wheel over the outline (`outline_wheel`,
+from `route_scroll`, which hands it every wheel event of a gesture
+that began there and stops it, so the outline's own scroller never
+takes one): the mark moves an entry at a time, one for a notch of a
+mouse wheel, one for every `WHEEL_STEP` of a trackpad's travel, and
+never faster than one each `WHEEL_PACE`, so a flick's momentum walks
+the entries. The outline keeps the marked entry in sight when it
+changes (`outline_at`), which is all the scrolling it does now.
+Choosing an entry moves the conversation to its round, and the move is
+drawn (`outline_go`, `Glide`): a task steps the list every
+`GLIDE_TICK` until the round is at the top. The list knows where a
+round is only once it is laid out, so the way is felt out. With the
+round's place known (it is the one at the top, or one below that
+`bounds_for_item` answers for) what is left falls away over
+`GLIDE_EASE`, and more than `GLIDE_CAP` of it is skipped first, so a
+far round arrives over the same moment as a near one. With it unknown
+(any round above, or one below never drawn) the list runs that way for
+`GLIDE_RUN_TICKS`, which lays out what it passes; a round above still
+not reached is then gone to `GLIDE_FROM` under its top and come up
+onto, and one below is gone to directly. A list held at its end has
+nothing to run from and skips the run. The move is over when nothing
+is left, when the list's end holds it short (no nearer for four ticks,
+or the view back on the end's own anchor), or after `GLIDE_MOST`; a
+newer choice takes it over (`outline_glide`, its number), and a wheel
+in the conversation ends it. While it runs the mark stays on the entry
+chosen (`outline_gliding`). The click used to set the list's place in
+one step, which the person called abrupt. Checked with
+`EMAKI_GLIDE_DEBUG=1`, which prints the list's place and what is left
+at every tick, and `EMAKI_GO=outline:<n>` to a near round, a far one,
+one above and one below, and from the list's end: each came to rest on
+its round within 36 ticks, what was left shrinking at every one. Not
+driven from a script: the wheel itself, and how the move looks. Both panels' scrollers are panes of their own to
+`route_scroll`. `emaki-core outline <id>` prints one.
+
+Checked with `EMAKI_SHOT` in a second copy: the tree with two folders
+opened, a Rust file on the sheet, the menu of a file, the outline with
+`outline:3` marked and its round at the top (those with the panels
+still at the right), then the files panel at the left with the plate
+under its segment, and no panel with no plate. The outline is
+covered by a test. Not driven from a script: a real click or right
+click, Rename, New file, New folder and Move to Trash (none was run),
+the sheet's buttons, a wheel in either panel, the two keys, and the
+panel's arrival and the plate's slide, whose moving frames were not
+captured. Code on the
+sheet came out in one colour, unhighlighted, in that probe. The icons
+and git's marks were checked the same way, dark and light, against the
+capture of VS Code on this repository: the same icons, colours, letters
+and dots on every row both showed. The git states are covered by a
+test on a repository made for it, the icon table by one in the app;
+the Windows type check passes with both new crates.
 
 **Empty space along the top moves the window, and the app says which.**
 The window is opened with `app_owns_titlebar_drag`, and

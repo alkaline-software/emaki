@@ -55,6 +55,29 @@ fn main() {
                 println!("{}  {}  {}  {}  {}", sh.id, sh.started, if sh.ended.is_empty() { "running" } else { &sh.status }, sh.ended, if sh.description.is_empty() { &sh.command } else { &sh.description });
             }
         }
+        "outline" => {
+            let target = args.get(1).expect("outline <session-id|path>");
+            let session = emaki_core::build::build_from_path(&resolve(target, &cfg), "");
+            for e in emaki_core::outline::of(&session) {
+                println!("{:>4}  {:?}  {}\n      {}", e.round + 1, e.kind, e.title, e.gist);
+            }
+        }
+        "git" => {
+            let folder = std::fs::canonicalize(args.get(1).expect("git <folder> [path...]")).expect("a folder");
+            println!("{:?}", emaki_core::git::branches(&folder));
+            match emaki_core::git::status(&folder) {
+                None => println!("not in a repository"),
+                Some(st) => {
+                    for p in &args[2..] {
+                        let path = folder.join(p);
+                        println!("{p}  {:?}", st.mark(&path, path.is_dir()));
+                    }
+                    if args.len() < 3 {
+                        println!("{st:#?}");
+                    }
+                }
+            }
+        }
         "files" => {
             let folder = args.get(1).expect("files <folder> [typed]");
             let all = emaki_core::files::list(folder);
