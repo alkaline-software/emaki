@@ -409,7 +409,6 @@ pub fn dialog_on_screen(text: &str) -> Option<Dialog> {
     let plain: Vec<String> = styled.iter().map(|l| strip_sgr(l)).collect();
     let lines: Vec<&str> = plain.iter().map(|l| l.trim_end()).collect();
     let end = lines.iter().rposition(|l| !l.trim().is_empty())? + 1;
-    let is_rule = |l: &str| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
     let option = |l: &str| -> Option<(u32, Option<bool>, String)> {
         let t = l.trim_start().trim_start_matches('❯').trim_start();
         let dot = t.find('.')?;
@@ -548,7 +547,6 @@ fn sgr_spans(line: &str) -> Vec<(String, Option<u32>)> {
 pub fn suggestion_on_screen(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
-    let is_rule = |l: &str| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
     let below = (0..plain.len()).rev().find(|i| is_rule(&plain[*i]))?;
     let above = (0..below).rev().find(|i| is_rule(&plain[*i]))?;
     if below - above < 2 || !plain[above + 1].trim_start().starts_with('❯') {
@@ -575,6 +573,17 @@ pub fn suggestion_on_screen(text: &str) -> Option<String> {
     (!words.is_empty() && !words.starts_with("Try \"")).then_some(words)
 }
 
+/// Whether a line of the screen is one of the rules Claude Code draws
+/// round its prompt and over a dialog. The one over the prompt carries
+/// the session's name once it has one ("──── My session ─"), so a rule
+/// is a line that begins and ends as one and is mostly one, not a line
+/// of nothing else: read that way, a renamed session had no prompt, and
+/// a message typed for it waited for one that was already there.
+fn is_rule(line: &str) -> bool {
+    let l = line.trim();
+    l.starts_with("───") && l.ends_with('─') && l.chars().filter(|c| *c == '─').count() >= 10
+}
+
 /// Whether Claude Code's prompt is on the screen and empty: the line
 /// between its two rules, after "❯", with nothing typed on it (a
 /// suggestion or a hint, written dim, is not typing). `text` is the
@@ -583,7 +592,6 @@ pub fn suggestion_on_screen(text: &str) -> Option<String> {
 pub fn prompt_on_screen(text: &str) -> Option<bool> {
     let lines: Vec<&str> = text.lines().collect();
     let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
-    let is_rule = |l: &str| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
     let below = (0..plain.len()).rev().find(|i| is_rule(&plain[*i]))?;
     let above = (0..below).rev().find(|i| is_rule(&plain[*i]))?;
     if below - above < 2 || !plain[above + 1].trim_start().starts_with('❯') {

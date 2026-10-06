@@ -814,7 +814,8 @@ fn a_prompt_stopped_untouched_is_withdrawn() {
     assert_eq!(s.rounds.len(), 2);
     assert!(s.withdrawn.is_none());
 
-    // Stopped after the agent had started: the round stays, the marker does not show.
+    // Stopped after the agent had started: the round stays, and ends on
+    // the stop in the marker's own words.
     let rows = vec![
         user("do the thing", "2026-01-01T10:01:00Z"),
         assistant(vec![json!({"type": "text", "text": "starting"})], "", "2026-01-01T10:01:02Z"),
@@ -823,6 +824,33 @@ fn a_prompt_stopped_untouched_is_withdrawn() {
     let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
     assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["do the thing"]);
     assert!(s.withdrawn.is_none());
+    assert!(matches!(s.rounds[0].items.last(), Some(Item::Notice { text, variant: emaki_core::model::NoticeVariant::Interrupted, .. }) if text == "Request interrupted by user"));
+}
+
+/// Codex says a stop twice, as an event and inside the next user row;
+/// the round ends on it once, and reads as stopped, not working.
+#[test]
+fn a_codex_turn_stopped_says_so() {
+    use emaki_core::model::NoticeVariant;
+    let user = |text: &str, ts: &str| json!({"timestamp": ts, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}});
+    let mut rows = vec![
+        user("list files", "2026-03-02T02:38:02Z"),
+        json!({"timestamp": "2026-03-02T02:38:04Z", "type": "event_msg", "payload": {"type": "turn_aborted", "reason": "interrupted"}}),
+    ];
+    let s = build_codex(&rows, "");
+    assert!(matches!(s.rounds[0].items.last(), Some(Item::Notice { text, variant: NoticeVariant::Interrupted, .. }) if text == "Interrupted"));
+    assert_eq!(emaki_core::adapters::turn_state_from_session(&s).activity_kind, "stop");
+
+    rows.push(user("<turn_aborted>\nThe user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background.\n</turn_aborted>", "2026-03-02T02:38:05Z"));
+    rows.push(user("try again", "2026-03-02T02:38:09Z"));
+    let s = build_codex(&rows, "");
+    assert_eq!(s.rounds.len(), 2);
+    assert_eq!(s.rounds[0].items.len(), 1);
+
+    // The user row alone, as an older Codex wrote it.
+    rows.remove(1);
+    let s = build_codex(&rows, "");
+    assert!(matches!(s.rounds[0].items.last(), Some(Item::Notice { text, variant: NoticeVariant::Interrupted, .. }) if text == "The user interrupted the previous turn on purpose."));
 }
 
 /// `/plan` leaves no mode row until the next prompt; its output says it.
@@ -1353,6 +1381,12 @@ fn hidden_terminal_screen_feeds_the_readers() {
     let modes = vec![emaki_core::options::Choice { key: "acceptEdits".into(), label: "Accept edits".into(), ..Default::default() }];
     assert_eq!(driver::mode_on_screen(&pty::plain(&pty::rows_after(idle.as_bytes(), 12, 60)), &modes).as_deref(), Some("acceptEdits"));
 
+    // A session with a name of its own has it on the rule over the prompt.
+    let named = format!("{} My session ─\r\n❯\u{a0}\x1b[2mrun the tests\x1b[0m\r\n{rule}\r\n  ⏵⏵ auto mode on", "─".repeat(30));
+    let styled_named = pty::styled(&pty::rows_after(named.as_bytes(), 8, 60));
+    assert_eq!(driver::prompt_on_screen(&styled_named), Some(true));
+    assert_eq!(driver::suggestion_on_screen(&styled_named).as_deref(), Some("run the tests"));
+
     let typed = format!("{rule}\r\n❯ half a thought\r\n{rule}");
     assert_eq!(driver::prompt_on_screen(&pty::styled(&pty::rows_after(typed.as_bytes(), 8, 60))), Some(false));
 
@@ -1400,4 +1434,54 @@ fn hidden_terminal_clicks_become_keys() {
     assert_eq!(at(model, "Sonnet"), Some(b"\x1b[B\x1b[B\r".to_vec()));
     assert_eq!(at(model, "Opus 5.5 ✔"), Some(b"\r".to_vec()));
     assert_eq!(at(model, "use this session"), Some(b"s".to_vec()));
+}
+
+/// `/rename` writes the name as a `custom-title` row and again as an
+/// `agent-name` row; it is the title, over any the agent wrote.
+#[test]
+fn a_name_the_person_gave_is_the_title() {
+    use emaki_core::transcript::pick_title;
+    let rows = vec![
+        json!({"type": "ai-title", "aiTitle": "Embed terminal session headless"}),
+        json!({"type": "custom-title", "customTitle": "v0.1.6 - Headless terminal session"}),
+        json!({"type": "agent-name", "agentName": "v0.1.6 - Headless terminal session"}),
+        json!({"type": "ai-title", "aiTitle": "Something the agent wrote later"}),
+    ];
+    assert_eq!(pick_title(&rows), "v0.1.6 - Headless terminal session");
+    assert_eq!(pick_title(&rows[..1]), "Embed terminal session headless");
+}
+
+/// `/clear` starts a new transcript and carries the session's name into
+/// it. Until something is said there it is not a conversation.
+#[test]
+fn a_cleared_session_is_blank_until_something_is_said() {
+    let _guard = isolated();
+    let dir = emaki_core::paths::projects_dir().join("-tmp-blank");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("blank-1.jsonl");
+    let mut rows = vec![
+        json!({"type": "custom-title", "customTitle": "Named before", "sessionId": "blank-1"}),
+        json!({"type": "agent-name", "agentName": "Named before", "sessionId": "blank-1"}),
+        json!({"type": "user", "isMeta": true, "uuid": "u0", "cwd": "/tmp/blank", "message": {"role": "user", "content": "<local-command-caveat>x</local-command-caveat>"}}),
+        json!({"type": "user", "uuid": "u1", "cwd": "/tmp/blank", "message": {"role": "user", "content": "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"}}),
+        json!({"type": "system", "subtype": "local_command", "content": "<local-command-stdout></local-command-stdout>", "commandRun": {"command": "clear", "args": ""}}),
+    ];
+    let write = |rows: &[serde_json::Value]| {
+        let text: String = rows.iter().map(|r| format!("{r}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+    };
+    write(&rows);
+    let r = emaki_core::transcript::peek(&path);
+    assert!(r.blank);
+    assert_eq!(r.title, "Named before");
+
+    rows.push(json!({"type": "user", "uuid": "u2", "cwd": "/tmp/blank", "message": {"role": "user", "content": "hello"}}));
+    write(&rows);
+    assert!(!emaki_core::transcript::peek(&path).blank);
+
+    // A skill is a prompt, though it is written as a command.
+    rows.pop();
+    rows.push(json!({"type": "user", "uuid": "u3", "cwd": "/tmp/blank", "message": {"role": "user", "content": "<command-name>/code-review</command-name>\n<command-args></command-args>"}}));
+    write(&rows);
+    assert!(!emaki_core::transcript::peek(&path).blank);
 }

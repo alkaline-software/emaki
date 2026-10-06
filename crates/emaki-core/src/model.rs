@@ -186,6 +186,9 @@ pub enum NoticeVariant {
     Mode,
     Model,
     Effort,
+    /// The turn was stopped by the person; the text is what the agent
+    /// itself wrote of it in its transcript.
+    Interrupted,
 }
 
 impl NoticeVariant {

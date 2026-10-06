@@ -672,6 +672,7 @@ impl Workbench {
                 .into_any_element(),
             NoticeVariant::Compact => plate(theme.info.opacity(0.13), theme.foreground),
             NoticeVariant::Error => plate(theme.danger.opacity(0.13), theme.danger),
+            NoticeVariant::Interrupted => plate(theme.warning.opacity(0.16), theme.foreground),
             _ => div()
                 .w_full()
                 .min_w_0()

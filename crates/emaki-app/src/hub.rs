@@ -490,9 +490,18 @@ impl Hub {
                 thread::sleep(look);
             }
         };
-        for (ix, path) in images.iter().enumerate() {
+        // Each picture is on the screen before the next is pasted: one
+        // more "[Image #" than there was. Counted from what the screen
+        // already shows, since the conversation above the prompt names
+        // the pictures of earlier messages; counted from nothing, the
+        // wait was over before it began whenever one was in view, the
+        // second path went in on top of the first, and one picture of
+        // the two never arrived.
+        let marks = |screen: &str| screen.matches("[Image #").count();
+        for path in images.iter() {
+            let before = marks(&pty.styled());
             pty.paste(&path.to_string_lossy());
-            until(&|screen| screen.matches("[Image #").count() > ix);
+            until(&|screen| marks(screen) > before);
         }
         let words = text.trim();
         if !words.is_empty() {

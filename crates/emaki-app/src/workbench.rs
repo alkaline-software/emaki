@@ -52,6 +52,38 @@ pub const FIND_CONTEXT: &str = "FindBar";
 pub const TERMINAL_CONTEXT: &str = "Terminal";
 
 pub const SIDEBAR_W: Pixels = px(268.);
+/// What a right click offers: where it was made, and the choices.
+#[derive(Clone)]
+struct Menu {
+    at: Point<Pixels>,
+    items: Vec<(&'static str, MenuDo)>,
+}
+
+/// One choice on a right-click menu.
+#[derive(Clone)]
+enum MenuDo {
+    /// Open this folder in the file manager; none when it is gone.
+    OpenFolder(Option<String>),
+    /// Give the session, by its key, a name of the person's own.
+    Rename(String),
+    /// Show the session's transcript in the file manager.
+    Reveal(PathBuf),
+}
+
+/// Where the person's own names for sessions are kept, by session key.
+fn titles_file() -> PathBuf {
+    emaki_core::paths::state_dir().join("titles.json")
+}
+
+/// How many sessions an open folder shows in the sidebar before "N more".
+const FOLDER_ROWS: usize = 5;
+/// How many folders the sidebar lists before "N more".
+const SIDE_FOLDERS: usize = 10;
+/// How long a folder takes to unfold or fold away.
+const FOLDER_ANIM: Duration = Duration::from_millis(200);
+/// The sidebar's rows: an agent or a folder, and a session under a folder.
+const SIDE_ROW_H: Pixels = px(26.);
+const SIDE_SESSION_H: Pixels = px(24.);
 pub const TITLEBAR_H: Pixels = px(48.);
 /// Room for the traffic lights on a transparent title bar.
 pub const TRAFFIC_W: Pixels = px(80.);
@@ -432,6 +464,39 @@ pub struct Workbench {
     /// is on, as of the last draw.
     seg_state: std::cell::RefCell<HashMap<&'static str, (&'static str, &'static str)>>,
     pub attachments: Vec<Attachment>,
+    /// What was left typed and attached in each composer the person is
+    /// not looking at, by `draft_key`: every session has a composer of
+    /// its own, and the new-session page has one.
+    drafts: HashMap<String, (String, Vec<Attachment>)>,
+    /// The sidebar's folders that show their sessions; none until the
+    /// person opens or closes one (`folder_open`).
+    folders_open: Option<HashSet<String>>,
+    /// The folders with a live session as of the last draw, and those
+    /// opened for that reason and not touched since (`sync_folders`).
+    folders_live: HashSet<String>,
+    folders_auto: HashSet<String>,
+    /// The right-click menu showing, if one is.
+    menu: Option<Menu>,
+    /// The session being renamed, by its key, and the field for its name.
+    renaming: Option<String>,
+    rename_input: Entity<InputState>,
+    /// The person's own names for sessions, by session key
+    /// (`state/titles.json`); each stands in for the agent's title.
+    titles: HashMap<String, String>,
+    /// Names still to be given to the sessions themselves, by session
+    /// key: each waits for its session to be between turns.
+    renames: HashMap<String, String>,
+    /// The session showing changed on disk while it was being read; a
+    /// change that came then was dropped, and a prompt whose row was
+    /// half written at the read (a large pasted picture is one long
+    /// line) did not show until the agent's first words, seconds later.
+    reload_wanted: bool,
+    /// The folder last opened or closed: which, whether it was opened,
+    /// when, and the click's number, for the moment its sessions take to
+    /// unfold or fold away.
+    folder_anim: Option<(String, bool, std::time::Instant, u32)>,
+    /// Whose words the one textarea holds now.
+    draft_of: Option<String>,
     /// An attachment opened large over the window.
     pub lightbox: Option<Lightbox>,
     pub search_input: Entity<InputState>,
@@ -727,12 +792,27 @@ impl PillText {
     }
 }
 
+/// The colours of a choice with none of its own, from low to high,
+/// each on a light ground and then on a dark one: blue, green, amber,
+/// purple, red, in the shades Claude Code's two themes use, so a choice
+/// it has no colour for sits beside the ones it has.
+const RAMP: [[u32; 2]; 5] = [[0x3A68B0, 0x8FB2EA], [0x2C7A39, 0x4EBA65], [0x966C1E, 0xFFC107], [0x8700FF, 0xAF87FF], [0xAB2B3F, 0xFF6B80]];
+
+/// The rainbow on a light ground: Claude Code's seven colours are
+/// pastels made for a dark one, and its yellow and green all but
+/// vanish on cream, so each is taken down to a shade that reads there.
+const SPECTRUM_LIGHT: [u32; 7] = [0xC8372D, 0xC8611F, 0x9A7411, 0x3F8A3A, 0x356FB5, 0x6A4FB0, 0xA8418A];
+
+/// One of a light and dark pair, by the window's appearance.
+fn shade(pair: [u32; 2], theme: &gpui_component::Theme) -> Hsla {
+    rgb(if theme.mode.is_dark() { pair[1] } else { pair[0] }).into()
+}
+
 /// The colour of a choice with none of its own, by its place on a list
-/// of `len`: the status row's colours from low to high.
+/// of `len`.
 fn ramp(ix: usize, len: usize, theme: &gpui_component::Theme) -> Hsla {
-    let steps = [theme.blue, theme.success, theme.warning, theme.magenta, theme.danger];
     let t = if len > 1 { ix as f32 / (len - 1) as f32 } else { 0. };
-    steps[(t * (steps.len() - 1) as f32).round() as usize]
+    shade(RAMP[(t * (RAMP.len() - 1) as f32).round() as usize], theme)
 }
 
 /// The colour of the choice at `ix` of `list`: the agent's own when it
@@ -740,10 +820,15 @@ fn ramp(ix: usize, len: usize, theme: &gpui_component::Theme) -> Hsla {
 fn tint_of(list: &[Choice], ix: usize, theme: &gpui_component::Theme) -> Tint {
     let c = &list[ix];
     if !c.spectrum.is_empty() {
+        // The agent's rainbow as it lists it on a dark ground, ours
+        // for a light one when it is the seven colours we know.
+        if !theme.mode.is_dark() && c.spectrum.len() == SPECTRUM_LIGHT.len() {
+            return Tint::Spectrum(SPECTRUM_LIGHT.iter().map(|v| rgb(*v).into()).collect());
+        }
         return Tint::Spectrum(c.spectrum.iter().map(|v| rgb(*v).into()).collect());
     }
     Tint::Solid(match c.color {
-        Some([light, dark]) => rgb(if theme.mode.is_dark() { dark } else { light }).into(),
+        Some(pair) => shade(pair, theme),
         None => ramp(ix, list.len(), theme),
     })
 }
@@ -864,6 +949,14 @@ impl Workbench {
             }
         }));
 
+        let titles: HashMap<String, String> = emaki_core::paths::read_json(&titles_file()).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("A name for this session"));
+        cx.subscribe_in(&rename_input, window, |this, _, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                this.commit_rename(window, cx);
+            }
+        })
+        .detach();
         cx.subscribe_in(&search_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::Change => this.run_search(window, cx),
             InputEvent::PressEnter { .. } => {
@@ -989,6 +1082,20 @@ impl Workbench {
             load_task: None,
             composer,
             attachments: Vec::new(),
+            drafts: HashMap::new(),
+            folders_open: ui.folders_open.clone().map(|f| f.into_iter().collect()),
+            folder_anim: None,
+            folders_live: HashSet::new(),
+            folders_auto: HashSet::new(),
+            menu: None,
+            renaming: None,
+            rename_input,
+            titles: titles.clone(),
+            // A name still in our record is one its transcript does not
+            // say yet: asked for again at launch.
+            renames: titles,
+            reload_wanted: false,
+            draft_of: None,
             lightbox: None,
             search_input,
             search_open: false,
@@ -1089,8 +1196,48 @@ impl Workbench {
 
     fn on_hub_event(&mut self, ev: HubEvent, cx: &mut Context<Self>) {
         match ev {
-            HubEvent::Index(refs) => {
+            HubEvent::Index(mut refs) => {
+                // A session nothing was said in (what `/clear` leaves
+                // behind) is listed nowhere, unless the person has it
+                // showing or it is one of ours getting under way.
+                let shown = self.selected.clone();
+                let mut dropped: HashSet<String> = HashSet::new();
+                refs.retain(|r| {
+                    let keep = !r.blank
+                        || shown.as_deref() == Some(key_of(r).as_str())
+                        || self.driven(&r.session_id)
+                        || self.hub.terminal_for(&r.session_id).is_some();
+                    if !keep {
+                        dropped.insert(key_of(r));
+                    }
+                    keep
+                });
+                let tabs = self.tabs.len();
+                self.tabs.retain(|t| !dropped.contains(t));
+                if self.tabs.len() != tabs {
+                    self.save_ui(true);
+                }
+                // The person's own name for a session stands in for the
+                // agent's title wherever the list is drawn.
+                // Once the transcript says the same, the name is the
+                // session's own and ours is put away.
+                let mut settled = false;
+                for r in refs.iter_mut() {
+                    let key = key_of(r);
+                    match self.titles.get(&key) {
+                        Some(name) if *name == r.title => {
+                            self.titles.remove(&key);
+                            settled = true;
+                        }
+                        Some(name) => r.title = name.clone(),
+                        None => {}
+                    }
+                }
+                if settled {
+                    self.save_titles();
+                }
                 self.refs = refs;
+                self.try_renames();
                 // The turn showing was working and now reads as stopped
                 // (Escape in the terminal, or Stop here): its prompt goes
                 // back to the composer.
@@ -1154,7 +1301,12 @@ impl Workbench {
             HubEvent::Changed(path) => {
                 if let Some(d) = &self.detail {
                     let same = d.path == path || path.starts_with(d.path.with_extension(""));
-                    if same && self.loading.is_none() {
+                    if same && self.loading.is_some() {
+                        // A read is under way and may have been taken
+                        // before this change was whole: read once more
+                        // when it is back.
+                        self.reload_wanted = true;
+                    } else if same {
                         if let Some(r) = self.refs.iter().find(|r| r.path == d.path).cloned() {
                             self.load_detail(r, cx);
                         }
@@ -1491,6 +1643,37 @@ impl Workbench {
             Some("pill:model") => self.via_terminal(TerminalAction::Pick(Pill::Model), cx),
             Some("pill:effort") => self.via_terminal(TerminalAction::Pick(Pill::Effort), cx),
             Some("step:mode") => self.cycle_mode(cx),
+            // A click on a folder in the sidebar, by its name.
+            Some(t) if t.starts_with("folder:") => self.toggle_folder(&t["folder:".len()..], cx),
+            // The right-click menu of the session showing, the field it
+            // is renamed in, and a name given without the field.
+            Some("menu") => {
+                if let Some(r) = self.selected_ref().cloned() {
+                    self.open_menu(point(px(150.), px(330.)), vec![("Rename", MenuDo::Rename(key_of(&r))), (crate::sys::REVEAL_LABEL, MenuDo::Reveal(r.path.clone()))], cx);
+                }
+            }
+            Some("renaming") => {
+                self.renaming = self.selected.clone();
+                cx.notify();
+            }
+            Some(t) if t.starts_with("name:") => {
+                if let Some(key) = self.selected.clone() {
+                    self.set_title(&key, &t["name:".len()..]);
+                    cx.notify();
+                }
+            }
+            Some("page:new") => {
+                self.page = Page::New;
+                self.selected = None;
+                cx.notify();
+            }
+            // Another session, by the start of its id: for a look at
+            // what the composer holds after a switch.
+            Some(t) if t.starts_with("open:") => {
+                if let Some(key) = self.refs.iter().find(|r| r.session_id.starts_with(&t["open:".len()..])).map(key_of) {
+                    self.open_session(&key, cx);
+                }
+            }
             Some(t) if t.starts_with("mode:") => self.set_mode(&t["mode:".len()..], cx),
             Some(t) if t.starts_with("model:") => self.set_model(&t["model:".len()..], cx),
             Some(t) if t.starts_with("effort:") => self.set_effort(&t["effort:".len()..], cx),
@@ -1538,6 +1721,11 @@ impl Workbench {
             page: page.into(),
             tabs: self.tabs.clone(),
             active: self.selected.clone().filter(|_| self.page == Page::Session),
+            folders_open: self.folders_open.as_ref().map(|f| {
+                let mut v: Vec<String> = f.iter().cloned().collect();
+                v.sort();
+                v
+            }),
         }
         .save();
         self.last_ui_save = std::time::Instant::now();
@@ -1565,6 +1753,7 @@ impl Workbench {
     fn load_detail(&mut self, r: SessionRef, cx: &mut Context<Self>) {
         let key = key_of(&r);
         self.loading = Some(key.clone());
+        self.reload_wanted = false;
         let path = r.path.clone();
         // The folder's commands, read once per folder, so the commands a
         // prompt names are known by the time they are drawn.
@@ -1595,6 +1784,11 @@ impl Workbench {
                     this.request_live_explanations();
                 }
                 this.after_detail_loaded(cx);
+                if std::mem::take(&mut this.reload_wanted) {
+                    if let Some(r) = this.refs.iter().find(|r| key_of(r) == key).cloned() {
+                        this.load_detail(r, cx);
+                    }
+                }
                 if timing {
                     eprintln!("emaki: open {} — load {}ms, set_detail {}ms, {} rounds", &key, loaded.as_millis(), t.elapsed().as_millis(), rounds);
                 }
@@ -1604,7 +1798,35 @@ impl Workbench {
         }));
     }
 
-    fn set_detail(&mut self, key: String, path: PathBuf, session: Session) {
+    /// A message waiting in the queue is known to the transcript by its
+    /// words alone until the agent takes it up; the pictures and files
+    /// sent with it from here are put on it meanwhile, from the message
+    /// as it left the window.
+    fn dress_queued(&self, key: &str, session: &mut Session) {
+        let Some((sent_key, text, attached)) = &self.last_sent else { return };
+        if sent_key != key || attached.is_empty() {
+            return;
+        }
+        let Some(rnd) = session.rounds.iter_mut().rev().find(|r| r.queued) else { return };
+        if !rnd.attachments.is_empty() || rnd.prompt.trim() != text.trim() {
+            return;
+        }
+        rnd.attachments = attached
+            .iter()
+            .filter(|a| a.path.is_file())
+            .map(|a| emaki_core::model::Attachment {
+                kind: if a.image { "image".into() } else { "file".into() },
+                path: a.path.to_string_lossy().to_string(),
+                name: a.name.clone(),
+                media_type: a.mime.clone(),
+                size: std::fs::metadata(&a.path).map(|m| m.len()).unwrap_or(0),
+                ..Default::default()
+            })
+            .collect();
+    }
+
+    fn set_detail(&mut self, key: String, path: PathBuf, mut session: Session) {
+        self.dress_queued(&key, &mut session);
         self.limits.refresh_from_statusline();
         self.refresh_context(&session.id);
         let n = session.rounds.len();
@@ -3556,6 +3778,7 @@ impl Workbench {
     /// round holds, files and kept pictures by their paths. Nothing is
     /// touched when the composer already has something in it.
     fn restore_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_draft(window, cx);
         if !self.composer.read(cx).value().trim().is_empty() || !self.attachments.is_empty() {
             return;
         }
@@ -3597,6 +3820,49 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Whose composer is showing: the session's, or the new-session
+    /// page's. None on a page with no composer, where the textarea keeps
+    /// what it had.
+    fn draft_key(&self) -> Option<String> {
+        match self.page {
+            Page::Session => self.selected.clone(),
+            Page::New => Some(String::new()),
+            _ => None,
+        }
+    }
+
+    /// One textarea stands for every composer, so on arriving somewhere
+    /// else what it holds is put away under where it was typed, and what
+    /// was left typed here is brought back, caret at the end (setting the
+    /// value is not a change event, so it starts no terminal). Called at
+    /// every draw, and before anything that looks at the composer on
+    /// behalf of a session. It was one box for the whole window: words
+    /// typed for one session followed the person into the next.
+    fn sync_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.draft_key() else { return };
+        if self.draft_of.as_ref() == Some(&key) {
+            return;
+        }
+        // The first composer of the launch takes what is there (`EMAKI_TYPE`).
+        let Some(old) = self.draft_of.replace(key.clone()) else { return };
+        let text = self.composer.read(cx).value().to_string();
+        let attached = std::mem::take(&mut self.attachments);
+        if text.trim().is_empty() && attached.is_empty() {
+            self.drafts.remove(&old);
+        } else {
+            self.drafts.insert(old, (text, attached));
+        }
+        let (text, attached) = self.drafts.remove(&key).unwrap_or_default();
+        self.attachments = attached.into_iter().filter(|a| a.path.is_file()).collect();
+        let end = text.lines().count().saturating_sub(1) as u32;
+        let col = text.lines().last().map(|l| l.encode_utf16().count()).unwrap_or(0) as u32;
+        self.composer.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.set_cursor_position(gpui_component::input::Position::new(end, col), window, cx);
+        });
+        self.mark_slash(cx);
+    }
+
     /// Escape with nothing to close stops the turn running on the session
     /// showing, as it does in the terminal and as the Stop pill does.
     /// False when there is no turn to stop.
@@ -3611,7 +3877,12 @@ impl Workbench {
     /// What Escape closes, nearest first: the lightbox, then the search;
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_open {
+        if self.menu.is_some() {
+            self.menu = None;
+            cx.notify();
+        } else if self.renaming.is_some() {
+            self.close_rename(window, cx);
+        } else if self.settings_open {
             self.settings_open = false;
             cx.notify();
         } else if self.lightbox.is_some() {
@@ -4348,16 +4619,6 @@ impl Workbench {
             .collect()
     }
 
-    fn projects(&self) -> Vec<(String, usize)> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for r in &self.refs {
-            *counts.entry(r.project()).or_default() += 1;
-        }
-        let mut v: Vec<(String, usize)> = counts.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        v
-    }
-
     fn recent_cwds(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -4395,7 +4656,6 @@ impl Workbench {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let projects = self.projects();
         let page = self.page;
         let scope = self.scope.clone();
 
@@ -4410,7 +4670,19 @@ impl Workbench {
             .gap(px(5.))
             .items_center()
             .child(img("icon/app.png").size(px(30.)).flex_shrink_0())
-            .child(div().text_size(px(22.)).when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f)).child("Emaki"));
+            // Optima has a regular and a bold and nothing between: the
+            // regular read as thin in the accent's colour and the bold as
+            // thick. The name is drawn twice, half a pixel apart, which
+            // lands between the two.
+            .child(
+                div()
+                    .relative()
+                    .text_size(px(22.))
+                    .text_color(theme.primary)
+                    .when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f))
+                    .child("Emaki")
+                    .child(div().absolute().top_0().left(px(0.5)).child("Emaki")),
+            );
 
         let mut header = h_flex().h(TITLEBAR_H).flex_shrink_0().pl(px(16.)).pr(px(10.)).items_center();
         let mut top = v_flex().px(px(10.)).pt(px(2.)).gap(px(2.));
@@ -4474,9 +4746,12 @@ impl Workbench {
                 agents.push((a, n));
             }
         }
-        let shown_projects = projects.iter().take(8).cloned().collect::<Vec<_>>();
-        let more_projects = projects.len().saturating_sub(shown_projects.len());
-        let mut scroll = v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(10.)).pb(px(8.));
+        // The rows sit in a column of their own inside the scroller. As
+        // the scroller's children they were flex items of a column too
+        // short for them, and every row gave up height to fit, down to
+        // its text: 30px rows drew at about 21, and at 24 with a folder
+        // closed, so the list changed its spacing as a folder opened.
+        let mut scroll = v_flex().flex_shrink_0();
         scroll = scroll.child(self.group_label("Agents", cx));
         scroll = scroll.children(agents.into_iter().map(|(a, n)| {
             let active = sessions_active && scope == Scope::Agent(a);
@@ -4484,7 +4759,7 @@ impl Workbench {
             let live = self.refs.iter().filter(|r| r.agent == a && self.live_color(r, cx).is_some()).count();
             h_flex()
                 .id(SharedString::from(format!("agent-{}", a.as_str())))
-                .h(px(30.))
+                .h(SIDE_ROW_H)
                 .px(px(10.))
                 .gap(px(10.))
                 .rounded(px(8.))
@@ -4503,7 +4778,7 @@ impl Workbench {
             scroll = scroll.child(
                 h_flex()
                     .id("agent-kept")
-                    .h(px(30.))
+                    .h(SIDE_ROW_H)
                     .px(px(10.))
                     .gap(px(10.))
                     .rounded(px(8.))
@@ -4516,79 +4791,148 @@ impl Workbench {
                     .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(kept.to_string())),
             );
         }
-        if !shown_projects.is_empty() {
-            scroll = scroll.child(self.group_label("Projects", cx));
-            scroll = scroll.children(shown_projects.into_iter().map(|(p, _n)| {
-                let active = sessions_active && scope == Scope::Project(p.clone());
-                let theme = cx.theme().clone();
-                let label = p.clone();
-                h_flex()
-                    .id(SharedString::from(format!("proj-{p}")))
-                    .h(px(30.))
-                    .px(px(10.))
-                    .gap(px(10.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .when(active, |d| d.bg(theme.sidebar_accent))
-                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.show_sessions(Scope::Project(p.clone()), cx)))
-                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(IconName::Folder).with_size(px(15.)).text_color(theme.muted_foreground)))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(label))
-            }));
-            if more_projects > 0 {
-                scroll = scroll.child(
-                    h_flex()
-                        .id("proj-more")
-                        .h(px(28.))
-                        .px(px(10.))
-                        .pl(px(42.))
-                        .rounded(px(8.))
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .text_color(theme.muted_foreground)
-                        .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                        .on_click(cx.listener(|this, _, _, cx| this.show_sessions(Scope::All, cx)))
-                        .child(format!("{more_projects} more")),
-                );
+        // Folders: every project as a row that opens onto its sessions,
+        // newest folder first, the sessions under each headed by when
+        // (today, yesterday, this week, this month, earlier). A folder
+        // wears what its sessions wear: its icon takes the agent's colour
+        // while one of them is live, and the dot at its right is the most
+        // pressing of theirs (needs you, then working, then your turn).
+        // A session's mark is in the muted ink unless it is live, so a
+        // column of rows does not read as so many accents; a live one
+        // wears its agent's colour and turns while it works.
+        let mut folders: Vec<(String, Vec<SessionRef>)> = Vec::new();
+        for r in &self.refs {
+            let p = r.project();
+            match folders.iter_mut().find(|(name, _)| *name == p) {
+                Some((_, list)) => list.push(r.clone()),
+                None => folders.push((p, vec![r.clone()])),
             }
         }
-        // Recents, headed by when: today, yesterday, this week, this month,
-        // earlier. The agent's mark is drawn in the muted ink unless the
-        // session is live, so a column of forty rows does not read as
-        // forty accents; a live one wears its agent's colour and turns.
-        let recents: Vec<SessionRef> = self.refs.iter().take(40).cloned().collect();
-        let mut last_bucket = "";
-        for r in recents {
-            let b = bucket(r.mtime);
-            if b != last_bucket {
-                scroll = scroll.child(self.group_label(if last_bucket.is_empty() { "Recents" } else { b }, cx));
-                if last_bucket.is_empty() && b != "Today" {
-                    scroll = scroll.child(div().px(px(10.)).pb(px(4.)).text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.7)).child(b));
-                }
-                last_bucket = b;
-            }
-            let key = key_of(&r);
-            let active = page == Page::Session && self.selected.as_deref() == Some(key.as_str());
+        if !folders.is_empty() {
+            scroll = scroll.child(self.group_label("Folders", cx));
+        }
+        let more_folders = folders.len().saturating_sub(SIDE_FOLDERS);
+        for (p, list) in folders.into_iter().take(SIDE_FOLDERS) {
             let theme = cx.theme().clone();
-            let dot = self.live_color(&r, cx);
-            let working = self.is_working(&r);
-            let glyph_id = SharedString::from(format!("recent-glyph-{key}"));
-            let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
+            let open = self.folder_open(&p);
+            let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
+            let dot = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| self.column_color(*c, cx));
+            let tint = live.first().map(|(r, _)| agent_color(r.agent, &theme)).unwrap_or(theme.muted_foreground);
+            let name = p.clone();
+            // The folder itself, from the newest session that still has it.
+            let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
             scroll = scroll.child(
                 h_flex()
-                    .id(SharedString::from(format!("recent-{key}")))
-                    .h(px(28.))
+                    .id(SharedString::from(format!("folder-{p}")))
+                    .h(SIDE_ROW_H)
                     .px(px(10.))
                     .gap(px(10.))
                     .rounded(px(8.))
                     .cursor_pointer()
-                    .when(active, |d| d.bg(theme.sidebar_accent))
                     .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
-                    .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(r.title.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_folder(&name, cx)))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))], cx)))
+                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(p.clone()))
                     .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
-                    .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground.opacity(0.7)))),
+                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(list.len().to_string())),
+            );
+            let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
+            if !open && anim.is_none() {
+                continue;
+            }
+            // The sessions, in a box whose height is the sum of its rows,
+            // so opening and closing can run that height up and down.
+            let more = list.len().saturating_sub(FOLDER_ROWS);
+            let mut body = v_flex().overflow_hidden();
+            let mut body_h = 0.;
+            let mut last_bucket = "";
+            for r in list.into_iter().take(FOLDER_ROWS) {
+                let b = bucket(r.mtime);
+                if b != last_bucket {
+                    let h = if last_bucket.is_empty() { 18. } else { 24. };
+                    body = body.child(h_flex().h(px(h)).flex_shrink_0().items_end().pl(px(42.)).pb(px(2.)).text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.7)).child(b));
+                    body_h += h;
+                    last_bucket = b;
+                }
+                let key = key_of(&r);
+                let active = page == Page::Session && self.selected.as_deref() == Some(key.as_str());
+                let dot = self.live_color(&r, cx);
+                let working = self.is_working(&r);
+                let glyph_id = SharedString::from(format!("recent-glyph-{key}"));
+                let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
+                let (menu_key, menu_path) = (key.clone(), r.path.clone());
+                body = body.child(
+                    h_flex()
+                        .id(SharedString::from(format!("recent-{key}")))
+                        .h(SIDE_SESSION_H)
+                        .flex_shrink_0()
+                        .ml(px(18.))
+                        .px(px(10.))
+                        .gap(px(8.))
+                        .rounded(px(7.))
+                        .cursor_pointer()
+                        .when(active, |d| d.bg(theme.sidebar_accent))
+                        .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                        .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![("Rename", MenuDo::Rename(menu_key.clone())), (crate::sys::REVEAL_LABEL, MenuDo::Reveal(menu_path.clone()))], cx)),
+                        )
+                        .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(r.title.clone()))
+                        .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
+                        .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground.opacity(0.7)))),
+                );
+                body_h += f32::from(SIDE_SESSION_H);
+            }
+            if more > 0 {
+                let all = p.clone();
+                body = body.child(
+                    h_flex()
+                        .id(SharedString::from(format!("folder-more-{p}")))
+                        .h(SIDE_SESSION_H)
+                        .flex_shrink_0()
+                        .ml(px(18.))
+                        .pl(px(36.))
+                        .rounded(px(7.))
+                        .cursor_pointer()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                        .on_click(cx.listener(move |this, _, _, cx| this.show_sessions(Scope::Project(all.clone()), cx)))
+                        .child(format!("{more} more")),
+                );
+                body_h += f32::from(SIDE_SESSION_H);
+            }
+            scroll = scroll.child(match anim {
+                // Opening runs the box from nothing to its height, closing
+                // back again, the rows fading with it; the id carries the
+                // click's number so each one plays once.
+                Some((opening, serial)) => body
+                    .with_animation(ElementId::Name(format!("folder-body-{p}-{serial}").into()), Animation::new(FOLDER_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                        let t = if opening { t } else { 1. - t };
+                        d.h(px(body_h * t)).opacity(t)
+                    })
+                    .into_any_element(),
+                None => body.into_any_element(),
+            });
+        }
+
+        if more_folders > 0 {
+            scroll = scroll.child(
+                h_flex()
+                    .id("folders-more")
+                    .h(SIDE_ROW_H)
+                    .flex_shrink_0()
+                    .pl(px(42.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_sessions(Scope::All, cx)))
+                    .child(format!("{more_folders} more")),
             );
         }
 
@@ -4616,7 +4960,237 @@ impl Workbench {
                 cx.notify();
             }));
 
-        v_flex().w(SIDEBAR_W).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(scroll).child(footer)
+        v_flex().w(SIDEBAR_W).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(10.)).pb(px(8.)).child(scroll)).child(footer)
+    }
+
+    /// Whether a folder in the sidebar shows its sessions: the person's
+    /// own choice, on top of what `sync_folders` opens and closes.
+    fn folder_open(&self, project: &str) -> bool {
+        self.folders_open.as_ref().is_some_and(|open| open.contains(project))
+    }
+
+    /// A folder with a live session is open without being asked: it
+    /// opens when one of its sessions goes live (at launch, every one
+    /// that has one), and closes again when the last of them stops, if
+    /// it was opened here and the person has not touched it since. A
+    /// click is the person's choice and stays until the folder next goes
+    /// live or quiet.
+    fn sync_folders(&mut self, cx: &mut Context<Self>) {
+        let live: HashSet<String> = self.refs.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| r.project()).collect();
+        if live == self.folders_live {
+            return;
+        }
+        let open = self.folders_open.get_or_insert_with(HashSet::new);
+        for p in live.difference(&self.folders_live) {
+            if open.insert(p.clone()) {
+                self.folders_auto.insert(p.clone());
+            }
+        }
+        for p in self.folders_live.difference(&live) {
+            if self.folders_auto.remove(p) {
+                open.remove(p);
+            }
+        }
+        self.folders_live = live;
+        self.save_ui(false);
+    }
+
+    fn toggle_folder(&mut self, project: &str, cx: &mut Context<Self>) {
+        let open = self.folders_open.get_or_insert_with(HashSet::new);
+        self.folders_auto.remove(project);
+        if !open.remove(project) {
+            open.insert(project.to_string());
+        }
+        let opening = open.contains(project);
+        let serial = self.folder_anim.as_ref().map(|(_, _, _, n)| n + 1).unwrap_or(0);
+        self.folder_anim = Some((project.to_string(), opening, std::time::Instant::now(), serial));
+        self.save_ui(true);
+        cx.notify();
+    }
+
+    /// A right click: the menu opens where the pointer is.
+    fn open_menu(&mut self, at: Point<Pixels>, items: Vec<(&'static str, MenuDo)>, cx: &mut Context<Self>) {
+        self.menu = Some(Menu { at, items });
+        cx.notify();
+    }
+
+    fn menu_pick(&mut self, what: MenuDo, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        match what {
+            MenuDo::OpenFolder(Some(cwd)) => crate::sys::open_path(std::path::Path::new(&cwd)),
+            MenuDo::OpenFolder(None) => self.notice = Some(Notice::error(FOLDER_GONE)),
+            MenuDo::Reveal(path) => crate::sys::reveal_path(&path),
+            MenuDo::Rename(key) => {
+                let now = self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default();
+                self.renaming = Some(key);
+                self.rename_input.update(cx, |s, cx| {
+                    s.set_value(now, window, cx);
+                    s.focus(window, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// The name in the field becomes the session's (`set_title`); an
+    /// empty field changes nothing.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.renaming.clone() else { return };
+        let name = self.rename_input.read(cx).value().trim().to_string();
+        self.set_title(&key, &name);
+        self.close_rename(window, cx);
+    }
+
+    /// The session takes a name. It shows at once, from our own record
+    /// (`state/titles.json`), and the session itself is renamed as soon
+    /// as it can be (`try_renames`).
+    fn set_title(&mut self, key: &str, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        if let Some(r) = self.refs.iter_mut().find(|r| key_of(r) == key) {
+            r.title = name.to_string();
+        }
+        self.titles.insert(key.to_string(), name.to_string());
+        self.save_titles();
+        self.renames.insert(key.to_string(), name.to_string());
+        self.try_renames();
+    }
+
+    fn save_titles(&self) {
+        let _ = emaki_core::paths::ensure_dirs();
+        if let Ok(v) = serde_json::to_value(&self.titles) {
+            let _ = emaki_core::paths::write_json(&titles_file(), &v);
+        }
+    }
+
+    /// The rename itself is the agent's to make: nothing here writes to
+    /// a transcript, so Claude Code is asked, with its own `/rename`
+    /// typed into the session's hidden terminal (one is started when the
+    /// session has none), and it writes the name where its resume list
+    /// and every other reader find it. Not typed into a running turn:
+    /// the name waits here and goes when the turn is over. A session
+    /// that cannot be asked (another agent, one kept only, a folder
+    /// that is gone) keeps the name as ours alone.
+    fn try_renames(&mut self) {
+        for (key, name) in self.renames.clone() {
+            let Some(r) = self.refs.iter().find(|r| key_of(r) == key).cloned() else { continue };
+            if r.agent != AgentId::ClaudeCode || r.archived || !Self::folder_exists(&r) || !self.hub.hidden_terminals() {
+                self.renames.remove(&key);
+                continue;
+            }
+            if self.is_working(&r) {
+                continue;
+            }
+            self.renames.remove(&key);
+            if self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "").is_ok() {
+                // One line, as the command takes it.
+                let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+                self.hub.send_to_terminal(&r.session_id, format!("/rename {name}"), Vec::new());
+            }
+        }
+    }
+
+    fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = None;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// The right-click menu: a small card at the pointer, kept inside the
+    /// window, over a clear sheet that any click puts away.
+    fn render_menu(&self, menu: Menu, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let (w, row_h) = (px(210.), px(30.));
+        let h = row_h * menu.items.len() as f32 + px(10.);
+        let view = window.viewport_size();
+        let x = menu.at.x.min(view.width - w - px(8.)).max(px(8.));
+        let y = menu.at.y.min(view.height - h - px(8.)).max(px(8.));
+        let mut card = v_flex()
+            .id("menu-card")
+            .absolute()
+            .left(x)
+            .top(y)
+            .w(w)
+            .p(px(5.))
+            .rounded(px(10.))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(float_shadow(&theme))
+            .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
+        for (ix, (label, what)) in menu.items.into_iter().enumerate() {
+            card = card.child(
+                h_flex()
+                    .id(("menu-item", ix))
+                    .h(row_h)
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .hover(|s| s.bg(theme.sidebar_accent))
+                    .on_click(cx.listener(move |this, _, window, cx| this.menu_pick(what.clone(), window, cx)))
+                    .child(label),
+            );
+        }
+        let shut = |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
+            this.menu = None;
+            cx.notify();
+        };
+        div().id("menu-sheet").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(shut)).on_mouse_down(MouseButton::Right, cx.listener(shut)).child(card)
+    }
+
+    /// The field a session is renamed in: a small card over a scrim, ↩
+    /// to keep the name, Escape or a click outside to leave it.
+    fn render_rename(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let focus = self.rename_input.read(cx).focus_handle(cx);
+        let value = self.rename_input.read(cx).value().to_string();
+        div()
+            .id("rename-overlay")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(theme.overlay)
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(120.))
+            .on_click(cx.listener(|this, _, window, cx| this.close_rename(window, cx)))
+            .child(
+                v_flex()
+                    .id("rename-panel")
+                    .key_context(SEARCH_CONTEXT)
+                    .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_rename(window, cx)))
+                    .on_click(|_, window, cx| swallow_click(window, cx))
+                    .w(px(460.))
+                    .max_w(gpui::relative(0.94))
+                    .p(px(16.))
+                    .gap(px(10.))
+                    .rounded(px(16.))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow(float_shadow(&theme))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Rename session"))
+                    .child(
+                        div()
+                            .id("rename-field")
+                            .track_focus(&focus)
+                            .role(Role::TextInput)
+                            .aria_label("Session name")
+                            .aria_value(value)
+                            .px(px(10.))
+                            .h(px(36.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(8.))
+                            .bg(theme.muted)
+                            .text_size(px(14.))
+                            .child(Input::new(&self.rename_input).appearance(false).bordered(false)),
+                    )
+                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child("↩ to save · Esc to cancel")),
+            )
     }
 
     fn group_label(&self, text: &'static str, cx: &Context<Self>) -> impl IntoElement {
@@ -6443,6 +7017,7 @@ impl Workbench {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| c.clone());
             let parent = path.parent().map(|p| emaki_core::paths::tilde(&p.to_string_lossy())).filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into());
             let hover_border = theme.muted_foreground.opacity(0.45);
+            let menu_cwd = c.clone();
             h_flex()
                 .id(SharedString::from(format!("cwd-{c}")))
                 .flex_1()
@@ -6462,6 +7037,7 @@ impl Workbench {
                     this.new_cwd = c.clone();
                     cx.notify();
                 }))
+                .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(Some(menu_cwd.clone())))], cx)))
                 .child(
                     div()
                         .size(px(32.))
@@ -6509,7 +7085,7 @@ impl Workbench {
                             v_flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .child(h_flex().gap(px(14.)).items_center().child(mark_icon(px(28.), theme.primary)).child(div().text_size(px(36.)).font_family(display).child(greeting(&self.user_name))))
+                                .child(h_flex().gap(px(14.)).items_center().child(img("icon/app.png").size(px(44.)).flex_shrink_0()).child(div().text_size(px(36.)).font_family(display).child(greeting(&self.user_name))))
                                 .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(line)),
                         )
                         .child(self.render_composer(cx))
@@ -6801,13 +7377,7 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Our mark: the four-armed burst that stands for Claude in this window.
-pub fn mark_icon(size: Pixels, color: Hsla) -> Icon {
-    Icon::default().path("icons/mark.svg").with_size(size).text_color(color)
-}
-
-/// Claude's own mark, the starburst, for the agent's glyph; Emaki's plain
-/// asterisk (`mark_icon`) stays on the greeting.
+/// Claude's own mark, the starburst, for the agent's glyph.
 pub fn claude_icon(size: Pixels, color: Hsla) -> Icon {
     Icon::default().path("icons/claude.svg").with_size(size).text_color(color)
 }
@@ -7152,6 +7722,8 @@ fn picker(
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_draft(window, cx);
+        self.sync_folders(cx);
         // The focused element must be one this page draws. gpui dispatches a
         // keystroke from the focused node, or from the window root when that
         // node is not in the frame, and the root is above every handler here:
@@ -7302,5 +7874,7 @@ impl Render for Workbench {
             .when(search_open, |d| d.child(self.render_search(cx)))
             .when(self.settings_open, |d| d.child(self.render_settings(cx)))
             .when_some(self.lightbox.clone(), |d, lb| d.child(self.render_lightbox(lb, cx)))
+            .when(self.renaming.is_some(), |d| d.child(self.render_rename(cx)))
+            .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, window, cx)))
     }
 }
