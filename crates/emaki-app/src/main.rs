@@ -4,10 +4,12 @@
 
 mod a11y;
 mod assets;
+mod file_icons;
 mod fonts;
 mod format;
 mod hub;
 mod look;
+mod panels;
 mod sys;
 mod transcript;
 mod ui_state;
@@ -19,7 +21,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermTab, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermTab, ToggleFiles, ToggleOutline, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -29,6 +31,8 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-b", GoBoard, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-l", GoSessions, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-s", ToggleSidebar, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-e", ToggleFiles, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-o", ToggleOutline, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-1", Tab1, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-2", Tab2, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-3", Tab3, Some(KEY_CONTEXT)),
@@ -127,6 +131,8 @@ fn app_menus() -> Vec<Menu> {
             MenuItem::action("Find Previous", FindPrev),
             MenuItem::separator(),
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::action("Toggle Files", ToggleFiles),
+            MenuItem::action("Toggle Outline", ToggleOutline),
         ],
     });
     menus.push(Menu {

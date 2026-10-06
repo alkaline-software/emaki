@@ -87,3 +87,16 @@ pub fn today_line() -> String {
 pub fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("{n} {one}") } else { format!("{n} {many}") }
 }
+
+/// A count with its thousands set apart: 1257 is "1,257".
+pub fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (ix, c) in digits.chars().enumerate() {
+        if ix > 0 && (digits.len() - ix) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}

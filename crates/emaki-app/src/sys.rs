@@ -705,6 +705,27 @@ pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Show in folder"
 };
 
+/// What moving a file to the trash is called where we are, and the trash.
+pub const TRASH_LABEL: &str = if cfg!(target_os = "windows") { "Move to Recycle Bin" } else { "Move to Trash" };
+pub const TRASH_NAME: &str = if cfg!(target_os = "windows") { "Recycle Bin" } else { "Trash" };
+
+/// Move `path` to the system's trash, where it can be put back from. On
+/// macOS through the file manager's own call: the crate's default asks
+/// Finder by AppleScript, which needs the person's leave to automate it.
+pub fn trash_path(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos as _};
+        let mut ctx = trash::TrashContext::default();
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
+        ctx.delete(path).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        trash::delete(path).map_err(|e| e.to_string())
+    }
+}
+
 /// What opening a folder in the file manager is called where we are.
 pub const OPEN_FOLDER_LABEL: &str = if cfg!(target_os = "macos") {
     "Open in Finder"
