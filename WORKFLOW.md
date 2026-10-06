@@ -90,16 +90,24 @@ notarizing the Mac images again; v0.1.5 was tagged three times, the first
 for a line that did not compile on Windows, which this check catches in a
 minute.
 
-### 4. Tag and push
+### 4. Push, wait for the tests, then tag
 
 Work happens on a branch; `main` is fast-forwarded to it at release.
+Push the branch first and let `rust.yml` finish on it: that is the only
+place the tests run on Windows and Linux (the check in step 3 type-checks
+Windows and runs nothing there). Tag only once it is green on all three:
 
 ```
 git push origin HEAD                 # the branch
+gh run list --repo alkaline-software/emaki --workflow rust --limit 1
+gh run watch <run-id> --repo alkaline-software/emaki --exit-status
 git push origin HEAD:main            # fast-forward main
 git tag -a vX.Y.Z -m "Emaki vX.Y.Z"
 git push origin vX.Y.Z
 ```
+
+The Mac images (step 5) can be built while it runs: the commit is the
+one that will be tagged, unless the tests send you back.
 
 The tag push starts `release.yml`. It takes about twenty minutes (the
 cold GPUI build), and ends with a **draft** release holding CI's
@@ -224,6 +232,17 @@ Finder honours, so the layout is not generated offline. This works on the
 GitHub macOS runners too.
 
 ## When something fails
+
+Every failure met while cutting a release gets a line here once it is
+solved, with what would have caught it, and the steps above are changed
+so it is caught before the tag next time.
+
+- **A test passes here and fails on Windows or Linux** (the `rust`
+  workflow goes red after the push): the tests only run on the other
+  systems in CI. Step 4 now waits for that run before tagging. v0.1.6's
+  second cut was tagged with it still running, and a new test failed on
+  Windows, where a file name's trailing dot is ignored, so `main.rs.`
+  answered as `main.rs`; the tag and both notarized images were redone.
 
 - **"Cargo.toml says X but the tag is vY"**: the version and the tag
   disagree. Fix `Cargo.toml`, commit, redo the tag.
