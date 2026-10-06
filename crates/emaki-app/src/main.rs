@@ -19,7 +19,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, TermBackTab, TermTab, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermTab, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -29,6 +29,15 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-b", GoBoard, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-l", GoSessions, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-s", ToggleSidebar, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-1", Tab1, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-2", Tab2, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-3", Tab3, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-4", Tab4, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-5", Tab5, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-6", Tab6, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-7", Tab7, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-8", Tab8, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-9", Tab9, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(SEARCH_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(FIND_CONTEXT)),
@@ -146,7 +155,7 @@ fn remembered_bounds(cx: &App) -> Option<Bounds<Pixels>> {
 fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
     let bounds = remembered_bounds(cx).unwrap_or_else(|| Bounds::centered(None, size(px(1180.), px(760.)), cx));
     let titlebar = if cfg!(target_os = "macos") {
-        TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(12.), px(13.))) }
+        TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(17.), px(18.))) }
     } else {
         TitlebarOptions { title: Some("Emaki".into()), appears_transparent: false, traffic_light_position: None }
     };
@@ -158,6 +167,9 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             // the conversation to run edge to edge, like the Claude app.
             window_min_size: Some(size(px(560.), px(480.))),
             app_id: Some("emaki".into()),
+            // The top strip holds tabs, which are dragged along it, so the
+            // app says which presses move the window (`drag_region`).
+            app_owns_titlebar_drag: true,
             ..Default::default()
         },
         |window, cx| {

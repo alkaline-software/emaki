@@ -481,6 +481,17 @@ fn options_are_kept_for_the_next_launch() {
 }
 
 #[test]
+fn a_terminal_colour_is_answered_in_both_themes() {
+    use emaki_core::driver::theme_pair;
+    // The thinking yellow of the dark theme, and the light theme's own.
+    assert_eq!(theme_pair(0xFFC107), Some([0x966C1E, 0xFFC107]));
+    assert_eq!(theme_pair(0x966C1E), Some([0x966C1E, 0xFFC107]));
+    // The mark's colour is one shade in both.
+    assert_eq!(theme_pair(0xD77757), Some([0xD77757, 0xD77757]));
+    assert_eq!(theme_pair(0x123456), None);
+}
+
+#[test]
 fn working_on_screen_is_the_line_over_the_prompt() {
     use emaki_core::driver::working_on_screen;
     let foot = "\n\n────\n❯ \n────\n  Context 16% | 5h: 8% (3h33m)\n  ⏵⏵ auto mode on (shift+tab to cycle)\n";

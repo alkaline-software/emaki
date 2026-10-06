@@ -14,6 +14,11 @@ grouped into one. The reasoning belongs in AGENTS.md.
 - A slash command that has an interface (`/status`, `/config`) shows on the same card.
 - Nothing done in Emaki touches a terminal of yours: a session open there is used through the hidden terminal as well.
 - The terminal button opens the session in your default terminal, or brings it forward when it is already open there; a session open in an IDE's terminal counts as not open.
+- Beside the traffic lights: the sidebar button and search. With the sidebar hidden, pointing at its button floats it in.
+- Switching tabs is instant: the conversation and the tab bar no longer blink, and each tab stays where you left it.
+- Tabs share the row evenly and resize smoothly as one opens or closes. Drag a tab to move it, press ⌘1 to ⌘9 to go to one (a number past the last goes to the last), and right-click one to rename it or reveal it in Finder.
+- Dragging a tab no longer moves the window; empty space along the top still does.
+- The word beside "Claude is working" keeps one colour through a turn.
 
 ## v0.1.5
 
