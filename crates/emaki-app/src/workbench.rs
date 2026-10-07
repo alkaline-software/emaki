@@ -42,7 +42,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab, TermClear, TermNewTab, TermCloseTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -99,12 +99,45 @@ pub(crate) enum MenuDo {
     Copy(String),
     /// Put this picture on the clipboard.
     CopyImage(Pic),
+    /// Show the session in the terminal at the conversation's right.
+    OpenTerminal(String),
     /// Close the session's tab.
     CloseTab(String),
     /// Close every tab but the session's.
     CloseOthers(String),
     /// Not a choice: a line between two groups of them.
     Rule,
+}
+
+impl MenuDo {
+    /// The icon in front of a choice: what it does, at a glance. Every
+    /// choice has one, so the words of a menu stand in one column.
+    fn icon(&self, label: &str) -> &'static str {
+        use crate::panels::FileDo;
+        match self {
+            MenuDo::Rename(_) | MenuDo::File(FileDo::Rename, _) => "icons/pencil-simple.svg",
+            MenuDo::OpenFolder(_) => "icons/folder-open.svg",
+            MenuDo::Reveal(_) if label.contains("Transcript") => "icons/file-text.svg",
+            MenuDo::Reveal(_) | MenuDo::File(FileDo::Reveal, _) => "icons/folder-open.svg",
+            MenuDo::File(FileDo::Changes, _) => "icons/git-diff.svg",
+            MenuDo::File(FileDo::Open, _) if label.contains(" in ") || label.ends_with("folder") => "icons/folder-open.svg",
+            MenuDo::File(FileDo::Open, _) => "icons/external-link.svg",
+            MenuDo::File(FileDo::Mention, _) => "icons/at.svg",
+            MenuDo::File(FileDo::NewFile, _) => "icons/file-plus.svg",
+            MenuDo::File(FileDo::NewFolder, _) => "icons/folder-plus.svg",
+            MenuDo::File(FileDo::Trash, _) => "icons/trash.svg",
+            MenuDo::File(FileDo::CopyPath | FileDo::CopyRel, _) => "icons/copy.svg",
+            MenuDo::Copy(_) if label.contains("Session ID") => "icons/hash.svg",
+            MenuDo::Copy(_) if label.contains("Command") => "icons/terminal.svg",
+            MenuDo::Copy(_) if label.contains("Branch") => "icons/git-branch.svg",
+            MenuDo::Copy(_) => "icons/copy.svg",
+            MenuDo::CopyImage(_) => "icons/image.svg",
+            MenuDo::OpenTerminal(_) => "icons/square-terminal.svg",
+            MenuDo::CloseTab(_) => "icons/close.svg",
+            MenuDo::CloseOthers(_) => "icons/circle-x.svg",
+            MenuDo::Rule => "",
+        }
+    }
 }
 
 /// Where the person's own names for sessions are kept, by session key.
@@ -163,7 +196,7 @@ const TAB_HINT_HOLD: Duration = Duration::from_millis(500);
 struct DragTab(String);
 
 /// What follows the pointer while a tab is dragged: its title on a plate.
-struct TabGhost(String);
+pub(crate) struct TabGhost(pub(crate) String);
 
 impl Render for TabGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -309,6 +342,8 @@ pub enum Pane {
     ChangeLines,
     /// Over such a card or sheet, on nothing that scrolls.
     Nowhere,
+    /// The terminal at the conversation's right.
+    Terminal,
 }
 
 /// A wheel event this long after the previous one begins a new gesture: a
@@ -858,6 +893,52 @@ pub struct Workbench {
     pub(crate) panel_w: Pixels,
     pub(crate) panel_drag: Option<bool>,
     pub(crate) panel_fit_wanted: bool,
+    /// The terminal at the conversation's right (`term_panel.rs`):
+    /// whether it is asked for, whether it shows the agent and not the
+    /// shell, its width, and the edge being dragged.
+    pub(crate) side_term: bool,
+    pub(crate) side_term_agent: bool,
+    pub(crate) side_term_w: Pixels,
+    pub(crate) side_term_drag: bool,
+    pub(crate) side_term_focus: FocusHandle,
+    /// The side that showed before the last press and the one after,
+    /// when, and which press that was.
+    pub(crate) side_term_anim: Option<(Option<bool>, Option<bool>, Instant, u32)>,
+    pub(crate) side_term_poll: Option<Task<()>>,
+    /// Where its screen was last drawn, and the rows and columns that fit.
+    pub(crate) side_term_bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    pub(crate) side_term_size: Rc<std::cell::Cell<(u16, u16)>>,
+    /// How many rows back it is scrolled, and what of the wheel is left
+    /// over from the last whole row.
+    pub(crate) side_back: usize,
+    pub(crate) side_wheel: f32,
+    /// The sessions whose agent the panel has started by itself, so one
+    /// that ends at once is not started in a loop.
+    pub(crate) side_term_tried: HashSet<String>,
+    /// A shell a session, by session id, started when first shown.
+    pub(crate) shells: HashMap<String, crate::term_panel::Shells>,
+    /// The shell tab left for another: which, when, and a count that
+    /// names the change, so the screens cross over once.
+    pub(crate) shell_swap: Option<(u64, Instant, u32)>,
+    /// The shell tab being dragged along its row.
+    pub(crate) shell_drag: Option<u64>,
+    /// A cell's width in the panel, as last drawn.
+    pub(crate) side_cell_w: f32,
+    /// The button held in the panel on a program that hears the mouse,
+    /// and the cell last told to it.
+    pub(crate) side_mouse: Option<u8>,
+    pub(crate) side_mouse_cell: (u16, u16),
+    /// What is selected in the panel, whether the drag that selects is
+    /// still held, and when a selection was last copied.
+    pub(crate) side_sel: Option<crate::term_panel::Sel>,
+    pub(crate) side_selecting: bool,
+    pub(crate) side_copied: Option<Instant>,
+    /// The row of shell tabs, which scrolls when it is full.
+    pub(crate) shell_scroll: ScrollHandle,
+    /// Until when the tab that shows is kept in view: a new one grows in.
+    pub(crate) shell_reveal: Option<Instant>,
+    /// The window's width at the last draw.
+    pub(crate) view_w: Pixels,
     pub(crate) tree: crate::panels::Tree,
     pub(crate) files_scroll: ScrollHandle,
     pub(crate) outline_scroll: ScrollHandle,
@@ -1962,6 +2043,30 @@ impl Workbench {
             panel_w: ui.panel_w.map(px).unwrap_or(crate::panels::PANEL_W),
             panel_drag: None,
             panel_fit_wanted: false,
+            side_term: false,
+            side_term_agent: ui.term_agent.unwrap_or(false),
+            side_term_w: px(ui.term_w.unwrap_or(f32::from(crate::term_panel::TERM_W))),
+            side_term_drag: false,
+            side_term_focus: cx.focus_handle(),
+            side_term_anim: None,
+            side_term_poll: None,
+            side_term_bounds: Rc::new(std::cell::Cell::new(Bounds::default())),
+            side_term_size: Rc::new(std::cell::Cell::new((0, 0))),
+            side_back: 0,
+            side_wheel: 0.,
+            side_term_tried: HashSet::new(),
+            shells: HashMap::new(),
+            shell_swap: None,
+            shell_drag: None,
+            side_cell_w: 0.,
+            side_mouse: None,
+            side_mouse_cell: (0, 0),
+            side_sel: None,
+            side_selecting: false,
+            side_copied: None,
+            shell_scroll: ScrollHandle::new(),
+            shell_reveal: None,
+            view_w: px(1280.),
             tree: Default::default(),
             files_scroll: ScrollHandle::new(),
             outline_scroll: ScrollHandle::new(),
@@ -2474,7 +2579,6 @@ impl Workbench {
         }
         match Some(step) {
             Some("terminal") => self.go_to_terminal(cx),
-            Some("button:terminal") => self.open_in_terminal(cx),
             Some(t) if t.starts_with("type:") => self.run_in_terminal(t["type:".len()..].to_string(), cx),
             Some("pill:mode") => self.cycle_mode(cx),
             Some("pill:model") => self.via_terminal(TerminalAction::Pick(Pill::Model), cx),
@@ -2489,6 +2593,10 @@ impl Workbench {
                     self.open_menu(point(px(150.), px(330.)), self.session_menu(&key_of(&r)), cx);
                 }
             }
+            // The terminal panel: `term` brings it, `term:agent` and
+            // `term:shell` choose what it shows, `termtype:<words>` types
+            // them there with Return.
+            Some(t) if t == "term" || t.starts_with("term:") || t.starts_with("termtype:") => self.term_panel_probe(t, cx),
             Some("renaming") => {
                 self.renaming = self.selected.clone();
                 cx.notify();
@@ -2595,6 +2703,8 @@ impl Workbench {
             sidebar_w: Some(f32::from(self.sidebar_w)),
             files_on: Some(self.files_on),
             panel_w: Some(f32::from(self.panel_w)),
+            term_w: Some(f32::from(self.side_term_w)),
+            term_agent: Some(self.side_term_agent),
             outline_on: Some(self.outline_on),
             branches_by_name: Some(self.branch_by_name),
             page: page.into(),
@@ -3706,9 +3816,9 @@ impl Workbench {
     /// Do something only the session's terminal can take: a pick from
     /// `/model` or `/effort`, a typed command, ⇧Tab for the mode, or just
     /// going there. With the session in a terminal it is done at once.
-    /// With none, the terminal is opened first, the way the button at the
-    /// top right opens it (`open_in_terminal`: the agent's own resume
-    /// command, an idle driver of ours stopped on the way), the row under
+    /// With none, the hidden terminal is started first (an idle driver of
+    /// ours stopped on the way; never a terminal app of the person's),
+    /// the row under
     /// the composer says so, and the action waits in `pending_terminal`
     /// until Claude Code has registered there and says it is idle
     /// (`terminal_ready`). A session a driver is mid-reply on is refused,
@@ -3747,14 +3857,15 @@ impl Workbench {
         if self.drivers.remove(&r.session_id).is_some() {
             self.hub.stop_driver(&r.session_id);
         }
-        // The terminal is one of our own, with no window, unless the
-        // setting says otherwise; then theirs is opened, as the button
-        // opens it.
+        // The terminal is one of our own, with no window. No terminal app
+        // of the person's is ever opened: where ours cannot be had
+        // (another agent, the setting off), the thing is not done.
         let opened = if r.agent == AgentId::ClaudeCode && self.hub.hidden_terminals() {
             self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "")
+        } else if r.agent != AgentId::ClaudeCode {
+            Err(format!("that needs {}'s own terminal, which Emaki does not run yet", r.agent.display_name()))
         } else {
-            let argv = emaki_core::terminal::resume_argv(r.agent, &r.session_id);
-            crate::sys::open_in_terminal(&r.session_id, &r.cwd, &argv)
+            Err("the hidden terminal is off (driver.hidden_terminal in config.json)".to_string())
         };
         match opened {
             Ok(()) => {
@@ -3762,7 +3873,7 @@ impl Workbench {
                 self.notice = Some(self.opening(&r.session_id));
                 self.hub.refresh();
             }
-            Err(e) => self.notice = Some(Notice::error(format!("could not open a terminal: {e}"))),
+            Err(e) => self.notice = Some(Notice::error(e)),
         }
         cx.notify();
     }
@@ -4306,7 +4417,18 @@ impl Workbench {
     /// transcript, and a conversation only read would move to the top
     /// of every list and read as live.
     fn warm_terminal(&mut self, cx: &mut Context<Self>) {
-        if self.page != Page::Session || self.composer.read(cx).value().trim().is_empty() {
+        if self.composer.read(cx).value().trim().is_empty() {
+            return;
+        }
+        self.warm_now();
+    }
+
+    /// The same at the first sign the person means to do something on
+    /// the session and not only read it: a click in the composer, the
+    /// terminal panel opened. The terminal takes a second to come up,
+    /// and started here it is there by the time it is wanted.
+    pub(crate) fn warm_now(&mut self) {
+        if self.page != Page::Session {
             return;
         }
         let Some(r) = self.selected_ref().cloned() else { return };
@@ -4492,6 +4614,35 @@ impl Workbench {
         .detach();
     }
 
+    /// `terminal_check`, for the terminal panel.
+    pub(crate) fn terminal_ok(&self, r: &SessionRef) -> Result<(), &'static str> {
+        self.terminal_check(r)
+    }
+
+    /// Whether the session runs in a terminal that is not ours.
+    pub(crate) fn in_own_terminal(&self, r: &SessionRef) -> bool {
+        self.reply_via_for(r).0 == "inbox" && self.hub.terminal_for(&r.session_id).is_none()
+    }
+
+    /// Start the hidden terminal of the session showing, for the
+    /// terminal panel to show: an idle driver is let go first, as
+    /// `via_terminal` does, and nothing is typed there.
+    pub(crate) fn start_hidden_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.selected_ref().cloned() else { return };
+        if let Err(why) = self.terminal_check(&r) {
+            self.notice = Some(Notice::error(why));
+            return;
+        }
+        if self.drivers.remove(&r.session_id).is_some() {
+            self.hub.stop_driver(&r.session_id);
+        }
+        match self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "") {
+            Ok(()) => self.hub.refresh(),
+            Err(e) => self.notice = Some(Notice::error(format!("could not start it: {e}"))),
+        }
+        cx.notify();
+    }
+
     fn terminal_check(&self, r: &SessionRef) -> Result<(), &'static str> {
         if r.archived {
             return Err("Kept only: the agent no longer has this transcript");
@@ -4516,51 +4667,6 @@ impl Workbench {
         matches!(self.reply_via_for(r).0, "inbox" | "pty")
     }
 
-    /// The first of the three buttons at the top right: continue the session
-    /// showing in the person's own terminal, with the agent's resume command. See
-    /// `emaki_core::terminal` and `sys::open_in_terminal`.
-    pub fn open_in_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(r) = self.selected_ref().cloned() else { return };
-        // "Your terminal" is the default one, the app the system keeps
-        // for shell scripts, and only that: a session running there
-        // already, however it got there, is brought forward. One in any
-        // other terminal (an IDE's, say) counts as not open.
-        let ours = self.hub.terminal_for(&r.session_id).map(|t| t.pid);
-        let theirs: Vec<emaki_core::peer::Peer> =
-            emaki_core::peer::registry_all().into_iter().filter(|p| p.session_id == r.session_id && Some(p.pid) != ours).collect();
-        if let Some(there) = theirs.iter().find(|p| crate::sys::in_default_terminal(p.pid)) {
-            self.notice = Some(match crate::sys::focus_terminal(there.pid) {
-                Ok(app) => Notice::said(format!("already open in {app}")),
-                Err(e) => Notice::error(e),
-            });
-            cx.notify();
-            return;
-        }
-        if let Err(why) = self.terminal_check(&r) {
-            self.notice = Some(Notice::error(why));
-            cx.notify();
-            return;
-        }
-        // Not onto a turn that is running, here or anywhere.
-        let ours_busy = ours.is_some() && self.hub.peer_for(&r.session_id).is_some_and(|p| p.status != "idle");
-        if ours_busy || self.is_working(&r) || theirs.iter().any(|p| p.status == "busy") {
-            self.notice = Some(Notice::error("Wait for the running reply, then open"));
-            cx.notify();
-            return;
-        }
-        // The hidden terminal stays as it is: the person's terminal is
-        // theirs, and opening it changes nothing in the window.
-        if self.drivers.remove(&r.session_id).is_some() {
-            self.hub.stop_driver(&r.session_id);
-        }
-        let argv = emaki_core::terminal::resume_argv(r.agent, &r.session_id);
-        self.notice = Some(match crate::sys::open_in_terminal(&r.session_id, &r.cwd, &argv) {
-            Ok(()) => Notice::said("opened in your terminal"),
-            Err(e) => Notice::error(format!("could not open a terminal: {e}")),
-        });
-        cx.notify();
-    }
-
     /// Put `text` on the clipboard, and have the button `key` show a tick
     /// for a moment.
     pub fn copy_text(&mut self, key: SharedString, text: String, cx: &mut Context<Self>) {
@@ -4579,7 +4685,7 @@ impl Workbench {
         .detach();
     }
 
-    fn folder_exists(r: &SessionRef) -> bool {
+    pub(crate) fn folder_exists(r: &SessionRef) -> bool {
         !r.cwd.is_empty() && std::path::Path::new(&r.cwd).is_dir()
     }
 
@@ -4648,7 +4754,9 @@ impl Workbench {
         }
         let inline_sidebar = (self.sidebar_open && !self.narrow) || self.sidebar_float;
         let (files, outline) = self.panels_shown();
-        let here = if files && self.files_scroll.bounds().contains(&e.position) {
+        let here = if self.term_panel_bounds().is_some_and(|b| b.contains(&e.position)) {
+            Pane::Terminal
+        } else if files && self.files_scroll.bounds().contains(&e.position) {
             Pane::Files
         } else if outline && self.outline_scroll.bounds().contains(&e.position) {
             Pane::Outline
@@ -4673,7 +4781,14 @@ impl Workbench {
                 self.outline_gliding = false;
             }
         }
-        if owner == here || !(inline_sidebar || files || outline) {
+        // The terminal has no scroller of its own to hear the wheel.
+        if owner == Pane::Terminal {
+            self.term_panel_wheel(e.delta.pixel_delta(px(20.)).y, e.position, &e.modifiers);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if owner == here || !(inline_sidebar || files || outline || here == Pane::Terminal) {
             return;
         }
         let delta = e.delta.pixel_delta(px(20.));
@@ -4701,7 +4816,7 @@ impl Workbench {
                 Page::Board => {}
             },
             // Momentum left over from a card or sheet that has gone.
-            Pane::Branches | Pane::ChangeFiles | Pane::ChangeLines | Pane::Nowhere => {}
+            Pane::Branches | Pane::ChangeFiles | Pane::ChangeLines | Pane::Nowhere | Pane::Terminal => {}
         }
         cx.stop_propagation();
         cx.notify();
@@ -6235,6 +6350,9 @@ impl Workbench {
             items.push(("Copy Image", MenuDo::CopyImage(pic)));
         }
         if let Some(path) = path {
+            if !items.is_empty() {
+                items.push(("", MenuDo::Rule));
+            }
             items.push(("Copy Path", MenuDo::Copy(path.to_string_lossy().to_string())));
             items.push((crate::sys::REVEAL_LABEL, MenuDo::Reveal(path)));
         }
@@ -6282,6 +6400,7 @@ impl Workbench {
             ("Copy Session ID", MenuDo::Copy(r.session_id.clone())),
             ("Copy Resume Command", MenuDo::Copy(resume)),
             ("", MenuDo::Rule),
+            ("Open in Terminal", MenuDo::OpenTerminal(key.to_string())),
             (crate::sys::OPEN_SESSION_FOLDER_LABEL, MenuDo::OpenFolder(Self::folder_exists(r).then(|| r.cwd.clone()))),
             (crate::sys::REVEAL_SESSION_LABEL, MenuDo::Reveal(r.path.clone())),
         ];
@@ -6318,6 +6437,12 @@ impl Workbench {
             MenuDo::File(what, path) => self.file_do(what, path, window, cx),
             MenuDo::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuDo::CopyImage(pic) => self.copy_image(pic, cx),
+            MenuDo::OpenTerminal(key) => {
+                if self.selected.as_deref() != Some(key.as_str()) {
+                    self.open_session(&key, cx);
+                }
+                self.open_term_panel_agent(window, cx);
+            }
             MenuDo::CloseTab(key) => self.close_tab(&key, window, cx),
             MenuDo::CloseOthers(key) => {
                 for other in self.tabs.clone().into_iter().filter(|t| *t != key) {
@@ -6413,10 +6538,24 @@ impl Workbench {
     fn render_menu(&self, menu: Menu, gone: Option<Duration>, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let (row_h, rule_h) = (px(30.), px(9.));
-        // The width is reckoned, not measured: the card has to be placed
-        // before it is laid out.
-        let longest = menu.items.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0);
-        let w = px((longest as f32 * 7.4 + 34.).max(96.));
+        // As wide as its longest choice and no wider, so the room at the
+        // right of the words is the room at the left of the icons. The
+        // words are measured here: the card has to be placed before it
+        // is laid out.
+        // An icon's drawing stops short of its box by about two pixels a
+        // side, so the row is that much tighter at the left: set the same
+        // both sides, the icon stood further in than the words' end did.
+        let (row_pl, row_pr, icon_w, icon_gap, card_p) = (8., 10., 15., 9., 5.);
+        let face = font(theme.font_family.clone());
+        let longest = menu
+            .items
+            .iter()
+            .map(|(label, _)| {
+                let run = TextRun { len: label.len(), font: face.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+                f32::from(window.text_system().shape_line(SharedString::from(*label), px(13.), &[run], None).width)
+            })
+            .fold(0f32, f32::max);
+        let w = px((longest + icon_w + icon_gap + row_pl + row_pr + 2. * card_p + 2.).ceil());
         let rules = menu.items.iter().filter(|(_, what)| matches!(what, MenuDo::Rule)).count();
         let h = row_h * (menu.items.len() - rules) as f32 + rule_h * rules as f32 + px(10.);
         let view = window.viewport_size();
@@ -6443,12 +6582,15 @@ impl Workbench {
                 h_flex()
                     .id(("menu-item", ix))
                     .h(row_h)
-                    .px(px(10.))
+                    .pl(px(row_pl))
+                    .pr(px(row_pr))
+                    .gap(px(icon_gap))
                     .rounded(px(6.))
                     .cursor_pointer()
                     .text_size(px(13.))
                     .whitespace_nowrap()
                     .hover(|s| s.bg(theme.sidebar_accent))
+                    .child(Icon::default().path(what.icon(label)).with_size(px(icon_w)).text_color(theme.foreground).flex_shrink_0())
                     .on_click(cx.listener(move |this, _, window, cx| this.menu_pick(what.clone(), window, cx)))
                     .child(label),
             );
@@ -6922,7 +7064,7 @@ impl Workbench {
     }
     // -- one conversation ----------------------------------------------------
 
-    fn render_detail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(r) = self.selected_ref().cloned() else {
             return v_flex()
@@ -6947,22 +7089,10 @@ impl Workbench {
         if r.archived {
             right.push(badge("kept", theme.muted, theme.muted_foreground).into_any_element());
         }
-        // The three places a session can be taken to, side by side: the
-        // terminal, the project's folder, the transcript on disk.
-        let terminal_tip = match self.terminal_check(&r) {
-            Ok(()) => "Open in your terminal",
-            Err(why) => why,
-        };
-        right.push(icon_button("terminal", Icon::default().path("icons/square-terminal.svg"), terminal_tip, cx, |this, _, cx| this.open_in_terminal(cx)).into_any_element());
+        // The terminal is the panel at the right (`term_panel.rs`); the
+        // person's own terminal app is on the session's menu.
+        right.push(self.term_buttons(r.agent, cx));
         let folder_tip = if Self::folder_exists(&r) { "Open the project folder" } else { FOLDER_GONE };
-        right.push(icon_button("project-folder", IconName::FolderOpen, folder_tip, cx, |this, _, cx| this.open_project_folder(cx)).into_any_element());
-        right.push(
-            icon_button("reveal", Icon::default().path("icons/file-text.svg"), crate::sys::REVEAL_TRANSCRIPT_LABEL, cx, {
-                let p = r.path.clone();
-                move |_, _, _| crate::sys::reveal_path(&p)
-            })
-            .into_any_element(),
-        );
         let tabs = self.render_tabs(cx);
         let topbar = self.render_topbar_ends(self.panel_buttons(cx), tabs, right, cx);
 
@@ -7142,6 +7272,8 @@ impl Workbench {
         // At the conversation's left, under the top strip: the folder's
         // files or the outline, one at a time (`panels.rs`).
         let (files_shown, outline_shown) = self.panels_shown();
+        self.fit_agent_pty(&r.session_id);
+        let term_panel = self.render_term_panel(&r, window, cx);
         let leaving = self.panel_leaving();
         let files_panel = (files_shown || leaving == Some(true)).then(|| self.render_files_panel(cx));
         let outline_panel = (outline_shown || leaving == Some(false)).then(|| self.render_outline_panel(cx));
@@ -7182,7 +7314,7 @@ impl Workbench {
             .h_full()
             .bg(theme.background)
             .child(topbar)
-            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().children(files_panel).children(outline_panel).child(conversation))
+            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().children(files_panel).children(outline_panel).child(conversation).children(term_panel))
             .into_any_element()
     }
 
@@ -8379,7 +8511,10 @@ impl Workbench {
                 move |s, _, _, _| s.border_color(accent)
             })
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach_paths(paths.paths(), cx)))
-            .on_click(cx.listener(|this, _, window, cx| this.focus_composer(window, cx)))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.warm_now();
+                this.focus_composer(window, cx)
+            }))
             .when(!attachments.is_empty(), |d| {
                 d.child(h_flex().flex_wrap().gap(px(6.)).pb(px(2.)).children(attachments.into_iter().enumerate().map(|(i, a)| {
                     let theme = cx.theme().clone();
@@ -9281,6 +9416,15 @@ pub fn claude_icon(size: Pixels, color: Hsla) -> Icon {
     Icon::default().path("icons/claude.svg").with_size(size).text_color(color)
 }
 
+/// The file of the glyph that says which agent a session belongs to, for
+/// an icon that takes its ink from where it stands.
+pub(crate) fn agent_icon_path(agent: AgentId) -> &'static str {
+    match agent {
+        AgentId::ClaudeCode => "icons/claude.svg",
+        AgentId::Codex => "icons/square-terminal.svg",
+    }
+}
+
 /// The glyph that says which agent a session belongs to.
 pub fn agent_icon(agent: AgentId, size: Pixels, color: Hsla) -> Icon {
     match agent {
@@ -9431,7 +9575,7 @@ pub fn slash_command(text: &str) -> Option<String> {
 
 /// A key pressed on the terminal card, as a terminal sends it. None for
 /// a key that is the app's own (anything with ⌘) or sends nothing.
-fn term_bytes(k: &Keystroke) -> Option<Vec<u8>> {
+pub(crate) fn term_bytes(k: &Keystroke) -> Option<Vec<u8>> {
     let m = &k.modifiers;
     if m.platform {
         return None;
@@ -9468,7 +9612,7 @@ fn term_bytes(k: &Keystroke) -> Option<Vec<u8>> {
 /// Whether Claude Code is set to one of its light themes (`theme` in
 /// `~/.claude.json`, dark when it says nothing): the colours it writes
 /// are made for that ground, so the terminal card is drawn on it.
-fn claude_theme_light() -> bool {
+pub(crate) fn claude_theme_light() -> bool {
     static LIGHT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *LIGHT.get_or_init(|| {
         emaki_core::paths::read_json(&emaki_core::paths::home().join(".claude.json"))
@@ -9721,6 +9865,7 @@ impl Render for Workbench {
         let sidebar_open = self.sidebar_open && !self.narrow;
         let sidebar_peek = self.narrow && self.sidebar_peek;
         self.sync_tab_widths(cx);
+        self.view_w = window.viewport_size().width;
         self.pane_w = window.viewport_size().width - if sidebar_open { self.sidebar_w } else { px(0.) };
         if std::mem::take(&mut self.panel_fit_wanted) {
             self.panel_w = self.panel_fit(window, cx);
@@ -9768,6 +9913,8 @@ impl Render for Workbench {
                                     .update(cx, |w, cx| {
                                         if w.side_drag {
                                             w.side_drag_to(e, cx);
+                                        } else if w.side_term_drag {
+                                            w.term_drag_to(e, cx);
                                         } else if w.panel_drag.is_some() {
                                             w.panel_drag_to(e, cx);
                                         } else {
@@ -9859,6 +10006,7 @@ impl Render for Workbench {
             )
             .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))
             .children(self.render_panel_grip(cx))
+            .children(self.render_term_grip(cx))
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
             .children(self.render_sidebar_float(cx))
             .child(self.render_strip(cx))

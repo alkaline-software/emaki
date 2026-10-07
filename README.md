@@ -41,8 +41,10 @@ Open the app. The first launch copies every transcript it finds into
   like the Claude app. Type in the composer to reply: a session running in
   a terminal gets the message through Claude Code's inbox, and a finished
   one resumes under Emaki. Attach files by paste, drop or the "+" button.
-- **Terminal.** The buttons at the top right continue the session in your
-  terminal, open its folder, or show its transcript file.
+- **Terminal.** The button at the top right opens a terminal beside the
+  conversation: a shell in the session's folder, or the session's own
+  Claude Code. A session's right-click menu opens its folder and shows
+  its transcript file.
 - **Settings.** ⌘, sets the appearance, accent, font, text size and what a
   new session starts with.
 

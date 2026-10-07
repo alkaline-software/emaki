@@ -478,7 +478,20 @@ pub fn dialog_on_screen(text: &str) -> Option<Dialog> {
     let styled: Vec<&str> = text.lines().collect();
     let plain: Vec<String> = styled.iter().map(|l| strip_sgr(l)).collect();
     let lines: Vec<&str> = plain.iter().map(|l| l.trim_end()).collect();
-    let end = lines.iter().rposition(|l| !l.trim().is_empty())? + 1;
+    let mut end = lines.iter().rposition(|l| !l.trim().is_empty())? + 1;
+    // A session with a name has a rule under the dialog that carries
+    // it, the last thing on the screen. It is the screen's frame and no
+    // part of the dialog: taken for the dialog's own last rule, only
+    // "Chat about this" was read and the question was not seen at all.
+    // The prompt ends in a rule too, with its line straight under
+    // another; that one is left, and is no dialog.
+    if is_rule(lines[end - 1]) {
+        let mut above = lines[..end - 1].iter().rev().filter(|l| !l.trim().is_empty());
+        let prompt = above.next().is_some_and(|l| l.trim_start().starts_with('❯')) && above.next().is_some_and(|l| is_rule(l));
+        if !prompt {
+            end = lines[..end - 1].iter().rposition(|l| !l.trim().is_empty())? + 1;
+        }
+    }
     let option = |l: &str| -> Option<(u32, Option<bool>, String)> {
         let t = l.trim_start().trim_start_matches('❯').trim_start();
         let dot = t.find('.')?;

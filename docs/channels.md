@@ -6,6 +6,13 @@ Source: `crates/emaki-core/src/driver.rs`, `pty.rs`, `peer`, `terminal.rs`;
 
 ## Rules
 
+- Where a session was started makes no difference. One begun in Emaki,
+  in a terminal app or in an IDE's terminal is the same session: it is
+  read, replied to and taken up here the same way, and it can be resumed
+  in any terminal with its own resume command (the session's menu copies
+  it). The one thing that depends on another process is a turn running
+  there now, which is never joined by a second Claude Code.
+
 - Between turns, nothing is sent to, typed in or ended in a terminal of
   the person's. The window uses its hidden terminal. Ending their Claude
   Code to resume it hidden dropped their IDE terminal to its shell.
@@ -38,8 +45,8 @@ Source: `crates/emaki-core/src/driver.rs`, `pty.rs`, `peer`, `terminal.rs`;
   (`Host::wait_front`), and in an IDE focus its terminal. Activation may
   be granted late, and early keys land in whatever is in front, Emaki's
   composer included.
-- The terminal button leaves the hidden terminal running. Letting it go
-  made the next ⇧Tab wait for a new one.
+- No terminal app of the person's is opened, for anything: what needs a
+  terminal is done in the hidden one and shown in the terminal panel.
 - Never draw the terminal card on a screen with Claude Code's prompt on
   it. The registry's `waiting` is up to a second old, and the whole
   conversation flashed on the card after a pick.
@@ -104,7 +111,7 @@ names it (only `cli` is rewritten to `sdk-cli` on a headless run), so
 the driver's child is started with `emaki`. The explainer's children
 keep `sdk-cli`: they are not conversations. A session that already
 begins with `sdk-cli` stays out of the list, since nothing here writes
-to a transcript; the terminal button still opens it.
+to a transcript.
 
 ## The hidden terminal
 
@@ -123,8 +130,10 @@ key is a write: any platform, no app coming forward, no Accessibility
 access.
 
 **Start.** `Hub::start_terminal`, from a message sent on `spawn`, from
-anything `via_terminal` is asked for, and from the first character typed
-in the composer of a `spawn` session (`Workbench::warm_terminal`). It is
+anything `via_terminal` is asked for, and at the first sign the person means to do
+something on a `spawn` session and not only read it: a click in the
+composer, the first character typed there, the terminal panel opened
+(`Workbench::warm_now`, `warm_terminal`). It is
 up and registered in 0.7 to 1.4 s (2.1.289), which is why the first
 keystroke is early enough and opening the session is not used.
 
@@ -136,8 +145,9 @@ hidden terminal is started and the action waits in `pending_terminal`; a
 wish asked again during the wait replaces the older one. The wait is a
 state, not a time: `terminal_ready` wants the registry record `idle` (a
 login or trust screen says `waiting` and is never typed into) and the
-prompt on the screen. With `driver.hidden_terminal` on it never opens
-the person's terminal; with it off it opens theirs as the button does.
+prompt on the screen. It never opens the person's terminal: with
+`driver.hidden_terminal` off, or for another agent, it says so and does
+nothing.
 
 **A message.** `Hub::send_to_terminal` waits for the registry and the
 prompt (`driver::prompt_on_screen`), pastes each picture's path by
@@ -187,6 +197,135 @@ on a ground chosen by Claude Code's `theme`.
   that runs, in a column with no gap. Tried and dropped: the column's
   gap (a stop at the end) and a negative margin with padding (a shake).
 
+## The terminal panel
+
+`term_panel.rs`: a terminal at the conversation's right, under the top
+strip. It shows one of two things, one at a time, each with a button at
+the strip's right end (`term_buttons`, the same two-segment control as
+the files and the outline at the left: the shell's first, then the
+agent's). A press on the other swaps the side and slides the plate, a
+press on the one showing puts the panel away (`toggle_term`, `term_go`).
+`side_term_anim` keeps the side before the press and the one after, and
+the sides come, go and take each other's place as the two panels at the
+left do (`render_term_panel`; the side that goes is drawn for that moment
+as it was, with nothing started, sized or measured for it). The side and
+the width are in `ui.json`. A double click on the panel's edge puts the
+width back to the one it began with.
+
+The conversation keeps `panels::CONVERSATION_MIN` between the panels at
+its two sides, the width at which the composer's pills and send button
+still fit their card. Both panels are drawn no wider than leaves it
+(`term_panel_w`, `panel_w_now`): the terminal gives way first, down to
+its least, then the files or the outline. A window too narrow for all
+three at their least squeezes the conversation.
+
+A side's head is as tall as the path bar over the conversation, with its
+ground and its two rules, so the heads read as one line across the
+window. It has no close button: the strip's button puts the panel away.
+The agent's mark is in the agent's colour in its head, and on its button
+while its side shows or the pointer is over it.
+The head stands on the window's ground and the screen under it on its
+own, or the agent's dark screen showed through the head.
+
+- **Shell.** The person's login shell (`pty::shell_argv`) in the
+  session's folder, a tab each in the side's head (`Workbench::shells`, a
+  `Shells` a session; `render_shell_tabs`). The first is made when the
+  side is first looked at; the + after the last tab makes another
+  (`shell_new`), a tab's own button closes it and lets its shell go
+  (`shell_close`), and with none left the side says so and stays empty.
+  A press shows a tab (`shell_pick`), its screen fading in while the one
+  before fades out over it (`shell_swap`), and a drag moves it along the
+  row as the window's own tabs move. A new tab grows in from nothing.
+  Tabs share the head down to a least width; past that the row scrolls
+  and the + is held at the head's right end, with the tab that shows
+  brought into view (`shell_reveal`). A tab's name carries one more than
+  the largest number in the row when it was made, so a closed tab's
+  number is given again; what tells tabs apart in the code is `id`,
+  which is never given twice.
+  Shells are kept until closed, exited, or the app quits. Their
+  environment is `pty::child_env`, so no `CLAUDE*` variable of ours is in
+  it and a `claude` typed there is nobody's child.
+- **The agent.** The session's hidden terminal, the same `Pty` the window
+  reads and types into, drawn whole. With none behind the session it
+  is started as soon as this side is looked at (`start_hidden_terminal`:
+  the checks of `terminal_check`, an idle driver let go, then
+  `Hub::start_terminal`), and the panel says "Starting…" until the agent
+  has drawn something. Once a session (`side_term_tried`, forgotten when
+  one has run thirty seconds): an agent that ends straight away is not
+  started in a loop, and the panel then says it has stopped and offers
+  Start. Where it may not be started (a turn running in a terminal of the
+  person's, a driver mid-reply, a session kept only) the panel says why.
+  Claude Code only.
+
+How it works:
+
+- The screen is `Pty::rows_back`, a row a line in the mono face. Under
+  the letters each row draws its own cells: a stretch's ground the whole
+  height of the row, and the block characters (U+2580 to U+259F) as the
+  shapes they are (`block_shape`). Left to the font, those are as tall as
+  a letter and not as a row, and a picture made of them, Claude Code's
+  mark at the top of its screen, came out in stripes. The cursor is a
+  line in the accent while the panel has the keyboard and the outline of
+  a block otherwise. The pty is resized to the rows and columns
+  that fit (`side_term_bounds`, measured by a canvas at the last draw).
+- The agent's pty takes the panel's size only while the panel shows it
+  (`fit_agent_pty`, at every draw of the conversation) and goes back to
+  `pty::ROWS` by `COLS` otherwise: the terminal card and the screen's
+  readers were made for that size.
+- Scrolling back is the panel's own count of rows (`side_back`), applied
+  for the one look and taken off again inside `rows_back`. Set on the
+  screen model itself, the readers in `driver` would read an old screen.
+- A pty writes from its own thread and tells the window nothing, so while
+  the panel shows a task looks every 33 ms and redraws when the screen
+  changed in the last moments (`term_panel_watch`).
+- Keys are `term_bytes`, plus what a Mac's terminals add (Kaku's list was
+  the model): ⌥←, ⌥→ and ⌥⌫ as words; ⌘←, ⌘→ and ⌘⌫ as the line's
+  start, its end and all of it before the cursor (^A, ^E, ^U); ⌘↩ and
+  ⇧↩ a new line that sends nothing (ESC and Return); the arrows in their
+  application form when the program asked for it; ⌘V a paste and ⌘C the
+  selection. ⌘K forgets the screen and what has left it and asks for a
+  redraw (`Pty::clear_all`, then ^L), not where a program has the screen
+  to itself. On the shell's side ⌘T is a new tab, ⌘W closes the one
+  showing, and ⌘⇧[ and ⌘⇧] go to the tab before and after. ⌘K, ⌘T and
+  ⌘W are bound in the terminal's key context, because a binding is
+  answered before any key listener and the window has its own for two of
+  them; where the panel does not take one (the agent's side, no tab left)
+  it passes it on and the window's is next. Any other ⌘ key is the
+  window's.
+- A drag selects, by the letter, by the word after a double click and by
+  the row after a triple (`Sel`), and the selection is copied when the
+  button is let go, with "Copied" shown for a moment. Rows that run on
+  into the next are copied as one line (`Pty::wraps_back`). The
+  selection is in the screen's rows as they were drawn, so it is dropped
+  on a key, a paste, the wheel, another tab or side; output that moves
+  the rows leaves it where it was. ⌘ and a click opens the http address
+  under the pointer, and ⌥ and a click on the cursor's row takes the
+  cursor to that column with arrow keys.
+- The wheel is routed (`Pane::Terminal`): the panel has no scroller to
+  hear it. Where a program has the screen to itself (an editor, a pager)
+  it is that program's arrow keys.
+- The mouse goes to a program that asked to hear it (`Pty::mouse`, the
+  modes 1000, 1002 and 1003 as the screen model keeps them): a press, the
+  button let go, the pointer moving a cell at a time with a button held
+  or, where asked, without, and the wheel as the program's own, each in
+  the form it asked for (`pty::mouse_bytes`). So a click, a drag, a
+  double click and the wheel in Claude Code's screen are Claude Code's to
+  answer. With Shift held the press is the panel's and selects, as in any
+  terminal. Nothing is told while the panel is scrolled back.
+- Both sides are one terminal: everything above holds for the shell and
+  for the agent alike.
+- Not done: a drag followed past the panel's edge (no scrolling while
+  selecting), the panel's own text size, a search, and typing through an
+  input method (the keys arrive one at a time, so composed text does
+  not).
+
+Embedding a terminal app was looked at and dropped: Kaku is WezTerm with
+its own window and renderer, not a view another app can hold.
+
+"Open in Terminal" on a session's menu is this panel on the agent's side
+(`open_term_panel_agent`), and there the agent is started when it is not
+running and may be: the person asked for it by name.
+
 ## A terminal of the person's
 
 Between turns such a session answers `spawn`, so anything done in the
@@ -200,27 +339,19 @@ That is the person's decision. Tried and dropped: following the session
 into its terminal (in an IDE: an app switch, the command palette, a mode
 pill that cannot name its mode).
 
-## The terminal button
+## No terminal app is opened
 
-`Workbench::open_in_terminal`. "Your terminal" is the app the system
-keeps for shell scripts (`sys::in_default_terminal`). Of the session's
-registry records (`peer::registry_all`, ours left out), one in the
-default terminal is brought forward and nothing is opened; one in any
-other terminal (an IDE's) counts as not open, and the session is opened
-in the default terminal beside it. Refused for a session kept only, a
-folder gone, a driver mid-reply, and a running turn anywhere; an idle
-driver is stopped on the way.
+Emaki opens no terminal app of the person's, for anything. What needs a
+terminal is done in the hidden one, and the person sees it in the
+terminal panel. Until 2026-10-07 a button continued a session in the
+default terminal app (a `.command` script handed to `open`), and
+`via_terminal` fell back to that with `driver.hidden_terminal` off; both
+are gone, and with the setting off or for another agent the action says
+it cannot be done. `terminal.rs` keeps the resume command, which the
+session's menu copies.
 
-Tried and dropped: a guard after the click (`handed`) under which
-nothing hidden was started. A ⇧Tab then ran the terminal's script again
-and a message started the headless driver.
-
-`terminal.rs` writes `~/.emaki/run/terminal/<session>.command`: clear
-the `CLAUDE*` variables, `cd` to the folder, `exec` the agent's resume
-command (`claude --resume <id>`, `codex resume <id>`).
-`sys::open_in_terminal` hands it over: macOS `open`, so the system's
-choice of app and no setting; Windows a `cmd` window through `start`;
-Linux `$TERMINAL`, then the usual emulators.
+A session the person started in a terminal themselves is another matter:
+it is where it is, and the next section is how it is reached.
 
 ## Reaching a real terminal app
 
@@ -272,6 +403,12 @@ typing and ↩ takes the best match, the shorter name first within a rank.
   delivers by hand; `emaki-core drive` runs a turn through the driver.
 - `emaki-core pty <cwd>` (or `--resume`) runs a hidden terminal from a
   shell, and can stand in for a terminal of the person's.
+- `EMAKI_GO=term` opens the terminal panel, `term:shell` and `term:agent`
+  go to that side, `term:off` puts it away, `term:start` starts the
+  agent's hidden terminal, `term:tab+` makes a shell tab, `term:tab-`
+  closes the one showing, `term:tab:<n>` shows the nth from 0, `term:w:<w>` drags the edge to that width, `term:clear` is ⌘K, `term:sel:<unit>,<row>,<col>,<row>,<col>` selects and prints the words,
+  and `termtype:<words>` types them there with Return. Several probe
+  copies at once run their steps late: one at a time for a sequence.
 - `EMAKI_GO=send:<words>` sends once the session or the new-session page
   is up; it carries no attachment. Also `pill:effort`, `pill:model`,
   `step:mode`, `type:/status`, `button:terminal`, joined with `;`.

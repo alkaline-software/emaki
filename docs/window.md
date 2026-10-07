@@ -11,6 +11,13 @@ window remembers.
   toolkit's selection layer begins a text drag on every left mouse-down and
   ends it on the bubble-phase mouse-up; a handler that stops propagation
   eats that mouse-up and every later mouse move extends a selection.
+- A hover style that changes the text's colour is set whatever state the
+  element is in, never under a `when`. gpui works the text's colour out
+  at layout from a flag it keeps per element, and that flag hears the
+  pointer leave only while a hover style is set. Taken off an active
+  segment, the flag stayed "over", and the segment came back to rest
+  lit with the pointer elsewhere. A hover that changes a ground or a
+  border is painted from where the pointer is and has no such trap.
 - Every input the window owns sits in a `div` that `track_focus`es the
   `InputState`'s handle and carries the text role. The toolkit's input
   frame tracks a handle of its own, so focusing a state from code lands on a
@@ -220,8 +227,13 @@ A right click opens a menu of our own. `Workbench::open_menu` puts a small
 card at the pointer (`render_menu`, kept inside the window, over a clear
 sheet any click or Escape puts away) and `menu_pick` does what was chosen
 (`MenuDo`). The toolkit's action-based context menu was more than a few
-choices needed. The card is as wide as its longest choice, reckoned from
-the count of letters since it is placed before it is laid out. It settles
+choices needed. Every menu is made the same way, and a new one follows it:
+each choice has an icon in front of its words (`MenuDo::icon`, by what
+the choice does), and choices of one kind stand together with a line
+between the groups (`MenuDo::Rule`): what opens the thing, what it gives
+the clipboard or the message, what changes it. The card is as wide as its
+longest choice and no wider, the words measured before it is placed, so
+the room at its right is the room at its left. It settles
 in from just above (`MENU_IN`, keyed on the menu's serial so each opening
 plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
 `MENU_OUT`), taking no click meanwhile.
@@ -232,8 +244,9 @@ plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
   none, the menu says the folder is gone.
 - A session offers one menu wherever it is right-clicked, in the sidebar,
   on the sessions page and on its tab (`session_menu`): Rename; Copy
-  Session ID and Copy Resume Command (the command the terminal button
-  runs, after a `cd` to its folder); Open Folder and Reveal Transcript in
+  Session ID and Copy Resume Command (the agent's own, after a `cd` to
+  its folder); Open in Terminal, which shows the session in the terminal
+  panel; Open Folder and Reveal Transcript in
   the file manager; and, when it has a tab, Close Tab and Close Other
   Tabs. `MenuDo::Rule` is a line between groups.
 - The conversation offers Copy for what is selected in it
@@ -286,13 +299,13 @@ pane there is nothing to do.
 
 ## The top strip of a session
 
-Three buttons at the top right, one group, in this order: the terminal
-(continue the session there), the project folder
-(`Workbench::open_project_folder`, the session's `cwd`, refused with a
-notice when the folder is gone), and the transcript (revealed in the file
-manager, under a file icon so it does not read as a second folder). Tried
-and dropped: the terminal button alone at the top left, which read as
-unrelated to the other two. The agent is named by its mark on the tab and
+One control at the top right, of two segments: the shell and the agent's
+terminal, which open the panel at the conversation's right
+(`term_panel.rs`, `docs/channels.md`). The project
+folder and the transcript are on the session's right-click menu, and the
+folder is also the path line under the strip
+(`Workbench::open_project_folder`); their two buttons stood here until
+the menu had them. The agent is named by its mark on the tab and
 its name over every reply, not by a badge here.
 
 Under the tabs is a band with the session's folder and nothing else

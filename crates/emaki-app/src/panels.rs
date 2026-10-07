@@ -48,8 +48,10 @@ const LABEL_REST: Duration = Duration::from_millis(300);
 const LABEL_FADE: Duration = Duration::from_millis(320);
 /// The room over the pinned day's words.
 const PIN_LEAD: Pixels = px(10.);
-/// The least the conversation keeps beside a dragged panel.
-const CONVERSATION_MIN: Pixels = px(360.);
+/// The least the conversation keeps beside the panels at its sides: the
+/// width at which the composer's row of pills and its send button still
+/// fit inside the card.
+pub(crate) const CONVERSATION_MIN: Pixels = px(480.);
 /// How wide the strip at the panel's edge that takes the drag is.
 const PANEL_GRIP: Pixels = px(8.);
 /// A panel's head is as tall as the folder's band beside it, so the two
@@ -555,7 +557,12 @@ impl Workbench {
                 .rounded(px(7.))
                 .cursor_pointer()
                 .text_color(if active { theme.foreground } else { theme.muted_foreground })
-                .when(!active, |d| d.hover(|s| s.text_color(theme.foreground)))
+                // On the active one too, where it changes nothing: gpui
+                // keeps "the pointer is over this" for the text's colour
+                // and only hears the pointer leave while a hover style is
+                // set. Without one the mark stayed lit when its segment
+                // went back to rest with the pointer elsewhere.
+                .hover(|s| s.text_color(theme.foreground))
                 .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(which, cx)))
@@ -604,7 +611,7 @@ impl Workbench {
         // row's layout.
         let over = matches!(live, Some((from, Some(_), _, _)) if from == Some(files));
         let serial = self.panel_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0);
-        let w = self.panel_w;
+        let w = self.panel_w_now();
         div()
             .h_full()
             .flex_shrink_0()
@@ -632,7 +639,16 @@ impl Workbench {
     /// The widest the panel may be dragged: the conversation keeps
     /// `CONVERSATION_MIN` beside it.
     fn panel_max(&self) -> Pixels {
-        PANEL_MAX.min(self.pane_w - CONVERSATION_MIN).max(PANEL_MIN)
+        let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
+        PANEL_MAX.min(self.pane_w - CONVERSATION_MIN - term).max(PANEL_MIN)
+    }
+
+    /// The panel's width as drawn: what it was dragged to, less when the
+    /// conversation would be left with too little (the window narrowed,
+    /// the terminal opened). The terminal gives way first, down to its
+    /// least, then this panel.
+    pub(crate) fn panel_w_now(&self) -> Pixels {
+        self.panel_w.min(self.panel_max())
     }
 
     /// The panel's edge follows the pointer while it is held, between the
@@ -718,7 +734,7 @@ impl Workbench {
                 .absolute()
                 .top(crate::workbench::TITLEBAR_H)
                 .bottom_0()
-                .left(self.panel_left() + self.panel_w - PANEL_GRIP / 2.)
+                .left(self.panel_left() + self.panel_w_now() - PANEL_GRIP / 2.)
                 .w(PANEL_GRIP)
                 .occlude()
                 .cursor(CursorStyle::ResizeLeftRight)
@@ -828,37 +844,42 @@ impl Workbench {
     fn file_menu(&mut self, node: Option<&Node>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(root) = self.files_root() else { return };
         let item = |label: &'static str, what: FileDo, path: &Path| (label, MenuDo::File(what, path.to_path_buf()));
+        let rule = || ("", MenuDo::Rule);
+        // In groups, a line between them: what opens it, what it gives
+        // the message or the clipboard, and what changes it on disk.
         let items = match node {
             Some(n) if n.dir => vec![
                 item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &n.path),
-                item("Add to message", FileDo::Mention, &n.path),
-                item("New file", FileDo::NewFile, &n.path),
-                item("New folder", FileDo::NewFolder, &n.path),
-                item("Copy path", FileDo::CopyPath, &n.path),
-                item("Copy relative path", FileDo::CopyRel, &n.path),
+                rule(),
+                item("New File", FileDo::NewFile, &n.path),
+                item("New Folder", FileDo::NewFolder, &n.path),
+                rule(),
+                item("Add to Message", FileDo::Mention, &n.path),
+                item("Copy Path", FileDo::CopyPath, &n.path),
+                item("Copy Relative Path", FileDo::CopyRel, &n.path),
+                rule(),
                 item("Rename", FileDo::Rename, &n.path),
                 item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
             ],
-            Some(n) if self.tree.changed.iter().any(|(p, _)| *p == n.path) => vec![
-                item("Show changes", FileDo::Changes, &n.path),
-                item("Open", FileDo::Open, &n.path),
-                item(crate::sys::REVEAL_LABEL, FileDo::Reveal, &n.path),
-                item("Add to message", FileDo::Mention, &n.path),
-                item("Copy path", FileDo::CopyPath, &n.path),
-                item("Copy relative path", FileDo::CopyRel, &n.path),
-                item("Rename", FileDo::Rename, &n.path),
-                item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
-            ],
-            Some(n) => vec![
-                item("Open", FileDo::Open, &n.path),
-                item(crate::sys::REVEAL_LABEL, FileDo::Reveal, &n.path),
-                item("Add to message", FileDo::Mention, &n.path),
-                item("Copy path", FileDo::CopyPath, &n.path),
-                item("Copy relative path", FileDo::CopyRel, &n.path),
-                item("Rename", FileDo::Rename, &n.path),
-                item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
-            ],
-            None => vec![item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &root), item("New file", FileDo::NewFile, &root), item("New folder", FileDo::NewFolder, &root), item("Copy path", FileDo::CopyPath, &root)],
+            Some(n) => {
+                let mut items = Vec::new();
+                if self.tree.changed.iter().any(|(p, _)| *p == n.path) {
+                    items.push(item("Show Changes", FileDo::Changes, &n.path));
+                }
+                items.extend([
+                    item("Open", FileDo::Open, &n.path),
+                    item(crate::sys::REVEAL_LABEL, FileDo::Reveal, &n.path),
+                    rule(),
+                    item("Add to Message", FileDo::Mention, &n.path),
+                    item("Copy Path", FileDo::CopyPath, &n.path),
+                    item("Copy Relative Path", FileDo::CopyRel, &n.path),
+                    rule(),
+                    item("Rename", FileDo::Rename, &n.path),
+                    item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
+                ]);
+                items
+            }
+            None => vec![item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &root), rule(), item("New File", FileDo::NewFile, &root), item("New Folder", FileDo::NewFolder, &root), rule(), item("Copy Path", FileDo::CopyPath, &root)],
         };
         self.open_menu(at, items, cx);
     }
@@ -1109,7 +1130,7 @@ impl Workbench {
         } else {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("The session's folder is gone.").into_any_element()
         };
-        let el = v_flex().w(self.panel_w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.stash_strip(cx)).child(body);
+        let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.stash_strip(cx)).child(body);
         self.panel_in(true, el)
     }
 
@@ -2353,7 +2374,7 @@ impl Workbench {
                 })
                 .into_any_element()
         };
-        let el = v_flex().w(self.panel_w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Outline", None, Some(if waiting > 0 {
+        let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Outline", None, Some(if waiting > 0 {
             // The labels are on their way.
             h_flex()
                 .gap(px(6.))

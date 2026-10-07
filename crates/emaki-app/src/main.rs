@@ -11,6 +11,7 @@ mod hub;
 mod look;
 mod panels;
 mod sys;
+mod term_panel;
 mod transcript;
 mod ui_state;
 mod workbench;
@@ -21,7 +22,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermTab, ToggleFiles, ToggleOutline, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermCloseTab, TermNewTab, TermTab, ToggleFiles, ToggleOutline, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -55,6 +56,11 @@ fn key_bindings() -> Vec<KeyBinding> {
         // move to the next field.
         KeyBinding::new("tab", TermTab, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("shift-tab", TermBackTab, Some(TERMINAL_CONTEXT)),
+        // The terminal panel's own: where it does not take one (the
+        // agent's side has no tabs) the window's binding is next.
+        KeyBinding::new("secondary-k", TermClear, Some(TERMINAL_CONTEXT)),
+        KeyBinding::new("secondary-t", TermNewTab, Some(TERMINAL_CONTEXT)),
+        KeyBinding::new("secondary-w", TermCloseTab, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("secondary-q", Quit, None),
         // ⌘, on macOS, Ctrl+, elsewhere; Win+, as well where there is a
         // Win key, though Windows itself may take it first (desktop peek).

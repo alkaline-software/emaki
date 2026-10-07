@@ -116,6 +116,7 @@ handed work on one of these files is told to read the doc too.
 | The pills, pickers, mode/model/effort notices; `emaki-core/src/options.rs`; `mode_*`, `effort_*`, `model_*`, `options_from` in `driver.rs` | `docs/modes.md` |
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
+| `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs` | `docs/panels.md` |
 | The sidebar, sessions page, board, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/anthropic-mono.py` | `docs/look.md` |
@@ -160,6 +161,7 @@ crates/emaki-app/         the window
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/panels.rs              beside a conversation: the folder's files as a tree, and the outline
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets
+  src/term_panel.rs          the terminal at a conversation's right: a shell, and the agent's hidden terminal drawn whole
   src/main.rs                menus, key bindings, the window
   src/sys.rs                 open, reveal, open in a terminal, the person's name: per OS
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers

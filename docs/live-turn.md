@@ -34,6 +34,14 @@ question, dialog, shells and permission cards), the screen readers in
 - No frame answers a terminal session's question: the inbox socket takes
   only `auth` and `user` frames (2.1.288). Keys do.
 - A bare ↩ never answers a question, and "Allow all" skips questions.
+- A session with a name has a rule under the dialog carrying that name,
+  the last line on the screen. `dialog_on_screen` leaves it out: taken
+  for the dialog's own last rule, only "Chat about this" was read, no
+  question was seen, and the raw terminal card came up in place of the
+  question card.
+- A click on "Type something" on the terminal card goes there and does
+  not press Return (`pty::hits`): Return on the empty field ended the
+  question unanswered.
 - A background command with no end counts as running only while a process
   that registered before it began is behind the session
   (`Workbench::shells_running`, `Peer::started_at`): one whose Claude Code

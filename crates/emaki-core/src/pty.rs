@@ -36,6 +36,9 @@ use crate::driver;
 /// cut, narrow enough to draw in the window's column.
 pub const ROWS: u16 = 40;
 pub const COLS: u16 = 96;
+/// How many rows that have left the top of the screen are kept, for the
+/// terminal panel to scroll back through.
+pub const SCROLLBACK: usize = 5000;
 
 /// A stretch of one row drawn the same way.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -69,6 +72,54 @@ pub struct Pty {
     last_output: Mutex<Instant>,
 }
 
+/// What a program hears of the mouse: a button let go, the pointer
+/// moving with a button held, the pointer moving at all, and the form
+/// the reports take.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MouseWant {
+    pub release: bool,
+    pub drag: bool,
+    pub motion: bool,
+    pub form: MouseForm,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MouseForm {
+    /// `ESC [ M` and three bytes: nothing past column or row 223.
+    Bytes,
+    /// The same, each number a UTF-8 character.
+    Utf8,
+    /// `ESC [ < code ; column ; row` and `M`, or `m` for a button let go.
+    Sgr,
+}
+
+/// One report of the mouse, as the bytes a terminal sends. `code` is the
+/// button (0 left, 1 middle, 2 right; 64 and 65 the wheel up and down),
+/// with 32 added while the pointer moves and 4, 8, 16 for Shift, Alt and
+/// Control. The cell is counted from 0. Empty when the form cannot say it.
+pub fn mouse_bytes(code: u8, col: u16, row: u16, press: bool, form: MouseForm) -> Vec<u8> {
+    match form {
+        MouseForm::Sgr => format!("\x1b[<{code};{};{}{}", col + 1, row + 1, if press { 'M' } else { 'm' }).into_bytes(),
+        MouseForm::Bytes | MouseForm::Utf8 => {
+            // A button let go is button 3 in these forms, the modifiers kept.
+            let code = if press { code } else { code & !3 | 3 };
+            let (b, x, y) = (32 + code as u32, 33 + col as u32, 33 + row as u32);
+            let mut out = b"\x1b[M".to_vec();
+            for v in [b, x, y] {
+                if form == MouseForm::Utf8 {
+                    let Some(c) = char::from_u32(v) else { return Vec::new() };
+                    out.extend(c.to_string().as_bytes());
+                } else if v <= 255 {
+                    out.push(v as u8);
+                } else {
+                    return Vec::new();
+                }
+            }
+            out
+        }
+    }
+}
+
 /// Every live one, for `for_pid`.
 static LIVE: Mutex<Vec<Arc<Pty>>> = Mutex::new(Vec::new());
 
@@ -92,6 +143,15 @@ pub fn claude_argv(session_id: &str, resume: bool, mode: &str, model: &str) -> V
         }
     }
     argv
+}
+
+/// The person's own shell, as a login shell, for the terminal panel: what
+/// `SHELL` names, else `sh`; on Windows what `COMSPEC` names, else `cmd`.
+pub fn shell_argv() -> Vec<String> {
+    if cfg!(windows) {
+        return vec![std::env::var("COMSPEC").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "cmd.exe".into())];
+    }
+    vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into()), "-l".into()]
 }
 
 /// The environment for the child: `driver::child_env`, as a terminal
@@ -129,7 +189,7 @@ impl Pty {
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
         let pty = Arc::new(Pty {
             pid,
-            parser: Mutex::new(vt100::Parser::new(ROWS, COLS, 0)),
+            parser: Mutex::new(vt100::Parser::new(ROWS, COLS, SCROLLBACK)),
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             killer: Mutex::new(child.clone_killer()),
@@ -229,6 +289,109 @@ impl Pty {
     pub fn resize(&self, rows: u16, cols: u16) {
         let _ = self.master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         self.parser.lock().unwrap().screen_mut().set_size(rows, cols);
+    }
+
+    /// The screen's size: rows, columns.
+    pub fn size(&self) -> (u16, u16) {
+        self.parser.lock().unwrap().screen().size()
+    }
+
+    /// Where the cursor is, row and column, unless the program hid it.
+    pub fn cursor(&self) -> Option<(u16, u16)> {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        (!screen.hide_cursor()).then(|| screen.cursor_position())
+    }
+
+    /// Whether the program asked for the arrow keys in their application
+    /// form (`ESC O A`), as a full-screen editor does.
+    pub fn app_cursor(&self) -> bool {
+        self.parser.lock().unwrap().screen().application_cursor()
+    }
+
+    /// Whether the program has the screen to itself (an editor, a
+    /// pager), where there is nothing to scroll back to.
+    pub fn alt_screen(&self) -> bool {
+        self.parser.lock().unwrap().screen().alternate_screen()
+    }
+
+    /// The screen as it was `back` rows ago, and how far back that
+    /// really is (there may be fewer rows kept). The look is taken and
+    /// the screen put back at once: the readers of `rows`, `text` and
+    /// `styled` always see it as it is now.
+    pub fn rows_back(&self, back: usize) -> (Vec<Vec<Span>>, usize) {
+        let mut parser = self.parser.lock().unwrap();
+        parser.screen_mut().set_scrollback(back);
+        let at = parser.screen().scrollback();
+        let rows = rows_of(parser.screen());
+        parser.screen_mut().set_scrollback(0);
+        (rows, at)
+    }
+
+    /// Which rows of that look run on into the next, a long line and
+    /// not two: copied, such rows are one line.
+    pub fn wraps_back(&self, back: usize) -> Vec<bool> {
+        let mut parser = self.parser.lock().unwrap();
+        parser.screen_mut().set_scrollback(back);
+        let rows = parser.screen().size().0;
+        let wraps = (0..rows).map(|r| parser.screen().row_wrapped(r)).collect();
+        parser.screen_mut().set_scrollback(0);
+        wraps
+    }
+
+    /// The screen and everything that has left it are forgotten, as a
+    /// terminal's "clear" does, and what the program asked for (the
+    /// mouse, pastes in brackets, the cursor) is kept. Not where a
+    /// program has the screen to itself: `false` then, and nothing done.
+    /// The program is not told; a redraw is the caller's to ask for.
+    pub fn clear_all(&self) -> bool {
+        use vt100::{MouseProtocolEncoding as E, MouseProtocolMode as M};
+        let mut parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        if screen.alternate_screen() {
+            return false;
+        }
+        let mut again: Vec<u8> = Vec::new();
+        for (on, seq) in [
+            (screen.bracketed_paste(), &b"\x1b[?2004h"[..]),
+            (screen.application_cursor(), b"\x1b[?1h"),
+            (screen.application_keypad(), b"\x1b="),
+            (screen.hide_cursor(), b"\x1b[?25l"),
+            (screen.mouse_protocol_mode() == M::Press, b"\x1b[?9h"),
+            (screen.mouse_protocol_mode() == M::PressRelease, b"\x1b[?1000h"),
+            (screen.mouse_protocol_mode() == M::ButtonMotion, b"\x1b[?1002h"),
+            (screen.mouse_protocol_mode() == M::AnyMotion, b"\x1b[?1003h"),
+            (screen.mouse_protocol_encoding() == E::Utf8, b"\x1b[?1005h"),
+            (screen.mouse_protocol_encoding() == E::Sgr, b"\x1b[?1006h"),
+        ] {
+            if on {
+                again.extend(seq);
+            }
+        }
+        parser.process(b"\x1bc");
+        parser.process(&again);
+        true
+    }
+
+    /// What the program asked to be told of the mouse, when anything.
+    pub fn mouse(&self) -> Option<MouseWant> {
+        use vt100::{MouseProtocolEncoding as E, MouseProtocolMode as M};
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let mode = screen.mouse_protocol_mode();
+        if mode == M::None {
+            return None;
+        }
+        Some(MouseWant {
+            release: mode != M::Press,
+            drag: matches!(mode, M::ButtonMotion | M::AnyMotion),
+            motion: mode == M::AnyMotion,
+            form: match screen.mouse_protocol_encoding() {
+                E::Sgr => MouseForm::Sgr,
+                E::Utf8 => MouseForm::Utf8,
+                E::Default => MouseForm::Bytes,
+            },
+        })
     }
 
     /// Let the child go, as closing a terminal's window does.
@@ -403,7 +566,14 @@ pub fn hits(rows: &[Vec<Span>]) -> Vec<Hit> {
     for (row, line) in lines.iter().enumerate() {
         if let Some((_, n, start)) = choice(line) {
             if let Some(from) = pointed {
-                out.push(Hit { row, start, end: line.len(), keys: arrows(n - from, "\x1b[A", "\x1b[B") });
+                let mut keys = arrows(n - from, "\x1b[A", "\x1b[B");
+                // "Type something" is a field: the pointer goes there and
+                // the person types. Return on it empty ended the question
+                // unanswered.
+                if line.iter().collect::<String>().contains("Type something") {
+                    keys.pop();
+                }
+                out.push(Hit { row, start, end: line.len(), keys });
             }
             continue;
         }

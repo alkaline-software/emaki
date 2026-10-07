@@ -552,6 +552,13 @@ fn dialog_on_screen_is_the_question_and_its_choices() {
     assert_eq!(d.options[1].detail, "from this project");
     // The prompt is not a dialog.
     assert_eq!(dialog_on_screen(&format!("⏺ 1. one\n  2. two\n{rule}\n❯ \n{rule}\n  Context 16%\n  ⏵⏵ auto mode on\n")), None);
+    // A named session has a rule under the dialog with its name on it,
+    // which is not the dialog's; under the prompt it is still no dialog.
+    let named = format!("{rule} v0.1.7 - File system ─");
+    let screen = format!("❯ ask me\n{rule}\n←  ☒ Fruit  ☐ Colors  ✔ Submit  →\nWhich colour?\n❯ 1. Red\n  2. Type something.\n{rule}\n  3. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n{named}\n");
+    let d = dialog_on_screen(&screen).unwrap();
+    assert_eq!((d.body, d.options.len(), d.tabs.len()), (vec!["Which colour?".to_string()], 3, 3));
+    assert_eq!(dialog_on_screen(&format!("{rule}\n⏺ 1. one\n  2. two\n{rule}\n❯ 3. typed\n{named}\n")), None);
 }
 
 #[test]
@@ -1440,6 +1447,11 @@ fn hidden_terminal_clicks_become_keys() {
     assert_eq!(at(effort, "adjust"), None);
     assert_eq!(at(effort, "Ultracode"), None);
 
+    // "Type something" is gone to and not confirmed: it is a field.
+    let ask = "   Which fruit?\n\n   ❯ 1. Apple\n     2. Banana\n     3. Type something.\n";
+    assert_eq!(at(ask, "Banana"), Some(b"\x1b[B\r".to_vec()));
+    assert_eq!(at(ask, "Type something"), Some(b"\x1b[B\x1b[B".to_vec()));
+
     let model = "   Select model\n\n     1.  Default (recommended)  Opus 5.5 · Best for everyday tasks\n   ❯ 2.  Opus 5.5 ✔             For complex work\n     3.  Fable 5.1              For your toughest challenges\n   ↓ 4.  Sonnet 5.5             Most efficient\n\n   Enter to set as default · s to use this session only · Esc to cancel";
     assert_eq!(at(model, "Default"), Some(b"\x1b[A\r".to_vec()));
     assert_eq!(at(model, "Sonnet"), Some(b"\x1b[B\x1b[B\r".to_vec()));
@@ -1890,4 +1902,18 @@ fn git_lists_branches_and_switches_between_them() {
 
     assert!(git::valid_name("v0.1.8-next") && git::valid_name("feature/x"));
     assert!(!git::valid_name("") && !git::valid_name("two words") && !git::valid_name("-b") && !git::valid_name("a..b"));
+}
+
+#[test]
+fn mouse_reports_as_a_terminal_sends_them() {
+    use emaki_core::pty::{mouse_bytes, MouseForm};
+    assert_eq!(mouse_bytes(0, 4, 2, true, MouseForm::Sgr), b"\x1b[<0;5;3M");
+    assert_eq!(mouse_bytes(0, 4, 2, false, MouseForm::Sgr), b"\x1b[<0;5;3m");
+    assert_eq!(mouse_bytes(64, 0, 0, true, MouseForm::Sgr), b"\x1b[<64;1;1M");
+    assert_eq!(mouse_bytes(0, 0, 0, true, MouseForm::Bytes), b"\x1b[M !!");
+    // Let go is button 3, with the modifiers kept.
+    assert_eq!(mouse_bytes(4, 1, 1, false, MouseForm::Bytes), [0x1b, b'[', b'M', 32 + 7, 34, 34]);
+    // Past what a byte holds there is nothing to send.
+    assert!(mouse_bytes(0, 300, 0, true, MouseForm::Bytes).is_empty());
+    assert!(!mouse_bytes(0, 300, 0, true, MouseForm::Utf8).is_empty());
 }

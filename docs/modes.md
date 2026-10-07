@@ -123,9 +123,9 @@ a typed command, ⇧Tab, going there).
 - In a terminal that has registered: done at once (`do_in_terminal`).
 - With none: an idle driver is stopped, a driver mid-reply is refused
   (`terminal_check`, one writer per transcript), and a terminal is
-  started. That is the hidden one (`Hub::start_terminal`) for Claude Code
-  unless `driver.hidden_terminal` is false; else the person's, as the
-  top-right button opens it. The action waits in `pending_terminal` and
+  started. That is the hidden one (`Hub::start_terminal`), for Claude Code
+  with `driver.hidden_terminal` on; otherwise the action says it cannot
+  be done, and no terminal of the person's is opened. The action waits in `pending_terminal` and
   the row under the composer says so.
 - Asked again during the wait, the newer action replaces the older and
   goes on waiting. Done at once, it ran a second time when the wait ended.

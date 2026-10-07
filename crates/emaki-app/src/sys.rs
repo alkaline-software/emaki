@@ -374,29 +374,6 @@ pub fn type_in_terminal(pid: i32, text: &str) -> Result<String, String> {
     Err("typing into the terminal is not done on this platform yet".into())
 }
 
-/// Whether the process runs in the person's default terminal: the app
-/// the system keeps for shell scripts, which is the one the terminal
-/// button opens a session in. A terminal inside an IDE is another app,
-/// and so is any terminal the person did not make their default.
-#[cfg(target_os = "macos")]
-pub fn in_default_terminal(pid: i32) -> bool {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::{NSString, NSURL};
-    let Ok(host) = host_of(pid) else { return false };
-    // Asked of a script that is there: the answer goes by the file.
-    let Ok(script) = emaki_core::terminal::write_script("default-terminal", "/", &["true".to_string()]) else { return false };
-    let url = NSURL::fileURLWithPath(&NSString::from_str(&script.to_string_lossy()));
-    let Some(app) = NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&url).and_then(|u| u.path()).map(|p| p.to_string()) else { return false };
-    app.trim_end_matches('/') == host.path.trim_end_matches('/')
-}
-
-/// Elsewhere the app a process runs under is not looked for: a session
-/// with a terminal counts as open in it.
-#[cfg(not(target_os = "macos"))]
-pub fn in_default_terminal(_pid: i32) -> bool {
-    true
-}
-
 /// The application a session's process runs under, and the tty it is on.
 #[cfg(target_os = "macos")]
 struct Host {
@@ -638,64 +615,6 @@ pub fn reveal_path(path: &Path) {
     }
 }
 
-/// Run `argv` in `cwd` in a terminal window of the person's own. The script
-/// is `emaki_core::terminal::write_script`; what opens it is per OS. On
-/// macOS `open` hands a `.command` file to the app the system keeps for
-/// shell scripts, Terminal unless another terminal claimed the type, so the
-/// choice is the system's, not ours. On Windows it is a new `cmd` window
-/// through `start`, in `cwd`. On Linux `$TERMINAL`, then the usual names.
-pub fn open_in_terminal(session_id: &str, cwd: &str, argv: &[String]) -> Result<(), String> {
-    let script = emaki_core::terminal::write_script(session_id, cwd, argv).map_err(|e| format!("could not write the script: {e}"))?;
-    #[cfg(target_os = "macos")]
-    {
-        // `open` hands a terminal app it has to launch its own
-        // environment, and every shell in that app then carries it: an
-        // Emaki started from inside a Claude Code session gave the
-        // terminal that session's markers, and Claude Code typed there
-        // by hand said "Transcript saving is off, inherited
-        // CLAUDE_CODE_CHILD_SESSION marker". The script clears them for
-        // the session it resumes; this clears them for the app.
-        let status = std::process::Command::new("open")
-            .arg(&script)
-            .env_clear()
-            .envs(emaki_core::driver::child_env())
-            .status()
-            .map_err(|e| format!("could not run open: {e}"))?;
-        if !status.success() {
-            return Err("no app on this Mac opens shell scripts".into());
-        }
-        Ok(())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = script;
-        let line = argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ");
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", "/D", cwd, "cmd", "/k", &line])
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("could not open a terminal: {e}"))
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let mut candidates: Vec<String> = std::env::var("TERMINAL").ok().filter(|t| !t.is_empty()).into_iter().collect();
-        candidates.extend(["x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "alacritty", "kitty", "wezterm", "xterm"].map(String::from));
-        for term in candidates {
-            let mut cmd = std::process::Command::new(&term);
-            // gnome-terminal takes its command after `--`; the rest after `-e`.
-            if term.ends_with("gnome-terminal") {
-                cmd.arg("--");
-            } else {
-                cmd.arg("-e");
-            }
-            if cmd.arg(&script).current_dir(cwd).spawn().is_ok() {
-                return Ok(());
-            }
-        }
-        Err("no terminal emulator found; set $TERMINAL".into())
-    }
-}
-
 /// What the reveal action is called where we are.
 pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Reveal in Finder"
@@ -750,15 +669,6 @@ pub const OPEN_FOLDER_LABEL: &str = if cfg!(target_os = "macos") {
     "Open in Explorer"
 } else {
     "Open folder"
-};
-
-/// The same action on the button that shows a session's transcript file.
-pub const REVEAL_TRANSCRIPT_LABEL: &str = if cfg!(target_os = "macos") {
-    "Reveal the transcript in Finder"
-} else if cfg!(target_os = "windows") {
-    "Show the transcript in Explorer"
-} else {
-    "Show the transcript in its folder"
 };
 
 /// The account's first name, else the login name, capitalised.
