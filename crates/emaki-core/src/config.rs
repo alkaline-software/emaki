@@ -57,6 +57,9 @@ pub struct AppConfig {
     pub chat_font: String,
     /// How large the conversation is set: `small`, `medium` or `large`.
     pub chat_size: String,
+    /// The key that sends a message: `cmd-enter` (Ctrl off a Mac) or
+    /// `enter`. Shift with Enter is a new line either way.
+    pub send_key: String,
     /// `system` follows the OS; `light` and `dark` pin one look.
     pub appearance: String,
     /// The accent colour, by name; see `ACCENTS`.
@@ -74,7 +77,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "serif".into(), chat_size: "medium".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new() }
+        Self { chat_font: "serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new() }
     }
 }
 

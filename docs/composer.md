@@ -133,8 +133,18 @@ patch was lost and the row froze.
 
 ## The suggested prompt
 
+What the empty composer says is drawn by the window over the textarea's
+first line (`render_composer_hint`), and the textarea has no placeholder
+of its own: the key beside a suggested prompt ("→ to accept") is
+Phosphor's icon, which a placeholder, being a string, cannot hold. Nothing
+says that ⌘↩ sends.
+
+⌘↩ sends. Settings, Composer, "Send with" makes a bare ↩ send as well
+(`AppConfig::send_key`, `cmd-enter` or `enter`); ⇧↩ is a new line either
+way, and the slash list takes ↩ before sending does.
+
 After a turn Claude Code sets dim, untyped words in its input. The
-composer shows them as its placeholder. → or Tab in the empty box makes
+composer shows them in that place. → or Tab in the empty box makes
 them the text (`Workbench::accept_suggestion`, captured before the
 textarea's own `MoveRight` and `IndentInline`); ⌘↩ on the empty box sends
 them. `read_suggestion` reads the screen on the clock while the session

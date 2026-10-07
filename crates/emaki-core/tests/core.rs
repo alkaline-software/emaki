@@ -1643,11 +1643,15 @@ fn outline_says_what_was_asked_and_what_came_of_it() {
     let o = emaki_core::outline::of(&s);
     assert!(o[0].wants_summary() && !o[0].prompt.contains("Attached file") && o[0].key == emaki_core::outline::key_for(&o[0].prompt));
     assert!(!o[1].wants_summary());
-    // The child's reply: a line a message behind its number. A line that
-    // answers a message instead of labelling it is not a label.
-    let said = "1: Fix the sidebar's scrolling\n2. \"Rename the tabs.\"\n3: **If you have code to review**, I can help with that\n9: out of range\nno number";
-    let got = emaki_core::outline::parse_summaries(said, 3);
-    assert_eq!(got, vec![Some("Fix the sidebar's scrolling".to_string()), Some("Rename the tabs".to_string()), None]);
+    // The child's reply: a line a message behind its number.
+    let got = emaki_core::outline::parse_summaries("1: Fix sidebar scrolling\n\n2. \"Rename the tabs.\"", 3);
+    assert_eq!(got, vec![Some("Fix sidebar scrolling".to_string()), Some("Rename the tabs".to_string()), None]);
+    // A reply that answers the messages is no label at all, numbered
+    // list in it or not.
+    let answered = "I don't see any project files here. You can:\n1. Copy or clone your project files into the working directory, or\n2. Tell me where they are";
+    assert_eq!(emaki_core::outline::parse_summaries(answered, 2), vec![None, None]);
+    assert_eq!(emaki_core::outline::parse_summaries("1: Fix it\n2: **If you have code to review**, I can help with that", 2), vec![None, None]);
+    assert_eq!(emaki_core::outline::parse_summaries("1: Fix it\n9: out of range", 2), vec![None, None]);
     assert_eq!(emaki_core::outline::parse_summaries("Please run /login", 2), vec![None, None]);
     let argv = emaki_core::outline::summary_argv("", &["one", "two"]);
     assert!(argv.contains(&"claude-haiku-4-5".to_string()) && argv.contains(&"--strict-mcp-config".to_string()));

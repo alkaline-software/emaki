@@ -220,14 +220,39 @@ A right click opens a menu of our own. `Workbench::open_menu` puts a small
 card at the pointer (`render_menu`, kept inside the window, over a clear
 sheet any click or Escape puts away) and `menu_pick` does what was chosen
 (`MenuDo`). The toolkit's action-based context menu was more than a few
-choices needed.
+choices needed. The card is as wide as its longest choice, reckoned from
+the count of letters since it is placed before it is laid out. It settles
+in from just above (`MENU_IN`, keyed on the menu's serial so each opening
+plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
+`MENU_OUT`), taking no click meanwhile.
 
 - A folder, in the sidebar or on the new-session page's cards, offers "Open
   in Finder" (`sys::OPEN_FOLDER_LABEL`). The sidebar's folder is a project,
   so its path is the newest session's `cwd` that is still a directory; with
   none, the menu says the folder is gone.
-- A session, in the sidebar or on its tab, offers Rename and "Reveal in
-  Finder", which shows its transcript.
+- A session offers one menu wherever it is right-clicked, in the sidebar,
+  on the sessions page and on its tab (`session_menu`): Rename; Copy
+  Session ID and Copy Resume Command (the command the terminal button
+  runs, after a `cd` to its folder); Open Folder and Reveal Transcript in
+  the file manager; and, when it has a tab, Close Tab and Close Other
+  Tabs. `MenuDo::Rule` is a line between groups.
+- The conversation offers Copy for what is selected in it
+  (`conversation_menu`). A right click on a word selects that word first:
+  the toolkit's text view does word selection itself (`inline.rs`, its
+  double click), not the window's selection layer, whose participants
+  hold no text for a rendered document, so the right click is handled
+  there too (`UPSTREAM.md`). The menu is opened a moment after the press
+  (`window.defer`), once the word is selected. A right click on no text
+  with nothing selected opens nothing.
+- An attachment, as a tile in the conversation, a picture a tool read, or
+  a chip in the composer, offers Copy Image for a picture
+  (`attachment_menu`, `copy_image`: the file's bytes in its own format, or
+  the bytes read back out of the transcript) and, when the file is on
+  disk, Copy Path and Reveal. Its handler stops the press, so the
+  conversation's own menu does not open over it.
+- A branch, on the pill in the files' head and on a row of the list,
+  offers Copy Branch Name. The row stops the press, which would otherwise
+  reach the list's sheet and put the list away.
 
 Rename opens a field over a scrim (`render_rename`, `rename_input`): ↩ keeps
 the name, Escape or a click outside leaves it, an empty field changes

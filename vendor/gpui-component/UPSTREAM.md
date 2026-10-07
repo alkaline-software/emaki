@@ -92,6 +92,15 @@ upstream revision finds them.
     registers the two actions only on a textarea and returns early for a
     single line, so the keys did nothing in a field.
 
+12. `crates/ui/src/text/inline.rs`: a right click on text selects the
+    word under it, as a double click does, unless the press is inside
+    what is selected already. Upstream's handler takes the left button
+    only, so a menu opened at a right click had nothing to copy.
+
+13. `crates/ui/src/text/node.rs`: a code block's actions
+    (`code_block_actions`) show while the pointer is on the block.
+    Upstream draws them all the time.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply
