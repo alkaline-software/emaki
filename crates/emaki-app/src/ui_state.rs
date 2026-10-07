@@ -30,6 +30,10 @@ pub struct UiState {
     /// The list of branches in the order of their names, not by when
     /// each was last committed to.
     pub branches_by_name: Option<bool>,
+    /// The terminal at the conversation's right: how wide it was dragged
+    /// to, and whether it showed the agent and not the shell.
+    pub term_w: Option<f32>,
+    pub term_agent: Option<bool>,
     /// `board`, `sessions`, `session` or `new`.
     pub page: String,
     /// Session keys (`<agent>:<id>`) with a tab, in tab order.
