@@ -28,6 +28,24 @@ pub fn relative(mtime: f64, now: f64) -> String {
     dt.map(|d| d.format("%b %-d").to_string()).unwrap_or_default()
 }
 
+/// How long ago, in whole words: "just now", "15 hours ago", "3 days
+/// ago", "2 months ago".
+pub fn ago(then: f64, now: f64) -> String {
+    let delta = (now - then).max(0.0);
+    let count = |n: f64, one: &str| {
+        let n = n.round().max(1.0) as u64;
+        format!("{n} {one}{} ago", if n == 1 { "" } else { "s" })
+    };
+    match delta {
+        d if d < 60.0 => "just now".into(),
+        d if d < 3600.0 => count(d / 60.0, "minute"),
+        d if d < 86_400.0 => count(d / 3600.0, "hour"),
+        d if d < 60.0 * 86_400.0 => count(d / 86_400.0, "day"),
+        d if d < 365.0 * 86_400.0 => count(d / (30.44 * 86_400.0), "month"),
+        d => count(d / (365.25 * 86_400.0), "year"),
+    }
+}
+
 /// Seconds since an ISO timestamp, as "12s", "4m 03s", "1h 12m".
 pub fn elapsed_since(ts: &str, now: f64) -> String {
     let Some(start) = emaki_core::build::parse_ts(ts) else { return String::new() };

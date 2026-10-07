@@ -19,7 +19,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
+use gpui_component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _};
 
 use emaki_core::git;
 use emaki_core::outline::{self, Kind};
@@ -418,6 +418,39 @@ fn day_label(ts: &str) -> String {
 
 /// A panel's head: its name, something straight after it, and something
 /// at the right.
+/// A change of branch that is waiting to be told where the changes not
+/// yet committed go.
+#[derive(Clone)]
+pub(crate) struct BranchAsk {
+    pub(crate) name: String,
+    pub(crate) create: bool,
+    /// The choice so far: leave them on the branch being left.
+    pub(crate) leave: bool,
+    /// The files whose changes would conflict on the branch gone to,
+    /// once git has been asked; bringing them is offered only when
+    /// there are none.
+    pub(crate) fit: Option<Vec<String>>,
+    /// Not a question but a refusal to read: its title and its words.
+    pub(crate) stop: Option<(String, String)>,
+}
+
+impl BranchAsk {
+    fn stop(title: &str, words: String) -> Self {
+        BranchAsk { name: String::new(), create: false, leave: false, fit: None, stop: Some((title.to_string(), words)) }
+    }
+}
+
+/// The ground of a panel's row under the pointer. A panel is on the
+/// sidebar's ground, and in a light window the theme's muted grey is all
+/// but that same colour, so the row takes a wash of the ink there.
+fn row_hover(theme: &gpui_component::Theme, dark: bool) -> Hsla {
+    if dark {
+        theme.muted.opacity(0.7)
+    } else {
+        theme.foreground.opacity(0.07)
+    }
+}
+
 fn panel_head(label: &'static str, after: Option<AnyElement>, right: Option<AnyElement>, theme: &gpui_component::Theme) -> impl IntoElement {
     h_flex()
         .h(HEAD_H)
@@ -984,8 +1017,11 @@ impl Workbench {
                             .rounded(px(6.))
                             .cursor_pointer()
                             .when(chosen, |d| d.bg(theme.primary.opacity(0.12)))
-                            .when(!chosen, |d| d.hover(|s| s.bg(theme.muted.opacity(0.7))))
+                            .when(!chosen, |d| d.hover(|s| s.bg(row_hover(&theme, dark))))
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                // The click is the row's: the room around
+                                // the rows takes one as "choose nothing".
+                                swallow_click(window, cx);
                                 if click.dir {
                                     this.tree_toggle(&click.path, cx)
                                 } else {
@@ -1022,6 +1058,13 @@ impl Workbench {
                         .px(px(6.))
                         .py(px(6.))
                         .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.file_menu(None, ev.position, cx)))
+                        // A click on the panel's empty room lets the
+                        // chosen file go.
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.tree.picked.take().is_some() {
+                                cx.notify();
+                            }
+                        }))
                         .child(list),
                 )
                 .vertical_scrollbar(&self.files_scroll)
@@ -1029,13 +1072,19 @@ impl Workbench {
         } else {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("The session's folder is gone.").into_any_element()
         };
-        let el = v_flex().w(self.panel_w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).child(body);
+        let el = v_flex().w(self.panel_w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.stash_strip(cx)).child(body);
         self.panel_in(true, el)
     }
 
     // -- branches -------------------------------------------------------------
 
     /// The folder's branches, when it is in a repository.
+    /// How many files git says have a change in the folder showing; 0
+    /// until it has been asked.
+    pub(crate) fn panel_changes(&self) -> usize {
+        self.files_root().filter(|root| self.tree.git.as_ref().is_some_and(|(of, _)| of == root)).map_or(0, |_| self.tree.changed.len())
+    }
+
     fn branches(&self) -> Option<Rc<git::Branches>> {
         let root = self.files_root()?;
         self.tree.branches.as_ref().filter(|(of, _)| *of == root).map(|(_, b)| b.clone())
@@ -1101,7 +1150,10 @@ impl Workbench {
         let Some(b) = self.branches() else { return (Vec::new(), None) };
         let typed = self.branch_input.read(cx).value().trim().to_string();
         let low = typed.to_lowercase();
-        let rows: Vec<(String, bool)> = b.local.iter().map(|n| (n.clone(), false)).chain(b.remote.iter().map(|n| (n.clone(), true))).filter(|(n, _)| n.to_lowercase().contains(&low)).collect();
+        // By when each was last committed to, the newest first, or as git
+        // names them: the default, the rest by name, then a remote's own.
+        let all: Vec<(String, bool)> = if self.branch_by_name { b.local.iter().map(|n| (n.clone(), false)).chain(b.remote.iter().map(|n| (n.clone(), true))).collect() } else { b.by_recency() };
+        let rows: Vec<(String, bool)> = all.into_iter().filter(|(n, _)| n.to_lowercase().contains(&low)).collect();
         let fresh = (!typed.is_empty() && !b.has(&typed)).then_some(typed);
         (rows, fresh)
     }
@@ -1121,7 +1173,7 @@ impl Workbench {
     /// Check a branch out, or make one and check it out. Git does it
     /// and git may refuse; nothing is forced. Not under a running turn:
     /// the agent is writing to the files a switch would change.
-    fn branch_go(&mut self, name: String, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn branch_go(&mut self, name: String, create: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.close_branch_menu(window, cx);
         let Some(root) = self.files_root() else { return };
         if self.branches().is_some_and(|b| b.current.as_deref() == Some(&name)) || self.branch_busy {
@@ -1135,17 +1187,73 @@ impl Workbench {
             self.notice = Some(Notice::error(format!("\u{201c}{name}\u{201d} is not a name git takes for a branch")));
             return;
         }
+        // With changes not yet committed the person says where they go,
+        // as GitHub Desktop asks it. A detached head has no branch to
+        // leave them on.
+        if self.tree.git.as_ref().is_some_and(|(of, _)| *of == root) && !self.tree.changed.is_empty() {
+            // A conflict still open is resolved before anything else: git
+            // switches nowhere with one, and a stash cannot hold it.
+            let open: Vec<String> = self.tree.changed.iter().filter(|(_, st)| *st == git::State::Conflict).map(|(p, _)| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string()).collect();
+            if !open.is_empty() {
+                self.branch_ask = Some(BranchAsk::stop("Resolve the conflicts first", format!("{} on this branch {} a conflict git is waiting to have resolved: {}. Resolve and commit, or undo the merge, then switch.", plural(open.len(), "file", "files"), if open.len() == 1 { "has" } else { "have" }, git::name_some(&open))));
+                cx.notify();
+                return;
+            }
+            // Whether the changes would fit on the other branch is asked
+            // of git while the question is up; a new branch starts from
+            // here, so they always do.
+            self.branch_ask = Some(BranchAsk { name: name.clone(), create, leave: true, fit: create.then(Vec::new), stop: None });
+            if !create {
+                cx.spawn(async move |this, cx| {
+                    let (dir, to) = (root.clone(), name.clone());
+                    let bad = cx.background_executor().spawn(async move { git::misfits(&dir, &to) }).await;
+                    this.update(cx, |this, cx| {
+                        if let Some(a) = this.branch_ask.as_mut().filter(|a| a.name == name && a.stop.is_none()) {
+                            a.fit = Some(bad);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            cx.notify();
+            return;
+        }
+        self.branch_run(name, create, git::Carry::Bring, cx);
+    }
+
+    /// The switch itself, off the main thread, with the changes going
+    /// where `carry` says.
+    pub(crate) fn branch_run(&mut self, name: String, create: bool, carry: git::Carry, cx: &mut Context<Self>) {
+        self.branch_ask = None;
+        let Some(root) = self.files_root() else { return };
+        if self.branch_busy {
+            return;
+        }
+        if self.selected_ref().is_some_and(|r| self.is_working(r)) {
+            self.notice = Some(Notice::error("a turn is running here; switch branches when it is over"));
+            return;
+        }
+        let from = self.branches().map(|b| b.label()).unwrap_or_default();
         self.branch_busy = true;
         cx.spawn(async move |this, cx| {
             let (dir, to) = (root.clone(), name.clone());
-            let done = cx.background_executor().spawn(async move { if create { git::create(&dir, &to) } else { git::switch(&dir, &to) } }).await;
+            let done = cx.background_executor().spawn(async move { (git::dirty(&dir), git::switch_with(&dir, &to, create, carry)) }).await;
             this.update(cx, |this, cx| {
                 this.branch_busy = false;
-                this.notice = Some(match done {
-                    Ok(()) if create => Notice::said(format!("made {name} and switched to it")),
-                    Ok(()) => Notice::said(format!("switched to {name}")),
-                    Err(why) => Notice::error(format!("not switched: {why}")),
+                let made = if create { format!("made {name} and switched to it") } else { format!("switched to {name}") };
+                this.notice = Some(match &done {
+                    (false, Ok(())) => Notice::said(made),
+                    (true, Ok(())) if carry == git::Carry::Leave => Notice::said(format!("{made}; your changes stay on {from}")),
+                    (true, Ok(())) => Notice::said(format!("{made}, with your changes")),
+                    (_, Err(why)) => Notice::error(format!("not switched: {why}")),
                 });
+                // A refusal is also said where it cannot be missed: the
+                // row under the composer may be under a sheet.
+                if let (_, Err(why)) = done {
+                    this.branch_ask = Some(BranchAsk::stop("Not switched", format!("Nothing was changed. {}{}.", why[..1].to_uppercase(), &why[1..])));
+                }
                 // The files are another branch's now.
                 this.tree.refresh(&root);
                 this.read_git(root, cx);
@@ -1154,6 +1262,216 @@ impl Workbench {
             .ok();
         })
         .detach();
+    }
+
+    /// Put back the changes left on this branch at an earlier switch.
+    /// Git refuses, and keeps them, when they would write over a change
+    /// made here since.
+    fn branch_restore(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        if self.branch_busy {
+            return;
+        }
+        if self.selected_ref().is_some_and(|r| self.is_working(r)) {
+            self.notice = Some(Notice::error("a turn is running here; put the changes back when it is over"));
+            return;
+        }
+        self.branch_busy = true;
+        cx.spawn(async move |this, cx| {
+            let dir = root.clone();
+            let done = cx.background_executor().spawn(async move { git::restore(&dir) }).await;
+            this.update(cx, |this, cx| {
+                this.branch_busy = false;
+                this.notice = Some(match done {
+                    Ok(()) => Notice::said("your changes are back"),
+                    Err(why) => Notice::error(format!("not put back: {why}")),
+                });
+                this.tree.refresh(&root);
+                this.read_git(root, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Under the files' head, on a branch that changes were left on:
+    /// one line saying so, and the button that puts them back.
+    fn stash_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let b = self.branches()?;
+        if b.stashed == 0 {
+            return None;
+        }
+        Some(
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .px(px(12.))
+                .py(px(7.))
+                .gap(px(8.))
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.primary.opacity(0.07))
+                .text_size(px(11.5))
+                .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.link).flex_shrink_0())
+                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child("Changes you left on this branch"))
+                .child(Button::new("stash-restore").outline().xsmall().label("Restore").disabled(self.branch_busy).on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.branch_restore(cx)
+                })))
+                .into_any_element(),
+        )
+    }
+
+    /// The question a switch asks when there are changes not yet
+    /// committed, as GitHub Desktop asks it: leave them on the branch
+    /// being left, or bring them along.
+    pub(crate) fn render_branch_ask(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(ask) = self.branch_ask.clone() else { return div().into_any_element() };
+        let from = self.branches().map(|b| b.label()).unwrap_or_default();
+        let can_leave = self.branches().is_some_and(|b| b.current.is_some());
+        // A refusal: its words and one button.
+        if let Some((title, words)) = ask.stop.clone() {
+            return div()
+                .id("branch-ask-overlay")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(theme.overlay)
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(px(120.))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.branch_ask = None;
+                    cx.notify();
+                }))
+                .child(
+                    v_flex()
+                        .id("branch-ask")
+                        .on_click(|_, window, cx| swallow_click(window, cx))
+                        .w(px(440.))
+                        .max_w(gpui::relative(0.94))
+                        .p(px(16.))
+                        .gap(px(12.))
+                        .rounded(px(16.))
+                        .bg(theme.popover)
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow(float_shadow(&theme))
+                        .child(h_flex().gap(px(8.)).items_center().child(Icon::new(IconName::TriangleAlert).with_size(px(15.)).text_color(theme.danger)).child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title)))
+                        .child(div().text_size(px(12.5)).line_height(px(19.)).text_color(theme.foreground).child(words))
+                        .child(h_flex().w_full().justify_end().child(Button::new("ask-close").primary().small().label("Close").on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.branch_ask = None;
+                            cx.notify();
+                        })))),
+                )
+                .into_any_element();
+        }
+        // Bringing is offered once git has said the changes fit there.
+        let fits = ask.fit.as_ref().is_some_and(Vec::is_empty);
+        let bring_line = match &ask.fit {
+            None => "Checking whether your changes fit there…".to_string(),
+            Some(bad) if bad.is_empty() => "Your work in progress follows you to the new branch.".to_string(),
+            Some(bad) => format!("Not possible: {} would conflict there ({}). Leave them here, or commit them first.", plural(bad.len(), "file", "files"), git::name_some(bad)),
+        };
+        let option = |id: &'static str, on: bool, enabled: bool, title: String, line: String| {
+            h_flex()
+                .id(id)
+                .w_full()
+                .px(px(12.))
+                .py(px(10.))
+                .gap(px(10.))
+                .items_start()
+                .when(on, |d| d.bg(theme.primary.opacity(0.07)))
+                .when(enabled && !on, |d| d.cursor_pointer().hover(|s| s.bg(theme.muted.opacity(0.6))))
+                .when(!enabled, |d| d.opacity(0.45))
+                .child(
+                    div().mt(px(2.)).size(px(14.)).flex_shrink_0().rounded_full().border_1().border_color(if on { theme.primary } else { theme.muted_foreground.opacity(0.6) }).flex().items_center().justify_center().when(on, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.primary))),
+                )
+                .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(title)).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(line)))
+        };
+        let pick = |leave: bool| {
+            cx.listener(move |this, _: &ClickEvent, window, cx| {
+                swallow_click(window, cx);
+                if let Some(a) = this.branch_ask.as_mut() {
+                    let can_leave = this.tree.branches.as_ref().is_some_and(|(_, b)| b.current.is_some());
+                    let fits = a.fit.as_ref().is_some_and(Vec::is_empty);
+                    // A choice that is not on offer is not taken.
+                    if (leave && can_leave) || (!leave && fits) {
+                        a.leave = leave;
+                    }
+                }
+                cx.notify();
+            })
+        };
+        // Leaving is the choice to begin with, as in GitHub Desktop, where
+        // there is a branch to leave them on.
+        let (name, create, leave) = (ask.name.clone(), ask.create, ask.leave && can_leave);
+        // With neither on offer (a detached head whose changes do not
+        // fit) there is nothing to go ahead with.
+        let ready = leave || fits;
+        div()
+            .id("branch-ask-overlay")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(theme.overlay)
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(120.))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.branch_ask = None;
+                cx.notify();
+            }))
+            .child(
+                v_flex()
+                    .id("branch-ask")
+                    .on_click(|_, window, cx| swallow_click(window, cx))
+                    .w(px(440.))
+                    .max_w(gpui::relative(0.94))
+                    .p(px(16.))
+                    .gap(px(12.))
+                    .rounded(px(16.))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow(float_shadow(&theme))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(if create { "Create branch" } else { "Switch branch" }))
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("You have changes on this branch. What would you like to do with them?"))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .overflow_hidden()
+                            .child(option("ask-leave", leave, can_leave, format!("Leave my changes on {from}"), "Your work in progress is stashed on this branch for you to return to later.".to_string()).on_click(pick(true)))
+                            .child(div().h(px(1.)).w_full().bg(theme.border))
+                            .child(option("ask-bring", !leave && fits, fits, format!("Bring my changes to {name}"), bring_line).on_click(pick(false))),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(Button::new("ask-cancel").outline().small().label("Cancel").on_click(cx.listener(|this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.branch_ask = None;
+                                cx.notify();
+                            })))
+                            .child(Button::new("ask-go").primary().small().label(if create { "Create branch" } else { "Switch branch" }).disabled(!ready).on_click(cx.listener(move |this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.branch_run(name.clone(), create, if leave { git::Carry::Leave } else { git::Carry::Bring }, cx);
+                            }))),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// The list of branches: a card under the button, over a clear
@@ -1167,10 +1485,12 @@ impl Workbench {
         let focus = self.branch_input.read(cx).focus_handle(cx);
         let typed = self.branch_input.read(cx).value().to_string();
         let view = window.viewport_size();
-        let w = px(300.).min(view.width - px(16.));
+        let w = px(340.).min(view.width - px(16.));
         let x = (at.x - px(40.)).min(view.width - w - px(8.)).max(px(8.));
         let y = (at.y + px(16.)).min(view.height - px(200.)).max(px(8.));
-        let chip = |word: &'static str| div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.border).text_size(px(10.5)).text_color(theme.muted_foreground).child(word);
+        // The outline is a thinned ink, not the border colour: that is the
+        // row's own ground under the pointer, and the pill went with it.
+        let chip = |word: &'static str| div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.muted_foreground.opacity(0.4)).text_size(px(10.5)).text_color(theme.muted_foreground).child(word);
         let mut list = v_flex().w_full();
         for (ix, (name, remote)) in rows.iter().enumerate() {
             let here = b.current.as_deref() == Some(name.as_str());
@@ -1189,9 +1509,13 @@ impl Workbench {
                     .hover(|s| s.bg(theme.sidebar_accent))
                     .on_click(cx.listener(move |this, _, window, cx| this.branch_go(to.clone(), false, window, cx)))
                     .child(div().w(px(14.)).flex_shrink_0().when(here, |d| d.child(Icon::new(IconName::Check).with_size(px(13.)))))
-                    .child(div().flex_1().min_w_0().truncate().when(here, |d| d.font_weight(FontWeight::MEDIUM)).child(name.clone()))
+                    // The name, its tags straight after it, and the time at
+                    // the row's far end.
+                    .child(div().min_w_0().truncate().when(here, |d| d.font_weight(FontWeight::MEDIUM)).child(name.clone()))
                     .when(b.default.as_deref() == Some(name.as_str()), |d| d.child(chip("default")))
-                    .when(*remote, |d| d.child(chip("remote"))),
+                    .when(*remote, |d| d.child(chip("remote")))
+                    .child(div().flex_1())
+                    .when_some(b.when.get(name).filter(|at| **at > 0), |d, at| d.child(div().flex_shrink_0().text_size(px(11.5)).text_color(theme.muted_foreground).child(crate::format::ago(*at as f64, self.now)))),
             );
         }
         if rows.is_empty() && fresh.is_none() {
@@ -1215,6 +1539,21 @@ impl Workbench {
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
                 .child(div().min_w_0().child(StyledText::new(format!("Create branch {name} from {}", b.label())).with_highlights([(14..14 + name.len(), HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() })])))
         });
+        // How the list is ordered: the settings panel's segmented
+        // control in a small size, its plate sliding to the choice.
+        let sort = div().flex_shrink_0().mr(px(4.)).child(self.segmented_sized(
+            "branch-sort",
+            vec![("recent", "Recent".to_string(), None), ("name", "Name".to_string(), None)],
+            if self.branch_by_name { "name" } else { "recent" },
+            Rc::new(|this: &mut Self, key, window, cx| {
+                swallow_click(window, cx);
+                this.branch_by_name = key == "name";
+                this.save_ui(true);
+                cx.notify();
+            }),
+            true,
+            cx,
+        ));
         let card = v_flex()
             .id("branch-card")
             .key_context(crate::workbench::SEARCH_CONTEXT)
@@ -1240,7 +1579,8 @@ impl Workbench {
                     .pb(px(8.))
                     .items_center()
                     .justify_between()
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Switch branches"))
+                    .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Switch branches"))
+                    .child(sort)
                     .child(Button::new("branch-close").ghost().xsmall().icon(IconName::Close).on_click(cx.listener(|this, _, window, cx| this.close_branch_menu(window, cx)))),
             )
             .child(
@@ -1847,7 +2187,7 @@ impl Workbench {
                     .rounded(px(8.))
                     .cursor_pointer()
                     .when(is_current, |d| d.bg(theme.primary.opacity(if dark { 0.16 } else { 0.10 })))
-                    .when(!is_current, |d| d.hover(|s| s.bg(theme.muted.opacity(0.7))))
+                    .when(!is_current, |d| d.hover(|s| s.bg(row_hover(&theme, dark))))
                     .on_click(cx.listener(move |this, _, _, cx| this.outline_go(round, cx)))
                     .child(h_flex().flex_1().min_w_0().py(px(7.)).gap(px(8.)).items_start().child(stamp).child(div().flex_1().min_w_0().child(said)))
                     .into_any_element(),
@@ -1976,6 +2316,23 @@ impl Workbench {
             // The comparison, on the first changed file or on that one.
             "changes" => self.open_changes(None, cx),
             t if t.starts_with("changes:") => self.open_changes(under(&t["changes:".len()..]), cx),
+            // The question a switch asks with changes not committed.
+            t if t.starts_with("branchask:") => {
+                // Through the menu's own way in, so the check for a
+                // conflict runs as it does at a click.
+                let name = t["branchask:".len()..].to_string();
+                if let Some(root) = self.files_root() {
+                    self.read_git(root, cx);
+                }
+                self.branch_ask_probe = Some(name);
+            }
+            // Its answer: `branchgo:<name>:leave` or `:bring`; and the
+            // strip's button.
+            t if t.starts_with("branchgo:") => {
+                let (name, how) = t["branchgo:".len()..].rsplit_once(':').unwrap_or((&t["branchgo:".len()..], "bring"));
+                self.branch_run(name.to_string(), false, if how == "leave" { git::Carry::Leave } else { git::Carry::Bring }, cx)
+            }
+            "branchrestore" => self.branch_restore(cx),
             t if t.starts_with("branchq:") => self.branch_probe = Some(t["branchq:".len()..].to_string()),
             "outline" => self.toggle_panel(false, cx),
             // The panel's edge dragged to that width and let go, and the

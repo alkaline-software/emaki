@@ -563,9 +563,9 @@ pub struct Workbench {
     /// relative to its track, by `control-key`, so the raised plate can
     /// slide from the old choice to the new one. See `segmented`.
     seg_bounds: Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>,
-    /// For each control, the choice the plate slides from and the one it
-    /// is on, as of the last draw.
-    seg_state: std::cell::RefCell<HashMap<&'static str, (&'static str, &'static str)>>,
+    /// For each control, the choice the plate slides from, the one it is
+    /// on, and when it changed: the slide is drawn for that moment only.
+    seg_state: std::cell::RefCell<HashMap<&'static str, (&'static str, &'static str, Option<Instant>)>>,
     pub attachments: Vec<Attachment>,
     /// What was left typed and attached in each composer the person is
     /// not looking at, by `draft_key`: every session has a composer of
@@ -674,6 +674,10 @@ pub struct Workbench {
     /// (by the command's id).
     shells_open: Option<String>,
     shell_tails: HashMap<String, String>,
+    /// The same for the subagents running in the background: the session
+    /// whose list is open, and what each agent was last seen doing.
+    agents_open: Option<String>,
+    agent_steps: HashMap<String, String>,
     /// It was put there by the window, for a screen it could not read,
     /// and goes when the terminal stops waiting.
     term_auto: bool,
@@ -867,7 +871,17 @@ pub struct Workbench {
     pub(crate) branch_scroll: ScrollHandle,
     /// A switch is under way.
     pub(crate) branch_busy: bool,
+    /// The list of branches by name; by when each was last committed to
+    /// otherwise.
+    pub(crate) branch_by_name: bool,
+    /// A switch is waiting on a choice: what becomes of the changes not
+    /// yet committed.
+    pub(crate) branch_ask: Option<crate::panels::BranchAsk>,
     pub(crate) branch_probe: Option<String>,
+    /// A probe's switch to that branch, held until git's status is in:
+    /// it is for looking at the question, and with no changes known the
+    /// switch would go straight through.
+    pub(crate) branch_ask_probe: Option<String>,
     /// The comparison of the folder's files against the last commit,
     /// while it shows.
     pub(crate) changes: Option<crate::panels::Changes>,
@@ -1570,6 +1584,7 @@ impl Workbench {
                 .update(cx, |this, cx| {
                     this.now = now_secs();
                     this.read_shell_tails();
+                    this.read_agent_steps();
                     this.tick_files(cx);
                     // The status line's files once a minute, which is the
                     // countdown's own resolution; a session's load reads
@@ -1850,6 +1865,8 @@ impl Workbench {
             term_open: None,
             shells_open: None,
             shell_tails: HashMap::new(),
+            agents_open: None,
+            agent_steps: HashMap::new(),
             term_auto: false,
             term_shown: std::cell::RefCell::new(TermShown::default()),
             term_dismissed: None,
@@ -1937,7 +1954,10 @@ impl Workbench {
             branch_input,
             branch_scroll: ScrollHandle::new(),
             branch_busy: false,
+            branch_by_name: ui.branches_by_name.unwrap_or(false),
+            branch_ask: None,
             branch_probe: None,
+            branch_ask_probe: None,
             changes: None,
             file_probe: None,
             side_drag: false,
@@ -2463,6 +2483,10 @@ impl Workbench {
                 }
             }
 // A click on the row of background commands.
+            Some("agents") => {
+                self.agents_open = self.selected_ref().map(|r| r.session_id.clone());
+                self.read_agent_steps();
+            }
             Some("shells") => {
                 self.shells_open = self.selected_ref().map(|r| r.session_id.clone());
                 self.read_shell_tails();
@@ -2544,6 +2568,7 @@ impl Workbench {
             files_on: Some(self.files_on),
             panel_w: Some(f32::from(self.panel_w)),
             outline_on: Some(self.outline_on),
+            branches_by_name: Some(self.branch_by_name),
             page: page.into(),
             tabs: self.tabs.clone(),
             active: self.selected.clone().filter(|_| self.page == Page::Session),
@@ -3236,18 +3261,33 @@ impl Workbench {
     /// plate instead, so nothing flashes.
     #[allow(clippy::type_complexity)]
     fn segmented(&self, control: &'static str, options: Vec<(&'static str, String, Option<String>)>, current: &'static str, on: Rc<dyn Fn(&mut Self, &'static str, &mut Window, &mut Context<Self>)>, cx: &mut Context<Self>) -> AnyElement {
+        self.segmented_sized(control, options, current, on, false, cx)
+    }
+
+    /// `segmented`, in the settings panel's size or, `small`, in the
+    /// size that fits a card's head.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn segmented_sized(&self, control: &'static str, options: Vec<(&'static str, String, Option<String>)>, current: &'static str, on: Rc<dyn Fn(&mut Self, &'static str, &mut Window, &mut Context<Self>)>, small: bool, cx: &mut Context<Self>) -> AnyElement {
+        const SLIDE: Duration = Duration::from_millis(220);
+        let (pad, seg_h, seg_px, seg_text, round) = if small { (px(2.), px(18.), px(7.), px(11.), px(5.)) } else { (px(3.), px(26.), px(11.), px(12.5), px(7.)) };
         let theme = cx.theme().clone();
         let dark = theme.mode.is_dark();
         let track_bg = if dark { theme.sidebar } else { theme.muted };
         let plate_bg = if dark { theme.secondary_active } else { theme.popover };
         let (from, to) = {
             let mut st = self.seg_state.borrow_mut();
-            let e = st.entry(control).or_insert((current, current));
+            let e = st.entry(control).or_insert((current, current, None));
             if e.1 != current {
                 e.0 = e.1;
                 e.1 = current;
+                e.2 = Some(Instant::now());
             }
-            *e
+            // The slide belongs to the change. A control drawn anew later
+            // (its panel opened again) is a new element, whose animation
+            // would start over and slide the plate once more from a
+            // choice made long before.
+            let sliding = e.2.is_some_and(|at| at.elapsed() < SLIDE + Duration::from_millis(80));
+            (if sliding { e.0 } else { e.1 }, e.1)
         };
         let (b_from, b_to) = {
             let b = self.seg_bounds.borrow();
@@ -3257,10 +3297,10 @@ impl Workbench {
             (Some(a), Some(b)) => Some(
                 div()
                     .absolute()
-                    .rounded(px(7.))
+                    .rounded(round)
                     .bg(plate_bg)
                     .shadow_sm()
-                    .with_animation(ElementId::Name(format!("{control}-plate-{to}").into()), Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), move |d, t| {
+                    .with_animation(ElementId::Name(format!("{control}-plate-{to}").into()), Animation::new(SLIDE).with_easing(ease_out_quint()), move |d, t| {
                         let x = a.origin.x + (b.origin.x - a.origin.x) * t;
                         let w = a.size.width + (b.size.width - a.size.width) * t;
                         d.left(x).top(b.origin.y).w(w).h(b.size.height)
@@ -3282,7 +3322,7 @@ impl Workbench {
                 let mut changed = false;
                 let mut map = seg_bounds.borrow_mut();
                 for (id, b) in ids.iter().zip(bounds.iter()) {
-                    let rel = Bounds { origin: point(b.origin.x - first.origin.x + px(3.), px(3.)), size: b.size };
+                    let rel = Bounds { origin: point(b.origin.x - first.origin.x + pad, pad), size: b.size };
                     if map.get(id) != Some(&rel) {
                         map.insert(id.clone(), rel);
                         changed = true;
@@ -3298,12 +3338,12 @@ impl Workbench {
                 let on = on.clone();
                 h_flex()
                     .id(SharedString::from(format!("{control}-{key}")))
-                    .h(px(26.))
-                    .px(px(11.))
+                    .h(seg_h)
+                    .px(seg_px)
                     .items_center()
-                    .rounded(px(7.))
+                    .rounded(round)
                     .cursor_pointer()
-                    .text_size(px(12.5))
+                    .text_size(seg_text)
                     .when(active && !measured, |d| d.bg(plate_bg).shadow_sm())
                     .when(active, |d| d.font_weight(FontWeight::MEDIUM).text_color(theme.foreground))
                     .when(!active, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
@@ -3311,7 +3351,7 @@ impl Workbench {
                     .on_click(cx.listener(move |this, _, window, cx| on(this, key, window, cx)))
                     .child(label)
             }));
-        h_flex().relative().p(px(3.)).rounded(px(9.)).bg(track_bg).flex_shrink_0().children(plate).child(row).into_any_element()
+        h_flex().relative().p(pad).rounded(round + px(2.)).bg(track_bg).flex_shrink_0().children(plate).child(row).into_any_element()
     }
 
     // -- find in the conversation ------------------------------------------
@@ -4897,6 +4937,9 @@ impl Workbench {
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.is_some() {
             self.menu = None;
+            cx.notify();
+        } else if self.branch_ask.is_some() {
+            self.branch_ask = None;
             cx.notify();
         } else if self.branch_menu.is_some() {
             self.close_branch_menu(window, cx);
@@ -6887,7 +6930,9 @@ impl Workbench {
 
         // The hidden terminal's own screen, when it has to be seen, takes
         // the place of any card: it is the same dialog, as it is.
-        let shells = self.render_shells(&r, &self.shells_running(&r, &session), cx);
+        let (agents, commands): (Vec<_>, Vec<_>) = self.shells_running(&r, &session).into_iter().partition(|sh| sh.agent);
+        let agents = self.render_shells(&r, &agents, true, cx);
+        let shells = self.render_shells(&r, &commands, false, cx);
         let terminal = self.render_terminal(&r, cx);
         let dialog = if terminal.is_some() { None } else { self.render_dialog(&r, cx) };
         let covered = dialog.is_some() || terminal.is_some();
@@ -6911,9 +6956,10 @@ impl Workbench {
                     .w_full()
                     .items_center()
                     .px(px(24.))
-                    .when(status.is_some() || waiting.is_some() || shells.is_some(), |d| d.pt(px(12.)))
+                    .when(status.is_some() || waiting.is_some() || shells.is_some() || agents.is_some(), |d| d.pt(px(12.)))
                     .pb(px(14.))
                     .gap(px(8.))
+                    .children(agents)
                     .children(shells)
                     .children(status.filter(|_| !covered))
                     .children(waiting.filter(|_| !covered))
@@ -6961,7 +7007,7 @@ impl Workbench {
         let Some(sid) = self.shells_open.clone() else { return };
         let Some(detail) = self.detail.as_ref().filter(|d| d.session.id == sid) else { return };
         let mut tails = HashMap::new();
-        for sh in detail.session.shells.iter().filter(|sh| sh.ended.is_empty() && !sh.output_path.is_empty()) {
+        for sh in detail.session.shells.iter().filter(|sh| !sh.agent && sh.ended.is_empty() && !sh.output_path.is_empty()) {
             if let Some(tail) = file_tail(&sh.output_path, 6000, SHELL_TAIL_LINES) {
                 tails.insert(sh.id.clone(), tail);
             }
@@ -6969,20 +7015,36 @@ impl Workbench {
         self.shell_tails = tails;
     }
 
-    /// The row over the composer that says commands are running in the
-    /// background, and, opened with a click, what each one is and the
-    /// last of what it has printed.
-    fn render_shells(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// What each running subagent is on, read again on the clock while
+    /// their list is open, from the end of each one's own transcript.
+    fn read_agent_steps(&mut self) {
+        let Some(sid) = self.agents_open.clone() else { return };
+        let Some(detail) = self.detail.as_ref().filter(|d| d.session.id == sid) else { return };
+        let mut steps = HashMap::new();
+        for sh in detail.session.shells.iter().filter(|sh| sh.agent && sh.ended.is_empty()) {
+            let path = emaki_core::build::agent_transcript(&detail.session.transcript_path, &sh.id);
+            if let Some(step) = emaki_core::build::agent_step(&path) {
+                steps.insert(sh.id.clone(), step);
+            }
+        }
+        self.agent_steps = steps;
+    }
+
+    /// The row over the composer that says commands, or subagents, are
+    /// running in the background, and, opened with a click, what each
+    /// one is: a command with the last of what it has printed, an agent
+    /// with what it was last seen doing.
+    fn render_shells(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], agents: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         if shells.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
-        let open = self.shells_open.as_deref() == Some(r.session_id.as_str());
+        let open = if agents { &self.agents_open } else { &self.shells_open }.as_deref() == Some(r.session_id.as_str());
         let label = |sh: &emaki_core::model::Shell| if sh.description.is_empty() { sh.command.lines().next().unwrap_or("").to_string() } else { sh.description.clone() };
         let first = &shells[0];
         let sid = r.session_id.clone();
         let row = h_flex()
-            .id("shells-row")
+            .id(if agents { "agents-row" } else { "shells-row" })
             .w_full()
             .h(px(26.))
             .px(px(6.))
@@ -6995,13 +7057,19 @@ impl Workbench {
             .hover(|s| s.bg(theme.muted.opacity(0.5)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 swallow_click(window, cx);
-                this.shells_open = if this.shells_open.as_deref() == Some(sid.as_str()) { None } else { Some(sid.clone()) };
-                this.shell_tails.clear();
-                this.read_shell_tails();
+                if agents {
+                    this.agents_open = if this.agents_open.as_deref() == Some(sid.as_str()) { None } else { Some(sid.clone()) };
+                    this.agent_steps.clear();
+                    this.read_agent_steps();
+                } else {
+                    this.shells_open = if this.shells_open.as_deref() == Some(sid.as_str()) { None } else { Some(sid.clone()) };
+                    this.shell_tails.clear();
+                    this.read_shell_tails();
+                }
                 cx.notify();
             }))
-            .child(div().size(px(7.)).rounded_full().bg(theme.blue).flex_shrink_0().with_animation("shells-dot", Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.opacity(0.35 + 0.65 * (1. - (2. * t - 1.).abs()))))
-            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} running in the background", plural(shells.len(), "command", "commands"))))
+            .child(div().size(px(7.)).rounded_full().bg(theme.blue).flex_shrink_0().with_animation(if agents { "agents-dot" } else { "shells-dot" }, Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.opacity(0.35 + 0.65 * (1. - (2. * t - 1.).abs()))))
+            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} running in the background", if agents { plural(shells.len(), "agent", "agents") } else { plural(shells.len(), "command", "commands") })))
             .child(div().flex_1().min_w_0().truncate().child(if shells.len() == 1 { label(first) } else { String::new() }))
             .when(shells.len() == 1, |d| d.child(div().flex_shrink_0().child(elapsed_since(&first.started, self.now))))
             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronUp }).with_size(px(13.)).flex_shrink_0());
@@ -7009,6 +7077,37 @@ impl Workbench {
         if open {
             let mut list = v_flex().w_full().gap(px(10.)).p(px(12.)).mb(px(4.)).rounded(px(10.)).border_1().border_color(theme.border).bg(theme.muted.opacity(0.25));
             for sh in shells {
+                if agents {
+                    // An agent is its task, the kind of agent it is, and
+                    // one line on what it was last seen doing.
+                    let step = self.agent_steps.get(&sh.id).cloned().unwrap_or_default();
+                    list = list.child(
+                        v_flex()
+                            .w_full()
+                            .gap(px(4.))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .items_center()
+                                    .text_size(px(12.5))
+                                    .child(Icon::new(IconName::Bot).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
+                                    .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(label(sh)))
+                                    .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(sh.command.clone()))
+                                    .child(div().flex_shrink_0().text_size(px(11.5)).text_color(theme.muted_foreground).child(elapsed_since(&sh.started, self.now))),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .pl(px(21.))
+                                    .truncate()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_size(px(11.))
+                                    .text_color(theme.muted_foreground.opacity(if step.is_empty() { 0.7 } else { 1. }))
+                                    .child(if step.is_empty() { "starting…".to_string() } else { step }),
+                            ),
+                    );
+                    continue;
+                }
                 let tail = self.shell_tails.get(&sh.id).cloned().unwrap_or_default();
                 list = list.child(
                     v_flex()
@@ -9370,6 +9469,11 @@ impl Render for Workbench {
         if let Some(path) = self.file_probe.take() {
             self.file_preview(&path, window, cx);
         }
+        if self.branch_ask_probe.is_some() && self.panel_changes() > 0 {
+            if let Some(name) = self.branch_ask_probe.take() {
+                self.branch_go(name, false, window, cx);
+            }
+        }
         if let Some(typed) = self.branch_probe.take() {
             if self.branch_menu.is_none() {
                 self.branch_menu_toggle(point(px(230.), px(66.)), window, cx);
@@ -9564,6 +9668,7 @@ impl Render for Workbench {
             .when_some(self.lightbox.clone(), |d, lb| d.child(self.render_lightbox(lb, cx)))
             .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(self.render_rename(cx)))
             .when_some(self.branch_menu, |d, at| d.child(self.render_branch_menu(at, window, cx)))
+            .when(self.branch_ask.is_some(), |d| d.child(self.render_branch_ask(cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, window, cx)))
     }
 }

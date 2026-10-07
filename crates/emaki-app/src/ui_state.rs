@@ -27,6 +27,9 @@ pub struct UiState {
     pub outline_on: Option<bool>,
     /// How wide that panel was dragged to.
     pub panel_w: Option<f32>,
+    /// The list of branches in the order of their names, not by when
+    /// each was last committed to.
+    pub branches_by_name: Option<bool>,
     /// `board`, `sessions`, `session` or `new`.
     pub page: String,
     /// Session keys (`<agent>:<id>`) with a tab, in tab order.
