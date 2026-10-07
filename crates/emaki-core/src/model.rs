@@ -481,13 +481,19 @@ pub struct Session {
     pub log_path: String,
 }
 
-/// A command the agent started in the background (`Bash` with
-/// `run_in_background`): the turn goes on, or ends, while it runs, and
-/// Claude Code tells the agent when it is over.
+/// Something the agent started in the background: a command (`Bash`
+/// with `run_in_background`) or a subagent (`Agent` launched without
+/// waiting for it). The turn goes on, or ends, while it runs, and Claude
+/// Code tells the agent when it is over.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Shell {
     /// Claude Code's id for the task.
     pub id: String,
+    /// A subagent and not a command. `command` is then the kind of agent
+    /// it is ("general-purpose") and there is no output file: what it
+    /// does is in its own transcript.
+    #[serde(default)]
+    pub agent: bool,
     pub command: String,
     /// The agent's own line on what the command is for.
     pub description: String,

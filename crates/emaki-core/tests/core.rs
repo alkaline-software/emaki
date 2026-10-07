@@ -1529,6 +1529,57 @@ fn background_shells_start_and_end() {
     assert_eq!((s.shells[1].command.as_str(), s.shells[1].ended.as_str()), ("sleep 600", ""));
 }
 
+/// A subagent launched without waiting for it is a background task too:
+/// it starts at the `Agent` result that says `isAsync`, ends at the
+/// notification for its id, and what it is on is the end of its own
+/// transcript.
+#[test]
+fn background_agents_start_and_end() {
+    let launch = |id: &str, call: &str| {
+        json!({"type": "user", "uuid": format!("r-{id}"), "timestamp": "2026-10-07T02:27:40.000Z", "sessionId": "s1",
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call, "content": [{"type": "text", "text": "Async agent launched successfully."}]}]},
+            "toolUseResult": {"isAsync": true, "status": "async_launched", "agentId": id, "description": "From the sidecar"}})
+    };
+    let call = |call: &str, what: &str| {
+        json!({"type": "assistant", "uuid": format!("a-{call}"), "timestamp": "2026-10-07T02:27:39.000Z", "sessionId": "s1",
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": call, "name": "Agent", "input": {"description": what, "subagent_type": "general-purpose", "prompt": "do it"}}]}})
+    };
+    let rows = vec![
+        json!({"type": "user", "uuid": "u1", "timestamp": "2026-10-07T02:27:30.000Z", "sessionId": "s1", "message": {"role": "user", "content": "split it"}}),
+        call("t1", "Trim window doc"),
+        launch("ag1", "t1"),
+        call("t2", "Trim channels doc"),
+        launch("ag2", "t2"),
+        // A foreground agent has a result and no `isAsync`: not a task.
+        json!({"type": "user", "uuid": "r-fg", "timestamp": "2026-10-07T02:28:00.000Z", "sessionId": "s1",
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t9", "content": "done"}]}, "toolUseResult": {"status": "completed", "agentId": "fg"}}),
+        json!({"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-07T02:29:48.000Z", "sessionId": "s1",
+            "content": "<task-notification>\n<task-id>ag1</task-id>\n<status>completed</status>\n<summary>Agent \"Trim window doc\" finished</summary>\n</task-notification>"}),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.shells.len(), 2);
+    assert!(s.shells.iter().all(|sh| sh.agent && sh.command == "general-purpose"));
+    assert_eq!((s.shells[0].description.as_str(), s.shells[0].status.as_str()), ("Trim window doc", "completed"));
+    assert_eq!((s.shells[1].description.as_str(), s.shells[1].ended.as_str()), ("Trim channels doc", ""));
+
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("s1.jsonl");
+    let path = emaki_core::build::agent_transcript(transcript.to_str().unwrap(), "ag2");
+    assert!(path.ends_with("s1/subagents/agent-ag2.jsonl"));
+    assert_eq!(emaki_core::build::agent_step(&path), None);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let lines = [
+        json!({"type": "assistant", "cwd": "/repo", "message": {"role": "assistant", "content": [{"type": "text", "text": "\nReading the raw file first.\nThen the doc."}]}}),
+        json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}]}}),
+    ];
+    std::fs::write(&path, lines.iter().map(|l| l.to_string() + "\n").collect::<String>()).unwrap();
+    assert_eq!(emaki_core::build::agent_step(&path).as_deref(), Some("Reading the raw file first."));
+    let more = json!({"type": "assistant", "cwd": "/repo", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "x2", "name": "Read", "input": {"file_path": "/repo/docs/window.md"}}]}});
+    std::fs::write(&path, lines.iter().chain([&more]).map(|l| l.to_string() + "\n").collect::<String>()).unwrap();
+    let step = emaki_core::build::agent_step(&path).unwrap();
+    assert!(step.starts_with("read") && step.contains("window.md"), "{step}");
+}
+
 /// "@" in the composer: the folder's files, what answers the words typed,
 /// and which "@" in a message names something that is there.
 #[test]
@@ -1732,6 +1783,18 @@ fn git_lists_branches_and_switches_between_them() {
     assert_eq!(b.local, ["main", "alpha", "zeta"]);
     assert_eq!(b.remote, ["theirs"]);
     assert_eq!(b.label(), "main");
+    assert!(b.when["main"] > 1_600_000_000 && b.when.contains_key("theirs"));
+    // By recency the branch committed to last comes straight after the
+    // default one, whatever its name.
+    run(&work, &["switch", "-q", "zeta"]);
+    std::fs::write(work.join("z.txt"), "z").unwrap();
+    run(&work, &["add", "."]);
+    let later = std::process::Command::new("git").arg("-C").arg(&work).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "later"]).env("GIT_COMMITTER_DATE", "2030-01-01T00:00:00").output().unwrap();
+    assert!(later.status.success());
+    run(&work, &["switch", "-q", "main"]);
+    let recent = git::branches(&work).unwrap().by_recency();
+    assert_eq!((recent[0].0.as_str(), recent[1].0.as_str()), ("main", "zeta"));
+    assert_eq!(recent.len(), 4);
 
     git::switch(&work, "alpha").unwrap();
     assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("alpha"));
@@ -1753,6 +1816,68 @@ fn git_lists_branches_and_switches_between_them() {
     assert!(why.contains("overwritten"), "{why}");
     assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "mine, not committed");
     assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("fresh/idea"));
+
+    // Left behind: the other branch is as committed, and the changes,
+    // a new file among them, wait on the branch they were made on.
+    std::fs::write(work.join("new.txt"), "untracked").unwrap();
+    assert!(git::dirty(&work));
+    assert_eq!(git::switch_with(&work, "main", false, git::Carry::Leave), Ok(()));
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "one");
+    assert!(!work.join("new.txt").exists() && !git::dirty(&work));
+    assert_eq!(git::branches(&work).unwrap().stashed, 0, "nothing was left on main");
+    assert!(git::restore(&work).is_err());
+    git::switch(&work, "fresh/idea").unwrap();
+    assert_eq!(git::branches(&work).unwrap().stashed, 1);
+    git::restore(&work).unwrap();
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "mine, not committed");
+    assert_eq!(std::fs::read_to_string(work.join("new.txt")).unwrap(), "untracked");
+    assert_eq!(git::branches(&work).unwrap().stashed, 0);
+
+    // Brought along: a change to a file the branches agree on goes by
+    // itself, a new file with it.
+    std::fs::write(work.join("a.txt"), "two").unwrap();
+    assert!(git::misfits(&work, "alpha").is_empty());
+    assert_eq!(git::switch_with(&work, "alpha", false, git::Carry::Bring), Ok(()));
+    assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("alpha"));
+    assert_eq!(std::fs::read_to_string(work.join("new.txt")).unwrap(), "untracked");
+    // A change that would conflict there is seen beforehand, without a
+    // file being touched, and the switch is refused whole: same branch,
+    // same files, nothing stashed, no conflict left behind.
+    std::fs::write(work.join("a.txt"), "mine on alpha").unwrap();
+    assert_eq!(git::misfits(&work, "fresh/idea"), ["a.txt"]);
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "mine on alpha");
+    let why = git::switch_with(&work, "fresh/idea", false, git::Carry::Bring).unwrap_err();
+    assert!(why.contains("do not fit") && why.contains("a.txt"), "{why}");
+    assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("alpha"));
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "mine on alpha");
+    assert_eq!(std::fs::read_to_string(work.join("new.txt")).unwrap(), "untracked");
+    assert!(git::unmerged(&work).is_empty());
+    let stashes = std::process::Command::new("git").arg("-C").arg(&work).args(["stash", "list"]).output().unwrap();
+    assert!(stashes.stdout.is_empty(), "{}", String::from_utf8_lossy(&stashes.stdout));
+    // A new file the other branch has under the same name does not fit either.
+    run(&work, &["checkout", "-q", "--", "a.txt"]);
+    run(&work, &["switch", "-q", "-c", "has-new"]);
+    run(&work, &["add", "new.txt"]);
+    run(&work, &["commit", "-q", "-m", "new"]);
+    run(&work, &["switch", "-q", "alpha"]);
+    std::fs::write(work.join("new.txt"), "untracked again").unwrap();
+    assert_eq!(git::misfits(&work, "has-new"), ["new.txt"]);
+    // With a conflict already open, no switch is tried at all.
+    run(&work, &["add", "new.txt"]);
+    run(&work, &["commit", "-q", "-m", "mine"]);
+    let merged = std::process::Command::new("git").arg("-C").arg(&work).args(["-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "has-new"]).output().unwrap();
+    assert!(!merged.status.success());
+    assert_eq!(git::unmerged(&work), ["new.txt"]);
+    let why = git::switch_with(&work, "main", false, git::Carry::Leave).unwrap_err();
+    assert!(why.contains("conflict") && why.contains("new.txt"), "{why}");
+    run(&work, &["merge", "--abort"]);
+    run(&work, &["switch", "-q", "fresh/idea"]);
+    // A switch that cannot be made puts the changes back.
+    std::fs::write(work.join("a.txt"), "still mine").unwrap();
+    assert!(git::switch_with(&work, "no-such-branch", false, git::Carry::Leave).is_err());
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "still mine");
+    run(&work, &["checkout", "-q", "--", "a.txt"]);
+    std::fs::remove_file(work.join("new.txt")).ok();
 
     // Detached, the place is the commit.
     run(&work, &["checkout", "-q", "--detach"]);

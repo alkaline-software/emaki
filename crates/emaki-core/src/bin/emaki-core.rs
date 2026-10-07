@@ -52,7 +52,11 @@ fn main() {
             let target = args.get(1).expect("shells <session-id|path>");
             let session = emaki_core::build::build_from_path(&resolve(target, &cfg), "");
             for sh in &session.shells {
-                println!("{}  {}  {}  {}  {}", sh.id, sh.started, if sh.ended.is_empty() { "running" } else { &sh.status }, sh.ended, if sh.description.is_empty() { &sh.command } else { &sh.description });
+                println!("{}  {}  {}  {}  {}  {}", if sh.agent { "agent" } else { "command" }, sh.id, sh.started, if sh.ended.is_empty() { "running" } else { &sh.status }, sh.ended, if sh.description.is_empty() { &sh.command } else { &sh.description });
+                if sh.agent {
+                    let path = emaki_core::build::agent_transcript(&session.transcript_path, &sh.id);
+                    println!("    last step: {}", emaki_core::build::agent_step(&path).unwrap_or_else(|| "nothing yet".into()));
+                }
             }
         }
         "outline" => {

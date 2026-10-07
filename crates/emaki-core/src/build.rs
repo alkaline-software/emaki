@@ -7,7 +7,7 @@
 //! not recognise rather than failing.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use chrono::{DateTime, FixedOffset};
@@ -914,7 +914,10 @@ pub fn build(input: BuildInput) -> Session {
 /// to), and is over at the first `<task-notification>` for that id:
 /// Claude Code writes it into the queue the moment the command exits,
 /// and again as the prompt of the turn it starts. A stop the agent asks
-/// for (`KillShell`, `TaskStop`) ends it too. A command still running
+/// for (`KillShell`, `TaskStop`) ends it too. A subagent is the same
+/// with another start: an `Agent` result whose sidecar says `isAsync`
+/// and names the `agentId`, which is the id its notification carries.
+/// A command still running
 /// when its Claude Code went away gets no row at all, so whether one
 /// without an end is running is for the caller to say, from the process.
 fn shells_of(rows: &[&Value]) -> Vec<Shell> {
@@ -938,6 +941,9 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
                         "Bash" => {
                             calls.insert(str_of(block, "id").into(), (field("command"), field("description")));
                         }
+                        "Agent" | "Task" => {
+                            calls.insert(str_of(block, "id").into(), (field("subagent_type"), field("description")));
+                        }
                         "KillShell" | "TaskStop" | "KillBash" => {
                             let id = [field("shell_id"), field("task_id"), field("bash_id")].into_iter().find(|v| !v.is_empty()).unwrap_or_default();
                             end(&mut shells, &id, "killed", "", ts);
@@ -954,6 +960,18 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
                     let (command, description) = calls.get(call).cloned().unwrap_or_default();
                     if !shells.iter().any(|sh| sh.id == id) {
                         shells.push(Shell { id: id.into(), command, description, output_path: RE_TASK_OUTPUT.captures(&said).map(|c| c[1].to_string()).unwrap_or_default(), started: ts.into(), ..Default::default() });
+                    }
+                    continue;
+                }
+                let side = row.get("toolUseResult");
+                if let Some(id) = side.filter(|r| r.get("isAsync").and_then(Value::as_bool) == Some(true)).and_then(|r| r.get("agentId")).and_then(Value::as_str) {
+                    let call = blocks(row).into_iter().find(|x| block_type(x) == "tool_result").map(|x| str_of(&x, "tool_use_id").to_string()).unwrap_or_default();
+                    let (kind, mut description) = calls.get(&call).cloned().unwrap_or_default();
+                    if description.is_empty() {
+                        description = side.map(|r| str_of(r, "description")).unwrap_or("").into();
+                    }
+                    if !shells.iter().any(|sh| sh.id == id) {
+                        shells.push(Shell { id: id.into(), agent: true, command: kind, description, started: ts.into(), ..Default::default() });
                     }
                     continue;
                 }
@@ -976,6 +994,57 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
         }
     }
     shells
+}
+
+/// Where a background subagent of the session at `transcript_path`
+/// writes its own transcript.
+pub fn agent_transcript(transcript_path: &str, agent_id: &str) -> PathBuf {
+    let path = Path::new(transcript_path);
+    path.with_extension("").join("subagents").join(format!("agent-{agent_id}.jsonl"))
+}
+
+/// What a running subagent is on, from the end of its transcript: the
+/// last tool it called with what it called it on, or the first line of
+/// the last thing it said. Only the file's end is read, since this is
+/// asked on the clock.
+pub fn agent_step(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 256 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    // The first line is cut wherever the tail began, unless the tail is
+    // the whole file.
+    let skip = usize::from(len > TAIL);
+    let lines: Vec<&str> = text.lines().skip(skip).collect();
+    for line in lines.iter().rev() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else { continue };
+        if str_of(&row, "type") != "assistant" {
+            continue;
+        }
+        let cwd = str_of(&row, "cwd");
+        for block in blocks(&row).iter().rev() {
+            match block_type(block) {
+                "tool_use" => {
+                    let name = str_of(block, "name");
+                    let empty = Map::new();
+                    let subject = tool_subject(name, block.get("input").and_then(Value::as_object).unwrap_or(&empty), cwd);
+                    let label = name.rsplit("__").next().unwrap_or(name).to_lowercase();
+                    return Some(if subject.is_empty() { label } else { format!("{label}  {}", subject.lines().next().unwrap_or("")) });
+                }
+                "text" => {
+                    if let Some(said) = str_of(block, "text").lines().map(str::trim).find(|l| !l.is_empty()) {
+                        return Some(said.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// Claude Code's queue of messages sent while a turn runs, replayed from

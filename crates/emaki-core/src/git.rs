@@ -206,12 +206,26 @@ pub struct Branches {
     /// Branches a remote has and this repository does not, by the name
     /// a switch would give them.
     pub remote: Vec<String>,
+    /// When each branch's last commit was made, in seconds since 1970.
+    pub when: std::collections::HashMap<String, i64>,
+    /// How many sets of changes were left behind on the branch checked
+    /// out (`Carry::Leave`) and are still waiting to be put back.
+    pub stashed: usize,
 }
 
 impl Branches {
     /// What a button naming the place says: the branch, else the commit.
     pub fn label(&self) -> String {
         self.current.clone().unwrap_or_else(|| self.head.clone())
+    }
+
+    /// Every branch by the time of its last commit, the newest first,
+    /// after the default branch, which is first in any order; each with
+    /// whether only a remote has it.
+    pub fn by_recency(&self) -> Vec<(String, bool)> {
+        let mut all: Vec<(String, bool)> = self.local.iter().map(|n| (n.clone(), false)).chain(self.remote.iter().map(|n| (n.clone(), true))).collect();
+        all.sort_by_key(|(n, _)| (Some(n) != self.default.as_ref(), std::cmp::Reverse(self.when.get(n).copied().unwrap_or(0)), n.clone()));
+        all
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -228,14 +242,22 @@ fn line(dir: &Path, args: &[&str]) -> Option<String> {
 /// none.
 pub fn branches(dir: &Path) -> Option<Branches> {
     git(dir, &["rev-parse", "--git-dir"])?;
-    let refs = String::from_utf8_lossy(&git(dir, &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"])?).to_string();
+    let refs = String::from_utf8_lossy(&git(dir, &["for-each-ref", "--format=%(refname)%09%(committerdate:unix)", "refs/heads", "refs/remotes"])?).to_string();
     let mut b = Branches { current: line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]), head: line(dir, &["rev-parse", "--short", "HEAD"]).unwrap_or_default(), ..Default::default() };
-    for name in refs.lines() {
+    for row in refs.lines() {
+        let (name, at) = row.split_once('\t').unwrap_or((row, ""));
+        let at = at.trim().parse::<i64>().unwrap_or(0);
         if let Some(local) = name.strip_prefix("refs/heads/") {
             b.local.push(local.to_string());
+            // The local branch's own time, whatever a remote's copy says.
+            b.when.insert(local.to_string(), at);
         } else if let Some((_, branch)) = name.strip_prefix("refs/remotes/").and_then(|r| r.split_once('/')) {
             if branch != "HEAD" {
                 b.remote.push(branch.to_string());
+                if !refs.contains(&format!("refs/heads/{branch}\t")) {
+                    let seen = b.when.entry(branch.to_string()).or_insert(at);
+                    *seen = (*seen).max(at);
+                }
             }
         }
     }
@@ -253,6 +275,7 @@ pub fn branches(dir: &Path) -> Option<Branches> {
         .or_else(|| ["main", "master"].iter().find(|n| b.local.iter().any(|l| l == *n)).map(|n| n.to_string()));
     let default = b.default.clone();
     b.local.sort_by_key(|name| (Some(name) != default.as_ref(), name.clone()));
+    b.stashed = b.current.as_ref().map_or(0, |cur| left_on(dir, cur).len());
     Some(b)
 }
 
@@ -280,6 +303,172 @@ pub fn switch(dir: &Path, name: &str) -> Result<(), String> {
 /// Make the branch `name` from what is checked out, and check it out.
 pub fn create(dir: &Path, name: &str) -> Result<(), String> {
     act(dir, &["switch", "-c", name])
+}
+
+/// What becomes of the changes not yet committed when the branch is
+/// changed, as GitHub Desktop asks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Carry {
+    /// They stay with the branch being left, in a stash named for it,
+    /// and are put back from there (`restore`).
+    Leave,
+    /// They come along to the branch gone to.
+    Bring,
+}
+
+/// The name GitHub Desktop gives the stash of the changes left on a
+/// branch, so that app and this one see the same ones.
+const LEFT_MARK: &str = "!!GitHub_Desktop";
+
+fn left_name(branch: &str) -> String {
+    format!("{LEFT_MARK}<{branch}>")
+}
+
+/// The stashes holding changes left on `branch`, newest first, by the
+/// name git takes for each (`stash@{0}`).
+fn left_on(dir: &Path, branch: &str) -> Vec<String> {
+    let Some(out) = git(dir, &["stash", "list", "--format=%gd%x1f%gs"]) else { return Vec::new() };
+    let name = left_name(branch);
+    String::from_utf8_lossy(&out).lines().filter_map(|l| l.split_once('\u{1f}')).filter(|(_, said)| said.ends_with(&name)).map(|(at, _)| at.to_string()).collect()
+}
+
+/// Whether anything here is not committed: changed, staged, or new and
+/// not ignored.
+pub fn dirty(dir: &Path) -> bool {
+    git(dir, &["status", "--porcelain", "--untracked-files=normal"]).is_some_and(|out| !out.iter().all(u8::is_ascii_whitespace))
+}
+
+/// The files with a conflict git is still waiting to have resolved.
+pub fn unmerged(dir: &Path) -> Vec<String> {
+    git(dir, &["diff", "--name-only", "--diff-filter=U"]).map(|out| String::from_utf8_lossy(&out).lines().map(str::to_string).collect()).unwrap_or_default()
+}
+
+/// A few of `files` by name, for a sentence: "a, b and 3 more".
+pub fn name_some(files: &[String]) -> String {
+    let shown: Vec<&str> = files.iter().take(4).map(String::as_str).collect();
+    match files.len() - shown.len() {
+        0 => shown.join(", "),
+        more => format!("{} and {more} more", shown.join(", ")),
+    }
+}
+
+/// The commit `name` would check out: the local branch, else a remote's.
+fn tip(dir: &Path, name: &str) -> Option<String> {
+    line(dir, &["rev-parse", "--verify", "-q", &format!("refs/heads/{name}^{{commit}}")]).or_else(|| {
+        let refs = git(dir, &["for-each-ref", "--format=%(refname)", "refs/remotes"])?;
+        let found = String::from_utf8_lossy(&refs).lines().find(|r| r.strip_prefix("refs/remotes/").and_then(|r| r.split_once('/')).is_some_and(|(_, b)| b == name))?.to_string();
+        line(dir, &["rev-parse", "--verify", "-q", &format!("{found}^{{commit}}")])
+    })
+}
+
+/// The files whose changes here would not go onto the branch `name`:
+/// asked of git without touching a file (`stash create` makes a commit
+/// of the changes and leaves them where they are, `merge-tree` merges
+/// in memory). Empty when they all fit, which is what `Carry::Bring`
+/// needs. A new file counts when the branch has a file of its name.
+pub fn misfits(dir: &Path, name: &str) -> Vec<String> {
+    let Some(theirs) = tip(dir, name) else { return Vec::new() };
+    let mut bad = Vec::new();
+    if let Some(mine) = line(dir, &["stash", "create"]) {
+        let out = Command::new("git").arg("-C").arg(dir).args(["merge-tree", "--write-tree", "--name-only", "--no-messages", "--merge-base=HEAD", &theirs, &mine]).output();
+        match out {
+            // Exit 1 is "merged, with conflicts": the tree's id, then the files.
+            Ok(o) if o.status.code() == Some(1) => bad.extend(String::from_utf8_lossy(&o.stdout).lines().skip(1).filter(|l| !l.is_empty()).map(str::to_string)),
+            Ok(o) if o.status.success() => {}
+            // A git too old to merge in memory: every changed file the
+            // two branches differ in counts, which is what git itself
+            // refuses a plain switch over.
+            _ => {
+                let differ = git(dir, &["diff", "--name-only", "HEAD", &theirs]).map(|o| String::from_utf8_lossy(&o).lines().map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+                let changed = git(dir, &["diff", "--name-only", "HEAD"]).map(|o| String::from_utf8_lossy(&o).lines().map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+                bad.extend(changed.into_iter().filter(|c| differ.contains(c)));
+            }
+        }
+    }
+    let fresh = git(dir, &["ls-files", "--others", "--exclude-standard"]).map(|o| String::from_utf8_lossy(&o).lines().map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+    if !fresh.is_empty() {
+        let there: std::collections::HashSet<String> = git(dir, &["ls-tree", "-r", "--name-only", &theirs]).map(|o| String::from_utf8_lossy(&o).lines().map(str::to_string).collect()).unwrap_or_default();
+        bad.extend(fresh.into_iter().filter(|f| there.contains(f)));
+    }
+    bad.sort();
+    bad.dedup();
+    bad
+}
+
+/// Check `name` out (or make it, with `create`) with changes not yet
+/// committed, which go where `carry` says. All or nothing: either the
+/// branch is changed and every change is where it was asked to go, or
+/// nothing has moved and the reason comes back. No path leaves a
+/// conflict behind, and none throws a change away.
+pub fn switch_with(dir: &Path, name: &str, create: bool, carry: Carry) -> Result<(), String> {
+    let open = unmerged(dir);
+    if !open.is_empty() {
+        return Err(format!("{} to resolve first: {}", if open.len() == 1 { "a file has a conflict".to_string() } else { format!("{} files have conflicts", open.len()) }, name_some(&open)));
+    }
+    let go = |dir: &Path| if create { self::create(dir, name) } else { switch(dir, name) };
+    if !dirty(dir) {
+        return go(dir);
+    }
+    // Where to come back to if the changes cannot be put down.
+    let from = line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    match carry {
+        Carry::Leave => {
+            let from = from.ok_or("no branch is checked out to leave the changes on")?;
+            act(dir, &["stash", "push", "--include-untracked", "-m", &left_name(&from)])?;
+            // Not switched after all: the changes go back where they were.
+            go(dir).inspect_err(|_| {
+                let _ = act(dir, &["stash", "pop"]);
+            })
+        }
+        Carry::Bring => {
+            if !create {
+                let bad = misfits(dir, name);
+                if !bad.is_empty() {
+                    return Err(format!("your changes do not fit on {name}: {} would conflict", name_some(&bad)));
+                }
+            }
+            // Git takes changes along by itself when none of them is to
+            // a file the two branches differ in.
+            if go(dir).is_ok() {
+                return Ok(());
+            }
+            let back = from.clone().or_else(|| line(dir, &["rev-parse", "HEAD"])).ok_or("nothing is checked out")?;
+            act(dir, &["stash", "push", "--include-untracked", "-m", &format!("Emaki: changes brought to {name}")])?;
+            go(dir).inspect_err(|_| {
+                let _ = act(dir, &["stash", "pop"]);
+            })?;
+            if act(dir, &["stash", "pop"]).is_ok() {
+                return Ok(());
+            }
+            // They did not go on after all (the check above should have
+            // said so). Git kept the stash, so the half-applied files are
+            // cleared, the branch left is checked out again, and the
+            // changes are put back on it.
+            let fresh = git(dir, &["ls-tree", "-r", "--name-only", "stash@{0}^3"]).map(|o| String::from_utf8_lossy(&o).lines().map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+            act(dir, &["reset", "--hard", "-q"])?;
+            for f in fresh {
+                let _ = std::fs::remove_file(dir.join(f));
+            }
+            if create {
+                act(dir, &["switch", "-q", if from.is_some() { &back } else { "--detach" }])?;
+                let _ = act(dir, &["branch", "-D", name]);
+            } else if from.is_some() {
+                act(dir, &["switch", "-q", &back])?;
+            } else {
+                act(dir, &["switch", "-q", "--detach", &back])?;
+            }
+            act(dir, &["stash", "pop"])?;
+            Err(format!("your changes do not fit on {name}, so nothing was switched"))
+        }
+    }
+}
+
+/// Put back the changes last left on the branch checked out. Git
+/// refuses, and keeps them, when they would write over a change here.
+pub fn restore(dir: &Path) -> Result<(), String> {
+    let cur = line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).ok_or("no branch is checked out")?;
+    let at = left_on(dir, &cur).into_iter().next().ok_or("nothing was left on this branch")?;
+    act(dir, &["stash", "pop", &at])
 }
 
 /// Whether git would take `name` as a branch's name.
