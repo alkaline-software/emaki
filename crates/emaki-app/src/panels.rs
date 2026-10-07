@@ -44,6 +44,8 @@ const OUTLINE_FIT: Pixels = px(300.);
 /// for, and how long its scroller rests before they are.
 const LABEL_AHEAD: Pixels = px(320.);
 const LABEL_REST: Duration = Duration::from_millis(300);
+/// How long a label that has just landed takes to fade in.
+const LABEL_FADE: Duration = Duration::from_millis(320);
 /// The room over the pinned day's words.
 const PIN_LEAD: Pixels = px(10.);
 /// The least the conversation keeps beside a dragged panel.
@@ -508,6 +510,14 @@ impl Workbench {
         self.panel_anim = Some((from, to, std::time::Instant::now(), self.panel_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
         self.save_ui(true);
         cx.notify();
+        if from.is_some() {
+            // The panel left is drawn while it goes: once more when it has.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(crate::workbench::PANEL_ANIM + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
     }
 
     /// The two buttons at the top strip's left end, as one control: a
@@ -564,24 +574,51 @@ impl Workbench {
             .into_any_element()]
     }
 
-    /// A panel as it arrives: beside nothing it widens from nothing and
-    /// fades in; in the other's place it only fades in, so the
-    /// conversation stays where it is.
-    fn panel_in(&self, files: bool, el: Div) -> AnyElement {
-        match self.panel_anim.filter(|(_, to, at, _)| *to == Some(files) && at.elapsed() < crate::workbench::PANEL_ANIM) {
-            Some((from, _, _, serial)) => {
-                let fresh = from.is_none();
-                let w = self.panel_w;
-                div()
-                    .h_full()
-                    .flex_shrink_0()
-                    .overflow_hidden()
-                    .child(el)
-                    .with_animation(ElementId::Name(format!("panel-{files}-{serial}").into()), Animation::new(crate::workbench::PANEL_ANIM).with_easing(ease_out_quint()), move |d, t| d.w(if fresh { (w * t).round() } else { w }).opacity(t))
-                    .into_any_element()
-            }
-            None => el.into_any_element(),
+    /// The panel that was showing until a moment ago, put away or
+    /// replaced, drawn for the moment it takes to go.
+    pub(crate) fn panel_leaving(&self) -> Option<bool> {
+        if self.page != Page::Session || self.detail.is_none() {
+            return None;
         }
+        match self.panel_anim {
+            Some((Some(from), to, at, _)) if to != Some(from) && at.elapsed() < crate::workbench::PANEL_ANIM => Some(from),
+            _ => None,
+        }
+    }
+
+    /// A panel as it arrives and as it goes: beside nothing it widens
+    /// from nothing and fades in, and put away it narrows and fades out;
+    /// in the other's place it fades in while the other fades out over
+    /// it, so the conversation stays where it is. The wrapper is there at rest too, under the same
+    /// name: an animation inside the panel is kept by the names above
+    /// it, and began again when the wrapper went.
+    fn panel_in(&self, files: bool, el: Div) -> AnyElement {
+        let live = self.panel_anim.filter(|(_, _, at, _)| at.elapsed() < crate::workbench::PANEL_ANIM);
+        // (widens or narrows, comes or goes)
+        let play = match live {
+            Some((from, to, _, _)) if to == Some(files) => Some((from.is_none(), true)),
+            Some((from, to, _, _)) if from == Some(files) => Some((to.is_none(), false)),
+            _ => None,
+        };
+        // Going while the other comes: over the other's place, out of the
+        // row's layout.
+        let over = matches!(live, Some((from, Some(_), _, _)) if from == Some(files));
+        let serial = self.panel_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0);
+        let w = self.panel_w;
+        div()
+            .h_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .when(over, |d| d.absolute().top_0().left_0())
+            .child(el)
+            .with_animation(ElementId::Name(format!("panel-{files}-{serial}").into()), Animation::new(crate::workbench::PANEL_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
+                Some((wide, comes)) => {
+                    let t = if comes { t } else { 1. - t };
+                    d.w(if wide { (w * t).round() } else { w }).opacity(t)
+                }
+                None => d,
+            })
+            .into_any_element()
     }
 
     // -- the panel's edge ---------------------------------------------------
@@ -1114,6 +1151,13 @@ impl Workbench {
                 .text_color(theme.foreground)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| this.branch_menu_toggle(ev.position(), window, cx)))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener({
+                        let name = b.label();
+                        move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![("Copy Branch Name", MenuDo::Copy(name.clone()))], cx)
+                    }),
+                )
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
                 .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(b.label()))
                 .child(Icon::new(IconName::ChevronDown).with_size(px(9.)).text_color(theme.muted_foreground).flex_shrink_0())
@@ -1508,6 +1552,17 @@ impl Workbench {
                     .text_size(px(13.))
                     .hover(|s| s.bg(theme.sidebar_accent))
                     .on_click(cx.listener(move |this, _, window, cx| this.branch_go(to.clone(), false, window, cx)))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener({
+                            let name = name.clone();
+                            move |this, ev: &MouseDownEvent, _, cx| {
+                                // Not the sheet's own right click, which puts the list away.
+                                cx.stop_propagation();
+                                this.open_menu(ev.position, vec![("Copy Branch Name", MenuDo::Copy(name.clone()))], cx);
+                            }
+                        }),
+                    )
                     .child(div().w(px(14.)).flex_shrink_0().when(here, |d| d.child(Icon::new(IconName::Check).with_size(px(13.)))))
                     // The name, its tags straight after it, and the time at
                     // the row's far end.
@@ -1628,23 +1683,30 @@ impl Workbench {
         let theme = cx.theme().clone();
         let root = self.files_root()?;
         let n = self.tree.git.as_ref().filter(|(of, _)| *of == root).map(|_| self.tree.changed.len()).filter(|n| *n > 0)?;
+        // A button as the branch's is, lit while its sheet is up.
+        let open = self.changes.is_some();
+        let tip = format!("Show {}", plural(n, "changed file", "changed files"));
         Some(
             h_flex()
                 .id("changes-pill")
                 .flex_shrink_0()
                 .h(px(21.))
-                .px(px(6.))
-                .gap(px(4.))
+                .px(px(7.))
+                .gap(px(5.))
                 .items_center()
                 .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(if open { theme.muted } else { theme.background.opacity(0.6) })
                 .hover(|s| s.bg(theme.muted))
                 .cursor_pointer()
                 .text_size(px(11.5))
-                .text_color(theme.muted_foreground)
+                .text_color(theme.foreground)
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| this.open_changes(None, cx)))
-                .child(Icon::default().path("icons/git-diff.svg").with_size(px(12.)).flex_shrink_0())
-                .child(crate::format::thousands(n))
+                .child(Icon::default().path("icons/git-diff.svg").with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
+                .child(div().font_weight(FontWeight::MEDIUM).child(crate::format::thousands(n)))
                 .into_any_element(),
         )
     }
@@ -2056,7 +2118,7 @@ impl Workbench {
                         this.outline_asking.remove(&key);
                         match line {
                             Some(line) => {
-                                this.outline_fresh.insert(key.clone());
+                                this.outline_fresh.insert(key.clone(), std::time::Instant::now());
                                 this.outline_labels.insert(key, line.into());
                             }
                             None => {
@@ -2129,7 +2191,7 @@ impl Workbench {
             if pending && !self.outline_asking.contains(&e.key) {
                 unlabelled.push((rows.len(), e.round, e.key.clone(), e.prompt.clone()));
             }
-            let fresh = label.is_some() && self.outline_fresh.contains(&e.key);
+            let fresh = label.is_some() && self.outline_fresh.get(&e.key).is_some_and(|at| at.elapsed() < LABEL_FADE);
             let words = label.unwrap_or_else(|| e.title.clone());
             let said: AnyElement = if pending {
                 let bar = |w: f32| div().h(px(8.)).w(relative(w)).rounded_full().bg(theme.muted_foreground.opacity(0.22));
@@ -2152,7 +2214,7 @@ impl Workbench {
                     .when(quiet, |d| d.font_family(theme.mono_font_family.clone()).text_size(px(11.5)))
                     .child(words);
                 if fresh {
-                    text.with_animation(("outline-label", e.round), Animation::new(Duration::from_millis(320)).with_easing(ease_out_quint()), |d, t| d.opacity(t)).into_any_element()
+                    text.with_animation(("outline-label", e.round), Animation::new(LABEL_FADE).with_easing(ease_out_quint()), |d, t| d.opacity(t)).into_any_element()
                 } else {
                     text.into_any_element()
                 }
@@ -2202,7 +2264,8 @@ impl Workbench {
         // same way, by the foot and not by its row.
         let (off, most) = (self.outline_scroll.offset().y, self.outline_scroll.max_offset().y);
         let at_foot = most > px(0.) && off <= px(1.) - most;
-        let moved = self.outline_at != at && !rows.is_empty();
+        let leaving = self.panel_leaving() == Some(false);
+        let moved = !leaving && self.outline_at != at && !rows.is_empty();
         if moved {
             self.outline_at = at;
         }
@@ -2216,7 +2279,7 @@ impl Workbench {
         // above and below it, once the scroller has rested `LABEL_REST`
         // and nothing is being asked already, so a scroll through a long
         // conversation asks about where it stops and not what it passes.
-        if !unlabelled.is_empty() {
+        if !unlabelled.is_empty() && !leaving {
             let y = f32::from(self.outline_scroll.offset().y);
             let rested = match &self.outline_rest {
                 Some((k, at, since)) if *k == key && (*at - y).abs() < 0.5 => since.elapsed() >= LABEL_REST,

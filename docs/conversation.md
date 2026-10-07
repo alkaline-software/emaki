@@ -24,6 +24,11 @@ About `crates/emaki-app/src/transcript.rs`, the conversation list in
 
 ## Copy buttons and times
 
+A block of code has a copy button at its top right while the pointer is on
+the block: `md_view` gives the toolkit's `code_block_actions` its own
+`Clipboard` button, and the vendored `node.rs` shows the actions under the
+pointer only.
+
 Under a prompt's bubble, on the right: when it was sent (`format::stamp`)
 and a copy button. Under a reply's last line, on the left: the button, then
 the time of the round's last text item. Both are gpui groups

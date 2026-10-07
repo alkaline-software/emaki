@@ -569,17 +569,29 @@ impl Element for Inline {
                 let inline_state = self.state.clone();
                 let text = self.text.clone();
                 let text_view_state = UiGlobalState::global(cx).text_view_state().cloned();
+                // EMAKI: what of this run is selected as it is painted,
+                // for the right click below.
+                let selected = state.selection.as_ref().map(|s| (s.start.min(s.end), s.start.max(s.end)));
                 move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.bubble()
-                        || !hitbox.is_hovered(window)
-                        || event.button != MouseButton::Left
-                    {
+                    if !phase.bubble() || !hitbox.is_hovered(window) {
                         return;
                     }
 
-                    let kind = match event.click_count {
-                        2 => TextViewMultiClickKind::Word,
-                        3 => TextViewMultiClickKind::Paragraph,
+                    // EMAKI: a right click selects the word under it, as
+                    // a double click does, so a menu has something to
+                    // copy; inside a selection there is, it changes
+                    // nothing.
+                    let kind = match (event.button, event.click_count) {
+                        (MouseButton::Right, _) => {
+                            let at = text_layout.index_for_position(event.position).ok();
+                            if selected.zip(at).is_some_and(|((start, end), at)| start < end && at >= start && at <= end) {
+                                return;
+                            }
+                            gpui_base::TextSelection::clear(window, cx);
+                            TextViewMultiClickKind::Word
+                        }
+                        (MouseButton::Left, 2) => TextViewMultiClickKind::Word,
+                        (MouseButton::Left, 3) => TextViewMultiClickKind::Paragraph,
                         _ => return,
                     };
 

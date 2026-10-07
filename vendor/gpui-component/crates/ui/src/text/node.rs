@@ -1237,6 +1237,9 @@ impl CodeBlock {
             .child(
                 div()
                     .id(("codeblock", options.ix))
+                    // EMAKI: the actions show while the pointer is on the
+                    // block, and not all the time.
+                    .group("codeblock")
                     .w_full()
                     .min_w_0()
                     .p_3()
@@ -1262,6 +1265,8 @@ impl CodeBlock {
                                 .right_2()
                                 .bg(cx.theme().tokens.muted)
                                 .rounded(cx.theme().radius)
+                                .opacity(0.)
+                                .group_hover("codeblock", |s| s.opacity(1.))
                                 .child(actions(&self, window, cx)),
                         )
                     }),

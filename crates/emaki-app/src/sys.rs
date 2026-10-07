@@ -705,6 +705,23 @@ pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Show in folder"
 };
 
+/// The same two things on a session's menu, where each has to say what
+/// it shows: the folder the session ran in, and its transcript.
+pub const OPEN_SESSION_FOLDER_LABEL: &str = if cfg!(target_os = "macos") {
+    "Open Folder in Finder"
+} else if cfg!(target_os = "windows") {
+    "Open Folder in Explorer"
+} else {
+    "Open Folder"
+};
+pub const REVEAL_SESSION_LABEL: &str = if cfg!(target_os = "macos") {
+    "Reveal Transcript in Finder"
+} else if cfg!(target_os = "windows") {
+    "Show Transcript in Explorer"
+} else {
+    "Show Transcript in Folder"
+};
+
 /// What moving a file to the trash is called where we are, and the trash.
 pub const TRASH_LABEL: &str = if cfg!(target_os = "windows") { "Move to Recycle Bin" } else { "Move to Trash" };
 pub const TRASH_NAME: &str = if cfg!(target_os = "windows") { "Recycle Bin" } else { "Trash" };

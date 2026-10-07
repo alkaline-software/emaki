@@ -89,6 +89,11 @@ pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
             }
             .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.))),
         )
+        // A block of code is copied whole with the button at its top
+        // right, which shows under the pointer (the vendored `node.rs`).
+        .code_block_actions(|block, _, _| {
+            gpui_component::clipboard::Clipboard::new("copy").value(block.code()).on_copied(|_, window, cx| gpui_base::TextSelection::end(window, cx))
+        })
 }
 
 /// The plain-words line on a tool call or a permission card: a box on a
@@ -571,6 +576,23 @@ impl Workbench {
                 .overflow_hidden()
                 .cursor_pointer()
                 .hover(|s| s.border_color(theme.primary))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener({
+                        let (p3, k3) = (path.clone(), thumb_key.clone());
+                        move |this, ev: &MouseDownEvent, _, cx| {
+                            let kept = p3.clone().filter(|p| p.is_file());
+                            let pic = if !is_image {
+                                None
+                            } else if let Some(p) = kept.clone() {
+                                Some(crate::workbench::Pic::File(p))
+                            } else {
+                                this.detail.as_ref().and_then(|d| d.thumbs.get(&k3).cloned().flatten()).map(|t| crate::workbench::Pic::Bytes(t.image))
+                            };
+                            this.attachment_menu(ev.position, kept, pic, cx);
+                        }
+                    }),
+                )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     let image = if !is_image {
                         None
@@ -1001,6 +1023,13 @@ impl Workbench {
                                     .overflow_hidden()
                                     .cursor_pointer()
                                     .hover(|s| s.border_color(theme.primary))
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener({
+                                            let (file, pic) = (file.clone(), t.image.clone());
+                                            move |this, ev: &MouseDownEvent, _, cx| this.attachment_menu(ev.position, file.clone().filter(|p| p.is_file()), Some(crate::workbench::Pic::Bytes(pic.clone())), cx)
+                                        }),
+                                    )
                                     .on_click(cx.listener(move |this, _, window, cx| this.preview_attachment(title.clone(), file.clone(), Some(image.clone()), window, cx)))
                                     .child(img(ImageSource::from(t.image)).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain))
                                     .child(tile_caption(w, caption, &theme)),

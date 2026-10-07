@@ -64,11 +64,25 @@ const SIDEBAR_FOLD_AT: Pixels = px(170.);
 /// How wide the strip at the sidebar's edge that takes the drag is.
 const SIDEBAR_GRIP: Pixels = px(8.);
 /// What a right click offers: where it was made, and the choices.
+/// `serial` names its arrival, so each opening plays it once.
 #[derive(Clone)]
 pub(crate) struct Menu {
     at: Point<Pixels>,
     items: Vec<(&'static str, MenuDo)>,
+    serial: u32,
 }
+
+/// A picture to put on the clipboard: a file, or the bytes read back out
+/// of a transcript.
+#[derive(Clone)]
+pub(crate) enum Pic {
+    File(PathBuf),
+    Bytes(Arc<gpui::Image>),
+}
+
+/// How long a menu takes to come and to go.
+const MENU_IN: Duration = Duration::from_millis(140);
+const MENU_OUT: Duration = Duration::from_millis(110);
 
 /// One choice on a right-click menu.
 #[derive(Clone)]
@@ -81,6 +95,16 @@ pub(crate) enum MenuDo {
     Reveal(PathBuf),
     /// Something asked of a file or folder in the files panel.
     File(crate::panels::FileDo, PathBuf),
+    /// Put these words on the clipboard.
+    Copy(String),
+    /// Put this picture on the clipboard.
+    CopyImage(Pic),
+    /// Close the session's tab.
+    CloseTab(String),
+    /// Close every tab but the session's.
+    CloseOthers(String),
+    /// Not a choice: a line between two groups of them.
+    Rule,
 }
 
 /// Where the person's own names for sessions are kept, by session key.
@@ -179,7 +203,7 @@ pub const COL_MIN_W: Pixels = px(210.);
 /// Home-page folder cards to a row.
 pub const FOLDER_COLS: usize = 3;
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("explain", "Explanations", "icons/bot.svg"), ("updates", "Updates", "icons/redo-2.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("explain", "Explanations", "icons/bot.svg"), ("updates", "Updates", "icons/redo-2.svg")];
 /// The panel's size: wide enough for a rail beside the rows, and a fixed
 /// height so it reads as a sheet, not a second window (capped by the
 /// window when that is smaller).
@@ -187,10 +211,11 @@ pub const SETTINGS_W: Pixels = px(720.);
 pub const SETTINGS_H: Pixels = px(580.);
 pub const SETTINGS_RAIL_W: Pixels = px(180.);
 /// What the composer says when empty: on the home page, and on a session.
-pub const PLACEHOLDER_NEW: &str = "Start a session…  (⌘↩ to send)";
-pub const PLACEHOLDER_REPLY: &str = "Reply…  (⌘↩ to send)";
+/// Drawn by `render_composer_hint`.
+pub const PLACEHOLDER_NEW: &str = "Start a session…";
+pub const PLACEHOLDER_REPLY: &str = "Reply…";
 /// While a question of Claude's is waiting, what is typed answers it.
-pub const PLACEHOLDER_ANSWER: &str = "Type an answer…  (⌘↩ to send)";
+pub const PLACEHOLDER_ANSWER: &str = "Type an answer…";
 /// How long the window waits to come back from the terminal on its own.
 const COME_BACK_SECS: f64 = 15. * 60.;
 
@@ -557,8 +582,6 @@ pub struct Workbench {
     /// The message being written: plain text, on purpose. Markdown in it
     /// renders once sent, like any prompt.
     pub composer: Entity<TextareaState>,
-    /// What the composer's placeholder says now; see `render`.
-    composer_placeholder: String,
     /// Where each segment of a settings control sat on the last draw,
     /// relative to its track, by `control-key`, so the raised plate can
     /// slide from the old choice to the new one. See `segmented`.
@@ -580,6 +603,9 @@ pub struct Workbench {
     folders_auto: HashSet<String>,
     /// The right-click menu showing, if one is.
     menu: Option<Menu>,
+    /// The menu just put away, and when: drawn while it fades.
+    menu_gone: Option<(Menu, Instant)>,
+    menu_serial: u32,
     /// The session being renamed, by its key, and the field for its name.
     renaming: Option<String>,
     pub(crate) rename_input: Entity<InputState>,
@@ -849,7 +875,8 @@ pub struct Workbench {
     /// conversation, and since when: labels are asked for once it rests.
     pub(crate) outline_rest: Option<(String, f32, Instant)>,
     pub(crate) outline_failed: HashSet<String>,
-    pub(crate) outline_fresh: HashSet<String>,
+    /// The labels that landed a moment ago, and when: each fades in once.
+    pub(crate) outline_fresh: HashMap<String, Instant>,
     pub(crate) outline_pick: Option<usize>,
     /// The entry chosen is a round the list's end holds short of the top:
     /// how many rounds there were when the move to it ended there.
@@ -1546,7 +1573,7 @@ impl Workbench {
         let cfg = Config::load();
         let (hub, mut rx) = Hub::start(cfg.clone());
 
-        let composer = cx.new(|cx| TextareaState::new(window, cx).placeholder(PLACEHOLDER_NEW).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
+        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search every conversation, live and kept"));
         let find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this conversation"));
 
@@ -1824,6 +1851,8 @@ impl Workbench {
             folders_live: HashSet::new(),
             folders_auto: HashSet::new(),
             menu: None,
+            menu_gone: None,
+            menu_serial: 0,
             renaming: None,
             rename_input,
             name_input,
@@ -1916,7 +1945,6 @@ impl Workbench {
             last_ui_save: std::time::Instant::now(),
             narrow: false,
             pane_w: px(1180.),
-            composer_placeholder: PLACEHOLDER_NEW.to_string(),
             settings_scroll: ScrollHandle::new(),
             seg_bounds: Rc::new(std::cell::RefCell::new(HashMap::new())),
             seg_state: std::cell::RefCell::new(HashMap::new()),
@@ -1942,7 +1970,7 @@ impl Workbench {
             outline_asking: HashSet::new(),
             outline_rest: None,
             outline_failed: HashSet::new(),
-            outline_fresh: HashSet::new(),
+            outline_fresh: HashMap::new(),
             outline_pick: None,
             outline_pick_end: None,
             outline_gliding: false,
@@ -2458,7 +2486,7 @@ impl Workbench {
             // is renamed in, and a name given without the field.
             Some("menu") => {
                 if let Some(r) = self.selected_ref().cloned() {
-                    self.open_menu(point(px(150.), px(330.)), vec![("Rename", MenuDo::Rename(key_of(&r))), (crate::sys::REVEAL_LABEL, MenuDo::Reveal(r.path.clone()))], cx);
+                    self.open_menu(point(px(150.), px(330.)), self.session_menu(&key_of(&r)), cx);
                 }
             }
             Some("renaming") => {
@@ -2840,6 +2868,12 @@ impl Workbench {
         cx.notify();
     }
 
+    fn set_send_key(&mut self, choice: &str, cx: &mut Context<Self>) {
+        self.cfg.app.send_key = choice.to_string();
+        self.save_app_config();
+        cx.notify();
+    }
+
     /// System, light or dark: drawn now and kept for the next launch.
     fn set_appearance(&mut self, choice: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.cfg.app.appearance = choice.to_string();
@@ -2949,6 +2983,11 @@ impl Workbench {
             _ => "medium",
         };
         let size = self.segmented("size", vec![("small", "Small".into(), None), ("medium", "Medium".into(), None), ("large", "Large".into(), None)], size_key, Rc::new(|this, key, _, cx| this.set_chat_size(key, cx)), cx);
+        // The key that sends, named as the keyboard has it.
+        let enter_sends = app.send_key == "enter";
+        let with = if cfg!(target_os = "macos") { "Cmd + Enter" } else { "Ctrl + Enter" };
+        let send = self.segmented("send-key", vec![("cmd-enter", with.into(), None), ("enter", "Enter".into(), None)], if enter_sends { "enter" } else { "cmd-enter" }, Rc::new(|this, key, _, cx| this.set_send_key(key, cx)), cx);
+        let send_note = if enter_sends { "Shift + Enter starts a new line." } else { "Enter or Shift + Enter starts a new line." };
         let note = match &fonts.source {
             Some(dir) => format!("Anthropic Serif and Anthropic Sans are loaded from the Claude app at {}.", emaki_core::paths::tilde(&dir.to_string_lossy())),
             None => "Anthropic Serif and Anthropic Sans are the Claude desktop app's fonts and are loaded from it when it is installed. It was not found here, so Georgia stands in for the serif and the window's own face for the sans.".to_string(),
@@ -3056,12 +3095,14 @@ impl Workbench {
         // The rows of the section showing, and the rail beside them.
         let section = self.settings_section;
         let (section_title, section_anim): (&'static str, &'static str) = match section {
+            "composer" => ("Composer", "settings-composer"),
             "sessions" => ("New sessions", "settings-sessions"),
             "explain" => ("Explanations", "settings-explain"),
             "updates" => ("Updates", "settings-updates"),
             _ => ("Appearance", "settings-appearance"),
         };
         let rows: Vec<AnyElement> = match section {
+            "composer" => vec![row("Send with", send_note, send, &theme).into_any_element()],
             "sessions" => vec![
                 row("Permission mode", "What a session started here begins in.", modes.into_any_element(), &theme).into_any_element(),
                 row("Model", "Which model a session started here uses.", models.into_any_element(), &theme).into_any_element(),
@@ -4004,6 +4045,46 @@ impl Workbench {
     }
 
     /// The suggested prompt for the session showing, when there is one.
+    /// What the empty composer says, drawn here and not as the
+    /// textarea's placeholder, so a key in it is an icon of the one
+    /// family and not the text font's glyph: what a message here does.
+    /// A prompt the terminal suggests stands there instead, in the same
+    /// lighter ink (words offered, not yet said), with the key that
+    /// takes it. ⌘↩ sends and is not said. It sits where the textarea
+    /// draws its own first line and takes no click.
+    fn render_composer_hint(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.composer.read(cx).value().is_empty() {
+            return None;
+        }
+        let ink = cx.theme().muted_foreground;
+        let suggested = self.question_pending().is_none() && self.page != Page::New;
+        let (words, accept) = if self.question_pending().is_some() {
+            (PLACEHOLDER_ANSWER.to_string(), false)
+        } else if self.page == Page::New {
+            (PLACEHOLDER_NEW.to_string(), false)
+        } else {
+            match self.suggested().filter(|_| suggested) {
+                Some(words) => (words.to_string(), true),
+                None => (PLACEHOLDER_REPLY.to_string(), false),
+            }
+        };
+        let key = |path: &'static str| Icon::default().path(path).with_size(px(14.)).text_color(ink).flex_shrink_0();
+        Some(
+            h_flex()
+                .absolute()
+                .top(px(7.5))
+                .left(px(10.5))
+                .right(px(10.5))
+                .flex_wrap()
+                .items_center()
+                .gap_x(px(8.))
+                .text_color(ink)
+                .child(div().min_w_0().child(words))
+                .when(accept, |d| d.child(h_flex().flex_shrink_0().items_center().child("(").child(key("icons/arrow-right.svg")).child(div().ml(px(4.)).child("to accept)"))))
+                .into_any_element(),
+        )
+    }
+
     fn suggested(&self) -> Option<&str> {
         let r = self.selected_ref().filter(|_| self.page == Page::Session)?;
         self.suggestion.as_ref().filter(|(sid, _)| *sid == r.session_id).map(|(_, w)| w.as_str())
@@ -4936,8 +5017,7 @@ impl Workbench {
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.is_some() {
-            self.menu = None;
-            cx.notify();
+            self.close_menu(cx);
         } else if self.branch_ask.is_some() {
             self.branch_ask = None;
             cx.notify();
@@ -5918,7 +5998,7 @@ impl Workbench {
                 let working = self.is_working(&r);
                 let glyph_id = SharedString::from(format!("recent-glyph-{key}"));
                 let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
-                let (menu_key, menu_path) = (key.clone(), r.path.clone());
+                let menu_key = key.clone();
                 body = body.child(
                     h_flex()
                         .id(SharedString::from(format!("recent-{key}")))
@@ -5934,7 +6014,7 @@ impl Workbench {
                         .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![("Rename", MenuDo::Rename(menu_key.clone())), (crate::sys::REVEAL_LABEL, MenuDo::Reveal(menu_path.clone()))], cx)),
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key), cx)),
                         )
                         .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
                         .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(r.title.clone()))
@@ -6123,17 +6203,128 @@ impl Workbench {
 
     /// A right click: the menu opens where the pointer is.
     pub(crate) fn open_menu(&mut self, at: Point<Pixels>, items: Vec<(&'static str, MenuDo)>, cx: &mut Context<Self>) {
-        self.menu = Some(Menu { at, items });
+        self.menu_serial += 1;
+        self.menu_gone = None;
+        self.menu = Some(Menu { at, items, serial: self.menu_serial });
         cx.notify();
     }
 
+    /// The menu is put away: it fades where it was, taking no click.
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.menu.take() {
+            self.menu_gone = Some((menu, Instant::now()));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(MENU_OUT + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.menu_gone.as_ref().is_some_and(|(_, at)| at.elapsed() >= MENU_OUT) {
+                        this.menu_gone = None;
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// A right click on an attachment: a picture is copied as a picture,
+    /// and a file that is on disk gives its path and its place.
+    pub(crate) fn attachment_menu(&mut self, at: Point<Pixels>, path: Option<PathBuf>, pic: Option<Pic>, cx: &mut Context<Self>) {
+        let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
+        if let Some(pic) = pic {
+            items.push(("Copy Image", MenuDo::CopyImage(pic)));
+        }
+        if let Some(path) = path {
+            items.push(("Copy Path", MenuDo::Copy(path.to_string_lossy().to_string())));
+            items.push((crate::sys::REVEAL_LABEL, MenuDo::Reveal(path)));
+        }
+        // The conversation's own menu is not for this press.
+        cx.stop_propagation();
+        if !items.is_empty() {
+            self.open_menu(at, items, cx);
+        }
+    }
+
+    /// The picture goes to the clipboard as a picture, in its own format.
+    fn copy_image(&mut self, pic: Pic, cx: &mut Context<Self>) {
+        let image = match pic {
+            Pic::Bytes(image) => Some((*image).clone()),
+            Pic::File(path) => {
+                let format = match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+                    "png" => Some(gpui::ImageFormat::Png),
+                    "jpg" | "jpeg" => Some(gpui::ImageFormat::Jpeg),
+                    "webp" => Some(gpui::ImageFormat::Webp),
+                    "gif" => Some(gpui::ImageFormat::Gif),
+                    "svg" => Some(gpui::ImageFormat::Svg),
+                    "bmp" => Some(gpui::ImageFormat::Bmp),
+                    "tif" | "tiff" => Some(gpui::ImageFormat::Tiff),
+                    _ => None,
+                };
+                format.zip(std::fs::read(&path).ok()).map(|(format, bytes)| gpui::Image::from_bytes(format, bytes))
+            }
+        };
+        match image {
+            Some(image) => cx.write_to_clipboard(ClipboardItem::new_image(&image)),
+            None => self.notice = Some(Notice::error("could not read that picture")),
+        }
+    }
+
+    /// What a session offers at a right click, the same in the sidebar,
+    /// on the sessions page and on its tab: its name, what can be copied
+    /// of it, where it is on disk, and its tab when it has one.
+    pub(crate) fn session_menu(&self, key: &str) -> Vec<(&'static str, MenuDo)> {
+        let Some(r) = self.refs.iter().find(|r| key_of(r) == key) else { return Vec::new() };
+        let resume = emaki_core::terminal::resume_argv(r.agent, &r.session_id).iter().map(|a| emaki_core::terminal::shell_quote(a)).collect::<Vec<_>>().join(" ");
+        let resume = if r.cwd.is_empty() { resume } else { format!("cd {} && {resume}", emaki_core::terminal::shell_quote(&r.cwd)) };
+        let mut items = vec![
+            ("Rename", MenuDo::Rename(key.to_string())),
+            ("", MenuDo::Rule),
+            ("Copy Session ID", MenuDo::Copy(r.session_id.clone())),
+            ("Copy Resume Command", MenuDo::Copy(resume)),
+            ("", MenuDo::Rule),
+            (crate::sys::OPEN_SESSION_FOLDER_LABEL, MenuDo::OpenFolder(Self::folder_exists(r).then(|| r.cwd.clone()))),
+            (crate::sys::REVEAL_SESSION_LABEL, MenuDo::Reveal(r.path.clone())),
+        ];
+        if self.tabs.iter().any(|t| t == key) {
+            items.push(("", MenuDo::Rule));
+            items.push(("Close Tab", MenuDo::CloseTab(key.to_string())));
+            if self.tabs.len() > 1 {
+                items.push(("Close Other Tabs", MenuDo::CloseOthers(key.to_string())));
+            }
+        }
+        items
+    }
+
+    /// A right click in the conversation: Copy, for the words selected
+    /// there. The text under the pointer selects its word at the same
+    /// press (the vendored `inline.rs`), so what is selected is asked
+    /// once the press has been handed round.
+    fn conversation_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.defer(cx, move |window, cx| {
+            let text = gpui_base::TextSelection::selected_text(window, cx);
+            if !text.trim().is_empty() {
+                this.update(cx, |this, cx| this.open_menu(at, vec![("Copy", MenuDo::Copy(text))], cx));
+            }
+        });
+    }
+
     fn menu_pick(&mut self, what: MenuDo, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu = None;
+        self.close_menu(cx);
         match what {
             MenuDo::OpenFolder(Some(cwd)) => crate::sys::open_path(std::path::Path::new(&cwd)),
             MenuDo::OpenFolder(None) => self.notice = Some(Notice::error(FOLDER_GONE)),
             MenuDo::Reveal(path) => crate::sys::reveal_path(&path),
             MenuDo::File(what, path) => self.file_do(what, path, window, cx),
+            MenuDo::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            MenuDo::CopyImage(pic) => self.copy_image(pic, cx),
+            MenuDo::CloseTab(key) => self.close_tab(&key, window, cx),
+            MenuDo::CloseOthers(key) => {
+                for other in self.tabs.clone().into_iter().filter(|t| *t != key) {
+                    self.close_tab(&other, window, cx);
+                }
+            }
+            MenuDo::Rule => {}
             MenuDo::Rename(key) => {
                 let now = self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default();
                 self.renaming = Some(key);
@@ -6215,12 +6406,19 @@ impl Workbench {
         cx.notify();
     }
 
-    /// The right-click menu: a small card at the pointer, kept inside the
-    /// window, over a clear sheet that any click puts away.
-    fn render_menu(&self, menu: Menu, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The right-click menu: a small card at the pointer, as wide as its
+    /// longest choice, kept inside the window, over a clear sheet that
+    /// any click puts away. It settles in from just above, and fades
+    /// where it is when put away (`gone`: how long ago), taking no click.
+    fn render_menu(&self, menu: Menu, gone: Option<Duration>, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let (w, row_h) = (px(210.), px(30.));
-        let h = row_h * menu.items.len() as f32 + px(10.);
+        let (row_h, rule_h) = (px(30.), px(9.));
+        // The width is reckoned, not measured: the card has to be placed
+        // before it is laid out.
+        let longest = menu.items.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0);
+        let w = px((longest as f32 * 7.4 + 34.).max(96.));
+        let rules = menu.items.iter().filter(|(_, what)| matches!(what, MenuDo::Rule)).count();
+        let h = row_h * (menu.items.len() - rules) as f32 + rule_h * rules as f32 + px(10.);
         let view = window.viewport_size();
         let x = menu.at.x.min(view.width - w - px(8.)).max(px(8.));
         let y = menu.at.y.min(view.height - h - px(8.)).max(px(8.));
@@ -6228,7 +6426,6 @@ impl Workbench {
             .id("menu-card")
             .absolute()
             .left(x)
-            .top(y)
             .w(w)
             .p(px(5.))
             .rounded(px(10.))
@@ -6238,6 +6435,10 @@ impl Workbench {
             .shadow(float_shadow(&theme))
             .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
         for (ix, (label, what)) in menu.items.into_iter().enumerate() {
+            if matches!(what, MenuDo::Rule) {
+                card = card.child(div().h(rule_h).flex().items_center().child(div().h(px(1.)).w_full().mx(px(6.)).bg(theme.border)));
+                continue;
+            }
             card = card.child(
                 h_flex()
                     .id(("menu-item", ix))
@@ -6246,16 +6447,20 @@ impl Workbench {
                     .rounded(px(6.))
                     .cursor_pointer()
                     .text_size(px(13.))
+                    .whitespace_nowrap()
                     .hover(|s| s.bg(theme.sidebar_accent))
                     .on_click(cx.listener(move |this, _, window, cx| this.menu_pick(what.clone(), window, cx)))
                     .child(label),
             );
         }
-        let shut = |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
-            this.menu = None;
-            cx.notify();
-        };
-        div().id("menu-sheet").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(shut)).on_mouse_down(MouseButton::Right, cx.listener(shut)).child(card)
+        if gone.is_some() {
+            return card
+                .with_animation(ElementId::Name(format!("menu-out-{}", menu.serial).into()), Animation::new(MENU_OUT), move |d, t| d.top(y).opacity(1. - t))
+                .into_any_element();
+        }
+        let card = card.with_animation(ElementId::Name(format!("menu-in-{}", menu.serial).into()), Animation::new(MENU_IN).with_easing(ease_out_quint()), move |d, t| d.top(y - px(5.) * (1. - t)).opacity(t));
+        let shut = |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| this.close_menu(cx);
+        div().id("menu-sheet").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(shut)).on_mouse_down(MouseButton::Right, cx.listener(shut)).child(card).into_any_element()
     }
 
     /// The field a session is renamed in: a small card over a scrim, ↩
@@ -6370,10 +6575,7 @@ impl Workbench {
             let close_bg = theme.border;
             let ghost = title.clone();
             // The same menu the session has in the sidebar.
-            let menu: Vec<(&'static str, MenuDo)> = match &r {
-                Some(r) => vec![("Rename", MenuDo::Rename(key.clone())), (crate::sys::REVEAL_LABEL, MenuDo::Reveal(r.path.clone()))],
-                None => Vec::new(),
-            };
+            let menu = self.session_menu(&key);
             // A width that is over is drawn as it ended, so that a row
             // drawn afresh does not play it again.
             let width = self.tab_widths.get(&key).copied().unwrap_or(TabWidth { from: TAB_MAX, to: TAB_MAX, at: Instant::now(), serial: 0 });
@@ -6629,7 +6831,7 @@ impl Workbench {
                     sub.push(format!("⎇ {}", r.git_branch));
                 }
                 sub.push(relative(r.mtime, now));
-                let (menu_key, menu_path) = (key.clone(), r.path.clone());
+                let menu_key = key.clone();
                 rows.push(
                     h_flex()
                         .id(SharedString::from(format!("row-{key}")))
@@ -6644,7 +6846,7 @@ impl Workbench {
                         .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![("Rename", MenuDo::Rename(menu_key.clone())), (crate::sys::REVEAL_LABEL, MenuDo::Reveal(menu_path.clone()))], cx)),
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key), cx)),
                         )
                         .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working, glyph_id)))
                         .child(
@@ -6814,7 +7016,8 @@ impl Workbench {
                 })
                 .size_full(),
             )
-            .vertical_scrollbar(&list);
+            .vertical_scrollbar(&list)
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.conversation_menu(ev.position, window, cx)));
 
         // The agent at work, said under the transcript so it is seen without
         // scrolling: the mark turns while a turn is running.
@@ -6939,8 +7142,9 @@ impl Workbench {
         // At the conversation's left, under the top strip: the folder's
         // files or the outline, one at a time (`panels.rs`).
         let (files_shown, outline_shown) = self.panels_shown();
-        let files_panel = files_shown.then(|| self.render_files_panel(cx));
-        let outline_panel = outline_shown.then(|| self.render_outline_panel(cx));
+        let leaving = self.panel_leaving();
+        let files_panel = (files_shown || leaving == Some(true)).then(|| self.render_files_panel(cx));
+        let outline_panel = (outline_shown || leaving == Some(false)).then(|| self.render_outline_panel(cx));
         let conversation = v_flex()
             .flex_1()
             .min_w_0()
@@ -8195,6 +8399,13 @@ impl Workbench {
                         .text_size(px(12.))
                         .cursor_pointer()
                         .hover(|s| s.border_color(theme.primary))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener({
+                                let path = a.path.clone();
+                                move |this, ev: &MouseDownEvent, _, cx| this.attachment_menu(ev.position, Some(path.clone()), a_image.then(|| Pic::File(path.clone())), cx)
+                            }),
+                        )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let image = a_image.then(|| ImageSource::from(a_path.clone()));
                             this.preview_attachment(a_title.clone(), Some(a_path.clone()), image, window, cx);
@@ -8249,16 +8460,22 @@ impl Workbench {
                         this.cycle_mode(cx);
                         cx.stop_propagation();
                     }))
-                    // ⌘↩ sends. Taken here, before the textarea sees it,
-                    // because the textarea puts a newline at the caret for
-                    // every Enter and only then reports the key, which left
-                    // a line break wherever the caret stood in a sent
-                    // message. A bare ↩ still reaches the textarea.
+                    // ⌘↩ sends, and a bare ↩ too when the setting says so
+                    // (`send_key`), after the slash list has had it. Taken
+                    // here, before the textarea sees it, because the
+                    // textarea puts a newline at the caret for every Enter
+                    // and only then reports the key, which left a line
+                    // break wherever the caret stood in a sent message.
+                    // Any other ↩, ⇧↩ always, reaches the textarea and is
+                    // a new line.
                     .capture_action(cx.listener(|this, a: &gpui_component::input::Enter, window, cx| {
                         if a.secondary {
                             this.send_message(window, cx);
                             cx.stop_propagation();
                         } else if this.slash_key(SlashKey::Run, window, cx) {
+                            cx.stop_propagation();
+                        } else if !a.shift && this.cfg.app.send_key == "enter" {
+                            this.send_message(window, cx);
                             cx.stop_propagation();
                         }
                     }))
@@ -8304,7 +8521,9 @@ impl Workbench {
                     .aria_value(field_value)
                     .w_full()
                     .text_size(px(14.))
-                    .child(Textarea::new(&self.composer).appearance(false).bordered(false)),
+                    .relative()
+                    .child(Textarea::new(&self.composer).appearance(false).bordered(false))
+                    .children(self.render_composer_hint(cx)),
             )
             .child(
                 h_flex()
@@ -9486,24 +9705,6 @@ impl Render for Workbench {
             let this = cx.entity();
             window.defer(cx, move |window, cx| this.update(cx, |this, cx| this.restore_prompt(window, cx)));
         }
-        // The composer is one field for both pages; its placeholder says
-        // what a message here does. Set only when it differs, since the
-        // setter notifies.
-        // A prompt the terminal suggests stands there instead, in the
-        // placeholder's own lighter ink: words offered, not yet said.
-        let want = if self.question_pending().is_some() {
-            PLACEHOLDER_ANSWER.to_string()
-        } else if self.page == Page::New {
-            PLACEHOLDER_NEW.to_string()
-        } else if let Some(words) = self.suggested() {
-            format!("{words}   (→ to accept, ⌘↩ to send)")
-        } else {
-            PLACEHOLDER_REPLY.to_string()
-        };
-        if self.composer_placeholder != want {
-            self.composer_placeholder = want.clone();
-            self.composer.update(cx, |s, cx| s.set_placeholder(want, window, cx));
-        }
         let theme = cx.theme().clone();
         let search_open = self.search_open;
         // Below `NARROW_W` the sidebar leaves the row and comes back only as
@@ -9669,6 +9870,7 @@ impl Render for Workbench {
             .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(self.render_rename(cx)))
             .when_some(self.branch_menu, |d, at| d.child(self.render_branch_menu(at, window, cx)))
             .when(self.branch_ask.is_some(), |d| d.child(self.render_branch_ask(cx)))
-            .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, window, cx)))
+            .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
+            .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
     }
 }

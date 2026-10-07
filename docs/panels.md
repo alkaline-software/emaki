@@ -49,6 +49,22 @@ About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
   (`logical_scroll_top` is the item count, `bounds_for_item` answers for
   nothing), so "the top is the round chosen" never holds there. That is
   what `outline_pick_end` is for.
+- The wrapper `panel_in` puts around a panel is there at rest too, under
+  the name of the last press. gpui keeps an animation by the names above
+  it, so a wrapper that went when the arrival was over began every
+  animation inside the panel again: the outline blinked 200 ms after it
+  opened.
+- A label fades in once, for `LABEL_FADE` after it lands
+  (`outline_fresh` keeps when). Kept as a set with no time, every label
+  made since launch faded in again at each opening of the outline.
+- A child's reply is labels only when every line of it is "n: label"
+  (`parse_summaries`); anything else in it and the whole reply is
+  dropped. A child that answered a message with a numbered list once gave
+  the outline "Copy or clone your project files into the working
+  directory, or" as a label.
+- A change to `SUMMARY_PROMPT` raises `SUMMARY_VERSION`, which is part of
+  a label's name in the cache, so labels made by the old wording are
+  asked for again as they come into view.
 - Every scroller in a panel, card or sheet is a pane of its own to
   `route_scroll` (`Pane::Branches`, `ChangeFiles`, `ChangeLines`, and
   `Nowhere` for the rest while a card is up), or momentum from it scrolls
@@ -62,8 +78,13 @@ and slides the plate, a press on the one showing puts the panel away
 (`toggle_panel`, ⌘⇧E and ⌘⇧O). `panel_anim` keeps what showed before the
 press and what after. The segments are a fixed size, so the plate's place
 is known without measuring, unlike `segmented`. A panel that comes beside
-nothing widens and fades in; one that takes the other's place only fades
-in; one put away goes at once. The choice and the width are in `ui.json`.
+nothing widens and fades in; one that takes the other's place fades in
+while the other fades out over the same place, out of the row's layout;
+one put away narrows and fades out. A panel that goes is drawn for that
+moment though it is no longer chosen (`panel_leaving`), with a timer's
+redraw to drop it.
+While it goes the outline neither scrolls itself nor asks for labels. The
+choice and the width are in `ui.json`.
 
 The edge is dragged as the sidebar's is: `render_panel_grip` holds it at
 a press (`panel_drag`), and the raw mouse-move listener that follows the
@@ -230,9 +251,11 @@ writes (`outline::summarize`): the explainer's model and isolation
 (`explain::run_child`: Haiku, no settings, no tools, the scratch folder
 whose transcripts are swept), `BATCH` messages to a child and the
 children side by side, each message inside `<message n>` tags and cut to
-900 characters, the reply a line per message, "n: label". A child
-sometimes answers its messages instead of labelling them; the tags, the
-prompt's wording and the retry are for that. Labels are kept for good in
+900 characters, the reply a line per message, "n: label". A label is a
+headline of three to five words for the main thing asked, never a list of
+all of it. A child sometimes answers its messages instead of labelling
+them; the tags, the instruction before and after the messages, the check
+on the reply and the one retry are for that. Labels are kept for good in
 `cache/outline.json` by a hash of the words they were made from
 (`key_for`), so a message is asked about once.
 
@@ -243,8 +266,8 @@ through a long conversation asks about where it stops.
 
 An entry with no label is two breathing bars; the head says
 "Summarizing…" while a call is out; a label fades in as it lands
-(`outline_fresh`). A line that does not read as a label (markdown in it,
-more than sixteen words) is dropped and asked for once more. What still
+(`outline_fresh`). A reply with a line that does not read as a label (no number,
+markdown in it, more than eight words) is dropped and asked for once more. What still
 has none shows the message's own first words and is asked again at the
 next launch (`outline_failed`).
 
