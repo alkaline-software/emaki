@@ -5,6 +5,20 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.1.7
+
+- A terminal inside Emaki, at the conversation's right: shells in tabs, and the session's own agent as it runs. Nothing opens a terminal app any more.
+- In it: select with the mouse (copied on release), click and scroll in programs that take the mouse, and the line keys of a Mac terminal (⌘←, ⌘→, ⌘⌫, ⇧↩, ⌘K).
+- A files panel beside the conversation: the project's folder as a tree with git's marks, a file's contents, and what changed.
+- Switch branches from the files panel, carrying your changes along or leaving them behind to restore later.
+- An outline of the conversation, a short label per prompt; click one to go there.
+- Right-click menus on sessions, tabs, files, the conversation, attachments and the branch name.
+- Code blocks have a copy button, and a right click on a word selects it.
+- Settings, Composer: send with ⌘↩ or with ↩; ⇧↩ is always a new line.
+- Running subagents show in a row over the composer; click it to see them.
+- Hold ⌘ to see each tab's number.
+- A question asked in a named session shows as a card, and "Type something" takes your own answer.
+
 ## v0.1.6
 
 - Sessions run in a hidden terminal of Emaki's own; nothing done in Emaki touches a terminal of yours.
