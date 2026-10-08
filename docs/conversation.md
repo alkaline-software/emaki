@@ -22,6 +22,30 @@ About `crates/emaki-app/src/transcript.rs`, the conversation list in
   an element's layout aborts the app.
 - Each place that draws the moving agent mark passes its own animation id.
 
+## The end, and what is new
+
+A conversation opens at its end and follows it (`FollowMode::Tail`): the
+list pins to the end at each layout, and stops when the reader scrolls
+up. Two things are ours, for prompts and replies alike:
+
+- **Near the end counts as at it.** When more arrives and the reader is
+  within `NEAR_END` of the end and not mid-scroll (no wheel for
+  `SCROLL_REST`), the list is set following again (`set_detail`). gpui
+  alone resumes only at the very end, so a reader a line short of it was
+  left behind. How far off they are is the list's last layout, from
+  before what arrived.
+- **Further up, a pill says so.** `Detail::seen` is how much of the
+  conversation the reader has been at the end of (`shape_of`: the rounds,
+  and the items of the last), kept up while the list follows. With more
+  than that and the list not following, "New messages" stands over the
+  conversation's foot (`unread_pill`, rising in and fading out). A click
+  goes to where the new part begins (`unread_show`) and counts it seen.
+  A new round is an item the list can go to. An item part way down a
+  round is not: the round is gone to, a mark of no height is drawn
+  before that item (`render_round`, `unread_go`), and when it has been
+  drawn the list is moved by how far it is from the top
+  (`unread_arrive`).
+
 ## Copy buttons and times
 
 A block of code has a copy button at its top right while the pointer is on

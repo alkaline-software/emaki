@@ -20,7 +20,12 @@ chrono.workspace = true
 # produce a second copy of gpui that it does not build against.
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
+# The grammars colour code: in the file shown beside a conversation and
+# in a conversation's code blocks. R has none in the toolkit's set, so
+# its grammar is our own to register (`look::install_languages`).
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c", features = ["tree-sitter-languages"] }
+tree-sitter = "0.26"
+tree-sitter-r = "1.3"
 futures = "0.3"
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
 # The window selection layer, for ending a drag a swallowed click would leave open.
@@ -37,6 +42,9 @@ whoami = "1"
 # The person's picture, cut square and scaled down once to the sizes it
 # is drawn at. gpui already builds this crate; the features are the
 # formats the file picker takes.
+# A PDF's pages as pictures, for the file shown beside a conversation:
+# pure Rust, so the same on every OS.
+hayro = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 
 # The .exe carries the icon as a resource; nothing to do elsewhere.

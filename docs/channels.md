@@ -340,7 +340,10 @@ How it works:
   it passes it on and the window's is next. ⌘W is not bound there: the
   window's `CloseTab` is a global binding, which outranks one bound to a
   context (`docs/window.md`), so the panel answers that action itself,
-  first, being where the keyboard is. Any other ⌘ key is the window's.
+  first, being where the keyboard is. On the shell's side ⌘W is the
+  shell's alone: with no tab left it does nothing, and never reaches the
+  file shown or the session's tab (`docs/window.md`). Any other ⌘ key is
+  the window's.
 - The pointer is Kaku's. A drag selects, by the letter, by the word after
   a double click and by the row after a triple (`Sel`); with ⌥ it takes
   the same columns of every row, and a press with Shift runs the

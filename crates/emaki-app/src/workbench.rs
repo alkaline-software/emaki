@@ -18,6 +18,7 @@ use chrono::Timelike;
 use futures::StreamExt;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, OutdentInline, Textarea, TextareaState};
 use gpui_component::scroll::ScrollableElement as _;
@@ -114,12 +115,17 @@ pub(crate) enum MenuDo {
     CloseOthers(String),
     /// Something asked of the terminal at the conversation's right.
     Term(crate::term_panel::TermDo),
+    /// Copy or select all in the PDF shown beside the conversation.
+    Pdf(crate::panels::PdfDo),
     /// Cut, copy, paste or select all in the input that has this focus.
     Edit(EditDo, gpui::FocusHandle),
     /// Put these words where the composer's bytes are: a correction.
     Fix(std::ops::Range<usize>, String),
     /// Never mark this word as misspelt again.
     Learn(String),
+    /// Leave these marked words alone: the rule that marked them (none
+    /// for a spelling) and the words.
+    Ignore(String, String),
     /// Not a choice: a word the menu says, as when a spelling has no
     /// correction.
     Note(String),
@@ -156,7 +162,7 @@ impl MenuDo {
             MenuDo::CloseOthers(_) => "icons/circle-x.svg",
             MenuDo::Term(what) => what.icon(),
             // A menu over text is words only, as the system's is.
-            MenuDo::Edit(..) | MenuDo::Fix(..) | MenuDo::Learn(_) | MenuDo::Note(_) | MenuDo::Rule => "",
+            MenuDo::Pdf(_) | MenuDo::Edit(..) | MenuDo::Fix(..) | MenuDo::Learn(_) | MenuDo::Ignore(..) | MenuDo::Note(_) | MenuDo::Rule => "",
         }
     }
 
@@ -180,6 +186,19 @@ fn titles_file() -> PathBuf {
 /// and how much longer before the word at the caret is marked too.
 const CHECK_AFTER: Duration = Duration::from_millis(300);
 const CHECK_WORD_AFTER: Duration = Duration::from_millis(1200);
+
+/// How near the end of a conversation counts as at it, when more
+/// arrives; how long after a wheel the reader is taken to have stopped;
+/// and how long the "New messages" pill takes to come and go.
+const NEAR_END: Pixels = px(160.);
+const SCROLL_REST: Duration = Duration::from_millis(500);
+const UNREAD_ANIM: Duration = Duration::from_millis(180);
+
+/// How much a conversation holds, for telling that it grew: its rounds,
+/// and the items of the last.
+fn shape_of(session: &Session) -> (usize, usize) {
+    (session.rounds.len(), session.rounds.last().map(|r| r.items.len()).unwrap_or(0))
+}
 
 /// How many sessions an open folder shows in the sidebar before "N more".
 const FOLDER_ROWS: usize = 5;
@@ -384,6 +403,8 @@ pub enum Pane {
     ChangeLines,
     /// Over such a card or sheet, on nothing that scrolls.
     Nowhere,
+    /// The file shown at the conversation's right.
+    File,
     /// The terminal at the conversation's right.
     Terminal,
 }
@@ -457,6 +478,10 @@ pub struct Detail {
     /// The outline's entries, made when the panel first draws them and
     /// dropped with every reload.
     pub outline: Option<Rc<Vec<emaki_core::outline::Entry>>>,
+    /// How much of the conversation the reader has been at the end of:
+    /// how many rounds, and how many items the last of them had. What
+    /// comes after is new to them.
+    pub seen: (usize, usize),
 }
 
 /// What the settings panel says about updates.
@@ -1070,6 +1095,60 @@ pub struct Workbench {
     /// A file shown over the window, and where it is scrolled.
     pub(crate) file_view: Option<crate::panels::FileView>,
     pub(crate) file_view_scroll: ScrollHandle,
+    /// The pane coming or going: which, since when, and a count that
+    /// names the animation. `file_gone` is the file drawn as it goes.
+    pub(crate) file_anim: Option<(bool, Instant, u64)>,
+    pub(crate) file_gone: Option<crate::panels::FileView>,
+    pub(crate) file_serial: u64,
+    /// How wide the pane was dragged to, whether its edge is held, and
+    /// whether the window is too narrow to draw it.
+    pub(crate) file_w: Pixels,
+    pub(crate) file_drag: bool,
+    pub(crate) fold_file: bool,
+    /// Markdown shown as it is written, not as it reads; and a count of
+    /// the presses that changed it, for the plate's slide.
+    pub(crate) file_raw: bool,
+    pub(crate) file_mode_serial: u64,
+    /// The folder the pane's file is of, and the file each other folder
+    /// had showing: a file is a folder's, not the window's.
+    pub(crate) file_root: Option<PathBuf>,
+    pub(crate) file_for: HashMap<PathBuf, PathBuf>,
+    /// Code in the pane: its editor, under a name for the file and what
+    /// it held when the editor was made, and whether the editor shows
+    /// line numbers and the language's colours.
+    pub(crate) file_editor: Option<(String, Entity<gpui_component::input::EditorState>)>,
+    /// Beside a PDF's pages: the pages small (`true`), its table of
+    /// contents, or nothing; what it was before the last press, since
+    /// when, and a count for the animation.
+    pub(crate) pdf_side: Option<bool>,
+    pub(crate) pdf_side_anim: Option<(Option<bool>, Instant, u64)>,
+    pub(crate) pdf_side_scroll: ScrollHandle,
+    /// The pane's own focus, for its keys.
+    pub(crate) file_focus: FocusHandle,
+    /// In a PDF: the glyphs selected, from and to; where a drag began;
+    /// where each page is drawn; and its find row, the places found and
+    /// the one it is on.
+    pub(crate) pdf_sel: Option<(usize, usize)>,
+    pub(crate) pdf_drag: Option<usize>,
+    pub(crate) pdf_bounds: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    pub(crate) pdf_find_open: bool,
+    pub(crate) pdf_find_input: Entity<InputState>,
+    pub(crate) pdf_hits: Vec<(usize, usize)>,
+    pub(crate) pdf_hit: usize,
+    /// When the wheel last moved the conversation.
+    content_wheel_at: Option<Instant>,
+    /// The "New messages" pill: whether it showed at the last draw, and
+    /// its coming or going (which, since when, a count).
+    unread_was: bool,
+    unread_anim: Option<(bool, Instant, u64)>,
+    /// Going to where the new part begins inside a round: the round and
+    /// the item, until the place has been drawn and gone to; where that
+    /// place is in the window; and whether the next draw of it should go.
+    pub(crate) unread_go: Option<(usize, usize)>,
+    pub(crate) unread_y: Rc<std::cell::Cell<Option<Pixels>>>,
+    pub(crate) unread_due: Rc<std::cell::Cell<bool>>,
+    /// The grammar marks the person has ignored (`check::ignore_key`).
+    ignored: HashSet<String>,
     /// The rename field is asking for a file's name, not a session's.
     pub(crate) file_prompt: Option<crate::panels::FilePrompt>,
     /// The list of branches, open under where its button was clicked.
@@ -1423,7 +1502,7 @@ impl Workbench {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .when(lit, |d| d.bg(hover))
                 .hover(move |s| s.bg(hover))
-                .when(!tip.is_empty(), |d| d.tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx)))
+                .when(!tip.is_empty(), |d| d.managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx)))
                 .child(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground))
         };
         h_flex()
@@ -1907,6 +1986,13 @@ impl Workbench {
             }
         })
         .detach();
+        let pdf_find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this file"));
+        cx.subscribe_in(&pdf_find_input, window, |this, _, ev: &InputEvent, _window, cx| match ev {
+            InputEvent::Change => this.pdf_find(cx),
+            InputEvent::PressEnter { shift, .. } => this.pdf_find_step(if *shift { -1 } else { 1 }, cx),
+            _ => {}
+        })
+        .detach();
         cx.subscribe_in(&find_input, window, |this, _, ev: &InputEvent, _window, cx| match ev {
             InputEvent::Change => this.run_find(cx),
             InputEvent::PressEnter { shift, .. } => this.find_step(if *shift { -1 } else { 1 }, cx),
@@ -2014,6 +2100,16 @@ impl Workbench {
                                 let at = s.input_bounds().origin + point(px(x), px(10.));
                                 s.secondary_click_at(at, window, cx);
                             });
+                        }
+                        // ⌘W, from wherever the keyboard is; `focus:shell`
+                        // puts it in the terminal panel first. `tabs`
+                        // prints what is open.
+                        "closetab" => window.dispatch_action(Box::new(CloseTab), cx),
+                        "focus:shell" => {
+                            let _ = this.update(cx, |w, cx| window.focus(&w.side_term_focus, cx));
+                        }
+                        "tabs" => {
+                            let _ = this.update(cx, |w, _| eprintln!("emaki: tabs {} file {} shells {}", w.tabs.len(), w.file_view.is_some(), w.selected_ref().and_then(|r| w.shells.get(&r.session_id)).map(|s| s.tabs.len()).unwrap_or(0)));
                         }
                         t if t.starts_with("wait:") => {}
                         // Where the caret is in the rename field, printed.
@@ -2253,6 +2349,39 @@ impl Workbench {
             outline_glide: 0,
             file_view: None,
             file_view_scroll: ScrollHandle::new(),
+            file_anim: None,
+            file_gone: None,
+            file_serial: 0,
+            file_w: px(ui.file_w.unwrap_or(f32::from(crate::panels::FILE_W))),
+            file_drag: false,
+            fold_file: false,
+            file_raw: ui.file_raw.unwrap_or(false),
+            file_editor: None,
+            pdf_side: match ui.pdf_side.as_deref() {
+                Some("pages") => Some(true),
+                Some("contents") => Some(false),
+                _ => None,
+            },
+            pdf_side_anim: None,
+            pdf_side_scroll: ScrollHandle::new(),
+            file_mode_serial: 0,
+            file_root: None,
+            file_for: HashMap::new(),
+            file_focus: cx.focus_handle(),
+            pdf_sel: None,
+            pdf_drag: None,
+            pdf_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
+            pdf_find_open: false,
+            pdf_find_input,
+            pdf_hits: Vec::new(),
+            pdf_hit: 0,
+            content_wheel_at: None,
+            unread_was: false,
+            unread_anim: None,
+            unread_go: None,
+            unread_y: Rc::new(std::cell::Cell::new(None)),
+            unread_due: Rc::new(std::cell::Cell::new(false)),
+            ignored: emaki_core::check::ignored(),
             file_prompt: None,
             branch_menu: None,
             branch_input,
@@ -2838,6 +2967,25 @@ impl Workbench {
                 self.dialog_seen = emaki_core::driver::dialog_on_screen(&screen).map(|d| (sid, d));
                 cx.notify();
             }
+            // The same with a preview for each choice, as the terminal
+            // lays that out.
+            Some("dialogdemo:preview") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let rule = "─".repeat(96);
+                let screen = format!("{rule}\n ☐ File view\n\nWhere should a file open?\n\n  1. In place of the              ┌──────────────────────────────────────────┐\n    conversation (Recommended)    │ +--------+---------------------+         │\n❯ 2. As its own tab               │ | side   | [chat] [AS ITS OWN  |         │\n  3. Beside the conversation      │ | bar    |         TAB]        |         │\n                                  │ +--------+---------------------+         │\n                                  └──────────────────────────────────────────┘\n\n                                  Notes: press n to add notes\n\n{rule}\n  Chat about this\n\nEnter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n");
+                self.dialog_demo = true;
+                self.dialog_seen = emaki_core::driver::dialog_on_screen(&screen).map(|d| (sid, d));
+                cx.notify();
+            }
+            // The conversation scrolled by that many points (less than
+            // none is up), and a click on "New messages".
+            Some(t) if t.starts_with("scroll:") => {
+                if let (Ok(by), Some(d)) = (t["scroll:".len()..].parse::<f32>(), self.detail.as_ref()) {
+                    d.list.scroll_by(px(by));
+                    cx.notify();
+                }
+            }
+            Some("unread") => self.unread_show(cx),
             // The terminal card on a sample of what a command asks.
             Some("termdemo") => {
                 self.term_demo = true;
@@ -2893,6 +3041,14 @@ impl Workbench {
             files_on: Some(self.files_on),
             panel_w: Some(f32::from(self.panel_w)),
             term_w: Some(f32::from(self.side_term_w)),
+            file_w: Some(f32::from(self.file_w)),
+            file_raw: Some(self.file_raw),
+            pdf_side: Some(match self.pdf_side {
+                Some(true) => "pages",
+                Some(false) => "contents",
+                None => "",
+            }
+            .to_string()),
             term_agent: Some(self.side_term_agent),
             outline_on: Some(self.outline_on),
             branches_by_name: Some(self.branch_by_name),
@@ -3029,9 +3185,18 @@ impl Workbench {
         self.limits.refresh_from_statusline();
         self.refresh_context(&session.id);
         let n = session.rounds.len();
+        let seen = shape_of(&session);
+        // The reader is not on their way somewhere: no wheel for a moment.
+        let resting = self.content_wheel_at.is_none_or(|at| at.elapsed() > SCROLL_REST);
         match self.detail.as_mut() {
             Some(d) if d.key == key => {
                 let old = d.session.rounds.len();
+                let grew = seen > shape_of(&d.session);
+                // Near the end counts as at the end: more arriving takes
+                // the reader along, as it does from the very end. How far
+                // off they are is from the last draw, before what arrived.
+                let off = d.list.max_offset_for_scrollbar().y + d.list.scroll_px_offset_for_scrollbar().y;
+                let rejoin = grew && !d.list.is_following_tail() && resting && off <= NEAR_END;
                 d.session = Rc::new(session);
                 d.path = path;
                 d.find = None;
@@ -3047,6 +3212,12 @@ impl Workbench {
                     d.list.splice(old..old, n - old);
                 } else if n < old {
                     d.list.reset(n);
+                }
+                if rejoin {
+                    d.list.set_follow_mode(FollowMode::Tail);
+                }
+                if d.list.is_following_tail() || seen < d.seen {
+                    d.seen = seen;
                 }
             }
             _ => {
@@ -3077,6 +3248,7 @@ impl Workbench {
                     body_scrolls: HashMap::new(),
                     find: None,
                     outline: None,
+                    seen,
                 });
             }
         }
@@ -3286,7 +3458,7 @@ impl Workbench {
                 .border_2()
                 .border_color(if active { theme.foreground } else { theme.transparent })
                 .hover(|s| s.border_color(theme.muted_foreground))
-                .tooltip({
+                .managed_tooltip({
                     let name = a.name;
                     move |window, cx| gpui_component::tooltip::Tooltip::new(name).build(window, cx)
                 })
@@ -3782,6 +3954,11 @@ impl Workbench {
     /// in it. Nothing to find in on any other page.
     fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != Page::Session {
+            return;
+        }
+        // With the keyboard in a PDF shown beside it, the find is that
+        // file's.
+        if self.pdf_find_open(window, cx) {
             return;
         }
         self.find_open = true;
@@ -5279,7 +5456,10 @@ impl Workbench {
         }
         let inline_sidebar = (self.sidebar_open && !self.narrow) || self.sidebar_float;
         let (files, outline) = self.panels_shown();
-        let here = if self.term_panel_bounds().is_some_and(|b| b.contains(&e.position)) {
+        let file = self.file_pane_bounds().is_some_and(|b| b.contains(&e.position));
+        let here = if file {
+            Pane::File
+        } else if self.term_panel_bounds().is_some_and(|b| b.contains(&e.position)) {
             Pane::Terminal
         } else if files && self.files_scroll.bounds().contains(&e.position) {
             Pane::Files
@@ -5300,6 +5480,7 @@ impl Workbench {
         let Some(owner) = self.scroll_owner else { return };
         // A wheel in the conversation ends a move the outline began.
         if owner == Pane::Content {
+            self.content_wheel_at = Some(Instant::now());
             self.outline_pick_end = None;
             if self.outline_gliding {
                 self.outline_glide += 1;
@@ -5313,17 +5494,18 @@ impl Workbench {
             cx.notify();
             return;
         }
-        if owner == here || !(inline_sidebar || files || outline || here == Pane::Terminal) {
+        if owner == here || !(inline_sidebar || files || outline || here == Pane::Terminal || here == Pane::File || owner == Pane::File) {
             return;
         }
         let delta = e.delta.pixel_delta(px(20.));
         match owner {
             // A handle takes any offset it is given, so each is held to
             // what its list has.
-            Pane::Agents | Pane::Sidebar | Pane::Files | Pane::Outline => {
+            Pane::Agents | Pane::Sidebar | Pane::Files | Pane::Outline | Pane::File => {
                 let handle = match owner {
                     Pane::Agents => &self.agents_scroll,
                     Pane::Files => &self.files_scroll,
+                    Pane::File => &self.file_view_scroll,
                     Pane::Outline => &self.outline_scroll,
                     _ => &self.side_scroll,
                 };
@@ -5689,6 +5871,11 @@ impl Workbench {
             cx.notify();
         } else if self.changes.is_some() {
             self.close_changes(cx);
+        } else if self.pdf_find_open {
+            self.pdf_find_close(window, cx);
+        } else if self.pdf_sel.is_some() {
+            self.pdf_sel = None;
+            cx.notify();
         } else if self.file_view.is_some() {
             self.close_file_view(cx);
         } else if self.search_open {
@@ -6715,7 +6902,7 @@ impl Workbench {
                     .id("side-avatar")
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.85))
-                    .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Your picture and name").build(window, cx))
+                    .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Your picture and name").build(window, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.settings_section = "appearance";
@@ -6972,7 +7159,9 @@ impl Workbench {
                 }
             }
             MenuDo::Fix(range, with) => self.fix_writing(range, with, window, cx),
+            MenuDo::Pdf(what) => self.pdf_do(what, cx),
             MenuDo::Learn(word) => self.learn_word(word, cx),
+            MenuDo::Ignore(rule, words) => self.ignore_writing(rule, words, cx),
             MenuDo::Term(what) => self.term_do(what, window, cx),
             MenuDo::Rename(key) => {
                 let now = self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default();
@@ -7605,6 +7794,111 @@ impl Workbench {
     }
     // -- one conversation ----------------------------------------------------
 
+    /// Where what the reader has not been at the end for begins: a round,
+    /// and an item of it. None at the end, or with nothing new.
+    pub(crate) fn unread_from(&self) -> Option<(usize, usize)> {
+        let d = self.detail.as_ref()?;
+        if d.list.is_following_tail() {
+            return None;
+        }
+        let (rounds, items) = d.seen;
+        match d.session.rounds.get(rounds.checked_sub(1)?) {
+            Some(last) if last.items.len() > items => Some((rounds - 1, items)),
+            _ => (d.session.rounds.len() > rounds).then_some((rounds, 0)),
+        }
+    }
+
+    /// The pill over the conversation's foot while there is something
+    /// new below: a click goes to where the new part begins. It rises in
+    /// and fades out.
+    fn unread_pill(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let from = self.unread_from();
+        let now = from.is_some();
+        if now != self.unread_was {
+            self.unread_was = now;
+            self.unread_anim = Some((now, Instant::now(), self.unread_anim.map(|(_, _, n)| n + 1).unwrap_or(0)));
+            if !now {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(UNREAD_ANIM + Duration::from_millis(20)).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        }
+        let live = self.unread_anim.filter(|(_, at, _)| at.elapsed() < UNREAD_ANIM);
+        if !now && live.is_none() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let serial = self.unread_anim.map(|(_, _, n)| n).unwrap_or(0);
+        let pill = h_flex()
+            .id("unread-pill")
+            .h(px(30.))
+            .pl(px(10.))
+            .pr(px(13.))
+            .gap(px(6.))
+            .items_center()
+            .rounded(px(999.))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(float_shadow(&theme))
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .hover(|s| s.border_color(theme.primary))
+            .child(Icon::default().path("icons/arrow-down.svg").with_size(px(13.)).text_color(theme.primary))
+            .child("New messages")
+            .when(now, |d| {
+                d.on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.unread_show(cx);
+                }))
+            });
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(14.))
+                .flex()
+                .justify_center()
+                .child(pill.with_animation(ElementId::Name(format!("unread-pill-{serial}").into()), Animation::new(UNREAD_ANIM).with_easing(ease_out_quint()), move |d, t| match live {
+                    Some((true, _, _)) => d.opacity(t).mt(px(6. * (1. - t))),
+                    Some((false, _, _)) => d.opacity(1. - t),
+                    None => d,
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Goes to where the new part of the conversation begins, which the
+    /// reader has now seen. A new round is a place the list knows; an
+    /// item part way down a round is gone to once that round is drawn
+    /// and the item's place in it is known (`unread_arrive`).
+    fn unread_show(&mut self, cx: &mut Context<Self>) {
+        let Some((round, item)) = self.unread_from() else { return };
+        let Some(d) = self.detail.as_mut() else { return };
+        d.seen = shape_of(&d.session);
+        d.list.scroll_to(ListOffset { item_ix: round, offset_in_item: px(0.) });
+        if item > 0 {
+            self.unread_go = Some((round, item));
+            self.unread_y.set(None);
+            self.unread_due.set(true);
+        }
+        cx.notify();
+    }
+
+    /// The place gone to has been drawn: it is brought a little under
+    /// the top of the view.
+    pub(crate) fn unread_arrive(&mut self, cx: &mut Context<Self>) {
+        self.unread_go = None;
+        if let (Some(y), Some(d)) = (self.unread_y.take(), self.detail.as_ref()) {
+            d.list.scroll_by(y - d.list.viewport_bounds().top() - px(70.));
+        }
+        cx.notify();
+    }
+
     fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(r) = self.selected_ref().cloned() else {
@@ -7615,6 +7909,11 @@ impl Workbench {
                 .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child("Pick a session, or press ⌘K to search everything."))
                 .into_any_element();
         };
+        // At the end, what is there has been seen.
+        if let Some(d) = self.detail.as_mut().filter(|d| d.list.is_following_tail()) {
+            d.seen = shape_of(&d.session);
+        }
+        let unread = self.unread_pill(cx);
         // A tab shown for the first time, for as long as its read takes:
         // the tabs stay where they are and the pane is empty, with no
         // word to flash by.
@@ -7663,7 +7962,7 @@ impl Workbench {
                     .hover(move |s| s.bg(hover_bg))
                     .font_family(theme.mono_font_family.clone())
                     .text_size(px(11.))
-                    .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(folder_tip).build(window, cx))
+                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(folder_tip).build(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.open_project_folder(cx)))
                     .child(Icon::new(IconName::Folder).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
                     .child(
@@ -7688,6 +7987,7 @@ impl Workbench {
                 .size_full(),
             )
             .vertical_scrollbar(&list)
+            .children(unread)
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.conversation_menu(ev.position, window, cx)));
 
         // The agent at work, said under the transcript so it is seen without
@@ -7761,7 +8061,7 @@ impl Workbench {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)).text_color(theme.danger))
                         .active(|s| s.bg(theme.danger.opacity(0.18)))
-                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Stop this turn (Esc)").build(window, cx))
+                        .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Stop this turn (Esc)").build(window, cx))
                         .on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.interrupt(cx);
@@ -7815,6 +8115,10 @@ impl Workbench {
         let (files_shown, outline_shown) = self.panels_shown();
         self.fit_agent_pty(&r.session_id);
         let term_panel = self.render_term_panel(&r, window, cx);
+        // A file from the tree, shown between the tree and the conversation.
+        self.sync_file_root(cx);
+        self.sync_file_editor(window, cx);
+        let file_pane = self.render_file_pane(cx);
         let leaving = self.panel_leaving();
         let files_panel = (files_shown || leaving == Some(true)).then(|| self.render_files_panel(cx));
         let outline_panel = (outline_shown || leaving == Some(false)).then(|| self.render_outline_panel(cx));
@@ -7855,7 +8159,7 @@ impl Workbench {
             .h_full()
             .bg(theme.background)
             .child(topbar)
-            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().children(files_panel).children(outline_panel).child(conversation).children(term_panel))
+            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().children(files_panel).children(outline_panel).children(file_pane).child(conversation).children(term_panel))
             .into_any_element()
     }
 
@@ -8270,8 +8574,12 @@ impl Workbench {
         let busy = self.dialog_sending || leaving;
         let head = if approval { "approval" } else if review { "review" } else { "question" };
         let says = if approval { format!("{} asks to go ahead", r.agent.speaker()) } else { format!("{} asks", r.agent.speaker()) };
+        // With previews the terminal's pointer is the choice so far: a
+        // digit moves it, and Return takes the one it is on.
+        let previews = d.preview.is_some();
         let rows = d.options.iter().filter(|o| !(d.multi && o.label.starts_with("Type something"))).map(|o| {
-            let on = o.checked == Some(true);
+            let on = o.checked == Some(true) || (previews && o.cursor);
+            let pointed = previews && o.cursor;
             let (n, multi, own) = (o.n, d.multi, o.label.starts_with("Type something"));
             // The two the dialog adds to every question are quieter.
             let aside = own || o.label == "Chat about this";
@@ -8300,7 +8608,7 @@ impl Workbench {
                         this.notice = Some(Notice::said("type your answer in the box and send it"));
                         cx.notify();
                     } else {
-                        this.dialog_send(vec![DialogStep { keys: n.to_string(), until: None }], cx);
+                        this.dialog_send(vec![DialogStep { keys: if pointed { "\r".into() } else { n.to_string() }, until: None }], cx);
                     }
                 }))
                 .child(
@@ -8414,6 +8722,16 @@ impl Workbench {
                 })
                 .child(div().text_size(px(14.)).child(title))
                 .when(!review, |el| el.child(v_flex().gap(px(4.)).children(rows)))
+                // The picture of the choice the pointer is on, as the
+                // terminal draws it: text in columns, so in the mono
+                // face and never wrapped.
+                .when_some(d.preview.clone().filter(|p| !p.is_empty()), |el, lines| {
+                    el.child(
+                        div().id("dialog-preview").w_full().overflow_x_scroll().rounded(px(8.)).border_1().border_color(theme.border).bg(theme.muted).px(px(12.)).py(px(10.)).child(
+                            v_flex().font_family(theme.mono_font_family.clone()).text_size(px(12.)).line_height(px(17.)).children(lines.into_iter().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.replace(' ', "\u{a0}") }))),
+                        ),
+                    )
+                })
                 .when(review, |el| {
                     // The review's two choices are the card's buttons.
                     el.child(h_flex().gap(px(8.)).items_center().children(d.options.iter().enumerate().map(|(i, o)| {
@@ -8429,6 +8747,9 @@ impl Workbench {
                         .items_center()
                         .when(d.multi, |el| {
                             el.child(Button::new("dialog-next").primary().small().label("Next").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\t".into(), until: None }], cx))))
+                        })
+                        .when(previews, |el| {
+                            el.child(Button::new("dialog-choose").primary().small().label("Choose").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\r".into(), until: None }], cx))))
                         })
                         .child(Button::new("dialog-cancel").ghost().small().label("Cancel  esc").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx))))
                         .child(div().flex_1())
@@ -8902,7 +9223,7 @@ impl Workbench {
                 if this.check_serial != serial {
                     return false;
                 }
-                this.issues = check::keep(&text, found, &this.learned);
+                this.issues = check::keep(&text, found, &this.learned, &this.ignored);
                 this.issues_for = text;
                 this.check_at_caret = false;
                 this.mark_slash(cx);
@@ -8974,13 +9295,15 @@ impl Workbench {
     fn issue_items(&self, issue: &emaki_core::check::Issue) -> Vec<(&'static str, MenuDo)> {
         use emaki_core::check::Kind;
         let mut items: Vec<(&'static str, MenuDo)> = issue.fixes.iter().take(5).map(|fix| ("", MenuDo::Fix(issue.range.clone(), fix.clone()))).collect();
-        if issue.kind == Kind::Spelling {
-            if issue.fixes.is_empty() {
-                items.push(("", MenuDo::Note("No spelling found".to_string())));
-            }
-            items.push(("", MenuDo::Rule));
-            items.push(("Learn Spelling", MenuDo::Learn(self.issues_for[issue.range.clone()].to_string())));
+        let words = self.issues_for[issue.range.clone()].to_string();
+        if issue.kind == Kind::Spelling && issue.fixes.is_empty() {
+            items.push(("", MenuDo::Note("No spelling found".to_string())));
         }
+        items.push(("", MenuDo::Rule));
+        if issue.kind == Kind::Spelling {
+            items.push(("Learn Spelling", MenuDo::Learn(words.clone())));
+        }
+        items.push(("Ignore", MenuDo::Ignore(issue.rule.clone(), words)));
         items
     }
 
@@ -9003,6 +9326,27 @@ impl Workbench {
         }
         self.learned.insert(word.to_lowercase());
         self.issues.retain(|i| !(i.kind == emaki_core::check::Kind::Spelling && self.issues_for[i.range.clone()].eq_ignore_ascii_case(&word)));
+        self.mark_slash(cx);
+    }
+
+    /// Ignore, at the foot of a mark's menu. A spelling is left alone
+    /// until the app is quit, as the system's own Ignore Spelling does;
+    /// Learn Spelling is the one that keeps it. A grammar mark has no
+    /// other way out, so it is kept: those words are not marked by that
+    /// rule again.
+    fn ignore_writing(&mut self, rule: String, words: String, cx: &mut Context<Self>) {
+        use emaki_core::check::{self, Kind};
+        if rule.is_empty() || self.issues.iter().any(|i| i.kind == Kind::Spelling && i.rule == rule && self.issues_for[i.range.clone()] == words) {
+            self.learned.insert(words.to_lowercase());
+        } else {
+            if let Err(e) = check::ignore(&rule, &words) {
+                self.notice = Some(Notice::error(format!("could not keep that: {e}")));
+            }
+            self.ignored.insert(check::ignore_key(&rule, &words));
+        }
+        let (text, learned, ignored) = (std::mem::take(&mut self.issues_for), &self.learned, &self.ignored);
+        self.issues = check::keep(&text, std::mem::take(&mut self.issues), learned, ignored);
+        self.issues_for = text;
         self.mark_slash(cx);
     }
 
@@ -10307,14 +10651,17 @@ impl Render for Workbench {
         let on_session = self.page == Page::Session && self.detail.is_some();
         let want_left = on_session && (self.files_on || self.outline_on);
         let want_term = on_session && self.side_term;
-        let (left_min, term_min) = (if want_left { crate::panels::PANEL_MIN } else { px(0.) }, if want_term { crate::term_panel::TERM_MIN } else { px(0.) });
+        let want_file = on_session && self.file_view.is_some();
+        let (left_min, term_min, file_min) = (if want_left { crate::panels::PANEL_MIN } else { px(0.) }, if want_term { crate::term_panel::TERM_MIN } else { px(0.) }, if want_file { crate::panels::FILE_MIN } else { px(0.) });
         let least = crate::panels::CONVERSATION_MIN + left_min + term_min;
         let vw = window.viewport_size().width;
-        self.narrow = vw < NARROW_W || ((want_left || want_term) && vw < self.sidebar_w + least);
+        self.narrow = vw < NARROW_W || ((want_left || want_term || want_file) && vw < self.sidebar_w + least + file_min);
         // A window too narrow even so does not draw what will not fit, the
         // files or the outline first and then the terminal, until it is
         // wide enough again. What was asked for is kept.
         let room = vw - if self.sidebar_open && !self.narrow { self.sidebar_w } else { px(0.) };
+        // The file shown is the first not drawn.
+        self.fold_file = want_file && room < least + file_min;
         self.fold_left = want_left && room < least;
         self.fold_term = want_term && room < crate::panels::CONVERSATION_MIN + term_min;
         if self.fold_term && want_left {
@@ -10381,6 +10728,8 @@ impl Render for Workbench {
                                             w.term_drag_to(e, cx);
                                         } else if w.panel_drag.is_some() {
                                             w.panel_drag_to(e, cx);
+                                        } else if w.file_drag {
+                                            w.file_drag_to(e, cx);
                                         } else {
                                             return false;
                                         }
@@ -10396,6 +10745,9 @@ impl Render for Workbench {
                                 let _ = lifter.update(cx, |w, _| {
                                     w.side_drag_end();
                                     w.panel_drag_end();
+                                    if std::mem::take(&mut w.file_drag) {
+                                        w.save_ui(true);
+                                    }
                                 });
                             }
                         });
@@ -10416,6 +10768,11 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {
+                // ⌘W closes the nearest thing: a file shown beside the
+                // conversation first, then the session's tab, then the
+                // window. A shell with the keyboard never gets here
+                // (`term_panel.rs`).
+                _ if this.file_pane_shown() => this.close_file_view(cx),
                 Some(key) if this.page == Page::Session && this.tabs.contains(&key) => this.close_tab(&key, window, cx),
                 _ => window.remove_window(),
             }))
@@ -10466,13 +10823,13 @@ impl Render for Workbench {
             )
             .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))
             .children(self.render_panel_grip(cx))
+            .children(self.render_file_grip(cx))
             .children(self.render_term_grip(cx))
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
             .children(self.render_sidebar_float(cx))
             .child(self.render_strip(cx))
             .when(search_open, |d| d.child(self.render_search(cx)))
             .when(self.settings_open, |d| d.child(self.render_settings(cx)))
-            .when(self.file_view.is_some(), |d| d.child(self.render_file_view(cx)))
             .when(self.changes.is_some(), |d| d.child(self.render_changes(cx)))
             .when_some(self.lightbox.clone(), |d, lb| d.child(self.render_lightbox(lb, cx)))
             .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(self.render_rename(cx)))

@@ -4,6 +4,7 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::highlighter::HighlightTheme;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::text::{TextView, TextViewStyle};
@@ -321,8 +322,38 @@ impl Workbench {
         let kind_of = |item: &Item| if let Item::Notice { variant, .. } = item { variant.setting().map(|_| *variant) } else { None };
         let at_of = |item: &Item| chrono::DateTime::parse_from_rfc3339(item.ts()).map(|t| t.timestamp_millis() as f64 / 1000.0).unwrap_or(f64::INFINITY);
         let mut e = 0;
+        // Where "New messages" is going to, when that is in this round:
+        // a mark of no height before the item, which says where it is
+        // drawn and, the first time, has the conversation go there.
+        let mut going = self.unread_go.filter(|(round, _)| *round == ix).map(|(_, item)| item);
         while jx < n {
             any = true;
+            if let Some(item) = going {
+                // A run of tool calls is one row: the mark goes before it.
+                let mut reach = jx + 1;
+                while is_run_item(&rnd.items[jx]) && reach < n && is_run_item(&rnd.items[reach]) {
+                    reach += 1;
+                }
+                if item < reach {
+                    going = None;
+                    let (place, due, entity) = (self.unread_y.clone(), self.unread_due.clone(), cx.entity().downgrade());
+                    body = body.child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                place.set(Some(bounds.top()));
+                                if due.replace(false) {
+                                    if let Some(entity) = entity.upgrade() {
+                                        cx.defer(move |cx| entity.update(cx, |this, cx| this.unread_arrive(cx)));
+                                    }
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .w_full()
+                        .h(px(0.)),
+                    );
+                }
+            }
             // The extra lines from before this item, each unless the line
             // after it is of its own kind.
             let until = at_of(&rnd.items[jx]);
@@ -422,7 +453,7 @@ impl Workbench {
             .justify_center()
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
-            .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
+            .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let text = this.detail.as_ref().and_then(|d| d.session.rounds.get(ix)).map(|r| if reply { r.reply_markdown() } else { r.prompt.clone() }).unwrap_or_default();
                 this.copy_text(key.clone(), text, cx);

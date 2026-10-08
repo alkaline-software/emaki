@@ -12,7 +12,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use harper_core::linting::{LintGroup, LintKind, Linter, Suggestion};
+use harper_core::linting::{LintGroup, LintKind, Suggestion};
 use harper_core::parsers::PlainEnglish;
 use harper_core::spell::FstDictionary;
 use harper_core::{Dialect, Document};
@@ -38,6 +38,9 @@ pub struct Issue {
     pub kind: Kind,
     pub message: String,
     pub fixes: Vec<String>,
+    /// Harper's name for the rule that marked it; empty for the
+    /// system's spelling.
+    pub rule: String,
 }
 
 struct English {
@@ -46,12 +49,43 @@ struct English {
     british: LintGroup,
 }
 
+/// Harper's rules that are left off: the ones that guess. A mark says
+/// "this is wrong", so a rule earns one only when what it marks is wrong
+/// however the sentence is read. These are not: they guess which part of
+/// speech a word is ("the effect triggers" read as a verb wanted), find
+/// a word missing that the sentence does without, or prefer one accepted
+/// way of writing over another (a comma, a dash, a title's capitals).
+/// With them, `settled` drops what only joins or splits words.
+const GUESSES: &[&str] = &[
+    "NounVerbConfusion", "VerbToAdjective", "NeedToNoun", "ForNoun", "NominalWants", "ComplainAsNoun", "ThieveNoun", "LayoutVerb", "ShutdownVerb", "ThreatenVerb", "PartsOfSpeech",
+    "MissingDeterminer", "DefiniteArticle", "MassNouns", "MissingPreposition", "MissingTo", "SomeWithoutArticle",
+    "OxfordComma", "NoOxfordComma", "CommaFixes", "Dashes", "Spaces", "EllipsisLength", "UseEllipsisCharacter", "NoFrenchSpaces", "QuoteSpacing", "UnclosedQuotes", "UseTitleCase", "NumericRangeEnDash", "CurrencyPlacement",
+    "Hedging", "FillerWords", "DiscourseMarkers", "BoringWords", "LongSentences", "SpelledNumbers", "AvoidContractions", "AvoidCurses",
+];
+
+fn curated(dictionary: &Arc<FstDictionary>, dialect: Dialect) -> LintGroup {
+    let mut group = LintGroup::new_curated(dictionary.clone(), dialect);
+    for rule in GUESSES {
+        group.config.set_rule_enabled(rule, false);
+    }
+    group
+}
+
 fn english_checker() -> &'static Mutex<English> {
     static CHECKER: OnceLock<Mutex<English>> = OnceLock::new();
     CHECKER.get_or_init(|| {
         let dictionary = FstDictionary::curated();
-        Mutex::new(English { american: LintGroup::new_curated(dictionary.clone(), Dialect::American), british: LintGroup::new_curated(dictionary.clone(), Dialect::British), dictionary })
+        Mutex::new(English { american: curated(&dictionary, Dialect::American), british: curated(&dictionary, Dialect::British), dictionary })
     })
+}
+
+/// Whether a correction only joins or splits the words it replaces:
+/// "file system" to "filesystem", "setup" to "set up". Both are written,
+/// so it is a preference and no mistake; a word that is wrong joined
+/// ("alot") is a misspelling, and marked as one.
+fn only_joins(was: &str, fix: &str) -> bool {
+    let bare = |s: &str| s.chars().filter(|c| !c.is_whitespace() && *c != '-').flat_map(char::to_lowercase).collect::<String>();
+    was != fix && bare(was) == bare(fix)
 }
 
 /// What Harper marks in an English message. Advice on style is left out:
@@ -60,13 +94,13 @@ fn english_checker() -> &'static Mutex<English> {
 pub fn english(text: &str, british: bool) -> Vec<Issue> {
     let Ok(mut checker) = english_checker().lock() else { return Vec::new() };
     let document = Document::new(text, &PlainEnglish, &checker.dictionary);
-    let lints = if british { checker.british.lint(&document) } else { checker.american.lint(&document) };
+    let by_rule = if british { checker.british.organized_lints(&document) } else { checker.american.organized_lints(&document) };
     drop(checker);
     // Harper counts characters; the window counts bytes.
     let mut at: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
     at.push(text.len());
     let mut issues = Vec::new();
-    for lint in lints {
+    for (rule, lint) in by_rule.into_iter().flat_map(|(rule, lints)| lints.into_iter().map(move |lint| (rule.clone(), lint))) {
         let kind = match lint.lint_kind {
             LintKind::Spelling | LintKind::Typo => Kind::Spelling,
             LintKind::Enhancement | LintKind::Formatting | LintKind::Readability | LintKind::Style | LintKind::Regionalism => continue,
@@ -90,10 +124,10 @@ pub fn english(text: &str, british: bool) -> Vec<Issue> {
         }
         // The window offers corrections and explains nothing, so a mark
         // with nothing to offer would be a mark with no way out.
-        if kind == Kind::Grammar && fixes.is_empty() {
+        if kind == Kind::Grammar && (fixes.is_empty() || fixes.iter().all(|fix| only_joins(was, fix))) {
             continue;
         }
-        issues.push(Issue { range: start..end, kind, message: lint.message, fixes });
+        issues.push(Issue { range: start..end, kind, message: lint.message, fixes, rule });
     }
     issues
 }
@@ -188,13 +222,17 @@ fn is_word(token: &str) -> bool {
 
 /// The issues that are about prose, less the words the person has
 /// taught, one to a place.
-pub fn keep(text: &str, mut issues: Vec<Issue>, learned: &HashSet<String>) -> Vec<Issue> {
+pub fn keep(text: &str, mut issues: Vec<Issue>, learned: &HashSet<String>, ignored: &HashSet<String>) -> Vec<Issue> {
     let skip = not_prose(text);
     issues.retain(|issue| {
         if skip.iter().any(|r| issue.range.start < r.end && r.start < issue.range.end) {
             return false;
         }
-        !(issue.kind == Kind::Spelling && learned.contains(&text[issue.range.clone()].to_lowercase()))
+        let words = &text[issue.range.clone()];
+        match issue.kind {
+            Kind::Spelling => !learned.contains(&words.to_lowercase()),
+            Kind::Grammar => !ignored.contains(&ignore_key(&issue.rule, words)),
+        }
     });
     // Grammar first where two start together: it knows more of the
     // sentence than the dictionary does.
@@ -340,6 +378,35 @@ fn starts_sentence(before: &str) -> bool {
         return false;
     }
     !matches!(stem.as_str(), "etc" | "vs" | "cf" | "eg" | "ie" | "mr" | "mrs" | "ms" | "dr" | "st" | "no" | "approx" | "fig")
+}
+
+/// How a grammar mark the person has ignored is kept: the rule and the
+/// words it marked, so the same words are still marked for another
+/// reason.
+pub fn ignore_key(rule: &str, words: &str) -> String {
+    format!("{rule}\t{}", words.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+pub fn ignored_file() -> PathBuf {
+    crate::paths::root().join("ignored.txt")
+}
+
+pub fn ignored() -> HashSet<String> {
+    std::fs::read_to_string(ignored_file()).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect()
+}
+
+/// Never mark these words for this rule again.
+pub fn ignore(rule: &str, words: &str) -> std::io::Result<()> {
+    let mut all = ignored();
+    if !all.insert(ignore_key(rule, words)) {
+        return Ok(());
+    }
+    let mut list: Vec<String> = all.into_iter().collect();
+    list.sort();
+    let file = ignored_file();
+    let tmp = file.with_extension("txt.tmp");
+    std::fs::write(&tmp, list.join("\n") + "\n")?;
+    std::fs::rename(tmp, file)
 }
 
 /// Where the words the person has taught are kept, one to a line.

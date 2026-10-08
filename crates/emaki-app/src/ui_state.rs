@@ -33,6 +33,12 @@ pub struct UiState {
     /// The terminal at the conversation's right: how wide it was dragged
     /// to, and whether it showed the agent and not the shell.
     pub term_w: Option<f32>,
+    /// How wide the file shown beside the conversation was dragged to.
+    pub file_w: Option<f32>,
+    /// Markdown shown as it is written, and what stands beside a PDF's
+    /// pages: `pages`, `contents` or nothing.
+    pub file_raw: Option<bool>,
+    pub pdf_side: Option<String>,
     pub term_agent: Option<bool>,
     /// `sessions`, `session` or `new`.
     pub page: String,

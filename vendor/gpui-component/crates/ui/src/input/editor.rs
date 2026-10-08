@@ -27,6 +27,8 @@ pub struct Editor {
     ///
     /// If set, this overrides the built-in context menu.
     context_menu_builder: Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
+    /// (Emaki addition.)
+    secondary_click: Option<Rc<dyn Fn(gpui::Point<gpui::Pixels>, &mut Window, &mut App)>>,
 }
 
 impl Editor {
@@ -43,6 +45,7 @@ impl Editor {
             role: RoleOverride::default(),
             aria_label: None,
             context_menu_builder: None,
+            secondary_click: None,
         }
     }
 
@@ -104,6 +107,17 @@ impl Editor {
     }
 }
 
+impl Editor {
+    /// As `Input::on_secondary_click`. (Emaki addition.)
+    pub fn on_secondary_click(
+        mut self,
+        f: impl Fn(gpui::Point<gpui::Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.secondary_click = Some(Rc::new(f));
+        self
+    }
+}
+
 impl Styled for Editor {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style
@@ -124,6 +138,9 @@ impl RenderOnce for Editor {
             .when_some(self.aria_label, |this, label| this.aria_label(label))
             .when_some(self.context_menu_builder, |this, build| {
                 this.context_menu(move |menu, window, cx| build(menu, window, cx))
+            })
+            .when_some(self.secondary_click, |this, own| {
+                this.on_secondary_click(move |at, window, cx| own(at, window, cx))
             })
             .refine_style(&self.style)
     }
