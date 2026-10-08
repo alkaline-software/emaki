@@ -82,6 +82,15 @@ pub(crate) enum Pic {
 const MENU_IN: Duration = Duration::from_millis(140);
 const MENU_OUT: Duration = Duration::from_millis(110);
 
+/// What a menu over text does to it.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum EditDo {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
 /// One choice on a right-click menu.
 #[derive(Clone)]
 pub(crate) enum MenuDo {
@@ -105,13 +114,23 @@ pub(crate) enum MenuDo {
     CloseOthers(String),
     /// Something asked of the terminal at the conversation's right.
     Term(crate::term_panel::TermDo),
+    /// Cut, copy, paste or select all in the input that has this focus.
+    Edit(EditDo, gpui::FocusHandle),
+    /// Put these words where the composer's bytes are: a correction.
+    Fix(std::ops::Range<usize>, String),
+    /// Never mark this word as misspelt again.
+    Learn(String),
+    /// Not a choice: a word the menu says, as when a spelling has no
+    /// correction.
+    Note(String),
     /// Not a choice: a line between two groups of them.
     Rule,
 }
 
 impl MenuDo {
     /// The icon in front of a choice: what it does, at a glance. Every
-    /// choice has one, so the words of a menu stand in one column.
+    /// choice of a menu has one or none has, so its words stand in one
+    /// column.
     fn icon(&self, label: &str) -> &'static str {
         use crate::panels::FileDo;
         match self {
@@ -136,7 +155,18 @@ impl MenuDo {
             MenuDo::CloseTab(_) => "icons/close.svg",
             MenuDo::CloseOthers(_) => "icons/circle-x.svg",
             MenuDo::Term(what) => what.icon(),
-            MenuDo::Rule => "",
+            // A menu over text is words only, as the system's is.
+            MenuDo::Edit(..) | MenuDo::Fix(..) | MenuDo::Learn(_) | MenuDo::Note(_) | MenuDo::Rule => "",
+        }
+    }
+
+    /// The words of a choice, where they are not the same every time.
+    fn words(&self, label: &'static str) -> SharedString {
+        match self {
+            MenuDo::Fix(_, with) if with.is_empty() => "Remove".into(),
+            MenuDo::Fix(_, with) => with.clone().into(),
+            MenuDo::Note(what) => what.clone().into(),
+            _ => label.into(),
         }
     }
 }
@@ -145,6 +175,11 @@ impl MenuDo {
 fn titles_file() -> PathBuf {
     emaki_core::paths::state_dir().join("titles.json")
 }
+
+/// How long the typing has paused before the composer's text is checked,
+/// and how much longer before the word at the caret is marked too.
+const CHECK_AFTER: Duration = Duration::from_millis(300);
+const CHECK_WORD_AFTER: Duration = Duration::from_millis(1200);
 
 /// How many sessions an open folder shows in the sidebar before "N more".
 const FOLDER_ROWS: usize = 5;
@@ -826,6 +861,26 @@ pub struct Workbench {
     /// The prompt handed back to the composer while it was still a round
     /// in the transcript: the session's key and the round's `uuid`.
     handed_back: Option<(String, String)>,
+    /// What is marked in the composer as misspelt or ungrammatical, and
+    /// the text it was found in: marks are bytes of that text and no
+    /// other.
+    issues: Vec<emaki_core::check::Issue>,
+    issues_for: String,
+    /// Counts the checks asked for; an answer to an older one is dropped.
+    check_serial: u64,
+    /// The word the caret stands at the end of is not marked yet: it is
+    /// still being typed.
+    check_at_caret: bool,
+    /// The composer's text as of the last look, to tell one keystroke
+    /// from a paste or a draft coming back.
+    last_text: String,
+    /// Where a character was just deleted: a letter typed there again
+    /// is the person's choice of case.
+    cap_skip: Option<usize>,
+    /// A letter the person typed small on purpose.
+    cap_refused: Option<usize>,
+    /// The words never marked as misspelt.
+    learned: HashSet<String>,
     /// A turn was just stopped: put its prompt back in the composer at
     /// the next draw, which is where a window is at hand.
     restore_due: bool,
@@ -1840,6 +1895,7 @@ impl Workbench {
             if let InputEvent::Change = ev {
                 this.slash_sel = 0;
                 this.slash_closed = false;
+                this.writing_changed(window, cx);
                 this.mark_slash(cx);
                 this.warm_terminal(cx);
             }
@@ -1893,8 +1949,11 @@ impl Workbench {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs(4)).await;
                 let _ = cx.update(|window, cx| composer.update(cx, |s, cx| s.focus(window, cx)));
-                for key in keys.split(',') {
-                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                // `keys:<words>` is a keystroke a letter, each handled
+                // before the next, as from the keyboard.
+                let keys: Vec<String> = keys.split(',').flat_map(|key| match key.strip_prefix("keys:") { Some(words) => words.chars().map(|c| format!("key:{c}")).collect(), None => vec![key.to_string()] }).collect();
+                for key in keys.iter().map(String::as_str) {
+                    cx.background_executor().timer(Duration::from_millis(if key.starts_with("key:") { 15 } else { 200 })).await;
                     let _ = cx.update(|window, cx| match key {
                         // The menu's Rename on the session showing: the
                         // field, holding its title, with the caret in it.
@@ -1915,6 +1974,48 @@ impl Workbench {
                         "text" => {
                             let _ = this.update(cx, |w, cx| eprintln!("emaki: composer {:?}", w.composer.read(cx).value()));
                         }
+                        t if t.starts_with("key:") => composer.update(cx, |s, cx| s.insert(t["key:".len()..].to_string(), window, cx)),
+                        "back" => window.dispatch_action(Box::new(gpui_component::input::Backspace), cx),
+                        // What is marked in the composer, printed; `fix`
+                        // takes the first correction of the first mark,
+                        // `marks` opens its menu.
+                        "issues" => {
+                            let _ = this.update(cx, |w, _| {
+                                for i in &w.issues {
+                                    eprintln!("emaki: issue {:?} {:?} {:?} {:?}", &w.issues_for[i.range.clone()], i.kind, i.message, i.fixes);
+                                }
+                            });
+                        }
+                        "fix" => {
+                            let _ = this.update(cx, |w, cx| {
+                                if let Some((range, with)) = w.issues.first().and_then(|i| Some((i.range.clone(), i.fixes.first()?.clone()))) {
+                                    w.fix_writing(range, with, window, cx);
+                                }
+                            });
+                        }
+                        "marks" => {
+                            let _ = this.update(cx, |w, cx| {
+                                let at = w.composer.read(cx).input_bounds().origin;
+                                if let Some(issue) = w.issues.first() {
+                                    let items = w.issue_items(issue);
+                                    w.open_menu(at, items, cx);
+                                }
+                            });
+                        }
+                        // A right click in the composer, at its first
+                        // word; `all` selects everything first.
+                        "all" => window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx),
+                        // Through the input's own handler, the path the
+                        // mouse takes; `rightclick:<x>` is that far along
+                        // the first line.
+                        t if t.starts_with("rightclick") => {
+                            let x = t.strip_prefix("rightclick:").and_then(|v| v.parse::<f32>().ok()).unwrap_or(30.);
+                            composer.update(cx, |s, cx| {
+                                let at = s.input_bounds().origin + point(px(x), px(10.));
+                                s.secondary_click_at(at, window, cx);
+                            });
+                        }
+                        t if t.starts_with("wait:") => {}
                         // Where the caret is in the rename field, printed.
                         "caret" => {
                             let _ = this.update(cx, |w, cx| eprintln!("emaki: caret {} of {}", w.rename_input.read(cx).cursor(), w.rename_input.read(cx).value().len()));
@@ -2066,6 +2167,14 @@ impl Workbench {
             last_sent: None,
             was_working: None,
             handed_back: None,
+            issues: Vec::new(),
+            issues_for: String::new(),
+            check_serial: 0,
+            check_at_caret: true,
+            last_text: String::new(),
+            cap_skip: None,
+            cap_refused: None,
+            learned: emaki_core::check::learned(),
             restore_due: false,
             update: {
                 let s = UpdateState::load();
@@ -3233,6 +3342,12 @@ impl Workbench {
         let term_ligatures = Checkbox::new("term-ligatures").checked(term.ligatures).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.ligatures = *on, cx)));
         let term_copy = Checkbox::new("term-copy").checked(term.copy_on_select).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.copy_on_select = *on, cx)));
 
+        let auto_cap = Checkbox::new("auto-capitalize").checked(self.cfg.app.auto_capitalize).on_click(cx.listener(|this, on: &bool, _, cx| this.set_writing(|a| a.auto_capitalize = *on, cx)));
+        let check_writing = Checkbox::new("check-writing").checked(self.cfg.app.check_writing).on_click(cx.listener(|this, on: &bool, _, cx| this.set_writing(|a| a.check_writing = *on, cx)));
+        let languages: Vec<&'static str> = emaki_core::check::LANGUAGES.iter().map(|l| l.0).collect();
+        let writing_language = self.segmented("writing-language", emaki_core::check::LANGUAGES.iter().map(|(key, name)| (*key, name.to_string(), None)).collect(), pick(&languages, &self.cfg.app.writing_language), Rc::new(|this, key, _, cx| this.set_writing(|a| a.writing_language = key.into(), cx)), cx);
+        let language_note = if crate::sys::SYSTEM_SPELLING { "English gets spelling and grammar. Spanish, French and German get spelling." } else { "English gets spelling and grammar. Spanish, French and German are checked on a Mac only." };
+
         let scope = if self.cfg.explain.enabled { self.cfg.explain.scope.as_str() } else { "off" };
         let explain_key = match scope {
             "off" => "off",
@@ -3314,7 +3429,18 @@ impl Workbench {
             _ => ("Appearance", "settings-appearance"),
         };
         let rows: Vec<AnyElement> = match section {
-            "composer" => vec![row("Send with", send_note, send, &theme).into_any_element()],
+            "composer" => vec![
+                row("Send with", send_note, send, &theme).into_any_element(),
+                row("Auto-capitalization", "A sentence starts with a capital, and a lone \"i\" becomes \"I\". Delete the capital and type the letter again to keep it small.", auto_cap.into_any_element(), &theme).into_any_element(),
+                row("Spelling and grammar", "Marked under the words as you type, on this machine. Right-click a mark for corrections. Code, paths and commands are left alone.", check_writing.into_any_element(), &theme).into_any_element(),
+                // Five choices are wider than the room beside a note, so
+                // they stand under it.
+                v_flex()
+                    .gap(px(8.))
+                    .child(v_flex().gap(px(2.)).child(div().text_size(px(13.5)).child("Language")).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(language_note)))
+                    .child(h_flex().child(writing_language))
+                    .into_any_element(),
+            ],
             "sessions" => vec![
                 row("Permission mode", "What a session started here begins in.", modes, &theme).into_any_element(),
                 row("Model", "Which model a session started here uses.", models, &theme).into_any_element(),
@@ -3431,7 +3557,7 @@ impl Workbench {
                         .rounded(px(8.))
                         .bg(theme.muted)
                         .text_size(px(13.5))
-                        .child(Input::new(&self.name_input).appearance(false).bordered(false))
+                        .child(Input::new(&self.name_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.name_input, false, cx)))
                         .into_any_element(),
                     &theme,
                 )
@@ -3821,7 +3947,7 @@ impl Workbench {
                         .flex_1()
                         .min_w_0()
                         .text_size(px(13.))
-                        .child(Input::new(&self.find_input).appearance(false).bordered(false)),
+                        .child(Input::new(&self.find_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.find_input, false, cx))),
                 )
                 .child(div().text_size(px(11.5)).flex_shrink_0().text_color(if n == 0 && !empty { theme.danger } else { theme.muted_foreground }).child(count))
                 .child(icon_button("find-prev", IconName::ChevronUp, "Previous (⇧↩, ⌘⇧G)", cx, |this, _, cx| this.find_step(-1, cx)))
@@ -5431,6 +5557,7 @@ impl Workbench {
     /// touched when the composer already has something in it.
     fn restore_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_draft(window, cx);
+        self.writing_sync(cx);
         if !self.composer.read(cx).value().trim().is_empty() || !self.attachments.is_empty() {
             return;
         }
@@ -6834,7 +6961,18 @@ impl Workbench {
                     self.close_tab(&other, window, cx);
                 }
             }
-            MenuDo::Rule => {}
+            MenuDo::Rule | MenuDo::Note(_) => {}
+            MenuDo::Edit(what, focus) => {
+                use gpui_component::input::{Copy, Cut, Paste, SelectAll};
+                match what {
+                    EditDo::Cut => focus.dispatch_action(&Cut, window, cx),
+                    EditDo::Copy => focus.dispatch_action(&Copy, window, cx),
+                    EditDo::Paste => focus.dispatch_action(&Paste, window, cx),
+                    EditDo::SelectAll => focus.dispatch_action(&SelectAll, window, cx),
+                }
+            }
+            MenuDo::Fix(range, with) => self.fix_writing(range, with, window, cx),
+            MenuDo::Learn(word) => self.learn_word(word, cx),
             MenuDo::Term(what) => self.term_do(what, window, cx),
             MenuDo::Rename(key) => {
                 let now = self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default();
@@ -6936,11 +7074,16 @@ impl Workbench {
         let longest = menu
             .items
             .iter()
-            .map(|(label, _)| {
+            .map(|(label, what)| {
+                let label = what.words(label);
                 let run = TextRun { len: label.len(), font: face.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
-                f32::from(window.text_system().shape_line(SharedString::from(*label), px(13.), &[run], None).width)
+                f32::from(window.text_system().shape_line(label, px(13.), &[run], None).width)
             })
             .fold(0f32, f32::max);
+        // A menu over text has no icons, and its words start where they
+        // end: the same room both sides.
+        let bare = menu.items.iter().all(|(label, what)| what.icon(label).is_empty());
+        let (row_pl, icon_w, icon_gap) = if bare { (row_pr, 0., 0.) } else { (row_pl, icon_w, icon_gap) };
         let w = px((longest + icon_w + icon_gap + row_pl + row_pr + 2. * card_p + 2.).ceil());
         let rules = menu.items.iter().filter(|(_, what)| matches!(what, MenuDo::Rule)).count();
         let h = row_h * (menu.items.len() - rules) as f32 + rule_h * rules as f32 + px(10.);
@@ -6964,6 +7107,23 @@ impl Workbench {
                 card = card.child(div().h(rule_h).flex().items_center().child(div().h(px(1.)).w_full().mx(px(6.)).bg(theme.border)));
                 continue;
             }
+            let words = what.words(label);
+            // What is wrong is said, not chosen.
+            if matches!(what, MenuDo::Note(_)) {
+                card = card.child(
+                    h_flex()
+                        .h(row_h)
+                        .pl(px(row_pl))
+                        .pr(px(row_pr))
+                        .gap(px(icon_gap))
+                        .text_size(px(13.))
+                        .whitespace_nowrap()
+                        .text_color(theme.muted_foreground)
+                        .when(!bare, |d| d.child(Icon::default().path(what.icon(label)).with_size(px(icon_w)).text_color(theme.muted_foreground).flex_shrink_0()))
+                        .child(words),
+                );
+                continue;
+            }
             card = card.child(
                 h_flex()
                     .id(("menu-item", ix))
@@ -6976,9 +7136,9 @@ impl Workbench {
                     .text_size(px(13.))
                     .whitespace_nowrap()
                     .hover(|s| s.bg(theme.sidebar_accent))
-                    .child(Icon::default().path(what.icon(label)).with_size(px(icon_w)).text_color(theme.foreground).flex_shrink_0())
+                    .when(!bare, |d| d.child(Icon::default().path(what.icon(label)).with_size(px(icon_w)).text_color(theme.foreground).flex_shrink_0()))
                     .on_click(cx.listener(move |this, _, window, cx| this.menu_pick(what.clone(), window, cx)))
-                    .child(label),
+                    .child(words),
             );
         }
         if gone.is_some() {
@@ -7038,7 +7198,7 @@ impl Workbench {
                             .rounded(px(8.))
                             .bg(theme.muted)
                             .text_size(px(14.))
-                            .child(Input::new(&self.rename_input).appearance(false).bordered(false)),
+                            .child(Input::new(&self.rename_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.rename_input, false, cx))),
                     )
                     .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child("↩ to save · Esc to cancel")),
             )
@@ -8665,6 +8825,197 @@ impl Workbench {
         true
     }
 
+    /// One change of the composer's text, by the person's hand: the
+    /// marks move with the words until they are checked again, and a
+    /// letter that starts a sentence gets its capital.
+    fn writing_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use emaki_core::check::{self, Typed};
+        let (new, caret, composing) = {
+            let state = self.composer.read(cx);
+            (state.value().to_string(), state.cursor(), state.composing())
+        };
+        let old = std::mem::replace(&mut self.last_text, new.clone());
+        self.issues = check::carry(&self.issues_for, &new, &self.issues);
+        self.issues_for = new.clone();
+        // An input method's letters are not yet what was typed.
+        if self.cfg.app.auto_capitalize && !composing {
+            match check::typed(&old, &new, caret) {
+                Typed::In(c, end) => {
+                    let at = end - c.len_utf8();
+                    if self.cap_skip.take() == Some(at) {
+                        self.cap_refused = Some(at);
+                    } else if let Some((range, with)) = check::capital(&new, end, check::is_english(&self.cfg.app.writing_language)) {
+                        if self.cap_refused != Some(range.start) {
+                            self.composer.update(cx, |s, cx| s.replace_bytes(range, &with, caret, window, cx));
+                            return;
+                        }
+                    }
+                }
+                Typed::Out(at) => self.cap_skip = Some(at),
+                Typed::Other => (self.cap_skip, self.cap_refused) = (None, None),
+            }
+        }
+        self.check_soon(cx);
+    }
+
+    /// The composer's text was set from outside a keystroke (a draft
+    /// back, a message sent, a prompt handed back): what was marked was
+    /// another text's.
+    fn writing_sync(&mut self, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value();
+        if self.last_text.as_str() == text.as_ref() {
+            return;
+        }
+        self.last_text = text.to_string();
+        (self.cap_skip, self.cap_refused) = (None, None);
+        self.issues.clear();
+        self.mark_slash(cx);
+        self.check_soon(cx);
+    }
+
+    /// Checks the composer's text once the typing has paused. English is
+    /// Harper's, off the main thread; another language's spelling is the
+    /// system's. The word being typed is marked a little later than the
+    /// rest, so a word is not wrong while it is half written.
+    fn check_soon(&mut self, cx: &mut Context<Self>) {
+        use emaki_core::check;
+        self.check_serial += 1;
+        let serial = self.check_serial;
+        let text = self.composer.read(cx).value().to_string();
+        if !self.cfg.app.check_writing || text.trim().is_empty() {
+            self.issues.clear();
+            return;
+        }
+        let language = self.cfg.app.writing_language.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHECK_AFTER).await;
+            if this.read_with(cx, |this, _| this.check_serial != serial).unwrap_or(true) {
+                return;
+            }
+            let found = if check::is_english(&language) {
+                let (text, british) = (text.clone(), language == "en-GB");
+                cx.background_spawn(async move { check::english(&text, british) }).await
+            } else {
+                crate::sys::spelling(&text, &language)
+            };
+            let shown = this.update(cx, |this, cx| {
+                if this.check_serial != serial {
+                    return false;
+                }
+                this.issues = check::keep(&text, found, &this.learned);
+                this.issues_for = text;
+                this.check_at_caret = false;
+                this.mark_slash(cx);
+                true
+            });
+            if !shown.unwrap_or(false) {
+                return;
+            }
+            cx.background_executor().timer(CHECK_WORD_AFTER).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.check_serial == serial {
+                    this.check_at_caret = true;
+                    this.mark_slash(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// What an input hands its right click to: the window's own menu, in
+    /// place of the system's. In the composer a marked word gets its
+    /// corrections and nothing else; any other text gets cut, copy,
+    /// paste and select all.
+    pub(crate) fn input_menu<M: gpui_base::input::InputModeKind>(&self, input: &Entity<gpui_base::input::InputBaseState<M>>, composer: bool, cx: &mut Context<Self>) -> impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static {
+        let (this, input) = (cx.entity().downgrade(), input.clone());
+        move |at, window, cx| {
+            // The input calls this from inside its own update, where it
+            // cannot be read: reading it there aborts the app. So the
+            // menu is made once that update is over.
+            let (this, input) = (this.clone(), input.clone());
+            window.defer(cx, move |_, cx| {
+                let (selection, focus) = {
+                    let state = input.read(cx);
+                    (!state.selected_range().is_empty(), gpui::Focusable::focus_handle(state, cx))
+                };
+                let _ = this.update(cx, |this, cx| {
+                    let mut items = if composer { this.corrections(at, cx) } else { Vec::new() };
+                    if items.is_empty() {
+                        if selection {
+                            items.push(("Cut", MenuDo::Edit(EditDo::Cut, focus.clone())));
+                            items.push(("Copy", MenuDo::Edit(EditDo::Copy, focus.clone())));
+                        }
+                        if cx.read_from_clipboard().is_some() {
+                            items.push(("Paste", MenuDo::Edit(EditDo::Paste, focus.clone())));
+                        }
+                        if !items.is_empty() {
+                            items.push(("", MenuDo::Rule));
+                        }
+                        items.push(("Select All", MenuDo::Edit(EditDo::SelectAll, focus.clone())));
+                    }
+                    this.open_menu(at, items, cx);
+                });
+            });
+        }
+    }
+
+    /// What could stand in place of the marked words under a point of
+    /// the composer, as a menu's first choices. The grammar is not
+    /// explained.
+    fn corrections(&self, at: Point<Pixels>, cx: &App) -> Vec<(&'static str, MenuDo)> {
+        let state = self.composer.read(cx);
+        let offset = state.offset_at(at);
+        if self.issues_for.as_str() != state.value().as_ref() {
+            return Vec::new();
+        }
+        self.issues.iter().find(|i| i.range.start <= offset && offset <= i.range.end).map(|issue| self.issue_items(issue)).unwrap_or_default()
+    }
+
+    fn issue_items(&self, issue: &emaki_core::check::Issue) -> Vec<(&'static str, MenuDo)> {
+        use emaki_core::check::Kind;
+        let mut items: Vec<(&'static str, MenuDo)> = issue.fixes.iter().take(5).map(|fix| ("", MenuDo::Fix(issue.range.clone(), fix.clone()))).collect();
+        if issue.kind == Kind::Spelling {
+            if issue.fixes.is_empty() {
+                items.push(("", MenuDo::Note("No spelling found".to_string())));
+            }
+            items.push(("", MenuDo::Rule));
+            items.push(("Learn Spelling", MenuDo::Learn(self.issues_for[issue.range.clone()].to_string())));
+        }
+        items
+    }
+
+    /// A correction chosen from the menu goes where the marked words
+    /// were, as one step for undo.
+    fn fix_writing(&mut self, range: std::ops::Range<usize>, with: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composer.read(cx).value().as_ref() != self.issues_for.as_str() {
+            return;
+        }
+        let caret = range.start + with.len();
+        self.composer.update(cx, |s, cx| {
+            s.replace_bytes(range, &with, caret, window, cx);
+            s.focus(window, cx);
+        });
+    }
+
+    fn learn_word(&mut self, word: String, cx: &mut Context<Self>) {
+        if let Err(e) = emaki_core::check::learn(&word) {
+            self.notice = Some(Notice::error(format!("could not keep the word: {e}")));
+        }
+        self.learned.insert(word.to_lowercase());
+        self.issues.retain(|i| !(i.kind == emaki_core::check::Kind::Spelling && self.issues_for[i.range.clone()].eq_ignore_ascii_case(&word)));
+        self.mark_slash(cx);
+    }
+
+    /// A change to how the composer treats what is written in it.
+    fn set_writing(&mut self, change: impl FnOnce(&mut emaki_core::config::AppConfig), cx: &mut Context<Self>) {
+        change(&mut self.cfg.app);
+        self.save_app_config();
+        self.issues.clear();
+        self.mark_slash(cx);
+        self.check_soon(cx);
+        cx.notify();
+    }
+
     /// Colours every command the composer's text names (`/ph-image` in a
     /// sentence, `/compact` alone) in the accent, as the conversation does
     /// once it is sent. Set again on every change: the ranges are not
@@ -8697,8 +9048,23 @@ impl Workbench {
                     marks.push(gpui_component::input::TextDecoration::new(a..end, style));
                 }
             }
-            marks.sort_by_key(|m| m.range.start);
         }
+        // And what is misspelt or ungrammatical, underlined as a word
+        // processor does: red for a spelling, blue for the grammar.
+        if self.cfg.app.check_writing && self.issues_for == text {
+            let caret = self.composer.read(cx).cursor();
+            let theme = cx.theme();
+            for issue in &self.issues {
+                let spelling = issue.kind == emaki_core::check::Kind::Spelling;
+                if spelling && !self.check_at_caret && issue.range.end == caret {
+                    continue;
+                }
+                let color = if spelling { theme.danger } else { theme.info };
+                let style = HighlightStyle { underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: Some(color), wavy: true }), ..Default::default() };
+                marks.push(gpui_component::input::TextDecoration::new(issue.range.clone(), style));
+            }
+        }
+        marks.sort_by_key(|m| m.range.start);
         self.composer.update(cx, |s, cx| s.set_marks(marks, cx));
         self.want_files(cx);
     }
@@ -9070,7 +9436,7 @@ impl Workbench {
                     .w_full()
                     .text_size(px(14.))
                     .relative()
-                    .child(Textarea::new(&self.composer).appearance(false).bordered(false))
+                    .child(Textarea::new(&self.composer).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.composer, true, cx)))
                     .children(self.render_composer_hint(cx)),
             )
             .child(
@@ -9383,7 +9749,7 @@ impl Workbench {
                                     .flex_1()
                                     .min_w_0()
                                     .text_size(px(14.))
-                                    .child(Input::new(&self.search_input).appearance(false).bordered(false)),
+                                    .child(Input::new(&self.search_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.search_input, false, cx))),
                             ),
                     )
                     .child(v_flex().id("search-results").flex_1().min_h_0().overflow_y_scroll().p(px(8.)).map(|d| match results {
@@ -9881,6 +10247,7 @@ impl PickRow {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_draft(window, cx);
+        self.writing_sync(cx);
         self.sync_folders(cx);
         // The key let go while the window was not looking (⌘Tab to
         // another app sends no release here) takes the numbers with it.

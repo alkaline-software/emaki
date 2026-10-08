@@ -875,6 +875,50 @@ impl<M: InputModeKind> InputBaseState<M> {
         });
     }
 
+    /// Replace these bytes of the value as typing over them would, one
+    /// step for undo, and leave the cursor at `cursor`, a byte of the new
+    /// value. (Emaki addition.)
+    pub fn replace_bytes(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        cursor: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if range.end > self.text.len() || range.start > range.end {
+            return;
+        }
+        self.with_edits_allowed(|this| {
+            this.undo_manager.commit_transaction();
+            this.undo_manager.pending_intent = Some(EditIntent::Atomic);
+            let range_utf16 = this.range_to_utf16(&range);
+            this.replace_text_in_range_silent(Some(range_utf16), text, window, cx);
+            let cursor = this.text.clip_offset(cursor.min(this.text.len()), Bias::Left);
+            this.selected_range = (cursor..cursor).into();
+            this.undo_manager.commit_transaction();
+        });
+    }
+
+    /// The byte of the value under a point of the window. (Emaki
+    /// addition.)
+    pub fn offset_at(&self, position: Point<Pixels>) -> usize {
+        self.index_for_mouse_position(position)
+    }
+
+    /// A right click at a point of the window, as the mouse makes it.
+    /// (Emaki addition.)
+    pub fn secondary_click_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let offset = self.index_for_mouse_position(position);
+        self.handle_right_click_menu(position, offset, window, cx);
+    }
+
+    /// Whether an input method is part way through a character: what is
+    /// in the text is not yet what was typed. (Emaki addition.)
+    pub fn composing(&self) -> bool {
+        self.ime_marked_range.is_some()
+    }
+
     /// Replace text at the current cursor position.
     ///
     /// And the cursor will be moved to the end of replaced text.

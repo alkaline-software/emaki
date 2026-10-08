@@ -101,6 +101,18 @@ upstream revision finds them.
     (`code_block_actions`) show while the pointer is on the block.
     Upstream draws them all the time.
 
+14. `crates/base/src/input/base/state.rs`: three small doors for the
+    composer's spelling and capitals. `replace_bytes` replaces a byte
+    range as one undo step and sets the cursor; `offset_at` is
+    `index_for_mouse_position` made public; `composing` says whether an
+    input method has marked text.
+
+15. `crates/ui/src/input/input.rs`, `textarea.rs`: `on_secondary_click`
+    hands a right click to the application and shows no native menu, so
+    an input's menu can be the window's own. `secondary_click_at` in
+    `crates/base/src/input/base/state.rs` makes that click from code,
+    through the same path the mouse takes, for a probe.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

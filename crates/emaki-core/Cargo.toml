@@ -20,6 +20,8 @@ unicode-normalization.workspace = true
 ureq = { version = "2", default-features = false, features = ["tls"] }
 vt100 = "0.16"
 portable-pty = "0.9"
+# English grammar and spelling for the composer, offline and in process.
+harper-core = { version = "2.11", default-features = false, features = ["concurrent"] }
 
 # Probing a pid (the inbox registry) is a Unix signal; a file's identity on
 # Windows needs the NTFS file index, which std does not expose on stable.
