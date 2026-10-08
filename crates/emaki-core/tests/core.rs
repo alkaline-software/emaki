@@ -2021,3 +2021,67 @@ fn mouse_reports_as_a_terminal_sends_them() {
     assert!(mouse_bytes(0, 300, 0, true, MouseForm::Bytes).is_empty());
     assert!(!mouse_bytes(0, 300, 0, true, MouseForm::Utf8).is_empty());
 }
+
+#[test]
+fn a_sentence_typed_gets_its_capital() {
+    use emaki_core::check::{capital, typed, Typed};
+    let cap = |text: &str| capital(text, text.len(), true).map(|(r, s)| (r.start, s));
+    assert_eq!(cap("h"), Some((0, "H".into())));
+    assert_eq!(cap("Done. n"), Some((6, "N".into())));
+    assert_eq!(cap("He said \"stop.\" n"), Some((16, "N".into())));
+    assert_eq!(cap("first\nn"), Some((6, "N".into())));
+    assert_eq!(cap("first n"), None);
+    assert_eq!(cap("Done.n"), None);
+    assert_eq!(cap("e.g. n"), None);
+    assert_eq!(cap("and so on... n"), None);
+    assert_eq!(cap("run `cargo. b"), None);
+    assert_eq!(cap("```\nl"), None);
+    assert_eq!(cap("é"), Some((0, "É".into())));
+    assert_eq!(cap("ß"), None);
+    // A lone "i", in English only, and not the start of "i.e.".
+    assert_eq!(cap("Then i "), Some((5, "I".into())));
+    assert_eq!(cap("i'"), Some((0, "I".into())));
+    assert_eq!(cap("Hi "), None);
+    assert_eq!(cap("Then i."), None);
+    assert_eq!(capital("Luego i ", 8, false), None);
+
+    assert_eq!(typed("", "h", 1), Typed::In('h', 1));
+    assert_eq!(typed("helo", "hello", 4), Typed::In('l', 4));
+    assert_eq!(typed("hello", "hell", 4), Typed::Out(4));
+    assert_eq!(typed("hello", "helo", 3), Typed::Out(3));
+    assert_eq!(typed("a long message", "h", 1), Typed::Other);
+    assert_eq!(typed("", "pasted", 6), Typed::Other);
+}
+
+#[test]
+fn only_prose_is_checked() {
+    use emaki_core::check::{carry, english, keep, Kind};
+    let said = |text: &str, british: bool, learned: &[&str]| -> Vec<(String, Kind)> {
+        let learned = learned.iter().map(|w| w.to_string()).collect();
+        keep(text, english(text, british), &learned).into_iter().map(|i| (text[i.range].to_string(), i.kind)).collect()
+    };
+    let text = "I has went to the store and recieve a apple.";
+    let found = said(text, false, &[]);
+    assert!(found.contains(&("recieve".into(), Kind::Spelling)), "{found:?}");
+    assert!(found.contains(&("a".into(), Kind::Grammar)), "{found:?}");
+    assert!(found.iter().any(|(w, k)| w == "has" && *k == Kind::Grammar), "{found:?}");
+    // Code, paths, commands, names out of code and taught words are not prose.
+    let code = "Run `cargo bild` in crates/emaki-app/src/workbench.rs with --relase, see /code-reviw and @AGENTS.md, then HashMap and snake_case in emaki.";
+    assert_eq!(said(code, false, &["emaki"]), vec![]);
+    assert_eq!(said("Open emaki.", false, &[]).len(), 1);
+    // One dialect's spelling is the other's mistake.
+    assert!(said("The colour is fine.", false, &[]).iter().any(|(w, _)| w == "colour"));
+    assert!(said("The colour is fine.", true, &[]).is_empty());
+    assert!(said("The color is fine.", true, &[]).iter().any(|(w, _)| w == "color"));
+    // A fix replaces the range it names.
+    let issue = keep(text, english(text, false), &Default::default()).into_iter().find(|i| &text[i.range.clone()] == "recieve").unwrap();
+    assert_eq!(issue.fixes.first().map(String::as_str), Some("receive"));
+    // Marks follow an edit until the next check.
+    let old = "Teh cat and teh dog.";
+    let issues = keep(old, english(old, false), &Default::default());
+    assert_eq!(issues.len(), 2, "{issues:?}");
+    let new = "Teh big cat and teh dog.";
+    let moved = carry(old, new, &issues);
+    assert_eq!(moved.iter().map(|i| &new[i.range.clone()]).collect::<Vec<_>>(), vec!["Teh", "teh"]);
+    assert_eq!(carry(old, "Tehx cat and teh dog.", &issues).len(), 1);
+}

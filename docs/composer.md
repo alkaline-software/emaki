@@ -65,6 +65,49 @@ back with the caret at its end. It runs at every draw and before
 behalf. The sessions page draws no composer and changes nothing. Drafts are in memory only. Tried and dropped: one box for the
 window, whose words followed the person into the next session.
 
+## Spelling, grammar and capitals
+
+Three settings under Composer: auto-capitalization, spelling and grammar,
+and the language (`app.auto_capitalize`, `check_writing`,
+`writing_language`). `emaki-core/src/check.rs` is the part without a
+window.
+
+- English, US or UK, is Harper's (`harper-core`): spelling and grammar,
+  in the process, nothing sent anywhere. Its advice on style is left out
+  (`check::english`).
+- Spanish, French and German get spelling only, from the system's checker
+  (`sys::spelling`, the Mac's `NSSpellChecker`). Windows and Linux mark
+  nothing in those three. The Mac's own grammar check was tried first and
+  found none of a dozen plain mistakes in any of the four languages; real
+  grammar in more languages means LanguageTool, which is a Java server or
+  every prompt sent to someone else's.
+- Only prose is checked. `check::not_prose` takes out code between
+  backticks, fenced blocks, and any word that is a path, a command, an
+  "@" file, a flag, a name out of code or a number; an issue touching one
+  is dropped (`check::keep`), as is a word the person taught
+  (`~/.emaki/words.txt`, "Learn Spelling").
+- A check runs once the typing has paused (`check_soon`), Harper's off the
+  main thread. The word the caret ends is marked a little later than the
+  rest. Until the answer comes, the marks move with the text
+  (`check::carry`); marks are bytes of one text (`issues_for`) and are not
+  drawn on another.
+- The marks are the textarea's (`set_marks`, with the slash marks): a
+  wavy underline, red for spelling and blue for grammar. A right click on
+  one makes the input's menu what could stand there, in place of cut,
+  copy and paste (`corrections`): corrections only, the grammar is not explained, and
+  a grammar mark Harper has no correction for is not drawn; a correction goes in as one step for undo
+  (the vendored `replace_bytes`).
+- A capital (`check::capital`) is given at the keystroke: the first
+  letter of the message, of a line, or after ". ", "! " or "? ", and in
+  English a lone "i". Not after an abbreviation or an ellipsis, not inside
+  code. Only a single typed character counts (`check::typed`), so a
+  paste, a draft coming back and an input method part way through a
+  character (`composing`) are left as they are. A capital deleted and
+  typed small again stays small.
+- `writing_sync` runs at every draw and notices a text set from outside a
+  keystroke (setting the value is not a change event), so every such
+  place is checked without knowing of it.
+
 ## Attachments
 
 - Files first: a pasted image is written under
@@ -244,5 +287,12 @@ own).
   the suggestion.
 - Nothing types into the box mid-run, so two sessions each holding a draft
   cannot be set up from a script.
+- `EMAKI_KEYS="keys:i has teh apple,wait:,wait:,wait:,wait:,wait:,wait:,wait:,wait:,issues,marks"`
+  types a keystroke a letter (so capitals are given), waits out the
+  check, prints what is marked and opens the first mark's menu; `fix`
+  takes its first correction and `back` is Backspace; `rightclick` is a
+  right click on the composer's first word, made through the input's own
+  handler (`rightclick:<x>` that many points along the line) and `all` selects everything. All the letters of
+  one `keys:` handled in one update would arrive as one change, a paste.
 - `emaki-core files <folder> [typed]` prints what "@" would offer.
 - `emaki-core statusline restore` puts back the previous `statusLine`.

@@ -1677,7 +1677,7 @@ impl Workbench {
                     .bg(theme.muted)
                     .text_size(px(13.))
                     .child(Icon::new(IconName::Search).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
-                    .child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.branch_input).appearance(false).bordered(false))),
+                    .child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.branch_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.branch_input, false, cx)))),
             )
             .when(!(rows.is_empty() && make.is_some()), |d| {
                 d.child(

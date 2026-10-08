@@ -297,6 +297,17 @@ plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
   the bytes read back out of the transcript) and, when the file is on
   disk, Copy Path and Reveal. Its handler stops the press, so the
   conversation's own menu does not open over it.
+- A text input (the composer, search, find, rename, the name, the
+  branch field) offers Cut and Copy with a selection, Paste with
+  something on the clipboard, and Select All (`input_menu`, `EditDo`,
+  dispatched to the input's own focus). The toolkit would show the
+  system's menu there; the vendored `on_secondary_click` hands the click
+  over instead. A menu over text has no icons, none of its choices, so
+  its words still stand in one column. On a marked word of the composer
+  the menu is that word's corrections and nothing else
+  (`docs/composer.md`). The input calls the handler from inside its own
+  update, so the menu is made a moment later (`window.defer`): reading
+  the input there aborts the app.
 - A branch, on the pill in the files' head and on a row of the list,
   offers Copy Branch Name. The row stops the press, which would otherwise
   reach the list's sheet and put the list away.

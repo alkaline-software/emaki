@@ -73,11 +73,17 @@ pub struct AppConfig {
     /// The person's picture, a file the app keeps a copy of; empty for
     /// the first letter of the name on a disc.
     pub avatar: String,
+    /// A sentence typed in the composer starts with a capital.
+    pub auto_capitalize: bool,
+    /// Spelling and grammar are marked in the composer.
+    pub check_writing: bool,
+    /// The language they are checked in; see `check::LANGUAGES`.
+    pub writing_language: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new() }
+        Self { chat_font: "serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into() }
     }
 }
 

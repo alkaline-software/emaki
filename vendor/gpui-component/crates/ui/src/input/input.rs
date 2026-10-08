@@ -131,6 +131,9 @@ pub struct Input {
     ///
     /// If set, this overrides the built-in context menu.
     context_menu_builder: Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
+    /// What a right click does in place of any native menu. (Emaki
+    /// addition.)
+    secondary_click: Option<Rc<dyn Fn(gpui::Point<gpui::Pixels>, &mut Window, &mut App)>>,
 }
 
 impl Sizable for Input {
@@ -198,6 +201,7 @@ impl Input {
             accessibility_id: None,
             aria_label: None,
             context_menu_builder: None,
+            secondary_click: None,
         }
     }
 
@@ -300,6 +304,18 @@ impl Input {
     /// Set the tab index for the input, default is 0.
     pub fn tab_index(mut self, index: isize) -> Self {
         self.tab_index = index;
+        self
+    }
+
+    /// A right click, at this point of the window, is the application's:
+    /// no native menu is shown, so the application can draw its own. The
+    /// cursor has already gone to the click unless it fell in the
+    /// selection. (Emaki addition.)
+    pub fn on_secondary_click(
+        mut self,
+        f: impl Fn(gpui::Point<gpui::Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.secondary_click = Some(Rc::new(f));
         self
     }
 
@@ -425,8 +441,14 @@ impl RenderOnce for Input {
         state.set_readonly(self.readonly, cx);
         state.set_text_align(text_align, cx);
         let custom = self.context_menu_builder.clone();
+        let secondary_click = self.secondary_click.clone();
         state.on_context_menu(
             Rc::new(move |_, capabilities, position, window, cx| {
+                // (Emaki addition.)
+                if let Some(own) = secondary_click.as_ref() {
+                    own(position, window, cx);
+                    return;
+                }
                 let menu = if let Some(custom) = custom.as_ref() {
                     custom(NativeMenu::new(), window, cx)
                 } else {

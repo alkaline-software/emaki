@@ -779,3 +779,45 @@ pub fn shoot_window(window: &gpui::Window, path: &std::path::Path) -> Result<(),
 pub fn shoot_window(_window: &gpui::Window, _path: &std::path::Path) -> Result<(), String> {
     Err("a picture of the window is only taken on macOS".into())
 }
+
+/// Whether the system checks spelling for the window: the languages
+/// Harper does not know are the system's, where it has a checker.
+pub const SYSTEM_SPELLING: bool = cfg!(target_os = "macos");
+
+/// The words of `text` the system's checker does not know in `language`,
+/// each with what it would put there. The system's checker is the Mac's
+/// (`NSSpellChecker`); Windows and Linux mark nothing. Call it on the
+/// main thread.
+#[cfg(target_os = "macos")]
+pub fn spelling(text: &str, language: &str) -> Vec<emaki_core::check::Issue> {
+    use emaki_core::check::{Issue, Kind};
+    use objc2_app_kit::NSSpellChecker;
+    use objc2_foundation::{NSRange, NSString};
+    const MOST: usize = 60;
+    let checker = NSSpellChecker::sharedSpellChecker();
+    let (string, language) = (NSString::from_str(text), NSString::from_str(language));
+    // The checker counts UTF-16 units; the window counts bytes.
+    let mut bytes = Vec::with_capacity(text.len() + 1);
+    for (i, c) in text.char_indices() {
+        bytes.extend(std::iter::repeat_n(i, c.len_utf16()));
+    }
+    bytes.push(text.len());
+    let mut out = Vec::new();
+    let mut from = 0isize;
+    while out.len() < MOST {
+        let found: NSRange = unsafe { checker.checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount(&string, from, Some(&language), false, 0, std::ptr::null_mut()) };
+        if found.length == 0 || found.location >= bytes.len() {
+            break;
+        }
+        let (Some(&start), Some(&end)) = (bytes.get(found.location), bytes.get(found.location + found.length)) else { break };
+        let fixes = checker.guessesForWordRange_inString_language_inSpellDocumentWithTag(found, &string, Some(&language), 0).map(|guesses| guesses.iter().take(5).map(|g| g.to_string()).collect()).unwrap_or_default();
+        out.push(Issue { range: start..end, kind: Kind::Spelling, message: String::new(), fixes });
+        from = (found.location + found.length) as isize;
+    }
+    out
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn spelling(_text: &str, _language: &str) -> Vec<emaki_core::check::Issue> {
+    Vec::new()
+}
