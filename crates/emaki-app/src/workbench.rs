@@ -42,7 +42,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab, TermClear, TermNewTab, TermCloseTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -105,6 +105,8 @@ pub(crate) enum MenuDo {
     CloseTab(String),
     /// Close every tab but the session's.
     CloseOthers(String),
+    /// Something asked of the terminal at the conversation's right.
+    Term(crate::term_panel::TermDo),
     /// Not a choice: a line between two groups of them.
     Rule,
 }
@@ -135,6 +137,7 @@ impl MenuDo {
             MenuDo::OpenTerminal(_) => "icons/square-terminal.svg",
             MenuDo::CloseTab(_) => "icons/close.svg",
             MenuDo::CloseOthers(_) => "icons/circle-x.svg",
+            MenuDo::Term(what) => what.icon(),
             MenuDo::Rule => "",
         }
     }
@@ -236,7 +239,7 @@ pub const COL_MIN_W: Pixels = px(210.);
 /// Home-page folder cards to a row.
 pub const FOLDER_COLS: usize = 3;
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("explain", "Explanations", "icons/bot.svg"), ("updates", "Updates", "icons/redo-2.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("explain", "Explanations", "icons/bot.svg"), ("updates", "Updates", "icons/redo-2.svg")];
 /// The panel's size: wide enough for a rail beside the rows, and a fixed
 /// height so it reads as a sheet, not a second window (capped by the
 /// window when that is smaller).
@@ -900,6 +903,10 @@ pub struct Workbench {
     pub(crate) side_term_agent: bool,
     pub(crate) side_term_w: Pixels,
     pub(crate) side_term_drag: bool,
+    /// The window is too narrow for the files or the outline, or for the
+    /// terminal, beside a conversation at its least: not drawn for now.
+    pub(crate) fold_left: bool,
+    pub(crate) fold_term: bool,
     pub(crate) side_term_focus: FocusHandle,
     /// The side that showed before the last press and the one after,
     /// when, and which press that was.
@@ -933,6 +940,21 @@ pub struct Workbench {
     pub(crate) side_sel: Option<crate::term_panel::Sel>,
     pub(crate) side_selecting: bool,
     pub(crate) side_copied: Option<Instant>,
+    /// The room around the screen as last drawn: at the sides and the
+    /// top, and at the foot.
+    pub(crate) side_pad: (f32, f32),
+    /// Where the cursor was at the last draw and since when, which is
+    /// when its blinking began again; whether it was drawn; and whether
+    /// the panel had the keyboard.
+    pub(crate) side_blink: ((u16, u16), Instant),
+    pub(crate) side_blink_on: bool,
+    pub(crate) side_focused: bool,
+    /// The link under the pointer.
+    pub(crate) side_link: Option<crate::term_panel::Link>,
+    /// A press with ⌥ that has not moved: let go, it takes the cursor there.
+    pub(crate) side_alt: bool,
+    /// The cell the pointer was last over, column and row.
+    pub(crate) side_hover: (u16, u16),
     /// The row of shell tabs, which scrolls when it is full.
     pub(crate) shell_scroll: ScrollHandle,
     /// Until when the tab that shows is kept in view: a new one grows in.
@@ -2047,6 +2069,8 @@ impl Workbench {
             side_term_agent: ui.term_agent.unwrap_or(false),
             side_term_w: px(ui.term_w.unwrap_or(f32::from(crate::term_panel::TERM_W))),
             side_term_drag: false,
+            fold_left: false,
+            fold_term: false,
             side_term_focus: cx.focus_handle(),
             side_term_anim: None,
             side_term_poll: None,
@@ -2064,6 +2088,13 @@ impl Workbench {
             side_sel: None,
             side_selecting: false,
             side_copied: None,
+            side_pad: (0., 0.),
+            side_blink: ((0, 0), Instant::now()),
+            side_blink_on: true,
+            side_focused: false,
+            side_link: None,
+            side_alt: false,
+            side_hover: (u16::MAX, u16::MAX),
             shell_scroll: ScrollHandle::new(),
             shell_reveal: None,
             view_w: px(1280.),
@@ -2972,6 +3003,17 @@ impl Workbench {
         cx.notify();
     }
 
+    /// A change to the terminal's settings, kept and drawn at once.
+    fn set_terminal(&mut self, change: impl FnOnce(&mut emaki_core::config::Terminal), cx: &mut Context<Self>) {
+        change(&mut self.cfg.terminal);
+        let terminal = self.cfg.terminal.clone();
+        if let Err(e) = Config::edit(move |c| c.terminal = terminal) {
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+        }
+        self.side_sel = None;
+        cx.notify();
+    }
+
     fn set_chat_size(&mut self, choice: &str, cx: &mut Context<Self>) {
         self.cfg.app.chat_size = choice.to_string();
         self.save_app_config();
@@ -3132,6 +3174,26 @@ impl Workbench {
             cx,
         );
 
+        // The terminal's rows: each a choice of Kaku's own or another.
+        let term = self.cfg.terminal.clone();
+        let pick = |list: &[&'static str], now: &str| list.iter().copied().find(|k| *k == now).unwrap_or(list[0]);
+        let term_theme = self.segmented("term-theme", vec![("match", "Match window".into(), None), ("dark", "Dark".into(), None), ("light", "Light".into(), None)], pick(&["match", "dark", "light"], &term.theme), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.theme = key.into(), cx)), cx);
+        let code_name = fonts.code.clone().filter(|f| f.starts_with("Anthropic")).map(|_| "Anthropic Mono").unwrap_or("Code font");
+        let mut faces = vec![("jetbrains", "JetBrains Mono".to_string(), Some(crate::fonts::TERM_FAMILY.to_string())), ("code", code_name.to_string(), Some(crate::fonts::term_family("code", cx).to_string()))];
+        if cfg!(target_os = "macos") {
+            faces.push(("system", "SF Mono".to_string(), Some(crate::fonts::term_family("system", cx).to_string())));
+        }
+        let term_font = self.segmented("term-font", faces, pick(&["jetbrains", "code", "system"], &term.font), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.font = key.into(), cx)), cx);
+        // Three steps each, under the same three names.
+        let size_now = if term.size < 12.5 { "small" } else if term.size > 14. { "large" } else { "medium" };
+        let term_size = self.segmented("term-size", vec![("small", "Small".into(), None), ("medium", "Medium".into(), None), ("large", "Large".into(), None)], size_now, Rc::new(|this, key, _, cx| this.set_terminal(|t| t.size = match key { "small" => 12., "large" => 15., _ => 13. }, cx)), cx);
+        let term_spacing = self.segmented("term-spacing", vec![("tight", "Small".into(), None), ("normal", "Medium".into(), None), ("roomy", "Large".into(), None)], pick(&["normal", "tight", "roomy"], &term.spacing), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.spacing = key.into(), cx)), cx);
+        let term_padding = self.segmented("term-padding", vec![("compact", "Small".into(), None), ("medium", "Medium".into(), None), ("roomy", "Large".into(), None)], pick(&["medium", "compact", "roomy"], &term.padding), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.padding = key.into(), cx)), cx);
+        let term_cursor = self.segmented("term-cursor", vec![("bar", "Bar".into(), None), ("block", "Block".into(), None), ("underline", "Underline".into(), None)], pick(&["bar", "block", "underline"], &term.cursor), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.cursor = key.into(), cx)), cx);
+        let term_blink = Checkbox::new("term-blink").checked(term.cursor_blink).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.cursor_blink = *on, cx)));
+        let term_ligatures = Checkbox::new("term-ligatures").checked(term.ligatures).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.ligatures = *on, cx)));
+        let term_copy = Checkbox::new("term-copy").checked(term.copy_on_select).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.copy_on_select = *on, cx)));
+
         let scope = if self.cfg.explain.enabled { self.cfg.explain.scope.as_str() } else { "off" };
         let explain_key = match scope {
             "off" => "off",
@@ -3207,6 +3269,7 @@ impl Workbench {
         let (section_title, section_anim): (&'static str, &'static str) = match section {
             "composer" => ("Composer", "settings-composer"),
             "sessions" => ("New sessions", "settings-sessions"),
+            "terminal" => ("Terminal", "settings-terminal"),
             "explain" => ("Explanations", "settings-explain"),
             "updates" => ("Updates", "settings-updates"),
             _ => ("Appearance", "settings-appearance"),
@@ -3217,6 +3280,49 @@ impl Workbench {
                 row("Permission mode", "What a session started here begins in.", modes.into_any_element(), &theme).into_any_element(),
                 row("Model", "Which model a session started here uses.", models.into_any_element(), &theme).into_any_element(),
                 div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes.").into_any_element(),
+            ],
+            "terminal" => vec![
+                row("Theme", "Follow the window, or keep one look.", term_theme, &theme).into_any_element(),
+                row("Font", "The face the terminal is set in.", term_font, &theme).into_any_element(),
+                row("Text size", "How large the terminal reads.", term_size, &theme).into_any_element(),
+                row("Line spacing", "The room between two rows.", term_spacing, &theme).into_any_element(),
+                row("Padding", "The room around the screen.", term_padding, &theme).into_any_element(),
+                row("Cursor", "Its shape.", term_cursor, &theme).into_any_element(),
+                row("Blinking cursor", "On and off by half seconds while the terminal has the keyboard.", term_blink.into_any_element(), &theme).into_any_element(),
+                row("Ligatures", "Join letters such as -> and != into one mark.", term_ligatures.into_any_element(), &theme).into_any_element(),
+                row("Copy on select", "A selection is copied when the button is let go.", term_copy.into_any_element(), &theme).into_any_element(),
+                // The credit, with the name a link to Kaku's own page.
+                h_flex()
+                    .text_size(px(12.))
+                    .text_color(theme.muted_foreground)
+                    .child("The styling and UI design are from ")
+                    .child(
+                        div()
+                            .id("term-credit")
+                            .cursor_pointer()
+                            .text_decoration_1()
+                            .text_decoration_color(link_color.opacity(0.6))
+                            .hover(move |s| s.text_color(link_hover).text_decoration_color(link_hover))
+                            .on_click(|_, _, _| {
+                                let _ = opener::open("https://kaku.fun");
+                            })
+                            .child("Kaku"),
+                    )
+                    .child(", made by ")
+                    .child(
+                        div()
+                            .id("term-credit-author")
+                            .cursor_pointer()
+                            .text_decoration_1()
+                            .text_decoration_color(link_color.opacity(0.6))
+                            .hover(move |s| s.text_color(link_hover).text_decoration_color(link_hover))
+                            .on_click(|_, _, _| {
+                                let _ = opener::open("https://github.com/tw93");
+                            })
+                            .child("tw93"),
+                    )
+                    .child(".")
+                    .into_any_element(),
             ],
             "explain" => vec![
                 row("Explain tool calls", "Which calls are put into plain words without asking.", explain.into_any_element(), &theme).into_any_element(),
@@ -6450,6 +6556,7 @@ impl Workbench {
                 }
             }
             MenuDo::Rule => {}
+            MenuDo::Term(what) => self.term_do(what, window, cx),
             MenuDo::Rename(key) => {
                 let now = self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default();
                 self.renaming = Some(key);
@@ -9855,7 +9962,25 @@ impl Render for Workbench {
         // an overlay, the way the Claude app folds its sidebar away when the
         // window gets narrow. `sidebar_open` keeps the person's preference
         // for when the window is wide again.
-        self.narrow = window.viewport_size().width < NARROW_W;
+        // Sooner where the panels beside a conversation are asked for: the
+        // conversation keeps its least width, and the sidebar is the first
+        // to give its room up.
+        let on_session = self.page == Page::Session && self.detail.is_some();
+        let want_left = on_session && (self.files_on || self.outline_on);
+        let want_term = on_session && self.side_term;
+        let (left_min, term_min) = (if want_left { crate::panels::PANEL_MIN } else { px(0.) }, if want_term { crate::term_panel::TERM_MIN } else { px(0.) });
+        let least = crate::panels::CONVERSATION_MIN + left_min + term_min;
+        let vw = window.viewport_size().width;
+        self.narrow = vw < NARROW_W || ((want_left || want_term) && vw < self.sidebar_w + least);
+        // A window too narrow even so does not draw what will not fit, the
+        // files or the outline first and then the terminal, until it is
+        // wide enough again. What was asked for is kept.
+        let room = vw - if self.sidebar_open && !self.narrow { self.sidebar_w } else { px(0.) };
+        self.fold_left = want_left && room < least;
+        self.fold_term = want_term && room < crate::panels::CONVERSATION_MIN + term_min;
+        if self.fold_term && want_left {
+            self.fold_left = room < crate::panels::CONVERSATION_MIN + left_min;
+        }
         if !self.narrow {
             self.sidebar_peek = false;
         }
@@ -9964,6 +10089,8 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_panel(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleOutline, _, cx| this.toggle_panel(false, cx)))
+            .on_action(cx.listener(|this, _: &ToggleShell, window, cx| this.toggle_term_key(false, window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleAgent, window, cx| this.toggle_term_key(true, window, cx)))
             .on_action(cx.listener(|this, _: &Tab1, window, cx| this.go_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &Tab2, window, cx| this.go_tab(2, window, cx)))
             .on_action(cx.listener(|this, _: &Tab3, window, cx| this.go_tab(3, window, cx)))

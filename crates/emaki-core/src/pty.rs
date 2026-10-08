@@ -47,6 +47,10 @@ pub struct Span {
     /// `0xRRGGBB`; None is the terminal's own ink or ground.
     pub fg: Option<u32>,
     pub bg: Option<u32>,
+    /// Which of the sixteen named colours the ink or the ground is, when
+    /// the program named one: a terminal draws those in its own palette.
+    pub fg_ix: Option<u8>,
+    pub bg_ix: Option<u8>,
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
@@ -56,7 +60,7 @@ pub struct Span {
 
 impl Span {
     fn same_look(&self, o: &Span) -> bool {
-        self.fg == o.fg && self.bg == o.bg && self.bold == o.bold && self.dim == o.dim && self.italic == o.italic && self.underline == o.underline && self.inverse == o.inverse
+        self.fg == o.fg && self.bg == o.bg && self.fg_ix == o.fg_ix && self.bg_ix == o.bg_ix && self.bold == o.bold && self.dim == o.dim && self.italic == o.italic && self.underline == o.underline && self.inverse == o.inverse
     }
 }
 
@@ -445,6 +449,13 @@ fn rgb(c: vt100::Color) -> Option<u32> {
     }
 }
 
+fn named(c: vt100::Color) -> Option<u8> {
+    match c {
+        vt100::Color::Idx(i) if i < 16 => Some(i),
+        _ => None,
+    }
+}
+
 /// A screen as stretches of text, a row at a time, blank to the right
 /// of the last thing written.
 pub fn rows_of(screen: &vt100::Screen) -> Vec<Vec<Span>> {
@@ -461,6 +472,8 @@ pub fn rows_of(screen: &vt100::Screen) -> Vec<Vec<Span>> {
                     text: if cell.has_contents() { cell.contents().to_string() } else { " ".into() },
                     fg: rgb(cell.fgcolor()),
                     bg: rgb(cell.bgcolor()),
+                    fg_ix: named(cell.fgcolor()),
+                    bg_ix: named(cell.bgcolor()),
                     bold: cell.bold(),
                     dim: cell.dim(),
                     italic: cell.italic(),

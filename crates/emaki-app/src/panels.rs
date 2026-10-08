@@ -33,7 +33,7 @@ pub const PANEL_W: Pixels = px(264.);
 /// The panel's edge is dragged between these; a double click on it asks
 /// for no more than `PANEL_FIT_MAX`, and dragged narrower than
 /// `PANEL_FOLD_AT` the panel is put away.
-const PANEL_MIN: Pixels = px(200.);
+pub(crate) const PANEL_MIN: Pixels = px(200.);
 const PANEL_MAX: Pixels = px(520.);
 const PANEL_FIT_MAX: Pixels = px(380.);
 const PANEL_FOLD_AT: Pixels = px(130.);
@@ -483,7 +483,7 @@ impl Workbench {
 
     /// Which of the two panels is drawn: (files, outline), one at most.
     pub(crate) fn panels_shown(&self) -> (bool, bool) {
-        if self.page != Page::Session || self.detail.is_none() {
+        if self.page != Page::Session || self.detail.is_none() || self.fold_left {
             return (false, false);
         }
         (self.files_on, self.outline_on && !self.files_on)

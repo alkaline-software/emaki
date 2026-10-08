@@ -79,7 +79,8 @@ be loaded the way those two are.
   Mono" (the file calls itself "Anthropic Mono Web"), else on macOS
   `.AppleSystemUIFontMonospaced`, else the toolkit's own.
 - `look::install` writes it into both theme configs as `mono_font_family`,
-  so it is every mono in the window.
+  so it is every mono in the window but the terminal panel's, which is
+  JetBrains Mono (`docs/channels.md`, The terminal panel).
 - `scripts/anthropic-mono.py` fills `~/.emaki/fonts`: given the roman and
   italic woff2, it unpacks each to TrueType and writes a second copy under
   the family `Inline Anthropic Mono` with the em enlarged by 1/0.9.
@@ -123,6 +124,8 @@ Four settings in `config.json` under `app`, changed in the settings panel:
   the vendored toolkit's `strong_font_weight`.
 
 The panel also sets `driver.default_mode` and `driver.default_model`.
+The terminal's own settings are under `terminal`, in the panel's Terminal
+section (`docs/channels.md`, The terminal panel).
 `driver.claude_path` names the `claude` binary when `PATH` does not.
 
 ## The picture and the name
