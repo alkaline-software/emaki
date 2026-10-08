@@ -5,6 +5,21 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.1.8
+
+- Click a file in the files panel to read it in a pane beside the conversation; click it again, or press ⌘W, to close it.
+- That pane shows code with line numbers and colours, markdown as it reads or as written, pictures, tables, and PDFs with search, selection, page previews and a table of contents.
+- The composer checks spelling and grammar as you type (English US or UK; Spanish, French and German spelling on a Mac) and capitalizes a new sentence. Right-click a marked word for corrections, Learn Spelling or Ignore.
+- Every text field has Emaki's own right-click menu.
+- The conversation follows new content when you are near the bottom, and a "New messages" button takes you to what arrived while you were reading higher up.
+- One terminal look for the shell and the agent's screen, after Kaku, with a Terminal section in Settings.
+- ⌘⇧T and ⌘⇧A show and hide the two sides of the terminal panel; in the shell, ⌘T opens a tab and ⌘W closes it.
+- The model and effort pills open a list in place, and code blocks in a conversation are coloured.
+- The archive copies sessions as clones where the disk allows, and a session its agent deleted stays listed as archived.
+- New icons (Tabler); the board is gone, and Projects is now All Projects.
+- A folder inside a repository shows git's marks for its own files only.
+- Fixes: a question with previews reads correctly and can be answered, a session whose process is gone stops showing as working, and a stopped prompt is not sent twice.
+
 ## v0.1.7
 
 - A terminal inside Emaki, at the conversation's right: shells in tabs, and the session's own agent as it runs. Nothing opens a terminal app any more.
