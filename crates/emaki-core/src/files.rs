@@ -290,3 +290,53 @@ pub fn mark_mentions(text: &str, cwd: &str) -> String {
     }
     out
 }
+
+/// A comma- or tab-separated file as rows of cells, for showing: quoted
+/// cells may hold the separator, a doubled quote and line breaks. No
+/// more than `most` rows are read; the second answer says whether the
+/// text went on.
+pub fn table(text: &str, sep: char, most: usize) -> (Vec<Vec<String>>, bool) {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let (mut row, mut cell, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+    let mut chars = text.strip_prefix('\u{feff}').unwrap_or(text).chars().peekable();
+    while let Some(c) = chars.next() {
+        if quoted {
+            match c {
+                '"' if chars.peek() == Some(&'"') => {
+                    chars.next();
+                    cell.push('"');
+                }
+                '"' => quoted = false,
+                c => cell.push(c),
+            }
+            continue;
+        }
+        match c {
+            '"' if cell.is_empty() => {
+                quoted = true;
+                any = true;
+            }
+            c if c == sep => {
+                row.push(std::mem::take(&mut cell));
+                any = true;
+            }
+            '\r' => {}
+            '\n' => {
+                if any || !cell.is_empty() {
+                    row.push(std::mem::take(&mut cell));
+                    rows.push(std::mem::take(&mut row));
+                }
+                any = false;
+                if rows.len() >= most {
+                    return (rows, chars.any(|c| !c.is_whitespace()));
+                }
+            }
+            c => cell.push(c),
+        }
+    }
+    if any || !cell.is_empty() {
+        row.push(cell);
+        rows.push(row);
+    }
+    (rows, false)
+}

@@ -226,7 +226,10 @@ impl ComponentTooltip {
 
 // ── Internal managed tooltip trait ──────────────────────────────────────────
 
-pub(crate) trait ManagedTooltipExt:
+/// Public so an application's own element gets the tooltip a `Button`
+/// has: one that comes in, and slides to the next element hovered on
+/// the same row. (Emaki addition: upstream keeps it to the crate.)
+pub trait ManagedTooltipExt:
     StatefulInteractiveElement + crate::ElementExt + Sized
 {
     fn managed_tooltip(

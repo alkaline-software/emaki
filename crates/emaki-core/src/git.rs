@@ -76,6 +76,9 @@ pub struct Status {
     whole: HashMap<PathBuf, State>,
     /// Every folder with a change somewhere under it.
     holding: HashMap<PathBuf, State>,
+    /// Something in the repository is not committed, here or outside
+    /// the folder asked about: what a change of branch has to ask of.
+    pub dirty: bool,
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
@@ -83,11 +86,24 @@ fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
-/// The state of everything in the repository `dir` is in, or `None`
-/// when it is in none. Paths are spelled as `dir` is: the repository's
-/// top is `dir` less its own place in the repository, not git's resolved
-/// path, which differs behind a symlink.
+/// Whether `dir` is in a repository as far as the window goes: inside
+/// one, and not a folder that repository ignores. A build folder under
+/// a checkout is on that checkout's disk and none of its business, so
+/// it has no branch, no marks and no changes.
+pub fn inside(dir: &Path) -> bool {
+    git(dir, &["rev-parse", "--git-dir"]).is_some() && git(dir, &["check-ignore", "-q", "."]).is_none()
+}
+
+/// The state of what is under `dir` in the repository it is in, or
+/// `None` when it is in none (`inside`). A folder part way down a
+/// repository is asked about by itself, as VS Code shows one: the
+/// changes counted are the ones under it. Paths are spelled as `dir`
+/// is: the repository's top is `dir` less its own place in the
+/// repository, not git's resolved path, which differs behind a symlink.
 pub fn status(dir: &Path) -> Option<Status> {
+    if !inside(dir) {
+        return None;
+    }
     let prefix = String::from_utf8_lossy(&git(dir, &["rev-parse", "--show-prefix"])?).trim_end_matches(['\r', '\n']).to_string();
     let mut top = dir;
     for _ in Path::new(&prefix).components() {
@@ -96,8 +112,10 @@ pub fn status(dir: &Path) -> Option<Status> {
     // Every untracked file by itself, as VS Code asks for them, so the
     // count of changes is the count of files; an ignored folder stays
     // one entry, or `target/` would be listed file by file.
-    let out = git(dir, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"])?;
-    Some(parse(top, &String::from_utf8_lossy(&out)))
+    let out = git(dir, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--", "."])?;
+    let mut status = parse(top, &String::from_utf8_lossy(&out));
+    status.dirty = status.changed_count() > 0 || (!prefix.is_empty() && dirty(dir));
+    Some(status)
 }
 
 /// `git status --porcelain=v1 -z` as states, under the repository's top.
@@ -239,9 +257,11 @@ fn line(dir: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// The branches of the repository `dir` is in, or `None` when it is in
-/// none.
+/// none (`inside`).
 pub fn branches(dir: &Path) -> Option<Branches> {
-    git(dir, &["rev-parse", "--git-dir"])?;
+    if !inside(dir) {
+        return None;
+    }
     let refs = String::from_utf8_lossy(&git(dir, &["for-each-ref", "--format=%(refname)%09%(committerdate:unix)", "refs/heads", "refs/remotes"])?).to_string();
     let mut b = Branches { current: line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]), head: line(dir, &["rev-parse", "--short", "HEAD"]).unwrap_or_default(), ..Default::default() };
     for row in refs.lines() {

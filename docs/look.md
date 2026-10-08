@@ -45,6 +45,12 @@ that were never replaced (the window controls, the right and bottom
 panels, `inspector`, `resize-corner`, `star-off`), none of which the
 window draws.
 
+## Code's colours
+
+The `highlight` part of each theme in `themes/emaki.json`: VS Code's
+Dark+ and Light+, on the window's own grounds, for the editor in the
+file's pane and a conversation's code blocks (`docs/panels.md`).
+
 ## Inline code
 
 The accent on a wash of itself, as the Claude app draws it. `md_view` sets

@@ -31,6 +31,9 @@ use emaki_core::watcher::Watcher;
 /// A process behind a transcript is assumed for this long after its last write
 /// when nothing else says so.
 pub const LIVE_GRACE_S: f64 = 600.0;
+/// The same for a Claude Code session whose transcript reads as working:
+/// see `Hub::is_live`.
+const WORKING_GRACE_S: f64 = 90.0;
 /// How long a session still at work goes between two copies into the
 /// archive. One whose turn is over is copied at once; this is for a turn
 /// that runs on. The archive is for a file the agent deletes or rewrites,
@@ -328,7 +331,19 @@ impl Hub {
                 fresh.insert(p.session_id.clone(), p);
             }
         }
-        *self.peers.lock().unwrap() = fresh;
+        // A process that was registered and no longer is has ended,
+        // whatever its transcript's tail reads as: killed part way
+        // through a turn, it left a prompt with no reply, which read as
+        // working for as long as a recent write is taken for a process.
+        let mut peers = self.peers.lock().unwrap();
+        let mut ended = self.ended.lock().unwrap();
+        for sid in peers.keys().filter(|sid| !fresh.contains_key(*sid)) {
+            ended.insert(sid.clone(), Instant::now());
+        }
+        for sid in fresh.keys() {
+            ended.remove(sid);
+        }
+        *peers = fresh;
     }
 
     /// The inbox of a terminal session, if Claude Code has one registered.
@@ -423,7 +438,13 @@ impl Hub {
         if self.has_ended(&r.session_id) {
             return false;
         }
-        now - r.mtime < LIVE_GRACE_S
+        // An interactive Claude Code always registers, so one that reads
+        // as working with no process registered is a headless run of
+        // someone's, which writes as it goes, or a process that died part
+        // way through a turn. A short quiet tells the two apart; the long
+        // grace kept a killed session "working" with its clock running.
+        let working = r.agent == AgentId::ClaudeCode && matches!(r.state.phase, emaki_core::build::Phase::Working);
+        now - r.mtime < if working { WORKING_GRACE_S } else { LIVE_GRACE_S }
     }
 
     // -- hidden terminals ---------------------------------------------------

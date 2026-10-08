@@ -4,7 +4,8 @@
 //! whole height under the top strip, chosen with a two-segment control at
 //! the strip's left end. The files are the session's folder as a tree, read from
 //! disk a folder at a time as it is opened; a click on a file shows it
-//! over the window, a right click offers what a file manager would. The
+//! at the conversation's right, a right click offers what a file manager
+//! would. The
 //! outline is `emaki_core::outline`: a line on what each round asked and
 //! a line on what came of it, the round in view marked, a click going
 //! there.
@@ -17,6 +18,7 @@ use std::time::Duration;
 use chrono::Datelike as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _};
@@ -71,8 +73,8 @@ const DIR_MAX: usize = 400;
 /// How often an open tree is read from disk again, in seconds.
 const TREE_SECS: f64 = 2.0;
 /// The most of a file a preview reads, and the most lines of code it sets.
-const PREVIEW_BYTES: usize = 400_000;
-const PREVIEW_LINES: usize = 1500;
+const PREVIEW_BYTES: usize = 1_500_000;
+const PREVIEW_LINES: usize = 20_000;
 
 /// How often a move of the conversation toward an outline entry is
 /// stepped, the most it may take, and its shape: how fast it runs while
@@ -306,7 +308,235 @@ impl Tree {
     }
 }
 
-/// A file shown over the window.
+/// How many of a PDF's pages are drawn, how wide in pixels, and how
+/// large a PDF is read at all.
+const PDF_PAGES: usize = 40;
+const PDF_W: f32 = 1400.;
+const PDF_BYTES: u64 = 120_000_000;
+/// How much of a table is shown.
+const TABLE_ROWS: usize = 500;
+const TABLE_COLS: usize = 40;
+const TABLE_CELL: usize = 48;
+/// How long the file's pane takes to come and to go.
+pub(crate) const FILE_ANIM: Duration = Duration::from_millis(200);
+/// How wide the pane is to begin with, and the least it is dragged to.
+pub(crate) const FILE_W: Pixels = px(460.);
+pub(crate) const FILE_MIN: Pixels = px(280.);
+
+/// One page of a PDF: its picture and that picture's size in pixels,
+/// the page's own size in its units, and which of the document's glyphs
+/// are on it.
+#[derive(Clone)]
+pub(crate) struct PdfPage {
+    image: std::sync::Arc<gpui::Image>,
+    /// The same page drawn small, for the list of pages: a large
+    /// picture drawn small is jagged.
+    thumb: std::sync::Arc<gpui::Image>,
+    px: (u32, u32),
+    unit: (f32, f32),
+    glyphs: std::ops::Range<usize>,
+}
+
+/// A glyph of a PDF's text, where the page draws it, in the page's
+/// units: the line it stands on and how far along it reaches. This is
+/// what a selection is made of, since the page shown is a picture.
+#[derive(Clone)]
+pub(crate) struct PdfGlyph {
+    x0: f32,
+    x1: f32,
+    base: f32,
+    em: f32,
+    text: String,
+    /// What stands between it and the glyph before: nothing, a space,
+    /// or a line break.
+    gap: u8,
+}
+
+/// A PDF as the pane shows it: the pages drawn, how many the file has,
+/// and the text in the order the file draws it.
+pub(crate) struct PdfDoc {
+    pages: Vec<PdfPage>,
+    total: usize,
+    glyphs: Vec<PdfGlyph>,
+    /// The file's own table of contents: each heading, the page it
+    /// leads to when that could be told, and how deep it is.
+    contents: Vec<(String, Option<usize>, usize)>,
+}
+
+impl PdfDoc {
+    /// The words from one glyph to another, both taken in.
+    fn text(&self, from: usize, to: usize) -> String {
+        let mut out = String::new();
+        for (ix, g) in self.glyphs.iter().enumerate().take(to + 1).skip(from) {
+            if ix > from {
+                match g.gap {
+                    1 => out.push(' '),
+                    2 => out.push('\n'),
+                    _ => {}
+                }
+            }
+            out.push_str(&g.text);
+        }
+        out
+    }
+
+    /// The glyph at a point of a page, or the nearest on that page: the
+    /// nearest line first, then the nearest along it.
+    fn glyph_at(&self, page: usize, x: f32, y: f32) -> Option<usize> {
+        let range = self.pages.get(page)?.glyphs.clone();
+        let mut best: Option<(f32, usize)> = None;
+        for ix in range {
+            let g = &self.glyphs[ix];
+            let (top, bottom) = (g.base - g.em * 0.85, g.base + g.em * 0.3);
+            let dy = if y < top { top - y } else if y > bottom { y - bottom } else { 0. };
+            let dx = if x < g.x0 { g.x0 - x } else if x > g.x1 { x - g.x1 } else { 0. };
+            let far = dy * 8. + dx;
+            if best.is_none_or(|(d, _)| far < d) {
+                best = Some((far, ix));
+            }
+        }
+        best.map(|(_, ix)| ix)
+    }
+
+    /// The word a glyph is in, and the line it is on.
+    fn word(&self, at: usize) -> (usize, usize) {
+        let solid = |g: &PdfGlyph| !g.text.trim().is_empty();
+        let (mut a, mut b) = (at, at);
+        while a > 0 && self.glyphs[a].gap == 0 && solid(&self.glyphs[a - 1]) && solid(&self.glyphs[a]) {
+            a -= 1;
+        }
+        while b + 1 < self.glyphs.len() && self.glyphs[b + 1].gap == 0 && solid(&self.glyphs[b + 1]) && solid(&self.glyphs[b]) {
+            b += 1;
+        }
+        (a, b)
+    }
+
+    fn line(&self, at: usize) -> (usize, usize) {
+        let (mut a, mut b) = (at, at);
+        while a > 0 && self.glyphs[a].gap != 2 {
+            a -= 1;
+        }
+        while b + 1 < self.glyphs.len() && self.glyphs[b + 1].gap != 2 {
+            b += 1;
+        }
+        (a, b)
+    }
+
+    /// Every place the words are found, as glyphs from and to, whatever
+    /// the case.
+    fn find(&self, words: &str) -> Vec<(usize, usize)> {
+        let needle = words.to_lowercase();
+        if needle.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut text = String::new();
+        // Where each glyph begins in the text searched.
+        let mut starts = Vec::with_capacity(self.glyphs.len());
+        for g in &self.glyphs {
+            if g.gap != 0 {
+                text.push(' ');
+            }
+            starts.push(text.len());
+            text.push_str(&g.text.to_lowercase());
+        }
+        let glyph_of = |byte: usize| starts.partition_point(|s| *s <= byte).saturating_sub(1);
+        text.match_indices(&needle).map(|(at, hit)| (glyph_of(at), glyph_of(at + hit.len() - 1))).collect()
+    }
+}
+
+/// How wide the list beside a PDF's pages is, and a page in it.
+const PDF_SIDE_W: f32 = 132.;
+const PDF_THUMB_W: f32 = 240.;
+
+/// A PDF's table of contents, read out of the file: the tree under
+/// `/Outlines`, each heading with the page its destination names. A
+/// destination is an array beginning with the page, or a name for one
+/// kept in the catalog's `/Dests` or in the name tree under `/Names`,
+/// which is how LaTeX writes them.
+mod pdf_contents {
+    use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Object};
+    use hayro::hayro_syntax::Pdf;
+    use std::collections::HashMap;
+
+    type Pages = HashMap<(i32, i32), usize>;
+
+    fn title(bytes: &[u8]) -> String {
+        let text = if bytes.starts_with(&[0xfe, 0xff]) {
+            String::from_utf16_lossy(&bytes[2..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect::<Vec<u16>>())
+        } else if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            String::from_utf8_lossy(&bytes[3..]).to_string()
+        } else {
+            bytes.iter().map(|b| *b as char).collect()
+        };
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn named<'a>(node: &Dict<'a>, key: &[u8], depth: usize) -> Option<Object<'a>> {
+        if depth > 12 {
+            return None;
+        }
+        if let Some(names) = node.get::<Array<'_>>("Names") {
+            let mut pairs = names.iter::<Object<'_>>();
+            while let (Some(name), Some(value)) = (pairs.next(), pairs.next()) {
+                if matches!(&name, Object::String(s) if s.as_bytes() == key) {
+                    return Some(value);
+                }
+            }
+        }
+        node.get::<Array<'_>>("Kids")?.iter::<Dict<'_>>().find_map(|kid| named(&kid, key, depth + 1))
+    }
+
+    fn page_of<'a>(dest: Object<'a>, root: &Dict<'a>, pages: &Pages, depth: usize) -> Option<usize> {
+        if depth > 4 {
+            return None;
+        }
+        match dest {
+            Object::Array(a) => match a.raw_iter().next()? {
+                MaybeRef::Ref(r) => pages.get(&(r.obj_number, r.gen_number)).copied(),
+                MaybeRef::NotRef(Object::Number(n)) => Some(n.as_f64() as usize),
+                _ => None,
+            },
+            Object::Dict(d) => page_of(d.get::<Object<'_>>("D")?, root, pages, depth + 1),
+            Object::String(s) => page_of(named(&root.get::<Dict<'_>>("Names")?.get::<Dict<'_>>("Dests")?, s.as_bytes(), 0)?, root, pages, depth + 1),
+            Object::Name(n) => page_of(root.get::<Dict<'_>>("Dests")?.get::<Object<'_>>(&*n)?, root, pages, depth + 1),
+            _ => None,
+        }
+    }
+
+    fn walk<'a>(mut item: Option<Dict<'a>>, depth: usize, root: &Dict<'a>, pages: &Pages, out: &mut Vec<(String, Option<usize>, usize)>) {
+        while let Some(it) = item {
+            if out.len() >= 2000 || depth > 8 {
+                return;
+            }
+            let name = it.get::<hayro::hayro_syntax::object::String<'_>>("Title").map(|s| title(s.as_bytes())).unwrap_or_default();
+            let dest = it.get::<Object<'_>>("Dest").or_else(|| it.get::<Dict<'_>>("A").and_then(|a| a.get::<Object<'_>>("D")));
+            if !name.is_empty() {
+                out.push((name, dest.and_then(|d| page_of(d, root, pages, 0)), depth));
+            }
+            walk(it.get::<Dict<'_>>("First"), depth + 1, root, pages, out);
+            item = it.get::<Dict<'_>>("Next");
+        }
+    }
+
+    pub fn read(pdf: &Pdf) -> Vec<(String, Option<usize>, usize)> {
+        let xref = pdf.xref();
+        let Some(root) = xref.get::<Dict<'_>>(xref.root_id()) else { return Vec::new() };
+        let pages: Pages = pdf.pages().iter().enumerate().filter_map(|(ix, page)| page.raw().obj_id().map(|id| ((id.obj_number, id.gen_number), ix))).collect();
+        let mut out = Vec::new();
+        walk(root.get::<Dict<'_>>("Outlines").and_then(|o| o.get::<Dict<'_>>("First")), 0, &root, &pages, &mut out);
+        out
+    }
+}
+
+/// What a right click on a PDF's page asks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PdfDo {
+    Copy,
+    SelectAll,
+}
+
+/// A file shown at the conversation's right.
+#[derive(Clone)]
 pub struct FileView {
     pub path: PathBuf,
     /// Its path under the session's folder, which is how it is named.
@@ -316,13 +546,23 @@ pub struct FileView {
     body: FileBody,
 }
 
+#[derive(Clone)]
 enum FileBody {
     /// Markdown, drawn as the conversation draws it.
     Markdown(String),
-    /// Anything else that is text, as a fenced block in its language,
-    /// with how many lines were left out.
-    Code(String, usize),
-    /// Not text, or not readable: why.
+    /// Anything else that is text: its lines, the language they are
+    /// in, and how many lines were left out.
+    Code(String, &'static str, usize),
+    /// A picture, with its size in pixels when its header says.
+    Picture(Option<(u32, u32)>),
+    /// A PDF: its first pages and their text. None while they are being
+    /// drawn.
+    Pages(Option<std::sync::Arc<PdfDoc>>),
+    /// A comma- or tab-separated file: rows of cells, the first the
+    /// head, each column's width in characters, and whether the file
+    /// has more rows than are shown.
+    Table(Vec<Vec<String>>, Vec<usize>, bool),
+    /// Not something the window shows, or not readable: why.
     None(String),
 }
 
@@ -380,11 +620,37 @@ fn read_file(path: &Path, root: &Path) -> FileView {
     let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
     let mtime = meta.as_ref().and_then(|m| m.modified().ok());
     let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if is_picture(path) {
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Picture(crate::workbench::file_image_dims(path)) };
+    }
+    if ext == "pdf" {
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Pages(None) };
+    }
     let mut bytes = Vec::new();
     let read = std::fs::File::open(path).and_then(|f| f.take(PREVIEW_BYTES as u64 + 1).read_to_end(&mut bytes));
     let body = match read {
         Err(e) => FileBody::None(format!("Could not read it: {e}")),
-        Ok(_) if bytes.iter().take(8192).any(|b| *b == 0) => FileBody::None("Not a text file.".into()),
+        Ok(_) if bytes.iter().take(8192).any(|b| *b == 0) => FileBody::None("Emaki cannot show this kind of file.".into()),
+        Ok(_) if ext == "csv" || ext == "tsv" => {
+            let cut = bytes.len() > PREVIEW_BYTES;
+            bytes.truncate(PREVIEW_BYTES);
+            let (mut rows, more) = emaki_core::files::table(&String::from_utf8_lossy(&bytes), if ext == "tsv" { '\t' } else { ',' }, TABLE_ROWS);
+            let cols = rows.iter().map(Vec::len).max().unwrap_or(0).min(TABLE_COLS);
+            let mut widths = vec![3usize; cols];
+            for row in rows.iter_mut() {
+                row.resize(cols, String::new());
+                for (cell, w) in row.iter_mut().zip(widths.iter_mut()) {
+                    // A cell is one line here; what it holds past that is the file's.
+                    if let Some(at) = cell.find('\n') {
+                        cell.truncate(at);
+                        cell.push('…');
+                    }
+                    *w = (*w).max(cell.chars().count()).min(TABLE_CELL);
+                }
+            }
+            FileBody::Table(rows, widths, more || cut)
+        }
         Ok(_) => {
             let cut = bytes.len() > PREVIEW_BYTES;
             bytes.truncate(PREVIEW_BYTES);
@@ -397,11 +663,103 @@ fn read_file(path: &Path, root: &Path) -> FileView {
                 let kept: String = text.lines().take(PREVIEW_LINES).collect::<Vec<_>>().join("\n");
                 // A file cut by size has more lines than were counted.
                 let dropped = total.saturating_sub(PREVIEW_LINES) + usize::from(cut);
-                FileBody::Code(emaki_core::render_md::code_block(&kept, lang), dropped)
+                FileBody::Code(kept, lang, dropped)
             }
         }
     };
     FileView { path: path.to_path_buf(), rel, size, mtime, body }
+}
+
+/// Collects a page's text as the interpreter draws it: each glyph
+/// with its place on the page.
+struct PdfText {
+    out: Vec<PdfGlyph>,
+}
+
+impl<'a> hayro::hayro_interpret::Device<'a> for PdfText {
+    fn draw_path(&mut self, _: &hayro::kurbo::BezPath, _: hayro::hayro_interpret::DrawProps<'a>, _: &hayro::hayro_interpret::DrawMode) {}
+    fn push_clip_path(&mut self, _: &hayro::hayro_interpret::ClipPath) {}
+    fn push_transparency_group(&mut self, _: f32, _: Option<hayro::hayro_interpret::SoftMask<'a>>, _: hayro::hayro_interpret::BlendMode) {}
+    fn draw_glyph_run(&mut self, run: &hayro::hayro_interpret::font::GlyphRun<'_, 'a>, props: hayro::hayro_interpret::DrawProps<'a>, _: &hayro::hayro_interpret::DrawMode) {
+        use hayro::hayro_interpret::font::Glyph;
+        use hayro::hayro_interpret::hayro_cmap::BfString;
+        use hayro::kurbo::Point;
+        for glyph in run.glyphs() {
+            let Some(unicode) = glyph.as_unicode() else { continue };
+            let text = match unicode {
+                BfString::Char(c) => c.to_string(),
+                BfString::String(s) => s,
+            };
+            // A glyph's own room is a thousand to the em.
+            let place = props.transform * glyph.transform();
+            let advance = match &**glyph {
+                Glyph::Outline(outline) => outline.advance_width().unwrap_or(500.) as f64,
+                _ => 500.,
+            };
+            let (from, to, up) = (place * Point::new(0., 0.), place * Point::new(advance, 0.), place * Point::new(0., 1000.));
+            let em = (up.y - from.y).abs().max((up.x - from.x).abs()) as f32;
+            if em < 0.5 || !from.x.is_finite() || !from.y.is_finite() {
+                continue;
+            }
+            let (x0, x1) = (from.x.min(to.x) as f32, from.x.max(to.x) as f32);
+            self.out.push(PdfGlyph { x0, x1: x1.max(x0 + em * 0.2), base: from.y as f32, em, text, gap: 0 });
+        }
+    }
+    fn draw_image(&mut self, _: hayro::hayro_interpret::Image<'a, '_>, _: hayro::hayro_interpret::ImageDrawProps<'a>) {}
+    fn pop_clip(&mut self) {}
+    fn pop_transparency_group(&mut self) {}
+}
+
+/// A PDF's first pages as pictures with their text, and how many pages
+/// it has. Slow enough to be kept off the main thread. The renderer is
+/// hayro, which is all Rust; a file it cannot read, or stops on, is
+/// said so.
+fn pdf_pages(path: &Path) -> Result<PdfDoc, String> {
+    use hayro::hayro_interpret::{interpret_page, Context, InterpreterCache, InterpreterSettings, TransformExt as _};
+    use hayro::hayro_syntax::Pdf;
+    use hayro::vello_cpu::color::palette::css::WHITE;
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > PDF_BYTES {
+        return Err("This PDF is too large to show here.".into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Could not read it: {e}"))?;
+    let drawn = std::panic::catch_unwind(move || {
+        let pdf = Pdf::new(bytes).ok()?;
+        let cache = hayro::RenderCache::new();
+        let words = InterpreterCache::new();
+        let all = pdf.pages();
+        let (mut pages, mut glyphs) = (Vec::new(), Vec::<PdfGlyph>::new());
+        for page in all.iter().take(PDF_PAGES) {
+            let (w, h) = page.render_dimensions();
+            let scale = (PDF_W / w.max(1.)).min(4.);
+            let pixmap = hayro::render(page, &cache, &InterpreterSettings::default(), &hayro::RenderSettings::default(), &hayro::PixmapSettings { x_scale: scale, y_scale: scale, bg_color: WHITE });
+            let px = (pixmap.width() as u32, pixmap.height() as u32);
+            let png = pixmap.into_png().ok()?;
+            let small = PDF_THUMB_W / w.max(1.);
+            let thumb = hayro::render(page, &cache, &InterpreterSettings::default(), &hayro::RenderSettings::default(), &hayro::PixmapSettings { x_scale: small, y_scale: small, bg_color: WHITE }).into_png().ok()?;
+            // The text, by the same reading of the page that drew it.
+            let mut text = PdfText { out: Vec::new() };
+            let mut context = Context::new(page.initial_transform(true).to_kurbo(), hayro::kurbo::Rect::new(0., 0., w as f64, h as f64), &words, page.xref(), InterpreterSettings::default());
+            interpret_page(page, &mut context, &mut text);
+            let from = glyphs.len();
+            for (ix, mut g) in text.out.into_iter().enumerate() {
+                // A new line where the baseline moves or the text goes
+                // back; a space where there is room for one.
+                g.gap = match glyphs.last().filter(|_| ix > 0) {
+                    None => 2,
+                    Some(was) if (g.base - was.base).abs() > was.em.max(g.em) * 0.5 || g.x0 < was.x0 - was.em => 2,
+                    Some(was) if g.x0 - was.x1 > g.em * 0.18 => 1,
+                    Some(_) => 0,
+                };
+                glyphs.push(g);
+            }
+            pages.push(PdfPage { image: std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)), thumb: std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, thumb)), px, unit: (w, h), glyphs: from..glyphs.len() });
+        }
+        Some(PdfDoc { pages, total: all.len(), glyphs, contents: pdf_contents::read(&pdf) })
+    });
+    match drawn {
+        Ok(Some(doc)) if !doc.pages.is_empty() => Ok(doc),
+        _ => Err("This PDF could not be drawn.".into()),
+    }
 }
 
 /// "Today", "Yesterday", or the date, for the outline's heads.
@@ -563,7 +921,7 @@ impl Workbench {
                 // set. Without one the mark stayed lit when its segment
                 // went back to rest with the pointer elsewhere.
                 .hover(|s| s.text_color(theme.foreground))
-                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(which, cx)))
                 .child(Icon::default().path(icon).with_size(px(15.)))
@@ -640,7 +998,85 @@ impl Workbench {
     /// `CONVERSATION_MIN` beside it.
     fn panel_max(&self) -> Pixels {
         let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
-        PANEL_MAX.min(self.pane_w - CONVERSATION_MIN - term).max(PANEL_MIN)
+        PANEL_MAX.min(self.pane_w - CONVERSATION_MIN - term - self.file_pane_least()).max(PANEL_MIN)
+    }
+
+    /// Whether the file's pane is drawn.
+    pub(crate) fn file_pane_shown(&self) -> bool {
+        self.file_view.is_some() && self.page == Page::Session && self.detail.is_some() && !self.fold_file
+    }
+
+    /// The least the file's pane takes of the row, none when it is away.
+    pub(crate) fn file_pane_least(&self) -> Pixels {
+        if self.file_pane_shown() { FILE_MIN } else { px(0.) }
+    }
+
+    /// Where the file's pane begins: after the files or the outline.
+    fn file_pane_left(&self) -> Pixels {
+        let (files, outline) = self.panels_shown();
+        self.panel_left() + if files || outline { self.panel_w_now() } else { px(0.) }
+    }
+
+    /// The pane's width as drawn: what it was dragged to, less when the
+    /// conversation would be left with too little. It gives way before
+    /// the terminal and the panel at its left do.
+    pub(crate) fn file_pane_w(&self) -> Pixels {
+        let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
+        self.file_w.min(self.view_w - self.file_pane_left() - term - CONVERSATION_MIN).max(FILE_MIN)
+    }
+
+    /// The pane's edge follows the pointer while it is held.
+    pub(crate) fn file_drag_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if e.pressed_button != Some(MouseButton::Left) {
+            if std::mem::take(&mut self.file_drag) {
+                self.save_ui(true);
+            }
+            return;
+        }
+        let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
+        let left = self.file_pane_left();
+        let w = (e.position.x - left).clamp(FILE_MIN, (self.view_w - left - term - CONVERSATION_MIN).max(FILE_MIN));
+        if w != self.file_w {
+            self.file_w = w;
+            cx.notify();
+        }
+    }
+
+    /// The strip over the pane's right edge, lit under the pointer; a
+    /// double click puts the width back.
+    pub(crate) fn render_file_grip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.file_pane_shown() {
+            return None;
+        }
+        let line = cx.theme().primary.opacity(0.55);
+        let held = self.file_drag;
+        Some(
+            div()
+                .id("file-grip")
+                .group("file-grip")
+                .absolute()
+                .top(crate::workbench::TITLEBAR_H)
+                .bottom_0()
+                .left(self.file_pane_left() + self.file_pane_w() - PANEL_GRIP / 2.)
+                .w(PANEL_GRIP)
+                .occlude()
+                .cursor(CursorStyle::ResizeLeftRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                        if ev.click_count == 2 {
+                            this.file_drag = false;
+                            this.file_w = FILE_W;
+                            this.save_ui(true);
+                        } else {
+                            this.file_drag = true;
+                        }
+                        swallow_click(window, cx);
+                        cx.notify();
+                    }),
+                )
+                .child(div().absolute().top_0().h_full().left(PANEL_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("file-grip", move |s| s.bg(line))),
+        )
     }
 
     /// The panel's width as drawn: what it was dragged to, less when the
@@ -764,10 +1200,9 @@ impl Workbench {
         if let Some(v) = &self.file_view {
             let now = std::fs::metadata(&v.path).ok().and_then(|m| m.modified().ok());
             if now.is_some() && now != v.mtime {
-                if let Some(root) = self.files_root() {
-                    self.file_view = Some(read_file(&v.path.clone(), &root));
-                    cx.notify();
-                }
+                let path = v.path.clone();
+                self.show_file(&path, cx);
+                cx.notify();
             }
         }
         if (!self.panels_shown().0 && self.changes.is_none()) || self.now - self.tree.read_at < TREE_SECS {
@@ -820,25 +1255,432 @@ impl Workbench {
         cx.notify();
     }
 
-    /// A click on a file: a picture opens in the lightbox, anything else
-    /// in the sheet that shows a file.
+    /// A click on a file in the tree shows it, or puts it away when it
+    /// is the one showing.
+    fn file_clicked(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_view.as_ref().is_some_and(|v| v.path == path) {
+            self.tree.picked = Some(path.to_path_buf());
+            self.close_file_view(cx);
+        } else {
+            self.file_preview(path, window, cx);
+        }
+    }
+
+    /// Shows a file between the tree and the conversation. The pane
+    /// comes in motion when there was none; another file takes the place
+    /// of the one showing.
     pub(crate) fn file_preview(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.files_root() else { return };
-        self.tree.picked = Some(path.to_path_buf());
-        if is_picture(path) {
-            let rel = path.strip_prefix(&root).unwrap_or(path).to_string_lossy().to_string();
-            self.preview_attachment(rel, Some(path.to_path_buf()), Some(ImageSource::from(path.to_path_buf())), window, cx);
+        if self.files_root().is_none() {
             return;
         }
-        self.file_view = Some(read_file(path, &root));
+        self.tree.picked = Some(path.to_path_buf());
+        let was = self.file_view.is_some();
+        self.show_file(path, cx);
         self.file_view_scroll.set_offset(point(px(0.), px(0.)));
+        self.file_serial += 1;
+        self.pdf_reset();
+        if !was {
+            self.file_gone = None;
+            self.file_anim = Some((true, std::time::Instant::now(), self.file_serial));
+        }
+        if self.fold_file {
+            self.notice = Some(Notice::said("the window is too narrow to show the file beside the conversation"));
+        }
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
+    /// Reads the file for the pane. A PDF's pages are drawn off the main
+    /// thread and put in when they are done, if the file is still the
+    /// one showing.
+    fn show_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        let view = read_file(path, &root);
+        let pdf = matches!(view.body, FileBody::Pages(None));
+        // The pages drawn so far stay while a changed file is drawn again.
+        let kept = self.file_view.take().filter(|was| pdf && was.path == path).map(|was| was.body);
+        self.file_view = Some(FileView { body: kept.unwrap_or(view.body.clone()), ..view });
+        if !pdf {
+            return;
+        }
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let from = path.clone();
+            let got = cx.background_executor().spawn(async move { pdf_pages(&from) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(v) = this.file_view.as_mut().filter(|v| v.path == path) {
+                    v.body = match got {
+                        Ok(doc) => FileBody::Pages(Some(std::sync::Arc::new(doc))),
+                        Err(why) => FileBody::None(why),
+                    };
+                    this.pdf_sel = None;
+                    this.pdf_find(cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The pane goes, in motion; drawn as it was for that moment.
     pub(crate) fn close_file_view(&mut self, cx: &mut Context<Self>) {
-        self.file_view = None;
+        if let Some(v) = self.file_view.take() {
+            self.file_gone = Some(v);
+            self.file_serial += 1;
+            self.file_anim = Some((false, std::time::Instant::now(), self.file_serial));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(FILE_ANIM + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.file_view.is_none() && this.file_anim.is_some_and(|(_, at, _)| at.elapsed() >= FILE_ANIM) {
+                        this.file_gone = None;
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         cx.notify();
+    }
+
+    /// The folder showing changed: the file shown is that folder's own,
+    /// kept while another folder's session shows and back when one of
+    /// this folder's does. Nothing moves; the pane is another folder's.
+    pub(crate) fn sync_file_root(&mut self, cx: &mut Context<Self>) {
+        let root = self.files_root();
+        if root == self.file_root {
+            return;
+        }
+        match (self.file_root.take(), self.file_view.take()) {
+            (Some(old), Some(v)) => {
+                self.file_for.insert(old, v.path);
+            }
+            (Some(old), None) => {
+                self.file_for.remove(&old);
+            }
+            _ => {}
+        }
+        (self.file_gone, self.file_anim) = (None, None);
+        self.pdf_reset();
+        self.file_root = root.clone();
+        if let Some(path) = root.and_then(|r| self.file_for.get(&r).cloned()).filter(|p| p.is_file()) {
+            self.tree.picked = Some(path.clone());
+            self.show_file(&path, cx);
+        }
+    }
+
+    // -- a PDF's text ---------------------------------------------------------
+
+    fn pdf_doc(&self) -> Option<std::sync::Arc<PdfDoc>> {
+        match &self.file_view.as_ref()?.body {
+            FileBody::Pages(Some(doc)) => Some(doc.clone()),
+            _ => None,
+        }
+    }
+
+    /// Another file, or none: what was selected and found was the last one's.
+    fn pdf_reset(&mut self) {
+        (self.pdf_sel, self.pdf_drag, self.pdf_find_open, self.pdf_hit) = (None, None, false, 0);
+        self.pdf_hits.clear();
+        self.pdf_bounds.borrow_mut().clear();
+    }
+
+    /// The glyph under a point of the window, on whichever page it is.
+    fn pdf_glyph_at(&self, at: Point<Pixels>) -> Option<usize> {
+        let doc = self.pdf_doc()?;
+        let bounds = self.pdf_bounds.borrow();
+        // The page under the point, or the nearest above or below it.
+        let (page, b) = bounds.iter().enumerate().min_by_key(|(_, b)| if at.y < b.top() { f32::from(b.top() - at.y) as i64 } else if at.y > b.bottom() { f32::from(at.y - b.bottom()) as i64 } else { 0 })?;
+        let unit = doc.pages.get(page)?.unit;
+        let scale = unit.0 / f32::from(b.size.width).max(1.);
+        doc.glyph_at(page, f32::from(at.x - b.left()) * scale, f32::from(at.y - b.top()) * scale)
+    }
+
+    /// The left button went down on a page: a selection begins there,
+    /// by the letter, or is the word or the line on a second or third
+    /// click. With ⇧ the one there reaches to the press.
+    fn pdf_mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.file_focus, cx);
+        let (Some(doc), Some(at)) = (self.pdf_doc(), self.pdf_glyph_at(e.position)) else { return };
+        match (e.click_count, self.pdf_sel) {
+            (2, _) => (self.pdf_sel, self.pdf_drag) = (Some(doc.word(at)), None),
+            (n, _) if n >= 3 => (self.pdf_sel, self.pdf_drag) = (Some(doc.line(at)), None),
+            (_, Some((from, _))) if e.modifiers.shift => (self.pdf_sel, self.pdf_drag) = (Some((from.min(at), from.max(at))), Some(from)),
+            // A press alone selects nothing until the pointer moves.
+            _ => (self.pdf_sel, self.pdf_drag) = (None, Some(at)),
+        }
+        cx.notify();
+    }
+
+    /// The pointer moved with the button held: the selection reaches it.
+    fn pdf_mouse_move(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(anchor) = self.pdf_drag else { return };
+        if e.pressed_button != Some(MouseButton::Left) {
+            self.pdf_drag = None;
+            return;
+        }
+        if let Some(at) = self.pdf_glyph_at(e.position) {
+            let sel = Some((anchor.min(at), anchor.max(at)));
+            if sel != self.pdf_sel {
+                self.pdf_sel = sel;
+                cx.notify();
+            }
+        }
+    }
+
+    /// A right click on a page: Copy for what is selected, Select All,
+    /// and what can be done with the file.
+    fn pdf_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.file_focus, cx);
+        let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
+        if self.pdf_sel.is_some() {
+            items.push(("Copy", MenuDo::Pdf(PdfDo::Copy)));
+        }
+        items.push(("Select All", MenuDo::Pdf(PdfDo::SelectAll)));
+        self.file_pane_menu(items, at, cx);
+    }
+
+    /// The pane's menu: what the place pressed offers first, then what
+    /// every file has, as its row in the tree does.
+    fn file_pane_menu(&mut self, mut items: Vec<(&'static str, MenuDo)>, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(path) = self.file_view.as_ref().map(|v| v.path.clone()) else { return };
+        if !items.is_empty() {
+            items.push(("", MenuDo::Rule));
+        }
+        items.extend([
+            ("Add to Message", MenuDo::File(FileDo::Mention, path.clone())),
+            ("Open", MenuDo::File(FileDo::Open, path.clone())),
+            (crate::sys::REVEAL_LABEL, MenuDo::File(FileDo::Reveal, path.clone())),
+            ("", MenuDo::Rule),
+            ("Copy Path", MenuDo::File(FileDo::CopyPath, path.clone())),
+            ("Copy Relative Path", MenuDo::File(FileDo::CopyRel, path)),
+        ]);
+        self.open_menu(at, items, cx);
+    }
+
+    /// A right click on a file that is not a PDF: Copy for the words
+    /// selected, or the picture, and what every file has. The text
+    /// under the pointer selects its word at the same press, so what is
+    /// selected is asked once the press has been handed round.
+    fn file_body_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let picture = self.file_view.as_ref().filter(|v| matches!(v.body, FileBody::Picture(_))).map(|v| v.path.clone());
+        let this = cx.entity();
+        window.defer(cx, move |window, cx| {
+            let text = gpui_base::TextSelection::selected_text(window, cx);
+            this.update(cx, |this, cx| {
+                let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
+                if !text.trim().is_empty() {
+                    items.push(("Copy", MenuDo::Copy(text)));
+                }
+                if let Some(path) = picture {
+                    items.push(("Copy Image", MenuDo::CopyImage(crate::workbench::Pic::File(path))));
+                }
+                this.file_pane_menu(items, at, cx);
+            });
+        });
+    }
+
+    /// One of the two buttons over a PDF: its list of pages, or its
+    /// table of contents. The one showing goes at a second press.
+    fn pdf_side_toggle(&mut self, pages: bool, cx: &mut Context<Self>) {
+        let was = self.pdf_side;
+        self.pdf_side = (was != Some(pages)).then_some(pages);
+        self.pdf_side_anim = Some((was, std::time::Instant::now(), self.pdf_side_anim.map(|(_, _, n)| n + 1).unwrap_or(1)));
+        self.save_ui(true);
+        if was.is_some() {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(FILE_ANIM + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The page at the top of the pane's view.
+    fn pdf_page_now(&self) -> usize {
+        let line = self.file_view_scroll.bounds().top() + px(90.);
+        let bounds = self.pdf_bounds.borrow();
+        bounds.iter().rposition(|b| b.size.height > px(0.) && b.top() <= line).unwrap_or(0)
+    }
+
+    /// Brings a page to the top of the pane.
+    fn pdf_go_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let Some(b) = self.pdf_bounds.borrow().get(page).copied() else { return };
+        let (view, at) = (self.file_view_scroll.bounds(), self.file_view_scroll.offset());
+        let to = at.y - (b.top() - view.top() - px(10.));
+        self.file_view_scroll.set_offset(point(at.x, to.clamp(-self.file_view_scroll.max_offset().y, px(0.))));
+        cx.notify();
+    }
+
+    pub(crate) fn pdf_do(&mut self, what: PdfDo, cx: &mut Context<Self>) {
+        let Some(doc) = self.pdf_doc() else { return };
+        match what {
+            PdfDo::Copy => {
+                if let Some((from, to)) = self.pdf_sel {
+                    cx.write_to_clipboard(ClipboardItem::new_string(doc.text(from, to)));
+                }
+            }
+            PdfDo::SelectAll => self.pdf_sel = (!doc.glyphs.is_empty()).then(|| (0, doc.glyphs.len() - 1)),
+        }
+        cx.notify();
+    }
+
+    /// A key in the pane with a PDF showing: ⌘C copies what is selected
+    /// and ⌘A selects it all. Anything else is the window's.
+    fn pdf_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.pdf_doc().is_none() || !e.keystroke.modifiers.secondary() {
+            return;
+        }
+        match e.keystroke.key.as_str() {
+            "c" if self.pdf_sel.is_some() => self.pdf_do(PdfDo::Copy, cx),
+            "a" => self.pdf_do(PdfDo::SelectAll, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    /// ⌘F with the pane's PDF in hand: its own find row, with the caret
+    /// in it. False when there is no PDF to find in or the keyboard is
+    /// elsewhere, and the find is the conversation's.
+    pub(crate) fn pdf_find_open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let here = self.file_focus.is_focused(window) || self.pdf_find_input.read(cx).focus_handle(cx).is_focused(window);
+        if self.pdf_doc().is_none() || !self.file_pane_shown() || !here {
+            return false;
+        }
+        self.pdf_find_open = true;
+        self.pdf_find_input.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        self.pdf_find(cx);
+        true
+    }
+
+    pub(crate) fn pdf_find_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pdf_find_open = false;
+        self.pdf_hits.clear();
+        window.focus(&self.file_focus, cx);
+        cx.notify();
+    }
+
+    /// Finds the row's words in the PDF and goes to the first place.
+    pub(crate) fn pdf_find(&mut self, cx: &mut Context<Self>) {
+        if !self.pdf_find_open {
+            return;
+        }
+        let words = self.pdf_find_input.read(cx).value().to_string();
+        self.pdf_hits = self.pdf_doc().map(|doc| doc.find(&words)).unwrap_or_default();
+        self.pdf_hit = 0;
+        self.pdf_find_show(cx);
+    }
+
+    /// To the next place the words are, or the one before, round the ends.
+    pub(crate) fn pdf_find_step(&mut self, by: i64, cx: &mut Context<Self>) {
+        let n = self.pdf_hits.len() as i64;
+        if n > 0 {
+            self.pdf_hit = ((self.pdf_hit as i64 + by).rem_euclid(n)) as usize;
+            self.pdf_find_show(cx);
+        }
+    }
+
+    /// Brings the place the find is on into view, a little under the
+    /// pane's top.
+    fn pdf_find_show(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+        let (Some(doc), Some((from, _))) = (self.pdf_doc(), self.pdf_hits.get(self.pdf_hit).copied()) else { return };
+        let Some(page) = doc.pages.iter().position(|p| p.glyphs.contains(&from)) else { return };
+        let Some(b) = self.pdf_bounds.borrow().get(page).copied() else { return };
+        let y = b.top() + b.size.height * (doc.glyphs[from].base / doc.pages[page].unit.1.max(1.));
+        let view = self.file_view_scroll.bounds();
+        if y < view.top() + px(40.) || y > view.bottom() - px(40.) {
+            let at = self.file_view_scroll.offset();
+            let to = at.y - (y - view.top() - px(110.));
+            self.file_view_scroll.set_offset(point(at.x, to.clamp(-self.file_view_scroll.max_offset().y, px(0.))));
+        }
+    }
+
+    /// The toolkit's name for a language, or plain text where it has no
+    /// grammar for it.
+    fn editor_language(&self, lang: &str) -> &'static str {
+        match lang {
+            "jsx" => "javascript",
+            "scss" => "css",
+            "python" => "python",
+            "r" => "r",
+            "javascript" => "javascript",
+            "typescript" => "typescript",
+            "tsx" => "tsx",
+            "json" => "json",
+            "bash" => "bash",
+            "yaml" => "yaml",
+            "toml" => "toml",
+            "markdown" => "markdown",
+            "html" => "html",
+            "css" => "css",
+            "sql" => "sql",
+            "go" => "go",
+            "rust" => "rust",
+            "c" => "c",
+            "cpp" => "cpp",
+            "java" => "java",
+            "ruby" => "ruby",
+            "swift" => "swift",
+            "lua" => "lua",
+            "csharp" => "csharp",
+            "kotlin" => "kotlin",
+            "php" => "php",
+            "zig" => "zig",
+            "scala" => "scala",
+            "elixir" => "elixir",
+            "proto" => "proto",
+            "graphql" => "graphql",
+            "cmake" => "cmake",
+            "make" => "make",
+            "diff" => "diff",
+            "svelte" => "svelte",
+            "astro" => "astro",
+            _ => "text",
+        }
+    }
+
+    /// The editor for the file showing, made when the file, or what it
+    /// holds, is another: code, or markdown as it is written.
+    pub(crate) fn sync_file_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let want = self.file_view.as_ref().and_then(|v| match &v.body {
+            FileBody::Code(text, lang, _) => Some((format!("{}|{:?}|{}", v.path.display(), v.mtime, text.len()), text.clone(), *lang)),
+            FileBody::Markdown(text) if self.file_raw => Some((format!("{}|{:?}|{}", v.path.display(), v.mtime, text.len()), text.clone(), "markdown")),
+            _ => None,
+        });
+        match want {
+            None => self.file_editor = None,
+            Some((key, _, _)) if self.file_editor.as_ref().is_some_and(|(was, _)| *was == key) => {}
+            Some((key, text, lang)) => {
+                let language = self.editor_language(lang);
+                let state = cx.new(|cx| {
+                    let mut state = gpui_component::input::EditorState::new(window, cx).language(language).line_number(true).soft_wrap(true);
+                    state.set_value(text, window, cx);
+                    state
+                });
+                self.file_editor = Some((key, state));
+            }
+        }
+    }
+
+    /// Markdown as it reads, or as it is written.
+    fn set_file_raw(&mut self, raw: bool, cx: &mut Context<Self>) {
+        if self.file_raw != raw {
+            self.file_raw = raw;
+            self.file_mode_serial += 1;
+            self.save_ui(true);
+            self.file_serial += 1;
+            self.file_view_scroll.set_offset(point(px(0.), px(0.)));
+            cx.notify();
+        }
+    }
+
+    /// Where the wheel is over the file's pane.
+    pub(crate) fn file_pane_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.file_pane_shown().then(|| self.file_view_scroll.bounds())
     }
 
     fn file_menu(&mut self, node: Option<&Node>, at: Point<Pixels>, cx: &mut Context<Self>) {
@@ -1083,7 +1925,7 @@ impl Workbench {
                                 if click.dir {
                                     this.tree_toggle(&click.path, cx)
                                 } else {
-                                    this.file_preview(&click.path, window, cx)
+                                    this.file_clicked(&click.path, window, cx)
                                 }
                             }))
                             .on_mouse_down(
@@ -1255,7 +2097,9 @@ impl Workbench {
         // With changes not yet committed the person says where they go,
         // as GitHub Desktop asks it. A detached head has no branch to
         // leave them on.
-        if self.tree.git.as_ref().is_some_and(|(of, _)| *of == root) && !self.tree.changed.is_empty() {
+        // The changes are the repository's, not only this folder's: a
+        // switch moves all of them.
+        if self.tree.git.as_ref().is_some_and(|(of, st)| *of == root && st.dirty) {
             // A conflict still open is resolved before anything else: git
             // switches nowhere with one, and a stash cannot hold it.
             let open: Vec<String> = self.tree.changed.iter().filter(|(_, st)| *st == git::State::Conflict).map(|(p, _)| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string()).collect();
@@ -1723,7 +2567,7 @@ impl Workbench {
                 .cursor_pointer()
                 .text_size(px(11.5))
                 .text_color(theme.foreground)
-                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| this.open_changes(None, cx)))
                 .child(Icon::default().path("icons/git-diff.svg").with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
@@ -1977,88 +2821,456 @@ impl Workbench {
 
     // -- the file shown -------------------------------------------------------
 
-    pub(crate) fn render_file_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The file's pane in the row beside the conversation, or none:
+    /// between the tree and the conversation, widening in and narrowing
+    /// out as the panels at its sides do.
+    pub(crate) fn render_file_pane(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.page != Page::Session || self.detail.is_none() || self.fold_file {
+            return None;
+        }
+        let live = self.file_anim.filter(|(_, at, _)| at.elapsed() < FILE_ANIM);
+        let (v, leaving) = match (&self.file_view, &self.file_gone, live) {
+            (Some(v), _, _) => (v, false),
+            (None, Some(v), Some((false, _, _))) => (v, true),
+            _ => return None,
+        };
+        let w = self.file_pane_w();
+        let serial = self.file_anim.map(|(_, _, n)| n).unwrap_or(0);
+        let play = live.map(|(opening, _, _)| opening);
+        Some(
+            div()
+                .h_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(self.file_pane(v, w, leaving, cx))
+                .with_animation(ElementId::Name(format!("file-pane-{serial}").into()), Animation::new(FILE_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
+                    Some(opening) => {
+                        let t = if opening { t } else { 1. - t };
+                        d.w((w * t).round()).opacity(t)
+                    }
+                    None => d,
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The pane: a head naming the file, with what can be done with it,
+    /// over the file as the window can show it.
+    fn file_pane(&self, v: &FileView, w: Pixels, leaving: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let Some(v) = &self.file_view else { return div().into_any_element() };
         let name = v.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let folder = v.rel.strip_suffix(&name).unwrap_or("").trim_end_matches(['/', '\\']).to_string();
-        let (open, reveal, mention) = (v.path.clone(), v.path.clone(), v.path.clone());
-        let body = match &v.body {
+        let (open, open_too, reveal, mention) = (v.path.clone(), v.path.clone(), v.path.clone(), v.path.clone());
+        let (pad_x, pad_y) = (18., 16.);
+        // A PDF's pages give the list beside them its room.
+        let beside = if matches!(v.body, FileBody::Pages(Some(_))) && self.pdf_side.is_some() { PDF_SIDE_W } else { 0. };
+        let room = (f32::from(w) - beside - 2. * pad_x - 1.).max(120.);
+        let quiet = |words: String| div().text_size(px(12.)).text_color(theme.muted_foreground).child(words);
+        let mut wide = false;
+        let markdown = matches!(v.body, FileBody::Markdown(_));
+        let pdf = matches!(v.body, FileBody::Pages(Some(_)));
+        let body: AnyElement = match &v.body {
+            // Code, and markdown as it is written, are the editor's.
+            FileBody::Markdown(_) if self.file_raw => div().into_any_element(),
+            FileBody::Code(..) => div().into_any_element(),
             FileBody::Markdown(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
-            FileBody::Code(md, dropped) => v_flex()
-                .gap(px(10.))
-                .text_size(px(12.5))
-                .child(crate::transcript::md_view(format!("file-{}", v.rel), md.clone(), cx))
-                .when(*dropped > 0, |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(format!("Only the first {PREVIEW_LINES} lines are shown. Open the file for the rest."))))
-                .into_any_element(),
-            FileBody::None(why) => v_flex().py(px(60.)).gap(px(10.)).items_center().text_color(theme.muted_foreground).child(Icon::default().path(crate::assets::file_icon_path(&name)).with_size(px(36.))).child(div().text_size(px(13.)).child(why.clone())).into_any_element(),
-        };
-        div()
-            .id("file-overlay")
-            .absolute()
-            .inset_0()
-            .occlude()
-            .bg(theme.overlay)
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_click(cx.listener(|this, _, _, cx| this.close_file_view(cx)))
-            .child(
+            FileBody::Picture(size) => {
+                // At its own size when that fits, never larger.
+                let (pw, ph) = match size {
+                    Some((iw, ih)) if *iw > 0 && *ih > 0 => {
+                        let pw = room.min(*iw as f32);
+                        (pw, pw * *ih as f32 / *iw as f32)
+                    }
+                    _ => (room, room * 0.75),
+                };
+                v_flex().items_center().gap(px(8.)).child(img(v.path.clone()).w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.))).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
+            }
+            FileBody::Pages(None) => v_flex().py(px(60.)).items_center().child(quiet("Drawing the pages…".into())).into_any_element(),
+            FileBody::Pages(Some(doc)) => {
+                let (sel, hits, on) = (self.pdf_sel, std::rc::Rc::new(self.pdf_hits.clone()), self.pdf_hits.get(self.pdf_hit).copied());
+                let showing = self.pdf_find_open;
+                let (ink_sel, ink_hit, ink_on) = (gpui::rgba(0x2f7cf655), gpui::rgba(0xffd43b66), gpui::rgba(0xff922bb0));
                 v_flex()
-                    .id("file-sheet")
-                    .on_click(|_, window, cx| swallow_click(window, cx))
-                    .w(px(880.))
-                    .max_w(gpui::relative(0.94))
-                    .h(gpui::relative(0.88))
-                    .rounded(px(16.))
-                    .overflow_hidden()
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow(float_shadow(&theme))
-                    .child(
-                        h_flex()
-                            .h(px(50.))
+                    .gap(px(12.))
+                    .items_center()
+                    .children(doc.pages.iter().enumerate().map(|(ix, page)| {
+                        let (doc, places, hits) = (doc.clone(), self.pdf_bounds.clone(), hits.clone());
+                        let tall = room * page.px.1 as f32 / page.px.0.max(1) as f32;
+                        div()
+                            .id(("pdf-page", ix))
+                            .relative()
+                            .w(px(room))
+                            .h(px(tall))
                             .flex_shrink_0()
-                            .pl(px(18.))
-                            .pr(px(12.))
-                            .gap(px(10.))
-                            .items_center()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(gpui::white())
+                            .cursor(CursorStyle::IBeam)
+                            .child(img(ImageSource::Image(page.image.clone())).size_full())
+                            // Over the picture: where the page is, kept for
+                            // the mouse, and the marks of what is selected
+                            // and found, a line at a time.
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| {
+                                        let mut places = places.borrow_mut();
+                                        if places.len() <= ix {
+                                            places.resize(ix + 1, Bounds::default());
+                                        }
+                                        places[ix] = bounds;
+                                    },
+                                    move |bounds, _, window, _| {
+                                        let page = &doc.pages[ix];
+                                        let scale = f32::from(bounds.size.width) / page.unit.0.max(1.);
+                                        let mut mark = |from: usize, to: usize, ink: gpui::Rgba| {
+                                            let (from, to) = (from.max(page.glyphs.start), to.min(page.glyphs.end.saturating_sub(1)));
+                                            if page.glyphs.is_empty() || from > to {
+                                                return;
+                                            }
+                                            let mut run: Option<(f32, f32, f32, f32)> = None;
+                                            let mut flush = |run: &mut Option<(f32, f32, f32, f32)>| {
+                                                if let Some((x0, x1, base, em)) = run.take() {
+                                                    let at = bounds.origin + point(px(x0 * scale), px((base - em * 0.85) * scale));
+                                                    window.paint_quad(fill(Bounds::new(at, size(px((x1 - x0) * scale), px(em * 1.15 * scale))), ink));
+                                                }
+                                            };
+                                            for g in &doc.glyphs[from..=to] {
+                                                match &mut run {
+                                                    Some((_, x1, base, em)) if g.gap != 2 && (g.base - *base).abs() < *em * 0.5 => {
+                                                        *x1 = x1.max(g.x1);
+                                                        *em = em.max(g.em);
+                                                    }
+                                                    _ => {
+                                                        flush(&mut run);
+                                                        run = Some((g.x0, g.x1, g.base, g.em));
+                                                    }
+                                                }
+                                            }
+                                            flush(&mut run);
+                                        };
+                                        if showing {
+                                            for (from, to) in hits.iter() {
+                                                mark(*from, *to, if on == Some((*from, *to)) { ink_on } else { ink_hit });
+                                            }
+                                        }
+                                        if let Some((from, to)) = sel {
+                                            mark(from, to, ink_sel);
+                                        }
+                                    },
+                                )
+                                .absolute()
+                                .inset_0(),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                                    this.pdf_mouse_down(e, window, cx);
+                                    swallow_click(window, cx);
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.pdf_menu(e.position, window, cx);
+                                }),
+                            )
+                    }))
+                    .child(quiet(if doc.total > doc.pages.len() { format!("The first {} of {} pages. Open the file for the rest.", doc.pages.len(), doc.total) } else { plural(doc.total, "page", "pages") }))
+                    .into_any_element()
+            }
+            FileBody::Table(rows, widths, more) => {
+                wide = true;
+                // A column is as wide as its longest cell, up to a point.
+                let cell_w = |chars: usize| px(chars as f32 * 7.8 + 22.);
+                v_flex()
+                    .text_size(px(12.))
+                    .children(rows.iter().enumerate().map(|(ix, row)| {
+                        let whole: Rc<Vec<String>> = Rc::new(row.clone());
+                        h_flex()
+                            .h(px(26.))
+                            .flex_shrink_0()
                             .border_b_1()
                             .border_color(theme.border)
-                            .child(Icon::default().path(crate::assets::file_icon_path(&name)).with_size(px(16.)).text_color(theme.muted_foreground).flex_shrink_0())
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap(px(8.))
-                                    .items_baseline()
-                                    .child(div().flex_shrink_0().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                                    .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(theme.muted_foreground).child(folder))
-                                    .child(div().flex_shrink_0().text_size(px(11.)).text_color(theme.muted_foreground).child(human_size(v.size))),
-                            )
-                            .child(pill_button("file-mention", "Add to message", &theme, {
-                                let this = cx.entity().downgrade();
-                                move |_, window, cx| {
-                                    let _ = this.update(cx, |this, cx| {
-                                        this.file_view = None;
-                                        this.file_mention(&mention, window, cx);
-                                        cx.notify();
-                                    });
-                                }
+                            .when(ix == 0, |d| d.font_weight(FontWeight::SEMIBOLD).bg(theme.muted.opacity(0.5)))
+                            .children(row.iter().zip(widths).enumerate().map(|(col, (cell, chars))| {
+                                let whole = whole.clone();
+                                div().w(cell_w(*chars)).flex_shrink_0().px(px(10.)).truncate().child(cell.clone()).on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        let items = vec![("Copy Cell", MenuDo::Copy(whole[col].clone())), ("Copy Row", MenuDo::Copy(whole.join("\t")))];
+                                        this.file_pane_menu(items, e.position, cx);
+                                    }),
+                                )
                             }))
-                            .child(pill_button("file-open", "Open", &theme, move |_, _, _| crate::sys::open_path(&open)))
-                            .child(pill_button("file-reveal", crate::sys::REVEAL_LABEL, &theme, move |_, _, _| crate::sys::reveal_path(&reveal)))
-                            .child(Button::new("file-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| this.close_file_view(cx)))),
-                    )
+                    }))
+                    .when(*more, |d| d.child(div().pt(px(10.)).child(quiet(format!("Only the first {TABLE_ROWS} rows are shown. Open the file for the rest.")))))
+                    .into_any_element()
+            }
+            FileBody::None(why) => v_flex()
+                .py(px(60.))
+                .gap(px(12.))
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child(Icon::default().path(crate::assets::file_icon_path(&name)).with_size(px(36.)))
+                .child(div().text_size(px(13.)).text_center().child(why.clone()))
+                .child(pill_button("file-open-default", "Open with default app", &theme, move |_, _, _| crate::sys::open_path(&open_too)))
+                .into_any_element(),
+        };
+        // Code and raw markdown: the toolkit's editor, read only, with
+        // line numbers and the language's colours, both of which the
+        // head can turn off. It finds (⌘F), selects and copies by itself.
+        let code = matches!(v.body, FileBody::Code(..)) || (markdown && self.file_raw);
+        let editor = self.file_editor.as_ref().filter(|_| code && !leaving).map(|(_, state)| {
+            let menu = {
+                let (this, state) = (cx.entity().downgrade(), state.clone());
+                move |at: Point<Pixels>, window: &mut Window, cx: &mut App| {
+                    let (this, state) = (this.clone(), state.clone());
+                    // Asked from inside the editor's own update.
+                    window.defer(cx, move |_, cx| {
+                        let (selection, focus) = {
+                            let s = state.read(cx);
+                            (!s.selected_range().is_empty(), gpui::Focusable::focus_handle(s, cx))
+                        };
+                        let _ = this.update(cx, |this, cx| {
+                            let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
+                            if selection {
+                                items.push(("Copy", MenuDo::Edit(crate::workbench::EditDo::Copy, focus.clone())));
+                            }
+                            items.push(("Select All", MenuDo::Edit(crate::workbench::EditDo::SelectAll, focus)));
+                            this.file_pane_menu(items, at, cx);
+                        });
+                    });
+                }
+            };
+            gpui_component::input::Editor::new(state).readonly(true).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).on_secondary_click(menu).into_any_element()
+        });
+        let cut = match &v.body {
+            FileBody::Code(_, _, dropped) if *dropped > 0 => Some(div().flex_shrink_0().px(px(pad_x)).py(px(8.)).border_t_1().border_color(theme.border).child(quiet(format!("Only the first {PREVIEW_LINES} lines are shown. Open the file for the rest.")))),
+            _ => None,
+        };
+        // What the file is drawn again as, so a new one fades in.
+        let body = div().child(body).with_animation(ElementId::Name(format!("file-body-{}", self.file_serial).into()), Animation::new(FILE_ANIM), |d, t| d.opacity(t));
+        let tool = |id: &'static str, icon: Icon, tip: &'static str| Button::new(id).ghost().small().icon(icon).tooltip(tip);
+        // Two segments in the head, as the files and the outline have
+        // in the strip, smaller: for markdown how it shows, for a PDF
+        // what stands beside its pages. `on` is the first segment, the
+        // second, or neither; `was` what it was before the last press.
+        let pair = |key: &'static str, on: Option<bool>, was: Option<bool>, serial: u64, first: (&'static str, &'static str), second: (&'static str, &'static str), press: fn(&mut Self, bool, &mut Context<Self>), cx: &mut Context<Self>| {
+            let dark = theme.mode.is_dark();
+            let (seg_w, seg_h, pad, gap) = (26., 20., 2., 2.);
+            let x_of = |first: bool| pad + if first { 0. } else { seg_w + gap };
+            let (from, to) = if serial == 0 { (on, on) } else { (was, on) };
+            let plate = (from.is_some() || to.is_some()).then(|| {
+                let (a, b) = (x_of(from.or(to).unwrap_or(true)), x_of(to.or(from).unwrap_or(true)));
+                let (o_a, o_b) = (if from.is_some() { 1. } else { 0. }, if to.is_some() { 1. } else { 0. });
+                div().absolute().top(px(pad)).w(px(seg_w)).h(px(seg_h)).rounded(px(6.)).bg(if dark { theme.secondary_active } else { theme.popover }).shadow_sm().with_animation(
+                    ElementId::Name(format!("{key}-plate-{serial}").into()),
+                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                    move |d, t| d.left(px(a + (b - a) * t)).opacity(o_a + (o_b - o_a) * t),
+                )
+            });
+            let mut row = h_flex().relative().flex_shrink_0().p(px(pad)).gap(px(gap)).rounded(px(8.)).bg(if dark { theme.sidebar } else { theme.muted }).children(plate);
+            for (which, (icon, tip)) in [(true, first), (false, second)] {
+                row = row.child(
+                    h_flex()
+                        .id(SharedString::from(format!("{key}-{which}")))
+                        .w(px(seg_w))
+                        .h(px(seg_h))
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .text_color(if on == Some(which) { theme.foreground } else { theme.muted_foreground })
+                        .hover(|s| s.text_color(theme.foreground))
+                        .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| press(this, which, cx)))
+                        .child(Icon::default().path(icon).with_size(px(13.))),
+                );
+            }
+            row
+        };
+        let modes = if leaving {
+            None
+        } else if markdown {
+            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, ("icons/eye.svg", "Rendered"), ("icons/file-code.svg", "Raw"), |this, first, cx| this.set_file_raw(!first, cx), cx))
+        } else if pdf {
+            let (was, serial) = self.pdf_side_anim.map(|(was, _, n)| (was, n)).unwrap_or((self.pdf_side, 0));
+            Some(pair("pdf-side", self.pdf_side, was, serial, ("icons/gallery-vertical-end.svg", "Pages"), ("icons/list-bullets.svg", "Contents"), |this, first, cx| this.pdf_side_toggle(first, cx), cx))
+        } else {
+            None
+        };
+        // Beside a PDF's pages: the pages small, or the file's table of
+        // contents. A click goes to the page; the one in view is marked.
+        let side_live = self.pdf_side_anim.filter(|(_, at, _)| at.elapsed() < FILE_ANIM);
+        let side_what = self.pdf_side.or(side_live.and_then(|(was, _, _)| was));
+        let side = match (&v.body, side_what) {
+            (FileBody::Pages(Some(doc)), Some(pages)) if !leaving => {
+                let now = self.pdf_page_now();
+                let list: AnyElement = if pages {
+                    v_flex()
+                        .gap(px(10.))
+                        .items_center()
+                        .children(doc.pages.iter().enumerate().map(|(ix, page)| {
+                            let w = PDF_SIDE_W - 36.;
+                            v_flex()
+                                .id(("pdf-thumb", ix))
+                                .p(px(5.))
+                                .gap(px(3.))
+                                .items_center()
+                                .rounded(px(8.))
+                                .cursor_pointer()
+                                .when(ix == now, |d| d.bg(theme.primary.opacity(0.16)))
+                                .when(ix != now, |d| d.hover(|s| s.bg(theme.muted)))
+                                .on_click(cx.listener(move |this, _, _, cx| this.pdf_go_page(ix, cx)))
+                                .child(img(ImageSource::Image(page.thumb.clone())).w(px(w)).h(px(w * page.px.1 as f32 / page.px.0.max(1) as f32)).rounded(px(3.)).border_1().border_color(theme.border).bg(gpui::white()))
+                                .child(div().text_size(px(10.5)).text_color(if ix == now { theme.foreground } else { theme.muted_foreground }).child((ix + 1).to_string()))
+                        }))
+                        .into_any_element()
+                } else if doc.contents.is_empty() {
+                    div().px(px(10.)).py(px(14.)).text_size(px(11.5)).text_color(theme.muted_foreground).child("This file has no table of contents.").into_any_element()
+                } else {
+                    // The heading the page in view is under: the last one at or before it.
+                    let here = doc.contents.iter().rposition(|(_, page, _)| page.is_some_and(|p| p <= now));
+                    v_flex()
+                        .gap(px(1.))
+                        .children(doc.contents.iter().enumerate().map(|(ix, (title, page, depth))| {
+                            let page = *page;
+                            div()
+                                .id(("pdf-heading", ix))
+                                .w_full()
+                                .pl(px(8. + 9. * *depth as f32))
+                                .pr(px(6.))
+                                .py(px(4.))
+                                .rounded(px(6.))
+                                .text_size(px(11.5))
+                                .line_height(px(15.))
+                                .text_color(if Some(ix) == here { theme.foreground } else { theme.muted_foreground })
+                                .when(Some(ix) == here, |d| d.bg(theme.primary.opacity(0.16)).font_weight(FontWeight::MEDIUM))
+                                .when(page.is_some(), |d| d.cursor_pointer().hover(|s| s.bg(theme.muted).text_color(theme.foreground)))
+                                .when_some(page, |d, page| d.on_click(cx.listener(move |this, _, _, cx| this.pdf_go_page(page, cx))))
+                                .child(title.clone())
+                        }))
+                        .into_any_element()
+                };
+                let serial = self.pdf_side_anim.map(|(_, _, n)| n).unwrap_or(0);
+                // (widens or narrows, comes or goes)
+                let play = side_live.map(|(was, _, _)| (was.is_none(), self.pdf_side.is_some()));
+                Some(
+                    div()
+                        .h_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .child(div().id("pdf-side").w(px(PDF_SIDE_W)).h_full().border_r_1().border_color(theme.border).bg(theme.muted.opacity(0.25)).overflow_y_scroll().track_scroll(&self.pdf_side_scroll).px(px(6.)).py(px(8.)).child(list))
+                        .with_animation(ElementId::Name(format!("pdf-side-{serial}").into()), Animation::new(FILE_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
+                            Some((wide, comes)) if wide || !comes => {
+                                let t = if comes { t } else { 1. - t };
+                                d.w(px((PDF_SIDE_W * t).round())).opacity(t)
+                            }
+                            _ => d,
+                        }),
+                )
+            }
+            _ => None,
+        };
+        // A PDF's own find, under the head while it is asked for.
+        let find = (pdf && self.pdf_find_open && !leaving).then(|| {
+            let focus = self.pdf_find_input.read(cx).focus_handle(cx);
+            let value = self.pdf_find_input.read(cx).value().to_string();
+            let n = self.pdf_hits.len();
+            let count = if value.trim().is_empty() { String::new() } else if n == 0 { "no matches".into() } else { format!("{} of {n}", self.pdf_hit + 1) };
+            h_flex()
+                .id("file-find")
+                .key_context(crate::workbench::FIND_CONTEXT)
+                .h(px(34.))
+                .flex_shrink_0()
+                .pl(px(12.))
+                .pr(px(6.))
+                .gap(px(6.))
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(Icon::new(IconName::Search).with_size(px(13.)).text_color(theme.muted_foreground))
+                .child(div().id("file-find-field").track_focus(&focus).flex_1().min_w_0().text_size(px(12.5)).child(gpui_component::input::Input::new(&self.pdf_find_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.pdf_find_input, false, cx))))
+                .child(div().flex_shrink_0().text_size(px(11.)).text_color(if n == 0 && !value.trim().is_empty() { theme.danger } else { theme.muted_foreground }).child(count))
+                .child(tool("file-find-prev", Icon::new(IconName::ChevronUp), "Previous (⇧↩)").on_click(cx.listener(|this, _, _, cx| this.pdf_find_step(-1, cx))))
+                .child(tool("file-find-next", Icon::new(IconName::ChevronDown), "Next (↩)").on_click(cx.listener(|this, _, _, cx| this.pdf_find_step(1, cx))))
+                .child(tool("file-find-close", Icon::new(IconName::Close), "Close (esc)").on_click(cx.listener(|this, _, window, cx| this.pdf_find_close(window, cx))))
+        });
+        let scroller = v_flex().id("file-body").flex_1().min_h_0().px(px(pad_x)).py(px(pad_y)).track_scroll(&self.file_view_scroll).when(!pdf && !leaving, |d| {
+            // A PDF's pages and a table's cells have menus of their own.
+            d.on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, window, cx| this.file_body_menu(e.position, window, cx)))
+        });
+        v_flex()
+            .id("file-pane")
+            .w(w)
+            .h_full()
+            .flex_shrink_0()
+            .bg(theme.background)
+            .border_r_1()
+            .border_color(theme.border)
+            .when(!leaving, |d| d.track_focus(&self.file_focus))
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.pdf_key(e, cx)))
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.pdf_mouse_move(e, cx)))
+            // The page in view is said in the head and marked in the list.
+            .when(pdf, |d| d.on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())))
+            .on_click(|_, window, cx| swallow_click(window, cx))
+            .child(
+                h_flex()
+                    .h(HEAD_H)
+                    .flex_shrink_0()
+                    .pl(px(12.))
+                    .pr(px(6.))
+                    .gap(px(7.))
+                    .items_center()
+                    .bg(theme.muted.opacity(0.3))
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(img(crate::file_icons::path(&name, false, false, theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
                     .child(
-                        v_flex()
-                            .relative()
+                        h_flex()
                             .flex_1()
-                            .min_h_0()
-                            .child(v_flex().id("file-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.file_view_scroll).px(px(22.)).py(px(18.)).child(body))
-                            .vertical_scrollbar(&self.file_view_scroll),
-                    ),
+                            .min_w_0()
+                            .gap(px(7.))
+                            .items_baseline()
+                            .child(div().flex_shrink_0().max_w(relative(0.6)).truncate().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+                            .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(10.5)).text_color(theme.muted_foreground).child(folder))
+                            .child(div().flex_shrink_0().text_size(px(10.5)).text_color(theme.muted_foreground).child(match &v.body {
+                                FileBody::Pages(Some(doc)) => format!("page {} of {}", self.pdf_page_now() + 1, doc.total),
+                                _ => human_size(v.size),
+                            })),
+                    )
+                    .children(modes)
+                    .when(!leaving, |d| {
+                        d.child(tool("file-mention", Icon::default().path("icons/at.svg"), "Add to message").on_click({
+                            let this = cx.entity().downgrade();
+                            move |_, window, cx| {
+                                let _ = this.update(cx, |this, cx| this.file_mention(&mention, window, cx));
+                            }
+                        }))
+                        .child(tool("file-open", Icon::default().path("icons/external-link.svg"), "Open with default app").on_click(move |_, _, _| crate::sys::open_path(&open)))
+                        .child(tool("file-reveal", Icon::default().path("icons/folder-open.svg"), crate::sys::REVEAL_LABEL).on_click(move |_, _, _| crate::sys::reveal_path(&reveal)))
+                        .child(tool("file-close", Icon::new(IconName::Close), "Close (esc)").on_click(cx.listener(|this, _, _, cx| this.close_file_view(cx))))
+                    }),
+            )
+            .children(find)
+            .child(
+                h_flex().flex_1().min_h_0().items_stretch().children(side).child(
+                    v_flex()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .map(|d| match editor {
+                            // The editor scrolls itself; the wrapper only
+                            // says where the pane's body is.
+                            Some(editor) => d.child(div().id("file-body").flex_1().min_h_0().track_scroll(&self.file_view_scroll).pt(px(6.)).font_family(theme.mono_font_family.clone()).text_size(px(12.5)).child(editor)).children(cut),
+                            None => d.child(if wide { scroller.overflow_scroll().child(body) } else { scroller.overflow_y_scroll().child(body) }).vertical_scrollbar(&self.file_view_scroll),
+                        }),
+                ),
             )
             .into_any_element()
     }
@@ -2434,6 +3646,43 @@ impl Workbench {
                 if let Some(p) = under(&t["tree:".len()..]) {
                     self.tree_toggle(&p, cx);
                 }
+            }
+            "file:off" => self.close_file_view(cx),
+            "pdf:pages" => self.pdf_side_toggle(true, cx),
+            "pdf:contents" => self.pdf_side_toggle(false, cx),
+            t if t.starts_with("pdf:page:") => {
+                if let Ok(page) = t["pdf:page:".len()..].parse::<usize>() {
+                    self.pdf_go_page(page, cx);
+                }
+            }
+            "file:menu" => {
+                let at = self.file_view_scroll.bounds().origin + point(px(40.), px(40.));
+                self.file_pane_menu(Vec::new(), at, cx);
+            }
+            "file:raw" => self.set_file_raw(true, cx),
+            "file:read" => self.set_file_raw(false, cx),
+            // In the PDF showing: select everything, or glyphs from and
+            // to; print what is selected; find words, and step on.
+            "pdf:all" => self.pdf_do(PdfDo::SelectAll, cx),
+            "pdf:text" => {
+                if let (Some(doc), Some((from, to))) = (self.pdf_doc(), self.pdf_sel) {
+                    eprintln!("emaki: pdf {:?}", doc.text(from, to));
+                }
+            }
+            "pdf:next" => self.pdf_find_step(1, cx),
+            t if t.starts_with("pdf:sel:") => {
+                let n: Vec<usize> = t["pdf:sel:".len()..].split(',').filter_map(|v| v.parse().ok()).collect();
+                if let [from, to] = n[..] {
+                    self.pdf_sel = Some((from, to));
+                    cx.notify();
+                }
+            }
+            t if t.starts_with("pdf:find:") => {
+                self.pdf_find_open = true;
+                self.pdf_hits = self.pdf_doc().map(|doc| doc.find(&t["pdf:find:".len()..])).unwrap_or_default();
+                self.pdf_hit = 0;
+                eprintln!("emaki: pdf found {}", self.pdf_hits.len());
+                self.pdf_find_show(cx);
             }
             t if t.starts_with("file:") => self.file_probe = under(&t["file:".len()..]),
             t if t.starts_with("filemenu:") => {

@@ -811,7 +811,7 @@ pub fn spelling(text: &str, language: &str) -> Vec<emaki_core::check::Issue> {
         }
         let (Some(&start), Some(&end)) = (bytes.get(found.location), bytes.get(found.location + found.length)) else { break };
         let fixes = checker.guessesForWordRange_inString_language_inSpellDocumentWithTag(found, &string, Some(&language), 0).map(|guesses| guesses.iter().take(5).map(|g| g.to_string()).collect()).unwrap_or_default();
-        out.push(Issue { range: start..end, kind: Kind::Spelling, message: String::new(), fixes });
+        out.push(Issue { range: start..end, kind: Kind::Spelling, message: String::new(), fixes, rule: String::new() });
         from = (found.location + found.length) as isize;
     }
     out

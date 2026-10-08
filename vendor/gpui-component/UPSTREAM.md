@@ -107,11 +107,16 @@ upstream revision finds them.
     `index_for_mouse_position` made public; `composing` says whether an
     input method has marked text.
 
-15. `crates/ui/src/input/input.rs`, `textarea.rs`: `on_secondary_click`
+15. `crates/ui/src/input/input.rs`, `textarea.rs`, `editor.rs`: `on_secondary_click`
     hands a right click to the application and shows no native menu, so
     an input's menu can be the window's own. `secondary_click_at` in
     `crates/base/src/input/base/state.rs` makes that click from code,
     through the same path the mouse takes, for a probe.
+
+16. `crates/ui/src/tooltip.rs`: `ManagedTooltipExt` is public, so an
+    element of the application's own gets the tooltip a `Button` has
+    (`managed_tooltip`). gpui's plain `.tooltip` appears and goes from
+    one frame to the next and does not slide along a row.
 
 ## Updating
 

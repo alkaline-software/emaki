@@ -29,8 +29,12 @@ window remembers.
 - ⌘W is one global `CloseTab` binding. A context-bound one loses to a
   global binding whenever the focus is in the composer. A part of the
   window that wants ⌘W for itself answers `CloseTab` on its own focused
-  element and passes it on when it has nothing to close, as the terminal
-  panel does; a second ⌘W binding in its context is never reached.
+  element, as the terminal panel does; a second ⌘W binding in its
+  context is never reached.
+- ⌘W closes the nearest thing, in this order: with the keyboard in a
+  shell, that shell's tab and nothing else, even with none left to
+  close; otherwise a file shown beside the conversation, then the
+  session's tab, then the window.
 - Keep `on_reopen` in `main.rs`. The app stays running with no window, and
   without the handler a Dock click does nothing.
 - A new scroller takes the toolkit's `vertical_scrollbar` and nothing else,
@@ -163,6 +167,10 @@ on a folder and the session's menu on a session.
 Nothing in the window appears or disappears from one frame to the next.
 The patterns, each in use and to be used again:
 
+- **A hover's label**: `managed_tooltip`, the toolkit's own, which a
+  `Button` uses: it comes in, and slides to the next element hovered on
+  the same row. Not gpui's plain `.tooltip`, which jumps in and out; a
+  row with both kinds read as two different controls.
 - **A menu or a list over the window** (`render_menu`, `render_pick`):
   it comes in over `MENU_IN`, rising a few pixels into place as it
   fades in, and goes out over `MENU_OUT`, fading where it was. What was
@@ -201,6 +209,17 @@ trailing `AskUserQuestion` or `ExitPlanMode` needs you, and the latest
 permission mode says whether working is planning. `peek` computes it for the
 index from the same tail slice it reads the title from, cached on (size,
 mtime), so a rescan of every transcript costs nothing.
+
+A phase is shown only for a session with something behind it
+(`Hub::is_live`): a driver, a hidden terminal, a registered process, or,
+with none of those, a write in the last ten minutes. Two things keep a
+dead session from reading as "working" with its clock running, as one
+killed while a question waited did. A session whose process was
+registered and is gone has ended (`refresh_peers`). And a Claude Code
+session that reads as working with no process registered gets a minute
+and a half, not ten: an interactive one always registers, so it is a
+headless run of someone's, which writes as it goes, or a process that
+died before this launch.
 
 ## Layout
 

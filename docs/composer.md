@@ -73,8 +73,16 @@ and the language (`app.auto_capitalize`, `check_writing`,
 window.
 
 - English, US or UK, is Harper's (`harper-core`): spelling and grammar,
-  in the process, nothing sent anywhere. Its advice on style is left out
-  (`check::english`).
+  in the process, nothing sent anywhere (`check::english`).
+- A mark says "this is wrong", so a rule earns one only when what it
+  marks is wrong however the sentence is read. Harper has some nine
+  hundred rules and many are guesses or preferences, so three things are
+  left out: its advice on style (by kind); the rules that guess a part
+  of speech, find a word missing, or prefer one accepted punctuation
+  (`GUESSES`, by name); and any correction that only joins or splits
+  words (`only_joins`). "The effect triggers" was marked for "affect",
+  and "file system" for "filesystem". A rule that turns out to guess
+  goes in `GUESSES`; do not answer one false mark with a special case.
 - Spanish, French and German get spelling only, from the system's checker
   (`sys::spelling`, the Mac's `NSSpellChecker`). Windows and Linux mark
   nothing in those three. The Mac's own grammar check was tried first and
@@ -86,6 +94,11 @@ window.
   "@" file, a flag, a name out of code or a number; an issue touching one
   is dropped (`check::keep`), as is a word the person taught
   (`~/.emaki/words.txt`, "Learn Spelling").
+- Every mark's menu ends in Ignore (`ignore_writing`). For a spelling it
+  lasts until the app is quit, as the system's Ignore Spelling does,
+  since Learn Spelling is the one that keeps a word. For grammar it is
+  kept (`~/.emaki/ignored.txt`, `check::ignore_key`): the rule and the
+  words, so the same words are still marked for another reason.
 - A check runs once the typing has paused (`check_soon`), Harper's off the
   main thread. The word the caret ends is marked a little later than the
   rest. Until the answer comes, the marks move with the text

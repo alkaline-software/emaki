@@ -120,6 +120,16 @@ theme is the same copy again.
 is in, read off the main thread on the tree's clock (`read_git`, and at
 the first draw of a folder not asked about yet), into a state per path.
 
+- Which repository, as VS Code's explorer has it (`git::inside`): the
+  one the folder is in, when the folder is its top or a tracked part of
+  it. A folder that repository ignores (`target/x` under a checkout) is
+  in none: no branch, no marks, no count. A folder that only holds
+  repositories is in none either, and nothing is said of its children's.
+- A folder part way down a repository is asked about by itself (`git
+  status -- .`): the marks, the count and the comparison are of what is
+  under it. The branch is the repository's, and so is the question a
+  switch asks: `Status::dirty` says whether anything in the repository
+  is uncommitted, in the folder or outside it.
 - A file wears its letter (M, U, A, D, R, T, "!" for a conflict). A
   folder wears a dot for the most pressing thing under it: a conflict,
   then what is new or gone, then what is changed. Ignored is dimmed with
@@ -207,13 +217,106 @@ changed file's menu opens it on that file.
   so reading on does not move the reader. `DIFF_LINES` at most; a file
   that is not text says so.
 
-## The file sheet and the menu
+## The file's pane and the menu
 
-A click on a file is `file_preview`: a picture in the lightbox, anything
-else on a sheet (`render_file_view`), markdown drawn as the conversation
-draws it and other text as a code block in the file's language, the
-first `PREVIEW_BYTES` and `PREVIEW_LINES` of it, read again when the file
-changes on disk. A file that is not text says so and offers Open.
+A click on a file shows it in a pane between the tree and the
+conversation (`render_file_pane`, `file_pane`), with a width of its own
+(`file_w`, in `ui.json`) and an edge to drag (`render_file_grip`; a
+double click puts the width back). Tried and dropped: a sheet over the
+window, which read as something passing, and the pane in the terminal's
+place at the right, which kept the two from showing together and stood
+far from the tree.
+
+- A click shows the file, and a click on the file showing puts it away
+  (`file_clicked`). Opening it in the system's app is on the row's menu
+  and in the pane's head. Tried and dropped: two clicks to open it
+  there, which made every single click wait to see whether a second
+  followed.
+- The pane widens in and narrows out as the panels at its sides do
+  (`file_anim`, `file_gone`), and another file takes the place of the
+  one showing and fades in (`file_serial`). Its button and Escape close
+  it.
+- It is the first to give room up: narrower before the terminal and the
+  tree are (`file_pane_w`, and `file_pane_least` in their own widths),
+  and in a window with no room for its least it is not drawn
+  (`fold_file`), with a line under the composer saying so.
+- What is shown (`FileBody`, `read_file`): markdown as the conversation
+  draws it; other text in the editor (below), the first `PREVIEW_BYTES`
+  and `PREVIEW_LINES` of it; a picture at its own size
+  or the pane's width; a PDF's first `PDF_PAGES` pages as pictures; a
+  `.csv` or `.tsv` as a table (`files::table`), its first `TABLE_ROWS`
+  rows, a column as wide as its longest cell up to a point. Anything
+  else, or a file that cannot be read, is a line saying so and "Open
+  with default app".
+- The file shown is the folder's, not the window's (`sync_file_root`,
+  `file_root`, `file_for`): going to a session of another folder puts
+  it out of sight, and coming back to any session of this folder shows
+  it again. Kept as one file for the window, it stayed up over another
+  project's conversation.
+- Code, and markdown as it is written, are drawn by the toolkit's code
+  editor, read only (`sync_file_editor`, `file_editor`): line numbers,
+  folding, the language's colours, and its own selection, copy and find
+  (⌘F). The editor is made again when the file, or
+  what it holds, is another, and scrolls by itself, so the pane's own
+  scroller is not drawn around it. Its right click is the pane's menu
+  (the vendored `on_secondary_click`).
+- The colours are the toolkit's tree-sitter grammars
+  (`tree-sitter-languages` on `gpui-component`, off until v0.1.8, which
+  also colours a conversation's code blocks). `render_md::lang_for_path`
+  names a file's language and `editor_language` is the toolkit's name
+  for it. R is not in the toolkit's set: `look::install_languages`
+  registers the `tree-sitter-r` crate's grammar and queries.
+- The palette is VS Code's Dark+ and Light+ on the window's own
+  grounds: the `highlight` part of each theme in `themes/emaki.json`.
+  Without one the toolkit keeps its light palette in a dark window. The
+  names it reads are a fixed list (`SyntaxColors`); note `comment_doc`,
+  with an underscore.
+- Markdown has two segments in the pane's head, as the files and the
+  outline have in the strip: as it reads, which is how it opens, and as
+  it is written, in the editor (`file_raw`, `set_file_raw`).
+- A PDF's page is a picture, so its text is kept beside it: each glyph
+  with its place on the page, collected by the same interpreter that
+  draws it (`PdfText`, `PdfGlyph`), in the order the file draws them,
+  with a space or a line break where the page leaves room for one. A
+  selection is glyphs from and to (`pdf_sel`), drawn as bands over the
+  picture by a `canvas` that also keeps where each page is
+  (`pdf_bounds`). A drag selects by the letter, a second click the
+  word, a third the line, ⇧ and a click reaches from the selection; ⌘C
+  copies, ⌘A selects all, and a right click offers both (`PdfDo`).
+  The pane has a focus of its own (`file_focus`) for those keys.
+- ⌘F with the keyboard in a PDF opens that file's own find row
+  (`pdf_find_open`, tried first in `open_find`): every place marked,
+  the one it is on darker and brought into view, ↩ and ⇧↩ to step,
+  Escape to close. Escape then drops a selection, then closes the pane.
+- A PDF's head has two segments for what stands beside its pages
+  (`pdf_side`, `pdf_side_toggle`, kept in `ui.json`): the pages small,
+  or the file's table of contents, and neither at a second press on the
+  one showing. A click goes to the page (`pdf_go_page`), the page in
+  view is marked in either list, and the head says "page n of m"
+  (`pdf_page_now`, from where the pages were last drawn; the pane draws
+  again at a wheel so it keeps up). The small pages are drawn small by
+  the renderer (`PdfPage::thumb`): the large picture scaled down by the
+  GPU is jagged.
+- The table of contents is read out of the file (`pdf_contents`): the
+  tree under `/Outlines`, each heading with the page its destination
+  names. A destination is an array beginning with the page, or a name
+  for one in the catalog's `/Dests` or the name tree under `/Names`,
+  which is how LaTeX writes them. hayro has no reader for this.
+- A right click anywhere in the pane opens the window's menu
+  (`file_pane_menu`): what the place offers first (Copy for selected
+  words, in markdown either way and in code; Copy Image on a picture;
+  Copy Cell and Copy Row on a table's cell; Copy and Select All on a
+  PDF's page), then what the file's row in the tree has: Add to
+  Message, Open, Reveal, the two paths.
+- Not done in a PDF: links, and text set in a font that says nothing of
+  its characters, which is drawn and cannot be selected.
+- A PDF is drawn by hayro, which is all Rust, so the same on every OS,
+  off the main thread (`pdf_pages`), each page to a PNG the window
+  draws. The pane says "Drawing the pages…" until they are in, and a
+  file the renderer stops on is said to be one it could not draw.
+- The file is read again when it changes on disk (`tick_files`).
+- The pane's scroller is a pane of its own to `route_scroll`
+  (`Pane::File`).
 
 The file clicked stays marked (`Tree::picked`) until another is, or until
 a click on the panel's empty room. A row's click goes through

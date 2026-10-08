@@ -227,6 +227,7 @@ fn main() {
         // the accent from config painted in, then the appearance it asks for.
         let app_cfg = emaki_core::config::Config::load().app;
         look::install(&app_cfg.accent, cx);
+        look::install_languages();
         look::apply(&app_cfg.appearance, None, cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());

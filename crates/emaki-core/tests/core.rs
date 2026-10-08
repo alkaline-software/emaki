@@ -1807,8 +1807,7 @@ fn git_marks_files_and_the_folders_that_hold_them() {
     std::fs::write(root.join("staged.txt"), "s").unwrap();
     run(&["add", "staged.txt"]);
 
-    // Asked from a folder inside, the answer is still the repository's.
-    let st = git::status(&root.join("src")).unwrap();
+    let st = git::status(&root).unwrap();
     let state = |p: &str, dir: bool| st.mark(&root.join(p), dir).map(|m| (m.state, m.folder));
     assert_eq!(state("src/deep/a.rs", false), Some((State::Modified, false)));
     assert_eq!(state("src/new.rs", false), Some((State::Untracked, false)));
@@ -2058,7 +2057,7 @@ fn only_prose_is_checked() {
     use emaki_core::check::{carry, english, keep, Kind};
     let said = |text: &str, british: bool, learned: &[&str]| -> Vec<(String, Kind)> {
         let learned = learned.iter().map(|w| w.to_string()).collect();
-        keep(text, english(text, british), &learned).into_iter().map(|i| (text[i.range].to_string(), i.kind)).collect()
+        keep(text, english(text, british), &learned, &Default::default()).into_iter().map(|i| (text[i.range].to_string(), i.kind)).collect()
     };
     let text = "I has went to the store and recieve a apple.";
     let found = said(text, false, &[]);
@@ -2074,14 +2073,107 @@ fn only_prose_is_checked() {
     assert!(said("The colour is fine.", true, &[]).is_empty());
     assert!(said("The color is fine.", true, &[]).iter().any(|(w, _)| w == "color"));
     // A fix replaces the range it names.
-    let issue = keep(text, english(text, false), &Default::default()).into_iter().find(|i| &text[i.range.clone()] == "recieve").unwrap();
+    let issue = keep(text, english(text, false), &Default::default(), &Default::default()).into_iter().find(|i| &text[i.range.clone()] == "recieve").unwrap();
     assert_eq!(issue.fixes.first().map(String::as_str), Some("receive"));
     // Marks follow an edit until the next check.
     let old = "Teh cat and teh dog.";
-    let issues = keep(old, english(old, false), &Default::default());
+    let issues = keep(old, english(old, false), &Default::default(), &Default::default());
     assert_eq!(issues.len(), 2, "{issues:?}");
     let new = "Teh big cat and teh dog.";
     let moved = carry(old, new, &issues);
     assert_eq!(moved.iter().map(|i| &new[i.range.clone()]).collect::<Vec<_>>(), vec!["Teh", "teh"]);
     assert_eq!(carry(old, "Tehx cat and teh dog.", &issues).len(), 1);
+}
+
+#[test]
+fn a_question_with_previews_is_read_in_two_columns() {
+    use emaki_core::driver::dialog_on_screen;
+    let rule = "─".repeat(96);
+    // Off 2.1.294, the pointer on the second choice.
+    let screen = format!(
+        "{rule}\n ☐ File view\n\nWhere should a file open?\n\n  1. In place of the              ┌──────────────────────────────────────────┐\n    conversation (Recommended)    │ +--------+---------------------+         │\n❯ 2. As its own tab               │ | side   | [chat] [AS ITS OWN  |         │\n  3. Beside the conversation      │ | bar    |         TAB]        |         │\n                                  │ +--------+---------------------+         │\n                                  └──────────────────────────────────────────┘\n\n                                  Notes: press n to add notes\n\n{rule}\n  Chat about this\n\nEnter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n"
+    );
+    let d = dialog_on_screen(&screen).unwrap();
+    assert_eq!(d.body, vec!["Where should a file open?"]);
+    assert_eq!(d.options.iter().map(|o| (o.n, o.label.as_str(), o.detail.as_str(), o.cursor)).collect::<Vec<_>>(), vec![(1, "In place of the conversation (Recommended)", "", false), (2, "As its own tab", "", true), (3, "Beside the conversation", "", false)]);
+    assert_eq!(d.preview.unwrap(), vec!["+--------+---------------------+", "| side   | [chat] [AS ITS OWN  |", "| bar    |         TAB]        |", "+--------+---------------------+"]);
+}
+
+#[test]
+fn a_folder_inside_a_repository_is_asked_about_by_itself() {
+    use emaki_core::git::{self, State};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(&root).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+        assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+    };
+    run(&["init", "-q"]);
+    for d in ["app/src", "lib", "target/probe"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    std::fs::write(root.join(".gitignore"), "/target\n").unwrap();
+    std::fs::write(root.join("app/src/main.rs"), "one\n").unwrap();
+    std::fs::write(root.join("lib/lib.rs"), "one\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "first"]);
+    // A change in each of two folders, and a new file in the ignored one.
+    std::fs::write(root.join("app/src/main.rs"), "two\n").unwrap();
+    std::fs::write(root.join("lib/lib.rs"), "two\n").unwrap();
+    std::fs::write(root.join("lib/new.rs"), "new\n").unwrap();
+    std::fs::write(root.join("target/probe/out.txt"), "x\n").unwrap();
+
+    let whole = git::status(&root).unwrap();
+    assert_eq!(whole.changed_count(), 3);
+    // Part way down: the branch is the repository's, the changes are the folder's.
+    let app = git::status(&root.join("app")).unwrap();
+    assert_eq!(app.changed(), vec![(root.join("app/src/main.rs"), State::Modified)]);
+    assert!(app.dirty);
+    assert!(git::branches(&root.join("app")).is_some());
+    assert_eq!(git::status(&root.join("lib")).unwrap().changed_count(), 2);
+    // A clean folder beside changed ones counts none, and a switch still asks.
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/a.md"), "a\n").unwrap();
+    run(&["add", "docs"]);
+    run(&["commit", "-q", "-m", "docs", "--", "docs"]);
+    let docs = git::status(&root.join("docs")).unwrap();
+    assert_eq!(docs.changed_count(), 0);
+    assert!(docs.dirty, "the repository has changes outside the folder");
+    // A folder the repository ignores is in no repository.
+    assert!(git::status(&root.join("target/probe")).is_none());
+    assert!(git::branches(&root.join("target/probe")).is_none());
+    assert!(git::status(&root.join("target")).is_none());
+}
+
+#[test]
+fn a_table_is_read_with_its_quotes() {
+    use emaki_core::files::table;
+    let text = "name,note\r\n\"Hu, Pingfan\",\"said \"\"hi\"\"\nthen left\"\n\nlast,\n";
+    let (rows, more) = table(text, ',', 10);
+    assert_eq!(rows, vec![vec!["name", "note"], vec!["Hu, Pingfan", "said \"hi\"\nthen left"], vec!["last", ""]]);
+    assert!(!more);
+    let (rows, more) = table("a\tb\n1\t2\n3\t4\n", '\t', 2);
+    assert_eq!(rows.len(), 2);
+    assert!(more);
+}
+
+#[test]
+fn a_mark_is_for_what_is_wrong_however_it_is_read() {
+    use emaki_core::check::{english, ignore_key, keep};
+    let marked = |text: &str, ignored: &[String]| -> Vec<String> {
+        let ignored = ignored.iter().cloned().collect();
+        keep(text, english(text, false), &Default::default(), &ignored).into_iter().map(|i| text[i.range].to_string()).collect()
+    };
+    // A guess at a part of speech, and one accepted way of writing over another.
+    assert_eq!(marked("It is to the right of the file system; the single-click effect triggers and I opened it.", &[]), Vec::<String>::new());
+    assert_eq!(marked("We set up the work flow on the back end of the web site.", &[]), Vec::<String>::new());
+    // What is wrong however it is read is still marked.
+    let found = marked("I could of done it, and he have a apple.", &[]);
+    for wrong in ["could of", "have", "a"] {
+        assert!(found.iter().any(|w| w == wrong), "{wrong} in {found:?}");
+    }
+    // A mark the person ignored is not made again, for that rule and those words.
+    let text = "He have a plan.";
+    let issue = keep(text, english(text, false), &Default::default(), &Default::default()).into_iter().find(|i| &text[i.range.clone()] == "have").unwrap();
+    assert!(!marked(text, &[ignore_key(&issue.rule, "have")]).contains(&"have".to_string()));
 }

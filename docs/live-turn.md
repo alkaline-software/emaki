@@ -172,6 +172,15 @@ needed" or "permission prompt"); the screen says which.
   line), the review ("Review your answers", "1. Submit answers / 2.
   Cancel") and an approval (the command between dashed rules over "Do you
   want to proceed?").
+- A question whose choices carry previews is laid out in two columns
+  (2.1.294): the choices at the left, a box at the right holding the
+  preview of the one the pointer is on, a line about notes under it, and
+  no descriptions. `dialog_on_screen` cuts each line at the box's column
+  (`Dialog::preview`); read whole, the box's rows were the choices'
+  labels. There a digit only moves the pointer and Return takes the
+  choice, so the card rings the pointed choice, shows its preview in the
+  mono face, sends the digit for a click on another choice, and Return
+  for a click on the pointed one or on Choose.
 - `render_dialog` draws it where the permission cards sit. The terminal's
   dialog is the one that moves, and the card is the screen read again: a
   click sends the choice's digit (`sys::text_in_terminal`, the pane never
@@ -254,6 +263,8 @@ answering. Stacked cards: the first also offers "Allow all".
 
 ## Probing
 
+- `EMAKI_GO=dialogdemo:preview` holds a sample question with previews on
+  the card.
 - `EMAKI_GO=dialog:<digit>` or `dialog:tab` presses that in the terminal's
   dialog; `answer:<words>` types an answer; `goto:<n>` goes to that tab.
 - `EMAKI_GO=shells` opens the background commands' card, `EMAKI_GO=agents`

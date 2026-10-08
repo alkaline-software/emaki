@@ -102,3 +102,11 @@ pub fn apply(appearance: &str, window: Option<&mut Window>, cx: &mut App) {
         _ => Theme::sync_system_appearance(window, cx),
     }
 }
+
+/// The grammars the toolkit does not carry. R is one: its own crate has
+/// the grammar and the queries, and the toolkit's registry takes them
+/// under the name `lang_for_path` gives an `.R` file.
+pub fn install_languages() {
+    use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
+    LanguageRegistry::singleton().register("r", &LanguageConfig::new("r", tree_sitter_r::LANGUAGE.into(), vec![], tree_sitter_r::HIGHLIGHTS_QUERY, "", tree_sitter_r::LOCALS_QUERY));
+}

@@ -448,6 +448,11 @@ pub struct Dialog {
     pub options: Vec<DialogOption>,
     /// The choices are ticked, several at once, and Tab moves on.
     pub multi: bool,
+    /// A question whose choices each come with a picture in text: the
+    /// lines of the one the pointer is on. The terminal lays such a
+    /// question out in two columns, and there a digit moves the pointer
+    /// to a choice and Return takes it.
+    pub preview: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -516,7 +521,47 @@ pub fn dialog_on_screen(text: &str) -> Option<Dialog> {
         _ => last,
     };
     let mut d = Dialog::default();
+    // Choices with previews stand at the left of a box that holds the
+    // preview of the one the pointer is on (2.1.294): "┌──┐" on the
+    // first choice's line, the box's rows beside the others, and a line
+    // about notes under it. The column the box begins in is where a
+    // line stops being about the choices.
+    let cut = |l: &str, col: usize| -> (String, String) { (l.chars().take(col).collect(), l.chars().skip(col).collect()) };
+    let boxed = lines[start + 1..end].iter().enumerate().find_map(|(at, l)| {
+        let col = l.chars().position(|c| c == '┌')?;
+        let top = cut(l, col).1;
+        (col > 0 && top.trim_end().ends_with('┐') && top.trim_end().chars().skip(1).take_while(|c| *c == '─').count() + 2 == top.trim_end().chars().count()).then_some((at, col))
+    });
+    let (mut in_box, mut past_box) = (false, false);
     for (at, l) in lines[start + 1..end].iter().enumerate() {
+        let left;
+        let l: &str = match boxed {
+            // Under the box a line is whole again, but for the one
+            // about notes, which stands in the box's column.
+            Some((_, col)) if past_box => {
+                if !l.trim().is_empty() && cut(l, col).0.trim().is_empty() {
+                    continue;
+                }
+                l
+            }
+            Some((top, col)) if at >= top => {
+                let (a, right) = cut(l, col);
+                let right = right.trim_end();
+                if at == top {
+                    in_box = true;
+                    d.preview = Some(Vec::new());
+                } else if right.starts_with('└') {
+                    (in_box, past_box) = (false, true);
+                } else if in_box {
+                    let row = right.strip_prefix('│').unwrap_or(right);
+                    let row = row.strip_suffix('│').unwrap_or(row);
+                    d.preview.get_or_insert_with(Vec::new).push(row.strip_prefix(' ').unwrap_or(row).trim_end().to_string());
+                }
+                left = a;
+                left.trim_end()
+            }
+            _ => l,
+        };
         let t = l.trim();
         if t.is_empty() || is_rule(l) || t.chars().all(|c| c == '╌') || t.contains("Esc to cancel") {
             continue;
@@ -548,6 +593,14 @@ pub fn dialog_on_screen(text: &str) -> Option<Dialog> {
             // "Submit" under a question that takes several is the same
             // as moving on with Tab.
             Some(_) if t == "Submit" => {}
+            // Beside a preview a choice has no description: what stands
+            // under it is the rest of its label, and "Chat about this"
+            // is the dialog's own, with no digit to send.
+            Some(_) if d.preview.is_some() && (t.is_empty() || t == "Chat about this") => {}
+            Some(o) if d.preview.is_some() => {
+                o.label.push(' ');
+                o.label.push_str(t);
+            }
             Some(o) => {
                 if !o.detail.is_empty() {
                     o.detail.push(' ');
