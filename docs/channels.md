@@ -203,7 +203,8 @@ on a ground chosen by Claude Code's `theme`.
 strip. It shows one of two things, one at a time, each with a button at
 the strip's right end (`term_buttons`, the same two-segment control as
 the files and the outline at the left: the shell's first, then the
-agent's). A press on the other swaps the side and slides the plate, a
+agent's) and a key (⌘⇧T for the shell, ⌘⇧A for the agent; Ctrl off a
+Mac). A press on the other swaps the side and slides the plate, a
 press on the one showing puts the panel away (`toggle_term`, `term_go`).
 `side_term_anim` keeps the side before the press and the one after, and
 the sides come, go and take each other's place as the two panels at the
@@ -216,16 +217,53 @@ The conversation keeps `panels::CONVERSATION_MIN` between the panels at
 its two sides, the width at which the composer's pills and send button
 still fit their card. Both panels are drawn no wider than leaves it
 (`term_panel_w`, `panel_w_now`): the terminal gives way first, down to
-its least, then the files or the outline. A window too narrow for all
-three at their least squeezes the conversation.
+its least, then the files or the outline. The conversation is never
+squeezed under that width (`Workbench::render`): where the panels asked
+for do not fit beside it at their least, the sidebar folds away as it
+does in a narrow window, and in a window too narrow even so a panel is
+not drawn until there is room again, the files or the outline first and
+then the terminal (`fold_left`, `fold_term`). What was asked for is kept.
 
-A side's head is as tall as the path bar over the conversation, with its
-ground and its two rules, so the heads read as one line across the
-window. It has no close button: the strip's button puts the panel away.
-The agent's mark is in the agent's colour in its head, and on its button
-while its side shows or the pointer is over it.
-The head stands on the window's ground and the screen under it on its
-own, or the agent's dark screen showed through the head.
+A side's head is as tall as the path bar over the conversation, so the
+heads read as one line across the window, and it is a row of tabs on the
+terminal's own ground, as Kaku's tab bar is: the agent's side has the one
+tab, with its mark in its colour, and the shell's a tab a shell. It has
+no close button: the strip's button puts the panel away.
+
+**The look is Kaku's** (tw93/kaku, MIT), the same for both sides:
+
+- The scheme is Kaku Dark or Kaku Light by the window's appearance
+  (`scheme`): ground, ink, cursor, selection, tabs, toast and the sixteen
+  named colours. A span keeps which named colour it asked for
+  (`Span::fg_ix`, `bg_ix`), so those are drawn from the scheme and not
+  from the screen model's own table.
+- The grounds and inks Kaku swaps (`grounds`, `inks`) are swapped, and an
+  ink is taken toward black or white until it stands 3 to 1 against its
+  ground (`legible`, Kaku's `text_min_contrast_ratio`). That is what makes
+  Claude Code's colours, chosen for its own theme, readable on either
+  scheme; the panel no longer asks which theme Claude Code is set to.
+- A grey ground from the other side of the scale is the scheme's quiet
+  ground (`Scheme::wash`), and a grey ink that was to stand out on it is
+  the scheme's ink. Claude Code set to a dark theme draws a near-black
+  band behind each prompt, which on the light scheme was a black bar
+  across the screen, as it is in Kaku.
+- The face is JetBrains Mono with Kaku's fallbacks, built in
+  (`fonts::TERM_FAMILY`, `assets/fonts`), no ligatures, no italic, plain
+  and bold a weight heavier on the light scheme, a row 1.28 of the font's
+  own line. The size is 13, smaller than Kaku's 17: the panel is a part
+  of a window.
+- Those are Kaku's own; ours begin at the middle step of the row's
+  height and of the room around the screen. `terminal` in `config.json`
+  (`config::Terminal`), changed in Settings, Terminal, chooses the scheme
+  (the window's, or one kept), the face (`fonts::term_family`), the
+  size, the row's height, the room around the screen, the cursor's shape
+  and whether it blinks, ligatures, and whether a selection is copied
+  when the button is let go. `set_terminal` saves a change and the panel
+  reads the settings at each draw, so nothing is restarted.
+- Kaku's room around the screen (40 of the screen's pixels at the sides
+  and the top, 26 on a screen that is not dense), its bar of a cursor
+  that is on and off by half seconds from when it last moved and still
+  without the keyboard, and its "Copied" toast.
 
 - **Shell.** The person's login shell (`pty::shell_argv`) in the
   session's folder, a tab each in the side's head (`Workbench::shells`, a
@@ -261,13 +299,12 @@ How it works:
 
 - The screen is `Pty::rows_back`, a row a line in the mono face. Under
   the letters each row draws its own cells: a stretch's ground the whole
-  height of the row, and the block characters (U+2580 to U+259F) as the
-  shapes they are (`block_shape`). Left to the font, those are as tall as
-  a letter and not as a row, and a picture made of them, Claude Code's
-  mark at the top of its screen, came out in stripes. The cursor is a
-  line in the accent while the panel has the keyboard and the outline of
-  a block otherwise. The pty is resized to the rows and columns
-  that fit (`side_term_bounds`, measured by a canvas at the last draw).
+  height of the row, then the selection, then the block characters
+  (U+2580 to U+259F) and the common line-drawing ones as the shapes they
+  are (`block_shape`, `line_shape`). Left to the font, those are as tall
+  as a letter and not as a row: Claude Code's mark came out in stripes
+  and its frames with a gap between every two rows. The pty is resized
+  to the rows and columns that fit (`side_term_bounds`, measured by a canvas at the last draw).
 - The agent's pty takes the panel's size only while the panel shows it
   (`fit_agent_pty`, at every draw of the conversation) and goes back to
   `pty::ROWS` by `COLS` otherwise: the terminal card and the screen's
@@ -285,22 +322,33 @@ How it works:
   application form when the program asked for it; ⌘V a paste and ⌘C the
   selection. ⌘K forgets the screen and what has left it and asks for a
   redraw (`Pty::clear_all`, then ^L), not where a program has the screen
-  to itself. On the shell's side ⌘T is a new tab, ⌘W closes the one
-  showing, and ⌘⇧[ and ⌘⇧] go to the tab before and after. ⌘K, ⌘T and
-  ⌘W are bound in the terminal's key context, because a binding is
+  to itself. On the shell's side, with the keyboard in the panel, ⌘T
+  or ⌘N is a new tab, ⌘W closes the one showing, and ⌘⇧[ and ⌘⇧] go to the tab before and after. ⌘K, ⌘T and ⌘N
+  are bound in the terminal's key context, because a binding is
   answered before any key listener and the window has its own for two of
   them; where the panel does not take one (the agent's side, no tab left)
-  it passes it on and the window's is next. Any other ⌘ key is the
-  window's.
-- A drag selects, by the letter, by the word after a double click and by
-  the row after a triple (`Sel`), and the selection is copied when the
+  it passes it on and the window's is next. ⌘W is not bound there: the
+  window's `CloseTab` is a global binding, which outranks one bound to a
+  context (`docs/window.md`), so the panel answers that action itself,
+  first, being where the keyboard is. Any other ⌘ key is the window's.
+- The pointer is Kaku's. A drag selects, by the letter, by the word after
+  a double click and by the row after a triple (`Sel`); with ⌥ it takes
+  the same columns of every row, and a press with Shift runs the
+  selection there is on to the press. The selection is copied when the
   button is let go, with "Copied" shown for a moment. Rows that run on
   into the next are copied as one line (`Pty::wraps_back`). The
   selection is in the screen's rows as they were drawn, so it is dropped
   on a key, a paste, the wheel, another tab or side; output that moves
-  the rows leaves it where it was. ⌘ and a click opens the http address
-  under the pointer, and ⌥ and a click on the cursor's row takes the
-  cursor to that column with arrow keys.
+  the rows leaves it where it was. ⌥ and a click that does not move, on
+  the cursor's row, takes the cursor to that column with arrow keys. The
+  middle button pastes, and the right one opens a menu: Copy, Paste,
+  Clear, and on the shell's side New Tab and Close Tab.
+- A link is underlined under the pointer, which becomes a hand, and ⌘
+  and a click opens it, in a program that hears the mouse too
+  (`link_at`): an address with a scheme, one that begins "www.", a mail
+  address, a bare domain under a well-known ending, and a path to a file
+  that is there, relative to the session's folder. The pointer is an
+  arrow over a program that hears the mouse.
 - The wheel is routed (`Pane::Terminal`): the panel has no scroller to
   hear it. Where a program has the screen to itself (an editor, a pager)
   it is that program's arrow keys.
@@ -314,8 +362,10 @@ How it works:
   terminal. Nothing is told while the panel is scrolled back.
 - Both sides are one terminal: everything above holds for the shell and
   for the agent alike.
-- Not done: a drag followed past the panel's edge (no scrolling while
-  selecting), the panel's own text size, a search, and typing through an
+- Not done, of Kaku's: its keys beyond the ones above, a link that runs
+  over two rows, a tab named by its shell's folder, the scroll bar and
+  the split panes. Also not done: a drag followed past the panel's edge
+  (no scrolling while selecting), a search, and typing through an
   input method (the keys arrive one at a time, so composed text does
   not).
 
@@ -407,6 +457,7 @@ typing and ↩ takes the best match, the shorter name first within a rank.
   go to that side, `term:off` puts it away, `term:start` starts the
   agent's hidden terminal, `term:tab+` makes a shell tab, `term:tab-`
   closes the one showing, `term:tab:<n>` shows the nth from 0, `term:w:<w>` drags the edge to that width, `term:clear` is ⌘K, `term:sel:<unit>,<row>,<col>,<row>,<col>` selects and prints the words,
+  (a unit of 4 or more is a block of columns), `term:hover:<row>,<col>` puts the pointer on that cell for a link, `term:copied` shows the toast, `term:text:<size>` sets the letters' size,
   and `termtype:<words>` types them there with Return. Several probe
   copies at once run their steps late: one at a time for a sequence.
 - `EMAKI_GO=send:<words>` sends once the session or the new-session page

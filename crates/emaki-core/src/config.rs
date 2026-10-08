@@ -96,6 +96,50 @@ impl AppConfig {
     }
 }
 
+/// The terminal beside a conversation: how it looks and what its pointer
+/// does. The look is Kaku's, with the middle step of each size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Terminal {
+    /// `match` follows the window's appearance; `dark` and `light` keep
+    /// Kaku Dark or Kaku Light whatever the window is.
+    pub theme: String,
+    /// `jetbrains` (JetBrains Mono, built in), `code` (the face the
+    /// window sets code in) or `system` (the system's monospaced face).
+    pub font: String,
+    /// The letters' size: the settings offer 12, 13 and 15.
+    pub size: f32,
+    /// A row's height over the font's own line: `tight` (1), `normal`
+    /// (1.15) or `roomy` (Kaku's 1.28).
+    pub spacing: String,
+    /// The room around the screen: `compact`, `medium` or `roomy` (Kaku's).
+    pub padding: String,
+    /// `bar`, `block` or `underline`.
+    pub cursor: String,
+    pub cursor_blink: bool,
+    /// Whether the face may join letters ("->" as an arrow).
+    pub ligatures: bool,
+    /// A selection is copied when the button is let go.
+    pub copy_on_select: bool,
+}
+
+impl Default for Terminal {
+    fn default() -> Self {
+        Self { theme: "match".into(), font: "jetbrains".into(), size: 13., spacing: "normal".into(), padding: "medium".into(), cursor: "bar".into(), cursor_blink: true, ligatures: false, copy_on_select: true }
+    }
+}
+
+impl Terminal {
+    /// What `spacing` multiplies the font's own line by.
+    pub fn line_scale(&self) -> f32 {
+        match self.spacing.as_str() {
+            "tight" => 1.0,
+            "roomy" => 1.28,
+            _ => 1.15,
+        }
+    }
+}
+
 /// Margin explanations of opaque tool calls, asked of a small model
 /// through the `claude` binary. See `explain.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +198,7 @@ pub struct Config {
     pub redact: Redact,
     pub explain: Explain,
     pub app: AppConfig,
+    pub terminal: Terminal,
     /// How often the app rescans the session index, in milliseconds.
     pub scan_interval_ms: u64,
     /// Sessions idle longer than this are not polled (they can still be opened).
@@ -170,6 +215,7 @@ impl Default for Config {
             redact: Redact::default(),
             explain: Explain::default(),
             app: AppConfig::default(),
+            terminal: Terminal::default(),
             scan_interval_ms: 4000,
             active_window_min: 180,
             agents: Vec::new(),

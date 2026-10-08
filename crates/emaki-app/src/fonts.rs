@@ -23,6 +23,29 @@ const INLINE_MONO: &str = "Inline Anthropic Mono";
 /// come with macOS). With none of them, the window's face.
 const WORDMARK_FACES: &[&str] = &["Optima", "Avenir Next", "Avenir"];
 
+/// The terminal panel's face, and what it falls back on for the letters
+/// it lacks: Kaku's own list. JetBrains Mono and the symbols are built in
+/// (`assets/fonts`, each under the SIL Open Font License beside it).
+pub const TERM_FAMILY: &str = "JetBrains Mono";
+pub const TERM_FALLBACKS: &[&str] = &["PingFang SC", "Apple Symbols", "Apple Color Emoji", "Symbols Nerd Font Mono"];
+const TERM_FACES: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf"),
+];
+
+/// The family the terminal is set in, for a choice in the settings:
+/// `code` is the face the window sets code in, `system` the system's
+/// monospaced face where it has a name here, anything else JetBrains Mono.
+pub fn term_family(choice: &str, cx: &App) -> SharedString {
+    match choice {
+        "code" => code_family(cx).unwrap_or_else(|| TERM_FAMILY.into()),
+        "system" if cfg!(target_os = "macos") => SYSTEM_MONO.into(),
+        _ => TERM_FAMILY.into(),
+    }
+}
+
 /// The family names the text system knows the two fonts by, once loaded.
 #[derive(Debug, Clone, Default)]
 pub struct ChatFonts {
@@ -123,6 +146,9 @@ fn load(files: &[PathBuf], cx: &mut App) -> bool {
 /// Load the Claude app's fonts into the text system, if the app is here.
 pub fn install(cx: &mut App) {
     let mut fonts = ChatFonts::default();
+    // The terminal's faces are a file a weight, which the text system
+    // takes as bytes on every platform.
+    let _ = cx.text_system().add_fonts(TERM_FACES.iter().map(|b| std::borrow::Cow::Borrowed(*b)).collect());
     for dir in font_dirs() {
         let files = font_files(&dir);
         if files.is_empty() || !load(&files, cx) {

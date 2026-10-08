@@ -27,7 +27,10 @@ window remembers.
   the frame, and the root is above every handler in the workbench, so every
   shortcut goes nowhere.
 - ⌘W is one global `CloseTab` binding. A context-bound one loses to a
-  global binding whenever the focus is in the composer.
+  global binding whenever the focus is in the composer. A part of the
+  window that wants ⌘W for itself answers `CloseTab` on its own focused
+  element and passes it on when it has nothing to close, as the terminal
+  panel does; a second ⌘W binding in its context is never reached.
 - Keep `on_reopen` in `main.rs`. The app stays running with no window, and
   without the handler a Dock click does nothing.
 - A new scroller takes the toolkit's `vertical_scrollbar` and nothing else,

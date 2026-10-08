@@ -98,6 +98,10 @@ already fixed once. The doc named after a rule has the full story.
   in its `UPSTREAM.md`. (`docs/platform.md`)
 - **Everything Unix-only is gated with a stated fallback.** Windows and
   Linux are build targets. (`docs/platform.md`)
+- **A shortcut is named as the Mac has it.** When the person says ⌘ and a
+  key, bind `secondary-<key>`, which is ⌘ on a Mac and Ctrl on Windows and
+  Linux, and write ⌘ in the docs. They do not say this each time.
+  (`main.rs`)
 - **The explainer's and the outline's model calls are real Claude Code
   calls on the person's account.** Cache the answer, ask for no more than
   is looked at, and never call one from a test. (`docs/core.md`,

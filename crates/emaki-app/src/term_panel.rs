@@ -21,33 +21,33 @@ use emaki_core::transcript::SessionRef;
 use emaki_core::pty::{self, Pty};
 
 use crate::panels::CONVERSATION_MIN;
-use crate::workbench::{pill_button, swallow_click, term_bytes, Page, TabGhost, TermBackTab, TermClear, TermCloseTab, TermNewTab, TermTab, Workbench, TERMINAL_CONTEXT};
+use crate::workbench::{pill_button, swallow_click, term_bytes, MenuDo, Page, TabGhost, CloseTab, TermBackTab, TermClear, TermNewTab, TermTab, Workbench, TERMINAL_CONTEXT};
 
 /// How wide the panel is to begin with, and the least it is dragged to.
 pub(crate) const TERM_W: Pixels = px(520.);
 pub(crate) const TERM_MIN: Pixels = px(300.);
 /// The strip over the panel's edge that takes the drag.
 const TERM_GRIP: Pixels = px(8.);
-/// A row's height and the letters' size, as the terminal card draws them.
-const LINE_H: f32 = 17.;
-const TEXT: f32 = 12.;
-/// The room around the screen.
-const PAD_X: f32 = 10.;
-const PAD_Y: f32 = 8.;
+/// A font's own line over the letters' size, as JetBrains Mono has it.
+const LINE_RATIO: f32 = 1.32;
+/// The wheel's pixels to a row, as Kaku counts a trackpad's.
+const WHEEL_ROW: f32 = 15.;
+/// The cursor's half blink.
+const BLINK: Duration = Duration::from_millis(500);
 /// How long the panel takes to come and to go.
 const TERM_PANEL_ANIM: Duration = Duration::from_millis(200);
 /// How often a panel that shows looks for something new on its screen.
 const POLL: Duration = Duration::from_millis(33);
 /// How long the panel says a selection was copied.
-const COPIED_FOR: Duration = Duration::from_millis(1200);
+const COPIED_FOR: Duration = Duration::from_millis(2500);
 /// The head over a side, as tall as the path bar over the conversation.
 const HEAD_H: f32 = 31.;
 /// A shell's tab in the head: its height, the most and the least it is
 /// wide, and the room between two.
 const TAB_H: f32 = 22.;
-const TAB_MAX: f32 = 116.;
-const TAB_MIN: f32 = 86.;
-const TAB_GAP: f32 = 3.;
+const TAB_MAX: f32 = 132.;
+const TAB_MIN: f32 = 92.;
+const TAB_GAP: f32 = 0.;
 /// How long a new tab takes to grow in, and one screen to take another's place.
 const TAB_ANIM: Duration = Duration::from_millis(180);
 
@@ -92,6 +92,8 @@ pub(crate) struct Sel {
     anchor: (u16, u16),
     head: (u16, u16),
     unit: usize,
+    /// The same columns of every row (a drag with ⌥), not a run of text.
+    block: bool,
 }
 
 impl Sel {
@@ -103,8 +105,16 @@ impl Sel {
         if self.unit <= 1 && a == b {
             return out;
         }
+        if self.block {
+            let (from, to) = (self.anchor.1.min(self.head.1) as usize, self.anchor.1.max(self.head.1) as usize + 1);
+            for slot in out.iter_mut().take(b.0 as usize + 1).skip(a.0 as usize) {
+                *slot = Some((from, to));
+            }
+            return out;
+        }
         let len = |r: u16| cells.get(r as usize).map(|c| c.len()).unwrap_or(0);
-        let word = |c: char| !c.is_whitespace() && !"{}[]()\"'`".contains(c);
+        // Kaku's `selection_word_boundary`.
+        let word = |c: char| !c.is_whitespace() && c != '\0' && !"{}[]()\"'-".contains(c);
         let (mut from, mut to) = (a.1 as usize, b.1 as usize + 1);
         match self.unit {
             2 => {
@@ -134,6 +144,43 @@ impl Sel {
     }
 }
 
+/// A choice of the panel's own menu, opened with a right click.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TermDo {
+    Copy,
+    Paste,
+    Clear,
+    NewTab,
+    CloseTab,
+}
+
+impl TermDo {
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            TermDo::Copy => "icons/copy.svg",
+            TermDo::Paste => "icons/file-plus.svg",
+            TermDo::Clear => "icons/trash.svg",
+            TermDo::NewTab => "icons/plus.svg",
+            TermDo::CloseTab => "icons/close.svg",
+        }
+    }
+}
+
+/// A link on the screen: its row, the cells it takes, and what it opens.
+#[derive(Clone, PartialEq)]
+pub(crate) struct Link {
+    row: u16,
+    from: usize,
+    to: usize,
+    target: Target,
+}
+
+#[derive(Clone, PartialEq)]
+enum Target {
+    Url(String),
+    File(std::path::PathBuf),
+}
+
 /// A row as its cells hold it: a character a cell, and a wide one's
 /// second cell a NUL.
 fn row_cells(row: &[pty::Span]) -> Vec<char> {
@@ -154,7 +201,7 @@ struct DragShell(u64);
 impl Workbench {
     /// Whether the panel is drawn: asked for, on a conversation.
     pub(crate) fn term_panel_shown(&self) -> bool {
-        self.side_term && self.page == Page::Session && self.detail.is_some()
+        self.side_term && self.page == Page::Session && self.detail.is_some() && !self.fold_term
     }
 
     /// Which side is asked for: the agent's is `true`, the shell's
@@ -169,6 +216,13 @@ impl Workbench {
         let to = (self.term_on() != Some(agent)).then_some(agent);
         self.term_go(to, cx);
         window.focus(if to.is_some() { &self.side_term_focus } else { &self.focus_handle }, cx);
+    }
+
+    /// ⌘⇧T and ⌘⇧A, the buttons' keys: beside a conversation only.
+    pub(crate) fn toggle_term_key(&mut self, agent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == Page::Session && self.detail.is_some() {
+            self.toggle_term(agent, window, cx);
+        }
     }
 
     /// The panel goes to that side, or away, and the change is drawn.
@@ -219,12 +273,21 @@ impl Workbench {
             }
             "term:tab+" => self.shell_new(None, cx),
             "term:fit" => self.side_term_w = TERM_W,
+            "term:copied" => self.side_copied = Some(Instant::now()),
+            _ if step.starts_with("term:hover:") => {
+                // term:hover:<row>,<col>
+                let n: Vec<u16> = step["term:hover:".len()..].split(',').filter_map(|v| v.parse().ok()).collect();
+                if let ([row, col], Some(pty)) = (&n[..], self.term_panel_pty()) {
+                    self.side_link = self.term_link_at(&pty, *row, *col);
+                }
+            }
+            _ if step.starts_with("term:text:") => self.cfg.terminal.size = step["term:text:".len()..].parse().unwrap_or(13.),
             "term:clear" => self.term_clear(),
             _ if step.starts_with("term:sel:") => {
                 // term:sel:<unit>,<row>,<col>,<row>,<col>
                 let n: Vec<u16> = step["term:sel:".len()..].split(',').filter_map(|v| v.parse().ok()).collect();
                 if let [unit, r1, c1, r2, c2] = n[..] {
-                    self.side_sel = Some(Sel { anchor: (r1, c1), head: (r2, c2), unit: unit as usize });
+                    self.side_sel = Some(Sel { anchor: (r1, c1), head: (r2, c2), unit: unit as usize % 4, block: unit >= 4 });
                     eprintln!("emaki: selected {:?}", self.term_sel_text());
                 }
             }
@@ -305,9 +368,9 @@ impl Workbench {
             .rounded(px(9.))
             .bg(track_bg)
             .children(plate)
-            .child(segment("term-shell", "icons/terminal.svg", "Shell".to_string(), false, cx))
+            .child(segment("term-shell", "icons/terminal.svg", "Shell (⌘⇧T)".to_string(), false, cx))
             // The agent's side wears the agent's own mark.
-            .child(segment("term-agent", crate::workbench::agent_icon_path(agent), format!("{} in a terminal", agent.display_name()), true, cx))
+            .child(segment("term-agent", crate::workbench::agent_icon_path(agent), format!("{} in a terminal (⌘⇧A)", agent.display_name()), true, cx))
             .into_any_element()
     }
 
@@ -321,7 +384,9 @@ impl Workbench {
                 if !this.side_term {
                     return false;
                 }
-                if this.term_panel_pty().is_some_and(|p| p.quiet_for() < POLL * 4 || !p.alive()) {
+                // The cursor's blink is a draw too, while the panel has the keyboard.
+                let blink = this.side_focused && this.cfg.terminal.cursor_blink && this.blink_on() != this.side_blink_on;
+                if blink || this.term_panel_pty().is_some_and(|p| p.quiet_for() < POLL * 4 || !p.alive()) {
                     cx.notify();
                 }
                 true
@@ -330,6 +395,40 @@ impl Workbench {
                 break;
             }
         }));
+    }
+
+    /// Whether the cursor is in the lit half of its blink: on and off by
+    /// turns, with no fade, from when it last moved.
+    fn blink_on(&self) -> bool {
+        (self.side_blink.1.elapsed().as_millis() / BLINK.as_millis()) % 2 == 0
+    }
+
+    /// A row's height at the letters' size now.
+    fn term_line_h(&self) -> f32 {
+        (self.cfg.terminal.size * LINE_RATIO * self.cfg.terminal.line_scale()).round()
+    }
+
+    /// The scheme the settings ask for: the window's own appearance, or
+    /// one of the two kept whatever the window is.
+    fn term_scheme(&self, cx: &App) -> &'static Scheme {
+        scheme(match self.cfg.terminal.theme.as_str() {
+            "dark" => false,
+            "light" => true,
+            _ => !cx.theme().mode.is_dark(),
+        })
+    }
+
+    /// The face the settings ask for, in the scheme's plain weight, with
+    /// Kaku's list of faces to fall back on.
+    fn term_font(&self, k: &Scheme, cx: &App) -> Font {
+        let t = &self.cfg.terminal;
+        Font {
+            family: crate::fonts::term_family(&t.font, cx),
+            features: FontFeatures(Arc::new(if t.ligatures { Vec::new() } else { vec![("calt".into(), 0), ("clig".into(), 0), ("liga".into(), 0)] })),
+            fallbacks: Some(FontFallbacks::from_fonts(crate::fonts::TERM_FALLBACKS.iter().map(|f| f.to_string()).collect())),
+            weight: k.plain,
+            style: FontStyle::Normal,
+        }
     }
 
     /// The pty the panel shows now, when there is one.
@@ -439,7 +538,8 @@ impl Workbench {
     /// down to `TAB_MIN` each, and past that the row scrolls with the
     /// button held at its right end.
     fn render_shell_tabs(&mut self, r: &SessionRef, room: f32, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
+        let k = self.term_scheme(cx);
+        let face = self.term_font(k, cx);
         if !cx.has_active_drag() {
             self.shell_drag = None;
         }
@@ -447,7 +547,7 @@ impl Workbench {
         let empty = Shells::default();
         let set = self.shells.get(&r.session_id).unwrap_or(&empty);
         let n = set.tabs.len().max(1) as f32;
-        let tab_w = ((room - TAB_H - TAB_GAP * n) / n).clamp(TAB_MIN, TAB_MAX);
+        let tab_w = ((room - TAB_H - 6. - TAB_GAP * n) / n).clamp(TAB_MIN, TAB_MAX);
         if self.shell_reveal.is_some_and(|until| Instant::now() < until) {
             if let Some(ix) = set.tabs.iter().position(|t| t.id == set.on) {
                 self.shell_scroll.scroll_to_item(ix);
@@ -466,26 +566,28 @@ impl Workbench {
             let ghost = label.to_string();
             let group: SharedString = format!("shell-tab-{id}").into();
             let fresh = tab.born.elapsed() < TAB_ANIM;
-            let (hover_bg, press_bg, close_bg) = (theme.muted, theme.border, theme.border);
+            // Kaku's tabs: flat, the one showing on a raised ground in
+                // the bold weight, the others grey until the pointer is
+                // over them.
+            let (hover_bg, press_bg, close_bg, lit) = (hsla(k.tab_hover), hsla(k.tab_on), hsla(k.split), hsla(k.fg));
             let el = h_flex()
                 .id(("shell-tab", id as usize))
                 .group(group.clone())
                 .w(px(tab_w))
-                .h(px(TAB_H))
-                .pl(px(7.))
-                .pr(px(3.))
-                .gap(px(5.))
+                .h(px(HEAD_H - 2.))
+                .pl(px(10.))
+                .pr(px(5.))
+                .gap(px(6.))
                 .items_center()
-                .rounded(px(6.))
-                .border_1()
                 .cursor_pointer()
                 .overflow_hidden()
+                .font(face.clone())
                 .text_size(px(11.5))
                 .map(|d| {
                     if active {
-                        d.bg(theme.background).border_color(theme.border).shadow_xs().text_color(theme.foreground).font_weight(FontWeight::MEDIUM)
+                        d.bg(hsla(k.tab_on)).text_color(lit).font_weight(k.bold)
                     } else {
-                        d.border_color(gpui::transparent_black()).text_color(theme.muted_foreground).hover(move |s| s.bg(hover_bg)).active(move |s| s.bg(press_bg))
+                        d.text_color(hsla(k.tab_off)).hover(move |s| s.bg(hover_bg).text_color(lit)).active(move |s| s.bg(press_bg))
                     }
                 })
                 .when(self.shell_drag == Some(id), |d| d.opacity(0.45))
@@ -514,7 +616,7 @@ impl Workbench {
                             swallow_click(window, cx);
                             this.shell_close(id, cx);
                         }))
-                        .child(Icon::new(IconName::Close).with_size(px(10.)).text_color(theme.muted_foreground)),
+                        .child(Icon::new(IconName::Close).with_size(px(10.)).text_color(hsla(k.tab_off))),
                 );
             // A new tab grows in from nothing. The wrapper is there at
             // rest too, under the same name.
@@ -522,20 +624,20 @@ impl Workbench {
                 if fresh { d.w(px(tab_w * t)).opacity(t) } else { d }
             }));
         }
-        let (hover_bg, press_bg) = (theme.muted, theme.border);
+        let (hover_bg, press_bg, lit) = (hsla(k.tab_hover), hsla(k.tab_on), hsla(k.fg));
         let plus = div()
             .id("shell-tab-new")
-            .size(px(TAB_H))
+            .w(px(TAB_H + 6.))
+            .h(px(HEAD_H - 2.))
             .flex_shrink_0()
-            .rounded(px(6.))
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .text_color(theme.muted_foreground)
-            .hover(move |s| s.bg(hover_bg).text_color(theme.foreground))
+            .text_color(hsla(k.tab_off))
+            .hover(move |s| s.bg(hover_bg).text_color(lit))
             .active(move |s| s.bg(press_bg))
-            .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("New shell").build(window, cx))
+            .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("New shell (⌘T)").build(window, cx))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
             .on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
@@ -613,7 +715,7 @@ impl Workbench {
     /// or, where a program has the screen to itself, its arrow keys.
     pub(crate) fn term_panel_wheel(&mut self, delta_y: Pixels, at: Point<Pixels>, mods: &Modifiers) {
         let Some(pty) = self.term_panel_pty() else { return };
-        self.side_wheel += f32::from(delta_y) / LINE_H;
+        self.side_wheel += f32::from(delta_y) / WHEEL_ROW;
         let lines = self.side_wheel.trunc() as i64;
         if lines == 0 {
             return;
@@ -637,6 +739,7 @@ impl Workbench {
         } else {
             self.side_back = (self.side_back as i64 + lines).max(0) as usize;
             self.side_sel = None;
+            self.term_unhover();
         }
     }
 
@@ -645,8 +748,8 @@ impl Workbench {
     fn term_cell(&self, at: Point<Pixels>, pty: &Pty) -> (u16, u16) {
         let b = self.side_term_bounds.get();
         let (rows, cols) = pty.size();
-        let col = (f32::from(at.x - b.left()) - PAD_X) / self.side_cell_w.max(1.);
-        let row = (f32::from(at.y - b.top()) - PAD_Y) / LINE_H;
+        let col = (f32::from(at.x - b.left()) - self.side_pad.0) / self.side_cell_w.max(1.);
+        let row = (f32::from(at.y - b.top()) - self.side_pad.0) / self.term_line_h();
         (col.floor().clamp(0., cols.saturating_sub(1) as f32) as u16, row.floor().clamp(0., rows.saturating_sub(1) as f32) as u16)
     }
 
@@ -659,6 +762,17 @@ impl Workbench {
     fn term_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let Some(pty) = self.term_panel_pty() else { return };
         let (col, row) = self.term_cell(e.position, &pty);
+        // ⌘ and a click opens the link under the pointer, in a program
+        // that hears the mouse too.
+        if e.button == MouseButton::Left && e.modifiers.platform {
+            if let Some(link) = self.term_link_at(&pty, row, col) {
+                match link.target {
+                    Target::Url(url) => cx.open_url(&url),
+                    Target::File(path) => crate::sys::open_path(&path),
+                }
+            }
+            return;
+        }
         let want = pty.mouse().filter(|_| pty.alive() && self.side_back == 0);
         if let (Some(want), false, Some(button)) = (want, e.modifiers.shift, button_code(e.button)) {
             self.side_sel = None;
@@ -667,39 +781,102 @@ impl Workbench {
             pty.write(&pty::mouse_bytes(button | mod_bits(&e.modifiers), col, row, true, want.form));
             return;
         }
-        if e.button != MouseButton::Left {
-            return;
-        }
-        if e.modifiers.platform {
-            let (rows, _) = pty.rows_back(self.side_back);
-            if let Some(url) = rows.get(row as usize).and_then(|r| link_at(&row_cells(r), col as usize)) {
-                cx.open_url(&url);
+        match e.button {
+            MouseButton::Left => {}
+            MouseButton::Right => {
+                let mut items = Vec::new();
+                if !self.term_sel_text().is_empty() {
+                    items.push(("Copy", MenuDo::Term(TermDo::Copy)));
+                }
+                items.push(("Paste", MenuDo::Term(TermDo::Paste)));
+                items.push(("Clear", MenuDo::Term(TermDo::Clear)));
+                if !self.side_term_agent {
+                    items.push(("", MenuDo::Rule));
+                    items.push(("New Tab", MenuDo::Term(TermDo::NewTab)));
+                    if self.term_panel_pty().is_some() {
+                        items.push(("Close Tab", MenuDo::Term(TermDo::CloseTab)));
+                    }
+                }
+                self.open_menu(e.position, items, cx);
+                return;
             }
+            MouseButton::Middle => return self.term_paste(cx),
+            _ => return,
+        }
+        // With Shift the selection there is runs on to the press.
+        if let Some(sel) = self.side_sel.as_mut().filter(|_| e.modifiers.shift) {
+            sel.head = (row, col);
+            self.side_selecting = true;
             return;
         }
-        if e.modifiers.alt && want.is_none() && self.side_back == 0 {
-            if let Some((at_row, at_col)) = pty.cursor().filter(|(r, _)| *r == row) {
-                let _ = at_row;
-                let key: &[u8] = match (col > at_col, pty.app_cursor()) {
-                    (true, false) => b"\x1b[C",
-                    (true, true) => b"\x1bOC",
-                    (false, false) => b"\x1b[D",
-                    (false, true) => b"\x1bOD",
-                };
-                pty.write(&key.repeat(col.abs_diff(at_col) as usize));
-            }
-            return;
-        }
-        self.side_sel = Some(Sel { anchor: (row, col), head: (row, col), unit: e.click_count.clamp(1, 3) });
+        // ⌥ and a drag takes the same columns of every row; ⌥ and a
+        // click at a prompt takes the cursor there, when the button is
+        // let go where it was pressed.
+        self.side_alt = e.modifiers.alt && want.is_none() && self.side_back == 0 && !pty.alt_screen();
+        self.side_sel = Some(Sel { anchor: (row, col), head: (row, col), unit: e.click_count.clamp(1, 3), block: e.modifiers.alt });
         self.side_selecting = true;
+    }
+
+    /// The cursor is taken along its row to a column, with arrow keys.
+    fn term_cursor_to(&self, pty: &Pty, row: u16, col: u16) {
+        let Some((_, at)) = pty.cursor().filter(|(r, _)| *r == row) else { return };
+        let key: &[u8] = match (col > at, pty.app_cursor()) {
+            (true, false) => b"\x1b[C",
+            (true, true) => b"\x1bOC",
+            (false, false) => b"\x1b[D",
+            (false, true) => b"\x1bOD",
+        };
+        pty.write(&key.repeat(col.abs_diff(at) as usize));
+    }
+
+    /// The link the cell is part of, when it is part of one.
+    fn term_link_at(&self, pty: &Pty, row: u16, col: u16) -> Option<Link> {
+        let (rows, _) = pty.rows_back(self.side_back);
+        let cwd = self.selected_ref().map(|r| std::path::PathBuf::from(&r.cwd)).unwrap_or_default();
+        let (from, to, target) = link_at(&row_cells(rows.get(row as usize)?), col as usize, &cwd)?;
+        Some(Link { row, from, to, target })
+    }
+
+    /// What is on the clipboard is pasted at the prompt.
+    fn term_paste(&mut self, cx: &mut Context<Self>) {
+        let Some(pty) = self.term_panel_pty().filter(|p| p.alive()) else { return };
+        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+            pty.paste(&text);
+            self.side_back = 0;
+            self.side_sel = None;
+        }
+    }
+
+    /// A choice of the panel's menu.
+    pub(crate) fn term_do(&mut self, what: TermDo, window: &mut Window, cx: &mut Context<Self>) {
+        match what {
+            TermDo::Copy => {
+                self.term_copy(cx);
+            }
+            TermDo::Paste => self.term_paste(cx),
+            TermDo::Clear => self.term_clear(),
+            TermDo::NewTab => self.shell_new(None, cx),
+            TermDo::CloseTab => {
+                if let Some(id) = self.selected_ref().and_then(|r| self.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
+                    self.shell_close(id, cx);
+                }
+            }
+        }
+        window.focus(&self.side_term_focus, cx);
     }
 
     /// The button let go, in the panel or outside it. A selection just
     /// made is copied, as it is in a terminal.
     fn term_mouse_up(&mut self, e: &MouseUpEvent, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.side_selecting) {
-            if !self.term_copy(cx) {
-                self.side_sel = None;
+            let alt = std::mem::take(&mut self.side_alt);
+            // With copying on selection off, what is selected stays for ⌘C.
+            let kept = !self.cfg.terminal.copy_on_select && !self.term_sel_text().is_empty();
+            if !kept && !self.term_copy(cx) {
+                let at = self.side_sel.take().map(|s| s.anchor);
+                if let (true, Some((row, col)), Some(pty)) = (alt, at, self.term_panel_pty()) {
+                    self.term_cursor_to(&pty, row, col);
+                }
             }
             cx.notify();
             return;
@@ -729,6 +906,16 @@ impl Workbench {
             }
             return;
         }
+        // The link under the pointer is underlined, looked for a cell at a time.
+        let cell = self.term_cell(e.position, &pty);
+        if cell != self.side_hover {
+            self.side_hover = cell;
+            let link = self.term_link_at(&pty, cell.1, cell.0);
+            if link != self.side_link {
+                self.side_link = link;
+                cx.notify();
+            }
+        }
         let Some(want) = pty.mouse().filter(|_| pty.alive() && self.side_back == 0) else { return };
         let held = self.side_mouse;
         if !(want.motion || want.drag && held.is_some()) {
@@ -756,7 +943,7 @@ impl Workbench {
         for (r, span) in spans.iter().enumerate() {
             let Some((from, to)) = *span else { continue };
             let piece: String = cells[r].iter().skip(from).take(to.saturating_sub(from)).filter(|c| **c != '\0').collect();
-            let runs_on = wraps.get(r).copied().unwrap_or(false) && Some(r) != last;
+            let runs_on = !sel.block && wraps.get(r).copied().unwrap_or(false) && Some(r) != last;
             out.push_str(if runs_on { &piece } else { piece.trim_end() });
             if Some(r) != last && !runs_on {
                 out.push('\n');
@@ -780,6 +967,13 @@ impl Workbench {
         })
         .detach();
         true
+    }
+
+    /// What was under the pointer is looked for again when it next moves:
+    /// the rows have changed under it.
+    fn term_unhover(&mut self) {
+        self.side_link = None;
+        self.side_hover = (u16::MAX, u16::MAX);
     }
 
     /// ⌘K: the screen and what has left it are forgotten, and the
@@ -827,11 +1021,7 @@ impl Workbench {
             };
             let handled = match k.key.as_str() {
                 "v" => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                        pty.paste(&text);
-                        self.side_back = 0;
-                        self.side_sel = None;
-                    }
+                    self.term_paste(cx);
                     true
                 }
                 "c" => self.term_copy(cx),
@@ -854,6 +1044,7 @@ impl Workbench {
                 },
             };
             if handled {
+                self.term_unhover();
                 cx.stop_propagation();
                 cx.notify();
             }
@@ -876,6 +1067,9 @@ impl Workbench {
         pty.write(&bytes);
         self.side_back = 0;
         self.side_sel = None;
+        self.term_unhover();
+        // A key begins the cursor's blink again, lit.
+        self.side_blink.1 = Instant::now();
         cx.stop_propagation();
         cx.notify();
     }
@@ -898,7 +1092,7 @@ impl Workbench {
     /// it, as the files and the outline do. The wrapper is there at rest
     /// too, under the same name (`docs/panels.md`).
     pub(crate) fn render_term_panel(&mut self, r: &SessionRef, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if self.page != Page::Session || self.detail.is_none() {
+        if self.page != Page::Session || self.detail.is_none() || self.fold_term {
             return Vec::new();
         }
         let live = self.side_term_anim.filter(|(_, _, at, _)| at.elapsed() < TERM_PANEL_ANIM);
@@ -943,17 +1137,29 @@ impl Workbench {
         let w = self.term_panel_w();
 
         // The screen's size in cells, from the room it was last given.
+        // One look for both sides, Kaku's: its scheme for the window's
+        // appearance, its face, and its room around the screen, which it
+        // counts in the screen's own pixels.
+        let k = self.term_scheme(cx);
+        let face = self.term_font(k, cx);
+        let (text, lh) = (self.cfg.terminal.size, self.term_line_h());
+        let scale = window.scale_factor().max(1.);
+        let (pad, pad_foot) = match self.cfg.terminal.padding.as_str() {
+            "compact" => (10., 8.),
+            "roomy" => (if scale >= 2. { 20. } else { 26. }, 16. / scale),
+            _ => (15., 8.),
+        };
         let cell_w = {
-            let font = font(theme.mono_font_family.clone());
             let probe = "MMMMMMMMMM";
-            let run = TextRun { len: probe.len(), font, color: gpui::black(), background_color: None, underline: None, strikethrough: None };
-            f32::from(window.text_system().shape_line(probe.into(), px(TEXT), &[run], None).width) / probe.len() as f32
+            let run = TextRun { len: probe.len(), font: face.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(probe.into(), px(text), &[run], None).width) / probe.len() as f32
         };
         let room = self.side_term_bounds.get().size;
-        let size = (((f32::from(room.height) - 2. * PAD_Y) / LINE_H).floor().max(4.) as u16, ((f32::from(room.width) - 2. * PAD_X) / cell_w.max(1.)).floor().max(20.) as u16);
+        let size = (((f32::from(room.height) - pad - pad_foot) / lh).floor().max(4.) as u16, ((f32::from(room.width) - 2. * pad) / cell_w.max(1.)).floor().max(20.) as u16);
         if room.height > px(0.) && !leaving {
             self.side_term_size.set(size);
             self.side_cell_w = cell_w;
+            self.side_pad = (pad, pad_foot);
         }
 
         // What shows: the shell, started when first looked at, or the
@@ -985,8 +1191,8 @@ impl Workbench {
                     .text_size(px(12.5))
                     .text_center()
                     .map(|d| match failed {
-                        Some(e) => d.text_color(theme.danger).child(format!("Could not start a shell: {e}")),
-                        None => d.text_color(theme.muted_foreground).child("No shell open. Press + for a new one."),
+                        Some(e) => d.text_color(hsla(k.ansi[1])).child(format!("Could not start a shell: {e}")),
+                        None => d.text_color(hsla(k.tab_off)).child("No shell open. Press + for a new one."),
                     })
                     .into_any_element()
             })
@@ -1001,13 +1207,14 @@ impl Workbench {
             }
         }
 
-        // The ground is the agent's own for its screen, whose colours
-        // were chosen for it, and the window's for a shell.
-        let light = if agent { crate::workbench::claude_theme_light() } else { !theme.mode.is_dark() };
-        let (ground, ink) = grounds(light);
+        let (ground, ink) = (k.bg, k.fg);
         let focused = self.side_term_focus.is_focused(window);
-        // With no screen to show, the words stand on the window's own ground.
-        let panel_bg = if shown.is_ok() { hsla(ground) } else { theme.background };
+        if !leaving {
+            self.side_focused = focused;
+        }
+        // A program that hears the mouse has the arrow, a link the hand.
+        let grabbed = shown.as_ref().is_ok_and(|p| p.alive() && p.mouse().is_some()) && self.side_back == 0;
+        let pointer = if self.side_link.is_some() { CursorStyle::PointingHand } else if grabbed { CursorStyle::Arrow } else { CursorStyle::IBeam };
         let body: AnyElement = match shown {
             Err(el) => el,
             Ok(pty) => {
@@ -1017,35 +1224,49 @@ impl Workbench {
                     Some(sel) if !leaving => sel.spans(&rows.iter().map(|r| row_cells(r)).collect::<Vec<_>>()),
                     _ => Vec::new(),
                 };
-                let lines = screen_lines(&rows, cell_w, light, agent, &picked, theme.primary.opacity(0.3));
+                let lines = screen_lines(&rows, cell_w, lh, k, &picked, self.side_link.as_ref().filter(|_| !leaving));
                 let copied = self.side_copied.filter(|at| at.elapsed() < COPIED_FOR && !leaving).map(|_| {
+                    // Kaku's toast: two cells in from the corner, a cell
+                    // and a half tall, gone over its last half second.
                     div()
                         .absolute()
-                        .right(px(12.))
-                        .bottom(px(12.))
-                        .h(px(22.))
-                        .px(px(9.))
+                        .right(px(2. * cell_w))
+                        .bottom(px(2. * lh))
+                        .h(px(1.5 * lh))
+                        .px(px(0.75 * cell_w * 2.))
                         .flex()
                         .items_center()
-                        .rounded(px(6.))
-                        .bg(theme.primary)
-                        .text_color(theme.primary_foreground)
-                        .font_family(theme.font_family.clone())
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
+                        .rounded(px(8.))
+                        .bg(hsla(k.toast.0).opacity(0.9))
+                        .text_color(hsla(k.toast.1))
+                        .font(face.clone())
+                        .text_size(px(text))
                         .child("Copied")
-                        .with_animation("term-copied", Animation::new(COPIED_FOR), |d, t| d.opacity(if t < 0.08 { t / 0.08 } else if t > 0.75 { (1. - t) / 0.25 } else { 1. }))
+                        .with_animation("term-copied", Animation::new(COPIED_FOR), |d, t| d.opacity(if t > 0.8 { (1. - t) / 0.2 } else { 1. }))
                 });
-                // The cursor, where the next letter goes: a line in the
-                // accent while the panel has the keyboard, the outline
-                // of a block otherwise.
-                let cursor = pty.cursor().filter(|_| back == 0 && pty.alive()).map(|(row, col)| {
-                    div()
-                        .absolute()
-                        .top(px(PAD_Y + row as f32 * LINE_H))
-                        .left(px(PAD_X + col as f32 * cell_w))
-                        .h(px(LINE_H))
-                        .map(|d| if focused { d.w(px(2.)).bg(theme.primary) } else { d.w(px(cell_w)).border_1().border_color(hsla(ink).opacity(0.55)) })
+                // The cursor, where the next letter goes: Kaku's bar, two
+                // of the screen's pixels wide and the row's height, on and
+                // off by turns from when it last moved while the panel has
+                // the keyboard, and still otherwise.
+                let at = pty.cursor().filter(|_| back == 0 && pty.alive());
+                if let Some(at) = at.filter(|at| !leaving && *at != self.side_blink.0) {
+                    self.side_blink = (at, Instant::now());
+                }
+                if !leaving {
+                    self.side_blink_on = self.blink_on();
+                }
+                let (shape, blinks) = (self.cfg.terminal.cursor.clone(), self.cfg.terminal.cursor_blink);
+                let cursor = at.filter(|_| !focused || !blinks || self.side_blink_on).map(|(row, col)| {
+                    let (thin, ink) = (px((2. / scale).max(1.)), hsla(k.cursor));
+                    let d = div().absolute().top(px(pad + row as f32 * lh)).left(px(pad + col as f32 * cell_w)).h(px(lh));
+                    match shape.as_str() {
+                        // The letter under a block shows through it; without
+                        // the keyboard the block is its outline.
+                        "block" if focused => d.w(px(cell_w)).bg(ink.opacity(0.55)),
+                        "block" => d.w(px(cell_w)).border_1().border_color(ink),
+                        "underline" => d.w(px(cell_w)).border_b(thin * 2.).border_color(ink),
+                        _ => d.w(thin).bg(ink),
+                    }
                 });
                 // One that has run a while may be started by itself again.
                 if agent && pty.age() > Duration::from_secs(30) {
@@ -1090,8 +1311,8 @@ impl Workbench {
                             })))
                         })
                 });
-                let mono = theme.mono_font_family.clone();
-                let screen = move |lines: Vec<AnyElement>| div().absolute().inset_0().overflow_hidden().px(px(PAD_X)).py(px(PAD_Y)).font_family(mono.clone()).text_size(px(TEXT)).text_color(hsla(ink)).children(lines);
+                let screen_face = face.clone();
+                let screen = move |lines: Vec<AnyElement>| div().absolute().inset_0().overflow_hidden().px(px(pad)).pt(px(pad)).font(screen_face.clone()).text_size(px(text)).text_color(hsla(ink)).children(lines);
                 let live = swap.is_some();
                 div()
                     .absolute()
@@ -1105,7 +1326,7 @@ impl Workbench {
                         move |d, t| if live { d.opacity(t) } else { d },
                     ))
                     .children(was.map(|old| {
-                        screen(screen_lines(&old.rows(), cell_w, light, false, &[], gpui::transparent_black())).with_animation(
+                        screen(screen_lines(&old.rows(), cell_w, lh, k, &[], None)).with_animation(
                             ElementId::Name(format!("term-screen-was-{swap_serial}").into()),
                             Animation::new(TAB_ANIM).with_easing(ease_out_quint()),
                             |d, t| d.opacity(1. - t),
@@ -1118,17 +1339,25 @@ impl Workbench {
             }
         };
 
-        let back = (self.side_back > 0).then(|| div().flex_shrink_0().text_size(px(11.)).text_color(theme.muted_foreground).child(format!("{} lines back", self.side_back)));
-        // The agent's head says whose screen it is; the shell's is its tabs.
+        let back = (self.side_back > 0).then(|| div().flex_shrink_0().pr(px(10.)).font(face.clone()).text_size(px(11.)).text_color(hsla(k.tab_off)).child(format!("{} lines back", self.side_back)));
+        // Both heads are a row of tabs: the agent's is its one screen,
+        // the shell's a tab a shell.
         let head_row: AnyElement = if agent {
             h_flex()
-                .gap(px(8.))
+                .h_full()
+                .px(px(10.))
+                .gap(px(6.))
                 .items_center()
-                .child(Icon::default().path(crate::workbench::agent_icon_path(r.agent)).with_size(px(13.)).text_color(crate::workbench::agent_color(r.agent, &theme)))
-                .child(div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(r.agent.display_name()))
+                .bg(hsla(k.tab_on))
+                .font(face.clone())
+                .font_weight(k.bold)
+                .text_size(px(11.5))
+                .text_color(hsla(k.fg))
+                .child(Icon::default().path(crate::workbench::agent_icon_path(r.agent)).with_size(px(12.)).text_color(crate::workbench::agent_color(r.agent, &theme)))
+                .child(r.agent.display_name())
                 .into_any_element()
         } else {
-            self.render_shell_tabs(r, f32::from(w) - 2. * 8. - if back.is_some() { 96. } else { 0. }, cx)
+            self.render_shell_tabs(r, f32::from(w) - if back.is_some() { 110. } else { 0. }, cx)
         };
         let bounds = self.side_term_bounds.clone();
         let entity = cx.entity().downgrade();
@@ -1138,21 +1367,20 @@ impl Workbench {
             .flex_shrink_0()
             .border_l_1()
             .border_color(theme.border)
-            .bg(theme.background)
+            .bg(hsla(k.bg))
             .child(
-                // The path bar's own height, ground and rules, so the two
-                // heads read as one line across the window.
+                // The path bar's own height, so the two heads read as
+                // one line across the window, on the terminal's ground
+                // as Kaku's tab bar is.
                 h_flex()
                     .h(px(HEAD_H))
                     .flex_shrink_0()
-                    .px(px(if agent { 12. } else { 8. }))
-                    .gap(px(8.))
                     .items_center()
                     .overflow_hidden()
-                    .bg(theme.muted.opacity(0.3))
+                    .bg(hsla(k.bg))
                     .border_t_1()
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(hsla(k.split))
                     .child(head_row)
                     .child(div().flex_1())
                     .children(back),
@@ -1166,8 +1394,8 @@ impl Workbench {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
-                    .bg(panel_bg)
-                    .cursor(CursorStyle::IBeam)
+                    .bg(hsla(ground))
+                    .cursor(pointer)
                     .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.term_panel_key(e, cx)))
                     .on_action(cx.listener(|this, _: &TermTab, _, cx| {
                         if let Some(pty) = this.term_panel_pty() {
@@ -1188,6 +1416,12 @@ impl Workbench {
                         cx.notify();
                     }))
                     .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.term_mouse_move(e, cx)))
+                    .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                        if !over && this.side_link.is_some() {
+                            this.term_unhover();
+                            cx.notify();
+                        }
+                    }))
                     .on_action(cx.listener(|this, _: &TermClear, _, cx| {
                         this.term_clear();
                         cx.notify();
@@ -1199,8 +1433,11 @@ impl Workbench {
                         this.shell_new(None, cx);
                         window.focus(&this.side_term_focus, cx);
                     }))
-                    .on_action(cx.listener(|this, _: &TermCloseTab, _, cx| {
-                        // With no shell tab to close, ⌘W is the window's.
+                    .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+                        // ⌘W, the window's own action, heard here first
+                        // while the panel has the keyboard: it closes the
+                        // shell tab showing. With none to close it is the
+                        // window's.
                         match this.selected_ref().and_then(|r| this.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id).filter(|_| !this.side_term_agent) {
                             Some(id) => this.shell_close(id, cx),
                             None => cx.propagate(),
@@ -1242,6 +1479,7 @@ impl Workbench {
 
     fn render_agent_absent(&self, r: &SessionRef, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let k = self.term_scheme(cx);
         let name = r.agent.display_name();
         let (line, can): (String, bool) = if r.agent != AgentId::ClaudeCode || !self.hub.hidden_terminals() {
             (format!("{name} runs here only for Claude Code sessions, with the hidden terminal on."), false)
@@ -1259,7 +1497,7 @@ impl Workbench {
             .justify_center()
             .gap(px(12.))
             .px(px(28.))
-            .child(div().text_size(px(12.5)).text_center().text_color(theme.muted_foreground).child(line))
+            .child(div().text_size(px(12.5)).text_center().text_color(hsla(k.tab_off)).child(line))
             .when(can, |d| {
                 d.child(pill_button("term-agent-start", SharedString::from(format!("Start {name}")), &theme, cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
@@ -1272,18 +1510,73 @@ impl Workbench {
     }
 }
 
-/// The link a cell is part of: the stretch between blanks and quotes
-/// around it, when that is an http address.
-fn link_at(cells: &[char], col: usize) -> Option<String> {
+/// The link a cell is part of, by Kaku's rules: the cells it takes and
+/// what it opens. An address with a scheme, one that begins "www.", a
+/// mail address, a bare domain under a well-known ending, and a path to
+/// a file that is there (`cwd` is where a relative one starts; a line and
+/// column after it are let go).
+fn link_at(cells: &[char], col: usize, cwd: &std::path::Path) -> Option<(usize, usize, Target)> {
+    const ENDINGS: &[&str] = &[
+        "com", "net", "org", "edu", "gov", "io", "dev", "ai", "fun", "xyz", "me", "im", "tv", "to", "co", "info", "biz", "tech", "site", "online", "cloud", "blog", "store", "link", "live", "news", "cn", "jp", "kr", "uk", "de", "fr",
+        "us", "ca", "au", "br", "ru", "nl", "se", "ch", "hk", "tw", "sg",
+    ];
     let edge = |c: char| c.is_whitespace() || c == '\0' || "\"'<>`".contains(c);
     if cells.get(col).is_none_or(|c| edge(*c)) {
         return None;
     }
-    let from = cells[..col].iter().rposition(|c| edge(*c)).map(|i| i + 1).unwrap_or(0);
-    let to = cells[col..].iter().position(|c| edge(*c)).map(|i| col + i).unwrap_or(cells.len());
+    let mut from = cells[..col].iter().rposition(|c| edge(*c)).map(|i| i + 1).unwrap_or(0);
+    let mut to = cells[col..].iter().position(|c| edge(*c)).map(|i| col + i).unwrap_or(cells.len());
+    // The brackets around it and the stop after it are not part of it.
+    while from < to && "([{".contains(cells[from]) {
+        from += 1;
+    }
+    while to > from && ".,;:!?)]}".contains(cells[to - 1]) && !(cells[to - 1] == ')' && cells[from..to].contains(&'(')) {
+        to -= 1;
+    }
     let word: String = cells[from..to].iter().collect();
-    let at = word.find("https://").or_else(|| word.find("http://"))?;
-    Some(word[at..].trim_end_matches(['.', ',', ')', ']', ';', ':']).to_string())
+    let target = if let Some(at) = word.find("://") {
+        // From where the scheme's name begins.
+        let start = word[..at].rfind(|c: char| !c.is_alphanumeric() && c != '_').map(|i| i + 1).unwrap_or(0);
+        if start == at {
+            return None;
+        }
+        from += word[..start].chars().count();
+        Target::Url(word[start..].to_string())
+    } else if word.to_lowercase().starts_with("www.") && word.len() > 4 {
+        Target::Url(format!("https://{word}"))
+    } else if let Some((name, host)) = word.split_once('@').filter(|(name, host)| {
+        let plain = |s: &str, more: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || more.contains(c));
+        plain(name, "_.+-") && host.contains('.') && host.split('.').all(|part| plain(part, "_-"))
+    }) {
+        Target::Url(format!("mailto:{name}@{host}"))
+    } else {
+        let host = word.split(['/', ':']).next().unwrap_or("").to_lowercase();
+        let parts: Vec<&str> = host.split('.').collect();
+        let domain = parts.len() > 1 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) && ENDINGS.contains(parts.last()?);
+        if domain {
+            Target::Url(format!("https://{word}"))
+        } else if word.contains('/') {
+            // A path, with the line and the column a compiler adds let go.
+            let mut path = word.as_str();
+            for _ in 0..2 {
+                if let Some((head, tail)) = path.rsplit_once(':').filter(|(_, tail)| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit())) {
+                    let _ = tail;
+                    path = head;
+                }
+            }
+            let path = match path.strip_prefix("~/") {
+                Some(rest) => emaki_core::paths::home().join(rest),
+                None => cwd.join(path),
+            };
+            if !path.exists() {
+                return None;
+            }
+            Target::File(path)
+        } else {
+            return None;
+        }
+    };
+    (from..to).contains(&col).then_some((from, to, target))
 }
 
 /// A button as a mouse report names it.
@@ -1301,9 +1594,75 @@ fn mod_bits(m: &Modifiers) -> u8 {
     (if m.shift { 4 } else { 0 }) | (if m.alt { 8 } else { 0 }) | (if m.control { 16 } else { 0 })
 }
 
-/// The ground and the ink of a screen, light or dark.
-fn grounds(light: bool) -> (u32, u32) {
-    if light { (0xfaf9f5, 0x1f1e1d) } else { (0x1f1e1d, 0xe8e6dc) }
+/// One of Kaku's two colour schemes (tw93/kaku, MIT): the screen's
+/// ground and ink, the cursor, the selection's ground (with how strong)
+/// and ink, the rule under the head, a tab's grounds and the ink of one
+/// not showing, the toast's ground and ink, the sixteen named colours,
+/// and the grounds and inks it draws as others because Claude Code's
+/// screen reads badly with them as they are.
+struct Scheme {
+    bg: u32,
+    fg: u32,
+    cursor: u32,
+    sel: (u32, f32),
+    sel_fg: u32,
+    split: u32,
+    tab_on: u32,
+    tab_hover: u32,
+    tab_off: u32,
+    toast: (u32, u32),
+    ansi: [u32; 16],
+    grounds: &'static [(u32, u32)],
+    inks: &'static [(u32, u32)],
+    /// The ground a grey from the other side of the scale is drawn as: a
+    /// program's quiet band on a dark terminal is a quiet band here.
+    wash: u32,
+    /// The weights of plain and of bold letters: one step heavier on a
+    /// light ground, where thin strokes fade.
+    plain: FontWeight,
+    bold: FontWeight,
+}
+
+static KAKU_DARK: Scheme = Scheme {
+    bg: 0x15141b,
+    fg: 0xd5d4d6,
+    cursor: 0x8e6ad9,
+    sel: (0x8e6ad9, 0.55),
+    sel_fg: 0xd5d4d6,
+    split: 0x29263c,
+    tab_on: 0x29263c,
+    tab_hover: 0x1f1d28,
+    tab_off: 0x6d6d6d,
+    toast: (0x8e6ad9, 0xffffff),
+    ansi: [0xc8c6cc, 0xd85d5d, 0x58d8ad, 0xdaae76, 0x68afda, 0x8e6ad9, 0x58d8ad, 0xd5d4d6, 0x6d6d6d, 0xd85d5d, 0x58d8ad, 0xdaae76, 0x90c9e6, 0x8e6ad9, 0x58d8ad, 0xd5d4d6],
+    grounds: &[(0xc8c6cc, 0x15141b), (0x6d6d6d, 0x3a3942), (0x6e6e6e, 0x3a3942), (0x8ec3ff, 0x3a3942), (0xd5d4d6, 0x4a4954)],
+    inks: &[(0x000000, 0xd5d4d6), (0x110f18, 0xd5d4d6), (0x15141b, 0xd5d4d6), (0x1a1a1a, 0xd5d4d6), (0x1c1c1c, 0xd5d4d6)],
+    wash: 0x3a3942,
+    plain: FontWeight::NORMAL,
+    bold: FontWeight::MEDIUM,
+};
+
+static KAKU_LIGHT: Scheme = Scheme {
+    bg: 0xfffcf0,
+    fg: 0x100f0f,
+    cursor: 0x343331,
+    sel: (0xe8e6db, 1.),
+    sel_fg: 0x100f0f,
+    split: 0xdddbcf,
+    tab_on: 0xe8e6db,
+    tab_hover: 0xe8e6db,
+    tab_off: 0x4a4946,
+    toast: (0x8e6b02, 0x1a1a1a),
+    ansi: [0x100f0f, 0xaf3029, 0x536907, 0x8e6b02, 0x205ea6, 0xa02f6f, 0x1c6c66, 0x575653, 0x6f6e69, 0xc03e35, 0x66790d, 0x8e6b02, 0x3171b2, 0xb74583, 0x277c75, 0x403e3c],
+    grounds: &[(0x575653, 0xf2f0eb), (0x585754, 0xf2f0eb), (0x225fa6, 0xf2f0eb), (0x1c6c66, 0xf2f0eb), (0x536907, 0xf2f0eb), (0x8e6b02, 0xf2f0eb), (0x205ea6, 0xc9ddf0), (0x403e3c, 0xe8e6db)],
+    inks: &[(0xffffdb, 0x575653), (0xffffdc, 0x575653)],
+    wash: 0xf2f0eb,
+    plain: FontWeight::MEDIUM,
+    bold: FontWeight::SEMIBOLD,
+};
+
+fn scheme(light: bool) -> &'static Scheme {
+    if light { &KAKU_LIGHT } else { &KAKU_DARK }
 }
 
 fn hsla(c: u32) -> Hsla {
@@ -1315,86 +1674,204 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
+/// The colour a scheme draws in place of `c`, when it has one.
+fn swapped(table: &[(u32, u32)], c: u32) -> u32 {
+    table.iter().find(|(from, _)| *from == c).map(|(_, to)| *to).unwrap_or(c)
+}
+
+/// Whether a colour is a grey, or near enough to one.
+fn grey(c: u32) -> bool {
+    let ch = [c >> 16 & 0xff, c >> 8 & 0xff, c & 0xff];
+    ch.iter().max().unwrap() - ch.iter().min().unwrap() < 28
+}
+
+/// How bright a colour is to the eye, 0 to 1.
+fn brightness(c: u32) -> f32 {
+    let ch = |sh: u32| {
+        let v = (c >> sh & 0xff) as f32 / 255.;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
+}
+
+/// An ink that can be read on its ground: Kaku's `text_min_contrast_ratio`
+/// of 3. An ink too close to the ground is taken toward black or white,
+/// whichever is the farther from it, as far as it takes. This is what
+/// makes colours a program chose for a dark terminal readable on the
+/// light scheme, and the other way round.
+fn legible(fg: u32, bg: u32) -> u32 {
+    let ratio = |a: u32, b: u32| {
+        let (x, y) = (brightness(a), brightness(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    };
+    if ratio(fg, bg) >= 3. {
+        return fg;
+    }
+    let to = if brightness(bg) > 0.18 { 0x000000 } else { 0xffffff };
+    (1..=10).map(|t| mix(fg, to, t as f32 / 10.)).find(|c| ratio(*c, bg) >= 3.).unwrap_or(to)
+}
+
 /// A screen's rows as they are drawn, a row a line.
-fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, light: bool, agent: bool, picked: &[Option<(usize, usize)>], picked_bg: Hsla) -> Vec<AnyElement> {
-    let (ground, ink) = grounds(light);
+fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picked: &[Option<(usize, usize)>], link: Option<&Link>) -> Vec<AnyElement> {
     let mut lines: Vec<AnyElement> = Vec::with_capacity(rows.len());
     for (ix, row) in rows.iter().enumerate() {
+        let sel = picked.get(ix).copied().flatten();
+        let linked = link.filter(|l| l.row as usize == ix).map(|l| (l.from, l.to));
+        // Whether a cell is selected, and whether it is part of the link
+        // under the pointer: either changes how its letter is drawn.
+        let marks = |col: usize| (sel.is_some_and(|(f, t)| (f..t).contains(&col)), linked.is_some_and(|(f, t)| (f..t).contains(&col)));
         let mut text = String::new();
         let mut looks = Vec::new();
-        // What is drawn under the letters, a cell at a time:
-        // each stretch's ground, the whole height of the row,
-        // and the block characters as the shapes they are.
+        // What is drawn under the letters, a cell at a time: each
+        // stretch's ground, the whole height of the row, then what is
+        // selected, then the block and line characters as the shapes
+        // they are.
+        let mut grounds: Vec<AnyElement> = Vec::new();
         let mut under: Vec<AnyElement> = Vec::new();
         let mut col = 0usize;
         for s in row {
-            let start = text.len();
-            let (mut fg, mut bg) = (s.fg.unwrap_or(ink), s.bg);
-            if s.inverse {
-                (fg, bg) = (bg.unwrap_or(ground), Some(fg));
-            }
-            if s.dim {
-                fg = mix(fg, bg.unwrap_or(ground), 0.45);
-            }
-            // A shell's colours are a dark terminal's: on a
-            // light ground the pale ones are brought toward
-            // the ink, or yellow and white cannot be read.
-            if light && !agent && bg.is_none() && s.fg.is_some() {
-                let lum = 0.2126 * (fg >> 16 & 0xff) as f32 + 0.7152 * (fg >> 8 & 0xff) as f32 + 0.0722 * (fg & 0xff) as f32;
-                if lum > 140. {
-                    fg = mix(fg, ink, ((lum - 140.) / 115. * 0.6 + 0.25).min(0.8));
+            // The sixteen named colours are the scheme's own.
+            let mut fg = match s.fg_ix {
+                Some(i) => k.ansi[i as usize],
+                None => s.fg.map(|c| swapped(k.inks, c)).unwrap_or(k.fg),
+            };
+            let mut bg = match s.bg_ix {
+                Some(i) => Some(swapped(k.grounds, k.ansi[i as usize])),
+                None => s.bg.map(|c| swapped(k.grounds, c)),
+            };
+            // A grey ground a program chose for the other kind of terminal
+            // (Claude Code's band behind a prompt, near black for a dark
+            // one) is the scheme's own quiet ground, and a grey ink that
+            // was to stand out on it is the scheme's ink. Kaku swaps the
+            // greys it knows by value; this is the same for any grey.
+            let light = brightness(k.bg) > 0.5;
+            if bg.is_some_and(|c| s.bg_ix.is_none() && grey(c) && if light { brightness(c) < 0.2 } else { brightness(c) > 0.5 }) {
+                bg = Some(k.wash);
+                if s.fg_ix.is_none() && grey(fg) && if light { brightness(fg) > 0.4 } else { brightness(fg) < 0.2 } {
+                    fg = k.fg;
                 }
             }
-            let (from, mark) = (col, under.len());
+            if s.inverse {
+                (fg, bg) = (bg.unwrap_or(k.bg), Some(fg));
+            }
+            if s.dim {
+                fg = mix(fg, bg.unwrap_or(k.bg), 0.45);
+            }
+            // Shapes keep the colour asked for; letters must be readable.
+            let shape = hsla(fg);
+            let fg = legible(fg, bg.unwrap_or(k.bg));
+            let look = |(picked, linked): (bool, bool)| HighlightStyle {
+                color: Some(hsla(if picked { k.sel_fg } else { fg })),
+                // Kaku has no italic: slanted text is drawn upright.
+                font_weight: s.bold.then_some(k.bold),
+                underline: (s.underline || linked).then(|| UnderlineStyle { thickness: px(1.), ..Default::default() }),
+                ..Default::default()
+            };
+            let from = col;
+            let mut run = (text.len(), marks(col));
             for c in s.text.chars() {
-                match block_shape(c) {
-                    Some((shapes, strength)) => {
-                        for (x, y, bw, bh) in shapes {
-                            under.push(
-                                div()
-                                    .absolute()
-                                    .left(px((col as f32 + x) * cell_w))
-                                    .top(px(y * LINE_H))
-                                    .w(px(bw * cell_w + 0.5))
-                                    .h(px(bh * LINE_H))
-                                    .bg(hsla(fg).opacity(strength))
-                                    .into_any_element(),
-                            );
-                        }
-                        text.push(' ');
+                let now = marks(col);
+                if now != run.1 {
+                    if run.0 < text.len() {
+                        looks.push((run.0..text.len(), look(run.1)));
                     }
-                    None => text.push(c),
+                    run = (text.len(), now);
+                }
+                let x0 = col as f32 * cell_w;
+                if let Some((shapes, strength)) = block_shape(c) {
+                    for (x, y, bw, bh) in shapes {
+                        under.push(div().absolute().left(px(x0 + x * cell_w)).top(px(y * lh)).w(px(bw * cell_w + 0.5)).h(px(bh * lh)).bg(shape.opacity(strength)).into_any_element());
+                    }
+                    text.push(' ');
+                } else if let Some(parts) = line_shape(c) {
+                    under.extend(line_parts(parts, x0, cell_w, lh, shape));
+                    text.push(' ');
+                } else {
+                    text.push(c);
                 }
                 col += if wide(c) { 2 } else { 1 };
             }
-            if let Some(bg) = bg {
-                // Before the shapes of its own cells.
-                under.insert(
-                    mark,
-                    div().absolute().left(px(from as f32 * cell_w)).top_0().w(px((col - from) as f32 * cell_w + 0.5)).h(px(LINE_H)).bg(hsla(bg)).into_any_element(),
-                );
+            if run.0 < text.len() {
+                looks.push((run.0..text.len(), look(run.1)));
             }
-            looks.push((
-                start..text.len(),
-                HighlightStyle {
-                    color: Some(hsla(fg)),
-                    font_weight: s.bold.then_some(FontWeight::BOLD),
-                    font_style: s.italic.then_some(FontStyle::Italic),
-                    underline: s.underline.then(|| UnderlineStyle { thickness: px(1.), ..Default::default() }),
-                    ..Default::default()
-                },
-            ));
+            if let Some(bg) = bg {
+                grounds.push(div().absolute().left(px(from as f32 * cell_w)).top_0().w(px((col - from) as f32 * cell_w + 0.5)).h(px(lh)).bg(hsla(bg)).into_any_element());
+            }
         }
-        // What is selected of the row, over its grounds and under its letters.
-        if let Some((from, to)) = picked.get(ix).copied().flatten() {
-            under.push(div().absolute().left(px(from as f32 * cell_w)).top_0().w(px((to - from) as f32 * cell_w)).h(px(LINE_H)).bg(picked_bg).into_any_element());
+        if let Some((from, to)) = sel {
+            grounds.push(div().absolute().left(px(from as f32 * cell_w)).top_0().w(px((to - from) as f32 * cell_w)).h(px(lh)).bg(hsla(k.sel.0).opacity(k.sel.1)).into_any_element());
         }
         if text.is_empty() {
             text.push(' ');
         }
-        lines.push(div().h(px(LINE_H)).relative().flex_shrink_0().whitespace_nowrap().children(under).child(div().relative().child(StyledText::new(text).with_highlights(looks))).into_any_element());
+        lines.push(div().h(px(lh)).relative().flex_shrink_0().whitespace_nowrap().children(grounds).children(under).child(div().relative().child(StyledText::new(text).with_highlights(looks))).into_any_element());
     }
     lines
+}
+
+/// A line-drawing character (U+2500 on) as the arms it has from the
+/// middle of its cell, left, right, up and down; how thick; and whether
+/// its corner is round. A font draws these to its own line height, which
+/// is less than a row's here, and the frames Claude Code draws came out
+/// with a gap between every two rows. The ones not here are the font's.
+fn line_shape(c: char) -> Option<(bool, bool, bool, bool, f32, bool)> {
+    let (l, r, u, d, thick, round) = match c as u32 {
+        0x2500 => (true, true, false, false, 1., false),
+        0x2501 => (true, true, false, false, 2., false),
+        0x2502 => (false, false, true, true, 1., false),
+        0x2503 => (false, false, true, true, 2., false),
+        0x250c => (false, true, false, true, 1., false),
+        0x2510 => (true, false, false, true, 1., false),
+        0x2514 => (false, true, true, false, 1., false),
+        0x2518 => (true, false, true, false, 1., false),
+        0x251c => (false, true, true, true, 1., false),
+        0x2524 => (true, false, true, true, 1., false),
+        0x252c => (true, true, false, true, 1., false),
+        0x2534 => (true, true, true, false, 1., false),
+        0x253c => (true, true, true, true, 1., false),
+        0x256d => (false, true, false, true, 1., true),
+        0x256e => (true, false, false, true, 1., true),
+        0x256f => (true, false, true, false, 1., true),
+        0x2570 => (false, true, true, false, 1., true),
+        0x2574 => (true, false, false, false, 1., false),
+        0x2575 => (false, false, true, false, 1., false),
+        0x2576 => (false, true, false, false, 1., false),
+        0x2577 => (false, false, false, true, 1., false),
+        _ => return None,
+    };
+    Some((l, r, u, d, thick, round))
+}
+
+/// The arms of a line-drawing character, drawn in the cell that begins
+/// at `x0`: each from the cell's middle to its edge.
+fn line_parts((l, r, u, d, thick, round): (bool, bool, bool, bool, f32, bool), x0: f32, cell_w: f32, lh: f32, ink: Hsla) -> Vec<AnyElement> {
+    let (cx, cy) = ((x0 + cell_w / 2. - thick / 2.).round(), (lh / 2. - thick / 2.).round());
+    let (left, right) = (cx - x0, x0 + cell_w - cx);
+    let at = |x: f32, y: f32, w: f32, h: f32| div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h));
+    if round {
+        // A quarter of a ring: two edges of a box with one round corner.
+        let radius = px((cell_w / 2.).floor());
+        let (x, w) = if r { (cx, right) } else { (x0, left + thick) };
+        let (y, h) = if d { (cy, lh - cy) } else { (0., cy + thick) };
+        let b = at(x, y, w, h).border_color(ink);
+        let b = match (r, d) {
+            (true, true) => b.border_l(px(thick)).border_t(px(thick)).rounded_tl(radius),
+            (false, true) => b.border_r(px(thick)).border_t(px(thick)).rounded_tr(radius),
+            (false, false) => b.border_r(px(thick)).border_b(px(thick)).rounded_br(radius),
+            (true, false) => b.border_l(px(thick)).border_b(px(thick)).rounded_bl(radius),
+        };
+        return vec![b.into_any_element()];
+    }
+    let mut out = Vec::new();
+    if l || r {
+        let (x, w) = (if l { x0 } else { cx }, if l && r { cell_w + 0.5 } else if l { left + thick } else { right + 0.5 });
+        out.push(at(x, cy, w, thick).bg(ink).into_any_element());
+    }
+    if u || d {
+        let (y, h) = (if u { 0. } else { cy }, if u && d { lh } else if u { cy + thick } else { lh - cy });
+        out.push(at(cx, y, thick, h).bg(ink).into_any_element());
+    }
+    out
 }
 
 /// Whether a character takes two cells, as East Asian wide ones do.

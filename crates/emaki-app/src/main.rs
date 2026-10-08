@@ -22,7 +22,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermCloseTab, TermNewTab, TermTab, ToggleFiles, ToggleOutline, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoBoard, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -34,6 +34,9 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-s", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-e", ToggleFiles, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-o", ToggleOutline, Some(KEY_CONTEXT)),
+        // The two sides of the terminal at a conversation's right.
+        KeyBinding::new("secondary-shift-t", ToggleShell, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-a", ToggleAgent, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-1", Tab1, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-2", Tab2, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-3", Tab3, Some(KEY_CONTEXT)),
@@ -57,10 +60,12 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("tab", TermTab, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("shift-tab", TermBackTab, Some(TERMINAL_CONTEXT)),
         // The terminal panel's own: where it does not take one (the
-        // agent's side has no tabs) the window's binding is next.
+        // agent's side has no tabs) the window's binding is next. ⌘W is
+        // not here: the panel answers the global `CloseTab` below itself,
+        // since a global binding outranks one bound to a context.
         KeyBinding::new("secondary-k", TermClear, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("secondary-t", TermNewTab, Some(TERMINAL_CONTEXT)),
-        KeyBinding::new("secondary-w", TermCloseTab, Some(TERMINAL_CONTEXT)),
+        KeyBinding::new("secondary-n", TermNewTab, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("secondary-q", Quit, None),
         // ⌘, on macOS, Ctrl+, elsewhere; Win+, as well where there is a
         // Win key, though Windows itself may take it first (desktop peek).
@@ -139,6 +144,8 @@ fn app_menus() -> Vec<Menu> {
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
             MenuItem::action("Toggle Files", ToggleFiles),
             MenuItem::action("Toggle Outline", ToggleOutline),
+            MenuItem::action("Toggle Shell", ToggleShell),
+            MenuItem::action("Toggle Agent Terminal", ToggleAgent),
         ],
     });
     menus.push(Menu {
