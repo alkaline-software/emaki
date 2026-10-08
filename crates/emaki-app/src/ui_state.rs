@@ -34,7 +34,7 @@ pub struct UiState {
     /// to, and whether it showed the agent and not the shell.
     pub term_w: Option<f32>,
     pub term_agent: Option<bool>,
-    /// `board`, `sessions`, `session` or `new`.
+    /// `sessions`, `session` or `new`.
     pub page: String,
     /// Session keys (`<agent>:<id>`) with a tab, in tab order.
     pub tabs: Vec<String>,

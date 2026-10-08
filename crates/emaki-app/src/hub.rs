@@ -31,6 +31,15 @@ use emaki_core::watcher::Watcher;
 /// A process behind a transcript is assumed for this long after its last write
 /// when nothing else says so.
 pub const LIVE_GRACE_S: f64 = 600.0;
+/// How long a session still at work goes between two copies into the
+/// archive. One whose turn is over is copied at once; this is for a turn
+/// that runs on. The archive is for a file the agent deletes or rewrites,
+/// which it does not do to one it is writing, so a copy every few seconds
+/// bought nothing.
+const ARCHIVE_EVERY: Duration = Duration::from_secs(300);
+/// How often the copies the agents no longer have are looked over for
+/// packing, after the look at launch.
+const PACK_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 pub enum HubEvent {
     Index(Vec<SessionRef>),
@@ -169,6 +178,10 @@ impl Hub {
             .name("emaki-scan".into())
             .spawn(move || {
                 let mut last_sig: Vec<(String, u64, f64)> = Vec::new();
+                // What of each session the archive has, by its size and
+                // time, and when it was taken.
+                let mut taken: HashMap<String, (u64, f64, Instant)> = HashMap::new();
+                let mut packed_at: Option<Instant> = None;
                 loop {
                     let (interval, agents) = {
                         let cfg = hub.cfg.read().unwrap();
@@ -187,10 +200,38 @@ impl Hub {
                     // pass so the elapsed clocks tick, cheap because peek is
                     // cached on (size, mtime).
                     hub.send(HubEvent::Index(refs.clone()));
+                    // Copy first, render second: at launch every session,
+                    // after that a session when it has changed and its
+                    // turn is over, and one still at work now and then.
+                    // The counts are bookkeeping and go nowhere the
+                    // person looks.
+                    let due: Vec<SessionRef> = refs
+                        .iter()
+                        .filter(|r| !r.archived)
+                        .filter(|r| match taken.get(&format!("{}:{}", r.agent.as_str(), r.session_id)) {
+                            None => true,
+                            Some((size, mtime, _)) if *size == r.size && *mtime == r.mtime => false,
+                            Some((_, _, at)) => r.state.phase != emaki_core::build::Phase::Working || at.elapsed() >= ARCHIVE_EVERY,
+                        })
+                        .cloned()
+                        .collect();
+                    if !due.is_empty() {
+                        let _ = archive::sweep(&due);
+                        for r in &due {
+                            taken.insert(format!("{}:{}", r.agent.as_str(), r.session_id), (r.size, r.mtime, Instant::now()));
+                        }
+                    }
+                    // The copies the agents no longer have are packed, in
+                    // their own time: once after launch, then a few times
+                    // a day.
+                    if packed_at.is_none_or(|at| at.elapsed() >= PACK_EVERY) {
+                        packed_at = Some(Instant::now());
+                        let stale: Vec<SessionRef> = refs.iter().filter(|r| r.archived).cloned().collect();
+                        let _ = thread::Builder::new().name("emaki-pack".into()).spawn(move || {
+                            let _ = archive::pack_stale(&stale);
+                        });
+                    }
                     if changed {
-                        // Copy first, render second. The counts are
-                        // bookkeeping and go nowhere the person looks.
-                        let _ = archive::sweep(&refs);
                         if let Ok(s) = hub.search_tx.lock() {
                             let _ = s.send(refs.clone());
                         }
@@ -497,6 +538,26 @@ impl Hub {
         // wait was over before it began whenever one was in view, the
         // second path went in on top of the first, and one picture of
         // the two never arrived.
+        // The prompt may hold words already: Claude Code puts a prompt
+        // stopped at once back into its input, as the window puts it
+        // back into the composer, and the message typed after it went
+        // out with the old words in front, twice over after two stops.
+        // What is there is taken out a line at a time (to the line's end,
+        // back to its start, and the break before it) until the prompt
+        // is empty, each step once the screen shows the one before.
+        for _ in 0..400 {
+            if driver::prompt_on_screen(&pty.styled()) != Some(false) || !pty.alive() {
+                break;
+            }
+            let before = pty.styled();
+            pty.write(b"\x05\x15\x7f");
+            for _ in 0..20 {
+                if pty.styled() != before {
+                    break;
+                }
+                thread::sleep(look);
+            }
+        }
         let marks = |screen: &str| screen.matches("[Image #").count();
         for path in images.iter() {
             let before = marks(&pty.styled());
@@ -759,6 +820,14 @@ impl Hub {
         if let Some(d) = d {
             thread::spawn(move || d.stop());
         }
+    }
+
+    /// Every session as it is now goes into the archive: at quit, so what
+    /// a turn still at work had written since its last copy is not left
+    /// for the next launch.
+    pub fn archive_all(&self) {
+        let agents = self.cfg.read().unwrap().agents.clone();
+        let _ = archive::sweep(&adapters::index_all(200, &agents));
     }
 
     pub fn stop_all(&self) {

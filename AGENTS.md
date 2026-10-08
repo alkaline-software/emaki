@@ -36,7 +36,7 @@ reproducible" untrue::
 **The archive is a peer source, not a backup.** `index_sessions` unions live and
 archived transcripts, so a session Claude Code has deleted stays listed,
 searchable, renderable and exportable. It is flagged `archived` and shown as
-`kept`.
+"archived", under its own agent.
 
 Everything else follows:
 
@@ -98,6 +98,11 @@ already fixed once. The doc named after a rule has the full story.
   in its `UPSTREAM.md`. (`docs/platform.md`)
 - **Everything Unix-only is gated with a stated fallback.** Windows and
   Linux are build targets. (`docs/platform.md`)
+- **Whatever appears or disappears does so in motion.** A menu, a card,
+  a panel, a list: it comes in over a moment and goes out over one, never
+  from one frame to the next, and what is around it moves with it. Use
+  the pattern its neighbours use; the person does not ask for this each
+  time. (`docs/window.md`, Motion)
 - **A shortcut is named as the Mac has it.** When the person says ⌘ and a
   key, bind `secondary-<key>`, which is ⌘ on a Mac and Ctrl on Windows and
   Linux, and write ⌘ in the docs. They do not say this each time.
@@ -122,7 +127,7 @@ handed work on one of these files is told to read the doc too.
 | `emaki-core/src/driver.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs` | `docs/panels.md` |
-| The sidebar, sessions page, board, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
+| The sidebar, sessions page, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/anthropic-mono.py` | `docs/look.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
 | `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs` | `docs/core.md` |
@@ -161,7 +166,7 @@ crates/emaki-core/        everything without a window
   tests/core.rs
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
-  src/workbench.rs           sidebar, session list, board, search, composer
+  src/workbench.rs           sidebar, session list, search, composer
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/panels.rs              beside a conversation: the folder's files as a tree, and the outline
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets

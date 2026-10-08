@@ -1,7 +1,7 @@
 # The window's chrome
 
 About `crates/emaki-app/src/workbench.rs`, `main.rs` and `ui_state.rs`: the
-strip buttons, the sidebar, the sessions page, the board, the layout, the
+strip buttons, the sidebar, the sessions page, the layout, the
 settings panel, menus and rename, tabs, focus, scroll routing, what the
 window remembers.
 
@@ -90,7 +90,7 @@ A name, three places and two cards (`render_sidebar`).
   in the content pane, so one line crosses the window. Tried and dropped: a
   row of its own for the wordmark, which put the two lines at different
   heights.
-- New session, Board, Projects. The Projects entry is still ⌘L and
+- New session, All Projects. The All Projects entry is still ⌘L and
   `GoSessions`; its icon is a briefcase so it does not read as a folder row.
 - Two cards (`card`), Agents and Projects, each under a name that does not
   scroll. The agents' card shows `SIDE_AGENTS` rows and scrolls for the rest
@@ -109,7 +109,7 @@ if it was opened that way and not clicked since. A click is the person's
 choice and stays until the folder next goes live or quiet.
 
 A session's mark is in the muted ink unless it is live, so many rows do not
-read as many accents, with a dot in its board column's colour. A folder
+read as many accents, with a dot in its phase's colour. A folder
 wears the most pressing of its sessions' (needs you, then working, then
 your turn).
 
@@ -146,25 +146,56 @@ Two levels, as the sidebar has. A project is a folder; the window says
 "project" and keeps the folder icon. The top level (`sessions_folder` none)
 is a row per folder with a chip for the most pressing of its live sessions.
 A click goes inside (`show_sessions_in`), where sessions are headed by when
-under a "Projects › folder" line that goes back up. The pills (All, one per
-agent, Kept only) narrow either level and stay as the level changes; inside
-a folder they count that folder's own.
+under an "All Projects › folder" line that goes back up. The pills (All, one per
+agent) narrow either level and stay as the level changes; inside
+a folder they count that folder's own. An archived session, one its agent no
+longer has, is listed with that agent's and wears an "archived" tag. It
+has no category of its own: a row a kind of session beside a row an agent
+read as a second sort of agent.
 
 "N more" under a folder in the sidebar goes inside that folder; "N more" at
-the foot of the folders and the Projects entry go to the top; an agent's
+the foot of the folders and the All Projects entry go to the top; an agent's
 row goes to the top narrowed to that agent. A right click is Open in Finder
 on a folder and the session's menu on a session.
 
-## The board
+## Motion
 
-Four columns (needs you, planning, working, your turn), a card per live
-session, and done as a row under them that opens into a grid. Every card
-names its agent, because the board mixes them. The columns sit four across
-when the pane has room (`pane_w`, measured on every draw, against
-`COL_MIN_W`), two by two when not, one under another in a narrow window.
-The board never scrolls sideways.
+Nothing in the window appears or disappears from one frame to the next.
+The patterns, each in use and to be used again:
 
-The column is `build::turn_state`, a function of the transcript's tail:
+- **A menu or a list over the window** (`render_menu`, `render_pick`):
+  it comes in over `MENU_IN`, rising a few pixels into place as it
+  fades in, and goes out over `MENU_OUT`, fading where it was. What was
+  closed is kept for that moment (`menu_gone`, `pick_gone`) and drawn
+  once more with no click taken. Each opening has a serial in its
+  animation's name, so it plays once.
+- **A card in the column over the composer** (`render_terminal`,
+  `render_dialog`): held by its foot, its height opens up from the
+  composer and closes back to it, with the gap under it part of what
+  moves, so the conversation above slides and does not jump. What it
+  last showed is kept (`TermShown`, `DialogShown`) to draw it closing. A
+  card whose height is its content's measures itself as it is drawn
+  (`dialog_h`) and takes no room until that is known.
+- **A panel at the conversation's side**: its width opens and closes
+  (`docs/panels.md`, `docs/channels.md`).
+- **A choice that moves** (a segmented control, the strip's buttons): one
+  plate slides from the old to the new.
+
+The toolkit's own popover has no way out but at once, which is why a
+pill's list is ours (`PickMenu`) and not a `Popover`.
+
+A measuring `canvas` laid over an element is `.absolute().inset_0()`.
+With `.size_full()` alone it stands after the element in the flow, and
+reports a place one element lower.
+
+## A session's phase
+
+There was a board, a page of live sessions in four columns; it was removed
+in v0.1.8 as of little use. What it sorted by is still what the sidebar's
+dots, the status row and the working mark go by (`Column`, `card_for`):
+needs you, planning, working, your turn, done.
+
+The phase is `build::turn_state`, a function of the transcript's tail:
 `stop_reason: end_turn` is your turn, a trailing `tool_use` is working, a
 trailing `AskUserQuestion` or `ExitPlanMode` needs you, and the latest
 permission mode says whether working is planning. `peek` computes it for the
@@ -392,8 +423,8 @@ new-session page with the caret in its composer), then the window. `main.rs`
 answers a `CloseTab` no view claimed by closing the window. `on_reopen` (a
 Dock click, a second launch) opens the window again.
 
-Clicking a session puts the caret in the composer. On the board and the
-sessions page, which draw no composer, `Workbench::render` moves the focus
+Clicking a session puts the caret in the composer. On the sessions page,
+which draws no composer, `Workbench::render` moves the focus
 to the workbench's own handle whenever the composer still holds it.
 
 ## Probing

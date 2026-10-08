@@ -6,7 +6,7 @@
 //! takes the rows it is given and returns a model, skipping anything it does
 //! not recognise rather than failing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -814,8 +814,31 @@ pub struct BuildInput<'a> {
     pub nested: bool,
 }
 
+/// The prompts taken back before the agent began on them, by `uuid`.
+/// Escape pressed at once leaves no "[Request interrupted by user]"
+/// (2.1.293): the prompt's row stays, nothing is ever written under it,
+/// and the next prompt is written beside it, under the same parent. The
+/// terminal takes such a prompt off its screen and back into its input,
+/// so it is no round here either. A prompt the agent had started on has
+/// rows under it and is not one of these.
+fn taken_back(rows: &[Value]) -> HashSet<&str> {
+    let parents: HashSet<&str> = rows.iter().map(|r| str_of(r, "parentUuid")).filter(|p| !p.is_empty()).collect();
+    let prompt = |r: &Value| str_of(r, "type") == "user" && !bool_of(r, "isSidechain") && !bool_of(r, "isMeta") && !blocks(r).iter().any(|x| block_type(x) == "tool_result");
+    // The last prompt written under each parent.
+    let mut last: HashMap<&str, usize> = HashMap::new();
+    for (ix, r) in rows.iter().enumerate().filter(|(_, r)| prompt(r) && !str_of(r, "parentUuid").is_empty()) {
+        last.insert(str_of(r, "parentUuid"), ix);
+    }
+    rows.iter()
+        .enumerate()
+        .filter(|(ix, r)| prompt(r) && !str_of(r, "uuid").is_empty() && !parents.contains(str_of(r, "uuid")) && last.get(str_of(r, "parentUuid")).is_some_and(|l| l > ix))
+        .map(|(_, r)| str_of(r, "uuid"))
+        .collect()
+}
+
 pub fn build(input: BuildInput) -> Session {
     let rows = input.rows;
+    let taken_back = taken_back(rows);
     let mut session = Session { agent: AgentId::ClaudeCode, transcript_path: input.transcript_path.into(), ..Default::default() };
 
     let (main_rows, side_rows): (Vec<&Value>, Vec<&Value>) = if input.nested {
@@ -875,6 +898,7 @@ pub fn build(input: BuildInput) -> Session {
         }
         match rtype {
             "system" => handle_system(&mut b, row, ts, &mut session),
+            "user" if taken_back.contains(str_of(row, "uuid")) => {}
             "user" => handle_user(&mut b, row, ts),
             "assistant" => handle_assistant(&mut b, row, ts, &mut session),
             "attachment" => {

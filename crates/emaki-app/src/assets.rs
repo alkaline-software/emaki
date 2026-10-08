@@ -2,9 +2,9 @@
 //!
 //! `Icon::new(IconName::…)` resolves through the app's `AssetSource`; this
 //! wrapper answers for the files under `assets/icons/` and hands everything
-//! else to the bundled set. The files there are Phosphor's regular weight
-//! (MIT, `PHOSPHOR-LICENSE` beside them), each under the name the toolkit
-//! or the app asks for (`close.svg` is Phosphor's `x`), so every icon in
+//! else to the bundled set. The files there are Tabler's outline icons
+//! (MIT, `TABLER-LICENSE` beside them), each under the name the toolkit
+//! or the app asks for (`close.svg` is Tabler's `x`), so every icon in
 //! the window is drawn from one family; `claude.svg` is Claude's own mark.
 
 use std::borrow::Cow;

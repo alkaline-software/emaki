@@ -32,8 +32,6 @@ Open the app. The first launch copies every transcript it finds into
 
 - **Home.** Pick a folder, type a message, and a new Claude Code session
   starts there.
-- **Board.** Live sessions in four columns: needs you, planning, working,
-  your turn.
 - **Sessions.** Every session, grouped by day. One that Claude Code has
   deleted is still there, marked *kept*.
 - **Search.** ⌘K searches every session. ⌘F finds inside the one showing.

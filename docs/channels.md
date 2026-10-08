@@ -28,6 +28,12 @@ Source: `crates/emaki-core/src/driver.rs`, `pty.rs`, `peer`, `terminal.rs`;
   to the transcript, so a conversation only read would read as live.
 - Never type a message while the registry says `waiting`: the words would
   answer the dialog.
+- Empty Claude Code's prompt before typing a message into it
+  (`Hub::type_message`: ^E, ^U and Backspace, a line at a time, until
+  `prompt_on_screen` says empty). A prompt stopped at once is put back
+  into Claude Code's own input as well as into the composer, and the
+  next message went out with the old words in front of it, doubling at
+  every stop.
 - Count "[Image #" marks from what the screen showed before each paste.
   Earlier messages' marks are in view; counted from zero, Return went
   before a large picture was read and the picture was lost.
@@ -66,7 +72,7 @@ read-only):
    `emaki_core::peer`) shows a process with an inbox. With
    `driver.hidden_terminal` on (the default), only while that record is
    not `idle`: a turn running in a terminal of the person's.
-4. `spawn`: none of those, the session is not kept only, the driver is
+4. `spawn`: none of those, the session is not archived, the driver is
    enabled and the folder is there.
 
 `in_terminal` is `inbox` or `pty`. `Hub::is_live` trusts the driver, the
@@ -169,15 +175,19 @@ screen.
 
 `Workbench::render_terminal` draws the pty's screen where the dialog
 cards sit: `pty::panel_rows` (what is under the "▔" line a picker opens
-beneath, else the screen without blank edges), in the terminal's colours
-on a ground chosen by Claude Code's `theme`.
+beneath, else the screen without blank edges), drawn as the terminal
+panel draws a screen (`term_card_look`: the same face, rows, shapes and
+colour rules, in letters small enough for every column to fit). Its
+scheme is the window's own appearance, light or dark, whatever theme
+Claude Code is set to and whatever the panel's scheme is set to: the card
+sits in the conversation.
 
 - Keys: the card holds the focus (`term_focus`, key context `Terminal`)
   and `term_bytes` turns a key into terminal bytes. Tab and ⇧Tab are
   bound there or the toolkit's focus traversal takes them. Escape is
   Claude Code's whenever the card is up, wherever the keyboard is.
 - Pointer: Claude Code takes no mouse, so `pty::hits` maps a click to
-  keys. A numbered choice is that many arrows from "❯"; a slider level is
+  keys, each a stretch of a row laid over the cells it covers. A numbered choice is that many arrows from "❯"; a slider level is
   arrows from "▲"; a key the screen names is that key. A choice or level
   is confirmed too, the arrows and Return in one write, which 2.1.289
   takes whole. Return saves the default for new sessions; `s` is session
@@ -292,7 +302,7 @@ no close button: the strip's button puts the panel away.
   one has run thirty seconds): an agent that ends straight away is not
   started in a loop, and the panel then says it has stopped and offers
   Start. Where it may not be started (a turn running in a terminal of the
-  person's, a driver mid-reply, a session kept only) the panel says why.
+  person's, a driver mid-reply, an archived session) the panel says why.
   Claude Code only.
 
 How it works:

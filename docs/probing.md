@@ -33,7 +33,7 @@ hands. Read this before checking a change to the app by eye.
 cargo build -p emaki-app && ./target/debug/Emaki
 cargo test -p emaki-core
 EMAKI_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launch
-EMAKI_PAGE=new|sessions|board ./target/debug/Emaki     # land on a page
+EMAKI_PAGE=new|sessions ./target/debug/Emaki     # land on a page
 EMAKI_FIND=<text> ./target/debug/Emaki                 # open the find bar on that query
 EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings panel (=updates: on that section)
 EMAKI_TYPE=/co ./target/debug/Emaki                    # put that text in the composer
@@ -45,7 +45,7 @@ EMAKI_GO="step:mode;button:terminal" EMAKI_OPEN=<id> ./target/debug/Emaki  # sev
 EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value without the picker: effort:, model:
 EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to another session, or to the new-session page
 EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar
-EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it; page:board is the board
+EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it
 EMAKI_GO="open:<id2>;tabhints" EMAKI_OPEN=<id> ./target/debug/Emaki  # the tabs' numbers, as holding ⌘ shows them
 EMAKI_GO="x;tree:crates;file:README.md" EMAKI_OPEN=<id> ./target/debug/Emaki  # the files panel: open a folder, show a file; filemenu:<path> is its right click; files and outline are the two buttons; outline:<n> goes to that round; panelw:<w> drags the panel's edge, panelfit is the double click on it; branches opens the list of branches, branchq:<words> types in its field, branchask:<name> shows the question a switch asks, branchgo:<name>:leave|bring answers it, branchrestore puts left changes back; changes opens the comparison, changes:<path> on that file
 EMAKI_GO="page:sessions;sessions:<folder>" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sessions page's folders, then inside one

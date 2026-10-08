@@ -321,6 +321,81 @@ fn archive_appends_and_rotates() {
 }
 
 #[test]
+fn a_copy_set_aside_when_earlier_rows_changed() {
+    let (_home, _g) = isolated();
+    let src_dir = emaki_core::paths::projects_dir().join("-tmp-proj");
+    fs::create_dir_all(&src_dir).unwrap();
+    let src = src_dir.join("sess.jsonl");
+    fs::write(&src, "line1\n").unwrap();
+    let r = SessionRef { agent: AgentId::ClaudeCode, session_id: "sess".into(), path: src.clone(), cwd: "/tmp/proj".into(), ..Default::default() };
+    archive::sweep(std::slice::from_ref(&r));
+    // Longer, but not the same file grown: what was archived is kept.
+    fs::write(&src, "LINE1\nline2\n").unwrap();
+    let stats = archive::sweep(std::slice::from_ref(&r));
+    assert_eq!(stats.rotated, 1);
+    let dir = archive::archive_dir().join("proj");
+    assert_eq!(fs::read_to_string(dir.join("sess.jsonl")).unwrap(), "LINE1\nline2\n");
+    assert_eq!(fs::read_to_string(dir.join("sess.gen1.jsonl")).unwrap(), "line1\n");
+}
+
+#[test]
+fn a_copy_that_is_not_the_source_is_taken_again() {
+    let (_home, _g) = isolated();
+    let src_dir = emaki_core::paths::projects_dir().join("-tmp-proj");
+    fs::create_dir_all(&src_dir).unwrap();
+    let src = src_dir.join("sess.jsonl");
+    fs::write(&src, "a\nb\nc\n").unwrap();
+    let r = SessionRef { agent: AgentId::ClaudeCode, session_id: "sess".into(), path: src.clone(), cwd: "/tmp/proj".into(), ..Default::default() };
+    archive::sweep(std::slice::from_ref(&r));
+    let dir = archive::archive_dir().join("proj");
+    let dst = dir.join("sess.jsonl");
+    // As an earlier Emaki left some: a row missing, a row twice, and its
+    // record saying the copy is whole and was never looked at again.
+    fs::write(&dst, "a\nc\nc\n").unwrap();
+    let state = archive::archive_dir().join("state.json");
+    let mut record: serde_json::Value = serde_json::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+    for entry in record.as_object_mut().unwrap().values_mut() {
+        entry["shared"] = false.into();
+    }
+    fs::write(&state, record.to_string()).unwrap();
+    let stats = archive::sweep(std::slice::from_ref(&r));
+    assert_eq!(fs::read_to_string(&dst).unwrap(), "a\nb\nc\n");
+    assert_eq!(stats.rotated, 0, "it held nothing the source lacks");
+    assert!(!dir.join("sess.gen1.jsonl").exists());
+    // Looked at once: the next sweep has nothing to do.
+    assert_eq!(archive::sweep(std::slice::from_ref(&r)).shared, 0);
+}
+
+#[test]
+fn a_stale_copy_is_packed_and_reads_the_same() {
+    let (_home, _g) = isolated();
+    let dir = archive::archive_dir().join("proj");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("old.jsonl");
+    let text = "{\"type\":\"user\",\"message\":\"the same words over and over\"}\n".repeat(8000);
+    fs::write(&path, &text).unwrap();
+    let r = SessionRef { agent: AgentId::ClaudeCode, session_id: "old".into(), path: path.clone(), archived: true, mtime: 1.0, ..Default::default() };
+    // One the agent still has, and one only just gone, are left alone.
+    let live = SessionRef { archived: false, ..r.clone() };
+    assert_eq!(archive::pack_stale(std::slice::from_ref(&live)), 0);
+    let fresh = SessionRef { mtime: emaki_core::transcript::mtime_secs(&fs::metadata(&path).unwrap()), ..r.clone() };
+    assert_eq!(archive::pack_stale(std::slice::from_ref(&fresh)), 0);
+
+    let packed = archive::pack_stale(std::slice::from_ref(&r));
+    assert_eq!(fs::read_to_string(&path).unwrap(), text, "the same bytes, packed or not");
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(packed, 1);
+        let st = fs::metadata(&path).unwrap();
+        assert!(st.blocks() * 512 < st.len() / 2, "it takes less room than it holds");
+        // A second look finds nothing left to do.
+        assert_eq!(archive::pack_stale(std::slice::from_ref(&r)), 0);
+    }
+    let _ = packed;
+}
+
+#[test]
 fn search_indexes_and_groups_hits() {
     let (_home, _g) = isolated();
     let src_dir = emaki_core::paths::projects_dir().join("-tmp-proj");
@@ -843,6 +918,35 @@ fn a_prompt_stopped_untouched_is_withdrawn() {
     assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["do the thing"]);
     assert!(s.withdrawn.is_none());
     assert!(matches!(s.rounds[0].items.last(), Some(Item::Notice { text, variant: emaki_core::model::NoticeVariant::Interrupted, .. }) if text == "Request interrupted by user"));
+}
+
+/// Escape pressed at once leaves no marker: the prompt's row has nothing
+/// under it and the next prompt is written beside it (2.1.293).
+#[test]
+fn a_prompt_taken_back_at_once_is_no_round() {
+    let chained = |mut row: Value, uuid: &str, parent: &str| {
+        row["uuid"] = json!(uuid);
+        row["parentUuid"] = json!(parent);
+        row
+    };
+    let rows = vec![
+        chained(user("hello", "2026-01-01T10:00:00Z"), "u1", ""),
+        chained(assistant(vec![json!({"type": "text", "text": "hi"})], "end_turn", "2026-01-01T10:00:02Z"), "a1", "u1"),
+        chained(user("try again", "2026-01-01T10:01:00Z"), "u2", "a1"),
+        chained(user("try again, and also this", "2026-01-01T10:01:30Z"), "u3", "a1"),
+        chained(assistant(vec![json!({"type": "text", "text": "on it"})], "end_turn", "2026-01-01T10:01:32Z"), "a2", "u3"),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["hello", "try again, and also this"]);
+    // Until the next prompt is written there is nothing to tell it by:
+    // it is still the last round, for the window to hand back.
+    let s = build(BuildInput { rows: &rows[..3], transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.len(), 2);
+    // A prompt the agent answered is kept, whatever is written beside it.
+    let mut rows = rows;
+    rows.push(chained(user("another way", "2026-01-01T10:03:00Z"), "u4", "a1"));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["hello", "try again, and also this", "another way"]);
 }
 
 /// Codex says a stop twice, as an event and inside the next user row;

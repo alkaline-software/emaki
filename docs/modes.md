@@ -93,13 +93,28 @@ there, and what asked for that was not found.
   (`picker`).
 - Mode: one ⇧Tab (`cycle_mode`). The mode has no command and no picker;
   Claude Code's key bindings offer only `chat:cycleMode`.
-- Model, effort: `via_terminal(TerminalAction::Pick)` to
-  `pick_in_terminal`, which types a bare `/model` or `/effort` so Claude
-  Code's own picker opens, drawn on the hidden terminal's card over the
-  composer (`show_terminal`). Enter saves the choice as the default for
-  new sessions and `s` keeps it to the session; that is Claude Code's and
-  the person's to decide. `/model` on a warm cache asks "Switch model?"
-  first.
+- Model, effort: a list each, opening up from its pill (`pick_pill`,
+  `PickMenu`, the one the settings panel's two pills have): the agent's
+  own choices with its line on each, an effort in its colour, the current
+  one ticked. It follows its pill (`pill_at`, measured at each draw) and
+  comes and goes in motion (`docs/window.md`, Motion). A pick is
+  `pill_picked`: the agent's command with the value, `/model <key>` or
+  `/effort <key>`, through `run_in_terminal`, which starts the hidden
+  terminal first when the session has none; with a headless driver behind
+  the session it is the driver's to set. The pill follows when the status
+  line names the new value. What the command asks after is the
+  terminal's, on its card: on a warm cache `/model fable` asks "Switch
+  model?". Reading that question onto the dialog card was tried and
+  dropped: Claude Code says it is waiting before the question is on its
+  screen, the screen passes through states that are neither prompt nor
+  question, and the terminal card came up first each time. A
+  typed `/effort <level>` or `/model <name>` is saved as the default for
+  new sessions, as Enter in the picker is (2.1.293). Not offered, since
+  the command has no word for them: keeping a choice to the session only
+  (the picker's `s`), and the effort picker's Ultracode switch; `/effort` and `/model`
+  typed bare in the composer still open Claude Code's own picker on the
+  card, and a model with no list of levels falls back to it
+  (`pick_in_terminal`).
 
 `cycle_mode` is also ⇧Tab in the composer (the wrapper captures the
 textarea's `OutdentInline`). With a terminal behind the session it is
@@ -111,7 +126,9 @@ steps down the agent's list through `set_mode`.
 `pick_in_terminal(Pill::Mode)` only says "Use ⇧Tab to change the mode";
 `set_mode` reaches it when a terminal is behind the session.
 
-Tried and dropped: lists under the pills; the mode pill going to the
+Tried and dropped: Claude Code's own picker on the card for every click of
+the effort or the model pill, which was a terminal to read where a list
+would do; the mode pill going to the
 terminal and coming back once the status line went quiet, which landed
 sometimes and not others.
 
@@ -215,7 +232,13 @@ tinted plate.
 
 ## Probing
 
-- `EMAKI_GO=pill:mode`, `pill:model`, `pill:effort` click a pill.
+- `EMAKI_GO=pill:mode` clicks the mode pill; `pill:model` and `pill:effort`
+  open Claude Code's own picker on the card. `EMAKI_GO=pick:effort`, `pick:model` or
+  `pick:default-mode` (with `EMAKI_SETTINGS=sessions`) opens that pill's
+  list and `pick:off` closes it; `effort:<key>` or `model:<key>` picks
+  from it. `dialogdemo` holds a sample question on the dialog card
+  and `dialogdemo:off` takes it off; `termdemo` draws the terminal card
+  on a sample "Switch model?".
 - `open` hands a newly launched terminal app the opener's environment, so
   a probe copy with `CLAUDE_CONFIG_DIR` at a scratch tree starts a
   terminal whose Claude Code is not logged in. Have the terminal app

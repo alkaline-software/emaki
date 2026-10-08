@@ -18,7 +18,7 @@ fn main() {
                     "{:<12} {:<38} {:<9} {:>8} {:<10} {}",
                     r.agent.as_str(),
                     r.session_id,
-                    if r.archived { "kept" } else { "live" },
+                    if r.archived { "archived" } else { "live" },
                     r.size,
                     r.state.phase.as_str(),
                     r.title
@@ -110,6 +110,8 @@ fn main() {
             let refs = adapters::index_all(200, &cfg.agents);
             let stats = archive::sweep(&refs);
             println!("{}", serde_json::to_string(&stats).unwrap());
+            // What the agents no longer have is packed, as the app does.
+            println!("{{\"packed\":{}}}", archive::pack_stale(&refs));
             println!("{}", serde_json::to_string(&archive::summary()).unwrap());
         }
         "sync" => {

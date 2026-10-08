@@ -5,7 +5,7 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
 
 ## Rules
 
-- No call site names Phosphor. A new icon is a file in `assets/icons/`
+- No call site names Tabler. A new icon is a file in `assets/icons/`
   under the toolkit's file name and a line in `OWN` (`assets.rs`).
 - Anthropic's fonts are not ours to ship. They are loaded from the machine,
   each with a fallback.
@@ -27,17 +27,21 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
 
 ## Icons
 
-Every icon is Phosphor's, regular weight. The toolkit ships Lucide's and
+Every icon is Tabler's outline (tabler.io/icons), drawn with a stroke of
+1.75 where Tabler's own is 2: at the sizes the window uses, 2 reads heavy.
+They took the place of Phosphor's in v0.1.8, whose corners read as sharp.
+The files tree keeps Catppuccin's (`docs/panels.md`). The toolkit ships Lucide's and
 asks for each by file name (`IconName::Close` is `icons/close.svg`), and
 `assets.rs` answers for a path before the toolkit's own set does. So
-`assets/icons/` holds a Phosphor icon under each toolkit name (`close.svg`
-is Phosphor's `x`, `inbox.svg` its `tray`, `box.svg` its `cube`), and the
+`assets/icons/` holds a Tabler icon under each toolkit name (`close.svg`
+is Tabler's `x`, `bot.svg` its `robot-face`, `tree-view.svg` its `subtask`), and the
 icons the toolkit draws by itself change too. The files are from
-`phosphor-icons/core` (`assets/regular/<name>.svg`; `star-fill` from
-`fill`), MIT, with `PHOSPHOR-LICENSE` beside them.
+the `@tabler/icons` package (`icons/outline/<name>.svg`; `star-fill` from
+`icons/filled`), MIT, with `TABLER-LICENSE` beside them. Each is written
+on one line without Tabler's empty bounding path.
 
-Not Phosphor: `claude.svg`, Claude's own mark, and eleven toolkit icons
-Phosphor has no match for (the window controls, the right and bottom
+Not Tabler: `claude.svg`, Claude's own mark, `mark.svg`, and eleven toolkit icons
+that were never replaced (the window controls, the right and bottom
 panels, `inspector`, `resize-corner`, `star-off`), none of which the
 window draws.
 

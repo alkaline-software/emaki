@@ -64,9 +64,9 @@ count and tokens.
 
 `agent_glyph` turns Claude's starburst (`assets/icons/claude.svg`) and
 makes it breathe inside a fixed box, so nothing around it moves; Codex's
-glyph only breathes. It moves whenever `is_working` holds (board column
+glyph only breathes. It moves whenever `is_working` holds (the phase is
 working or planning): in the status row under the transcript, the top bar,
-the session rows, the sessions page and board cards. The round header's
+the session rows and the sessions page. The round header's
 mark is still. Tried and dropped: a mark at the foot of the conversation,
 one too many beside the status row.
 
