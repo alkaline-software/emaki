@@ -50,7 +50,7 @@ A slash command answers its own prompt. `/compact` typed in the terminal
 is written as a user row saying `/compact`, then the rows the command
 leaves (`<command-name>` in a user row, or a `system/local_command` row
 with `commandRun`), and no assistant row. `turn_state` would read the
-prompt as one waiting on a reply, and the board would say working until
+prompt as one waiting on a reply, and the session would read as working until
 the next turn. So a prompt that is a slash command with a command row of
 the same name after it is skipped, and the state is the turn before it. A
 skill (`/review`) leaves no command row and is a prompt like any other.
@@ -145,8 +145,8 @@ shows without them.
 After the boundary, Claude Code writes the summary it hands the model as
 a `user` row flagged `isCompactSummary` (and `isVisibleInTranscriptOnly`:
 its own view hides it too). Read as a prompt it opens a round of the
-person's, "This session is being continued…", and leaves the board
-working. `build::machine_authored` covers that row and any `isMeta` row
+person's, "This session is being continued…", and leaves the session
+reading as working. `build::machine_authored` covers that row and any `isMeta` row
 without a peer origin.
 
 The boundary row's `compactMetadata.postTokens` becomes `context_tokens`

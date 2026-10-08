@@ -181,6 +181,24 @@ enum Target {
     File(std::path::PathBuf),
 }
 
+/// What the terminal card is drawn with: its rows, its ground and inks,
+/// its face, and the size of a cell.
+pub(crate) struct CardLook {
+    pub(crate) lines: Vec<AnyElement>,
+    pub(crate) ground: Hsla,
+    pub(crate) ink: Hsla,
+    pub(crate) quiet: Hsla,
+    pub(crate) font: Font,
+    pub(crate) text: f32,
+    pub(crate) line_h: f32,
+    pub(crate) cell_w: f32,
+}
+
+/// How many cells of a row stand before its `chars`-th character.
+pub(crate) fn cells_before(row: &[pty::Span], chars: usize) -> usize {
+    row.iter().flat_map(|s| s.text.chars()).take(chars).map(|c| if wide(c) { 2 } else { 1 }).sum()
+}
+
 /// A row as its cells hold it: a character a cell, and a wide one's
 /// second cell a NUL.
 fn row_cells(row: &[pty::Span]) -> Vec<char> {
@@ -429,6 +447,28 @@ impl Workbench {
             weight: k.plain,
             style: FontStyle::Normal,
         }
+    }
+
+    /// The terminal card's rows (`Workbench::render_terminal`), drawn as
+    /// the panel draws a screen: the same face, rows, shapes and colour
+    /// rules. The scheme is the window's own appearance, light or dark,
+    /// whatever the panel's is set to: the card sits in the conversation,
+    /// over the composer.
+    pub(crate) fn term_card_look(&self, rows: &[Vec<pty::Span>], cx: &App) -> CardLook {
+        let k = scheme(!cx.theme().mode.is_dark());
+        let font = self.term_font(k, cx);
+        let text = self.cfg.terminal.size;
+        // A cell is a letter's advance in the face: there is no window
+        // here to lay a line out with.
+        let ts = cx.text_system();
+        let cell_w = ts.advance(ts.resolve_font(&font), px(text), 'M').map(|a| f32::from(a.width)).unwrap_or(text * 0.6);
+        // The hidden terminal's screen is `pty::COLS` wide and the card
+        // no wider than the conversation's column: letters too large for
+        // every column to fit are drawn smaller, so no row is cut.
+        let fit = ((f32::from(crate::workbench::CONTENT_W) - 26.) / (cell_w * pty::COLS as f32)).min(1.);
+        let (text, cell_w) = (text * fit, cell_w * fit);
+        let lh = (text * LINE_RATIO * self.cfg.terminal.line_scale()).round();
+        CardLook { lines: screen_lines(rows, cell_w, lh, k, &[], None), ground: hsla(k.bg), ink: hsla(k.fg), quiet: hsla(mix(k.fg, k.bg, 0.45)), font, text, line_h: lh, cell_w }
     }
 
     /// The pty the panel shows now, when there is one.

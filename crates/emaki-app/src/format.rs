@@ -78,10 +78,6 @@ pub fn stamp(ts: &str) -> String {
     dt.format(form).to_string()
 }
 
-pub fn day(ts: &str) -> String {
-    emaki_core::render_md::fmt_date(ts)
-}
-
 /// Which group of a list by recency a time falls in: the sidebar and the
 /// sessions page head their rows with these.
 pub fn bucket(mtime: f64) -> &'static str {

@@ -18,6 +18,13 @@ question, dialog, shells and permission cards), the screen readers in
 - A withdrawn prompt leaves `rounds` for `Session::withdrawn`. Left in,
   the message showed twice once it was sent again.
 - A command that acts by itself (`/compact`) is never handed back.
+- Escape pressed at once leaves no marker (2.1.293): the prompt's row
+  stays with nothing under it, and the next prompt is written beside it,
+  under the same parent. `build::taken_back` drops such a row; until the
+  next prompt is written nothing in the transcript tells it from a prompt
+  just sent, so the window takes the round out itself when it hands the
+  words back (`handed_back`, applied in `set_detail`). A prompt the agent
+  began on has rows under it and stays, as in the terminal.
 - "[Request interrupted by user]" is Claude Code's marker, never a round
   of the person's.
 - A stop's words are read out of the transcript, never written here, and
@@ -179,8 +186,19 @@ needed" or "permission prompt"); the screen says which.
 - Not done: typed words on a question that takes several, whose field
   works another way; Terminal and an IDE, where keys need the app in
   front. There the "in your terminal" line stands.
-- Not shown while the person was sent to the terminal for `/model` or
-  `/effort`, whose list is theirs to use there.
+- Not shown while a command typed in the terminal is watched (`/model`,
+  `/effort`, with a value or bare): what it opens is the terminal's, on
+  its card.
+- The card comes and goes in motion (`DialogShown`; `docs/window.md`,
+  Motion).
+- The registry says `waiting` before the question is on the screen, by
+  as long as Claude Code takes to look something up first. Until then
+  the screen is its prompt, standing still: neither card comes up for a
+  screen with the prompt on it and no picker, and it is read again. A
+  screen still being written (`Pty::quiet_for` under `SCREEN_SETTLED`)
+  is read again too. Read once, the terminal card came up on the prompt
+  and then drew the question itself, a second before the dialog card.
+- Escape is the card's Cancel (`Workbench::escape`), as its button says.
 
 ## Background commands
 

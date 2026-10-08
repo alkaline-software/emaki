@@ -62,8 +62,7 @@ session, or the new-session page) the words and attachment chips are put
 away under where they were typed (`drafts`) and what was left here comes
 back with the caret at its end. It runs at every draw and before
 `restore_prompt`, which asks whether the box is empty on a session's
-behalf. The board and the sessions page draw no composer and change
-nothing. Drafts are in memory only. Tried and dropped: one box for the
+behalf. The sessions page draws no composer and changes nothing. Drafts are in memory only. Tried and dropped: one box for the
 window, whose words followed the person into the next session.
 
 ## Attachments
@@ -136,7 +135,7 @@ patch was lost and the row froze.
 What the empty composer says is drawn by the window over the textarea's
 first line (`render_composer_hint`), and the textarea has no placeholder
 of its own: the key beside a suggested prompt ("→ to accept") is
-Phosphor's icon, which a placeholder, being a string, cannot hold. Nothing
+an icon, which a placeholder, being a string, cannot hold. Nothing
 says that ⌘↩ sends.
 
 ⌘↩ sends. Settings, Composer, "Send with" makes a bare ↩ send as well

@@ -1,8 +1,7 @@
-//! The window: sidebar, sessions, board, search, transcript and composer.
+//! The window: sidebar, sessions, search, transcript and composer.
 //!
 //! State lives here; everything shown comes from the transcript through the
-//! core, and everything typed goes out through the hub. The board is the home
-//! page: the question the window answers on arrival is "what needs me".
+//! core, and everything typed goes out through the hub.
 //!
 //! The layout follows the Claude desktop app: one collapsible sidebar with a
 //! "new" entry, a few destinations and a list of recents; one content column
@@ -21,7 +20,6 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, OutdentInline, Textarea, TextareaState};
-use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Disableable as _, Sizable as _};
 
@@ -37,12 +35,12 @@ use emaki_core::options::{humanize, Choice, Options};
 use emaki_core::search::Results;
 use emaki_core::transcript::SessionRef;
 
-use crate::format::{bucket, clock, day, elapsed_since, now_secs, plural, relative, today_line};
+use crate::format::{bucket, elapsed_since, now_secs, plural, relative, today_line};
 use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, GoBoard, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -158,6 +156,9 @@ const SIDE_AGENTS: usize = 4;
 const FOLDER_ANIM: Duration = Duration::from_millis(200);
 /// How long the terminal card takes to come, and to go.
 const TERM_ANIM: Duration = Duration::from_millis(200);
+/// How long a hidden terminal's screen has to have stood still to be
+/// taken for drawn: Claude Code paints a question in a few writes.
+const SCREEN_SETTLED: Duration = Duration::from_millis(250);
 /// How long a panel beside the conversation takes to come.
 pub(crate) const PANEL_ANIM: Duration = Duration::from_millis(200);
 
@@ -174,6 +175,22 @@ struct TermShown {
     at: std::time::Instant,
     live: std::time::Instant,
     serial: u32,
+}
+
+/// The dialog card as it was last drawn, kept the same way: the dialog
+/// it showed is drawn once more, closing, when the screen has none.
+struct DialogShown {
+    sid: String,
+    dialog: Option<emaki_core::driver::Dialog>,
+    on: bool,
+    at: std::time::Instant,
+    serial: u32,
+}
+
+impl Default for DialogShown {
+    fn default() -> Self {
+        DialogShown { sid: String::new(), dialog: None, on: false, at: std::time::Instant::now(), serial: 0 }
+    }
 }
 
 impl Default for TermShown {
@@ -234,8 +251,6 @@ pub const TITLEBAR_H: Pixels = px(48.);
 pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
-/// A board column never gets narrower than this; past that the board scrolls.
-pub const COL_MIN_W: Pixels = px(210.);
 /// Home-page folder cards to a row.
 pub const FOLDER_COLS: usize = 3;
 /// The settings panel's sections, in rail order: key, label, icon.
@@ -275,12 +290,10 @@ pub const COMPOSER_MAX_ROWS: usize = 12;
 pub enum Scope {
     All,
     Agent(AgentId),
-    Kept,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
-    Board,
     Sessions,
     Session,
     New,
@@ -304,15 +317,6 @@ impl Column {
             Column::Working => "working",
             Column::YourTurn => "your turn",
             Column::Done => "done",
-        }
-    }
-    pub fn empty(self) -> &'static str {
-        match self {
-            Column::NeedsYou => "nothing is waiting on you",
-            Column::Planning => "no session is in plan mode",
-            Column::Working => "nothing is running",
-            Column::YourTurn => "no replies waiting to be read",
-            Column::Done => "nothing finished yet",
         }
     }
 }
@@ -589,15 +593,14 @@ pub struct Lightbox {
     pub path: Option<PathBuf>,
 }
 
-/// One session as the board sees it.
+/// Where a session stands: its phase, and the words and the approval
+/// that go with it.
 pub struct Card {
-    pub r: SessionRef,
     pub column: Column,
     pub chip: String,
     pub chip_kind: &'static str,
     pub text: String,
     pub pending: Option<PermissionRequest>,
-    pub queued: usize,
 }
 
 pub struct Workbench {
@@ -643,6 +646,17 @@ pub struct Workbench {
     menu: Option<Menu>,
     /// The menu just put away, and when: drawn while it fades.
     menu_gone: Option<(Menu, Instant)>,
+    /// A pill's list of choices: the one open, the one just closed (drawn
+    /// for a moment as it goes), a count that names each opening, and
+    /// where each pill was last drawn.
+    pick: Option<PickMenu>,
+    pick_gone: Option<(PickMenu, Instant)>,
+    pick_serial: u32,
+    pill_at: Rc<std::cell::RefCell<HashMap<PickFor, Bounds<Pixels>>>>,
+    /// `EMAKI_GO=dialogdemo`: a sample question is held on the card.
+    dialog_demo: bool,
+    /// `EMAKI_GO=termdemo`: the terminal card is drawn on a sample screen.
+    term_demo: bool,
     menu_serial: u32,
     /// The session being renamed, by its key, and the field for its name.
     renaming: Option<String>,
@@ -685,7 +699,6 @@ pub struct Workbench {
     /// or after this round: how a hit in the search palette opens on its
     /// match.
     find_pending: Option<usize>,
-    pub done_open: bool,
     pub permissions: Vec<(String, PermissionRequest)>,
     /// Options picked on a question card that has not been sent yet, by
     /// request id, then by question: a card with several questions, or a
@@ -717,6 +730,12 @@ pub struct Workbench {
     suggestion: Option<(String, String)>,
     suggestion_reading: bool,
     dialog_seen: Option<(String, emaki_core::driver::Dialog)>,
+    /// The dialog card as last drawn, for its coming and going, and how
+    /// tall it was measured to be.
+    dialog_shown: std::cell::RefCell<DialogShown>,
+    /// Since when a waiting screen has been read as still being drawn.
+    dialog_unsettled: Option<Instant>,
+    dialog_h: Rc<std::cell::Cell<f32>>,
     dialog_reading: bool,
     dialog_sending: bool,
     /// `EMAKI_GO=dialog:<keys>`, `answer:<words>` or `goto:<tab>`, done once on the
@@ -804,6 +823,9 @@ pub struct Workbench {
     /// The session that was showing and working at the last index, to
     /// notice the moment it is stopped.
     was_working: Option<String>,
+    /// The prompt handed back to the composer while it was still a round
+    /// in the transcript: the session's key and the round's `uuid`.
+    handed_back: Option<(String, String)>,
     /// A turn was just stopped: put its prompt back in the composer at
     /// the next draw, which is where a window is at hand.
     restore_due: bool,
@@ -1677,7 +1699,7 @@ impl Workbench {
         let (hub, mut rx) = Hub::start(cfg.clone());
 
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search every conversation, live and kept"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search every conversation, live and archived"));
         let find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this conversation"));
 
         // Every headless child is ours to close: a driver left running after
@@ -1685,6 +1707,7 @@ impl Workbench {
         let hub_for_quit = Arc::clone(&hub);
         cx.on_app_quit(move |_, _| {
             hub_for_quit.stop_all();
+            hub_for_quit.archive_all();
             async {}
         })
         .detach();
@@ -1746,7 +1769,7 @@ impl Workbench {
                         this.notice = None;
                         cx.notify();
                     }
-                    if this.page == Page::Board || this.drivers.values().any(|d| d.state == "running" || d.starting) {
+                    if this.drivers.values().any(|d| d.state == "running" || d.starting) {
                         cx.notify();
                     }
                 })
@@ -1840,7 +1863,7 @@ impl Workbench {
         // Last time's tabs and sidebar come back; the window opens on the
         // new-session page, as the Claude app opens on a new chat.
         // `EMAKI_OPEN=<session-id prefix>` opens a session on launch instead
-        // and `EMAKI_PAGE=new|sessions|board` picks the page. For probing
+        // and `EMAKI_PAGE=new|sessions` picks the page. For probing
         // the window from a script with no accessibility access,
         // `EMAKI_FIND=<text>` opens the find bar on that query,
         // `EMAKI_SETTINGS=1` opens the settings panel, `EMAKI_TYPE=<text>`
@@ -1930,7 +1953,6 @@ impl Workbench {
         let settings_section = std::env::var("EMAKI_SETTINGS").ok().and_then(|v| SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == v).map(|(k, _, _)| *k)).unwrap_or("appearance");
         let page = match std::env::var("EMAKI_PAGE").as_deref() {
             Ok("sessions") => Page::Sessions,
-            Ok("board") => Page::Board,
             _ => Page::New,
         };
         Self {
@@ -1955,6 +1977,12 @@ impl Workbench {
             folders_auto: HashSet::new(),
             menu: None,
             menu_gone: None,
+            pick: None,
+            pick_gone: None,
+            pick_serial: 0,
+            pill_at: Rc::new(std::cell::RefCell::new(HashMap::new())),
+            dialog_demo: false,
+            term_demo: false,
             menu_serial: 0,
             renaming: None,
             rename_input,
@@ -1977,7 +2005,6 @@ impl Workbench {
             find_hits: Vec::new(),
             find_at: 0,
             find_pending: startup_find.map(|_| 0),
-            done_open: false,
             permissions: Vec::new(),
             picks: HashMap::new(),
             come_back: None,
@@ -1988,6 +2015,9 @@ impl Workbench {
             suggestion: None,
             suggestion_reading: false,
             dialog_seen: None,
+            dialog_shown: std::cell::RefCell::new(DialogShown::default()),
+            dialog_unsettled: None,
+            dialog_h: Rc::new(std::cell::Cell::new(0.)),
             dialog_reading: false,
             dialog_sending: false,
             dialog_probe: std::env::var("EMAKI_GO").ok().filter(|g| g.starts_with("dialog:") || g.starts_with("answer:") || g.starts_with("goto:")),
@@ -2035,6 +2065,7 @@ impl Workbench {
             ctx_watch_until: 0.0,
             last_sent: None,
             was_working: None,
+            handed_back: None,
             restore_due: false,
             update: {
                 let s = UpdateState::load();
@@ -2671,10 +2702,6 @@ impl Workbench {
             }
             Some("page:sessions") => self.show_sessions(Scope::All, cx),
             Some(t) if t.starts_with("sessions:") => self.show_sessions_in(Scope::All, Some(t["sessions:".len()..].to_string()), cx),
-            Some("page:board") => {
-                self.page = Page::Board;
-                cx.notify();
-            }
             Some("page:new") => {
                 self.page = Page::New;
                 self.selected = None;
@@ -2688,8 +2715,31 @@ impl Workbench {
                 }
             }
             Some(t) if t.starts_with("mode:") => self.set_mode(&t["mode:".len()..], cx),
-            Some(t) if t.starts_with("model:") => self.set_model(&t["model:".len()..], cx),
-            Some(t) if t.starts_with("effort:") => self.set_effort(&t["effort:".len()..], cx),
+            Some("pick:effort") => self.pick_toggle(PickFor::Effort, cx),
+            Some("pick:model") => self.pick_toggle(PickFor::Model, cx),
+            Some("pick:default-mode") => self.pick_toggle(PickFor::DefaultMode, cx),
+            Some("pick:off") => self.close_pick(cx),
+            // A sample question held on the dialog card, and taken off
+            // it again.
+            Some("dialogdemo") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let rule = "─".repeat(40);
+                let screen = format!("{rule}\nWhich fruit?\n❯ 1. Apple\n     Crisp and sweet\n  2. Banana\n{rule}\n  3. Chat about this\nEnter to select · Esc to cancel\n");
+                self.dialog_demo = true;
+                self.dialog_seen = emaki_core::driver::dialog_on_screen(&screen).map(|d| (sid, d));
+                cx.notify();
+            }
+            // The terminal card on a sample of what a command asks.
+            Some("termdemo") => {
+                self.term_demo = true;
+                cx.notify();
+            }
+            Some("dialogdemo:off") => {
+                self.dialog_seen = None;
+                cx.notify();
+            }
+            Some(t) if t.starts_with("model:") => self.pill_picked(Pill::Model, &t["model:".len()..], cx),
+            Some(t) if t.starts_with("effort:") => self.pill_picked(Pill::Effort, &t["effort:".len()..], cx),
             _ => {}
         }
     }
@@ -2723,7 +2773,6 @@ impl Workbench {
             return;
         }
         let page = match self.page {
-            Page::Board => "board",
             Page::Sessions => "sessions",
             Page::Session => "session",
             Page::New => "new",
@@ -2857,6 +2906,17 @@ impl Workbench {
 
     fn set_detail(&mut self, key: String, path: PathBuf, mut session: Session) {
         self.dress_queued(&key, &mut session);
+        // A prompt handed back to the composer is no round, as the
+        // terminal takes it off its screen: until the transcript says so
+        // itself (its marker, or the next prompt written beside it), the
+        // window does. One the agent has since begun on is a round again.
+        if let Some((_, uuid)) = self.handed_back.clone().filter(|(k, _)| *k == key) {
+            let untouched = |r: &emaki_core::model::Round| !r.items.iter().any(|it| !matches!(it, Item::Notice { .. }));
+            match session.rounds.last() {
+                Some(last) if last.uuid == uuid && untouched(last) => session.withdrawn = session.rounds.pop(),
+                _ => self.handed_back = None,
+            }
+        }
         self.limits.refresh_from_statusline();
         self.refresh_context(&session.id);
         let n = session.rounds.len();
@@ -3149,30 +3209,9 @@ impl Workbench {
         // The same lists the pills under the composer open, since both
         // are whatever the agent offers.
         let options = self.options();
-        let wb = cx.entity().downgrade();
-        let modes = picker(
-            "default-mode",
-            "icons/shield.svg",
-            PillText { tail: "", ..mode_pill(&options, &default_mode, &theme) },
-            self.modes(&options).into_iter().map(|m| (m.key, m.label, m.detail)).collect(),
-            default_mode.clone(),
-            Anchor::TopRight,
-            wb.clone(),
-            Rc::new(|this, key, cx| this.set_default_mode(key, cx)),
-            cx,
-        );
+        let modes = self.pick_pill(PickFor::DefaultMode, "default-mode", "icons/shield.svg", PillText { tail: "", ..mode_pill(&options, &default_mode, &theme) }, cx);
         let default_model = if self.cfg.driver.default_model.is_empty() { options.default_model.clone() } else { self.cfg.driver.default_model.clone() };
-        let models = picker(
-            "default-model",
-            "icons/box.svg",
-            PillText::plain(model_name(&options, &default_model)),
-            options.models.iter().map(|m| (m.key.clone(), m.label.clone(), m.detail.clone())).collect(),
-            options.model(&default_model).map(|m| m.key.clone()).unwrap_or(default_model),
-            Anchor::TopRight,
-            wb,
-            Rc::new(|this, key, cx| this.set_default_model(key, cx)),
-            cx,
-        );
+        let models = self.pick_pill(PickFor::DefaultModel, "default-model", "icons/box.svg", PillText::plain(model_name(&options, &default_model)), cx);
 
         // The terminal's rows: each a choice of Kaku's own or another.
         let term = self.cfg.terminal.clone();
@@ -3277,8 +3316,8 @@ impl Workbench {
         let rows: Vec<AnyElement> = match section {
             "composer" => vec![row("Send with", send_note, send, &theme).into_any_element()],
             "sessions" => vec![
-                row("Permission mode", "What a session started here begins in.", modes.into_any_element(), &theme).into_any_element(),
-                row("Model", "Which model a session started here uses.", models.into_any_element(), &theme).into_any_element(),
+                row("Permission mode", "What a session started here begins in.", modes, &theme).into_any_element(),
+                row("Model", "Which model a session started here uses.", models, &theme).into_any_element(),
                 div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes.").into_any_element(),
             ],
             "terminal" => vec![
@@ -3919,6 +3958,218 @@ impl Workbench {
         cx.notify();
     }
 
+    /// A pill that opens a list of choices (`PickFor`). Where it is drawn
+    /// is kept, for the list to hang off.
+    fn pick_pill(&self, what: PickFor, id: &'static str, icon: &'static str, label: PillText, cx: &Context<Self>) -> AnyElement {
+        let at = self.pill_at.clone();
+        let entity = cx.entity().downgrade();
+        div()
+            .relative()
+            .flex_shrink_0()
+            .child(composer_pill(id, icon, label, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                swallow_click(window, cx);
+                this.pick_toggle(what, cx);
+            })))
+            .child(
+                canvas(
+                    // A pill moves as what is beside it changes (a mode
+                    // read a moment later, a row that comes under the
+                    // composer), and its list is drawn where the pill
+                    // was a frame ago: a move asks for one more draw.
+                    move |b, _, cx| {
+                        if at.borrow_mut().insert(what, b) != Some(b) {
+                            if let Some(e) = entity.upgrade() {
+                                cx.defer(move |cx| e.update(cx, |this, cx| {
+                                    if this.pick.is_some() {
+                                        cx.notify();
+                                    }
+                                }));
+                            }
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                // Over the pill: with no place given it stood after the
+                // pill, a pill's height lower.
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
+    }
+
+    /// The choices of a list as they stand now, and the one that is set.
+    fn pick_rows(&self, what: PickFor, cx: &App) -> (Vec<PickRow>, String) {
+        let options = self.options();
+        let theme = cx.theme();
+        match what {
+            PickFor::Effort => {
+                let (model, effort) = (self.current_model(), self.current_effort());
+                let levels = options.efforts_for(&model).to_vec();
+                let now = levels.iter().find(|e| e.key.eq_ignore_ascii_case(&effort) || e.label.eq_ignore_ascii_case(&effort)).map(|e| e.key.clone()).unwrap_or_default();
+                (levels.iter().enumerate().map(|(ix, e)| PickRow { key: e.key.clone(), name: e.label.clone(), detail: e.detail.clone(), tint: tint_of(&levels, ix, theme) }).collect(), now)
+            }
+            PickFor::Model => {
+                let now = options.model(&self.current_model()).map(|m| m.key.clone()).unwrap_or_default();
+                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), m.label.clone(), m.detail.clone())).collect(), now)
+            }
+            PickFor::DefaultMode => {
+                let now = if self.cfg.driver.default_mode.is_empty() { "default".to_string() } else { self.cfg.driver.default_mode.clone() };
+                (self.modes(&options).into_iter().map(|m| PickRow::plain(m.key, m.label, m.detail)).collect(), now)
+            }
+            PickFor::DefaultModel => {
+                let model = if self.cfg.driver.default_model.is_empty() { options.default_model.clone() } else { self.cfg.driver.default_model.clone() };
+                let now = options.model(&model).map(|m| m.key.clone()).unwrap_or(model);
+                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), m.label.clone(), m.detail.clone())).collect(), now)
+            }
+        }
+    }
+
+    /// A press on a pill with a list: the list opens, or, open, closes.
+    fn pick_toggle(&mut self, what: PickFor, cx: &mut Context<Self>) {
+        if self.pick.as_ref().is_some_and(|p| p.what == what) {
+            return self.close_pick(cx);
+        }
+        let (rows, current) = self.pick_rows(what, cx);
+        let by = self.pill_at.borrow().get(&what).copied().unwrap_or_default();
+        if rows.is_empty() {
+            return;
+        }
+        self.pick_serial += 1;
+        self.pick_gone = None;
+        self.pick = Some(PickMenu { what, rows: Rc::new(rows), current, by, serial: self.pick_serial });
+        cx.notify();
+    }
+
+    /// The list is put away: it fades where it was, taking no click.
+    fn close_pick(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut menu) = self.pick.take() {
+            menu.by = self.pill_at.borrow().get(&menu.what).copied().unwrap_or(menu.by);
+            self.pick_gone = Some((menu, Instant::now()));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(MENU_OUT + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.pick_gone.as_ref().is_some_and(|(_, at)| at.elapsed() >= MENU_OUT) {
+                        this.pick_gone = None;
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// A choice pressed on a list. The one already set changes nothing.
+    fn pick_chosen(&mut self, what: PickFor, key: &str, cx: &mut Context<Self>) {
+        let same = self.pick.as_ref().is_some_and(|p| p.current == key);
+        self.close_pick(cx);
+        if same {
+            return;
+        }
+        match what {
+            PickFor::Effort => self.pill_picked(Pill::Effort, key, cx),
+            PickFor::Model => self.pill_picked(Pill::Model, key, cx),
+            PickFor::DefaultMode => self.set_default_mode(key, cx),
+            PickFor::DefaultModel => self.set_default_model(key, cx),
+        }
+    }
+
+    /// A pill's list, hanging off its pill: up from one in the lower half
+    /// of the window, down from one in the upper, its edge on the pill's
+    /// nearer the window's side. It comes in over a moment, rising into
+    /// place, and goes out fading, as the right-click menu does.
+    fn render_pick(&self, menu: PickMenu, gone: bool, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let view = window.viewport_size();
+        // Its left edge on the pill's, unless it would not fit that way.
+        let (up, right) = (menu.by.center().y > view.height * 0.5, menu.by.left() + px(380.) > view.width - px(8.));
+        let gap = px(6.);
+        // The list is as long as the agent makes it (a dozen models), so
+        // it scrolls past the room there is.
+        let room = if up { menu.by.top() - gap - px(12.) } else { view.height - menu.by.bottom() - gap - px(12.) };
+        let what = menu.what;
+        let mut card = v_flex()
+            .id(("pick-card", menu.serial as usize))
+            .absolute()
+            .min_w(px(250.))
+            .max_w(px(380.))
+            .max_h(room.min(px(360.)))
+            .overflow_y_scroll()
+            .p(px(5.))
+            .gap(px(2.))
+            .rounded(px(12.))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(float_shadow(&theme))
+            .map(|d| if right { d.right(view.width - menu.by.right()) } else { d.left(menu.by.left()) })
+            .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
+        for (ix, PickRow { key, name, detail, tint }) in menu.rows.iter().enumerate() {
+            let active = *key == menu.current;
+            let key = key.clone();
+            card = card.child(
+                v_flex()
+                    .id(("pick-row", ix))
+                    .flex_shrink_0()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .gap(px(1.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.muted))
+                    .hover(|s| s.bg(theme.list_hover))
+                    .when(!gone, |d| d.on_click(cx.listener(move |this, _, _, cx| this.pick_chosen(what, &key, cx))))
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .items_center()
+                            // A choice the agent shows in a colour wears it here too.
+                            .child(match tint {
+                                Tint::Plain => div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()),
+                                tint => tinted(name, tint).text_size(px(13.)),
+                            })
+                            .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary))),
+                    )
+                    .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).whitespace_normal().child(detail.clone()))),
+            );
+        }
+        // Where it rests: its foot over the pill, or its head under it.
+        let rest = if up { view.height - menu.by.top() + gap } else { menu.by.bottom() + gap };
+        let place = move |d: Stateful<Div>, off: Pixels| if up { d.bottom(rest - off) } else { d.top(rest - off) };
+        if gone {
+            return card.with_animation(ElementId::Name(format!("pick-out-{}", menu.serial).into()), Animation::new(MENU_OUT), move |d, t| place(d, px(0.)).opacity(1. - t)).into_any_element();
+        }
+        let card = card.with_animation(ElementId::Name(format!("pick-in-{}", menu.serial).into()), Animation::new(MENU_IN).with_easing(ease_out_quint()), move |d, t| place(d, px(6.) * (1. - t)).opacity(t));
+        let shut = |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| this.close_pick(cx);
+        div().id("pick-sheet").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(shut)).on_mouse_down(MouseButton::Right, cx.listener(shut)).child(card).into_any_element()
+    }
+
+    /// A choice made on the effort's or the model's list under a session's
+    /// composer. It is the agent's own command for it, `/effort <level>`
+    /// or `/model <name>`, typed in the session's terminal, which is
+    /// started first when the session has none (`run_in_terminal`); with
+    /// a headless driver behind the session it is the driver's to set.
+    /// The pill follows when the status line names the new value. A
+    /// question the command asks (Claude Code's "Switch model?") is the
+    /// terminal's, and its card comes up for it as for any other.
+    fn pill_picked(&mut self, pill: Pill, key: &str, cx: &mut Context<Self>) {
+        let Some(r) = self.selected_ref().cloned() else { return };
+        if self.terminal_peer().is_none() && self.driven(&r.session_id) {
+            return match pill {
+                Pill::Model => self.set_model(key, cx),
+                Pill::Effort => self.set_effort(key, cx),
+                Pill::Mode => {}
+            };
+        }
+        let command = match pill {
+            Pill::Model => format!("/model {key}"),
+            Pill::Effort => format!("/effort {key}"),
+            Pill::Mode => return,
+        };
+        self.ctx_watch_until = self.now + 20.0;
+        self.run_in_terminal(command, cx);
+    }
+
     /// Do something only the session's terminal can take: a pick from
     /// `/model` or `/effort`, a typed command, ⇧Tab for the mode, or just
     /// going there. With the session in a terminal it is done at once.
@@ -4336,6 +4587,11 @@ impl Workbench {
     /// use there. A screen that cannot be read leaves the line that says
     /// to answer in the terminal.
     fn read_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.dialog_demo {
+            return;
+        }
+        // What a typed command opens (a picker, or the question
+        // `/model fable` asks) is the terminal's to draw, on its card.
         let picking = self.come_back.as_ref().is_some_and(|cb| cb.typed.is_some());
         let target = self.selected_ref().filter(|r| self.page == Page::Session && self.in_terminal(r) && !picking).map(|r| r.session_id.clone()).and_then(|sid| {
             self.hub.refresh_peers();
@@ -4359,14 +4615,51 @@ impl Workbench {
         }
         self.dialog_reading = true;
         cx.spawn(async move |this, cx| {
-            let seen = cx.background_spawn(async move { crate::sys::terminal_styled(pid).and_then(|t| emaki_core::driver::dialog_on_screen(&t)) }).await;
+            // Also read: whether the screen still shows Claude Code's
+            // prompt and nothing over it, which is a screen the question
+            // has not been drawn on yet.
+            let (seen, at_prompt) = cx
+                .background_spawn(async move {
+                    let text = crate::sys::terminal_styled(pid);
+                    let picker = text.as_deref().is_some_and(|t| t.lines().any(|l| l.chars().filter(|c| *c == '▔').count() >= 20));
+                    let at_prompt = !picker && text.as_deref().is_some_and(|t| emaki_core::driver::prompt_on_screen(t).is_some());
+                    (text.and_then(|t| emaki_core::driver::dialog_on_screen(&t)), at_prompt)
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.dialog_reading = false;
                 // Our own terminal waiting on a screen that is no
                 // dialog the card knows (a folder to trust, a login):
                 // the screen itself is drawn. A dialog the card does
                 // know takes its place.
+                // A screen still being drawn is neither yet: the
+                // registry says `waiting` before the question is on the
+                // screen, and read then it was no dialog, so the
+                // terminal came up first and the card a second later.
+                // It is read again as soon as it has stopped changing.
+                // A screen that never stands still (one with a spinner on
+                // it) is not waited on for ever.
+                let moving = seen.is_none() && this.hub.terminal_for(&sid).is_some_and(|p| p.quiet_for() < SCREEN_SETTLED);
+                let since = *this.dialog_unsettled.get_or_insert_with(Instant::now);
+                let settling = moving && since.elapsed() < Duration::from_secs(2);
+                if !settling {
+                    this.dialog_unsettled = None;
+                }
+                // Claude Code says it is waiting some time before it
+                // draws what it waits on (a model switch is checked
+                // first). Until then the screen is its prompt, standing
+                // still, with nothing to show: neither card comes up,
+                // and the screen is read again. The terminal card came
+                // up on that screen, and then drew the question itself.
+                let own = this.hub.terminal_for(&sid).is_some();
                 match &seen {
+                    None if settling || (own && at_prompt) => {
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_millis(80)).await;
+                            let _ = this.update(cx, |this, cx| this.read_dialog(cx));
+                        })
+                        .detach();
+                    }
                     None if this.term_open.is_none() && this.term_dismissed.as_deref() != Some(sid.as_str()) => this.show_terminal(&sid, true, cx),
                     Some(_) if this.term_auto => this.hide_terminal(cx),
                     _ => {}
@@ -4751,7 +5044,7 @@ impl Workbench {
 
     fn terminal_check(&self, r: &SessionRef) -> Result<(), &'static str> {
         if r.archived {
-            return Err("Kept only: the agent no longer has this transcript");
+            return Err("Archived: the agent no longer has this transcript");
         }
         if !Self::folder_exists(r) {
             return Err(FOLDER_GONE);
@@ -4919,7 +5212,6 @@ impl Workbench {
                 }
                 Page::Sessions => self.sessions_scroll.set_offset(self.sessions_scroll.offset() + delta),
                 Page::New => self.home_scroll.set_offset(self.home_scroll.offset() + delta),
-                Page::Board => {}
             },
             // Momentum left over from a card or sheet that has gone.
             Pane::Branches | Pane::ChangeFiles | Pane::ChangeLines | Pane::Nowhere | Pane::Terminal => {}
@@ -4966,7 +5258,7 @@ impl Workbench {
             return ("inbox", String::new());
         }
         if r.archived {
-            return ("", "kept only: Claude Code no longer has this transcript, so it cannot be resumed".into());
+            return ("", "archived: Claude Code no longer has this transcript, so it cannot be resumed".into());
         }
         if !self.cfg.driver.enabled {
             return ("", "the driver is off in config".into());
@@ -5150,6 +5442,11 @@ impl Workbench {
         let Some(rnd) = self.shown_session().and_then(|s| s.withdrawn.as_ref().or_else(|| s.rounds.iter().rev().find(|r| !r.queued).filter(untouched))) else {
             return;
         };
+        // Still a round: the stop left no marker (Escape pressed at
+        // once). It is taken out of the conversation once its words are
+        // in the composer.
+        let still_shown = self.shown_session().is_some_and(|s| s.withdrawn.is_none() && s.rounds.last().is_some_and(|l| l.uuid == rnd.uuid));
+        let uuid = rnd.uuid.clone();
         if !matches!(rnd.source, emaki_core::model::Source::User | emaki_core::model::Source::Web) {
             return;
         }
@@ -5177,6 +5474,12 @@ impl Workbench {
             self.mark_slash(cx);
         }
         self.notice = Some(Notice::said("stopped; your message is back in the box"));
+        if still_shown && !uuid.is_empty() {
+            if let (Some(key), Some((path, session))) = (self.selected.clone(), self.detail.as_ref().map(|d| (d.path.clone(), (*d.session).clone()))) {
+                self.handed_back = Some((key.clone(), uuid));
+                self.set_detail(key, path, session);
+            }
+        }
         cx.notify();
     }
 
@@ -5237,7 +5540,12 @@ impl Workbench {
     /// What Escape closes, nearest first: the lightbox, then the search;
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.is_some() {
+        if self.pick.is_some() {
+            self.close_pick(cx);
+        } else if self.dialog_seen.is_some() && self.term_open.is_none() && !self.settings_open && !self.search_open && self.lightbox.is_none() && self.menu.is_none() {
+            // The card's own Cancel: Escape in the terminal's dialog.
+            self.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx);
+        } else if self.menu.is_some() {
             self.close_menu(cx);
         } else if self.branch_ask.is_some() {
             self.branch_ask = None;
@@ -5907,11 +6215,6 @@ impl Workbench {
         self.answer_question_with(req.request_id, answers, cx);
     }
 
-    fn reply_from_board(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_session(key, cx);
-        self.focus_composer(window, cx);
-    }
-
     // -- derived ------------------------------------------------------------
 
     /// The transcript decides the phase; what the window adds is whether a
@@ -5922,7 +6225,7 @@ impl Workbench {
         let pending = self.permissions.iter().filter(|(s, _)| s == &r.session_id).map(|(_, p)| p.clone()).last();
         let drv = self.drivers.get(&r.session_id);
         let st = &r.state;
-        let mut card = Card { r: r.clone(), column: Column::Done, chip: String::new(), chip_kind: "", text: String::new(), pending: None, queued: drv.map(|v| v.queued).unwrap_or(0) };
+        let mut card = Card { column: Column::Done, chip: String::new(), chip_kind: "", text: String::new(), pending: None };
         if let Some(p) = pending {
             card.column = Column::NeedsYou;
             card.chip = p.tool_name.clone();
@@ -5982,7 +6285,6 @@ impl Workbench {
             .filter(|r| match &self.scope {
                 Scope::All => true,
                 Scope::Agent(a) => r.agent == *a,
-                Scope::Kept => r.archived,
             })
             .collect()
     }
@@ -6094,11 +6396,7 @@ impl Workbench {
         let sessions_active = page == Page::Sessions;
         let top = top
             .child(new_row)
-            .child(nav("nav-board", Icon::new(IconName::LayoutDashboard), "Board", "⌘B", page == Page::Board, cx, Box::new(|this, _, cx| {
-                this.page = Page::Board;
-                cx.notify();
-            })))
-            .child(nav("nav-sessions", Icon::default().path("icons/briefcase.svg"), "Projects", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))));
+            .child(nav("nav-sessions", Icon::default().path("icons/briefcase.svg"), "All Projects", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))));
 
         let mut agents: Vec<(AgentId, usize)> = Vec::new();
         for a in AgentId::ALL {
@@ -6133,25 +6431,6 @@ impl Workbench {
                 .when(live > 0, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.green).flex_shrink_0()))
                 .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(n.to_string()))
         }));
-        let kept = self.refs.iter().filter(|r| r.archived).count();
-        if kept > 0 {
-            let active = sessions_active && scope == Scope::Kept;
-            agent_rows = agent_rows.child(
-                h_flex()
-                    .id("agent-kept")
-                    .h(SIDE_ROW_H)
-                    .px(px(10.))
-                    .gap(px(10.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .when(active, |d| d.bg(theme.sidebar_accent))
-                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                    .on_click(cx.listener(|this, _, _, cx| this.show_sessions(Scope::Kept, cx)))
-                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(IconName::HardDrive).with_size(px(15.)).text_color(theme.muted_foreground)))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child("Kept only"))
-                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(kept.to_string())),
-            );
-        }
         // Folders: every project as a row that opens onto its sessions,
         // newest folder first, the sessions under each headed by when
         // (today, yesterday, this week, this month, earlier). A folder
@@ -6610,7 +6889,7 @@ impl Workbench {
     /// session has none), and it writes the name where its resume list
     /// and every other reader find it. Not typed into a running turn:
     /// the name waits here and goes when the turn is over. A session
-    /// that cannot be asked (another agent, one kept only, a folder
+    /// that cannot be asked (another agent, an archived one, a folder
     /// that is gone) keeps the name as ours alone.
     fn try_renames(&mut self) {
         for (key, name) in self.renames.clone() {
@@ -6947,7 +7226,7 @@ impl Workbench {
 
     /// Two levels, as the sidebar has: the folders, newest first, and
     /// inside one, its sessions headed by when. The pills narrow either
-    /// level to an agent or to what is kept only, and stay as the level
+    /// level to an agent, and stay as the level
     /// changes.
     fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -6957,7 +7236,6 @@ impl Workbench {
         // What the pills count: everything at the top, the folder's own
         // inside one.
         let base: Vec<&SessionRef> = self.refs.iter().filter(|r| folder.as_ref().is_none_or(|p| r.project() == *p)).collect();
-        let kept = base.iter().filter(|r| r.archived).count();
 
         let filter = |id: SharedString, label: String, to: Scope, cx: &mut Context<Self>| {
             let theme = cx.theme().clone();
@@ -6984,9 +7262,6 @@ impl Workbench {
             if n > 0 || scope == Scope::Agent(a) {
                 filters = filters.child(filter(format!("f-{}", a.as_str()).into(), format!("{} · {n}", a.display_name()), Scope::Agent(a), cx));
             }
-        }
-        if kept > 0 || scope == Scope::Kept {
-            filters = filters.child(filter("f-kept".into(), format!("Kept only · {kept}"), Scope::Kept, cx));
         }
 
         let refs: Vec<SessionRef> = self.scoped_refs().into_iter().cloned().collect();
@@ -7108,7 +7383,7 @@ impl Workbench {
                                         .gap(px(8.))
                                         .items_center()
                                         .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
-                                        .when(r.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground)))
+                                        .when(r.archived, |d| d.child(badge("archived", theme.muted, theme.muted_foreground)))
                                         .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
                                 )
                                 .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
@@ -7126,7 +7401,6 @@ impl Workbench {
             (Some(p), _) => p.clone(),
             (None, Scope::All) => "Your projects".to_string(),
             (None, Scope::Agent(a)) => format!("{} projects", a.display_name()),
-            (None, Scope::Kept) => "Kept projects".to_string(),
         };
         let line = match &folder {
             Some(_) => format!("{} in this project.", plural(count, "session", "sessions")),
@@ -7147,7 +7421,7 @@ impl Workbench {
                         .cursor_pointer()
                         .hover(move |s| s.text_color(hover))
                         .on_click(cx.listener(|this, _, _, cx| this.show_sessions_in(this.scope.clone(), None, cx)))
-                        .child("Projects"),
+                        .child("All Projects"),
                 )
                 .child(Icon::new(IconName::ChevronRight).with_size(px(11.)))
                 .child(div().min_w_0().truncate().child(title.clone()))
@@ -7194,7 +7468,7 @@ impl Workbench {
 
         let mut right: Vec<AnyElement> = Vec::new();
         if r.archived {
-            right.push(badge("kept", theme.muted, theme.muted_foreground).into_any_element());
+            right.push(badge("archived", theme.muted, theme.muted_foreground).into_any_element());
         }
         // The terminal is the panel at the right (`term_panel.rs`); the
         // person's own terminal app is on the session's menu.
@@ -7410,8 +7684,8 @@ impl Workbench {
                     // `render_terminal`), so it sits in a column with
                     // none, over the rest.
                     .child(
-                        v_flex().w_full().items_center().children(terminal).child(
-                            v_flex().w_full().items_center().gap(px(8.)).children(dialog).child(self.render_permissions(cx)).child(self.render_composer(cx)),
+                        v_flex().w_full().items_center().children(terminal).children(dialog).child(
+                            v_flex().w_full().items_center().gap(px(8.)).child(self.render_permissions(cx)).child(self.render_composer(cx)),
                         ),
                     ),
             );
@@ -7612,6 +7886,14 @@ impl Workbench {
             }
             Some(emaki_core::pty::panel_rows(screen))
         });
+        // `EMAKI_GO=termdemo`: what `/model fable` asks on a warm cache,
+        // in Claude Code's own colours (2.1.293).
+        let live = live.or_else(|| {
+            self.term_demo.then(|| {
+                let bytes = "\x1b[1m\x1b[38;2;255;193;7mSwitch model?\x1b[0m\r\n\x1b[38;2;153;153;153mYour next response will be slower and use more tokens\x1b[0m\r\n\r\nThis conversation is cached for the current model. Switching to \x1b[1mFable 5.1\x1b[0m means the full\r\nhistory gets re-read on your next message.\r\n\r\n\x1b[38;2;177;185;249m❯ \x1b[38;2;153;153;153m1. \x1b[38;2;177;185;249mYes, switch to Fable 5.1\x1b[0m\r\n  \x1b[38;2;153;153;153m2. \x1b[0mNo, go back\r\n";
+                emaki_core::pty::panel_rows(emaki_core::pty::rows_after(bytes.as_bytes(), 12, 96))
+            })
+        });
         // The card comes and goes over a moment (`TERM_ANIM`): once the
         // screen has nothing for it, it is drawn that long again from the
         // rows it last had, fading, and takes no click meanwhile.
@@ -7655,100 +7937,45 @@ impl Workbench {
             }
         };
         let theme = cx.theme().clone();
-        let (ground, ink): (u32, u32) = if claude_theme_light() { (0xfaf9f5, 0x1f1e1d) } else { (0x1f1e1d, 0xe8e6dc) };
-        let hsla = |c: u32| -> Hsla { rgb(c).into() };
-        let mix = |a: u32, b: u32, t: f32| {
-            let ch = |sh: u32| ((a >> sh & 0xff) as f32 * (1.0 - t) + (b >> sh & 0xff) as f32 * t).round() as u32;
-            ch(16) << 16 | ch(8) << 8 | ch(0)
-        };
+        // The card is the terminal panel's screen in small: its scheme
+        // for the window's appearance, its face, its rows and its
+        // shapes (`term_panel::card_screen`), whatever theme Claude Code
+        // is set to.
+        let look = self.term_card_look(&rows, cx);
+        let (ground, ink, quiet, lh, cell_w) = (look.ground, look.ink, look.quiet, look.line_h, look.cell_w);
         // What the pointer can press, as the keys that do it: Claude
-        // Code's own interface takes no mouse (`pty::hits`).
+        // Code's own interface takes no mouse (`pty::hits`). Each is a
+        // stretch of a row, laid over the cells it covers.
         let hits = if leaving { Vec::new() } else { emaki_core::pty::hits(&rows) };
-        let mut lines: Vec<AnyElement> = Vec::new();
-        for (rix, row) in rows.iter().enumerate() {
-            let mut text = String::new();
-            let mut looks = Vec::new();
-            for s in row {
-                let start = text.len();
-                text.push_str(&s.text);
-                let (mut fg, mut bg) = (s.fg.unwrap_or(ink), s.bg);
-                if s.inverse {
-                    (fg, bg) = (bg.unwrap_or(ground), Some(fg));
-                }
-                if s.dim {
-                    fg = mix(fg, bg.unwrap_or(ground), 0.45);
-                }
-                looks.push((
-                    start..text.len(),
-                    HighlightStyle {
-                        color: Some(hsla(fg)),
-                        background_color: bg.map(hsla),
-                        font_weight: s.bold.then_some(FontWeight::BOLD),
-                        font_style: s.italic.then_some(FontStyle::Italic),
-                        underline: s.underline.then(|| UnderlineStyle { thickness: px(1.), ..Default::default() }),
-                        ..Default::default()
-                    },
-                ));
-            }
-            let mut mine: Vec<&emaki_core::pty::Hit> = hits.iter().filter(|h| h.row == rix).collect();
-            mine.sort_by_key(|h| h.start);
-            if mine.is_empty() {
-                if text.is_empty() {
-                    text.push(' ');
-                }
-                lines.push(div().h(px(17.)).whitespace_nowrap().child(StyledText::new(text).with_highlights(looks)).into_any_element());
-                continue;
-            }
-            // The row in pieces, so each stretch that takes a click is an
-            // element of its own: characters to bytes, and each piece
-            // with the looks that fall inside it.
-            let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).chain(std::iter::once(text.len())).collect();
-            let last = offsets.len() - 1;
-            let piece = |from: usize, to: usize| {
-                let (a, b) = (offsets[from.min(last)], offsets[to.min(last)]);
-                let inside = looks.iter().filter_map(|(range, look)| {
-                    let (start, end) = (range.start.max(a), range.end.min(b));
-                    (start < end).then(|| (start - a..end - a, look.clone()))
-                });
-                StyledText::new(text[a..b].to_string()).with_highlights(inside.collect::<Vec<_>>())
-            };
-            let mut kids: Vec<AnyElement> = Vec::new();
-            let mut at = 0;
-            for hit in mine {
-                if hit.start < at || hit.end <= hit.start {
-                    continue;
-                }
-                if hit.start > at {
-                    kids.push(div().child(piece(at, hit.start)).into_any_element());
-                }
-                let keys = hit.keys.clone();
-                kids.push(
-                    div()
-                        .id(SharedString::from(format!("term-hit-{rix}-{}", hit.start)))
-                        .rounded(px(3.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(hsla(ink).opacity(0.16)))
-                        .active(|s| s.bg(hsla(ink).opacity(0.26)))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            swallow_click(window, cx);
-                            window.focus(&this.term_focus, cx);
-                            this.term_key(&keys, cx);
-                        }))
-                        .child(piece(hit.start, hit.end))
-                        .into_any_element(),
-                );
-                at = hit.end;
-            }
-            if at < last {
-                kids.push(div().child(piece(at, last)).into_any_element());
-            }
-            // From the top, as a row drawn whole is: centred, a split row sat two pixels off its neighbours.
-            lines.push(h_flex().items_start().h(px(17.)).whitespace_nowrap().children(kids).into_any_element());
-        }
-        let quiet = hsla(mix(ink, ground, 0.45));
-        // The card's height, which the animation runs: its head (35), a
-        // row each (17), the foot's padding (12) and the border (2).
-        let tall = 49. + 17. * lines.len() as f32;
+        let presses = hits.iter().filter(|h| h.end > h.start).filter_map(|hit| {
+            let row = rows.get(hit.row)?;
+            let (from, to) = (crate::term_panel::cells_before(row, hit.start), crate::term_panel::cells_before(row, hit.end));
+            let keys = hit.keys.clone();
+            Some(
+                div()
+                    .id(SharedString::from(format!("term-hit-{}-{}", hit.row, hit.start)))
+                    .absolute()
+                    .left(px(from as f32 * cell_w))
+                    .top(px(hit.row as f32 * lh))
+                    .w(px((to - from) as f32 * cell_w))
+                    .h(px(lh))
+                    .rounded(px(3.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(ink.opacity(0.14)))
+                    .active(|s| s.bg(ink.opacity(0.24)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        window.focus(&this.term_focus, cx);
+                        this.term_key(&keys, cx);
+                    })),
+            )
+        });
+        let presses: Vec<_> = presses.collect();
+        let rows_n = rows.len();
+        let lines = look.lines;
+        // The card's height, which the animation runs: a row each, the
+        // padding over and under them (12 each) and the border (2).
+        let tall = 26. + lh * rows_n as f32;
         let card =
             v_flex()
                 .id("terminal-card")
@@ -7759,7 +7986,7 @@ impl Workbench {
                 .rounded(px(14.))
                 .border_1()
                 .border_color(theme.primary)
-                .bg(hsla(ground))
+                .bg(ground)
                 .shadow_sm()
                 .overflow_hidden()
                 .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
@@ -7776,35 +8003,29 @@ impl Workbench {
                         window.focus(&this.term_focus, cx);
                     }),
                 )
+                // No head: the screen says what it is. The close button
+                // stands in the card's corner, over the screen.
+                .relative()
                 .child(
-                    h_flex()
-                        .px(px(12.))
-                        .pt(px(9.))
-                        .pb(px(6.))
-                        .gap(px(8.))
+                    div()
+                        .id("terminal-close")
+                        .absolute()
+                        .top(px(8.))
+                        .right(px(8.))
+                        .size(px(20.))
+                        .rounded(px(6.))
+                        .flex()
                         .items_center()
-                        .text_size(px(11.5))
-                        .child(Icon::default().path("icons/square-terminal.svg").with_size(px(13.)).text_color(hsla(ink)))
-                        .child(div().font_weight(FontWeight::MEDIUM).text_color(hsla(ink)).child(format!("{}'s terminal", r.agent.display_name())))
-                        .child(div().flex_1().min_w_0().truncate().text_color(quiet).child("click or use the keys; it closes when you are done"))
-                        .child(
-                            div()
-                                .id("terminal-close")
-                                .size(px(20.))
-                                .rounded(px(6.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(hsla(ink).opacity(0.12)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    swallow_click(window, cx);
-                                    this.dismiss_terminal(cx);
-                                }))
-                                .child(Icon::new(IconName::Close).with_size(px(12.)).text_color(quiet)),
-                        ),
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(ink.opacity(0.12)))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.dismiss_terminal(cx);
+                        }))
+                        .child(Icon::new(IconName::Close).with_size(px(12.)).text_color(quiet)),
                 )
-                .child(div().px(px(12.)).pb(px(12.)).font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(hsla(ink)).children(lines));
+                .child(div().px(px(14.)).py(px(12.)).child(div().relative().font(look.font).text_size(px(look.text)).text_color(ink).children(lines).children(presses)));
         // It opens upward from the composer and closes back down onto
         // it, fading: the card stays where it is, held by its foot, and
         // the room it is given grows or shrinks over it.
@@ -7840,7 +8061,42 @@ impl Workbench {
     /// moves on; the card is its screen read again. Words typed in the
     /// composer answer a question that offers "Type something".
     fn render_dialog(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (_, d) = self.dialog_seen.as_ref().filter(|(sid, _)| *sid == r.session_id)?;
+        // The card comes and goes over a moment, as the terminal card
+        // does: once there is no dialog it is drawn that long again from
+        // the one it last had, closing, and takes no click meanwhile.
+        let live = self.dialog_seen.as_ref().filter(|(sid, _)| *sid == r.session_id).map(|(_, d)| d.clone());
+        let (d, leaving, serial) = {
+            let mut shown = self.dialog_shown.borrow_mut();
+            let now = Instant::now();
+            match live {
+                Some(d) => {
+                    if !shown.on || shown.sid != r.session_id {
+                        shown.on = true;
+                        shown.sid = r.session_id.clone();
+                        shown.at = now;
+                        shown.serial += 1;
+                        self.dialog_h.set(0.);
+                    }
+                    shown.dialog = Some(d.clone());
+                    (d, false, shown.serial)
+                }
+                None => {
+                    if shown.on {
+                        shown.on = false;
+                        shown.serial += 1;
+                        shown.at = now;
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(TERM_ANIM + Duration::from_millis(20)).await;
+                            let _ = this.update(cx, |_, cx| cx.notify());
+                        })
+                        .detach();
+                    }
+                    let d = shown.dialog.clone().filter(|_| shown.sid == r.session_id && now.duration_since(shown.at) < TERM_ANIM)?;
+                    (d, true, shown.serial)
+                }
+            }
+        };
+        let d = &d;
         let theme = cx.theme().clone();
         let approval = d.body.last().is_some_and(|l| l.starts_with("Do you want"));
         let review = d.body.first().is_some_and(|l| l.starts_with("Review your answers"));
@@ -7851,7 +8107,7 @@ impl Workbench {
             None => (String::new(), Vec::new()),
         };
         let typed = !d.multi && d.options.iter().any(|o| o.label.starts_with("Type something"));
-        let busy = self.dialog_sending;
+        let busy = self.dialog_sending || leaving;
         let head = if approval { "approval" } else if review { "review" } else { "question" };
         let says = if approval { format!("{} asks to go ahead", r.agent.speaker()) } else { format!("{} asks", r.agent.speaker()) };
         let rows = d.options.iter().filter(|o| !(d.multi && o.label.starts_with("Type something"))).map(|o| {
@@ -7875,6 +8131,9 @@ impl Workbench {
                 .hover(|s| s.bg(theme.list_hover))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
+                    if leaving {
+                        return;
+                    }
                     if own {
                         let handle = this.composer.read(cx).focus_handle(cx);
                         window.focus(&handle, cx);
@@ -7906,10 +8165,14 @@ impl Workbench {
                         .when(!o.detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(o.detail.clone()))),
                 )
         });
-        Some(
+        // How tall the card is, measured as it is drawn, for the height
+        // that opens and closes it.
+        let tall = self.dialog_h.clone();
+        let card =
             v_flex()
                 .w_full()
-                .max_w(CONTENT_W)
+                .flex_shrink_0()
+                .relative()
                 .p(px(14.))
                 .gap(px(12.))
                 .rounded(px(14.))
@@ -7917,6 +8180,26 @@ impl Workbench {
                 .border_color(theme.primary)
                 .bg(theme.popover)
                 .shadow_sm()
+                .when(!leaving, |d| {
+                    let tall = tall.clone();
+                    let entity = cx.entity().downgrade();
+                    d.child(
+                        canvas(
+                            move |b, _, cx| {
+                                let h = f32::from(b.size.height);
+                                if (tall.get() - h).abs() > 0.5 {
+                                    tall.set(h);
+                                    if let Some(e) = entity.upgrade() {
+                                        cx.defer(move |cx| e.update(cx, |_, cx| cx.notify()));
+                                    }
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                })
                 .child(
                     h_flex()
                         .gap(px(8.))
@@ -7990,7 +8273,30 @@ impl Workbench {
                         .child(Button::new("dialog-cancel").ghost().small().label("Cancel  esc").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx))))
                         .child(div().flex_1())
                         .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if typed { "or type an answer below" } else { "" })),
-                ))
+                ));
+        // Held by its foot, it opens up from the composer and closes
+        // back down to it; the gap under it is part of what moves (see
+        // `render_terminal`). Until its height is known it takes none.
+        let gap = 8.;
+        let tall = self.dialog_h.clone();
+        Some(
+            v_flex()
+                .w_full()
+                .max_w(CONTENT_W)
+                .justify_end()
+                .overflow_hidden()
+                .child(card)
+                .child(div().h(px(gap)).flex_shrink_0())
+                .with_animation(ElementId::Name(format!("dialog-card-{serial}").into()), Animation::new(TERM_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    // At rest the card has its own height: one set here,
+                    // a rounded number, cut the card's top border off.
+                    if !leaving && t >= 1. {
+                        return d;
+                    }
+                    let t = if leaving { 1. - t } else { t };
+                    let h = tall.get();
+                    if h <= 0. { d.h(px(0.)).opacity(0.) } else { d.h(px(((h + gap) * t).ceil())).opacity(t) }
+                })
                 .into_any_element(),
         )
     }
@@ -8749,7 +9055,7 @@ impl Workbench {
                         // the key to itself otherwise.
                         if this.slash_key(SlashKey::Close, window, cx) {
                             cx.stop_propagation();
-                        } else if this.settings_open || this.lightbox.is_some() || this.search_open || this.find_open || this.term_open.is_some() {
+                        } else if this.pick.is_some() || this.dialog_seen.is_some() || this.settings_open || this.lightbox.is_some() || this.search_open || this.find_open || this.term_open.is_some() {
                             this.escape(window, cx);
                             cx.stop_propagation();
                         } else if this.escape_stops(cx) {
@@ -8790,20 +9096,35 @@ impl Workbench {
                             }))
                             .child(Icon::new(IconName::Plus).with_size(px(15.))),
                     )
-                    // The pills are buttons, on every channel: a choice is
-                    // made in the session's terminal (`pill_clicked`), which
-                    // is opened first when the session has none. Before a
-                    // session exists there is nothing to open, and they say
-                    // what a new one starts in, set in Settings.
+                    // The pills, on every channel. Before a session
+                    // exists they say what a new one starts in, set in
+                    // Settings (`pill_clicked`).
                     .when(settable, |d| {
                         let to = |pill: Pill| cx.listener(move |this, _: &ClickEvent, window, cx| this.pill_clicked(pill, window, cx));
                         // A mode changed in a terminal that cannot be read
                         // is not known until the next turn.
                         let mode_text = if mode.is_empty() { PillText { value: String::new(), tint: Tint::Plain, tail: "Mode" } } else { mode_pill(&options, &mode, &theme) };
+                        // On a session the effort and the model are a
+                        // list each, the agent's own, opening up from its
+                        // pill (`pick_pill`); a pick is the agent's
+                        // command for it, typed in the session's terminal
+                        // (`pill_picked`). A model that takes no level
+                        // has no list to show.
+                        let model_text = PillText::plain(model_name(&options, &model));
+                        let effort_el: AnyElement = if on_session && !options.efforts_for(&model).is_empty() {
+                            self.pick_pill(PickFor::Effort, "effort", "icons/gauge.svg", effort_text.clone(), cx)
+                        } else {
+                            composer_pill("effort", "icons/gauge.svg", effort_text.clone(), cx).on_click(to(Pill::Effort)).into_any_element()
+                        };
+                        let model_el: AnyElement = if on_session && !options.models.is_empty() {
+                            self.pick_pill(PickFor::Model, "model", "icons/box.svg", model_text, cx)
+                        } else {
+                            composer_pill("model", "icons/box.svg", model_text, cx).on_click(to(Pill::Model)).into_any_element()
+                        };
                         d.child(arrow_over(composer_pill("mode", "icons/shield.svg", mode_text, cx).on_click(to(Pill::Mode))))
-                            .when(on_session, |d| d.child(arrow_over(composer_pill("effort", "icons/gauge.svg", effort_text.clone(), cx).on_click(to(Pill::Effort)))))
+                            .when(on_session, |d| d.child(arrow_over(effort_el)))
                             .child(div().flex_1())
-                            .child(arrow_over(composer_pill("model", "icons/box.svg", PillText::plain(model_name(&options, &model)), cx).on_click(to(Pill::Model))))
+                            .child(arrow_over(model_el))
                     })
                     .when(!settable, |d| d.child(div().flex_1()))
                     .child(send),
@@ -8828,74 +9149,6 @@ impl Workbench {
         v_flex().w_full().items_center().gap(px(8.)).children(help).child(card).child(foot)
     }
 
-    // -- the board -----------------------------------------------------------
-
-    fn render_board(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let mut cols: HashMap<Column, Vec<Card>> = HashMap::new();
-        for r in &self.refs {
-            let card = self.card_for(r);
-            cols.entry(card.column).or_default().push(card);
-        }
-        // Whoever has waited longest on you comes first; everything else newest first.
-        let since_of = |c: &Card| emaki_core::build::parse_ts(if c.r.state.since.is_empty() { &c.r.updated } else { &c.r.state.since }).map(|d| d.timestamp()).unwrap_or(0);
-        if let Some(v) = cols.get_mut(&Column::NeedsYou) {
-            v.sort_by_key(since_of);
-        }
-        for col in [Column::Planning, Column::Working, Column::YourTurn] {
-            if let Some(v) = cols.get_mut(&col) {
-                v.sort_by_key(|c| std::cmp::Reverse(since_of(c)));
-            }
-        }
-        let needs = cols.get(&Column::NeedsYou).map(Vec::len).unwrap_or(0);
-        let done = cols.remove(&Column::Done).unwrap_or_default();
-        let live: usize = cols.values().map(Vec::len).sum();
-        let projects: HashSet<String> = cols.values().flatten().map(|c| c.r.project()).collect();
-
-        let stats = div().text_size(px(12.)).text_color(theme.muted_foreground).whitespace_nowrap().child(format!("{live} live · {needs} need you · {}", plural(projects.len(), "project", "projects"))).into_any_element();
-
-        // The four live columns side by side when the pane has room for
-        // them, two by two when it does not, one under another when it is
-        // narrow: the board never scrolls sideways. The columns are open
-        // regions under a hairline, not grey slabs, and done is a row
-        // under them that opens into a grid.
-        let gap = px(20.);
-        let per_row = {
-            let avail = self.pane_w - px(48.);
-            if avail >= COL_MIN_W * 4. + gap * 3. {
-                4
-            } else if avail >= COL_MIN_W * 2. + gap {
-                2
-            } else {
-                1
-            }
-        };
-        let mut rows = v_flex().w_full().gap(px(28.));
-        for chunk in Column::LIVE.chunks(per_row) {
-            let mut row = h_flex().w_full().gap(gap).items_start();
-            for c in chunk {
-                let cards = cols.remove(c).unwrap_or_default();
-                row = row.child(self.render_column(*c, cards, cx));
-            }
-            for _ in chunk.len()..per_row {
-                row = row.child(div().flex_1());
-            }
-            rows = rows.child(row);
-        }
-
-        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar("Board".into(), vec![stats], cx)).child(
-            v_flex()
-                .id("board")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .px(px(24.))
-                .pt(px(8.))
-                .pb(px(32.))
-                .child(page_in("page-board", v_flex().w_full().gap(px(28.)).child(rows).child(self.render_done(done, per_row, cx)))),
-        )
-    }
-
     fn column_color(&self, c: Column, cx: &App) -> Hsla {
         let theme = cx.theme();
         match c {
@@ -8904,234 +9157,6 @@ impl Workbench {
             Column::YourTurn => theme.green,
             Column::Done => theme.muted_foreground,
         }
-    }
-
-    fn dot(&self, c: Column, cx: &App) -> Div {
-        let color = self.column_color(c, cx);
-        let d = div().size(px(8.)).rounded_full().flex_shrink_0();
-        match c {
-            Column::Planning => d.border_2().border_color(color),
-            Column::NeedsYou => d.bg(color).shadow(vec![BoxShadow { color: color.opacity(0.25), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(3.), inset: false }]),
-            _ => d.bg(color),
-        }
-    }
-
-    /// A column's heading: the dot, the name and the count over a hairline.
-    fn column_head(&self, c: Column, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        h_flex()
-            .w_full()
-            .pb(px(10.))
-            .gap(px(8.))
-            .items_center()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(self.dot(c, cx))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(c.title()))
-            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(count.to_string()))
-    }
-
-    fn render_column(&self, c: Column, cards: Vec<Card>, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let count = cards.len();
-        let mut col = v_flex().flex_1().min_w_0().gap(px(10.)).child(self.column_head(c, count, cx));
-        if cards.is_empty() {
-            // An empty column says so inside a dashed outline the height
-            // of a card, so the page keeps its shape and the words are
-            // where a card would be, not floating in a tall void.
-            col = col.child(
-                div()
-                    .w_full()
-                    .h(px(84.))
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme.border)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .px(px(16.))
-                    .text_size(px(12.))
-                    .text_center()
-                    .text_color(theme.muted_foreground.opacity(0.8))
-                    .child(c.empty()),
-            );
-        } else {
-            let shown = cards.len().min(60);
-            let more = cards.len() - shown;
-            col = col
-                .children(cards.into_iter().take(shown).map(|card| self.render_card(card, cx)))
-                .when(more > 0, |d| d.child(div().py(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).text_center().child(format!("{more} more in the list"))));
-        }
-        col.into_any_element()
-    }
-
-    /// Done is a row under the live columns: the count and how many are
-    /// kept, with a chevron. Opened, every finished session as a grid in
-    /// as many columns as the live ones, newest first.
-    fn render_done(&self, done: Vec<Card>, per_row: usize, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let kept = done.iter().filter(|c| c.r.archived).count();
-        let open = self.done_open;
-        let head = h_flex()
-            .id("done-head")
-            .w_full()
-            .pb(px(10.))
-            .gap(px(8.))
-            .items_center()
-            .border_b_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.done_open = !this.done_open;
-                cx.notify();
-            }))
-            .child(self.dot(Column::Done, cx))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("done"))
-            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(done.len().to_string()))
-            .when(kept > 0, |d| d.child(badge_str(format!("{kept} kept"), theme.muted, theme.muted_foreground)))
-            .child(div().flex_1())
-            .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if open { "hide" } else { "show" }))
-            .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).with_size(px(13.)).text_color(theme.muted_foreground));
-        let mut section = v_flex().w_full().gap(px(10.)).child(head);
-        if open {
-            let shown = done.len().min(60);
-            let more = done.len() - shown;
-            let mut grid = v_flex().w_full().gap(px(10.));
-            let cards: Vec<Card> = done.into_iter().take(shown).collect();
-            let mut iter = cards.into_iter().peekable();
-            while iter.peek().is_some() {
-                let mut row = h_flex().w_full().gap(px(10.)).items_start();
-                let mut n = 0;
-                for card in iter.by_ref().take(per_row) {
-                    row = row.child(div().flex_1().min_w_0().child(self.render_card(card, cx)));
-                    n += 1;
-                }
-                for _ in n..per_row {
-                    row = row.child(div().flex_1());
-                }
-                grid = grid.child(row);
-            }
-            section = section.child(grid);
-            if more > 0 {
-                section = section.child(div().py(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).text_center().child(format!("{more} more in the list")));
-            }
-        }
-        section.into_any_element()
-    }
-    fn render_card(&self, card: Card, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let r = card.r.clone();
-        let key = key_of(&r);
-        let done = card.column == Column::Done;
-        let accent = self.column_color(card.column, cx);
-        let open_key = key.clone();
-        let mut el = v_flex()
-            .id(SharedString::from(format!("card-{key}")))
-            .relative()
-            .w_full()
-            .pl(px(14.))
-            .pr(px(12.))
-            .pt(px(10.))
-            .pb(px(9.))
-            .gap(px(5.))
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(12.))
-            .when(!done, |d| d.shadow_sm())
-            .cursor_pointer()
-            .hover(|s| s.border_color(accent))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_session(&open_key, cx)))
-            .child(div().absolute().left(px(0.)).top(px(8.)).bottom(px(8.)).w(px(3.)).rounded_r(px(2.)).bg(if done { theme.border } else { accent }))
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .text_size(px(10.5))
-                    .text_color(theme.muted_foreground)
-                    .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(r.project()))
-                    .when(!r.git_branch.is_empty(), |d| d.child(div().min_w_0().truncate().child(format!("· {}", r.git_branch))))
-                    .child(div().flex_1())
-                    .child(agent_badge(r.agent, &theme, matches!(card.column, Column::Working | Column::Planning), SharedString::from(format!("card-glyph-{key}")))),
-            )
-            .child(div().text_size(if done { px(12.5) } else { px(13.5) }).font_weight(FontWeight::MEDIUM).line_height(gpui::relative(1.3)).line_clamp(2).child(r.title.clone()));
-
-        if !done {
-            let (chip_bg, chip_fg) = match card.chip_kind {
-                "bash" | "task" | "web" | "mcp" | "plan" | "search" | "read" => (theme.blue.opacity(0.14), theme.blue),
-                "edit" | "write" | "approve" | "terminal" | "ask" => (theme.primary.opacity(0.14), theme.primary),
-                "reply" => (theme.green.opacity(0.16), theme.green),
-                "stop" => (theme.red.opacity(0.16), theme.red),
-                _ => (theme.muted, theme.muted_foreground),
-            };
-            let working = matches!(card.column, Column::Working | Column::Planning);
-            let clock_text = if working {
-                let from = if !r.state.turn_started.is_empty() { &r.state.turn_started } else if !r.state.since.is_empty() { &r.state.since } else { &r.updated };
-                elapsed_since(from, self.now)
-            } else {
-                ago(if r.state.since.is_empty() { &r.updated } else { &r.state.since }, self.now)
-            };
-            el = el.child(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .text_size(px(11.5))
-                    .child(div().flex_shrink_0().px(px(6.)).py(px(1.)).rounded(px(5.)).bg(chip_bg).text_color(chip_fg).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(card.chip.clone()))
-                    .child(div().flex_1().min_w_0().truncate().child(card.text.clone()))
-                    .child(div().flex_shrink_0().text_size(px(11.)).text_color(theme.muted_foreground).child(clock_text)),
-            );
-        }
-
-        let mut foot = h_flex().gap(px(6.)).items_center().pt(px(2.)).text_size(px(10.5)).text_color(theme.muted_foreground);
-        foot = foot.child(div().child(if done { format!("{} {}", day(&r.updated), clock(&r.updated)) } else { format!("since {}", clock(if r.started.is_empty() { &r.updated } else { &r.started })) }));
-        if card.queued > 0 {
-            foot = foot.child(badge_str(format!("{} queued", card.queued), theme.blue.opacity(0.14), theme.blue));
-        }
-        if r.archived {
-            foot = foot.child(badge("kept", theme.muted, theme.muted_foreground));
-        }
-        foot = foot.child(div().flex_1());
-        let (via, _) = self.reply_via_for(&r);
-        let small = |id: String, label: &'static str, primary: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
-            let b = Button::new(SharedString::from(id)).small().compact().label(label).on_click(cx.listener(move |this, _, window, cx| {
-                swallow_click(window, cx);
-                on(this, window, cx)
-            }));
-            if primary { b.primary() } else { b.outline() }
-        };
-        match (card.pending.clone(), card.column) {
-            (Some(pend), _) => {
-                let deny_id = pend.request_id.clone();
-                let allow_id = pend.request_id.clone();
-                foot = foot
-                    .child(small(format!("deny-{key}"), "deny", false, cx, Box::new(move |this, _, cx| this.answer_permission(deny_id.clone(), false, cx))))
-                    .child(small(format!("allow-{key}"), "approve", true, cx, Box::new(move |this, _, cx| this.answer_permission(allow_id.clone(), true, cx))));
-            }
-            (None, Column::NeedsYou) => {
-                let k = key.clone();
-                foot = foot.child(small(format!("answer-{key}"), "answer", true, cx, Box::new(move |this, _, cx| this.open_session(&k, cx))));
-            }
-            (None, Column::YourTurn) => {
-                if !via.is_empty() && via != "wait" {
-                    let k = key.clone();
-                    foot = foot.child(small(format!("reply-{key}"), "reply", false, cx, Box::new(move |this, window, cx| this.reply_from_board(&k, window, cx))));
-                }
-                let k = key.clone();
-                foot = foot.child(small(format!("read-{key}"), "read", true, cx, Box::new(move |this, _, cx| this.open_session(&k, cx))));
-            }
-            (None, Column::Done) => {
-                if via == "spawn" {
-                    let k = key.clone();
-                    foot = foot.child(small(format!("cont-{key}"), "continue", false, cx, Box::new(move |this, window, cx| this.reply_from_board(&k, window, cx))));
-                }
-            }
-            _ => {
-                let k = key.clone();
-                foot = foot.child(small(format!("open-{key}"), "open", false, cx, Box::new(move |this, _, cx| this.open_session(&k, cx))));
-            }
-        }
-        el.child(foot).into_any_element()
     }
 
     // -- new session: the home page -------------------------------------------
@@ -9386,7 +9411,7 @@ impl Workbench {
                                     h_flex()
                                         .gap(px(8.))
                                         .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(s.title.clone()))
-                                        .when(s.archived, |d| d.child(badge("kept", theme.muted, theme.muted_foreground)))
+                                        .when(s.archived, |d| d.child(badge("archived", theme.muted, theme.muted_foreground)))
                                         .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(format!("{} · {}", s.project, plural(s.hits, "hit", "hits")))),
                                 )
                                 .children(s.matches.into_iter().take(3).map(|m| {
@@ -9422,20 +9447,6 @@ fn kind_static(k: &str) -> &'static str {
         "approve" => "approve",
         "terminal" => "terminal",
         _ => "wait",
-    }
-}
-
-fn ago(ts: &str, now: f64) -> String {
-    let Some(t) = emaki_core::build::parse_ts(ts) else { return String::new() };
-    let d = (now - t.timestamp() as f64).max(0.0);
-    if d < 60.0 {
-        format!("{}s", d as u64)
-    } else if d < 3600.0 {
-        format!("{}m", (d / 60.0) as u64)
-    } else if d < 86_400.0 {
-        format!("{}h", (d / 3600.0) as u64)
-    } else {
-        format!("{}d", (d / 86_400.0) as u64)
     }
 }
 
@@ -9547,17 +9558,6 @@ pub fn agent_color(agent: AgentId, theme: &gpui_component::Theme) -> Hsla {
         AgentId::ClaudeCode => theme.primary,
         AgentId::Codex => theme.muted_foreground,
     }
-}
-
-/// Which agent a card belongs to, said on every card so the board never
-/// needs a legend.
-fn agent_badge(agent: AgentId, theme: &gpui_component::Theme, working: bool, id: impl Into<SharedString>) -> impl IntoElement {
-    let label = match agent {
-        AgentId::ClaudeCode => "Claude",
-        AgentId::Codex => "Codex",
-    };
-    let color = if working { agent_color(agent, theme) } else { theme.muted_foreground };
-    h_flex().gap(px(4.)).items_center().flex_shrink_0().child(agent_glyph(agent, px(11.), color, working, id)).child(div().text_size(px(10.5)).text_color(theme.muted_foreground).child(label))
 }
 
 /// The agent's glyph, turning (Claude) or breathing (Codex) while the agent
@@ -9716,18 +9716,6 @@ pub(crate) fn term_bytes(k: &Keystroke) -> Option<Vec<u8>> {
     Some(typed.into_bytes())
 }
 
-/// Whether Claude Code is set to one of its light themes (`theme` in
-/// `~/.claude.json`, dark when it says nothing): the colours it writes
-/// are made for that ground, so the terminal card is drawn on it.
-pub(crate) fn claude_theme_light() -> bool {
-    static LIGHT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *LIGHT.get_or_init(|| {
-        emaki_core::paths::read_json(&emaki_core::paths::home().join(".claude.json"))
-            .and_then(|v| v.get("theme").and_then(|t| t.as_str()).map(|t| t.starts_with("light")))
-            .unwrap_or(false)
-    })
-}
-
 /// What a session's terminal is wanted for (`Workbench::via_terminal`).
 #[derive(Debug, Clone)]
 pub enum TerminalAction {
@@ -9852,58 +9840,42 @@ fn arrow_over(button: impl IntoElement) -> Div {
     )
 }
 
-/// A pill that opens a list of choices, in the settings panel: the mode
-/// and the model a new session starts in. (The pills under the composer
-/// had these lists too, until every choice on a session came to be made
-/// in its terminal.) Every choice is on the list with a line on what it
-/// does, the current one ticked, so all of them can be reached (a pill that
-/// cycled on click hid the fourth mode behind three clicks and a label that
-/// did not know it). Picking one calls `on` with its key.
-#[allow(clippy::too_many_arguments)]
-fn picker(
-    id: &'static str,
-    icon: &'static str,
-    label: PillText,
-    options: Vec<(String, String, String)>,
+/// Which list a pill opens: under a session's composer its effort and
+/// its model, in the settings panel the mode and the model a new session
+/// starts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PickFor {
+    Effort,
+    Model,
+    DefaultMode,
+    DefaultModel,
+}
+
+/// A pill's list while it is open: every choice with a line on what it
+/// does, the current one ticked, by the pill it hangs off.
+#[derive(Clone)]
+pub(crate) struct PickMenu {
+    what: PickFor,
+    rows: Rc<Vec<PickRow>>,
     current: String,
-    anchor: Anchor,
-    wb: WeakEntity<Workbench>,
-    on: Rc<dyn Fn(&mut Workbench, &str, &mut Context<Workbench>)>,
-    cx: &App,
-) -> impl IntoElement {
-    let options = Rc::new(options);
-    let trigger = composer_pill(id, icon, label, cx);
-    Popover::new(id).anchor(anchor).trigger(trigger).content(move |_, _, cx| {
-        let theme = cx.theme().clone();
-        let popover = cx.entity();
-        // The list is as long as the agent makes it (a dozen models), so
-        // it scrolls past a height the smallest window still has room for.
-        v_flex().id(SharedString::from(format!("{id}-list"))).min_w(px(250.)).max_h(px(336.)).overflow_y_scroll().gap(px(2.)).children(options.iter().map(|(key, name, detail)| {
-            let active = *key == current;
-            let (wb, on, popover, key) = (wb.clone(), on.clone(), popover.clone(), key.clone());
-            v_flex()
-                .id(SharedString::from(format!("{id}-{key}")))
-                .px(px(10.))
-                .py(px(6.))
-                .gap(px(1.))
-                .rounded(px(8.))
-                .cursor_pointer()
-                .when(active, |d| d.bg(theme.muted))
-                .hover(|s| s.bg(theme.list_hover))
-                .on_click(move |_, window, cx| {
-                    let _ = wb.update(cx, |this, cx| on(this, &key, cx));
-                    popover.update(cx, |s, cx| s.dismiss(window, cx));
-                })
-                .child(
-                    h_flex()
-                        .gap(px(6.))
-                        .items_center()
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()))
-                        .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary))),
-                )
-                .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(detail.clone())))
-        }))
-    })
+    by: Bounds<Pixels>,
+    serial: u32,
+}
+
+/// One choice on a pill's list: its key, its name with the colour the
+/// agent shows it in, and a line on what it does.
+#[derive(Clone)]
+pub(crate) struct PickRow {
+    key: String,
+    name: String,
+    detail: String,
+    tint: Tint,
+}
+
+impl PickRow {
+    fn plain(key: String, name: String, detail: String) -> Self {
+        PickRow { key, name, detail, tint: Tint::Plain }
+    }
 }
 
 impl Render for Workbench {
@@ -9919,9 +9891,9 @@ impl Render for Workbench {
         // The focused element must be one this page draws. gpui dispatches a
         // keystroke from the focused node, or from the window root when that
         // node is not in the frame, and the root is above every handler here:
-        // with the caret left in a composer the board does not draw, ⌘W and
-        // every other shortcut went nowhere.
-        if matches!(self.page, Page::Board | Page::Sessions) && self.composer.read(cx).focus_handle(cx).is_focused(window) {
+        // with the caret left in a composer the sessions page does not draw,
+        // ⌘W and every other shortcut went nowhere.
+        if self.page == Page::Sessions && self.composer.read(cx).focus_handle(cx).is_focused(window) {
             window.focus(&self.focus_handle, cx);
         }
         match self.term_focus_due.take() {
@@ -10076,11 +10048,6 @@ impl Render for Workbench {
                 this.hub.refresh();
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
-            .on_action(cx.listener(|this, _: &GoBoard, _, cx| {
-                this.page = Page::Board;
-                this.save_ui(true);
-                cx.notify();
-            }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {
                 Some(key) if this.page == Page::Session && this.tabs.contains(&key) => this.close_tab(&key, window, cx),
                 _ => window.remove_window(),
@@ -10125,7 +10092,6 @@ impl Render for Workbench {
             .text_size(px(13.))
             .child(
                 h_flex().size_full().when(sidebar_open, |d| d.child(self.render_sidebar(cx))).map(|this| match self.page {
-                    Page::Board => this.child(self.render_board(cx)),
                     Page::New => this.child(self.render_new(cx)),
                     Page::Sessions => this.child(self.render_sessions(cx)),
                     Page::Session => this.child(self.render_detail(window, cx)),
@@ -10147,5 +10113,11 @@ impl Render for Workbench {
             .when(self.branch_ask.is_some(), |d| d.child(self.render_branch_ask(cx)))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
+            .when_some(self.pick_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))
+            // Where its pill is now, not where it was when the list opened.
+            .when_some(self.pick.clone(), |d, mut m| {
+                m.by = self.pill_at.borrow().get(&m.what).copied().unwrap_or(m.by);
+                d.child(self.render_pick(m, false, window, cx))
+            })
     }
 }

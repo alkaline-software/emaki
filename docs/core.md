@@ -33,6 +33,42 @@ registry in `state/projects.json`, `config.json`,
 `cache/explanations.json`. `~/.emaki/index.db` was the daemon's search
 index; nothing reads it now.
 
+## The archive
+
+`archive.rs`. Every session is in it from the first time it is seen, not
+from when its agent is about to delete it: the deletion is silent, the app
+may not be running that week, and the thirty days is a setting.
+
+- **A copy the agent still has is a clone** where the filesystem can
+  (`clone_over`, APFS): a second name for the same blocks, made again
+  whenever the source has grown. It takes next to no room, and it is a
+  picture of the source and not a link to it, so nothing done to the
+  source reaches it. Elsewhere the bytes are copied and what is new is
+  appended. Hard links were not used: the archive would be the source's
+  own file, and whatever cut the source short would cut the archive.
+- **A source that grew is taken only when the archive is still how it
+  begins** (`still_begins_with`). Claude Code rewrites a transcript in
+  place at times, and one rewritten and longer was once taken as one that
+  had grown: its new end went after the old copy, which then held rows
+  twice or lacked some. A copy made before this is compared with its
+  source once (`Entry::shared`) and taken again when it is not the same.
+- **Nothing is set aside that holds nothing.** A copy that is not the
+  source is kept as a generation file (`<name>.genN.jsonl`, listed as a
+  session of its own) only when it holds a row the source lacks
+  (`nothing_lost`); one that is merely behind is replaced.
+- **A copy the agent no longer has is packed** (`pack_stale`), a day after
+  it was last written: it is the only copy, takes its full size and never
+  changes again. The filesystem does it (`ditto --hfsCompression` on a
+  Mac, `compact` on Windows, nothing on Linux), so the file keeps its
+  name and every reader, ours and any other program, gets the same bytes.
+  On a Mac the packed copy is made beside the file and compared byte for
+  byte before it takes its place. A `.gz` beside the file was not used:
+  a dozen readers go by a transcript's name and seek in it.
+- **When** is the hub's (`spawn_scanner`): every session at launch and at
+  quit; after that a session whose file changed, once its turn is over,
+  and one still at work every five minutes. The scan every few seconds is
+  the window's and only reads sizes and times.
+
 The markdown a session renders to is byte-identical to the Python
 renderer's except JSON key order inside tool arguments and the `You (web)`
 label, now `You (emaki)`.
