@@ -2719,6 +2719,8 @@ fn discarding_goes_back_to_the_last_commit() {
     run(&["config", "user.email", "t@example.com"]);
     run(&["config", "user.name", "t"]);
     run(&["config", "commit.gpgsign", "false"]);
+    // Git for Windows turns line ends on checkout unless told not to.
+    run(&["config", "core.autocrlf", "false"]);
     fs::write(dir.join("kept.txt"), "as committed\n").unwrap();
     fs::write(dir.join("gone.txt"), "here\n").unwrap();
     run(&["add", "."]);
