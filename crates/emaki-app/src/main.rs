@@ -216,6 +216,15 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
 }
 
 fn main() {
+    // Started from the Dock there is no shell above us, and the PATH is
+    // the system's: the person's own is asked of their shell, before any
+    // thread or child is started, so that everything Claude Code runs
+    // finds what their terminal finds.
+    if std::env::var_os("SHLVL").is_none() {
+        if let Some(path) = emaki_core::driver::login_shell_path() {
+            std::env::set_var("PATH", path);
+        }
+    }
     let app = gpui_platform::application().with_assets(assets::Assets);
     // A click on the Dock icon, or a second launch, after the window was
     // closed (⌘W on the last tab): open it again, or bring it forward.

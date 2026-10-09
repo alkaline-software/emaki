@@ -2356,3 +2356,61 @@ fn a_sentence_left_small_is_marked() {
     assert!(keep("solved. Now", capitals("solved. Now"), &Default::default(), &ignored).is_empty());
     assert!(keep("src/main.rs is the file", capitals("src/main.rs is the file"), &Default::default(), &Default::default()).is_empty());
 }
+
+/// A `cd` in a command moves the `cwd` of every row after it. The
+/// session's folder stays the one it was started in, which is where the
+/// index files it and where it is resumed from.
+#[test]
+fn a_session_keeps_the_folder_it_started_in() {
+    let _home = isolated();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sess.jsonl");
+    let rows = [
+        json!({"type": "user", "sessionId": "sess", "cwd": "/work/papers", "timestamp": "2026-01-01T00:00:00Z", "message": {"role": "user", "content": "hello"}}),
+        json!({"type": "assistant", "sessionId": "sess", "cwd": "/work/papers/one/erl", "timestamp": "2026-01-01T00:00:01Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}),
+    ];
+    std::fs::write(&path, rows.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+    assert_eq!(emaki_core::transcript::peek(&path).cwd, "/work/papers");
+    let session = build(BuildInput { rows: &rows, transcript_path: "/x/sess.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(session.cwd, "/work/papers");
+}
+
+/// A program in a terminal copies by asking the terminal to (OSC 52).
+/// The sequence may arrive in pieces, ended by BEL or by `ESC \\`.
+#[test]
+fn a_terminal_copy_is_read_whole() {
+    use emaki_core::pty::take_osc52;
+    let mut pending = b"before \x1b]52;c;aGVsbG8gd29ybGQ=\x07 after".to_vec();
+    assert_eq!(take_osc52(&mut pending).as_deref(), Some("hello world"));
+    assert_eq!(take_osc52(&mut pending), None);
+    // In two reads, with the other ending.
+    let mut pending = b"x\x1b]5".to_vec();
+    assert_eq!(take_osc52(&mut pending), None);
+    pending.extend_from_slice(b"2;c;5L2g5aW9");
+    assert_eq!(take_osc52(&mut pending), None);
+    pending.extend_from_slice(b"\x1b\\");
+    assert_eq!(take_osc52(&mut pending).as_deref(), Some("\u{4f60}\u{597d}"));
+    // A question about the clipboard is not a copy.
+    let mut pending = b"\x1b]52;c;?\x07".to_vec();
+    assert_eq!(take_osc52(&mut pending), None);
+}
+
+/// The same through a terminal of ours: what a program there asks to
+/// have copied is kept for the window to take, once.
+#[cfg(unix)]
+#[test]
+fn a_program_in_our_terminal_copies() {
+    use emaki_core::pty::Pty;
+    let argv: Vec<String> = ["/bin/sh", "-c", "printf '\\033]52;c;aGk=\\007'; sleep 1"].iter().map(|s| s.to_string()).collect();
+    let pty = Pty::spawn(&argv, "/", std::sync::Arc::new(|| {})).expect("a pty");
+    let mut copied = None;
+    for _ in 0..100 {
+        copied = pty.take_copied();
+        if copied.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(copied.as_deref(), Some("hi"));
+    assert_eq!(pty.take_copied(), None);
+}

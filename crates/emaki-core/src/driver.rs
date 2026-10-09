@@ -1106,6 +1106,52 @@ pub fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 /// to a transcript.
 pub const ENTRYPOINT: &str = "emaki";
 
+/// The `PATH` the person's login shell has, asked of the shell itself.
+///
+/// An app started from the Dock is handed the system's `PATH` and none
+/// of what the person's shell adds to it. Emaki finds `claude` and `git`
+/// without it, but what Claude Code runs does not: a hook that calls
+/// `node`, an MCP server started by `npx`, anything installed by
+/// Homebrew or a version manager is "command not found". So the shell
+/// named by `SHELL` is run once, as a login and interactive shell (a
+/// `PATH` is as often set in the file read by one as by the other), and
+/// asked. `None` on Windows, where the system's `PATH` is everyone's,
+/// and when the shell does not answer within a few seconds.
+pub fn login_shell_path() -> Option<String> {
+    if cfg!(windows) {
+        return None;
+    }
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
+    let mut child = Command::new(shell)
+        .args(["-l", "-i", "-c", "printf '\\n__EMAKI_PATH__%s__EMAKI_END__\\n' \"$PATH\""])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut out, &mut text);
+        text
+    });
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let text = reader.join().ok()?;
+    let path = text.split("__EMAKI_PATH__").nth(1)?.split("__EMAKI_END__").next()?.trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
 /// The environment for a Claude Code child that must be its own session. The
 /// app may itself be a grandchild of a session (started from a hook) and
 /// would otherwise hand the child its parent's id, inbox and token.

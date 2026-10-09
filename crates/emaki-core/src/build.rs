@@ -853,7 +853,13 @@ pub fn build(input: BuildInput) -> Session {
         } else if !str_of(row, "session_id").is_empty() {
             session.id = str_of(row, "session_id").into();
         }
-        if !str_of(row, "cwd").is_empty() {
+        // The folder the session was started in: the first a row names.
+        // A row's `cwd` is where the shell stood when it was written, and
+        // a `cd` in a command moves it for every row after. The session
+        // is still the first folder's: that is where Claude Code keeps
+        // it, where it is resumed from, and what the index
+        // (`transcript::peek`) and the sidebar file it under.
+        if session.cwd.is_empty() && !str_of(row, "cwd").is_empty() {
             session.cwd = str_of(row, "cwd").into();
         }
         if !str_of(row, "gitBranch").is_empty() {
