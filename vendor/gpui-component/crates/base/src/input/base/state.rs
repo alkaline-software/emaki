@@ -380,6 +380,8 @@ pub struct InputBaseState<M: InputModeKind> {
     _pending_update: bool,
     /// A flag to indicate if we should ignore the next completion event.
     pub(super) silent_replace_text: bool,
+    /// The application's rule for a new line's indent. (Emaki addition.)
+    pub(super) next_line_indent: Option<Rc<dyn Fn(&str, &str) -> Option<String>>>,
     /// A flag to indicate if we should emit InputEvents.
     pub(super) emit_events: bool,
 
@@ -644,6 +646,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             completion_inserting: false,
             overlay_action_handler: None,
             silent_replace_text: false,
+            next_line_indent: None,
             emit_events: true,
             _subscriptions,
             _pending_update: false,
@@ -911,6 +914,13 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub fn secondary_click_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let offset = self.index_for_mouse_position(position);
         self.handle_right_click_menu(position, offset, window, cx);
+    }
+
+    /// Fold or unfold the section a line of the buffer heads, as a click
+    /// on its mark in the gutter does, for a probe. (Emaki addition.)
+    pub fn toggle_fold_at(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.display_map.toggle_fold(line);
+        cx.notify();
     }
 
     /// Whether an input method is part way through a character: what is
@@ -1461,6 +1471,32 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Get indent string of next line.
     ///
     /// To get current and next line indent, to return more depth one.
+    /// The new line's indent as the application has it, when it set a
+    /// rule (`set_next_line_indent`) and nothing is selected: the rule is
+    /// handed the line up to the caret and the last line with words
+    /// above it. (Emaki addition.)
+    fn asked_indent(&mut self) -> Option<String> {
+        let rule = self.next_line_indent.clone()?;
+        if !self.selected_range.is_empty() {
+            return None;
+        }
+        let (caret, start) = (self.cursor(), self.start_of_line());
+        if start > caret {
+            return None;
+        }
+        let before = self.text.slice(start..caret).to_string();
+        let from = self.text.clip_offset(start.saturating_sub(4000), Bias::Left);
+        let head = self.text.slice(from..start).to_string();
+        let above = head.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        rule(&before, above)
+    }
+
+    /// The rule a new line's indent is asked of; `None` from it keeps
+    /// the editor's own. (Emaki addition.)
+    pub fn set_next_line_indent(&mut self, rule: impl Fn(&str, &str) -> Option<String> + 'static) {
+        self.next_line_indent = Some(Rc::new(rule));
+    }
+
     pub(super) fn indent_of_next_line(&mut self) -> String {
         if self.is_single_line() {
             return "".into();
@@ -1634,7 +1670,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         if insert_newline {
             // Get current line indent
             let indent = if self.is_code_editor() {
-                self.indent_of_next_line()
+                let kept = self.indent_of_next_line();
+                self.asked_indent().unwrap_or(kept)
             } else {
                 "".to_string()
             };

@@ -126,7 +126,7 @@ handed work on one of these files is told to read the doc too.
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
-| `emaki-app/src/panels.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs` | `docs/panels.md` |
+| `emaki-app/src/panels.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs`, `indent.rs`, `format.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/anthropic-mono.py` | `docs/look.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
@@ -158,6 +158,8 @@ crates/emaki-core/        everything without a window
   src/check.rs               the composer's writing: Harper's English, what counts as prose, the capital a sentence starts with
   src/git.rs                 what git says of a folder's files, as VS Code's explorer shows it
   src/files.rs               a folder's files for "@" in the composer: the list, the match, the tokens
+  src/indent.rs              where a new line starts in the file's editor, by language, and what one step of indent is
+  src/format.rs              a file put in its language's form when saved: R, by Air built in
   src/update.rs              the newest release, its installer, and putting it in place
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
   src/terminal.rs            the agent's resume command as a script a terminal can be handed

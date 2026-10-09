@@ -343,7 +343,8 @@ plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
   offers Copy Branch Name. The row stops the press, which would otherwise
   reach the list's sheet and put the list away.
 
-Rename opens a field over a scrim (`render_rename`, `rename_input`): ↩ keeps
+Rename opens a field over a scrim (`render_rename`, `rename_input`), the
+name there selected whole so a key replaces it: ↩ keeps
 the name, Escape or a click outside leaves it, an empty field changes
 nothing. `try_renames` types `/rename <name>` into the session's hidden
 terminal, starting one when the session has none. Claude Code writes a

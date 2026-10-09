@@ -277,13 +277,88 @@ far from the tree.
   it out of sight, and coming back to any session of this folder shows
   it again. Kept as one file for the window, it stayed up over another
   project's conversation.
-- Code, and markdown as it is written, are drawn by the toolkit's code
-  editor, read only (`sync_file_editor`, `file_editor`): line numbers,
-  folding, the language's colours, and its own selection, copy and find
-  (⌘F). The editor is made again when the file, or
+- Code, and markdown or a table as it is written, are drawn by the
+  toolkit's code editor (`sync_file_editor`, `FileEditor`): line
+  numbers, folding, the language's colours, and its own selection, copy
+  and find (⌘F). The editor is made again when the file, or
   what it holds, is another, and scrolls by itself, so the pane's own
   scroller is not drawn around it. Its right click is the pane's menu
-  (the vendored `on_secondary_click`).
+  (the vendored `on_secondary_click`). A folded line ends in dots, as
+  VS Code's does (the vendored element).
+- A file the pane holds whole can be changed in that editor and saved
+  with ⌘S, File, Save File, or the Save button the head shows while
+  there is something to save (`save_file`).
+  - What may be edited is `FileView::source`: the file's text exactly,
+    kept when all of it was read and all of it is UTF-8. The text the
+    pane shows is not it (`Code` is lines joined, with no last line
+    break). A file cut for the preview, or with bytes that are no text,
+    has no source and its editor is read only.
+  - A `.csv` or `.tsv` has the two segments markdown has: the table,
+    and the file as written, which is where it is edited.
+  - The save writes the file in place, so it keeps its permissions,
+    then reads it again; the editor is kept (`FileEditor::key` is set
+    to the new file's) so the caret and the undo history stay.
+  - The agent writes files too. A dirty editor is never replaced by
+    what the disk now holds, and a save that finds the file changed
+    since it was read says so under the composer and writes nothing; a
+    second save writes over it (`file_conflict`).
+  - A file with changes not saved shows an orange dot where its close
+    button is, as an editor's tab does, and the cross again under the
+    pointer; Save stands where its size was. Nothing takes the file
+    away without asking (`file_guard`, `render_file_ask`): closing the pane, showing another file in its
+    place, closing the window (its button, ⌘W, the menu) and quitting
+    (⌘Q, the menu) each bring up the question an editor asks, in the
+    window's own card: Save, Don't Save, Cancel; ↩ saves and Escape
+    cancels. The card sits over the file's pane and is no wider than
+    it, since the question is that pane's; for a file not showing it is
+    in the middle of the window. Quitting and closing the window ask of
+    every such file, one after another, showing or not. The answer is followed by what
+    was being done (`FileThen`).
+  - Going to a session of another folder, or to markdown as it reads,
+    asks nothing: the file is still open, only out of sight, and its
+    dot is there when it is back.
+  - An editor that goes out of sight is kept whole (`file_parked`), so
+    what was typed is there when the file shows again and ⌘Z still
+    walks back through it. A few with nothing to save are kept too,
+    for their histories; one whose file has changed on disk since is
+    made again.
+  - What shows two ways reads, as it reads, the way its editor has it
+    while that has changes not saved (`edited_body`), not the way the
+    disk does. A file renamed keeps what was typed in it under the new
+    name; one put in the trash takes it along.
+  - What is not saved is also written to `state/file_drafts.json` on
+    the clock (`keep_drafts`, a `Draft`: the text and the time on the
+    file it was typed over, so a save still knows a file changed
+    since) and read at launch. The app can be ended with no moment to
+    ask (`scripts/relaunch.sh`, a crash, the system shutting down), and
+    nothing typed is lost to that; the undo history is.
+  - A new line starts where the language says (`emaki_core::indent`,
+    asked through the vendored `set_next_line_indent`): a step in after
+    Python's or YAML's `:` and after an opening bracket, a step out
+    after Python's `return`, `pass`, `break`, `continue`, `raise`, and
+    in R a step in after a pipe or an operator left open, once for the
+    chain. It reads the line's words and parses nothing, since it
+    answers at a keystroke in a file that does not parse yet. One step
+    is the file's own (`indent::unit`: the smallest indent its lines
+    show, a tab if they use tabs), else the language's habit.
+  - Saving an R file formats it first (`emaki_core::format`), with Air,
+    Posit's formatter, built in at its defaults: the editor takes the
+    formatted text as one step of undo, then the file does. A file Air
+    cannot parse is saved as typed and the row says it was not
+    formatted. No other language has a formatter; do not write one by
+    hand, take the language's own as Air was taken.
+- What shows two ways has two segments in the head, as it reads and as
+  it is written (`two_ways`, `file_raw`, one choice for all of them):
+  markdown; HTML (`FileBody::Html`, the toolkit's HTML view: words,
+  headings, lists, tables, links, pictures, and no style sheet or
+  script, since a webview draws over every overlay); an SVG, which is
+  a picture with a source; a table; a Jupyter notebook
+  (`FileBody::Notebook`, its cells as markdown by
+  `files::notebook_markdown`, its source the JSON). The written side is
+  the editor, so each is edited there.
+- An SVG the pane holds whole is drawn from its text and not by its
+  path. gpui keeps a picture read by path under that path, so one saved
+  here, or rewritten by the agent, went on showing as it was.
 - The colours are the toolkit's tree-sitter grammars
   (`tree-sitter-languages` on `gpui-component`, off until v0.1.8, which
   also colours a conversation's code blocks). `render_md::lang_for_path`

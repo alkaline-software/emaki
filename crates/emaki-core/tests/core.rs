@@ -2206,3 +2206,69 @@ fn a_mark_is_for_what_is_wrong_however_it_is_read() {
     let issue = keep(text, english(text, false), &Default::default(), &Default::default()).into_iter().find(|i| &text[i.range.clone()] == "have").unwrap();
     assert!(!marked(text, &[ignore_key(&issue.rule, "have")]).contains(&"have".to_string()));
 }
+
+#[test]
+fn a_new_line_starts_where_the_language_says() {
+    use emaki_core::indent::{after, unit};
+    // Python: a step in after a colon, a step out after what ends a
+    // block, and the same place otherwise.
+    assert_eq!(after("python", "def f(x):", "", "    "), "    ");
+    assert_eq!(after("python", "    if x:  # why", "def f(x):", "    "), "        ");
+    assert_eq!(after("python", "        return x", "    if x:", "    "), "    ");
+    assert_eq!(after("python", "    y = 1", "def f(x):", "    "), "    ");
+    assert_eq!(after("python", "    url = 'http://a'", "", "    "), "    ");
+    assert_eq!(after("python", "    d = {", "", "    "), "        ");
+    // R: a step in after an opening brace, and after a pipe or a `+`
+    // left open, once: the lines of the chain stay level.
+    assert_eq!(after("r", "f <- function(x) {", "", "  "), "  ");
+    assert_eq!(after("r", "df %>%", "x <- 1", "  "), "  ");
+    assert_eq!(after("r", "  filter(a > 1) %>%", "df %>%", "  "), "  ");
+    assert_eq!(after("r", "ggplot(df) +", "", "  "), "  ");
+    assert_eq!(after("r", "  x <- 1", "f <- function(x) {", "  "), "  ");
+    // Anything else: the bracket rule and no more.
+    assert_eq!(after("rust", "fn main() {", "", "    "), "    ");
+    assert_eq!(after("rust", "    let x = 1;", "", "    "), "    ");
+    assert_eq!(after("yaml", "jobs:", "", "  "), "  ");
+    assert_eq!(after("text", "a line: ", "", "  "), "");
+    // A step is the file's own when it shows one, else the language's.
+    assert_eq!(unit("python", "x = 1\n"), (4, false));
+    assert_eq!(unit("python", "def f():\n  return 1\n"), (2, false));
+    assert_eq!(unit("r", "x <- 1\n"), (2, false));
+    assert_eq!(unit("go", "package main\n"), (4, true));
+    assert_eq!(unit("c", "int main() {\n\treturn 0;\n}\n"), (4, true));
+}
+
+#[test]
+fn an_r_file_is_formatted_as_air_formats_it() {
+    use emaki_core::format::format;
+    let messy = "f<-function(x,y){\nif(x>1){y=x+1}\n      else {y=2}\nreturn(y)}\n";
+    let tidy = format("r", messy).unwrap().expect("a messy file changes");
+    assert_eq!(tidy, "f <- function(x, y) {\n  if (x > 1) {\n    y <- x + 1\n  } else {\n    y <- 2\n  }\n  return(y)\n}\n");
+    // The parser is Air's on a newer grammar than Air pins
+    // (vendor/air_r_parser): a file with most of the language in it
+    // still parses, formats, and formats to itself.
+    let wide = "library(dplyr)\n# a comment\ndf%>%filter(a>1,b%in%c('x',\"y\"))%>%mutate(z=a^2,w=-a)|>summarise(n=n())\nm<-lm(y~x+I(x^2),data=df)\ng<-function(x=1L,...,na.rm=TRUE)x[[1]]$name@slot\nfor(i in 1:10){if(i%%2==0)next else print(i)}\nwhile(TRUE){break}\nh<-\\(x)x+1\nl<-list(a=1,`b c`=NULL,d=1e-3,e=0x1F,f=2i,g=r\"(raw)\")\nrepeat{break}\nx[1,,drop=FALSE]\nif(is.na(x)||!ok&&TRUE)stop('no')else NULL\n";
+    let once = format("r", wide).unwrap().expect("it changes");
+    assert!(once.contains("df %>%\n  filter(a > 1, b %in% c('x', \"y\")) %>%"), "{once}");
+    assert_eq!(format("r", &once), Ok(None), "{once}");
+    // What is already in form is left alone, and so is what is not R.
+    assert_eq!(format("r", &tidy), Ok(None));
+    assert_eq!(format("python", "x=1\n"), Ok(None));
+    // A file that does not parse is not touched; the reason comes back.
+    assert!(format("r", "f <- function( {\n").is_err());
+}
+
+#[test]
+fn a_notebook_reads_as_markdown() {
+    let nb = json!({"metadata": {"kernelspec": {"language": "python"}}, "cells": [
+        {"cell_type": "markdown", "source": ["# Title\n", "Some words."]},
+        {"cell_type": "code", "execution_count": 3, "source": "print('hi')\n", "outputs": [
+            {"output_type": "stream", "text": ["hi\n"]},
+            {"output_type": "execute_result", "data": {"text/plain": ["42"]}},
+            {"output_type": "display_data", "data": {"image/png": "AAAA", "text/plain": "<Figure>"}}]},
+        {"cell_type": "code", "execution_count": null, "source": [], "outputs": []}]});
+    let md = emaki_core::files::notebook_markdown(&nb.to_string()).unwrap();
+    assert!(md.starts_with("# Title\nSome words.\n\n**In [3]**\n\n```python\nprint('hi')\n```\n\n```text\nhi\n```\n\n```text\n42\n```\n\n*A picture."), "{md}");
+    assert!(emaki_core::files::notebook_markdown("{\"a\": 1}").is_none());
+    assert!(emaki_core::files::notebook_markdown("not json").is_none());
+}

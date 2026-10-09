@@ -41,7 +41,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -1139,7 +1139,31 @@ pub struct Workbench {
     /// Code in the pane: its editor, under a name for the file and what
     /// it held when the editor was made, and whether the editor shows
     /// line numbers and the language's colours.
-    pub(crate) file_editor: Option<(String, Entity<gpui_component::input::EditorState>)>,
+    pub(crate) file_editor: Option<crate::panels::FileEditor>,
+    /// The editors of files not showing now, kept whole: what was typed
+    /// in them and not saved, and their undo histories. Newest last.
+    pub(crate) file_parked: Vec<crate::panels::FileEditor>,
+    /// The question a file with changes not saved asks before it is
+    /// closed, replaced, or the app is quit; a count for its animation;
+    /// and where the keyboard is while it is up.
+    pub(crate) file_ask: Option<crate::panels::FileAsk>,
+    pub(crate) file_ask_serial: u64,
+    pub(crate) file_ask_focus: FocusHandle,
+    /// What was typed into a file's editor and not saved, for a file
+    /// that is not showing now: it is back when the file is.
+    pub(crate) file_drafts: HashMap<PathBuf, crate::panels::Draft>,
+    /// The drafts as last written to disk (`keep_drafts`).
+    pub(crate) drafts_kept: HashMap<PathBuf, crate::panels::Draft>,
+    /// The time on a file that a save found changed on disk, and said
+    /// so: a second save with the same time writes over it.
+    pub(crate) file_conflict: Option<Option<std::time::SystemTime>>,
+    /// `EMAKI_GO=file:type:<words>`: words for the file's editor, put in
+    /// at the next draw, where there is a window to hand it.
+    pub(crate) pending_edit: Option<(Entity<gpui_component::input::EditorState>, String, usize)>,
+    /// `EMAKI_GO=file:save`, done at the next draw for the same reason.
+    pub(crate) pending_save: bool,
+    /// `EMAKI_GO=file:ask:<answer>`, likewise.
+    pub(crate) pending_answer: Option<crate::panels::FileAnswer>,
     /// Beside a PDF's pages: the pages small (`true`), its table of
     /// contents, or nothing; what it was before the last press, since
     /// when, and a count for the animation.
@@ -2387,6 +2411,16 @@ impl Workbench {
             fold_file: false,
             file_raw: ui.file_raw.unwrap_or(false),
             file_editor: None,
+            file_parked: Vec::new(),
+            file_ask: None,
+            file_ask_serial: 0,
+            file_ask_focus: cx.focus_handle(),
+            file_drafts: crate::panels::load_drafts(),
+            drafts_kept: crate::panels::load_drafts(),
+            file_conflict: None,
+            pending_edit: None,
+            pending_save: false,
+            pending_answer: None,
             pdf_side: match ui.pdf_side.as_deref() {
                 Some("pages") => Some(true),
                 Some("contents") => Some(false),
@@ -4883,7 +4917,9 @@ impl Workbench {
                 .items_center()
                 .gap_x(px(8.))
                 .text_color(ink)
-                .child(div().min_w_0().child(words))
+                // A suggested prompt is in italics: words offered, not
+                // yet the person's.
+                .child(div().min_w_0().when(accept, |d| d.italic()).child(words))
                 .when(accept, |d| d.child(h_flex().flex_shrink_0().items_center().child("(").child(key("icons/arrow-right.svg")).child(div().ml(px(4.)).child("to accept)"))))
                 .into_any_element(),
         )
@@ -5936,7 +5972,9 @@ impl Workbench {
     /// What Escape closes, nearest first: the lightbox, then the search;
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pick.is_some() {
+        if self.file_ask.is_some() {
+            self.file_answer(crate::panels::FileAnswer::Cancel, window, cx);
+        } else if self.pick.is_some() {
             self.close_pick(cx);
         } else if self.dialog_seen.is_some() && self.term_open.is_none() && !self.settings_open && !self.search_open && self.lightbox.is_none() && self.menu.is_none() {
             // The card's own Cancel: Escape in the terminal's dialog.
@@ -7254,9 +7292,12 @@ impl Workbench {
             MenuDo::Rename(key) => {
                 let now = self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default();
                 self.renaming = Some(key);
+                // The name there is selected whole: a key replaces it,
+                // an arrow keeps it.
                 self.rename_input.update(cx, |s, cx| {
                     s.set_value(now, window, cx);
                     s.focus(window, cx);
+                    s.select_all(window, cx);
                 });
             }
         }
@@ -8206,6 +8247,15 @@ impl Workbench {
         // A file from the tree, shown between the tree and the conversation.
         self.sync_file_root(cx);
         self.sync_file_editor(window, cx);
+        if let Some((state, words, caret)) = self.pending_edit.take() {
+            state.update(cx, |s, cx| s.replace_bytes(0..0, &words, caret, window, cx));
+        }
+        if std::mem::take(&mut self.pending_save) {
+            self.save_file(window, cx);
+        }
+        if let Some(answer) = self.pending_answer.take() {
+            self.file_answer(answer, window, cx);
+        }
         let file_pane = self.render_file_pane(cx);
         let leaving = self.panel_leaving();
         let files_panel = (files_shown || leaving == Some(true)).then(|| self.render_files_panel(cx));
@@ -10928,8 +10978,12 @@ impl Render for Workbench {
                 // (`term_panel.rs`).
                 _ if this.file_pane_shown() => this.close_file_view(cx),
                 Some(key) if this.page == Page::Session && this.tabs.contains(&key) => this.close_tab(&key, window, cx),
-                _ => window.remove_window(),
+                _ => this.close_window(window, cx),
             }))
+            // Quit and Close Window ask first when a file has changes
+            // not saved (`file_guard`).
+            .on_action(cx.listener(|this, _: &crate::Quit, _, cx| this.quit(cx)))
+            .on_action(cx.listener(|this, _: &crate::CloseWindow, window, cx| this.close_window(window, cx)))
             .on_action(cx.listener(|this, _: &GoSessions, _, cx| this.show_sessions(Scope::All, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_panel(true, cx)))
@@ -10953,6 +11007,7 @@ impl Render for Workbench {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FindInPage, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &SaveFile, window, cx| this.save_file(window, cx)))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_step(1, cx)))
             .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.find_step(-1, cx)))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
@@ -10989,6 +11044,7 @@ impl Render for Workbench {
             .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(self.render_rename(cx)))
             .when_some(self.branch_menu, |d, at| d.child(self.render_branch_menu(at, window, cx)))
             .when(self.branch_ask.is_some(), |d| d.child(self.render_branch_ask(cx)))
+            .when(self.file_ask.is_some(), |d| d.child(self.render_file_ask(window, cx)))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
             .when_some(self.pick_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))

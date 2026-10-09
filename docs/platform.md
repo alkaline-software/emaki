@@ -42,6 +42,13 @@ code the paragraph's face, and gpui's highlight styles carry no family, so
 neither could be changed from outside. A fork on GitHub was the
 alternative; one repository was preferred.
 
+`vendor/air_r_parser/` is the one crate of Air (Posit's R formatter)
+that could not be taken as it is. Air is not on crates.io and is used by
+git revision (`emaki-core/Cargo.toml`); its parser pins tree-sitter 0.24
+and the window's highlighting is on 0.26, and cargo links one
+tree-sitter. The copy is that crate with those two lines changed and
+nothing else; its `UPSTREAM.md` says how to move it.
+
 `UPSTREAM.md` lists the eleven changes, each with what upstream did, and
 says how to move to a newer revision: copy the crates over, re-apply the
 list, build. They cover the markdown view (strong weight, the inline-code
