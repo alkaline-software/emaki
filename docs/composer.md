@@ -202,7 +202,8 @@ patch was lost and the row froze.
 What the empty composer says is drawn by the window over the textarea's
 first line (`render_composer_hint`), and the textarea has no placeholder
 of its own: the key beside a suggested prompt ("→ to accept") is
-an icon, which a placeholder, being a string, cannot hold. Nothing
+an icon, which a placeholder, being a string, cannot hold. A suggested
+prompt is in italics, so it reads as offered and not yet written. Nothing
 says that ⌘↩ sends.
 
 ⌘↩ sends. Settings, Composer, "Send with" makes a bare ↩ send as well

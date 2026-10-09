@@ -1,0 +1,21 @@
+[package]
+name = "air_r_parser"
+version = "0.0.0"
+authors = ["Posit Software, PBC"]
+edition = "2024"
+description = "Air R parser"
+license = "MIT"
+publish = false
+
+# Air's own crates and its fork of Biome at the revisions Air pins; the
+# two tree-sitter lines are the reason this copy exists (UPSTREAM.md).
+[dependencies]
+air_r_factory = { git = "https://github.com/posit-dev/air", rev = "8d20826ccf65a0ccc1d6a82e78d308213271667c" }
+air_r_syntax = { git = "https://github.com/posit-dev/air", rev = "8d20826ccf65a0ccc1d6a82e78d308213271667c" }
+biome_parser = { git = "https://github.com/lionel-/biome", rev = "a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9" }
+biome_rowan = { git = "https://github.com/lionel-/biome", rev = "a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9" }
+biome_unicode_table = { git = "https://github.com/lionel-/biome", rev = "a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9" }
+serde = { version = "1.0.215", features = ["derive"] }
+tracing = { version = "0.1.40", default-features = false, features = ["std"] }
+tree-sitter = "0.26"
+tree-sitter-r = "1.3"

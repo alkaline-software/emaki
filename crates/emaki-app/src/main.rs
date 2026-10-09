@@ -22,7 +22,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoSessions, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -52,6 +52,8 @@ fn key_bindings() -> Vec<KeyBinding> {
         // the hits from anywhere, Enter and ⇧Enter from the find field.
         KeyBinding::new("secondary-f", FindInPage, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-g", FindNext, Some(KEY_CONTEXT)),
+        // The file's pane: what was changed in its editor goes to the file.
+        KeyBinding::new("secondary-s", SaveFile, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-g", FindPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-enter", Send, Some(COMPOSER_CONTEXT)),
         // On the terminal card Tab is Claude Code's, not the toolkit's
@@ -108,6 +110,8 @@ fn app_menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("New Session", NewSession),
                 MenuItem::action("Refresh", Refresh),
+                MenuItem::separator(),
+                MenuItem::action("Save File", SaveFile),
                 MenuItem::separator(),
                 MenuItem::action("Close Window", CloseWindow),
             ],
@@ -202,6 +206,10 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             a11y::install_window_focus_forwarder(window);
             let workbench = cx.new(|cx| Workbench::new(window, cx));
             window.focus(&workbench.read(cx).focus_handle(cx), cx);
+            // The window's own close button asks as Quit does when a file
+            // has changes not saved.
+            let asked = workbench.downgrade();
+            window.on_window_should_close(cx, move |_, cx| asked.update(cx, |w, cx| w.file_guard(crate::panels::FileThen::CloseWindow, cx)).unwrap_or(true));
             cx.new(|cx| Root::new(workbench, window, cx))
         },
     )

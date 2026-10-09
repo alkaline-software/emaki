@@ -118,6 +118,18 @@ upstream revision finds them.
     (`managed_tooltip`). gpui's plain `.tooltip` appears and goes from
     one frame to the next and does not slide along a row.
 
+17. `crates/base/src/input/base/element.rs`, `state.rs`: a folded line
+    ends in dots ("⋯", in the text's colour at less than half strength,
+    after the last word of its last wrapped row), as VS Code's does;
+    upstream marks a fold in the gutter only. `toggle_fold_at` folds a
+    line from code, for a probe.
+
+18. `crates/base/src/input/base/state.rs`: `set_next_line_indent` hands
+    the application the line up to the caret and the last line with
+    words above it at Enter in a code editor, and takes the new line's
+    indent from it (`asked_indent`). Upstream repeats the indent of the
+    line above, which is wrong after Python's `:` or an opening bracket.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

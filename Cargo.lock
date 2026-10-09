@@ -152,6 +152,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "air_r_factory"
+version = "0.0.0"
+source = "git+https://github.com/posit-dev/air?rev=8d20826ccf65a0ccc1d6a82e78d308213271667c#8d20826ccf65a0ccc1d6a82e78d308213271667c"
+dependencies = [
+ "air_r_syntax",
+ "biome_rowan",
+]
+
+[[package]]
+name = "air_r_formatter"
+version = "0.0.0"
+source = "git+https://github.com/posit-dev/air?rev=8d20826ccf65a0ccc1d6a82e78d308213271667c#8d20826ccf65a0ccc1d6a82e78d308213271667c"
+dependencies = [
+ "air_r_syntax",
+ "biome_formatter",
+ "biome_rowan",
+ "comments",
+ "itertools 0.13.0",
+ "line_ending",
+ "settings",
+ "tracing",
+]
+
+[[package]]
+name = "air_r_parser"
+version = "0.0.0"
+dependencies = [
+ "air_r_factory",
+ "air_r_syntax",
+ "biome_parser",
+ "biome_rowan",
+ "biome_unicode_table",
+ "serde",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-r",
+]
+
+[[package]]
+name = "air_r_syntax"
+version = "0.0.0"
+source = "git+https://github.com/posit-dev/air?rev=8d20826ccf65a0ccc1d6a82e78d308213271667c#8d20826ccf65a0ccc1d6a82e78d308213271667c"
+dependencies = [
+ "biome_rowan",
+ "serde",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -219,7 +267,7 @@ checksum = "f211a51805bc641f3ad5b7664c77d2547af685cc33b4cd8d31964027a46f13f1"
 dependencies = [
  "anstyle",
  "memchr",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -695,6 +743,207 @@ dependencies = [
  "shlex 1.3.0",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "biome_console"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_markup",
+ "biome_text_size",
+ "serde",
+ "termcolor",
+ "unicode-segmentation",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "biome_deserialize"
+version = "0.6.0"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_console",
+ "biome_diagnostics",
+ "biome_json_parser",
+ "biome_json_syntax",
+ "biome_rowan",
+ "enumflags2",
+]
+
+[[package]]
+name = "biome_deserialize_macros"
+version = "0.6.0"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_string_case",
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "biome_diagnostics"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "backtrace",
+ "biome_console",
+ "biome_diagnostics_categories",
+ "biome_diagnostics_macros",
+ "biome_rowan",
+ "biome_text_edit",
+ "biome_text_size",
+ "enumflags2",
+ "serde",
+ "serde_json",
+ "termcolor",
+ "terminal_size",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "biome_diagnostics_categories"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "quote",
+ "serde",
+]
+
+[[package]]
+name = "biome_diagnostics_macros"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "biome_formatter"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_console",
+ "biome_deserialize",
+ "biome_deserialize_macros",
+ "biome_diagnostics",
+ "biome_rowan",
+ "biome_string_case",
+ "camino",
+ "cfg-if",
+ "drop_bomb",
+ "indexmap",
+ "rustc-hash 2.1.3",
+ "tracing",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "biome_json_factory"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_json_syntax",
+ "biome_rowan",
+]
+
+[[package]]
+name = "biome_json_parser"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_console",
+ "biome_diagnostics",
+ "biome_json_factory",
+ "biome_json_syntax",
+ "biome_parser",
+ "biome_rowan",
+ "biome_unicode_table",
+ "tracing",
+ "unicode-bom",
+]
+
+[[package]]
+name = "biome_json_syntax"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_rowan",
+ "biome_string_case",
+ "camino",
+ "serde",
+]
+
+[[package]]
+name = "biome_markup"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "biome_parser"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_console",
+ "biome_diagnostics",
+ "biome_rowan",
+ "biome_unicode_table",
+ "drop_bomb",
+ "enumflags2",
+ "unicode-bom",
+]
+
+[[package]]
+name = "biome_rowan"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_text_edit",
+ "biome_text_size",
+ "hashbrown 0.15.5",
+ "rustc-hash 2.1.3",
+ "serde",
+]
+
+[[package]]
+name = "biome_string_case"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_rowan",
+]
+
+[[package]]
+name = "biome_text_edit"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "biome_text_size",
+ "serde",
+ "similar",
+]
+
+[[package]]
+name = "biome_text_size"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "biome_unicode_table"
+version = "0.5.7"
+source = "git+https://github.com/lionel-/biome?rev=a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9#a1296ea6ba363d8b8d8f02181b2a4ce9315c5ef9"
 
 [[package]]
 name = "bit-set"
@@ -1310,6 +1559,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "camino"
+version = "1.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbad30e4b4c14a39e3cc8aed085a12a327257c316619c93581e017bc52be591"
+
+[[package]]
 name = "candle-core"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1570,7 +1825,7 @@ checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1581,7 +1836,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1623,6 +1878,11 @@ checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "comments"
+version = "0.0.0"
+source = "git+https://github.com/posit-dev/air?rev=8d20826ccf65a0ccc1d6a82e78d308213271667c#8d20826ccf65a0ccc1d6a82e78d308213271667c"
 
 [[package]]
 name = "compression-codecs"
@@ -2691,6 +2951,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "drop_bomb"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bda8e21c04aca2ae33ffc2fd8c23134f3cac46db123ba97bd9d3f3b8a4a85e1"
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2787,6 +3053,8 @@ dependencies = [
 name = "emaki-core"
 version = "0.1.8"
 dependencies = [
+ "air_r_formatter",
+ "air_r_parser",
  "anyhow",
  "chrono",
  "dirs 5.0.1",
@@ -3662,7 +3930,7 @@ version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
 dependencies = [
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -4433,7 +4701,7 @@ dependencies = [
  "trie-rs",
  "unicode-blocks",
  "unicode-script",
- "unicode-width",
+ "unicode-width 0.2.2",
  "zip 8.6.0",
 ]
 
@@ -5437,6 +5705,15 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "line_ending"
+version = "0.0.0"
+source = "git+https://github.com/posit-dev/air?rev=8d20826ccf65a0ccc1d6a82e78d308213271667c#8d20826ccf65a0ccc1d6a82e78d308213271667c"
+dependencies = [
+ "memchr",
+ "settings",
 ]
 
 [[package]]
@@ -7156,6 +7433,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-error-attr2"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "proc-macro-error2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+dependencies = [
+ "proc-macro-error-attr2",
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8383,6 +8681,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "settings"
+version = "0.0.0"
+source = "git+https://github.com/posit-dev/air?rev=8d20826ccf65a0ccc1d6a82e78d308213271667c#8d20826ccf65a0ccc1d6a82e78d308213271667c"
+dependencies = [
+ "biome_formatter",
+ "serde",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8486,6 +8793,16 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+dependencies = [
+ "bstr",
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "simplecss"
@@ -8891,6 +9208,17 @@ dependencies = [
 
 [[package]]
 name = "syn"
+version = "1.0.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
@@ -9089,6 +9417,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
+ "rustix",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -10075,6 +10413,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "328edfd6d0bb91a22e592bed3a3b54c7b1f5c92a517f5a7aca24a2caef10c363"
 
 [[package]]
+name = "unicode-bom"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7eec5d1121208364f6793f7d2e222bf75a915c19557537745b195b253dd64217"
+
+[[package]]
 name = "unicode-ccc"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10130,6 +10474,12 @@ name = "unicode-vo"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
+
+[[package]]
+name = "unicode-width"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-width"
@@ -10433,7 +10783,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
 dependencies = [
  "itoa",
- "unicode-width",
+ "unicode-width 0.2.2",
  "vte",
 ]
 

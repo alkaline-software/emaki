@@ -2198,6 +2198,23 @@ impl<M: InputModeKind> Element for TextElement<M> {
         // Track the y-position of the cursor row for positioning the first line suffix
         let mut cursor_row_y = None;
 
+        // A folded line says so after its last word, as VS Code does:
+        // dots where what it holds went. (Emaki addition.)
+        let folded_rows: Vec<usize> = {
+            let state = self.state.read(cx);
+            if state.mode.is_folding() {
+                prepaint.last_layout.visible_buffer_lines.iter().copied().filter(|&row| state.display_map.is_folded_at(row)).collect()
+            } else {
+                Vec::new()
+            }
+        };
+        let fold_dots = (!folded_rows.is_empty()).then(|| {
+            let style = window.text_style();
+            let text = SharedString::new_static("⋯");
+            let run = TextRun { len: text.len(), font: style.font(), color: style.color.opacity(0.45), background_color: None, underline: None, strikethrough: None };
+            window.text_system().shape_line(text, style.font_size.to_pixels(window.rem_size()), &[run], None)
+        });
+
         for (line, &buffer_line) in prepaint
             .last_layout
             .lines
@@ -2220,6 +2237,12 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 window,
                 cx,
             );
+            if let (Some(dots), Some(last)) = (fold_dots.as_ref().filter(|_| folded_rows.contains(&row)), line.wrapped_lines.last()) {
+                let below = line.wrapped_lines.len() - 1;
+                let indent = if below > 0 { line.wrap_indent } else { px(0.) };
+                let at = point(p.x + indent + last.width + px(4.), line_y + line_height * below as f32);
+                _ = dots.paint(at, line_height, TextAlign::Left, None, window, cx);
+            }
             offset_y += line.size(line_height).height;
 
             if Some(row) == prepaint.current_row {

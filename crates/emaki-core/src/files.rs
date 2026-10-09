@@ -339,3 +339,61 @@ pub fn table(text: &str, sep: char, most: usize) -> (Vec<Vec<String>>, bool) {
     }
     (rows, false)
 }
+
+/// A Jupyter notebook as markdown, to read: each markdown cell as it
+/// is, each code cell fenced in the notebook's language with `In [n]`
+/// over it, and what it printed fenced under it. A picture among the
+/// outputs is a line saying so. `None` when the text is no notebook.
+pub fn notebook_markdown(text: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let cells = v.get("cells")?.as_array()?;
+    let lang = v.pointer("/metadata/kernelspec/language").or_else(|| v.pointer("/metadata/language_info/name")).and_then(|l| l.as_str()).unwrap_or("python").to_lowercase();
+    // A cell's `source` and an output's `text` are a string or its lines.
+    let joined = |v: Option<&serde_json::Value>| match v {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(lines)) => lines.iter().filter_map(|l| l.as_str()).collect(),
+        _ => String::new(),
+    };
+    // A fence longer than any run of backticks in what it holds.
+    let fenced = |body: &str, lang: &str| {
+        let mut longest = 0;
+        let mut run = 0;
+        for c in body.chars() {
+            run = if c == '`' { run + 1 } else { 0 };
+            longest = longest.max(run);
+        }
+        let fence = "`".repeat(longest.max(2) + 1);
+        format!("{fence}{lang}\n{}\n{fence}\n\n", body.trim_end_matches('\n'))
+    };
+    let mut out = String::new();
+    for cell in cells {
+        let source = joined(cell.get("source"));
+        match cell.get("cell_type").and_then(|t| t.as_str()) {
+            Some("markdown") => {
+                out.push_str(source.trim_end());
+                out.push_str("\n\n");
+            }
+            Some("code") => {
+                let n = cell.get("execution_count").and_then(|n| n.as_u64()).map(|n| n.to_string()).unwrap_or_else(|| " ".into());
+                out.push_str(&format!("**In [{n}]**\n\n"));
+                out.push_str(&fenced(&source, &lang));
+                for output in cell.get("outputs").and_then(|o| o.as_array()).into_iter().flatten() {
+                    let data = output.get("data");
+                    let words = match output.get("output_type").and_then(|t| t.as_str()) {
+                        Some("stream") => joined(output.get("text")),
+                        Some("error") => format!("{}: {}", output.get("ename").and_then(|e| e.as_str()).unwrap_or("error"), output.get("evalue").and_then(|e| e.as_str()).unwrap_or("")),
+                        _ => joined(data.and_then(|d| d.get("text/plain"))),
+                    };
+                    if data.and_then(|d| d.as_object()).is_some_and(|d| d.keys().any(|k| k.starts_with("image/"))) {
+                        out.push_str("*A picture. Open the notebook to see it.*\n\n");
+                    } else if !words.trim().is_empty() {
+                        out.push_str(&fenced(&words, "text"));
+                    }
+                }
+            }
+            _ if !source.trim().is_empty() => out.push_str(&fenced(&source, "text")),
+            _ => {}
+        }
+    }
+    Some(out)
+}

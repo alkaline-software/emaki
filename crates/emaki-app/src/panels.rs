@@ -547,6 +547,110 @@ pub struct FileView {
     pub size: u64,
     mtime: Option<std::time::SystemTime>,
     body: FileBody,
+    /// The file's text exactly as it is on disk, when the pane holds all
+    /// of it and it is UTF-8: what the editor may change and write back.
+    /// A file cut for the preview, or one with bytes that are no text,
+    /// has none and is read only.
+    source: Option<Rc<str>>,
+}
+
+/// What was typed into a file's editor and not saved, and the time on
+/// the file it was typed over, so a save still knows a file that has
+/// changed since.
+#[derive(Clone, PartialEq)]
+pub(crate) struct Draft {
+    text: String,
+    base: Option<std::time::SystemTime>,
+}
+
+fn drafts_path() -> PathBuf {
+    emaki_core::paths::state_dir().join("file_drafts.json")
+}
+
+/// The drafts kept from the last run (`keep_drafts`).
+pub(crate) fn load_drafts() -> HashMap<PathBuf, Draft> {
+    let Some(serde_json::Value::Array(rows)) = emaki_core::paths::read_json(&drafts_path()) else { return HashMap::new() };
+    rows.iter()
+        .filter_map(|row| {
+            let path = PathBuf::from(row.get("path")?.as_str()?);
+            let text = row.get("text")?.as_str()?.to_string();
+            let base = row.get("secs").and_then(|s| s.as_u64()).map(|secs| std::time::UNIX_EPOCH + Duration::new(secs, row.get("nanos").and_then(|n| n.as_u64()).unwrap_or(0) as u32));
+            // One the file already holds is nothing to save: the app was
+            // quit between the save and the next writing of this list.
+            if std::fs::read_to_string(&path).is_ok_and(|on_disk| on_disk == text) {
+                return None;
+            }
+            Some((path, Draft { text, base }))
+        })
+        .collect()
+}
+
+/// What was being done when a file with changes not saved stood in the
+/// way, done once the question is answered.
+#[derive(Clone, PartialEq)]
+pub(crate) enum FileThen {
+    /// The file's pane was being closed.
+    Close,
+    /// Another file was being shown in its place.
+    Open(PathBuf),
+    CloseWindow,
+    Quit,
+}
+
+/// The question asked of a file with changes not saved: save them,
+/// drop them, or do not do what was asked after all.
+#[derive(Clone)]
+pub(crate) struct FileAsk {
+    path: PathBuf,
+    then: FileThen,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FileAnswer {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// The dot on a file with changes not saved: orange, in both
+/// appearances.
+fn unsaved_dot() -> Hsla {
+    gpui::rgb(0xF2802B).into()
+}
+
+/// How many editors of files not showing are kept with nothing to save
+/// in them, for their undo histories.
+const PARKED_CLEAN: usize = 8;
+
+/// What `sync_file_editor` makes an editor from.
+struct EditorWant {
+    key: String,
+    path: PathBuf,
+    text: Rc<str>,
+    lang: &'static str,
+    saved: Option<Rc<str>>,
+    mtime: Option<std::time::SystemTime>,
+}
+
+/// The editor in the file's pane, and what it needs to save.
+pub(crate) struct FileEditor {
+    /// A name for the file and what it held when the editor was made.
+    key: String,
+    path: PathBuf,
+    /// The language, as `render_md::lang_for_path` names it.
+    lang: &'static str,
+    pub(crate) state: Entity<gpui_component::input::EditorState>,
+    /// What the file held when it was read or last saved here, and when
+    /// it was written; None when the file is read only.
+    saved: Option<Rc<str>>,
+    mtime: Option<std::time::SystemTime>,
+}
+
+impl FileEditor {
+    /// Whether what is in the editor is not what the file holds.
+    fn dirty(&self, cx: &App) -> bool {
+        self.saved.as_ref().is_some_and(|saved| self.state.read(cx).value().as_ref() != saved.as_ref())
+    }
 }
 
 #[derive(Clone)]
@@ -556,8 +660,18 @@ enum FileBody {
     /// Anything else that is text: its lines, the language they are
     /// in, and how many lines were left out.
     Code(String, &'static str, usize),
-    /// A picture, with its size in pixels when its header says.
-    Picture(Option<(u32, u32)>),
+    /// A picture, with its size in pixels when its header says. An SVG
+    /// the pane holds whole is drawn from its text and not its path: a
+    /// picture read by path is kept by path, and one saved here would
+    /// go on showing as it was.
+    Picture(Option<(u32, u32)>, Option<std::sync::Arc<gpui::Image>>),
+    /// A Jupyter notebook, as markdown made of its cells
+    /// (`files::notebook_markdown`); the file itself is JSON.
+    Notebook(String),
+    /// A page of HTML, drawn as far as the toolkit's text view reads
+    /// it: its words, headings, lists, tables, links and pictures. No
+    /// style sheet and no script is run.
+    Html(String),
     /// A PDF: its first pages and their text. None while they are being
     /// drawn.
     Pages(Option<std::sync::Arc<PdfDoc>>),
@@ -625,17 +739,35 @@ fn read_file(path: &Path, root: &Path) -> FileView {
     let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     if is_picture(path) {
-        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Picture(crate::workbench::file_image_dims(path)) };
+        // An SVG is text as well as a picture: it has a source to show
+        // and to edit.
+        let text = (ext == "svg" && size as usize <= PREVIEW_BYTES).then(|| std::fs::read_to_string(path).ok()).flatten();
+        let picture = text.as_ref().map(|t| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Svg, t.as_bytes().to_vec())));
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Picture(crate::workbench::file_image_dims(path), picture), source: text.map(Into::into) };
     }
     if ext == "pdf" {
-        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Pages(None) };
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Pages(None), source: None };
     }
     let mut bytes = Vec::new();
     let read = std::fs::File::open(path).and_then(|f| f.take(PREVIEW_BYTES as u64 + 1).read_to_end(&mut bytes));
-    let body = match read {
-        Err(e) => FileBody::None(format!("Could not read it: {e}")),
-        Ok(_) if bytes.iter().take(8192).any(|b| *b == 0) => FileBody::None("Emaki cannot show this kind of file.".into()),
-        Ok(_) if ext == "csv" || ext == "tsv" => {
+    let (body, source) = match read {
+        Err(e) => (FileBody::None(format!("Could not read it: {e}")), None),
+        Ok(_) => body_of(path, bytes),
+    };
+    FileView { path: path.to_path_buf(), rel, size, mtime, body, source }
+}
+
+/// What the pane shows for a file that holds `bytes`, and its source
+/// when it can be edited. The bytes are the file's, or what its editor
+/// holds when that is to be read before it is saved (`edited_body`).
+fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Rc<str>>) {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    // All of the file, and all of it text: it can be edited.
+    let whole = bytes.len() <= PREVIEW_BYTES && std::str::from_utf8(&bytes).is_ok();
+    let mut source: Option<Rc<str>> = None;
+    let body = match () {
+        () if bytes.iter().take(8192).any(|b| *b == 0) => FileBody::None("Emaki cannot show this kind of file.".into()),
+        () if ext == "csv" || ext == "tsv" => {
             let cut = bytes.len() > PREVIEW_BYTES;
             bytes.truncate(PREVIEW_BYTES);
             let (mut rows, more) = emaki_core::files::table(&String::from_utf8_lossy(&bytes), if ext == "tsv" { '\t' } else { ',' }, TABLE_ROWS);
@@ -652,17 +784,35 @@ fn read_file(path: &Path, root: &Path) -> FileView {
                     *w = (*w).max(cell.chars().count()).min(TABLE_CELL);
                 }
             }
+            if whole && !more {
+                source = Some(String::from_utf8_lossy(&bytes).into());
+            }
             FileBody::Table(rows, widths, more || cut)
         }
-        Ok(_) => {
+        () => {
             let cut = bytes.len() > PREVIEW_BYTES;
             bytes.truncate(PREVIEW_BYTES);
             let text = String::from_utf8_lossy(&bytes).to_string();
             let lang = emaki_core::render_md::lang_for_path(&path.to_string_lossy());
-            if lang == "markdown" && !cut {
+            let notebook = (ext == "ipynb" && whole).then(|| emaki_core::files::notebook_markdown(&text)).flatten();
+            if let Some(cells) = notebook {
+                source = Some(text.as_str().into());
+                FileBody::Notebook(cells)
+            } else if lang == "markdown" && !cut {
+                if whole {
+                    source = Some(text.as_str().into());
+                }
                 FileBody::Markdown(text)
+            } else if lang == "html" && !cut {
+                if whole {
+                    source = Some(text.as_str().into());
+                }
+                FileBody::Html(text)
             } else {
                 let total = text.lines().count();
+                if whole && total <= PREVIEW_LINES {
+                    source = Some(text.as_str().into());
+                }
                 let kept: String = text.lines().take(PREVIEW_LINES).collect::<Vec<_>>().join("\n");
                 // A file cut by size has more lines than were counted.
                 let dropped = total.saturating_sub(PREVIEW_LINES) + usize::from(cut);
@@ -670,8 +820,18 @@ fn read_file(path: &Path, root: &Path) -> FileView {
             }
         }
     };
-    FileView { path: path.to_path_buf(), rel, size, mtime, body }
+    (body, source)
 }
+
+/// The file as it would read with `text` in it: what the pane shows as
+/// it reads while its editor holds changes not saved.
+fn edited_body(path: &Path, text: &str) -> FileBody {
+    if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+        return FileBody::Picture(crate::workbench::file_image_dims(path), Some(std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Svg, text.as_bytes().to_vec()))));
+    }
+    body_of(path, text.as_bytes().to_vec()).0
+}
+
 
 /// Collects a page's text as the interpreter draws it: each glyph
 /// with its place on the page.
@@ -1200,6 +1360,7 @@ impl Workbench {
     /// Once a second: the tree read again when it is due, and the file
     /// showing read again when it has changed on disk.
     pub(crate) fn tick_files(&mut self, cx: &mut Context<Self>) {
+        self.keep_drafts(cx);
         if let Some(v) = &self.file_view {
             let now = std::fs::metadata(&v.path).ok().and_then(|m| m.modified().ok());
             if now.is_some() && now != v.mtime {
@@ -1296,6 +1457,11 @@ impl Workbench {
         if self.files_root().is_none() {
             return;
         }
+        // One file shows at a time, so another takes this one's place:
+        // not while this one has changes not saved.
+        if self.file_view.as_ref().is_some_and(|v| v.path != path) && !self.file_guard(FileThen::Open(path.to_path_buf()), cx) {
+            return;
+        }
         self.tree.picked = Some(path.to_path_buf());
         let was = self.file_view.is_some();
         self.show_file(path, cx);
@@ -1347,6 +1513,9 @@ impl Workbench {
 
     /// The pane goes, in motion; drawn as it was for that moment.
     pub(crate) fn close_file_view(&mut self, cx: &mut Context<Self>) {
+        if !self.file_guard(FileThen::Close, cx) {
+            return;
+        }
         if let Some(v) = self.file_view.take() {
             self.file_gone = Some(v);
             self.file_serial += 1;
@@ -1485,7 +1654,7 @@ impl Workbench {
     /// under the pointer selects its word at the same press, so what is
     /// selected is asked once the press has been handed round.
     fn file_body_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let picture = self.file_view.as_ref().filter(|v| matches!(v.body, FileBody::Picture(_))).map(|v| v.path.clone());
+        let picture = self.file_view.as_ref().filter(|v| matches!(v.body, FileBody::Picture(..))).map(|v| v.path.clone());
         let this = cx.entity();
         window.defer(cx, move |window, cx| {
             let text = gpui_base::TextSelection::selected_text(window, cx);
@@ -1669,29 +1838,345 @@ impl Workbench {
     /// The editor for the file showing, made when the file, or what it
     /// holds, is another: code, or markdown as it is written.
     pub(crate) fn sync_file_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let want = self.file_view.as_ref().and_then(|v| match &v.body {
-            FileBody::Code(text, lang, _) => Some((format!("{}|{:?}|{}", v.path.display(), v.mtime, text.len()), text.clone(), *lang)),
-            FileBody::Markdown(text) if self.file_raw => Some((format!("{}|{:?}|{}", v.path.display(), v.mtime, text.len()), text.clone(), "markdown")),
-            _ => None,
-        });
-        match want {
-            None => self.file_editor = None,
-            Some((key, _, _)) if self.file_editor.as_ref().is_some_and(|(was, _)| *was == key) => {}
-            Some((key, text, lang)) => {
-                let language = self.editor_language(lang);
-                let state = cx.new(|cx| {
-                    let mut state = gpui_component::input::EditorState::new(window, cx).language(language).line_number(true).soft_wrap(true);
-                    state.set_value(text, window, cx);
-                    state
-                });
-                self.file_editor = Some((key, state));
+        let want = self.file_editor_want();
+        // The same file, changed in the editor and not saved: the editor
+        // stays as it is whatever the disk now holds. Saving asks.
+        if let (Some(want), Some(ed)) = (&want, &self.file_editor) {
+            if ed.key == want.key || (ed.path == want.path && ed.dirty(cx)) {
+                return;
             }
         }
+        // The editor goes, or is another file's. It is kept, whole, for
+        // when the file shows again: what was typed and not saved, and
+        // the history ⌘Z walks back through. One with nothing to save is
+        // kept for its history alone, a few of them.
+        if let Some(ed) = self.file_editor.take() {
+            self.file_parked.retain(|p| p.path != ed.path);
+            self.file_parked.push(ed);
+            let clean: Vec<PathBuf> = self.file_parked.iter().filter(|p| !p.dirty(cx)).map(|p| p.path.clone()).collect();
+            if clean.len() > PARKED_CLEAN {
+                let gone = &clean[..clean.len() - PARKED_CLEAN];
+                self.file_parked.retain(|p| !gone.contains(&p.path));
+            }
+        }
+        self.file_conflict = None;
+        let Some(want) = want else { return };
+        // The one kept for this file, if what it was made from is what
+        // the file still holds, or it has changes of its own.
+        if let Some(at) = self.file_parked.iter().position(|p| p.path == want.path) {
+            let ed = self.file_parked.remove(at);
+            if ed.key == want.key || ed.dirty(cx) {
+                self.file_editor = Some(ed);
+                return;
+            }
+        }
+        let language = self.editor_language(want.lang);
+        // What was typed and not saved is back, over the file it was
+        // typed over.
+        let draft = self.file_drafts.remove(&want.path).filter(|_| want.saved.is_some());
+        let mtime = draft.as_ref().map(|d| d.base).unwrap_or(want.mtime);
+        let text = draft.map(|d| d.text).unwrap_or_else(|| want.text.to_string());
+        // One step of indent is the file's own, and a new line starts
+        // where the language says (`emaki_core::indent`).
+        let lang = want.lang;
+        let (columns, tabs) = emaki_core::indent::unit(lang, &text);
+        let step = if tabs { "\t".to_string() } else { " ".repeat(columns) };
+        let state = cx.new(|cx| {
+            let mut state = gpui_component::input::EditorState::new(window, cx).language(language).line_number(true).soft_wrap(true).tab_size(gpui_component::input::TabSize { tab_size: columns, hard_tabs: tabs });
+            state.set_next_line_indent(move |before, above| Some(emaki_core::indent::after(lang, before, above, &step)));
+            state.set_value(text, window, cx);
+            state
+        });
+        // The head says "not saved" from the first letter.
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        self.file_editor = Some(FileEditor { key: want.key, path: want.path, lang, state, saved: want.saved, mtime });
+    }
+
+    /// Everything typed into a file and not saved, written to
+    /// `state/file_drafts.json` on the clock when it differs from what
+    /// was last written: the app is quit, or replaced by a new build,
+    /// with no moment to ask, and what was typed is back at the next
+    /// launch.
+    pub(crate) fn keep_drafts(&mut self, cx: &mut Context<Self>) {
+        let mut all = self.file_drafts.clone();
+        for ed in self.file_editor.iter().chain(self.file_parked.iter()).filter(|ed| ed.dirty(cx)) {
+            all.insert(ed.path.clone(), Draft { text: ed.state.read(cx).value().to_string(), base: ed.mtime });
+        }
+        if all == self.drafts_kept {
+            return;
+        }
+        let rows: Vec<serde_json::Value> = all
+            .iter()
+            .map(|(path, d)| {
+                let since = d.base.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+                serde_json::json!({ "path": path.to_string_lossy(), "text": d.text, "secs": since.map(|s| s.as_secs()), "nanos": since.map(|s| s.subsec_nanos()) })
+            })
+            .collect();
+        if emaki_core::paths::write_json(&drafts_path(), &serde_json::Value::Array(rows)).is_ok() {
+            self.drafts_kept = all;
+        }
+    }
+
+    /// What the file's pane wants an editor for, if anything: code, or
+    /// markdown or a table as it is written.
+    fn file_editor_want(&self) -> Option<EditorWant> {
+        let v = self.file_view.as_ref()?;
+        let (text, lang): (Rc<str>, &'static str) = match &v.body {
+            FileBody::Code(text, lang, _) => (v.source.clone().unwrap_or_else(|| text.as_str().into()), *lang),
+            FileBody::Markdown(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), "markdown"),
+            FileBody::Html(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), "html"),
+            FileBody::Notebook(_) if self.file_raw => (v.source.clone()?, "json"),
+            FileBody::Table(..) if self.file_raw => (v.source.clone()?, "text"),
+            FileBody::Picture(..) if self.file_raw => (v.source.clone()?, "html"),
+            _ => return None,
+        };
+        Some(EditorWant { key: format!("{}|{:?}|{}", v.path.display(), v.mtime, text.len()), path: v.path.clone(), text, lang, saved: v.source.clone(), mtime: v.mtime })
+    }
+
+    /// Whether the file showing has changes that are not saved: in its
+    /// editor, or kept from when it last showed.
+    pub(crate) fn file_dirty(&self, cx: &App) -> bool {
+        let Some(v) = &self.file_view else { return false };
+        self.unsaved(cx).contains(&v.path)
+    }
+
+    /// Every file with changes not saved: the one in the editor, those
+    /// whose editors are kept, and those typed in a run before this one.
+    fn unsaved(&self, cx: &App) -> Vec<PathBuf> {
+        let mut all: Vec<PathBuf> = self.file_editor.iter().chain(self.file_parked.iter()).filter(|ed| ed.dirty(cx)).map(|ed| ed.path.clone()).collect();
+        all.extend(self.file_drafts.keys().filter(|p| !all.contains(p)).cloned().collect::<Vec<_>>());
+        all
+    }
+
+    /// Whether `then` may go ahead. With changes not saved in the way it
+    /// may not, and the question is asked instead (`render_file_ask`):
+    /// for closing a file or showing another, of the file showing; for
+    /// closing the window or quitting, of every file there is, one at a
+    /// time. This is what an editor does, and the reason is the same:
+    /// nothing typed goes without the person saying so.
+    pub(crate) fn file_guard(&mut self, then: FileThen, cx: &mut Context<Self>) -> bool {
+        let unsaved = self.unsaved(cx);
+        let path = match &then {
+            FileThen::Close | FileThen::Open(_) => self.file_view.as_ref().map(|v| v.path.clone()).filter(|p| unsaved.contains(p)),
+            FileThen::CloseWindow | FileThen::Quit => unsaved.into_iter().next(),
+        };
+        let Some(path) = path else { return true };
+        self.file_ask = Some(FileAsk { path, then });
+        self.file_ask_serial += 1;
+        cx.notify();
+        false
+    }
+
+    /// The question's answer, and then what was being done.
+    pub(crate) fn file_answer(&mut self, answer: FileAnswer, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ask) = self.file_ask.take() else { return };
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+        let showing = self.file_editor.as_ref().is_some_and(|ed| ed.path == ask.path);
+        match answer {
+            FileAnswer::Cancel => return,
+            FileAnswer::Save if showing => {
+                self.save_file(window, cx);
+                // Not saved after all (the file changed on disk, or could
+                // not be written): the row says why, and nothing goes on.
+                if self.file_editor.as_ref().is_some_and(|ed| ed.dirty(cx)) {
+                    return;
+                }
+            }
+            FileAnswer::Save => {
+                // A file not showing: its kept editor's text, or what was
+                // typed in an earlier run.
+                let kept = self.file_parked.iter().find(|p| p.path == ask.path).map(|p| (p.state.read(cx).value().to_string(), p.lang));
+                let lang = emaki_core::render_md::lang_for_path(&ask.path.to_string_lossy());
+                let Some((text, lang)) = kept.or_else(|| self.file_drafts.get(&ask.path).map(|d| (d.text.clone(), lang))) else { return };
+                let text = emaki_core::format::format(lang, &text).ok().flatten().unwrap_or(text);
+                if let Err(e) = std::fs::write(&ask.path, &text) {
+                    let name = ask.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    self.notice = Some(Notice::error(format!("could not save {name}: {e}")));
+                    return;
+                }
+                self.file_parked.retain(|p| p.path != ask.path);
+                self.file_drafts.remove(&ask.path);
+            }
+            FileAnswer::Discard => {
+                // The editor goes back to what the file holds, as one
+                // step, so even this can be undone while it shows.
+                if let Some(ed) = self.file_editor.as_ref().filter(|_| showing) {
+                    if let Some(saved) = ed.saved.clone() {
+                        ed.state.update(cx, |s, cx| {
+                            let len = s.value().len();
+                            s.replace_bytes(0..len, &saved, 0, window, cx);
+                        });
+                    }
+                }
+                self.file_parked.retain(|p| p.path != ask.path);
+                self.file_drafts.remove(&ask.path);
+            }
+        }
+        match ask.then {
+            FileThen::Close => self.close_file_view(cx),
+            FileThen::Open(path) => self.file_preview(&path, window, cx),
+            FileThen::CloseWindow => self.close_window(window, cx),
+            FileThen::Quit => self.quit(cx),
+        }
+    }
+
+    /// Quit, once no file has changes not saved.
+    pub(crate) fn quit(&mut self, cx: &mut Context<Self>) {
+        if self.file_guard(FileThen::Quit, cx) {
+            self.keep_drafts(cx);
+            cx.quit();
+        }
+    }
+
+    /// Close the window, once no file has changes not saved.
+    pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_guard(FileThen::CloseWindow, cx) {
+            window.remove_window();
+        }
+    }
+
+    /// The question over the window, as an editor asks it, in the
+    /// window's own card: ↩ saves, Escape cancels.
+    pub(crate) fn render_file_ask(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(ask) = self.file_ask.clone() else { return div().into_any_element() };
+        // The keyboard is the card's while it is up, not the editor's
+        // under it.
+        if !self.file_ask_focus.is_focused(window) {
+            window.focus(&self.file_ask_focus, cx);
+        }
+        let name = ask.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        // Over the file's pane when the file is the one showing: the
+        // question is that pane's. Else in the middle of the window.
+        let over = self.file_pane_bounds().filter(|b| self.file_view.as_ref().is_some_and(|v| v.path == ask.path) && b.size.width > px(120.));
+        let card_w = over.map(|b| (b.size.width - px(24.)).min(px(420.))).unwrap_or(px(420.));
+        let answer = |answer: FileAnswer| {
+            cx.listener(move |this, _: &ClickEvent, window, cx| {
+                swallow_click(window, cx);
+                this.file_answer(answer, window, cx);
+            })
+        };
+        div()
+            .id("file-ask-overlay")
+            .track_focus(&self.file_ask_focus)
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(theme.overlay)
+            .when(over.is_none(), |d| d.flex().flex_col().items_center().pt(px(120.)))
+            .on_click(|_, window, cx| swallow_click(window, cx))
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                if e.keystroke.key == "enter" {
+                    cx.stop_propagation();
+                    this.file_answer(FileAnswer::Save, window, cx);
+                }
+            }))
+            .child(
+                v_flex()
+                    .id("file-ask")
+                    .on_click(|_, window, cx| swallow_click(window, cx))
+                    .w(card_w)
+                    .max_w(gpui::relative(0.94))
+                    .map(|d| match over {
+                        Some(b) => d.absolute().left(b.left() + (b.size.width - card_w) / 2.).top(b.top() + px(48.)),
+                        None => d,
+                    })
+                    .p(px(16.))
+                    .gap(px(10.))
+                    .rounded(px(16.))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow(float_shadow(&theme))
+                    .child(div().w_full().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(format!("Do you want to save the changes you made to {name}?")))
+                    .child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child("Your changes will be lost if you don't save them."))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .pt(px(2.))
+                            .gap(px(8.))
+                            .flex_wrap()
+                            .child(Button::new("file-ask-discard").outline().small().label("Don't Save").on_click(answer(FileAnswer::Discard)))
+                            .child(div().flex_1())
+                            .child(Button::new("file-ask-cancel").outline().small().label("Cancel").on_click(answer(FileAnswer::Cancel)))
+                            .child(Button::new("file-ask-save").primary().small().label("Save").on_click(answer(FileAnswer::Save))),
+                    )
+                    .with_animation(ElementId::Name(format!("file-ask-in-{}", self.file_ask_serial).into()), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-6. * (1. - t)))),
+            )
+            .into_any_element()
+    }
+
+    /// ⌘S: what is in the file's editor goes to the file. A file that
+    /// was written by someone else since it was read here (the agent,
+    /// most often) is not written over at the first asking: the row
+    /// under the composer says so, and a second ⌘S does it.
+    ///
+    /// A language with a formatter is put in its form first
+    /// (`emaki_core::format`: R, by Air), in the editor as one step of
+    /// undo and then on disk. A file its formatter cannot read is saved
+    /// as it is, and the row says why it was not formatted.
+    pub(crate) fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ed) = self.file_editor.as_ref().filter(|ed| ed.dirty(cx)) else { return };
+        let (path, mut text) = (ed.path.clone(), ed.state.read(cx).value().to_string());
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mut unformatted = None;
+        match emaki_core::format::format(ed.lang, &text) {
+            Ok(Some(formed)) => {
+                ed.state.update(cx, |s, cx| {
+                    let caret = s.cursor().min(formed.len());
+                    s.replace_bytes(0..text.len(), &formed, caret, window, cx);
+                });
+                text = formed;
+            }
+            Ok(None) => {}
+            Err(why) => unformatted = Some(why),
+        }
+        let on_disk = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        if on_disk != ed.mtime && self.file_conflict != Some(on_disk) {
+            self.file_conflict = Some(on_disk);
+            self.notice = Some(Notice::error(format!("{name} changed on disk since it was opened. Save again to write over it.")));
+            cx.notify();
+            return;
+        }
+        // Written in place, so the file keeps its permissions.
+        if let Err(e) = std::fs::write(&path, &text) {
+            self.notice = Some(Notice::error(format!("could not save {name}: {e}")));
+            cx.notify();
+            return;
+        }
+        self.file_conflict = None;
+        self.show_file(&path, cx);
+        // The editor is the one for what the file now holds: it is not
+        // made again, and the caret and the undo history stay.
+        let want = self.file_editor_want();
+        if let Some(ed) = self.file_editor.as_mut() {
+            ed.saved = Some(text.as_str().into());
+            ed.mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+            if let Some(want) = want.filter(|w| w.path == ed.path) {
+                ed.key = want.key;
+            }
+        }
+        self.tree.read_at = 0.;
+        if let Some(why) = unformatted {
+            self.notice = Some(Notice::error(format!("{name} is saved but not formatted: {why}.")));
+        }
+        cx.notify();
     }
 
     /// Markdown as it reads, or as it is written.
     fn set_file_raw(&mut self, raw: bool, cx: &mut Context<Self>) {
         if self.file_raw != raw {
+            // As it reads, with changes not saved in its editor: it reads
+            // as the editor has it, not as the disk does.
+            if !raw {
+                let edited = self.file_editor.as_ref().filter(|ed| ed.dirty(cx)).map(|ed| (ed.path.clone(), ed.state.read(cx).value().to_string()));
+                if let (Some((path, text)), Some(v)) = (edited, self.file_view.as_mut()) {
+                    if v.path == path {
+                        v.body = edited_body(&path, &text);
+                    }
+                }
+            }
             self.file_raw = raw;
             self.file_mode_serial += 1;
             self.save_ui(true);
@@ -1781,6 +2266,10 @@ impl Workbench {
                     if self.file_view.as_ref().is_some_and(|v| v.path.starts_with(&path)) {
                         self.file_view = None;
                     }
+                    // What was typed in it and not saved goes with it.
+                    self.file_editor.take_if(|ed| ed.path.starts_with(&path));
+                    self.file_parked.retain(|ed| !ed.path.starts_with(&path));
+                    self.file_drafts.retain(|p, _| !p.starts_with(&path));
                     self.tree.refresh(&root);
                     self.notice = Some(Notice::said(format!("{} is in the {}", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), crate::sys::TRASH_NAME)));
                 }
@@ -1846,8 +2335,29 @@ impl Workbench {
                             self.tree.open.insert(if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) });
                         }
                     }
-                    if self.file_view.as_ref().is_some_and(|v| v.path.starts_with(from)) {
-                        self.file_view = None;
+                    // The file showing, and what was typed in any file under
+                    // the old name and not saved, are under the new one.
+                    let renamed = |p: &Path| p.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) });
+                    let shown = self.file_view.as_ref().and_then(|v| renamed(&v.path));
+                    for ed in self.file_editor.iter_mut().chain(self.file_parked.iter_mut()) {
+                        if let Some(now) = renamed(&ed.path) {
+                            ed.path = now;
+                        }
+                    }
+                    let drafts: Vec<PathBuf> = self.file_drafts.keys().filter(|p| p.starts_with(from)).cloned().collect();
+                    for old in drafts {
+                        if let (Some(draft), Some(now)) = (self.file_drafts.remove(&old), renamed(&old)) {
+                            self.file_drafts.insert(now, draft);
+                        }
+                    }
+                    if let Some(now) = shown {
+                        // Shown again under its name; its editor is kept
+                        // and found by the path it now has.
+                        if let Some(ed) = self.file_editor.take() {
+                            self.file_parked.push(ed);
+                        }
+                        self.tree.picked = Some(now.clone());
+                        self.show_file(&now, cx);
                     }
                     Ok(None)
                 }
@@ -2964,7 +3474,9 @@ impl Workbench {
             FileBody::Markdown(_) if self.file_raw => div().into_any_element(),
             FileBody::Code(..) => div().into_any_element(),
             FileBody::Markdown(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
-            FileBody::Picture(size) => {
+            FileBody::Notebook(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
+            FileBody::Html(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(gpui_component::text::TextView::html(SharedString::from(format!("file-html-{}-{}", v.rel, self.file_serial)), text.clone()).selectable(true)).into_any_element(),
+            FileBody::Picture(size, drawn) => {
                 // At its own size when that fits, never larger.
                 let (pw, ph) = match size {
                     Some((iw, ih)) if *iw > 0 && *ih > 0 => {
@@ -2973,7 +3485,7 @@ impl Workbench {
                     }
                     _ => (room, room * 0.75),
                 };
-                v_flex().items_center().gap(px(8.)).child(img(v.path.clone()).w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.))).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
+                v_flex().items_center().gap(px(8.)).child(match drawn { Some(picture) => img(picture.clone()), None => img(v.path.clone()) }.w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.))).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
             }
             FileBody::Pages(None) => v_flex().py(px(60.)).items_center().child(quiet("Drawing the pages…".into())).into_any_element(),
             FileBody::Pages(Some(doc)) => {
@@ -3108,11 +3620,18 @@ impl Workbench {
                 .child(pill_button("file-open-default", "Open with default app", &theme, move |_, _, _| crate::sys::open_path(&open_too)))
                 .into_any_element(),
         };
-        // Code and raw markdown: the toolkit's editor, read only, with
-        // line numbers and the language's colours, both of which the
-        // head can turn off. It finds (⌘F), selects and copies by itself.
-        let code = matches!(v.body, FileBody::Code(..)) || (markdown && self.file_raw);
-        let editor = self.file_editor.as_ref().filter(|_| code && !leaving).map(|(_, state)| {
+        // Code, and markdown or a table as it is written: the toolkit's
+        // editor, with line numbers and the language's colours. It
+        // finds (⌘F), selects and copies by itself, and a file the pane
+        // holds whole can be changed in it and saved (⌘S, `save_file`).
+        // What shows two ways, as it reads and as it is written: markdown
+        // and HTML, and a table or an SVG the pane holds whole.
+        let table = matches!(v.body, FileBody::Table(..)) && v.source.is_some();
+        let two_ways = markdown || table || matches!(v.body, FileBody::Html(_) | FileBody::Notebook(_)) || (matches!(v.body, FileBody::Picture(..)) && v.source.is_some());
+        let code = matches!(v.body, FileBody::Code(..)) || (two_ways && self.file_raw);
+        let dirty = !leaving && self.file_dirty(cx);
+        let editor = self.file_editor.as_ref().filter(|_| code && !leaving).map(|ed| {
+            let (state, readonly) = (&ed.state, ed.saved.is_none());
             let menu = {
                 let (this, state) = (cx.entity().downgrade(), state.clone());
                 move |at: Point<Pixels>, window: &mut Window, cx: &mut App| {
@@ -3134,7 +3653,7 @@ impl Workbench {
                     });
                 }
             };
-            gpui_component::input::Editor::new(state).readonly(true).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).on_secondary_click(menu).into_any_element()
+            gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).on_secondary_click(menu).into_any_element()
         });
         let cut = match &v.body {
             FileBody::Code(_, _, dropped) if *dropped > 0 => Some(div().flex_shrink_0().px(px(pad_x)).py(px(8.)).border_t_1().border_color(theme.border).child(quiet(format!("Only the first {PREVIEW_LINES} lines are shown. Open the file for the rest.")))),
@@ -3184,8 +3703,8 @@ impl Workbench {
         };
         let modes = if leaving {
             None
-        } else if markdown {
-            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, ("icons/eye.svg", "Rendered"), ("icons/file-code.svg", "Raw"), |this, first, cx| this.set_file_raw(!first, cx), cx))
+        } else if two_ways {
+            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, if table { "Table" } else { "Rendered" }), ("icons/file-code.svg", "Raw"), |this, first, cx| this.set_file_raw(!first, cx), cx))
         } else if pdf {
             let (was, serial) = self.pdf_side_anim.map(|(was, _, n)| (was, n)).unwrap_or((self.pdf_side, 0));
             Some(pair("pdf-side", self.pdf_side, was, serial, ("icons/gallery-vertical-end.svg", "Pages"), ("icons/list-bullets.svg", "Contents"), |this, first, cx| this.pdf_side_toggle(first, cx), cx))
@@ -3328,12 +3847,26 @@ impl Workbench {
                             .gap(px(7.))
                             .items_baseline()
                             .child(div().flex_shrink_0().max_w(relative(0.6)).truncate().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+
                             .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(10.5)).text_color(theme.muted_foreground).child(folder))
-                            .child(div().flex_shrink_0().text_size(px(10.5)).text_color(theme.muted_foreground).child(match &v.body {
-                                FileBody::Pages(Some(doc)) => format!("page {} of {}", self.pdf_page_now() + 1, doc.total),
-                                _ => human_size(v.size),
-                            })),
+                            // The size is the file's on disk: not said of one
+                            // with changes not saved, where Save stands instead.
+                            .when(!dirty, |d| {
+                                d.child(div().flex_shrink_0().text_size(px(10.5)).text_color(theme.muted_foreground).child(match &v.body {
+                                    FileBody::Pages(Some(doc)) => format!("page {} of {}", self.pdf_page_now() + 1, doc.total),
+                                    _ => human_size(v.size),
+                                }))
+                            }),
                     )
+                    .when(dirty, |d| {
+                        d.child(
+                            div().flex_shrink_0().child(Button::new("file-save").outline().xsmall().label("Save").tooltip("Save (⌘S)").on_click(cx.listener(|this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.save_file(window, cx)
+                            })))
+                            .with_animation("file-save-in", Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
+                        )
+                    })
                     .children(modes)
                     .when(!leaving, |d| {
                         d.child(tool("file-mention", Icon::default().path("icons/at.svg"), "Add to message").on_click({
@@ -3344,7 +3877,35 @@ impl Workbench {
                         }))
                         .child(tool("file-open", Icon::default().path("icons/external-link.svg"), "Open with default app").on_click(move |_, _, _| crate::sys::open_path(&open)))
                         .child(tool("file-reveal", Icon::default().path("icons/folder-open.svg"), crate::sys::REVEAL_LABEL).on_click(move |_, _, _| crate::sys::reveal_path(&reveal)))
-                        .child(tool("file-close", Icon::new(IconName::Close), "Close (esc)").on_click(cx.listener(|this, _, _, cx| this.close_file_view(cx))))
+                        // The close button, as an editor's tab has it: with
+                        // changes not saved it is an orange dot, and the
+                        // cross again under the pointer.
+                        .child({
+                            let hover_bg = theme.secondary_hover;
+                            div()
+                                .id("file-close")
+                                .group("file-close")
+                                .relative()
+                                .size(px(24.))
+                                .flex_shrink_0()
+                                .rounded(px(6.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(hover_bg))
+                                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if dirty { "Close (esc), not saved" } else { "Close (esc)" }).build(window, cx))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    swallow_click(window, cx);
+                                    this.close_file_view(cx)
+                                }))
+                                .child(div().flex().items_center().justify_center().when(dirty, |d| d.opacity(0.).group_hover("file-close", |s| s.opacity(1.))).child(Icon::new(IconName::Close).with_size(px(14.))))
+                                .when(dirty, |d| {
+                                    d.child(div().absolute().inset_0().flex().items_center().justify_center().group_hover("file-close", |s| s.opacity(0.)).child(
+                                        div().size(px(8.)).rounded_full().bg(unsaved_dot()).with_animation("file-dirty-in", Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
+                                    ))
+                                })
+                        })
                     }),
             )
             .children(find)
@@ -3750,6 +4311,28 @@ impl Workbench {
                 let at = self.file_view_scroll.bounds().origin + point(px(40.), px(40.));
                 self.file_pane_menu(Vec::new(), at, cx);
             }
+            // Fold the section that line (from 1) of the file's editor heads.
+            t if t.starts_with("file:fold:") => {
+                if let (Some(ed), Ok(line)) = (&self.file_editor, t["file:fold:".len()..].parse::<usize>()) {
+                    ed.state.update(cx, |s, cx| s.toggle_fold_at(line.saturating_sub(1), cx));
+                }
+            }
+            // Put words at the start of the file's editor, as typing
+            // does, and save what it holds.
+            t if t.starts_with("file:type:") => {
+                if let Some(ed) = self.file_editor.as_ref().filter(|ed| ed.saved.is_some()) {
+                    let words = t["file:type:".len()..].to_string();
+                    let at = words.len();
+                    self.pending_edit = Some((ed.state.clone(), words, at));
+                }
+            }
+            "file:save" => self.pending_save = true,
+            // Answer the question a file with changes not saved asks,
+            // and press Quit.
+            "file:ask:save" => self.pending_answer = Some(FileAnswer::Save),
+            "file:ask:discard" => self.pending_answer = Some(FileAnswer::Discard),
+            "file:ask:cancel" => self.pending_answer = Some(FileAnswer::Cancel),
+            "quit" => self.quit(cx),
             "file:raw" => self.set_file_raw(true, cx),
             "file:read" => self.set_file_raw(false, cx),
             // In the PDF showing: select everything, or glyphs from and

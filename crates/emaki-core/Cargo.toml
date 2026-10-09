@@ -23,6 +23,13 @@ portable-pty = "0.9"
 # English grammar and spelling for the composer, offline and in process.
 harper-core = { version = "2.11", default-features = false, features = ["concurrent"] }
 
+# Air, Posit's formatter for R, in the process: an R file saved from the
+# file's pane is formatted as Air's own extension formats one on save.
+# Not on crates.io; the revision is the pin. The parser is the copy in
+# vendor/air_r_parser, built on the tree-sitter the window already has.
+air_r_parser = { path = "../../vendor/air_r_parser" }
+air_r_formatter = { git = "https://github.com/posit-dev/air", rev = "8d20826ccf65a0ccc1d6a82e78d308213271667c" }
+
 # Probing a pid (the inbox registry) is a Unix signal; a file's identity on
 # Windows needs the NTFS file index, which std does not expose on stable.
 [target.'cfg(unix)'.dependencies]
