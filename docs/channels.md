@@ -138,6 +138,17 @@ coming forward, no Accessibility access. For a session in a terminal of
 the person's the answer is nothing, or a line saying the thing is done in
 that terminal.
 
+A program that draws its own selection copies by asking its terminal to
+(OSC 52), as Claude Code does. The pty reads the sequence
+(`pty::take_osc52`) and the window puts the words on the system's
+clipboard (`take_terminal_copy`); ignored, the screen says "copied" and
+the clipboard holds nothing.
+
+The child's `PATH` is the person's login shell's, asked of the shell once
+at startup when no shell started the app (`driver::login_shell_path`,
+`main`). A Dock launch has only the system's `PATH`, and then a hook that
+calls `node` or an MCP server started by `npx` is "command not found".
+
 **Start.** `Hub::start_terminal`, from a message sent on `spawn`, from
 anything `via_terminal` is asked for, and at the first sign the person means to do
 something on a `spawn` session and not only read it: a click in the

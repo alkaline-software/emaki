@@ -6,6 +6,12 @@ depend on. The code honours each; keep it that way.
 
 ## Rules
 
+- **A session's folder is the first `cwd` its rows name.** A row's `cwd`
+  is where the shell stood when the row was written, and a `cd` in a
+  command moves it for every row after. The session is still kept under,
+  and resumed from, the folder it was started in. The index and the built
+  model both take the first, or the header and the file tree show one
+  folder while the sidebar and the terminal are in another.
 - **Never feed the archive its own file as a source.** Once a session
   outlives its original it re-enters the index pointing at the archived
   copy. Without the guards in `archive.rs`, the rotate-then-copy path

@@ -11,9 +11,15 @@
 # agent's socket. Started from a session's shell it inherits the same from
 # whatever started the app before it. So the build goes in a bundle of its
 # own, target/debug/Emaki.app, and is opened through the system with an
-# environment that holds only what a Dock launch has. The bundle's
-# executable is a hard link to the build, made again each time, since a
-# build replaces the file.
+# environment that holds only what a Dock launch has.
+#
+# The bundle is signed with a signing identity of the developer's when the
+# keychain has one (EMAKI_SIGN_IDENTITY, else the first "Developer ID
+# Application"). macOS keeps what an app was allowed (the Documents
+# folder, the Desktop) by who signed it; a build signed by nobody is a new
+# app each time it is built, and the system asks again at every launch
+# after a build. With no identity it is signed by nobody and does ask.
+# The executable is a copy, since signing writes into the file.
 #
 # Elsewhere the build is simply run.
 
@@ -24,7 +30,8 @@ bin=target/debug/Emaki
 
 app=target/debug/Emaki.app
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-ln -f "$bin" "$app/Contents/MacOS/Emaki" 2>/dev/null || cp -f "$bin" "$app/Contents/MacOS/Emaki"
+rm -f "$app/Contents/MacOS/Emaki"
+cp -c "$bin" "$app/Contents/MacOS/Emaki" 2>/dev/null || cp "$bin" "$app/Contents/MacOS/Emaki"
 cp -f crates/emaki-app/assets/icon/icon.icns "$app/Contents/Resources/Emaki.icns"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,6 +51,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+identity="${EMAKI_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
+codesign --force --sign "${identity:--}" "$app" >/dev/null 2>&1 || codesign --force --sign - "$app" >/dev/null 2>&1
 
 # `open` hands the app the opener's environment, so the opener's is made
 # the one the Dock would give: no shell's PATH, no terminal's marks, the

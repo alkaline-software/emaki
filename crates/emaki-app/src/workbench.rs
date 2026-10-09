@@ -1999,6 +1999,7 @@ impl Workbench {
                     this.terminal_lost(cx);
                     this.watch_terminal(cx);
                     this.terminal_ready(cx);
+                    this.take_terminal_copy(cx);
                     this.try_renames(cx);
                     this.read_working(cx);
                     this.read_dialog(cx);
@@ -4978,12 +4979,12 @@ impl Workbench {
 
     /// The suggested prompt for the session showing, when there is one.
     /// What the empty composer says, drawn here and not as the
-    /// textarea's placeholder, so a key in it is an icon of the one
-    /// family and not the text font's glyph: what a message here does.
-    /// A prompt the terminal suggests stands there instead, in the same
-    /// lighter ink (words offered, not yet said), with the key that
-    /// takes it. ⌘↩ sends and is not said. It sits where the textarea
-    /// draws its own first line and takes no click.
+    /// textarea's placeholder, so a suggested prompt can be in italics:
+    /// what a message here does. A prompt the terminal suggests stands
+    /// there instead, in the same lighter ink (words offered, not yet
+    /// said). The keys that take it (→, Tab) and the one that sends
+    /// (⌘↩) are not said. It sits where the textarea draws its own
+    /// first line and takes no click.
     fn render_composer_hint(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.composer.read(cx).value().is_empty() {
             return None;
@@ -5000,7 +5001,6 @@ impl Workbench {
                 None => (PLACEHOLDER_REPLY.to_string(), false),
             }
         };
-        let key = |path: &'static str| Icon::default().path(path).with_size(px(14.)).text_color(ink).flex_shrink_0();
         Some(
             h_flex()
                 .absolute()
@@ -5014,7 +5014,6 @@ impl Workbench {
                 // A suggested prompt is in italics: words offered, not
                 // yet the person's.
                 .child(div().min_w_0().when(accept, |d| d.italic()).child(words))
-                .when(accept, |d| d.child(h_flex().flex_shrink_0().items_center().child("(").child(key("icons/arrow-right.svg")).child(div().ml(px(4.)).child("to accept)"))))
                 .into_any_element(),
         )
     }
@@ -5372,7 +5371,17 @@ impl Workbench {
     /// The hidden terminal's screen changed. The card is drawn again at
     /// once; what the window reads off the screen (the mode, the working
     /// line, a dialog) is read a moment later, once for a burst.
+    /// A program in a terminal of ours asked for a copy: it goes on the
+    /// system's clipboard. Looked at when a screen changes and on the
+    /// clock, which is when a shell's in the panel is seen.
+    fn take_terminal_copy(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = emaki_core::pty::take_copied() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
     fn on_screen(&mut self, sid: String, cx: &mut Context<Self>) {
+        self.take_terminal_copy(cx);
         if self.term_open.as_deref() == Some(sid.as_str()) {
             cx.notify();
         }

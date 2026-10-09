@@ -74,6 +74,9 @@ pub struct Pty {
     alive: AtomicBool,
     started: Instant,
     last_output: Mutex<Instant>,
+    /// What the program last asked to have put on the clipboard (OSC
+    /// 52), until the window takes it.
+    copied: Mutex<Option<String>>,
 }
 
 /// What a program hears of the mouse: a button let go, the pointer
@@ -172,6 +175,45 @@ fn child_env() -> Vec<(String, String)> {
     env
 }
 
+/// The newest whole "set the clipboard" sequence in `pending` (OSC 52:
+/// `ESC ] 52 ; <which> ; <base64>` ended by BEL or `ESC \`), decoded, and
+/// `pending` cut down to what may still be the start of one. A program
+/// run in a terminal copies this way when it draws its own selection,
+/// as Claude Code does, and a terminal that ignores it leaves "copied"
+/// on the screen and nothing on the clipboard. A question (`?`) asks
+/// what the clipboard holds, and is not answered.
+pub fn take_osc52(pending: &mut Vec<u8>) -> Option<String> {
+    const START: &[u8] = b"\x1b]52;";
+    const MOST: usize = 4 << 20;
+    let mut found = None;
+    loop {
+        let Some(at) = pending.windows(START.len()).position(|w| w == START) else {
+            // Nothing begun, but the last bytes may be the start of one.
+            let keep = pending.len().saturating_sub(START.len() - 1);
+            pending.drain(..keep);
+            return found;
+        };
+        pending.drain(..at);
+        let body = &pending[START.len()..];
+        let Some(end) = body.iter().position(|b| *b == 0x07 || *b == 0x1b) else {
+            if pending.len() > MOST {
+                pending.clear();
+            }
+            return found;
+        };
+        let data = body[..end].splitn(2, |b| *b == b';').nth(1).unwrap_or(&[]);
+        if let Some(text) = std::str::from_utf8(data).ok().filter(|d| *d != "?").and_then(driver::base64_decode).and_then(|b| String::from_utf8(b).ok()) {
+            found = Some(text);
+        }
+        pending.drain(..START.len() + end + 1);
+    }
+}
+
+/// The copy any live terminal of ours asked for, if one did.
+pub fn take_copied() -> Option<String> {
+    LIVE.lock().unwrap().iter().filter_map(|p| p.take_copied()).last()
+}
+
 impl Pty {
     /// Start `argv` in `cwd` on a pty of its own. `on_output` is called
     /// from the reading thread whenever the screen changed, and once more
@@ -200,6 +242,7 @@ impl Pty {
             alive: AtomicBool::new(true),
             started: Instant::now(),
             last_output: Mutex::new(Instant::now()),
+            copied: Mutex::new(None),
         });
         LIVE.lock().unwrap().push(Arc::clone(&pty));
         let log = std::env::var_os("EMAKI_PTY_LOG").and_then(|p| std::fs::File::create(p).ok());
@@ -211,6 +254,8 @@ impl Pty {
                 let mut buf = [0u8; 8192];
                 // What a query was cut off at, at the end of the last read.
                 let mut tail: Vec<u8> = Vec::new();
+                // A copy the program asks for, which may come in pieces.
+                let mut osc: Vec<u8> = Vec::new();
                 loop {
                     let n = match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -223,6 +268,10 @@ impl Pty {
                     *me.last_output.lock().unwrap() = Instant::now();
                     tail.extend_from_slice(&buf[..n]);
                     me.answer_queries(&tail);
+                    osc.extend_from_slice(&buf[..n]);
+                    if let Some(text) = take_osc52(&mut osc) {
+                        *me.copied.lock().unwrap() = Some(text);
+                    }
                     let keep = tail.len().saturating_sub(8);
                     tail.drain(..keep);
                     // A sequence answered once is not kept to be answered again.
@@ -257,6 +306,13 @@ impl Pty {
         if has(b"\x1b[c") || has(b"\x1b[0c") {
             self.write(b"\x1b[?62;c");
         }
+    }
+
+    /// The text the program asked to have copied since this was last
+    /// asked, once. A terminal with no window has no clipboard of its
+    /// own: the window puts it on the system's.
+    pub fn take_copied(&self) -> Option<String> {
+        self.copied.lock().unwrap().take()
     }
 
     pub fn alive(&self) -> bool {

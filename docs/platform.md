@@ -141,6 +141,10 @@ designed outside this repository; this copy is the app's source.
   session's shell after that inherits that terminal's marks
   (`__CFBundleIdentifier`, its ssh agent's socket) and hands them to every
   Claude Code it starts. `pty::child_env` drops the identifier as well.
+  The bundle is signed with the developer's signing identity when the
+  keychain has one: macOS keeps a folder's permission by who signed the
+  app, and a build signed by nobody is a new app after every build, asked
+  about again at each launch.
 - The conversation reads down to about 64px. At 16px the icon is two bars
   with a pale block between.
 
