@@ -43,6 +43,16 @@ pub struct Window {
     pub resets_at: f64,
 }
 
+impl Window {
+    /// The window as it stands at `now`. Past its reset nothing is spent
+    /// and no next reset is known: Claude Code leaves a window that has
+    /// run out off what it hands over until a request starts the next
+    /// one, so what is held is still the old window's.
+    pub fn at(self, now: f64) -> Window {
+        if self.resets_at > 0.0 && self.resets_at <= now { Window::default() } else { self }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Limits {

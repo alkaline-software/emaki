@@ -409,6 +409,22 @@ pub enum Pane {
     Terminal,
 }
 
+/// A scroller that is not a pane: one inside a pane or on a sheet over
+/// the window. Each says so as it is drawn (`Workbench::inner_scroller`,
+/// `kept_scroll`), and `route_scroll` keeps a gesture with the one it
+/// began in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Inner {
+    /// In the conversation, passing a stroke that starts at its edge on
+    /// to the conversation (a tool call's body; see `Stroke`).
+    Chained,
+    /// In a pane, passing nothing on.
+    Held,
+    /// On a sheet or a menu over the window: a gesture begun off it
+    /// moves nothing while the pointer is on it.
+    Over,
+}
+
 /// A wheel event this long after the previous one begins a new gesture: a
 /// mouse wheel sends no phases, and momentum comes at frame rate.
 const SCROLL_GAP: Duration = Duration::from_millis(150);
@@ -938,6 +954,13 @@ pub struct Workbench {
     /// came; see `route_scroll`.
     scroll_owner: Option<Pane>,
     last_scroll: Instant,
+    /// The scrollers that are not panes, as of this draw; the one the
+    /// current gesture began in, with where it stood then; and the
+    /// handles of those that have no field of their own, by name, with
+    /// whether this draw used each. See `Inner`.
+    inner_live: std::cell::RefCell<Vec<(ScrollHandle, Inner)>>,
+    scroll_inner: Option<(ScrollHandle, Inner, Pixels)>,
+    inner_kept: std::cell::RefCell<HashMap<SharedString, (ScrollHandle, bool)>>,
     /// The scroll positions momentum may be forwarded to.
     side_scroll: ScrollHandle,
     agents_scroll: ScrollHandle,
@@ -1234,6 +1257,8 @@ fn avatar_sizes(master: &std::path::Path) -> Result<(), String> {
 
 /// How many lines of a background command's output its card shows.
 const SHELL_TAIL_LINES: usize = 10;
+/// How tall a box of a background command's card gets before it scrolls.
+const SHELL_BOX_H: Pixels = px(160.);
 
 /// The last `lines` lines of a file, reading no more than its last
 /// `bytes`, with terminal colour sequences taken out.
@@ -1878,7 +1903,9 @@ impl Workbench {
                     // them too, and that is when they change.
                     if this.now - this.limits_read >= LIMITS_SECS {
                         this.limits_read = this.now;
-                        this.limits.refresh_from_statusline();
+                        if this.limits.refresh_from_statusline() {
+                            let _ = this.limits.save();
+                        }
                         if let Some(id) = this.shown_session().map(|s| s.id.clone()) {
                             this.refresh_context(&id);
                         }
@@ -2289,6 +2316,9 @@ impl Workbench {
             seg_state: std::cell::RefCell::new(HashMap::new()),
             scroll_owner: None,
             last_scroll: Instant::now(),
+            inner_live: Default::default(),
+            scroll_inner: None,
+            inner_kept: Default::default(),
             side_scroll: ScrollHandle::new(),
             agents_scroll: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
@@ -3182,7 +3212,9 @@ impl Workbench {
                 _ => self.handed_back = None,
             }
         }
-        self.limits.refresh_from_statusline();
+        if self.limits.refresh_from_statusline() {
+            let _ = self.limits.save();
+        }
         self.refresh_context(&session.id);
         let n = session.rounds.len();
         let seen = shape_of(&session);
@@ -3791,7 +3823,8 @@ impl Workbench {
                     // header with the toolkit's scrollbar at their edge (it
                     // fades a second after the last scroll, as every
                     // scrollbar in the window does).
-                    .child(h_flex().flex_1().min_h_0().items_stretch().child(rail).child(
+                    .child(h_flex().flex_1().min_h_0().items_stretch().child(rail).child({
+                        self.inner_scroller(&self.settings_scroll, Inner::Over);
                         v_flex().relative().flex_1().min_w_0().min_h_0().child(
                             v_flex()
                                 .id("settings-body")
@@ -3803,8 +3836,8 @@ impl Workbench {
                                 .py(px(20.))
                                 .child(page_in(section_anim, v_flex().gap(px(16.)).child(div().pb(px(2.)).text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(section_title)).children(rows))),
                         )
-                        .vertical_scrollbar(&self.settings_scroll),
-                    )),
+                        .vertical_scrollbar(&self.settings_scroll)
+                    })),
             )
     }
 
@@ -4391,15 +4424,14 @@ impl Workbench {
         // it scrolls past the room there is.
         let room = if up { menu.by.top() - gap - px(12.) } else { view.height - menu.by.bottom() - gap - px(12.) };
         let what = menu.what;
-        let mut card = v_flex()
+        let (scroll, _) = self.kept_scroll(format!("pick-{}", menu.serial).into(), Inner::Over);
+        let mut rows = v_flex().id(("pick-rows", menu.serial as usize)).max_h(room.min(px(360.))).overflow_y_scroll().track_scroll(&scroll).p(px(5.)).gap(px(2.));
+        let card = v_flex()
             .id(("pick-card", menu.serial as usize))
             .absolute()
             .min_w(px(250.))
             .max_w(px(380.))
-            .max_h(room.min(px(360.)))
-            .overflow_y_scroll()
-            .p(px(5.))
-            .gap(px(2.))
+            .overflow_hidden()
             .rounded(px(12.))
             .bg(theme.popover)
             .border_1()
@@ -4410,7 +4442,7 @@ impl Workbench {
         for (ix, PickRow { key, name, detail, tint }) in menu.rows.iter().enumerate() {
             let active = *key == menu.current;
             let key = key.clone();
-            card = card.child(
+            rows = rows.child(
                 v_flex()
                     .id(("pick-row", ix))
                     .flex_shrink_0()
@@ -4436,6 +4468,7 @@ impl Workbench {
                     .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).whitespace_normal().child(detail.clone()))),
             );
         }
+        let card = card.child(rows).vertical_scrollbar(&scroll);
         // Where it rests: its foot over the pill, or its head under it.
         let rest = if up { view.height - menu.by.top() + gap } else { menu.by.bottom() + gap };
         let place = move |d: Stateful<Div>, off: Pixels| if up { d.bottom(rest - off) } else { d.top(rest - off) };
@@ -5413,6 +5446,23 @@ impl Workbench {
     /// that lands in the other pane is applied to the owner's scroll
     /// position and stopped. With the sidebar folded away there is one pane
     /// and nothing to do.
+    /// A scroller that is not a pane, drawn now: `route_scroll` keeps a
+    /// gesture that begins in it with it.
+    pub(crate) fn inner_scroller(&self, handle: &ScrollHandle, kind: Inner) {
+        self.inner_live.borrow_mut().push((handle.clone(), kind));
+    }
+
+    /// The handle of such a scroller that has no field of its own, kept
+    /// under `key` for as long as it is drawn, and whether it is new.
+    pub(crate) fn kept_scroll(&self, key: SharedString, kind: Inner) -> (ScrollHandle, bool) {
+        let mut kept = self.inner_kept.borrow_mut();
+        let new = !kept.contains_key(&key);
+        let entry = kept.entry(key).or_default();
+        entry.1 = true;
+        self.inner_scroller(&entry.0, kind);
+        (entry.0.clone(), new)
+    }
+
     fn route_scroll(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
         if std::env::var("EMAKI_SCROLL_DEBUG").is_ok() {
             eprintln!("scroll {:?} at ({:.0},{:.0}) delta {:?} owner {:?}", e.touch_phase, f32::from(e.position.x), f32::from(e.position.y), e.delta, self.scroll_owner);
@@ -5424,6 +5474,7 @@ impl Workbench {
         // the only panes there are, and nothing under it moves. A flick
         // carried off the list it began in stays with that list.
         if self.branch_menu.is_some() || self.changes.is_some() {
+            self.scroll_inner = None;
             let here = match &self.changes {
                 _ if self.branch_menu.is_some() && self.branch_scroll.bounds().contains(&e.position) => Pane::Branches,
                 Some(c) if self.branch_menu.is_none() && c.files.0.borrow().base_handle.bounds().contains(&e.position) => Pane::ChangeFiles,
@@ -5472,12 +5523,48 @@ impl Workbench {
         } else {
             Pane::Sidebar
         };
-        match e.touch_phase {
-            TouchPhase::Started => self.scroll_owner = Some(here),
-            TouchPhase::Moved if fresh || self.scroll_owner.is_none() => self.scroll_owner = Some(here),
-            _ => {}
+        // A scroller inside a pane, or on a sheet over the window, with
+        // something to scroll: the gesture that begins in it is its own.
+        let inner = self.inner_live.borrow().iter().find(|(h, _)| h.max_offset().y > px(0.) && h.bounds().contains(&e.position)).cloned();
+        let begins = match e.touch_phase {
+            TouchPhase::Started => true,
+            TouchPhase::Moved => fresh || self.scroll_owner.is_none(),
+            _ => false,
+        };
+        if begins {
+            self.scroll_owner = Some(here);
+            self.scroll_inner = inner.clone().map(|(h, kind)| {
+                let at = h.offset().y;
+                (h, kind, at)
+            });
         }
         let Some(owner) = self.scroll_owner else { return };
+        if let Some((own, kind, began_at)) = self.scroll_inner.clone() {
+            let inside = own.bounds().contains(&e.position);
+            if kind == Inner::Chained && (inside || own.offset().y == began_at) {
+                // A tool call's body decides its own strokes while the
+                // pointer is on it. One it has not moved in was begun at
+                // its edge and is the conversation's.
+                if !inside {
+                    self.scroll_inner = None;
+                }
+            } else {
+                // Its own and nobody else's, wherever the pointer has
+                // been carried and whether or not it has more to give.
+                let at = own.offset().y + e.delta.pixel_delta(px(20.)).y;
+                own.set_offset(point(own.offset().x, at.clamp(-own.max_offset().y, px(0.))));
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
+        // Begun elsewhere and carried onto one: it does not move. On a
+        // sheet nothing does; in a pane the gesture's owner goes on.
+        let carried = self.scroll_inner.is_none() && inner.is_some();
+        if carried && inner.as_ref().is_some_and(|(_, kind)| *kind == Inner::Over) {
+            cx.stop_propagation();
+            return;
+        }
         // A wheel in the conversation ends a move the outline began.
         if owner == Pane::Content {
             self.content_wheel_at = Some(Instant::now());
@@ -5494,7 +5581,7 @@ impl Workbench {
             cx.notify();
             return;
         }
-        if owner == here || !(inline_sidebar || files || outline || here == Pane::Terminal || here == Pane::File || owner == Pane::File) {
+        if !carried && (owner == here || !(inline_sidebar || files || outline || here == Pane::Terminal || here == Pane::File || owner == Pane::File)) {
             return;
         }
         let delta = e.delta.pixel_delta(px(20.));
@@ -6262,6 +6349,7 @@ impl Workbench {
             row = row.child(bar());
             match w {
                 Some(w) => {
+                    let w = w.at(now);
                     let pct = (w.utilization * 100.0).round().max(0.0) as u64;
                     let left = emaki_core::limits::until(w.resets_at, now);
                     row = row.child(part(label, pct, usage_color(pct), if left.is_empty() { String::new() } else { format!("({left})") }));
@@ -7776,7 +7864,7 @@ impl Workbench {
                 .child(div().min_w_0().truncate().child(title.clone()))
         });
 
-        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
+        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(v_flex().relative().flex_1().min_h_0().vertical_scrollbar(&self.sessions_scroll).child(
             v_flex().id("sessions").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.sessions_scroll).px(px(24.)).items_center().child(page_in(
                 if folder.is_some() { "page-sessions-folder" } else { "page-sessions" },
                 v_flex()
@@ -7790,7 +7878,7 @@ impl Workbench {
                     .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(line))
                     .child(v_flex().w_full().gap(px(2.)).children(rows)),
             )),
-        )
+        ))
     }
     // -- one conversation ----------------------------------------------------
 
@@ -8190,6 +8278,15 @@ impl Workbench {
         let mut tails = HashMap::new();
         for sh in detail.session.shells.iter().filter(|sh| !sh.agent && sh.ended.is_empty() && !sh.output_path.is_empty()) {
             if let Some(tail) = file_tail(&sh.output_path, 6000, SHELL_TAIL_LINES) {
+                // More was printed: the box stays at its foot if it was
+                // there.
+                if self.shell_tails.get(&sh.id) != Some(&tail) {
+                    if let Some((scroll, _)) = self.inner_kept.borrow().get(format!("shell-out-{}", sh.id).as_str()) {
+                        if scroll.offset().y <= -scroll.max_offset().y + px(2.) {
+                            scroll.scroll_to_bottom();
+                        }
+                    }
+                }
                 tails.insert(sh.id.clone(), tail);
             }
         }
@@ -8303,27 +8400,77 @@ impl Workbench {
                                 .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(label(sh)))
                                 .child(div().flex_shrink_0().text_size(px(11.5)).text_color(theme.muted_foreground).child(elapsed_since(&sh.started, self.now))),
                         )
-                        .child(div().w_full().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(theme.muted_foreground).child(sh.command.lines().next().unwrap_or("").to_string()))
-                        .child(
-                            div()
-                                .w_full()
-                                .px(px(10.))
-                                .py(px(8.))
-                                .rounded(px(7.))
-                                .bg(theme.background)
-                                .border_1()
-                                .border_color(theme.border.opacity(0.6))
-                                .font_family(theme.mono_font_family.clone())
-                                .text_size(px(11.))
-                                .line_height(px(16.))
-                                .overflow_hidden()
-                                .map(|d| if tail.trim().is_empty() { d.text_color(theme.muted_foreground.opacity(0.7)).child("nothing printed yet") } else { d.children(tail.lines().map(|l| div().w_full().truncate().child(if l.is_empty() { " ".to_string() } else { l.to_string() }))) }),
-                        ),
+                        .child(self.shell_box(format!("shell-cmd-{}", sh.id).into(), "Command", &sh.command, "", false, cx))
+                        .child(self.shell_box(format!("shell-out-{}", sh.id).into(), "Output", tail.trim_end(), "nothing printed yet", true, cx)),
                 );
             }
-            card = card.child(list);
+            card = card.child(list.with_animation(if agents { "agents-in" } else { "shells-in" }, Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)));
         }
         Some(card.child(row).into_any_element())
+    }
+
+    /// One box of a background command's card: the command, or the last
+    /// of what it printed. Both are code and both are drawn alike: a
+    /// label, the text in the mono face with every line wrapped, and a
+    /// copy button at the top right while the pointer is over the box.
+    /// Past `SHELL_BOX_H` each scrolls: the command from its start, the
+    /// output (`tail`) from its foot, where it stays as more is printed
+    /// unless the reader has scrolled up (`read_shell_tails`).
+    fn shell_box(&self, key: SharedString, label: &'static str, text: &str, empty: &'static str, tail: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let done = self.copied.as_ref() == Some(&key);
+        let hover_bg = theme.muted;
+        let lines = v_flex().w_full().flex_shrink_0().map(|d| {
+            if text.is_empty() {
+                d.text_color(theme.muted_foreground.opacity(0.7)).child(empty)
+            } else {
+                d.children(text.lines().map(|l| div().w_full().child(if l.is_empty() { " ".to_string() } else { l.to_string() })))
+            }
+        });
+        let (scroll, new) = self.kept_scroll(key.clone(), Inner::Held);
+        if tail && new {
+            scroll.scroll_to_bottom();
+        }
+        let body = div().id(SharedString::from(format!("{key}-scroll"))).w_full().max_h(SHELL_BOX_H).overflow_y_scroll().track_scroll(&scroll).child(lines);
+        let copy = (!text.is_empty()).then(|| {
+            let (key, text) = (key.clone(), text.to_string());
+            div()
+                .id(key.clone())
+                .absolute()
+                .top(px(4.))
+                .right(px(4.))
+                .size(px(22.))
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .bg(theme.background)
+                .opacity(0.)
+                .group_hover(key.clone(), |s| s.opacity(1.))
+                .hover(move |s| s.bg(hover_bg))
+                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.copy_text(key.clone(), text.clone(), cx);
+                }))
+                .child(Icon::new(if done { IconName::Check } else { IconName::Copy }).with_size(px(13.)).text_color(theme.muted_foreground))
+        });
+        v_flex()
+            .group(key)
+            .relative()
+            .w_full()
+            .gap(px(3.))
+            .px(px(10.))
+            .py(px(7.))
+            .rounded(px(7.))
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border.opacity(0.6))
+            .child(div().text_size(px(10.5)).text_color(theme.muted_foreground.opacity(0.8)).child(label))
+            .child(div().w_full().font_family(theme.mono_font_family.clone()).text_size(px(11.)).line_height(px(16.)).child(body))
+            .vertical_scrollbar(&scroll)
+            .children(copy)
     }
 
     /// The hidden terminal's screen, drawn where the cards sit, when the
@@ -9310,7 +9457,9 @@ impl Workbench {
     /// A correction chosen from the menu goes where the marked words
     /// were, as one step for undo.
     fn fix_writing(&mut self, range: std::ops::Range<usize>, with: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.composer.read(cx).value().as_ref() != self.issues_for.as_str() {
+        // The range was read when the menu opened: it must still be
+        // whole characters of the text there is now.
+        if self.composer.read(cx).value().as_ref() != self.issues_for.as_str() || self.issues_for.get(range.clone()).is_none() {
             return;
         }
         let caret = range.start + with.len();
@@ -9946,7 +10095,7 @@ impl Workbench {
             folders = folders.child(line);
         }
 
-        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
+        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(v_flex().relative().flex_1().min_h_0().vertical_scrollbar(&self.home_scroll).child(
             v_flex().id("home").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.home_scroll).px(px(24.)).child(
                 page_in(
                     "page-home",
@@ -9968,7 +10117,7 @@ impl Workbench {
                         .child(v_flex().w_full().max_w(CONTENT_W).gap(px(10.)).pt(px(10.)).child(div().px(px(2.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("START IN")).child(folders)),
                 ),
             ),
-        )
+        ))
     }
     // -- lightbox --------------------------------------------------------------
 
@@ -10039,6 +10188,7 @@ impl Workbench {
     // -- search palette -------------------------------------------------------
 
     fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (search_scroll, _) = self.kept_scroll("search-results".into(), Inner::Over);
         let theme = cx.theme().clone();
         let results = self.search_results.clone();
         let search_focus = self.search_input.read(cx).focus_handle(cx);
@@ -10096,7 +10246,7 @@ impl Workbench {
                                     .child(Input::new(&self.search_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.search_input, false, cx))),
                             ),
                     )
-                    .child(v_flex().id("search-results").flex_1().min_h_0().overflow_y_scroll().p(px(8.)).map(|d| match results {
+                    .child(v_flex().relative().flex_1().min_h_0().vertical_scrollbar(&search_scroll).child(v_flex().id("search-results").flex_1().min_h_0().overflow_y_scroll().track_scroll(&search_scroll).p(px(8.)).map(|d| match results {
                         None => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Type to search prompts, replies, thoughts and tool calls across every session.")),
                         Some(res) if !res.error.is_empty() => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.danger).child(res.error)),
                         Some(res) if res.sessions.is_empty() => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("No matches.")),
@@ -10134,7 +10284,7 @@ impl Workbench {
                                         .child(div().flex_1().min_w_0().truncate().child(m.snippet.replace(['\x02', '\x03'], "").replace('\n', " ")))
                                 }))
                         })),
-                    })),
+                    }))),
             )
     }
 }
@@ -10590,6 +10740,10 @@ impl PickRow {
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The scrollers inside panes name themselves again as they are
+        // drawn; a kept handle the last draw did not use goes.
+        self.inner_live.borrow_mut().clear();
+        self.inner_kept.borrow_mut().retain(|_, kept| std::mem::take(&mut kept.1));
         self.sync_draft(window, cx);
         self.writing_sync(cx);
         self.sync_folders(cx);

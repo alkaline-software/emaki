@@ -303,11 +303,13 @@ pub fn typed(old: &str, new: &str, caret: usize) -> Typed {
     let (start, old_end, new_end) = changed(old, new);
     let (gone, came) = (&old[start..old_end], &new[start..new_end]);
     // A letter typed beside its twin ("l" into "hello") differs further
-    // on than where it went; the caret says where that was.
+    // on than where it went; the caret says where that was. A caret past
+    // the change is not a keystroke's: a correction from the menu that
+    // adds a letter inside a word leaves it at the word's end.
     let twins = |text: &str, c: char| text.get(caret..).is_some_and(|rest| rest.len() >= start.saturating_sub(caret) && caret <= start && text[caret..start].chars().all(|x| x == c));
     let (mut c_in, mut c_out) = (came.chars(), gone.chars());
     match (c_out.next(), c_in.next()) {
-        (None, Some(c)) if c_in.next().is_none() && caret >= c.len_utf8() && new.is_char_boundary(caret) && new[caret..new_end].chars().all(|x| x == c) && new[..caret].ends_with(c) => Typed::In(c, caret),
+        (None, Some(c)) if c_in.next().is_none() && caret >= c.len_utf8() && new.get(caret..new_end).is_some_and(|rest| rest.chars().all(|x| x == c)) && new[..caret].ends_with(c) => Typed::In(c, caret),
         (Some(c), None) if c_out.next().is_none() && twins(new, c) => Typed::Out(caret),
         _ => Typed::Other,
     }
