@@ -462,6 +462,9 @@ pub struct Scrollbar {
     /// being dragged for some complex interactions for reducing CPU usage.
     max_fps: usize,
     styles: ScrollbarStyles,
+    /// A click in the bar's strip jumps there whether or not the bar is
+    /// showing (`click_when_hidden`). (Emaki addition.)
+    click_when_hidden: bool,
 }
 
 impl Scrollbar {
@@ -477,6 +480,7 @@ impl Scrollbar {
             mode: None,
             scroll_handle: Rc::new(scroll_handle.clone()),
             max_fps: 120,
+            click_when_hidden: false,
             scroll_size: None,
             viewport_bounds: None,
             use_layout_bounds: false,
@@ -567,6 +571,15 @@ impl Scrollbar {
     /// If you have very high CPU usage, consider reducing this value to improve performance.
     ///
     /// Available values: 30..120
+    /// Take a click in the bar's strip when the bar has faded too, as an
+    /// editor's does: the strip is the bar's own there, with nothing
+    /// under it to click. Elsewhere a hidden bar lies over rows, and
+    /// the click is theirs. (Emaki addition.)
+    pub fn click_when_hidden(mut self, on: bool) -> Self {
+        self.click_when_hidden = on;
+        self
+    }
+
     #[doc(hidden)]
     pub fn max_fps(mut self, max_fps: usize) -> Self {
         self.max_fps = max_fps.clamp(30, 120);
@@ -1178,7 +1191,7 @@ impl Element for Scrollbar {
 
                     let safe_range = (-scroll_area_size + container_size)..px(0.);
 
-                    if is_hover_to_show || is_visible {
+                    if is_hover_to_show || is_visible || self.click_when_hidden {
                         window.on_mouse_event({
                             let state = scrollbar_state.clone();
                             let scroll_handle = self.scroll_handle.clone();
@@ -1197,30 +1210,26 @@ impl Element for Scrollbar {
                                         cx.notify(view_id);
                                     } else {
                                         // click on the scrollbar, jump to the position
-                                        // Set the thumb bar center to the click position
+                                        // Set the thumb bar center to the click position.
+                                        // The thumb's start runs over the track less the
+                                        // thumb while the offset runs over what scrolls
+                                        // less the view (see `thumb_start`), so the share
+                                        // of the one is the share of the other. Upstream
+                                        // took the share of everything that scrolls, and
+                                        // the thumb landed lower than the click the
+                                        // further down it was. (Emaki addition.)
                                         let offset = scroll_handle.offset();
-                                        let percentage = if is_vertical {
-                                            (event.position.y - thumb_size / 2. - bounds.origin.y)
-                                                / (bounds.size.height - thumb_size)
-                                        } else {
-                                            (event.position.x - thumb_size / 2. - bounds.origin.x)
-                                                / (bounds.size.width - thumb_size)
-                                        }
-                                        .min(1.);
+                                        let track = if is_vertical { bounds.size.height } else { bounds.size.width } - margin_end - thumb_size;
+                                        let at = if is_vertical { event.position.y - bounds.origin.y } else { event.position.x - bounds.origin.x } - thumb_size / 2.;
+                                        let percentage = if track > px(0.) { (at / track).clamp(0., 1.) } else { 0. };
+                                        let to = (-(scroll_area_size - container_size) * percentage).clamp(safe_range.start, safe_range.end);
 
                                         if is_vertical {
-                                            scroll_handle.set_offset(point(
-                                                offset.x,
-                                                (-scroll_area_size * percentage)
-                                                    .clamp(safe_range.start, safe_range.end),
-                                            ));
+                                            scroll_handle.set_offset(point(offset.x, to));
                                         } else {
-                                            scroll_handle.set_offset(point(
-                                                (-scroll_area_size * percentage)
-                                                    .clamp(safe_range.start, safe_range.end),
-                                                offset.y,
-                                            ));
+                                            scroll_handle.set_offset(point(to, offset.y));
                                         }
+                                        cx.notify(view_id);
                                     }
                                 }
                             }

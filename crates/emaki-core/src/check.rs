@@ -341,6 +341,40 @@ pub fn capital(text: &str, caret: usize, english: bool) -> Option<(Range<usize>,
     None
 }
 
+/// The rule a sentence left small is marked under.
+pub const CAPITAL_RULE: &str = "SentenceCapital";
+
+/// Every sentence of `text` that starts with a small letter, as a
+/// grammar mark that offers the capital. The capital is given at the
+/// keystroke (`capital`) and a capital deleted and typed small again
+/// stays small, which is the person's to choose; but a word is also
+/// retyped small after a slip, and then nothing said so. The mark
+/// says so, and its Ignore is the choice. The same places `capital`
+/// knows: the start of the message or of a line, or after a full stop,
+/// "!" or "?" and a space; not after an abbreviation or an ellipsis,
+/// and not in code. Harper's own rule for this passes over a short
+/// sentence, which is what a prompt often starts with.
+pub fn capitals(text: &str) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    let mut prev: Option<char> = None;
+    for (at, c) in text.char_indices() {
+        let starts_word = !prev.is_some_and(|p| p.is_alphanumeric() || matches!(p, '\'' | '’' | '_' | '-'));
+        prev = Some(c);
+        if !starts_word || !c.is_lowercase() {
+            continue;
+        }
+        let upper: String = c.to_uppercase().collect();
+        if upper.chars().count() != 1 || upper.starts_with(c) || !starts_sentence(&text[..at]) || in_code(&text[..at]) {
+            continue;
+        }
+        let rest = &text[at + c.len_utf8()..];
+        let end = at + c.len_utf8() + rest.find(|x: char| !(x.is_alphanumeric() || matches!(x, '\'' | '’'))).unwrap_or(rest.len());
+        let word = &text[at..end];
+        issues.push(Issue { range: at..end, kind: Kind::Grammar, message: "This sentence does not start with a capital letter".to_string(), fixes: vec![format!("{upper}{}", &word[c.len_utf8()..])], rule: CAPITAL_RULE.to_string() });
+    }
+    issues
+}
+
 /// Whether the place after `before` is inside code: a fenced block left
 /// open, or a backtick left open on this line.
 fn in_code(before: &str) -> bool {

@@ -644,6 +644,28 @@ pub(crate) struct FileEditor {
     /// it was written; None when the file is read only.
     saved: Option<Rc<str>>,
     mtime: Option<std::time::SystemTime>,
+    /// What git has of the file (`git::base_text`), which the marks in
+    /// the margin compare the editor's text with; none for a file git
+    /// does not track. Whether the marks are to be worked out again,
+    /// and whether they are being.
+    base: Option<std::sync::Arc<str>>,
+    marks_due: bool,
+    marks_busy: bool,
+    /// The places the text differs from git's copy, as last worked out:
+    /// a mark's `id` is its place here.
+    hunks: Vec<git::Hunk>,
+}
+
+/// One change in the file's editor, opened from its mark in the margin:
+/// the lines git has there and the lines there now, where the click
+/// was, and where the lines now are in the text, to put git's back.
+#[derive(Clone)]
+pub(crate) struct FilePeek {
+    old: String,
+    new: String,
+    bytes: std::ops::Range<usize>,
+    at: Point<Pixels>,
+    can_revert: bool,
 }
 
 impl FileEditor {
@@ -1380,6 +1402,9 @@ impl Workbench {
             }
             self.read_git(root, cx);
         }
+        if let Some(path) = self.file_editor.as_ref().map(|ed| ed.path.clone()) {
+            self.read_file_base(path, cx);
+        }
     }
 
     /// Ask git about the folder, off the main thread, one asking at a
@@ -1838,6 +1863,11 @@ impl Workbench {
     /// The editor for the file showing, made when the file, or what it
     /// holds, is another: code, or markdown as it is written.
     pub(crate) fn sync_file_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_file_editor_only(window, cx);
+        self.sync_file_marks(cx);
+    }
+
+    fn sync_file_editor_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let want = self.file_editor_want();
         // The same file, changed in the editor and not saved: the editor
         // stays as it is whatever the disk now holds. Saving asks.
@@ -1887,9 +1917,216 @@ impl Workbench {
             state.set_value(text, window, cx);
             state
         });
-        // The head says "not saved" from the first letter.
+        // A click on a mark in the margin opens that change.
+        let opener = cx.entity().downgrade();
+        state.update(cx, |s, _| {
+            s.set_gutter_click(move |id, at, _, cx| {
+                let _ = opener.update(cx, |this, cx| this.open_file_peek(id, at, cx));
+            })
+        });
+        // The head says "not saved" from the first letter, and the
+        // margin's marks follow what is typed.
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        self.file_editor = Some(FileEditor { key: want.key, path: want.path, lang, state, saved: want.saved, mtime });
+        cx.subscribe(&state, |this, state, ev: &gpui_component::input::InputEvent, _| {
+            if let gpui_component::input::InputEvent::Change = ev {
+                for ed in this.file_editor.iter_mut().chain(this.file_parked.iter_mut()).filter(|ed| ed.state == state) {
+                    ed.marks_due = true;
+                }
+            }
+        })
+        .detach();
+        let path = want.path.clone();
+        self.file_editor = Some(FileEditor { key: want.key, path: want.path, lang, state, saved: want.saved, mtime, base: None, marks_due: false, marks_busy: false, hunks: Vec::new() });
+        self.read_file_base(path, cx);
+    }
+
+    /// Ask git for its copy of a file an editor holds, off the main
+    /// thread: at the editor's making, after a save, and on the tree's
+    /// clock, since a commit or a staging elsewhere changes it.
+    fn read_file_base(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let asked = path.clone();
+            let base = cx.background_executor().spawn(async move { git::base_text(&asked) }).await.map(std::sync::Arc::<str>::from);
+            let _ = this.update(cx, |this, cx| {
+                for ed in this.file_editor.iter_mut().chain(this.file_parked.iter_mut()).filter(|ed| ed.path == path) {
+                    if ed.base != base {
+                        ed.base = base.clone();
+                        ed.marks_due = true;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A click on a mark in the margin: the change it stands for, the
+    /// lines git has beside the lines there now, on a card at the click
+    /// (`render_file_peek`). Not while the marks are behind the text:
+    /// the place would be another's.
+    fn open_file_peek(&mut self, id: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(ed) = self.file_editor.as_ref().filter(|ed| !ed.marks_due && !ed.marks_busy) else { return };
+        let (Some(hunk), Some(base)) = (ed.hunks.get(id), ed.base.as_ref()) else { return };
+        let text = ed.state.read(cx).value().to_string();
+        let (bytes, new) = git::lines_of(&text, &hunk.new);
+        let old = git::lines_of(base, &hunk.old).1;
+        self.file_peek = Some(FilePeek { old, new, bytes, at, can_revert: ed.saved.is_some() });
+        self.file_peek_serial += 1;
+        cx.notify();
+    }
+
+    /// Put git's lines back where the change showing is, as one step of
+    /// undo, and put the card away.
+    pub(crate) fn revert_file_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(peek) = self.file_peek.take() else { return };
+        if let Some(ed) = self.file_editor.as_ref().filter(|ed| ed.saved.is_some()) {
+            // Still the text the card was opened on.
+            if ed.state.read(cx).value().get(peek.bytes.clone()) == Some(peek.new.as_str()) {
+                ed.state.update(cx, |s, cx| {
+                    s.replace_bytes(peek.bytes.clone(), &peek.old, peek.bytes.start, window, cx);
+                    s.focus(window, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// The card a mark in the margin opens, as VS Code's does in its
+    /// own way: what git has there in red, what is there now in green,
+    /// and Revert, which puts git's back. Over the file's pane, under
+    /// the click or over it; a click off it or Escape puts it away.
+    pub(crate) fn render_file_peek(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(peek) = self.file_peek.clone() else { return div().into_any_element() };
+        let view = window.viewport_size();
+        let pane = self.file_pane_bounds().unwrap_or(Bounds::new(point(px(0.), px(0.)), view));
+        let card_w = (pane.size.width - px(24.)).min(px(620.)).max(px(220.));
+        let left = (pane.left() + px(12.)).min(view.width - card_w - px(8.)).max(px(8.));
+        let up = peek.at.y > view.height * 0.6;
+        let (scroll, _) = self.kept_scroll(format!("file-peek-{}", self.file_peek_serial).into(), crate::workbench::Inner::Over);
+        let (red, green) = (gpui::rgb(0xF85149), gpui::rgb(0x2EA043));
+        let side = |text: &str, sign: &'static str, ink: gpui::Rgba| {
+            let wash: Hsla = ink.into();
+            v_flex().w_full().children(text.split_inclusive('\n').map(|line| {
+                let line = line.trim_end_matches(['\n', '\r']);
+                h_flex().w_full().items_start().bg(wash.opacity(0.13)).child(div().w(px(18.)).flex_shrink_0().text_center().text_color(wash).child(sign)).child(div().flex_1().min_w_0().child(if line.is_empty() { " ".to_string() } else { line.to_string() }))
+            }))
+        };
+        let title = match (peek.old.is_empty(), peek.new.is_empty()) {
+            (true, _) => "Added",
+            (_, true) => "Removed",
+            _ => "Changed",
+        };
+        let card = v_flex()
+            .id(("file-peek", self.file_peek_serial as usize))
+            .absolute()
+            .left(left)
+            .w(card_w)
+            .map(|d| if up { d.bottom(view.height - peek.at.y + px(10.)) } else { d.top(peek.at.y + px(12.)) })
+            .rounded(px(10.))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(float_shadow(&theme))
+            .overflow_hidden()
+            .on_click(|_, window, cx| swallow_click(window, cx))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                h_flex()
+                    .w_full()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .gap(px(8.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .bg(theme.muted.opacity(0.4))
+                    .child(div().flex_1().min_w_0().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(format!("{title}, against git's copy")))
+                    .when(peek.can_revert, |d| {
+                        d.child(Button::new("file-peek-revert").outline().xsmall().label("Revert").on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.revert_file_peek(window, cx)
+                        })))
+                    })
+                    .child(Button::new("file-peek-close").ghost().xsmall().icon(Icon::new(IconName::Close)).on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.file_peek = None;
+                        cx.notify();
+                    }))),
+            )
+            .child(
+                v_flex().relative().w_full().child(
+                    v_flex()
+                        .id(("file-peek-lines", self.file_peek_serial as usize))
+                        .w_full()
+                        .max_h(px(280.))
+                        .overflow_y_scroll()
+                        .track_scroll(&scroll)
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(px(11.5))
+                        .line_height(px(17.))
+                        .when(!peek.old.is_empty(), |d| d.child(side(&peek.old, "−", red)))
+                        .when(!peek.new.is_empty(), |d| d.child(side(&peek.new, "+", green))),
+                )
+                .vertical_scrollbar(&scroll),
+            )
+            .with_animation(ElementId::Name(format!("file-peek-in-{}", self.file_peek_serial).into()), Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()), move |d, t| d.opacity(t).map(|d| if up { d.mb(px(-5. * (1. - t))) } else { d.mt(px(-5. * (1. - t))) }));
+        div()
+            .id("file-peek-sheet")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.file_peek = None;
+                    cx.notify();
+                }),
+            )
+            .child(card)
+            .into_any_element()
+    }
+
+    /// The marks in the editor's margin, as VS Code has them: a green
+    /// bar beside lines git does not have, a blue one beside lines that
+    /// differ, a red wedge where lines were taken out. They compare
+    /// what the editor holds, saved or not, with git's copy of the file
+    /// (`git::line_marks`), worked out off the main thread, one working
+    /// at a time, again when the text or git's copy changes.
+    fn sync_file_marks(&mut self, cx: &mut Context<Self>) {
+        let Some(ed) = self.file_editor.as_mut().filter(|ed| ed.marks_due && !ed.marks_busy) else { return };
+        ed.marks_due = false;
+        let (state, base) = (ed.state.clone(), ed.base.clone());
+        let Some(base) = base else {
+            state.update(cx, |s, cx| s.set_gutter_marks(Vec::new(), cx));
+            return;
+        };
+        ed.marks_busy = true;
+        let text = state.read(cx).value().to_string();
+        cx.spawn(async move |this, cx| {
+            let hunks = cx.background_executor().spawn(async move { git::line_hunks(&base, &text) }).await;
+            let _ = this.update(cx, |this, cx| {
+                let marks = git::hunk_marks(&hunks)
+                    .iter()
+                    .map(|(id, m)| {
+                        let color: Hsla = match m.kind {
+                            git::LineChange::Added => gpui::rgb(0x2EA043),
+                            git::LineChange::Modified => gpui::rgb(0x0078D4),
+                            git::LineChange::Deleted => gpui::rgb(0xF85149),
+                        }
+                        .into();
+                        gpui_component::input::GutterMark { id: *id, lines: m.line..m.line + m.lines, color, gone: m.kind == git::LineChange::Deleted }
+                    })
+                    .collect();
+                state.update(cx, |s, cx| s.set_gutter_marks(marks, cx));
+                for ed in this.file_editor.iter_mut().chain(this.file_parked.iter_mut()).filter(|ed| ed.state == state) {
+                    ed.marks_busy = false;
+                    ed.hunks = hunks.clone();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Everything typed into a file and not saved, written to
@@ -2158,6 +2395,7 @@ impl Workbench {
             }
         }
         self.tree.read_at = 0.;
+        self.read_file_base(path.clone(), cx);
         if let Some(why) = unformatted {
             self.notice = Some(Notice::error(format!("{name} is saved but not formatted: {why}.")));
         }
@@ -4329,6 +4567,14 @@ impl Workbench {
             "file:save" => self.pending_save = true,
             // Answer the question a file with changes not saved asks,
             // and press Quit.
+            // Open the change at a mark (from 0) on a card, and revert it.
+            t if t.starts_with("file:peek:") => {
+                if let Ok(id) = t["file:peek:".len()..].parse::<usize>() {
+                    let at = self.file_view_scroll.bounds().origin + point(px(40.), px(90.));
+                    self.open_file_peek(id, at, cx);
+                }
+            }
+            "file:revert" => self.pending_revert = true,
             "file:ask:save" => self.pending_answer = Some(FileAnswer::Save),
             "file:ask:discard" => self.pending_answer = Some(FileAnswer::Discard),
             "file:ask:cancel" => self.pending_answer = Some(FileAnswer::Cancel),

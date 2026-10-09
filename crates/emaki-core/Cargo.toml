@@ -23,6 +23,10 @@ portable-pty = "0.9"
 # English grammar and spelling for the composer, offline and in process.
 harper-core = { version = "2.11", default-features = false, features = ["concurrent"] }
 
+# Which lines of a file differ from what git has, for the marks beside
+# the file's editor. Already in the tree by way of other crates.
+similar = "2"
+
 # Air, Posit's formatter for R, in the process: an R file saved from the
 # file's pane is formatted as Air's own extension formats one on save.
 # Not on crates.io; the revision is the pin. The parser is the copy in

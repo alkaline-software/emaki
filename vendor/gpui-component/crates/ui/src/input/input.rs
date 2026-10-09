@@ -407,19 +407,21 @@ impl RenderOnce for Input {
                 editor_invisible: cx.theme().highlight_theme.style.editor_invisible,
                 editor_active_line: cx.theme().highlight_theme.style.editor_active_line,
                 editor_gutter_background: cx.theme().highlight_theme.style.editor_gutter_background,
-                fold_icon_renderer: Some(Rc::new(|ix, is_folded| {
-                    Button::new(("fold-icon", ix))
-                        .ghost()
-                        .icon(if is_folded {
+                // A plain mark, as VS Code's is: no plate under the
+                // pointer and none on a folded one. Upstream's was a
+                // ghost button. (Emaki addition.)
+                fold_icon_renderer: Some(Rc::new({
+                    let ink = cx.theme().muted_foreground;
+                    move |_, is_folded| {
+                        crate::Icon::new(if is_folded {
                             IconName::ChevronRight
                         } else {
                             IconName::ChevronDown
                         })
-                        .xsmall()
-                        .rounded_xs()
-                        .size(px(14.))
-                        .selected(is_folded)
+                        .with_size(px(14.))
+                        .text_color(ink)
                         .into_any_element()
+                    }
                 })),
             },
             cx,

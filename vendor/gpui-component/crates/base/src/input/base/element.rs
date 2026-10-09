@@ -48,9 +48,25 @@ fn diagnostic_highlight_style(
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
 pub(super) const RIGHT_MARGIN: Pixels = px(10.);
-pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
+// With fold marks the chevron's own box is the room before the text;
+// without them `PLAIN_GUTTER_GAP` is added, to upstream's ten points.
+// (Emaki: upstream 10, which with the marks' lane and the fold marks
+// stood the text 42 points off its line numbers; VS Code has 28.)
+pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(2.);
+const PLAIN_GUTTER_GAP: Pixels = px(8.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
-const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
+/// Room between the line numbers and the fold marks for the
+/// application's marks (`GutterMark`), so a bar stands clear of both.
+/// (Emaki addition.)
+const MARK_LANE: Pixels = px(13.);
+/// The strip at a code editor's right edge that its scrollbar runs in,
+/// with the application's marks and the cursor's line shown small down
+/// it. (Emaki addition.)
+pub(super) const RULER_WIDTH: Pixels = px(12.);
+/// How long the fold marks take to come and go with the pointer.
+/// (Emaki addition.)
+const FOLD_FADE: f32 = 0.15;
+const FOLD_ICON_HITBOX_WIDTH: Pixels = px(14.);
 const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
 const FOLD_CHEVRON_RIGHT_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
 const FOLD_CHEVRON_DOWN_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
@@ -228,6 +244,7 @@ impl<M: InputModeKind> Element for EditorScrollbar<M> {
             return None;
         };
         let scroll_handle = state.scroll_handle.clone();
+        let code_editor = state.is_code_editor();
 
         if scroll_handle.offset() != snapshot.cursor_scroll_offset {
             scroll_handle.set_offset(snapshot.cursor_scroll_offset);
@@ -240,6 +257,18 @@ impl<M: InputModeKind> Element for EditorScrollbar<M> {
         }
         .viewport_bounds(snapshot.layout.bounds)
         .scroll_size(snapshot.layout.scroll_size)
+        .click_when_hidden(code_editor)
+        // A code editor's bar is the width of the strip it runs in, over
+        // the marks shown there (Emaki addition).
+        .styles(|s| {
+            if code_editor {
+                // Square, its corners eased, as an editor's is.
+                let wide = |t: crate::scrollbar::ScrollbarThumbStyle| t.width(RULER_WIDTH).inset(px(0.)).radius(px(3.));
+                s.thumb(wide).thumb_hover(wide).thumb_active(wide)
+            } else {
+                s
+            }
+        })
         .into_any_element();
 
         scrollbar.prepaint_as_root(
@@ -980,8 +1009,11 @@ impl<M: InputModeKind> TextElement<M> {
         };
 
         if state.mode.is_folding() {
-            // Add extra space for fold icons
-            line_number_width += FOLD_ICON_HITBOX_WIDTH
+            // Add extra space for fold icons, and for the marks before
+            // them (Emaki addition).
+            line_number_width += FOLD_ICON_HITBOX_WIDTH + MARK_LANE
+        } else if state.is_code_editor() {
+            line_number_width += PLAIN_GUTTER_GAP
         }
 
         (line_number_width, line_number_len)
@@ -1161,6 +1193,7 @@ impl<M: InputModeKind> TextElement<M> {
             icons: vec![],
         };
 
+        let fold_fade = fold_fade_value(&self.state.read(cx).fold_fade);
         let fold_infos: Vec<FoldInfo> = {
             let state = self.state.read(cx);
             if !state.mode.is_folding() {
@@ -1242,9 +1275,14 @@ impl<M: InputModeKind> TextElement<M> {
                     .size(FOLD_ICON_WIDTH)
                     .into_any_element()
                 });
+            // A mark that is not folded shows while the pointer is in the
+            // margin, and comes and goes over a moment (Emaki addition).
+            let fade = if info.is_folded { 1. } else { fold_fade };
             let mut icon = gpui::div()
                 .id(("fold", ix))
                 .size(FOLD_ICON_WIDTH)
+                .cursor_pointer()
+                .opacity(fade)
                 .child(child)
                 .on_mouse_down(MouseButton::Left, {
                     let state = self.state.clone();
@@ -1252,10 +1290,7 @@ impl<M: InputModeKind> TextElement<M> {
                     move |_, _: &mut Window, cx: &mut App| {
                         cx.stop_propagation();
 
-                        state.update(cx, |state, cx| {
-                            state.display_map.toggle_fold(buffer_line);
-                            cx.notify();
-                        });
+                        state.update(cx, |state, cx| state.toggle_fold_moving(buffer_line, cx));
                     }
                 })
                 .into_any_element();
@@ -1285,15 +1320,32 @@ impl<M: InputModeKind> TextElement<M> {
     fn paint_fold_icons(
         &mut self,
         fold_icon_layout: &mut FoldIconLayout,
-        current_row: Option<usize>,
+        moving_from: Option<usize>,
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Shown while the pointer is in the margin, as VS Code has them,
+        // and a folded one always. They fade in and out: the pointer's
+        // coming or going is noted here, and the marks are drawn at the
+        // strength that calls for until the fade is done (Emaki
+        // addition; upstream showed them at once, and on the cursor's
+        // line too).
         let is_hovered = fold_icon_layout.line_number_hitbox.is_hovered(window);
-        for (display_row, is_folded, icon) in fold_icon_layout.icons.iter_mut() {
-            let is_current_line = current_row == Some(*display_row);
-
-            if !is_hovered && !is_current_line && !*is_folded {
+        let fade = self.state.read(cx).fold_fade.clone();
+        let (shown, since) = fade.get();
+        if shown != is_hovered {
+            // Turned round part way, it goes back from where it was.
+            let done = since.map(|at| (at.elapsed().as_secs_f32() / FOLD_FADE).min(1.)).unwrap_or(1.);
+            fade.set((is_hovered, Some(std::time::Instant::now() - std::time::Duration::from_secs_f32(FOLD_FADE * (1. - done)))));
+            window.request_animation_frame();
+        } else if since.is_some_and(|at| at.elapsed().as_secs_f32() < FOLD_FADE) {
+            window.request_animation_frame();
+        }
+        let strength = fold_fade_value(&fade);
+        for (row, is_folded, icon) in fold_icon_layout.icons.iter_mut() {
+            // Under a fold that is moving the marks are not where their
+            // lines are for that moment.
+            if (strength <= 0. && !*is_folded) || moving_from.is_some_and(|from| *row >= from) {
                 continue;
             }
 
@@ -2118,6 +2170,38 @@ impl<M: InputModeKind> Element for TextElement<M> {
             editor_style.background
         };
 
+        // A fold opening or closing (Emaki addition): where its lines
+        // are covered from, and how far the lines under them have still
+        // to go.
+        let fold_move = self.state.read(cx).fold_anim.get().and_then(|a| {
+            let t = a.at.elapsed().as_secs_f32() / super::state::FOLD_MOVE;
+            if t >= 1. {
+                return None;
+            }
+            let eased = 1. - (1. - t).powi(3);
+            // Closing: the fold's lines are gone, and the lines under
+            // them come up from where they were.
+            if a.closing {
+                return Some(FoldMove { first: a.first, last: a.last, clip_y: origin.y, dy: a.tall * (1. - eased) });
+            }
+            let shown = eased;
+            let (mut y, mut top, mut tall) = (invisible_top_padding, None, px(0.));
+            for (line, &buffer_line) in prepaint.last_layout.lines.iter().zip(prepaint.last_layout.visible_buffer_lines.iter()) {
+                let height = line.size(line_height).height;
+                if buffer_line >= a.first && buffer_line <= a.last {
+                    top.get_or_insert(y);
+                    tall += height;
+                }
+                y += height;
+            }
+            Some(FoldMove { first: a.first, last: a.last, clip_y: origin.y + top? + tall * shown, dy: -(tall * (1. - shown)) })
+        });
+        if fold_move.is_some() {
+            window.request_animation_frame();
+        }
+        let moving = fold_move.is_some();
+        let covered = |clip_y: Pixels| gpui::ContentMask { bounds: Bounds::from_corners(input_bounds.origin, point(input_bounds.right(), clip_y.max(input_bounds.top()))) };
+
         // Paint active line
         let mut offset_y = px(0.);
         if let Some(line_numbers) = prepaint.line_numbers.as_ref() {
@@ -2129,10 +2213,11 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
             {
                 let is_active = prepaint.current_row == Some(buffer_line);
-                let p = point(input_bounds.origin.x, origin.y + offset_y);
+                let (dy, clip) = FoldMove::place(&fold_move, buffer_line);
+                let p = point(input_bounds.origin.x, origin.y + offset_y + dy);
                 let height = line_height * lines.len() as f32;
                 // Paint the current line background
-                if is_active {
+                if is_active && clip.is_none() {
                     if let Some(bg_color) = active_line_color {
                         window.paint_quad(fill(
                             Bounds::new(p, size(bounds.size.width, height)),
@@ -2145,12 +2230,12 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         // Paint indent guides
-        if let Some(path) = prepaint.indent_guides_path.take() {
+        if let Some(path) = prepaint.indent_guides_path.take().filter(|_| !moving) {
             window.paint_path(path, editor_style.border.opacity(0.85));
         }
 
         // Paint selections
-        if window.is_window_active() {
+        if window.is_window_active() && !moving {
             let secondary_selection = Hsla {
                 s: 0.1,
                 ..editor_style.selection
@@ -2222,21 +2307,31 @@ impl<M: InputModeKind> Element for TextElement<M> {
             .zip(prepaint.last_layout.visible_buffer_lines.iter())
         {
             let row = buffer_line;
-            let line_y = origin.y + offset_y;
+            let (dy, clip) = FoldMove::place(&fold_move, buffer_line);
+            let line_y = origin.y + offset_y + dy;
             let p = point(
                 origin.x + prepaint.last_layout.line_number_width + (scroll_offset),
                 line_y,
             );
 
-            // Paint the actual line
-            _ = line.paint(
-                p,
-                line_height,
-                text_align,
-                Some(prepaint.last_layout.content_width),
-                window,
-                cx,
-            );
+            // Paint the actual line; one a moving fold covers, as far
+            // as it is not covered yet.
+            match clip {
+                Some(clip_y) if line_y >= clip_y => {}
+                Some(clip_y) => window.with_content_mask(Some(covered(clip_y)), |window| {
+                    _ = line.paint(p, line_height, text_align, Some(prepaint.last_layout.content_width), window, cx);
+                }),
+                None => {
+                    _ = line.paint(
+                        p,
+                        line_height,
+                        text_align,
+                        Some(prepaint.last_layout.content_width),
+                        window,
+                        cx,
+                    );
+                }
+            }
             if let (Some(dots), Some(last)) = (fold_dots.as_ref().filter(|_| folded_rows.contains(&row)), line.wrapped_lines.last()) {
                 let below = line.wrapped_lines.len() - 1;
                 let indent = if below > 0 { line.wrap_indent } else { px(0.) };
@@ -2281,7 +2376,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         // Paint blinking cursor
-        if focused && show_cursor {
+        if focused && show_cursor && !moving {
             if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
                 window.paint_quad(fill(cursor_bounds, editor_style.caret));
             }
@@ -2307,13 +2402,75 @@ impl<M: InputModeKind> Element for TextElement<M> {
             );
             window.paint_quad(fill(gutter_bounds, gutter_bg));
 
+            // The application's marks, between the numbers and the fold
+            // marks: a bar down each marked line, a wedge where lines
+            // were taken out. (Emaki addition.)
+            let (gutter_marks, folding, last_line, clickable) = {
+                let state = self.state.read(cx);
+                (state.gutter_marks.clone(), state.mode.is_folding(), state.text.lines_len().saturating_sub(1), state.gutter_click.is_some())
+            };
+            // A click on a mark is the application's, before the margin's
+            // own (a fold, a line): the mark is three points wide, so a
+            // little to each side counts.
+            let mark_click = |hit: Bounds<Pixels>, id: usize, window: &mut Window| {
+                if !clickable {
+                    return;
+                }
+                let state = self.state.clone();
+                window.on_mouse_event(move |ev: &gpui::MouseDownEvent, phase, window, cx| {
+                    if phase == gpui::DispatchPhase::Capture && ev.button == MouseButton::Left && hit.contains(&ev.position) {
+                        if let Some(click) = state.read(cx).gutter_click.clone() {
+                            cx.stop_propagation();
+                            click(id, ev.position, window, cx);
+                        }
+                    }
+                });
+            };
+            // The same marks small along the right edge, where the
+            // scrollbar runs: where in the whole file the changes are.
+            // By row as drawn, wrapped lines counted, which is what the
+            // scrollbar's thumb goes by. A file shorter than the view is
+            // not stretched to fill it: a row there is a row's height
+            // here too. The cursor's line is a thin grey line across the
+            // strip.
+            // The strip is where the scrollbar is (`EditorScrollbarLayout`:
+            // the editor's bounds and its padding), and a row is placed
+            // down it as the bar's thumb is: by its place in all that
+            // scrolls. The marks stand at the strip's left edge, inside
+            // the thumb when it is over them.
+            {
+                let state = self.state.read(cx);
+                let rows = state.display_map.display_row_count().max(1);
+                let row_of = |line: usize| if line > last_line { rows } else { state.display_map.buffer_line_to_display_row(line) };
+                let strip_top = input_bounds.top() - editor_paddings.top;
+                let strip_tall = input_bounds.size.height + editor_paddings.top + editor_paddings.bottom;
+                let per_row = strip_tall * (line_height / prepaint.scroll_size.height.max(strip_tall));
+                let ruler_x = input_bounds.right() + editor_paddings.right - RULER_WIDTH;
+                let y_of = |row: usize| strip_top + per_row * row as f32 + per_row * (editor_paddings.top / line_height);
+                for mark in &gutter_marks {
+                    let tall = (per_row * row_of(mark.lines.end).saturating_sub(row_of(mark.lines.start)) as f32).max(px(2.));
+                    window.paint_quad(fill(Bounds::new(point(ruler_x, y_of(row_of(mark.lines.start).min(rows - 1))), size(px(4.), tall)), mark.color.opacity(0.85)));
+                }
+                if let Some(row) = prepaint.current_row {
+                    window.paint_quad(fill(Bounds::new(point(ruler_x, y_of(row_of(row).min(rows - 1))), size(RULER_WIDTH, px(2.))), editor_style.foreground.opacity(0.4)));
+                }
+            }
+            // In the lane kept for them before the fold marks; with no
+            // fold marks, in the margin's own room.
+            let numbers_end = origin.x + prepaint.last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN;
+            let mark_x = if folding { numbers_end - FOLD_ICON_HITBOX_WIDTH - MARK_LANE + px(8.) } else { numbers_end + px(3.) };
+
             // Each item is the normal lines.
             for (lines, &buffer_line) in line_numbers
                 .iter()
                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
             {
-                let p = point(input_bounds.origin.x, origin.y + offset_y);
-                let is_active = prepaint.current_row == Some(buffer_line);
+                let (dy, clip) = FoldMove::place(&fold_move, buffer_line);
+                let p = point(input_bounds.origin.x, origin.y + offset_y + dy);
+                let is_active = prepaint.current_row == Some(buffer_line) && clip.is_none();
+                // A line a moving fold has covered is not in the margin
+                // either.
+                let hidden = clip.is_some_and(|clip_y| p.y >= clip_y);
 
                 let height = line_height * lines.len() as f32;
                 // paint active line number background
@@ -2329,8 +2486,27 @@ impl<M: InputModeKind> Element for TextElement<M> {
                     }
                 }
 
+                for mark in gutter_marks.iter().filter(|_| !hidden) {
+                    if mark.gone {
+                        // Past the last line, the wedge is at its foot.
+                        let below = mark.lines.start > last_line && buffer_line == last_line;
+                        if mark.lines.start == buffer_line || below {
+                            let y = if below { p.y + height } else { p.y };
+                            let mut wedge = gpui::Path::new(point(mark_x, y - px(4.)));
+                            wedge.line_to(point(mark_x + px(5.), y));
+                            wedge.line_to(point(mark_x, y + px(4.)));
+                            window.paint_path(wedge, mark.color);
+                            mark_click(Bounds::new(point(mark_x - px(4.), y - px(6.)), size(px(12.), px(12.))), mark.id, window);
+                        }
+                    } else if mark.lines.contains(&buffer_line) {
+                        window.paint_quad(fill(Bounds::new(point(mark_x, p.y), size(px(3.), height)), mark.color));
+                        mark_click(Bounds::new(point(mark_x - px(4.), p.y), size(px(11.), height)), mark.id, window);
+                    }
+                }
                 for line in lines {
-                    _ = line.paint(p, line_height, TextAlign::Left, None, window, cx);
+                    if !hidden {
+                        _ = line.paint(p, line_height, TextAlign::Left, None, window, cx);
+                    }
                     offset_y += line_height;
                 }
 
@@ -2344,7 +2520,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         // Paint fold icons (only visible on hover or for current line)
         self.paint_fold_icons(
             &mut prepaint.fold_icon_layout,
-            prepaint.current_row,
+            fold_move.as_ref().map(|m| m.first),
             window,
             cx,
         );
@@ -3069,5 +3245,37 @@ mod tests {
             cursor_surrounding_padding(false, None, visible_lines, line_height),
             raw.min(half),
         );
+    }
+}
+
+/// How strongly the fold marks show now, from none to full: the pointer
+/// came into the margin, or left it, `FOLD_FADE` ago at most. (Emaki
+/// addition.)
+fn fold_fade_value(fade: &std::cell::Cell<(bool, Option<std::time::Instant>)>) -> f32 {
+    let (shown, since) = fade.get();
+    let t = since.map(|at| (at.elapsed().as_secs_f32() / FOLD_FADE).min(1.)).unwrap_or(1.);
+    if shown { t } else { 1. - t }
+}
+
+/// A fold part way open or shut, as the painting needs it: the lines
+/// it shows (`first` to `last`) are drawn down to `clip_y` and no
+/// further, and every line under them `dy` off its place. (Emaki
+/// addition.)
+struct FoldMove {
+    first: usize,
+    last: usize,
+    clip_y: Pixels,
+    dy: Pixels,
+}
+
+impl FoldMove {
+    /// How far off its place a line of the buffer is drawn, and where
+    /// it is covered from, if it is one of the fold's own.
+    fn place(moving: &Option<FoldMove>, buffer_line: usize) -> (Pixels, Option<Pixels>) {
+        match moving {
+            Some(m) if buffer_line > m.last => (m.dy, None),
+            Some(m) if buffer_line >= m.first => (px(0.), Some(m.clip_y)),
+            _ => (px(0.), None),
+        }
     }
 }

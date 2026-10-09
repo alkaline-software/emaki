@@ -347,6 +347,43 @@ far from the tree.
     cannot parse is saved as typed and the row says it was not
     formatted. No other language has a formatter; do not write one by
     hand, take the language's own as Air was taken.
+- The editor's margin marks what differs from git's copy of the file,
+  as VS Code's does (`sync_file_marks`, the vendored `GutterMark`): a
+  green bar beside lines git does not have, a blue one beside lines
+  that differ, a red wedge where lines were taken out.
+  - They compare what the editor holds, saved or not, so a line is
+    marked as it is typed, with the index's copy (`git::base_text`:
+    `git show :./name`), which is the last commit's until something is
+    staged. A file git does not track has no marks.
+  - `git::line_marks` is `similar`'s line diff. A run that stands where
+    a shorter one stood is as many changed lines as there were, and the
+    rest new; marked "changed" whole, one line edited over two put in
+    read as three changed.
+  - Worked out off the main thread, one at a time, when the text
+    changes (the editor's `Change`, not its every notify: setting the
+    marks notifies too) or git's copy does, which is read again on the
+    tree's clock and after a save.
+  - The same marks run small down a strip at the editor's right edge:
+    where in the whole file the changes are, by row as wrapped, with
+    the cursor's line a thin grey line across. A file shorter than the
+    view is not stretched to fill it. The editor's scrollbar runs in
+    that strip and is as wide as it, over the marks, as VS Code's is.
+    It is the one scrollbar in the window that is not the usual width;
+    its fade is the same.
+  - In the margin the marks have a lane of their own between the line
+    numbers and the fold marks. The fold marks are plain chevrons with
+    no plate under the pointer, shown while the pointer is in the
+    margin and fading in and out, and a click on one opens or closes
+    the fold in motion: the lines under it slide to where they are
+    going. All of it is in the vendored editor (`UPSTREAM.md`, 20).
+  - A click on a mark opens that change on a card at the click
+    (`open_file_peek`, `render_file_peek`): git's lines in red over the
+    lines there now in green, and Revert, which puts git's lines back
+    as one step of undo (`git::lines_of` cuts both out whole). VS Code
+    opens it inside the text; the toolkit's editor has no room between
+    two lines to open, so it is a card over the pane. A mark's `id` is
+    its place among `FileEditor::hunks`, and a click while the marks
+    are behind the text opens nothing.
 - What shows two ways has two segments in the head, as it reads and as
   it is written (`two_ways`, `file_raw`, one choice for all of them):
   markdown; HTML (`FileBody::Html`, the toolkit's HTML view: words,

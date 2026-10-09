@@ -130,6 +130,51 @@ upstream revision finds them.
     indent from it (`asked_indent`). Upstream repeats the indent of the
     line above, which is wrong after Python's `:` or an opening bracket.
 
+19. `crates/base/src/input/base/state.rs`, `element.rs`,
+    `crates/ui/src/input/mod.rs`: `GutterMark` and `set_gutter_marks`, a
+    bar or a wedge in a code editor's margin between the line numbers
+    and the fold marks, in a colour the application gives, and the same
+    marks small along the editor's right edge. A click on one is handed
+    to the application with the mark's `id` (`set_gutter_click`), taken
+    in the capture phase so the margin's own click does not also run.
+    Upstream's margin has numbers and folds only.
+
+20. `crates/base/src/input/base/element.rs`, `state.rs`,
+    `editor/display_map/display_map.rs`, `crates/ui/src/input/input.rs`:
+    a code editor's margin and right edge, as VS Code has them.
+    - `MARK_LANE`: room between the line numbers and the fold marks, so
+      a `GutterMark` stands clear of both. The margin is otherwise
+      drawn in: `LINE_NUMBER_RIGHT_MARGIN` 2 and the fold mark's box 14
+      (upstream 10 and 18), so the text starts 29 points after its line
+      number, as VS Code's does; an editor with no fold marks keeps
+      upstream's ten (`PLAIN_GUTTER_GAP`).
+    - The fold marks are plain chevrons (upstream: ghost buttons with a
+      plate under the pointer and on a folded one), shown while the
+      pointer is in the margin and not on the cursor's line, and they
+      fade in and out (`fold_fade`, `FOLD_FADE`).
+    - A click on one moves the fold (`toggle_fold_moving`, `FoldAnim`,
+      `FoldMove`) over `FOLD_MOVE`. Opening, its lines are uncovered
+      from their head while the lines under them slide down. Closing,
+      its lines go at once and the lines under them slide up from where
+      they were: the editor lays out only what is in view, so the lines
+      a long fold brings into view are not there to draw until it is
+      made. The cursor, the selection and the indent guides are not
+      drawn for that moment.
+    - `RULER_WIDTH`: a code editor's scrollbar is that wide and square
+      with eased corners, and under it, in the same strip and placed as
+      its thumb is, the marks are drawn by row as wrapped, with the
+      cursor's line a thin line across.
+    - `crates/base/src/scrollbar.rs`: a click on the track puts the
+      thumb's middle on the click all the way down (upstream scaled by
+      everything that scrolls, not by what there is to scroll, and
+      overshot more the lower the click), for every scrollbar; and
+      `click_when_hidden`, which the code editor sets, takes that click
+      when the bar has faded too.
+    - A markdown `list` node is not a fold candidate
+      (`crates/ui/src/highlighter/input_adapter.rs`): it starts on the
+      line its first item does, and upstream's one-candidate-a-line
+      folded the whole list from that item's mark.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply
