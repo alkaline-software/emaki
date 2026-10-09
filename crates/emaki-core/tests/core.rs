@@ -1810,6 +1810,7 @@ fn git_marks_files_and_the_folders_that_hold_them() {
     std::fs::remove_dir(root.join(".git")).unwrap();
     run(&["init", "-q"]);
     assert_eq!(git::trouble(&root), None);
+    assert_eq!(git::base_text(&root.join("nothing.txt")), None, "a file git does not have has nothing to compare with");
     std::fs::create_dir_all(root.join("src/deep")).unwrap();
     std::fs::create_dir_all(root.join("docs")).unwrap();
     std::fs::write(root.join("src/deep/a.rs"), "a").unwrap();
@@ -2271,4 +2272,70 @@ fn a_notebook_reads_as_markdown() {
     assert!(md.starts_with("# Title\nSome words.\n\n**In [3]**\n\n```python\nprint('hi')\n```\n\n```text\nhi\n```\n\n```text\n42\n```\n\n*A picture."), "{md}");
     assert!(emaki_core::files::notebook_markdown("{\"a\": 1}").is_none());
     assert!(emaki_core::files::notebook_markdown("not json").is_none());
+}
+
+#[test]
+fn changed_lines_are_marked_against_what_git_has() {
+    use emaki_core::git::{self, line_marks, LineChange::*, LineMark};
+    let base = "one\ntwo\nthree\nfour\nfive\n";
+    assert_eq!(line_marks(base, base), vec![]);
+    // Two lines put in after the first: lines 1 and 2 are new.
+    assert_eq!(line_marks(base, "one\n\nnew\ntwo\nthree\nfour\nfive\n"), vec![LineMark { line: 1, lines: 2, kind: Added }]);
+    // A line changed, and one taken out further down: the place it was
+    // taken from is the top of the line now there.
+    assert_eq!(line_marks(base, "one\nTWO\nthree\nfive\n"), vec![LineMark { line: 1, lines: 1, kind: Modified }, LineMark { line: 3, lines: 0, kind: Deleted }]);
+    // Lines that stand where fewer stood: as many are changed as there
+    // were, and the rest are new. Where more stood, the rest were taken
+    // out, after the changed ones.
+    assert_eq!(line_marks("a\n\nb\n", "A\n\nnew\n\nb\n"), vec![LineMark { line: 0, lines: 1, kind: Modified }, LineMark { line: 1, lines: 2, kind: Added }]);
+    assert_eq!(line_marks("a\nb\nc\nd\n", "X\nd\n"), vec![LineMark { line: 0, lines: 1, kind: Modified }, LineMark { line: 1, lines: 0, kind: Deleted }]);
+    // The last line taken out: the place is past the end.
+    assert_eq!(line_marks(base, "one\ntwo\nthree\nfour\n"), vec![LineMark { line: 4, lines: 0, kind: Deleted }]);
+    // A place is the lines on both sides, and those lines can be cut
+    // out whole: what a revert puts back, and where.
+    let now = "one\nTWO\nthree\nfive\n";
+    let hunks = git::line_hunks(base, now);
+    assert_eq!(hunks, vec![git::Hunk { old: 1..2, new: 1..2 }, git::Hunk { old: 3..4, new: 3..3 }]);
+    assert_eq!(git::lines_of(base, &hunks[0].old), (4..8, "two\n".to_string()));
+    assert_eq!(git::lines_of(now, &hunks[1].new), (14..14, String::new()));
+    assert_eq!(git::lines_of(base, &hunks[1].old).1, "four\n");
+    assert_eq!(git::lines_of("a\nb", &(1..2)), (2..3, "b".to_string()));
+    assert_eq!(git::lines_of("a\n", &(5..6)), (2..2, String::new()));
+    // What git has is the index: the commit's, then what is staged.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&root).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap().status.success());
+    run(&["init", "-q"]);
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/a.txt"), base).unwrap();
+    assert_eq!(git::base_text(&root.join("sub/a.txt")), None);
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "one"]);
+    std::fs::write(root.join("sub/a.txt"), "changed\n").unwrap();
+    assert_eq!(git::base_text(&root.join("sub/a.txt")).as_deref(), Some(base));
+    run(&["add", "."]);
+    assert_eq!(git::base_text(&root.join("sub/a.txt")).as_deref(), Some("changed\n"));
+}
+
+#[test]
+fn a_sentence_left_small_is_marked() {
+    use emaki_core::check::{capitals, keep, Kind};
+    let found = |text: &str| capitals(text).into_iter().map(|i| (text[i.range.clone()].to_string(), i.fixes)).collect::<Vec<_>>();
+    // The start of the message, of a line, and after a full stop: each
+    // word left small is marked, and the capital is what is offered.
+    assert_eq!(found("solved. Now let's move on."), vec![("solved".to_string(), vec!["Solved".to_string()])]);
+    assert_eq!(found("Done. now this.\nand this"), vec![("now".to_string(), vec!["Now".to_string()]), ("and".to_string(), vec!["And".to_string()])]);
+    // Not where a sentence goes on, not in code, and not a word that
+    // already has its capital.
+    assert_eq!(found("Use e.g. apples, i.e. fruit... and so on"), vec![]);
+    assert_eq!(found("Run `cargo build`. Then `x`."), vec![]);
+    assert_eq!(found("```\nlet x = 1;\n```\n"), vec![]);
+    assert_eq!(found("- one\n- two"), vec![]);
+    // It is a grammar mark with a rule of its own, so Ignore keeps it
+    // away, and a command or a path at a line's start is not prose.
+    let all = capitals("solved. Now");
+    assert!(all[0].kind == Kind::Grammar && all[0].rule == "SentenceCapital");
+    let ignored: std::collections::HashSet<String> = [emaki_core::check::ignore_key("SentenceCapital", "solved")].into();
+    assert!(keep("solved. Now", capitals("solved. Now"), &Default::default(), &ignored).is_empty());
+    assert!(keep("src/main.rs is the file", capitals("src/main.rs is the file"), &Default::default(), &Default::default()).is_empty());
 }

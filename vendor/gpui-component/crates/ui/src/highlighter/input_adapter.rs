@@ -211,7 +211,14 @@ fn extract_fold_ranges_in_range(
         if end.saturating_sub(start) < 2 {
             return;
         }
-        ranges.push(FoldRange::new(start, end));
+        // A markdown list is not a fold of its own: it starts on the
+        // line its first item does, one mark stands there, and that
+        // mark is the item's, as every other item's is. With the list
+        // kept, the first item's mark folded every item. (Emaki
+        // addition.)
+        if node.kind() != "list" {
+            ranges.push(FoldRange::new(start, end));
+        }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             collect(child, bytes, ranges);

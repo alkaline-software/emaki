@@ -7,6 +7,7 @@
 //! path under one takes its state.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -755,4 +756,110 @@ pub fn parse_diff(text: &str) -> Diff {
         }
     }
     d
+}
+
+/// How a run of lines in a file differs from what git has of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineChange {
+    /// Lines git does not have.
+    Added,
+    /// Lines that stand where others stood.
+    Modified,
+    /// Lines git has that are gone from here: the mark is a place, the
+    /// top of `line`, and takes no lines up.
+    Deleted,
+}
+
+/// One run of changed lines: where it starts (from 0), how many lines
+/// it is (none for `Deleted`), and how it changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineMark {
+    pub line: usize,
+    pub lines: usize,
+    pub kind: LineChange,
+}
+
+/// What git has of a file to compare it with: the copy in the index,
+/// which is the last commit's until something is staged. VS Code's
+/// editor marks a file against the same thing. `None` for a file git
+/// does not track, or one in no repository: nothing to compare with,
+/// and no marks.
+pub fn base_text(file: &Path) -> Option<String> {
+    let (dir, name) = (file.parent()?, file.file_name()?.to_str()?);
+    let out = git(dir, &["show", &format!(":./{name}")])?;
+    String::from_utf8(out).ok()
+}
+
+/// One place a file differs from git's copy: the lines git has there
+/// and the lines that stand there now (either may be none), by line
+/// from 0. Lines are counted as `str::split_inclusive('\n')` cuts them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunk {
+    pub old: Range<usize>,
+    pub new: Range<usize>,
+}
+
+/// Where `now` differs from `base`, line by line (Myers', by `similar`).
+pub fn line_hunks(base: &str, now: &str) -> Vec<Hunk> {
+    use similar::DiffOp;
+    similar::TextDiff::from_lines(base, now)
+        .ops()
+        .iter()
+        .filter_map(|op| match *op {
+            DiffOp::Equal { .. } => None,
+            DiffOp::Insert { old_index, new_index, new_len } => Some(Hunk { old: old_index..old_index, new: new_index..new_index + new_len }),
+            DiffOp::Delete { old_index, old_len, new_index } => Some(Hunk { old: old_index..old_index + old_len, new: new_index..new_index }),
+            DiffOp::Replace { old_index, old_len, new_index, new_len } => Some(Hunk { old: old_index..old_index + old_len, new: new_index..new_index + new_len }),
+        })
+        .collect()
+}
+
+/// The marks an editor's margin shows for those places, each with the
+/// place it belongs to: added, modified, and where lines were taken
+/// from.
+pub fn hunk_marks(hunks: &[Hunk]) -> Vec<(usize, LineMark)> {
+    let mut marks = Vec::new();
+    for (ix, h) in hunks.iter().enumerate() {
+        let (old_len, new_len) = (h.old.len(), h.new.len());
+        // Lines in the place of others, and not as many: as many as
+        // there were are changed, and what is over is new, or what is
+        // short was taken out. One run marked "changed" whole called
+        // three lines changed where one was and two were put in under
+        // it.
+        let both = old_len.min(new_len);
+        if both > 0 {
+            marks.push((ix, LineMark { line: h.new.start, lines: both, kind: LineChange::Modified }));
+        }
+        if new_len > both {
+            marks.push((ix, LineMark { line: h.new.start + both, lines: new_len - both, kind: LineChange::Added }));
+        } else if old_len > both {
+            marks.push((ix, LineMark { line: h.new.start + both, lines: 0, kind: LineChange::Deleted }));
+        }
+    }
+    marks
+}
+
+/// The lines of `now` that differ from `base`, as an editor marks them
+/// in its margin.
+pub fn line_marks(base: &str, now: &str) -> Vec<LineMark> {
+    hunk_marks(&line_hunks(base, now)).into_iter().map(|(_, mark)| mark).collect()
+}
+
+/// The lines `range` of a text, whole, with their line breaks, and
+/// where they are in it by byte.
+pub fn lines_of(text: &str, range: &Range<usize>) -> (Range<usize>, String) {
+    let mut at = 0;
+    let (mut from, mut to) = (text.len(), text.len());
+    for (ix, line) in text.split_inclusive('\n').enumerate() {
+        if ix == range.start {
+            from = at;
+        }
+        if ix == range.end {
+            to = at;
+            break;
+        }
+        at += line.len();
+    }
+    let from = from.min(to);
+    (from..to, text[from..to].to_string())
 }

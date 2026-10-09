@@ -44,7 +44,9 @@ window remembers.
     handle and nothing else. It shows while the scroller moves, stays one
     second after the last movement and fades over half a second (the
     vendored `scrollbar.rs`). No scroller goes without one and none draws
-    its own.
+    its own. The file editor's is that bar made as wide as the strip of
+    marks it runs over (`docs/panels.md`); nothing else changes its
+    width.
   - **A gesture belongs to the scroller it began in**, its momentum
     included, wherever the pointer is carried: it never scrolls anything
     else, and stops at that scroller's edge. So a scroller is known to

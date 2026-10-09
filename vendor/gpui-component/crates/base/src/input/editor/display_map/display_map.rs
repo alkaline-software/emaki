@@ -152,6 +152,12 @@ impl DisplayMap {
         self.fold_map.is_folded_at(start_line)
     }
 
+    /// The lines a fold at `start_line` would put away, if one can be
+    /// made there. (Emaki addition.)
+    pub fn fold_candidate_at(&self, start_line: usize) -> Option<FoldRange> {
+        self.fold_map.fold_candidates().iter().find(|r| r.start_line == start_line).copied()
+    }
+
     /// Check if a line is a fold candidate
     #[inline]
     pub fn is_fold_candidate(&self, start_line: usize) -> bool {

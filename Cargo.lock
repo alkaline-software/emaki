@@ -3067,6 +3067,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1_smol",
+ "similar",
  "tempfile",
  "unicode-normalization",
  "ureq",

@@ -123,6 +123,13 @@ window.
   paste, a draft coming back and an input method part way through a
   character (`composing`) are left as they are. A capital deleted and
   typed small again stays small.
+- A sentence left small is marked (`check::capitals`, a grammar mark
+  under the rule `SentenceCapital`, offering the capital): a word typed
+  small again after a slip looked the same as one meant small, and
+  nothing said so. Ignore is the choice to keep it small, and is kept
+  as any grammar Ignore is. It uses the places `capital` knows and is
+  added to every language's findings; Harper's own rule for this passes
+  over a short sentence.
 - `writing_sync` runs at every draw and notices a text set from outside a
   keystroke (setting the value is not a change event), so every such
   place is checked without knowing of it.

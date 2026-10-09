@@ -1149,6 +1149,12 @@ pub struct Workbench {
     pub(crate) file_ask: Option<crate::panels::FileAsk>,
     pub(crate) file_ask_serial: u64,
     pub(crate) file_ask_focus: FocusHandle,
+    /// The change a mark in the editor's margin opened, and a count for
+    /// its animation.
+    pub(crate) file_peek: Option<crate::panels::FilePeek>,
+    pub(crate) file_peek_serial: u64,
+    /// `EMAKI_GO=file:revert`, done at the next draw.
+    pub(crate) pending_revert: bool,
     /// What was typed into a file's editor and not saved, for a file
     /// that is not showing now: it is back when the file is.
     pub(crate) file_drafts: HashMap<PathBuf, crate::panels::Draft>,
@@ -2415,6 +2421,9 @@ impl Workbench {
             file_ask: None,
             file_ask_serial: 0,
             file_ask_focus: cx.focus_handle(),
+            file_peek: None,
+            file_peek_serial: 0,
+            pending_revert: false,
             file_drafts: crate::panels::load_drafts(),
             drafts_kept: crate::panels::load_drafts(),
             file_conflict: None,
@@ -5974,6 +5983,9 @@ impl Workbench {
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_ask.is_some() {
             self.file_answer(crate::panels::FileAnswer::Cancel, window, cx);
+        } else if self.file_peek.is_some() {
+            self.file_peek = None;
+            cx.notify();
         } else if self.pick.is_some() {
             self.close_pick(cx);
         } else if self.dialog_seen.is_some() && self.term_open.is_none() && !self.settings_open && !self.search_open && self.lightbox.is_none() && self.menu.is_none() {
@@ -8253,6 +8265,9 @@ impl Workbench {
         if std::mem::take(&mut self.pending_save) {
             self.save_file(window, cx);
         }
+        if std::mem::take(&mut self.pending_revert) {
+            self.revert_file_peek(window, cx);
+        }
         if let Some(answer) = self.pending_answer.take() {
             self.file_answer(answer, window, cx);
         }
@@ -9410,12 +9425,14 @@ impl Workbench {
             if this.read_with(cx, |this, _| this.check_serial != serial).unwrap_or(true) {
                 return;
             }
-            let found = if check::is_english(&language) {
+            let mut found = if check::is_english(&language) {
                 let (text, british) = (text.clone(), language == "en-GB");
                 cx.background_spawn(async move { check::english(&text, british) }).await
             } else {
                 crate::sys::spelling(&text, &language)
             };
+            // A sentence left small, in any of the languages.
+            found.extend(check::capitals(&text));
             let shown = this.update(cx, |this, cx| {
                 if this.check_serial != serial {
                     return false;
@@ -11044,6 +11061,7 @@ impl Render for Workbench {
             .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(self.render_rename(cx)))
             .when_some(self.branch_menu, |d, at| d.child(self.render_branch_menu(at, window, cx)))
             .when(self.branch_ask.is_some(), |d| d.child(self.render_branch_ask(cx)))
+            .when(self.file_peek.is_some(), |d| d.child(self.render_file_peek(window, cx)))
             .when(self.file_ask.is_some(), |d| d.child(self.render_file_ask(window, cx)))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))

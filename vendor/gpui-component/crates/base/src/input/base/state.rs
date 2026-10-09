@@ -119,6 +119,38 @@ pub enum InputEvent {
 
 pub(super) const CONTEXT: &str = "Input";
 
+/// A fold opening or closing: the lines it shows or puts away, since
+/// when, and which. Opening, the lines are uncovered from their head
+/// while the lines under them slide down to where they now are.
+/// Closing, the lines are gone at once and the lines under them slide
+/// up from where they were, `tall` lower: what was in view of the fold.
+/// (Emaki addition.)
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FoldAnim {
+    pub(super) first: usize,
+    pub(super) last: usize,
+    pub(super) at: std::time::Instant,
+    pub(super) closing: bool,
+    pub(super) tall: Pixels,
+}
+
+/// How long a fold takes to open or close. (Emaki addition.)
+pub(super) const FOLD_MOVE: f32 = 0.18;
+
+/// A mark in a code editor's margin, as an editor shows what changed
+/// in a file: a bar beside `lines` (of the buffer, from 0), or with
+/// `gone` a small wedge at the top of the line `lines` starts at, for
+/// lines that were taken out there. (Emaki addition.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct GutterMark {
+    /// The application's name for what the mark stands for, handed back
+    /// at a click on it.
+    pub id: usize,
+    pub lines: Range<usize>,
+    pub color: gpui::Hsla,
+    pub gone: bool,
+}
+
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some(CONTEXT)),
@@ -382,6 +414,16 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) silent_replace_text: bool,
     /// The application's rule for a new line's indent. (Emaki addition.)
     pub(super) next_line_indent: Option<Rc<dyn Fn(&str, &str) -> Option<String>>>,
+    /// Marks in the margin, between the line numbers and the text.
+    /// (Emaki addition.)
+    pub(super) gutter_marks: Vec<GutterMark>,
+    /// Whether the fold marks show (the pointer is in the margin) and
+    /// since when, for their fade. (Emaki addition.)
+    pub(super) fold_fade: Rc<std::cell::Cell<(bool, Option<std::time::Instant>)>>,
+    /// The fold moving now, if one is. (Emaki addition.)
+    pub(super) fold_anim: Rc<std::cell::Cell<Option<FoldAnim>>>,
+    /// What a click on one of them does. (Emaki addition.)
+    pub(super) gutter_click: Option<Rc<dyn Fn(usize, gpui::Point<Pixels>, &mut Window, &mut App)>>,
     /// A flag to indicate if we should emit InputEvents.
     pub(super) emit_events: bool,
 
@@ -647,6 +689,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             overlay_action_handler: None,
             silent_replace_text: false,
             next_line_indent: None,
+            gutter_marks: Vec::new(),
+            gutter_click: None,
+            fold_anim: Rc::new(std::cell::Cell::new(None)),
+            fold_fade: Rc::new(std::cell::Cell::new((false, None))),
             emit_events: true,
             _subscriptions,
             _pending_update: false,
@@ -919,8 +965,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Fold or unfold the section a line of the buffer heads, as a click
     /// on its mark in the gutter does, for a probe. (Emaki addition.)
     pub fn toggle_fold_at(&mut self, line: usize, cx: &mut Context<Self>) {
-        self.display_map.toggle_fold(line);
-        cx.notify();
+        self.toggle_fold_moving(line, cx);
     }
 
     /// Whether an input method is part way through a character: what is
@@ -1489,6 +1534,61 @@ impl<M: InputModeKind> InputBaseState<M> {
         let head = self.text.slice(from..start).to_string();
         let above = head.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
         rule(&before, above)
+    }
+
+    /// The marks in the margin, in place of what was there. Not moved
+    /// with the text: the application sets them again when it changes.
+    /// (Emaki addition.)
+    pub fn set_gutter_marks(&mut self, marks: Vec<GutterMark>, cx: &mut Context<Self>) {
+        if self.gutter_marks != marks {
+            self.gutter_marks = marks;
+            cx.notify();
+        }
+    }
+
+    /// A click on a fold mark: the fold opens or closes over a moment
+    /// (`FOLD_MOVE`, `FoldAnim`). (Emaki addition.)
+    pub(super) fn toggle_fold_moving(&mut self, line: usize, cx: &mut Context<Self>) {
+        if self.fold_anim.get().is_some_and(|a| a.at.elapsed().as_secs_f32() < FOLD_MOVE) {
+            return;
+        }
+        let Some(range) = self.display_map.fold_candidate_at(line).filter(|r| r.end_line > r.start_line) else {
+            self.display_map.toggle_fold(line);
+            cx.notify();
+            return;
+        };
+        let closing = !self.display_map.is_folded_at(line);
+        // The lines the fold puts away, as the fold map has them when it
+        // is made: the range's last line can be one that stays.
+        if closing {
+            self.display_map.toggle_fold(line);
+        }
+        let first = range.start_line + 1;
+        let mut last = range.end_line;
+        while last > first && !self.display_map.is_buffer_line_hidden(last) {
+            last -= 1;
+        }
+        if !closing {
+            self.display_map.toggle_fold(line);
+        }
+        // How much of the fold is in view now, which is how far the
+        // lines under it have to come.
+        let tall = self
+            .last_layout
+            .as_ref()
+            .map(|layout| {
+                let rows: usize = layout.lines.iter().zip(layout.visible_buffer_lines.iter()).filter(|(_, line)| **line >= first && **line <= last).map(|(line, _)| line.wrapped_lines.len().max(1)).sum();
+                layout.line_height * rows as f32
+            })
+            .unwrap_or(px(0.));
+        self.fold_anim.set(Some(FoldAnim { first, last, at: std::time::Instant::now(), closing, tall }));
+        cx.notify();
+    }
+
+    /// What a click on a mark in the margin does: it is handed the
+    /// mark's `id` and where the click was. (Emaki addition.)
+    pub fn set_gutter_click(&mut self, click: impl Fn(usize, gpui::Point<Pixels>, &mut Window, &mut App) + 'static) {
+        self.gutter_click = Some(Rc::new(click));
     }
 
     /// The rule a new line's indent is asked of; `None` from it keeps
