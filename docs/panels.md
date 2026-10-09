@@ -10,8 +10,10 @@ About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
   conversation. Tried and dropped: both at the right, side by side.
 - The tree is not `files.rs`. That is git's flat list for "@", without
   what is ignored; the tree shows what is on disk.
-- Nothing here deletes or forces. Move to Trash is the system's trash,
-  and a refused `git switch` is reported in git's own words.
+- Nothing here deletes or forces without being asked first. Move to Trash
+  is the system's trash, a refused `git switch` is reported in git's own
+  words, a paste never writes over a file, and Discard in the comparison
+  asks on a card of its own before it does anything.
 - A change of branch is all or nothing (`git::switch_with`): either the
   branch is changed and every change is where it was asked to go, or
   nothing has moved and the reason is shown. No path leaves a conflict
@@ -24,7 +26,14 @@ About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
   the row under the composer, which a sheet can cover.
 - A branch switch is refused while a turn runs in the session showing: the
   agent is writing the files a switch would change.
-- The comparison only shows. Nothing is staged or committed from it.
+- Nothing is staged or committed from the comparison. The one thing it
+  changes is Discard, on the file showing (`ask_discard`, `discard_now`,
+  `git::discard`): a file the last commit has goes back to what that
+  commit has, staged or not, after what it held is written into git's
+  object store, where it stays until git prunes; a file the commit does
+  not have is unstaged and put in the system's trash. The question's
+  card says which of the two it is. What was typed in the file here and
+  not saved goes with it.
 - Dim in the tree means ignored by git, nothing else. A name beginning
   with a dot is not dimmed.
 - Labels are asked only for outline rows in or near the view, once the
@@ -268,10 +277,51 @@ far from the tree.
   draws it; other text in the editor (below), the first `PREVIEW_BYTES`
   and `PREVIEW_LINES` of it; a picture at its own size
   or the pane's width; a PDF's first `PDF_PAGES` pages as pictures; a
-  `.csv` or `.tsv` as a table (`files::table`), its first `TABLE_ROWS`
-  rows, a column as wide as its longest cell up to a point. Anything
-  else, or a file that cannot be read, is a line saying so and "Open
-  with default app".
+  `.csv` or `.tsv` as a grid (`files::table`, `render_table`), its first
+  `TABLE_ROWS` rows, a column as wide as its longest cell up to a point;
+  a Word, PowerPoint or Excel file as `emaki_core::office` reads it
+  (below). Anything else, or a file that cannot be read, is a line
+  saying so and "Open with default app".
+- An Office file is shown and nothing more (`office::read`, in
+  `read_file`): a `.docx` or a `.pptx` as markdown (`FileBody::Doc`: a
+  document's headings, paragraphs, lists and tables; a deck slide by
+  slide), an `.xlsx`, `.xlsm` or `.xls` as its sheets in the grid
+  (`FileBody::Sheets`), their names in a row over it when there are
+  several (`sheet_at`). It has no source, so no second way to show and
+  nothing to save. The old binary `.doc` and `.ppt` are not read: no
+  small reader for them was found, and nothing is asked of another
+  program. What is missed is in `office.rs`: a style's own formatting, a
+  cell's display format (0.5 for 50%), notes, pictures.
+- The grid (`render_table`) has columns named by letter and rows by
+  number, both staying in view: they are laid over the cells and moved
+  against the scroll (`file_view_scroll.offset()`), the pane drawn again
+  at every wheel. Every other row is a shade darker and the chosen cell
+  is outlined (`table_at`). A click chooses a cell, the arrows and Tab
+  move, ⌘C copies it.
+- A cell of a table the pane holds whole is written in the grid: a
+  second click, ↩ or a letter opens a field in the cell's place
+  (`table_edit`, `table_input`), ↩ keeps it and goes down a row, Escape
+  leaves it, Delete empties the cell. The field is the toolkit's input
+  at a size of its own, so its words stand where the cell's did, and its
+  outline is laid over it, not set around it as a border.
+  - What is written goes into the file's text in that cell's place and
+    nowhere else (`table_write`, `files::cell_at`, `cell_written`): the
+    rest of the file keeps its quotes and its line ends. Do not write
+    the table out again from its cells; that requotes every cell and
+    the comparison with git shows the whole file changed. A cell keeps
+    its quotes if it had them and gets them when it needs them; a row
+    too short for the column is made long enough.
+  - The text is the editor's. A table has its editor whichever way it
+    shows (`file_editor_want`), so one cell is one step of its undo
+    (⌘Z and ⇧⌘Z in the grid are the editor's, by the vendored
+    `undo_step`), the dot and Save are as for any file, and what is not
+    saved is kept in the drafts. The grid is read again from the
+    editor's text after each (`table_refresh`).
+  - A workbook's sheet, or a table shown in part, has no editor and
+    says so when a cell is opened.
+- What is wider than the pane (a grid) keeps its own width in the
+  scroller (`items_start`). Stretched across it, as a column's child
+  is, it measured as wide as the pane and never scrolled sideways.
 - The file shown is the folder's, not the window's (`sync_file_root`,
   `file_root`, `file_for`): going to a session of another folder puts
   it out of sight, and coming back to any session of this folder shows
@@ -293,8 +343,8 @@ far from the tree.
     pane shows is not it (`Code` is lines joined, with no last line
     break). A file cut for the preview, or with bytes that are no text,
     has no source and its editor is read only.
-  - A `.csv` or `.tsv` has the two segments markdown has: the table,
-    and the file as written, which is where it is edited.
+  - A `.csv` or `.tsv` has the two segments markdown has: the grid,
+    and the file as written. It is edited in either.
   - The save writes the file in place, so it keeps its permissions,
     then reads it again; the editor is kept (`FileEditor::key` is set
     to the new file's) so the caret and the undo history stay.
@@ -346,7 +396,11 @@ far from the tree.
     formatted text as one step of undo, then the file does. A file Air
     cannot parse is saved as typed and the row says it was not
     formatted. No other language has a formatter; do not write one by
-    hand, take the language's own as Air was taken.
+    hand, take the language's own as Air was taken. Settings, Files has
+    the switch (`app.format_on_save`, on to begin with); off, a file is
+    saved as typed. Air and the Biome crates under it are built without
+    debug assertions in the dev profile too (`Cargo.toml`): with them a
+    6,700-line file took half a second to format, without them 27 ms.
 - The editor's margin marks what differs from git's copy of the file,
   as VS Code's does (`sync_file_marks`, the vendored `GutterMark`): a
   green bar beside lines git does not have, a blue one beside lines
@@ -402,6 +456,12 @@ far from the tree.
   names a file's language and `editor_language` is the toolkit's name
   for it. R is not in the toolkit's set: `look::install_languages`
   registers the `tree-sitter-r` crate's grammar and queries.
+- A `.csv` or `.tsv` as written has each column in a colour of its own,
+  as the Rainbow CSV extension does: the vendored `delimited.rs`, a
+  highlighter with no grammar behind it for the languages `csv` and
+  `tsv`, which gives the columns ten of the theme's syntax colours in
+  turn. A quoted cell keeps its column across the separators and line
+  breaks inside it.
 - The palette is VS Code's Dark+ and Light+ on the window's own
   grounds: the `highlight` part of each theme in `themes/emaki.json`.
   Without one the toolkit keeps its light palette in a dark window. The
@@ -469,6 +529,27 @@ for in the
 field a session is renamed in (`file_prompt`, `commit_file_prompt`): one
 name for a rename, a path under the folder for something new, never
 "..", and a name already taken is refused with the field left up.
+
+Copy on a row's menu, or ⌘C with the row chosen, puts the file or folder
+itself on the clipboard (`tree_copy`, `sys::copy_file`: on a Mac as a file,
+so the Finder pastes it too; elsewhere its path, with the path kept in
+`file_clip`). Paste, or ⌘V, copies every file the clipboard holds
+(`clipboard_files`: what any app copied as files, else the one copied
+here while the clipboard still names it) into the folder chosen, the
+folder the chosen file is in, or the session's folder with nothing chosen
+(`tree_paste`, `files::copy_into`). A name already there is not written
+over: the copy is "name copy.ext", then "name copy 2.ext", as the Finder
+has it. Paste is on the menu only while there is a file to paste. ⌘Z
+in the panel asks whether to take the last paste back (`paste_last`,
+`ask_paste_undo`, on the card Discard's question is on, `ask_card`), and
+on Yes the copies it made go to the system's trash. The
+panel has a focus of its own for the two keys (`tree_focus`), taken at a
+click on a row or on its empty room, and handed to the window when the
+panel is put away with the keyboard in it. Opening a file from the tree
+leaves the keyboard in the tree (`file_preview` hands it to the window only
+when it was elsewhere): the row is still what ⌘C and ⌘V are about until a
+click in the file's pane takes it there. A click on a folder chooses it
+as well as opening it, so that it can be copied or pasted into.
 
 The trash is `sys::trash_path` (the `trash` crate). On macOS it uses the
 file manager's own call, since the crate's default asks Finder by
@@ -573,5 +654,14 @@ this the mark fell back to the last entry when the move ended.
 - `emaki-core git <folder> [path...]` prints what a path wears.
   `emaki-core outline <id>` prints an outline; `--summarize` asks for the
   labels and is how the timings in Rules were measured.
+- `EMAKI_GO=treecopy:<path>` copies that file or folder, `treepaste` or
+  `treepaste:<path>` pastes into the folder or at that row;
+  `discard:<path>` opens the comparison on a file with the question up,
+  and `discard:yes` answers it; `pasteundo` is ⌘Z after a paste and
+  `pasteundo:yes` its Yes. `treefocus` puts the keyboard in the files
+  panel, and `EMAKI_FOCUS_DEBUG=1` prints where it is at every draw.
+- `EMAKI_GO=cell:<row>,<col>` chooses a cell of the table showing (from
+  0), `cell:type:<words>` writes in it and goes down a row, `cell:open`
+  opens its field and leaves it up, `cell:undo` is ⌘Z.
 - Code on the file sheet came out in one colour, unhighlighted, in a
   probe; not looked into.

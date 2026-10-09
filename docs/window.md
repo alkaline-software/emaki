@@ -248,9 +248,19 @@ Laid out like the Claude desktop app.
   sidebar is hidden the strip makes room for the traffic lights.
 - The home page is a greeting in `fonts::display_family` (the Claude app's
   serif when present, so titles and the conversation agree) behind the app's
-  icon, over the composer, with the most recent folders as a grid of cards
-  (`FOLDER_COLS` to a row). Tried and dropped: full-path pills of every
-  width.
+  icon, over the composer. The composer's card stands on a tray of its own
+  width (`folder_tray`), and the strip of it that shows under the card
+  names the folder a new session starts in: its name, then the folders it
+  is in. A press anywhere on the strip drops its list down
+  (`PickFor::Folder`, the one list that never opens upward): the
+  `HOME_FOLDERS` folders worked in last, the chosen one among them even when
+  it is none of those, and under a line "Choose a folder…", a row with no
+  key, which asks the system for any folder (`choose_folder`). Tried and
+  dropped: a grid of six cards under the composer, and before it full-path
+  pills of every width, which took the page for one choice; a pill beside
+  the mode's on the composer's row, where it read as one more setting of
+  the agent's; and the panel buttons' small track by itself under the
+  card, which belonged to nothing around it.
 - Each page's content fades in when it arrives (`page_in`, keyed on the
   page). The conversation's list items are never animated.
 - Floating cards (composer, search palette, settings) lift with
@@ -308,7 +318,7 @@ in from just above (`MENU_IN`, keyed on the menu's serial so each opening
 plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
 `MENU_OUT`), taking no click meanwhile.
 
-- A folder, in the sidebar or on the new-session page's cards, offers "Open
+- A folder, in the sidebar or on the new-session page's control, offers "Open
   in Finder" (`sys::OPEN_FOLDER_LABEL`). The sidebar's folder is a project,
   so its path is the newest session's `cwd` that is still a directory; with
   none, the menu says the folder is gone.
@@ -386,6 +396,31 @@ that is gone, the hidden terminal off) the name is ours alone: laid over
 
 A terminal types one message at a time (`Hub::type_message`), so a rename
 and a message sent in the same moment do not arrive as one line.
+
+## A session begun from a folder
+
+A folder's row in the sidebar shows a plus in place of its count while the
+pointer is on it (both always there, one clear, so nothing moves). It
+begins a session in that folder (`new_session_in`) on a tab like any
+other's: the conversation page with nothing said, named "New session".
+⌘N and the home page are as they were.
+
+- It is a record of our own (`begun`), put at the head of every index
+  until the index has one of its own for it, under a session id made
+  here. Nothing is started and nothing is on disk.
+- The first message starts Claude Code with that id (`send_message`
+  starts where it would resume, `is_draft`), so the transcript that
+  follows has the tab's key and the tab goes on as that session, title
+  and all, with no hand-over.
+- Closed with nothing sent, it is gone with its tab. It is not written
+  to `ui.json`, since a launch would find nothing for its tab. A
+  message typed and not sent is the composer's draft and goes with it.
+- A folder's plus pressed twice goes back to the one begun and does not
+  make a second.
+- Until its first message it has no terminal to ask anything of: its
+  pills are the home page's (they open Settings), the composer says
+  "Start a session…", the terminal's button says to send a message
+  first, and it is not shown as live.
 
 ## Scroll routing
 
@@ -473,19 +508,48 @@ under tabs that stay put. A closed tab's `Detail` is let go. Tried and
 dropped: one `Detail`, dropped and reread at every switch, which blinked the
 pane and its tabs.
 
-Every tab has the same width (`sync_tab_widths`, at every draw): `TAB_MAX`
-while the row has room, the row divided among them once it has not, down to
-`TAB_MIN`. A new tab grows in from nothing while the others give way, and a
-closed one's room is taken up the same way, over `TAB_ANIM` (`tab_widths`).
-A change in the row's own width is followed at once. The row's width is
-measured as it is painted (`tabs_row_w`, a `canvas` over it) and used at the
-next draw. Tried and dropped: tabs as wide as their titles with the flex row
-shrinking them, which drew a new tab at full width for a frame.
+A folder's tabs stand together on one pill (`group_tabs`, at every draw):
+the segmented control's track, with a folder mark at its left end and the
+showing tab on a raised plate. The pills are in the order their first tabs
+had, a tab opened lands at the end of its folder's pill, and a session
+alone in its folder is a pill of one. A tab whose session is not listed yet
+is a pill by itself until it is. The folder is `SessionRef::project`, the
+sidebar's.
 
-A tab is dragged to another place (`on_drag` with a `DragTab`, the row's
-`on_drag_move` to `drag_tab_to`, which takes the place under the pointer as
-it moves). Its title follows the pointer on a plate (`TabGhost`) and its own
-tab is dimmed. The others change places at once.
+The plate is one element under a pill's tabs (`TabPlate`). It slides to
+another tab of the same pill, and between pills it fades out of one and into
+the other: a plate does not leave its track. It is placed by sum, never
+measured, since every width in the row is ours, and it reads the same clock
+the tabs' widths do (`TabWidth::now`), so it keeps its tab while they move.
+
+Every tab has the same width (`sync_tab_widths`, at every draw): `TAB_MAX`
+while the row has room, the row less the pills' own room divided among them
+once it has not, down to `TAB_MIN`. A new tab grows in from nothing while
+the others give way, and a closed one's room is taken up the same way, over
+`TAB_ANIM` (`tab_widths`). A new pill's track is let out with its tab
+(`pill_born`), in a wrapper that clips it and stays until the plate's move
+is over: taken off sooner, the plate under it is a new element and plays its
+move again. A change in the row's own width is followed at once. The row's
+width is measured as it is painted (`tabs_row_w`, a `canvas` over it) and
+used at the next draw. Tried and dropped: tabs as wide as their titles with
+the flex row shrinking them, which drew a new tab at full width for a frame.
+
+A tab is dragged to another place on its pill and no further (`on_drag`
+with a `DragTab`, the row's `on_drag_move` to `drag_tab_to`, which takes the
+place under the pointer as it moves). Its title follows the pointer on a
+plate (`TabGhost`) and its own tab is dimmed. The pill is dragged by its
+folder mark (`DragPill`, `drag_pill_to`), or by its tab when it has one, and
+stands after every pill whose middle the pointer has passed. Going by the
+middle is what keeps two pills of different widths from changing places back
+and forth under a pointer that is still.
+
+Whatever a drag moves slides to its new place (`TabShift`): a tab or a pill
+is laid out where it now stands and drawn off it by what is left of the way,
+a relative `left` read off the clock, with a frame asked for at every draw
+while one runs (`tabs_sliding`). One moved again on its way starts from
+where it is. The plate adds its tab's offset, and the pill being moved is
+painted after the row (`deferred`, `pill_top`), so it passes over the pills
+it changes places with and not under them.
 
 ⌘1 to ⌘9 (Ctrl elsewhere) go to that tab, or to the last one when there are
 fewer (`go_tab`). ⌘ held by itself for `TAB_HINT_HOLD` shows the digits:
@@ -527,8 +591,15 @@ to the workbench's own handle whenever the composer still holds it.
   click on it.
 - `EMAKI_GO=menu` opens the session's menu, `renaming` the rename field,
   `name:<words>` names it.
+- `EMAKI_GO=newin:<folder's path>` is the plus on that folder.
 - `EMAKI_GO=tabhints` shows the tabs' numbers with no key held.
   `EMAKI_GO="open:<id>;open:<id2>"` opens tabs in turn.
+  `tabdrag:<id>:<x>` drags that tab to an x from the row's left edge,
+  `pilldrag:<folder>:<x>` a pill. A step before the first index finds no
+  pills, so put an `x` step first. `tabslow` before them draws the slide
+  forty times slower, and a picture a second after the drag catches it
+  partway. `EMAKI_SHOT_AFTER` counts from later than the steps do: 6 lands a
+  second after a step at 10.
 - `EMAKI_SCROLL_DEBUG=1` prints every wheel event with its phase and owner.
 - A `mouseMoved` `CGEvent` posted to the pid moves gpui's hover, which is
   how the sidebar's float is driven. A synthetic click or press posted to

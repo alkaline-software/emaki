@@ -216,6 +216,40 @@ fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
+/// What `discard` did with a file's changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Discarded {
+    /// The file is as the last commit has it again.
+    Restored,
+    /// The last commit has no such file: it is no longer staged, and is
+    /// still on disk for the caller to put in the trash.
+    New,
+}
+
+/// Take back what has changed in one file since the last commit, staged
+/// or not. A file the commit has is put back as it was there (`git
+/// restore`), after what it held is written into git's object store
+/// (`hash-object -w`), where it stays until git next prunes: nothing
+/// shows it, and it can still be had back by hand. A file the commit
+/// does not have is only unstaged, and left for the caller to trash.
+pub fn discard(dir: &Path, path: &Path) -> Result<Discarded, String> {
+    let rel = path.strip_prefix(dir).unwrap_or(path).to_string_lossy().replace('\\', "/");
+    let at = path.to_string_lossy().to_string();
+    let run = |args: &[&str]| -> Result<(), String> {
+        let out = command().arg("-C").arg(dir).args(args).output().map_err(|e| e.to_string())?;
+        if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+    };
+    if git(dir, &["cat-file", "-e", &format!("HEAD:./{rel}")]).is_none() {
+        run(&["rm", "--cached", "-q", "--ignore-unmatch", "--", &at])?;
+        return Ok(Discarded::New);
+    }
+    if path.is_file() {
+        let _ = run(&["hash-object", "-w", "--", &at]);
+    }
+    run(&["restore", "--source=HEAD", "--staged", "--worktree", "--", &at])?;
+    Ok(Discarded::Restored)
+}
+
 /// Whether `dir` is in a repository as far as the window goes: inside
 /// one, and not a folder that repository ignores. A build folder under
 /// a checkout is on that checkout's disk and none of its business, so

@@ -6,6 +6,9 @@ pub use gpui_base::input::{
 mod diagnostic_styles;
 pub(crate) use diagnostic_styles::*;
 
+// Emaki: columns of separated text, each in a colour (UPSTREAM.md).
+#[cfg(feature = "tree-sitter")]
+mod delimited;
 #[cfg(feature = "tree-sitter")]
 mod input_adapter;
 #[cfg(feature = "tree-sitter")]

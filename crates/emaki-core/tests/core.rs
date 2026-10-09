@@ -2414,3 +2414,330 @@ fn a_program_in_our_terminal_copies() {
     assert_eq!(copied.as_deref(), Some("hi"));
     assert_eq!(pty.take_copied(), None);
 }
+
+/// An Office file is a zip of XML parts: one made here, part by part.
+fn office_zip(path: &std::path::Path, parts: &[(&str, &str)]) {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    for (name, body) in parts {
+        zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+const OFFICE_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="MAIN"/></Relationships>"#;
+
+/// A Word document comes out as markdown: headings by the style's name
+/// and not its id, which is in the document's language; a list by what
+/// its numbering says it is; a table; bold and italic; and a text box
+/// once, though the file holds it twice.
+#[test]
+fn a_word_file_reads_as_markdown() {
+    use emaki_core::office::{read, Office};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.docx");
+    let w = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#;
+    let styles = format!(r#"<w:styles {w}><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style><w:style w:type="paragraph" w:styleId="Titre2"><w:name w:val="heading 2"/></w:style></w:styles>"#);
+    let numbering = format!(
+        r#"<w:numbering {w}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+    );
+    let item = |list: u8, level: u8, text: &str| format!(r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="{list}"/></w:numPr></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#);
+    let cell = |text: &str| format!("<w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>");
+    let body = [
+        r#"<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Annual report</w:t></w:r></w:p>"#.to_string(),
+        r#"<w:p><w:pPr><w:pStyle w:val="Titre2"/></w:pPr><w:r><w:t>Sales</w:t></w:r></w:p>"#.to_string(),
+        // The paragraph's own mark is bold, which is not its text's.
+        r#"<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t xml:space="preserve">Up </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>a lot</w:t></w:r><w:r><w:rPr><w:b w:val="0"/><w:i/></w:rPr><w:t xml:space="preserve"> this</w:t></w:r><w:r><w:t xml:space="preserve"> year, R&amp;D too.</w:t><w:tab/><w:t>end</w:t><w:br/><w:t>next line</w:t></w:r></w:p>"#.to_string(),
+        "<w:p/>".to_string(),
+        item(1, 0, "apples"),
+        item(1, 1, "green ones"),
+        item(1, 0, "pears"),
+        item(2, 0, "first"),
+        item(2, 0, "second"),
+        format!("<w:tbl><w:tr>{}{}</w:tr><w:tr>{}{}</w:tr></w:tbl>", cell("Region"), cell("Total"), cell("North | South"), cell("12")),
+        r#"<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:txbxContent><w:p><w:r><w:t>In a box</w:t></w:r></w:p></w:txbxContent></mc:Choice><mc:Fallback><w:pict><w:txbxContent><w:p><w:r><w:t>In a box</w:t></w:r></w:p></w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>"#.to_string(),
+    ]
+    .concat();
+    let document = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {w}><w:body>{body}<w:sectPr/></w:body></w:document>"#);
+    office_zip(&path, &[("_rels/.rels", &OFFICE_RELS.replace("MAIN", "word/document.xml")), ("word/document.xml", &document), ("word/styles.xml", &styles), ("word/numbering.xml", &numbering)]);
+
+    let Ok(Office::Markdown(text)) = read(&path, 100) else { panic!("a document is markdown") };
+    let want = [
+        "# Annual report",
+        "",
+        "## Sales",
+        "",
+        "Up **a lot** *this* year, R&D too.\tend  ",
+        "next line",
+        "",
+        "- apples",
+        "    - green ones",
+        "- pears",
+        "1. first",
+        "2. second",
+        "",
+        "| Region | Total |",
+        "| --- | --- |",
+        "| North \\| South | 12 |",
+        "",
+        "In a box",
+    ]
+    .join("\n");
+    assert_eq!(text, want);
+}
+
+/// A deck comes out slide by slide, in the order the presentation shows
+/// them and not the order of the files' numbers, each under its title.
+#[test]
+fn a_deck_reads_slide_by_slide() {
+    use emaki_core::office::{read, Office};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("talk.pptx");
+    let ns = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    let presentation = format!(r#"<p:presentation {ns}><p:sldIdLst><p:sldId id="256" r:id="rId3"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>"#);
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="x/slideMaster" Target="slideMasters/slideMaster1.xml"/><Relationship Id="rId2" Type="x/slide" Target="slides/slide1.xml"/><Relationship Id="rId3" Type="x/slide" Target="/ppt/slides/slide2.xml"/></Relationships>"#;
+    let shape = |ph: &str, paras: &str| format!("<p:sp><p:nvSpPr><p:nvPr>{ph}</p:nvPr></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr><a:buNone/></a:lvl1pPr></a:lstStyle>{paras}</p:txBody></p:sp>");
+    let para = |props: &str, text: &str| format!("<a:p>{props}<a:r><a:rPr lang=\"en\"/><a:t>{text}</a:t></a:r></a:p>");
+    let cell = |text: &str| format!("<a:tc><a:txBody>{}</a:txBody></a:tc>", para("", text));
+    let opening = [
+        shape(r#"<p:ph type="body" idx="1"/>"#, &[para("", "Why now"), para(r#"<a:pPr lvl="1"/>"#, "Costs fell"), para(r#"<a:pPr><a:buNone/></a:pPr>"#, "A closing line")].concat()),
+        shape(r#"<p:ph type="title"/>"#, "<a:p><a:r><a:t>The </a:t></a:r><a:r><a:t>opening</a:t></a:r></a:p>"),
+        shape(r#"<p:ph type="sldNum" idx="12"/>"#, "<a:p><a:fld type=\"slidenum\"><a:t>1</a:t></a:fld></a:p>"),
+    ]
+    .concat();
+    let closing = [
+        shape("", &[para("", "A note in a box"), para(r#"<a:pPr><a:buAutoNum type="arabicPeriod"/></a:pPr>"#, "one"), para(r#"<a:pPr><a:buAutoNum type="arabicPeriod"/></a:pPr>"#, "two")].concat()),
+        format!("<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr>{}{}</a:tr><a:tr>{}{}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>", cell("Year"), cell("Users"), cell("2025"), cell("40")),
+    ]
+    .concat();
+    let slide = |shapes: &str| format!(r#"<p:sld {ns}><p:cSld><p:spTree>{shapes}</p:spTree></p:cSld></p:sld>"#);
+    office_zip(
+        &path,
+        &[
+            ("_rels/.rels", &OFFICE_RELS.replace("MAIN", "ppt/presentation.xml")),
+            ("ppt/presentation.xml", &presentation),
+            ("ppt/_rels/presentation.xml.rels", rels),
+            ("ppt/slides/slide1.xml", &slide(&closing)),
+            ("ppt/slides/slide2.xml", &slide(&opening)),
+        ],
+    );
+
+    let Ok(Office::Markdown(text)) = read(&path, 100) else { panic!("a deck is markdown") };
+    let want = [
+        "## 1. The opening",
+        "",
+        "- Why now",
+        "    - Costs fell",
+        "",
+        "A closing line",
+        "",
+        "## Slide 2",
+        "",
+        "A note in a box",
+        "",
+        "1. one",
+        "2. two",
+        "",
+        "| Year | Users |",
+        "| --- | --- |",
+        "| 2025 | 40 |",
+    ]
+    .join("\n");
+    assert_eq!(text, want);
+
+    // A deck with no slides yet is an empty one, not a file refused; and
+    // with no list of slides to go by, the files' numbers are the order.
+    let empty = dir.path().join("template.pptx");
+    office_zip(&empty, &[("ppt/presentation.xml", &format!("<p:presentation {ns}/>"))]);
+    assert_eq!(read(&empty, 100), Ok(Office::Markdown(String::new())));
+    let unlisted = dir.path().join("unlisted.pptx");
+    let titled = |title: &str| slide(&shape(r#"<p:ph type="ctrTitle"/>"#, &para("", title)));
+    office_zip(&unlisted, &[("ppt/slides/slide10.xml", &titled("Last")), ("ppt/slides/slide2.xml", &titled("First"))]);
+    assert_eq!(read(&unlisted, 100), Ok(Office::Markdown("## 1. First\n\n## 2. Last".into())));
+}
+
+/// A workbook comes out as its sheets' rows: a cell where the sheet has
+/// it, a whole number with no ".0", a date as ISO, and no more rows than
+/// were asked for. A hidden sheet is not among them.
+#[test]
+fn a_workbook_reads_as_rows() {
+    use emaki_core::office::{read, Office, Sheet};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("book.xlsx");
+    let main = r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#;
+    let workbook = format!(r#"<workbook {main}><sheets><sheet name="Totals" sheetId="1" r:id="rId1"/><sheet name="Secret" sheetId="2" state="hidden" r:id="rId2"/><sheet name="Long" sheetId="3" r:id="rId3"/></sheets></workbook>"#);
+    let sheet_type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{sheet_type}" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="{sheet_type}" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="{sheet_type}" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#
+    );
+    // The second cell format is a date's (number format 14).
+    let styles = format!(r#"<styleSheet {main}><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14" applyNumberFormat="1"/></cellXfs></styleSheet>"#);
+    let text = |at: &str, s: &str| format!(r#"<c r="{at}" t="inlineStr"><is><t>{s}</t></is></c>"#);
+    // It begins at B2, and its last row and last column hold nothing.
+    let totals = format!(
+        r#"<worksheet {main}><sheetData><row r="2">{}{}{}</row><row r="3">{}<c r="C3"><v>3</v></c><c r="D3"><v>2.5</v></c></row><row r="4"><c r="B4" t="b"><v>1</v></c><c r="C4" t="e"><v>#DIV/0!</v></c><c r="D4" s="1"><v>45943</v></c><c r="E4" s="1"><v>45943.5</v></c></row><row r="5">{}</row></sheetData></worksheet>"#,
+        text("B2", "Item"),
+        text("C2", "Count"),
+        text("D2", "Price"),
+        text("B3", "Tea &amp; milk"),
+        text("F5", ""),
+    );
+    let secret = format!(r#"<worksheet {main}><sheetData><row r="1">{}</row></sheetData></worksheet>"#, text("A1", "not shown"));
+    let long: String = (1..=5).map(|n| format!(r#"<row r="{n}"><c r="A{n}"><v>{n}</v></c></row>"#)).collect();
+    let long = format!(r#"<worksheet {main}><sheetData>{long}</sheetData></worksheet>"#);
+    office_zip(
+        &path,
+        &[
+            ("[Content_Types].xml", types),
+            ("_rels/.rels", &OFFICE_RELS.replace("MAIN", "xl/workbook.xml")),
+            ("xl/workbook.xml", &workbook),
+            ("xl/_rels/workbook.xml.rels", &rels),
+            ("xl/styles.xml", &styles),
+            ("xl/worksheets/sheet1.xml", &totals),
+            ("xl/worksheets/sheet2.xml", &secret),
+            ("xl/worksheets/sheet3.xml", &long),
+        ],
+    );
+
+    let Ok(Office::Sheets(sheets)) = read(&path, 3) else { panic!("a workbook is sheets") };
+    let row = |cells: &[&str]| cells.iter().map(|c| c.to_string()).collect::<Vec<String>>();
+    assert_eq!(sheets.len(), 2);
+    assert_eq!(sheets[0].name, "Totals");
+    assert!(sheets[0].more, "the sheet has a fourth row");
+    assert_eq!(sheets[0].rows, vec![row(&["", "", "", ""]), row(&["", "Item", "Count", "Price"]), row(&["", "Tea & milk", "3", "2.5"])]);
+    assert_eq!(sheets[1], Sheet { name: "Long".into(), rows: vec![row(&["1"]), row(&["2"]), row(&["3"])], more: true });
+
+    let Ok(Office::Sheets(sheets)) = read(&path, 100) else { panic!("a workbook is sheets") };
+    assert!(!sheets[0].more);
+    assert_eq!(sheets[0].rows.len(), 4, "the row that holds nothing is not one");
+    assert_eq!(sheets[0].rows[3], row(&["", "TRUE", "#DIV/0!", "2025-10-13", "2025-10-13 12:00:00"]));
+    assert_eq!(sheets[0].rows[1], row(&["", "Item", "Count", "Price", ""]), "every row is as wide as the widest");
+}
+
+/// What is not an Office file, or cannot be opened, is refused with a
+/// reason; the old binary document and deck are not offered at all.
+#[test]
+fn an_office_file_that_cannot_be_read_says_why() {
+    use emaki_core::office::{read, reads};
+    let dir = tempfile::tempdir().unwrap();
+    for (name, why) in [("a.docx", "it is not a Word file"), ("a.pptx", "it is not a PowerPoint file"), ("a.xlsx", "it is not an Excel file"), ("a.xls", "it is not an Excel file")] {
+        let path = dir.path().join(name);
+        fs::write(&path, "plain text under an Office name").unwrap();
+        assert_eq!(read(&path, 10).err().as_deref(), Some(why));
+    }
+    // A zip that is no document.
+    let path = dir.path().join("other.docx");
+    office_zip(&path, &[("readme.txt", "hello")]);
+    assert_eq!(read(&path, 10).err().as_deref(), Some("it is not a Word file"));
+    // Office keeps a file with a password in its old binary container,
+    // the encrypted zip under this name.
+    let mut locked = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    locked.extend(vec![0u8; 512]);
+    locked.extend("EncryptedPackage".encode_utf16().flat_map(u16::to_le_bytes));
+    for name in ["locked.docx", "locked.xlsx", "locked.pptx"] {
+        let path = dir.path().join(name);
+        fs::write(&path, &locked).unwrap();
+        assert_eq!(read(&path, 10).err().as_deref(), Some("it is protected by a password"));
+    }
+    assert_eq!(read(&dir.path().join("gone.docx"), 10).err().as_deref(), Some("it could not be read"));
+    assert!(["docx", "pptx", "xlsx", "xlsm", "xls"].iter().all(|ext| reads(ext)));
+    assert!(!reads("doc") && !reads("ppt") && !reads("pdf"));
+}
+
+/// A cell of a table is found where it is written, so one cell can be
+/// written over and the rest of the file left as it is.
+#[test]
+fn a_cell_is_found_where_it_is_written() {
+    use emaki_core::files::{cell_at, cell_value, cell_written, table, CellAt};
+    let text = "\u{feff}\"name\",\"says\",n\r\nann,\"hi, \"\"you\"\"\",1\r\n\r\nbob,\"two\nlines\"\r\nlast,,3";
+    let (rows, _) = table(text, ',', 100);
+    assert_eq!(rows.len(), 4, "a line with nothing on it is no row");
+    // Every cell the table gives is the one found at its place.
+    for (r, row) in rows.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            match cell_at(text, ',', r, c) {
+                Some(CellAt::At(span)) => assert_eq!(&cell_value(&text[span]), cell, "row {r} column {c}"),
+                other => panic!("row {r} column {c}: {other:?}"),
+            }
+        }
+    }
+    // A row that ends before the column says where it ends and how long it is.
+    let short = cell_at(text, ',', 2, 2);
+    assert!(matches!(short, Some(CellAt::Short { cells: 2, .. })), "{short:?}");
+    if let Some(CellAt::Short { end, .. }) = short {
+        assert!(text[..end].ends_with("lines\""));
+    }
+    assert_eq!(cell_at(text, ',', 9, 0), None);
+    // Written over, the cell is the only thing that changes, and the line end stays.
+    let Some(CellAt::At(span)) = cell_at(text, ',', 1, 2) else { panic!() };
+    let mut changed = text.to_string();
+    changed.replace_range(span, &cell_written("a, b", ',', false));
+    assert_eq!(changed, text.replace(",1\r\n", ",\"a, b\"\r\n"));
+    assert_eq!(table(&changed, ',', 100).0[1][2], "a, b");
+    // Quotes are kept where they were, and put where they are needed.
+    assert_eq!(cell_written("x", ',', true), "\"x\"");
+    assert_eq!(cell_written("x", ',', false), "x");
+    assert_eq!(cell_written("say \"x\"", ',', false), "\"say \"\"x\"\"\"");
+    assert_eq!(cell_written("a\tb", '\t', false), "\"a\tb\"");
+}
+
+/// A copy takes a free name beside what is there, a folder goes with
+/// all it holds, and nothing is written over.
+#[test]
+fn a_copy_takes_a_free_name() {
+    use emaki_core::files::{copy_into, copy_name};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::write(dir.join("notes.md"), "one").unwrap();
+    fs::create_dir_all(dir.join("src/deep")).unwrap();
+    fs::write(dir.join("src/deep/a.rs"), "fn a() {}").unwrap();
+    fs::write(dir.join(".env"), "x").unwrap();
+    assert_eq!(copy_name(&dir.join("notes.md"), &dir.join("src")), dir.join("src/notes.md"));
+    assert_eq!(copy_into(&dir.join("notes.md"), dir).unwrap(), dir.join("notes copy.md"));
+    assert_eq!(copy_into(&dir.join("notes.md"), dir).unwrap(), dir.join("notes copy 2.md"));
+    // A name that is all "kind" is not cut at its dot.
+    assert_eq!(copy_into(&dir.join(".env"), dir).unwrap(), dir.join(".env copy"));
+    let copy = copy_into(&dir.join("src"), dir).unwrap();
+    assert_eq!(copy, dir.join("src copy"));
+    assert_eq!(fs::read_to_string(copy.join("deep/a.rs")).unwrap(), "fn a() {}");
+    assert_eq!(fs::read_to_string(dir.join("notes.md")).unwrap(), "one");
+    assert!(copy_into(&dir.join("src"), &dir.join("src/deep")).is_err(), "a folder is not copied into itself");
+    assert!(copy_into(&dir.join("gone"), dir).is_err());
+}
+
+/// Discarding puts a committed file back as the commit has it, staged
+/// or not, and only unstages one the commit does not have.
+#[test]
+fn discarding_goes_back_to_the_last_commit() {
+    use emaki_core::git::{discard, Discarded};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success(), "git {args:?}");
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "t"]);
+    run(&["config", "commit.gpgsign", "false"]);
+    fs::write(dir.join("kept.txt"), "as committed\n").unwrap();
+    fs::write(dir.join("gone.txt"), "here\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "one"]);
+    // Changed and staged, deleted, and two new files, one of them staged.
+    fs::write(dir.join("kept.txt"), "changed\n").unwrap();
+    run(&["add", "kept.txt"]);
+    fs::write(dir.join("kept.txt"), "changed again\n").unwrap();
+    fs::remove_file(dir.join("gone.txt")).unwrap();
+    fs::write(dir.join("new.txt"), "new\n").unwrap();
+    fs::write(dir.join("staged.txt"), "new\n").unwrap();
+    run(&["add", "staged.txt"]);
+    assert_eq!(discard(&dir, &dir.join("kept.txt")), Ok(Discarded::Restored));
+    assert_eq!(fs::read_to_string(dir.join("kept.txt")).unwrap(), "as committed\n");
+    assert_eq!(discard(&dir, &dir.join("gone.txt")), Ok(Discarded::Restored));
+    assert!(dir.join("gone.txt").exists());
+    assert_eq!(discard(&dir, &dir.join("new.txt")), Ok(Discarded::New));
+    assert_eq!(discard(&dir, &dir.join("staged.txt")), Ok(Discarded::New));
+    assert!(dir.join("staged.txt").exists(), "a new file is left for the trash");
+    let status = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&dir).args(["status", "--porcelain"]).output().unwrap().stdout).unwrap();
+    assert_eq!(status, "?? new.txt\n?? staged.txt\n");
+}

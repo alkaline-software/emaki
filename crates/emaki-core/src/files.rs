@@ -290,6 +290,149 @@ pub fn mark_mentions(text: &str, cwd: &str) -> String {
     out
 }
 
+/// A name in `dir` for a copy of `from` that takes no other's place:
+/// its own name when that is free, else "name copy.ext", then "name
+/// copy 2.ext", as the Finder names them.
+pub fn copy_name(from: &Path, dir: &Path) -> PathBuf {
+    let name = from.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "copy".into());
+    if !dir.join(&name).exists() {
+        return dir.join(name);
+    }
+    // A folder's name is not cut at a dot; a file's last dot starts its kind.
+    let (stem, ext) = match name.rfind('.').filter(|at| *at > 0 && !from.is_dir()) {
+        Some(at) => (name[..at].to_string(), name[at..].to_string()),
+        None => (name.clone(), String::new()),
+    };
+    (1..)
+        .map(|n| dir.join(if n == 1 { format!("{stem} copy{ext}") } else { format!("{stem} copy {n}{ext}") }))
+        .find(|p| !p.exists())
+        .unwrap_or_else(|| dir.join(name))
+}
+
+/// Copy a file, or a folder with all it holds, into `dir` under a name
+/// that is free there (`copy_name`), and say where it went. A folder is
+/// not copied into itself, and nothing already there is written over.
+pub fn copy_into(from: &Path, dir: &Path) -> Result<PathBuf, String> {
+    fn tree(from: &Path, to: &Path) -> std::io::Result<()> {
+        let kind = std::fs::symlink_metadata(from)?.file_type();
+        if kind.is_dir() {
+            std::fs::create_dir(to)?;
+            for entry in std::fs::read_dir(from)? {
+                let entry = entry?;
+                tree(&entry.path(), &to.join(entry.file_name()))?;
+            }
+            Ok(())
+        } else if kind.is_symlink() {
+            // A link is copied as what it points at, when that is a file.
+            std::fs::copy(from, to).map(|_| ()).or(Ok(()))
+        } else {
+            std::fs::copy(from, to).map(|_| ())
+        }
+    }
+    if !from.exists() {
+        return Err("it is no longer there".to_string());
+    }
+    if from.is_dir() && dir.starts_with(from) {
+        return Err("a folder cannot be copied into itself".to_string());
+    }
+    let to = copy_name(from, dir);
+    if to.exists() {
+        return Err("there is no free name for it".to_string());
+    }
+    tree(from, &to).map_err(|e| e.to_string())?;
+    Ok(to)
+}
+
+/// Where one cell of `table`'s rows is in the text it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellAt {
+    /// The cell as written, quotes and all.
+    At(std::ops::Range<usize>),
+    /// The row is shorter than that: where it ends, and how many cells
+    /// it has.
+    Short { end: usize, cells: usize },
+}
+
+/// The place in `text` of the cell `table` gives at `row` and `col`, so
+/// that one cell can be written over and the rest of the file left as
+/// it is, quoting and line ends included. It goes by `table`'s own
+/// rules: a line with nothing on it is no row.
+pub fn cell_at(text: &str, sep: char, row: usize, col: usize) -> Option<CellAt> {
+    let bytes = text.as_bytes();
+    let sep = sep as u8;
+    let mut i = if text.starts_with('\u{feff}') { 3 } else { 0 };
+    let (mut row_ix, mut col_ix, mut start, mut quoted, mut any, mut filled) = (0usize, 0usize, i, false, false, false);
+    loop {
+        let byte = bytes.get(i).copied();
+        if quoted {
+            match byte {
+                None => quoted = false,
+                Some(b'"') if bytes.get(i + 1) == Some(&b'"') => i += 2,
+                Some(b'"') => {
+                    quoted = false;
+                    i += 1;
+                }
+                Some(_) => {
+                    filled = true;
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        match byte {
+            Some(b'"') if !filled => {
+                quoted = true;
+                any = true;
+            }
+            Some(b) if b == sep => {
+                if row_ix == row && col_ix == col {
+                    return Some(CellAt::At(start..i));
+                }
+                col_ix += 1;
+                start = i + 1;
+                any = true;
+                filled = false;
+            }
+            Some(b'\r') => {}
+            Some(b'\n') | None => {
+                if any || filled {
+                    if row_ix == row {
+                        let end = if byte.is_some() && i > start && bytes[i - 1] == b'\r' { i - 1 } else { i };
+                        return Some(if col_ix == col { CellAt::At(start..end) } else { CellAt::Short { end, cells: col_ix + 1 } });
+                    }
+                    row_ix += 1;
+                }
+                if byte.is_none() {
+                    return None;
+                }
+                col_ix = 0;
+                start = i + 1;
+                any = false;
+                filled = false;
+            }
+            Some(_) => filled = true,
+        }
+        i += 1;
+    }
+}
+
+/// What a cell holds, from how it is written: the quotes around it
+/// taken off and a doubled quote made one.
+pub fn cell_value(written: &str) -> String {
+    match written.strip_prefix('"') {
+        Some(rest) => rest.strip_suffix('"').unwrap_or(rest).replace("\"\"", "\""),
+        None => written.to_string(),
+    }
+}
+
+/// How a cell holding `value` is written: in quotes when it must be
+/// (the separator, a quote, a line break, a space at either end) or
+/// when `quoted` says the cell was in quotes before, as it is otherwise.
+pub fn cell_written(value: &str, sep: char, quoted: bool) -> String {
+    let must = value.contains(sep) || value.contains(['"', '\n', '\r']) || value.starts_with(' ') || value.ends_with(' ');
+    if quoted || must { format!("\"{}\"", value.replace('"', "\"\"")) } else { value.to_string() }
+}
+
 /// A comma- or tab-separated file as rows of cells, for showing: quoted
 /// cells may hold the separator, a doubled quote and line breaks. No
 /// more than `most` rows are read; the second answer says whether the

@@ -5,6 +5,21 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.1.9
+
+- Edit files in the pane beside the conversation and save with ⌘S. Unsaved changes are never lost without asking, and git's changes are marked in the margin, each with a card to see or revert it.
+- A CSV opens as a grid with lettered columns and numbered rows; edit a cell in place, or edit the file as written, where each column has its own colour.
+- Word, PowerPoint and Excel files (docx, pptx, xlsx, xls) open to read.
+- Tabs are grouped by project into pills; drag a tab within its pill, or a pill by its folder mark.
+- The home page is the greeting and the composer, with the folder to start in on a strip under it: four recent folders, or any folder you choose.
+- A plus on a project in the sidebar starts a new session there, on a tab of its own.
+- In the files panel: Copy and Paste on the menu, ⌘C and ⌘V on a row (to and from Finder too), and ⌘Z to take a paste back.
+- Discard a file's changes from the Changes panel, after a confirmation.
+- A rename made while the agent is working waits its turn, and the new name shows only once it is real.
+- Settings, Files: turn formatting R files on save (Air) on or off.
+- Copying from the agent's terminal reaches the clipboard, and a session stays in the folder it started in.
+- Emaki no longer asks any terminal app for anything.
+
 ## v0.1.8
 
 - Click a file in the files panel to read it in a pane beside the conversation; click it again, or press ⌘W, to close it.

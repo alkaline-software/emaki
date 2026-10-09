@@ -27,7 +27,7 @@ use emaki_core::git;
 use emaki_core::outline::{self, Kind};
 
 use crate::format::{clock, plural};
-use crate::workbench::{float_shadow, pill_button, swallow_click, MenuDo, Notice, Page, Workbench};
+use crate::workbench::{float_shadow, pill_button, pill_button_danger, swallow_click, MenuDo, Notice, Page, Workbench};
 
 /// How wide a panel is; both are, so one takes the other's place without
 /// moving the conversation.
@@ -319,6 +319,8 @@ const PDF_BYTES: u64 = 120_000_000;
 /// How much of a table is shown.
 const TABLE_ROWS: usize = 500;
 const TABLE_COLS: usize = 40;
+/// The largest Office file the pane reads: it is read whole, at once.
+const OFFICE_BYTES: usize = 40_000_000;
 const TABLE_CELL: usize = 48;
 /// How long the file's pane takes to come and to go.
 pub(crate) const FILE_ANIM: Duration = Duration::from_millis(200);
@@ -632,6 +634,42 @@ struct EditorWant {
     mtime: Option<std::time::SystemTime>,
 }
 
+/// A table's cell: whose table, which row and column of what the pane
+/// shows, and whether it is being written in.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TableAt {
+    path: PathBuf,
+    row: usize,
+    col: usize,
+    editing: bool,
+}
+
+/// A table's grid: a row's height, the head's, and the width of the
+/// column of row numbers.
+const GRID_ROW: f32 = 26.;
+const GRID_HEAD: f32 = 24.;
+const GRID_NUM: f32 = 46.;
+
+/// A column's width in the grid: as wide as its longest cell, up to a
+/// point (`TABLE_CELL`).
+fn table_col_w(chars: usize) -> f32 {
+    chars as f32 * 7.8 + 22.
+}
+
+/// A column's name as a spreadsheet has it: A to Z, then AA.
+fn column_name(mut n: usize) -> String {
+    let mut out = Vec::new();
+    loop {
+        out.push(b'A' + (n % 26) as u8);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
 /// The editor in the file's pane, and what it needs to save.
 pub(crate) struct FileEditor {
     /// A name for the file and what it held when the editor was made.
@@ -701,6 +739,12 @@ enum FileBody {
     /// head, each column's width in characters, and whether the file
     /// has more rows than are shown.
     Table(Vec<Vec<String>>, Vec<usize>, bool),
+    /// A Word document or a PowerPoint deck, read as markdown
+    /// (`emaki_core::office`). It is shown and nothing more: the file
+    /// is not text, so there is no way it is written to show.
+    Doc(String),
+    /// An Excel workbook: each sheet's name and what a table has.
+    Sheets(Vec<(String, Vec<Vec<String>>, Vec<usize>, bool)>),
     /// Not something the window shows, or not readable: why.
     None(String),
 }
@@ -715,6 +759,10 @@ pub enum FileDo {
     Mention,
     CopyPath,
     CopyRel,
+    /// The file or folder itself to the clipboard, and what the
+    /// clipboard holds into this folder (or beside this file).
+    Copy,
+    Paste,
     Rename,
     NewFile,
     NewFolder,
@@ -770,6 +818,30 @@ fn read_file(path: &Path, root: &Path) -> FileView {
     if ext == "pdf" {
         return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Pages(None), source: None };
     }
+    // Word, PowerPoint and Excel files are read by `emaki_core::office`,
+    // to look at: a document or a deck as markdown, a workbook as its
+    // sheets.
+    if emaki_core::office::reads(&ext) {
+        let body = if size as usize > OFFICE_BYTES {
+            FileBody::None("This file is too large to show here.".into())
+        } else {
+            match emaki_core::office::read(path, TABLE_ROWS) {
+                Ok(emaki_core::office::Office::Markdown(text)) if text.trim().is_empty() => FileBody::None("There is no text in this file to show.".into()),
+                Ok(emaki_core::office::Office::Markdown(text)) => FileBody::Doc(text),
+                Ok(emaki_core::office::Office::Sheets(sheets)) => FileBody::Sheets(
+                    sheets
+                        .into_iter()
+                        .map(|sheet| {
+                            let (rows, widths) = table_shape(sheet.rows);
+                            (sheet.name, rows, widths, sheet.more)
+                        })
+                        .collect(),
+                ),
+                Err(why) => FileBody::None(format!("Emaki cannot show this file: {why}.")),
+            }
+        };
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body, source: None };
+    }
     let mut bytes = Vec::new();
     let read = std::fs::File::open(path).and_then(|f| f.take(PREVIEW_BYTES as u64 + 1).read_to_end(&mut bytes));
     let (body, source) = match read {
@@ -777,6 +849,25 @@ fn read_file(path: &Path, root: &Path) -> FileView {
         Ok(_) => body_of(path, bytes),
     };
     FileView { path: path.to_path_buf(), rel, size, mtime, body, source }
+}
+
+/// Rows as the grid shows them: every row as long as the longest, up to
+/// `TABLE_COLS`, a cell one line, and each column's width in characters.
+fn table_shape(mut rows: Vec<Vec<String>>) -> (Vec<Vec<String>>, Vec<usize>) {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0).min(TABLE_COLS);
+    let mut widths = vec![3usize; cols];
+    for row in rows.iter_mut() {
+        row.resize(cols, String::new());
+        for (cell, w) in row.iter_mut().zip(widths.iter_mut()) {
+            // A cell is one line here; what it holds past that is the file's.
+            if let Some(at) = cell.find('\n') {
+                cell.truncate(at);
+                cell.push('…');
+            }
+            *w = (*w).max(cell.chars().count()).min(TABLE_CELL);
+        }
+    }
+    (rows, widths)
 }
 
 /// What the pane shows for a file that holds `bytes`, and its source
@@ -792,20 +883,8 @@ fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Rc<str>>) {
         () if ext == "csv" || ext == "tsv" => {
             let cut = bytes.len() > PREVIEW_BYTES;
             bytes.truncate(PREVIEW_BYTES);
-            let (mut rows, more) = emaki_core::files::table(&String::from_utf8_lossy(&bytes), if ext == "tsv" { '\t' } else { ',' }, TABLE_ROWS);
-            let cols = rows.iter().map(Vec::len).max().unwrap_or(0).min(TABLE_COLS);
-            let mut widths = vec![3usize; cols];
-            for row in rows.iter_mut() {
-                row.resize(cols, String::new());
-                for (cell, w) in row.iter_mut().zip(widths.iter_mut()) {
-                    // A cell is one line here; what it holds past that is the file's.
-                    if let Some(at) = cell.find('\n') {
-                        cell.truncate(at);
-                        cell.push('…');
-                    }
-                    *w = (*w).max(cell.chars().count()).min(TABLE_CELL);
-                }
-            }
+            let (rows, more) = emaki_core::files::table(&String::from_utf8_lossy(&bytes), if ext == "tsv" { '\t' } else { ',' }, TABLE_ROWS);
+            let (rows, widths) = table_shape(rows);
             if whole && !more {
                 source = Some(String::from_utf8_lossy(&bytes).into());
             }
@@ -1500,7 +1579,13 @@ impl Workbench {
         if self.fold_file {
             self.notice = Some(Notice::said("the window is too narrow to show the file beside the conversation"));
         }
-        window.focus(&self.focus_handle, cx);
+        // A file opened from the tree leaves the keyboard in the tree: the
+        // row is still what ⌘C and ⌘V are about, until a click in the
+        // file's pane takes it there. Opened any other way, the keyboard
+        // is the window's.
+        if !self.tree_focus.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
         cx.notify();
     }
 
@@ -1843,6 +1928,8 @@ impl Workbench {
             "ruby" => "ruby",
             "swift" => "swift",
             "lua" => "lua",
+            "csv" => "csv",
+            "tsv" => "tsv",
             "csharp" => "csharp",
             "kotlin" => "kotlin",
             "php" => "php",
@@ -2163,7 +2250,10 @@ impl Workbench {
             FileBody::Markdown(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), "markdown"),
             FileBody::Html(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), "html"),
             FileBody::Notebook(_) if self.file_raw => (v.source.clone()?, "json"),
-            FileBody::Table(..) if self.file_raw => (v.source.clone()?, "text"),
+            // A table has its editor whichever way it shows: a cell
+            // written in the grid is written in the editor's text, so
+            // undo, the dot and saving are the editor's either way.
+            FileBody::Table(..) => (v.source.clone()?, if v.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tsv")) { "tsv" } else { "csv" }),
             FileBody::Picture(..) if self.file_raw => (v.source.clone()?, "html"),
             _ => return None,
         };
@@ -2226,7 +2316,7 @@ impl Workbench {
                 let kept = self.file_parked.iter().find(|p| p.path == ask.path).map(|p| (p.state.read(cx).value().to_string(), p.lang));
                 let lang = emaki_core::render_md::lang_for_path(&ask.path.to_string_lossy());
                 let Some((text, lang)) = kept.or_else(|| self.file_drafts.get(&ask.path).map(|d| (d.text.clone(), lang))) else { return };
-                let text = emaki_core::format::format(lang, &text).ok().flatten().unwrap_or(text);
+                let text = if self.cfg.app.format_on_save { emaki_core::format::format(lang, &text).ok().flatten().unwrap_or(text) } else { text };
                 if let Err(e) = std::fs::write(&ask.path, &text) {
                     let name = ask.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     self.notice = Some(Notice::error(format!("could not save {name}: {e}")));
@@ -2358,7 +2448,8 @@ impl Workbench {
         let (path, mut text) = (ed.path.clone(), ed.state.read(cx).value().to_string());
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut unformatted = None;
-        match emaki_core::format::format(ed.lang, &text) {
+        // Off in Settings, a file is saved as typed.
+        match if self.cfg.app.format_on_save { emaki_core::format::format(ed.lang, &text) } else { Ok(None) } {
             Ok(Some(formed)) => {
                 ed.state.update(cx, |s, cx| {
                     let caret = s.cursor().min(formed.len());
@@ -2402,13 +2493,353 @@ impl Workbench {
         cx.notify();
     }
 
+    /// The editor of the table showing, when it can be written in.
+    fn table_editor(&self) -> Option<&FileEditor> {
+        let v = self.file_view.as_ref().filter(|v| matches!(v.body, FileBody::Table(..)))?;
+        self.file_editor.as_ref().filter(|ed| ed.path == v.path && ed.saved.is_some())
+    }
+
+    fn table_sep(path: &Path) -> char {
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tsv")) { '\t' } else { ',' }
+    }
+
+    /// The table reads as its editor has it.
+    fn table_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some((path, text)) = self.table_editor().map(|ed| (ed.path.clone(), ed.state.read(cx).value().to_string())) else { return };
+        if let Some(v) = self.file_view.as_mut() {
+            v.body = edited_body(&path, &text);
+        }
+        for ed in self.file_editor.iter_mut() {
+            ed.marks_due = true;
+        }
+        cx.notify();
+    }
+
+    /// The grid showing: a table's rows and widths, or those of the
+    /// workbook's sheet that is chosen.
+    fn grid_rows(&self) -> Option<(&Vec<Vec<String>>, &Vec<usize>)> {
+        let v = self.file_view.as_ref()?;
+        match &v.body {
+            FileBody::Table(rows, widths, _) => Some((rows, widths)),
+            FileBody::Sheets(sheets) => sheets.get(self.sheet_of(&v.path, sheets.len())).map(|(_, rows, widths, _)| (rows, widths)),
+            _ => None,
+        }
+    }
+
+    /// Which sheet of a workbook shows: the one chosen for that file,
+    /// else the first.
+    fn sheet_of(&self, path: &Path, sheets: usize) -> usize {
+        self.sheet_at.as_ref().filter(|(p, _)| p == path).map(|(_, ix)| *ix).unwrap_or(0).min(sheets.saturating_sub(1))
+    }
+
+    /// The cell chosen in the table showing, kept inside what it has.
+    fn table_cell(&self) -> Option<(usize, usize)> {
+        let v = self.file_view.as_ref()?;
+        let (rows, widths) = self.grid_rows()?;
+        let at = self.table_at.as_ref().filter(|at| at.path == v.path)?;
+        (at.row < rows.len() && at.col < widths.len()).then_some((at.row, at.col))
+    }
+
+    /// A cell is chosen: what was being written in another is kept first.
+    pub(crate) fn table_select(&mut self, row: usize, col: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.table_commit(None, window, cx);
+        let Some(path) = self.file_view.as_ref().map(|v| v.path.clone()) else { return };
+        self.table_at = Some(TableAt { path, row, col, editing: false });
+        window.focus(&self.file_focus, cx);
+        self.table_reveal();
+        cx.notify();
+    }
+
+    /// The chosen cell is brought into view, clear of the two heads.
+    fn table_reveal(&self) {
+        let Some((row, col)) = self.table_cell() else { return };
+        let Some((_, widths)) = self.grid_rows() else { return };
+        let view = self.file_view_scroll.bounds().size;
+        let mut off = self.file_view_scroll.offset();
+        let x: f32 = widths[..col].iter().map(|w| table_col_w(*w)).sum();
+        let (w, y) = (table_col_w(widths[col]), row as f32 * GRID_ROW);
+        let (left, top) = (-f32::from(off.x), -f32::from(off.y));
+        let (room_w, room_h) = (f32::from(view.width) - GRID_NUM, f32::from(view.height) - GRID_HEAD);
+        if x < left {
+            off.x = px(-x);
+        } else if x + w > left + room_w {
+            off.x = px(-(x + w - room_w).max(0.).min(x));
+        }
+        if y < top {
+            off.y = px(-y);
+        } else if y + GRID_ROW > top + room_h {
+            off.y = px(-(y + GRID_ROW - room_h).max(0.));
+        }
+        self.file_view_scroll.set_offset(off);
+    }
+
+    /// The chosen cell is opened for writing, with what it holds, or
+    /// with `typed` in its place when a letter opened it.
+    pub(crate) fn table_edit(&mut self, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, col)) = self.table_cell() else { return };
+        let Some(ed) = self.table_editor() else {
+            self.notice = Some(Notice::error("this table cannot be changed here: it is a workbook, or a file shown in part".to_string()));
+            cx.notify();
+            return;
+        };
+        let text = ed.state.read(cx).value().to_string();
+        let held = match emaki_core::files::cell_at(&text, Self::table_sep(&ed.path), row, col) {
+            Some(emaki_core::files::CellAt::At(span)) => emaki_core::files::cell_value(&text[span]),
+            Some(emaki_core::files::CellAt::Short { .. }) => String::new(),
+            None => return,
+        };
+        let value = typed.map(str::to_string).unwrap_or(held);
+        self.table_input.update(cx, |s, cx| {
+            s.set_value(value, window, cx);
+            s.focus(window, cx);
+        });
+        if let Some(at) = self.table_at.as_mut() {
+            at.editing = true;
+        }
+        cx.notify();
+    }
+
+    /// What was written in the cell goes into the file's text, in that
+    /// cell's place and nowhere else: the rest of the file keeps its
+    /// quotes and its line ends. Then, with `step`, the cell that many
+    /// rows and columns on is chosen.
+    pub(crate) fn table_commit(&mut self, step: Option<(isize, isize)>, window: &mut Window, cx: &mut Context<Self>) {
+        let editing = self.table_at.as_ref().is_some_and(|at| at.editing);
+        if editing {
+            if let Some(at) = self.table_at.as_mut() {
+                at.editing = false;
+            }
+            let value = self.table_input.read(cx).value().to_string();
+            self.table_write(&value, window, cx);
+            window.focus(&self.file_focus, cx);
+        }
+        if let Some((rows, cols)) = step {
+            self.table_step(rows, cols, cx);
+        }
+        cx.notify();
+    }
+
+    /// Leave the cell as it was.
+    pub(crate) fn table_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(at) = self.table_at.as_mut() {
+            at.editing = false;
+        }
+        window.focus(&self.file_focus, cx);
+        cx.notify();
+    }
+
+    /// Put `value` in the chosen cell, as one step of the editor's undo.
+    fn table_write(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, col)) = self.table_cell() else { return };
+        let Some(ed) = self.table_editor() else { return };
+        let (state, sep) = (ed.state.clone(), Self::table_sep(&ed.path));
+        let text = state.read(cx).value().to_string();
+        let (span, written) = match emaki_core::files::cell_at(&text, sep, row, col) {
+            Some(emaki_core::files::CellAt::At(span)) => {
+                let was = &text[span.clone()];
+                if emaki_core::files::cell_value(was) == value {
+                    return;
+                }
+                let written = emaki_core::files::cell_written(value, sep, was.starts_with('"'));
+                (span, written)
+            }
+            // A row that ends before this column is made long enough.
+            Some(emaki_core::files::CellAt::Short { end, cells }) => {
+                if value.is_empty() {
+                    return;
+                }
+                (end..end, format!("{}{}", sep.to_string().repeat(col + 1 - cells), emaki_core::files::cell_written(value, sep, false)))
+            }
+            None => return,
+        };
+        let caret = span.start + written.len();
+        state.update(cx, |s, cx| s.replace_bytes(span, &written, caret, window, cx));
+        self.table_refresh(cx);
+    }
+
+    /// The choice moves by rows and columns, and stops at the edges.
+    fn table_step(&mut self, rows: isize, cols: isize, cx: &mut Context<Self>) {
+        let Some((all, widths)) = self.grid_rows() else { return };
+        let (n_rows, n_cols) = (all.len() as isize, widths.len() as isize);
+        if let Some(at) = self.table_at.as_mut() {
+            at.row = (at.row as isize + rows).clamp(0, (n_rows - 1).max(0)) as usize;
+            at.col = (at.col as isize + cols).clamp(0, (n_cols - 1).max(0)) as usize;
+        }
+        self.table_reveal();
+        cx.notify();
+    }
+
+    /// `EMAKI_GO=cell:<row>,<col>` chooses a cell (from 0),
+    /// `cell:type:<words>` writes in it and goes down a row,
+    /// `cell:open` opens it and leaves the field up, `cell:undo` is ⌘Z.
+    pub(crate) fn table_probe(&mut self, step: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(words) = step.strip_prefix("type:") {
+            self.table_edit(Some(words), window, cx);
+            self.table_commit(Some((1, 0)), window, cx);
+        } else if step == "open" {
+            self.table_edit(None, window, cx);
+        } else if step == "undo" {
+            if let Some(state) = self.table_editor().map(|ed| ed.state.clone()) {
+                state.update(cx, |s, cx| s.undo_step(window, cx));
+                self.table_refresh(cx);
+            }
+        } else if let Some((row, col)) = step.split_once(',').and_then(|(r, c)| Some((r.parse().ok()?, c.parse().ok()?))) {
+            self.table_select(row, col, window, cx);
+        }
+    }
+
+    /// The table's keys, with a cell chosen and none being written in:
+    /// the arrows and Tab move, ↩ opens the cell, Delete empties it, a
+    /// letter opens it with that letter, and undo and redo are the
+    /// editor's.
+    fn table_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_raw || !self.file_focus.is_focused(window) || self.table_cell().is_none() || self.table_at.as_ref().is_some_and(|at| at.editing) {
+            return;
+        }
+        let m = e.keystroke.modifiers;
+        match e.keystroke.key.as_str() {
+            "up" => self.table_step(-1, 0, cx),
+            "down" => self.table_step(1, 0, cx),
+            "left" => self.table_step(0, -1, cx),
+            "right" => self.table_step(0, 1, cx),
+            "tab" => self.table_step(0, if m.shift { -1 } else { 1 }, cx),
+            "enter" => self.table_edit(None, window, cx),
+            "backspace" | "delete" if self.table_editor().is_some() => self.table_write("", window, cx),
+            "z" if m.secondary() => {
+                let Some(state) = self.table_editor().map(|ed| ed.state.clone()) else { return };
+                state.update(cx, |s, cx| if m.shift { s.redo_step(window, cx) } else { s.undo_step(window, cx) });
+                self.table_refresh(cx);
+            }
+            "c" if m.secondary() => {
+                let Some((row, col)) = self.table_cell() else { return };
+                if let Some((rows, _)) = self.grid_rows() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(rows[row][col].clone()));
+                }
+            }
+            _ => match e.keystroke.key_char.as_deref().filter(|c| !m.secondary() && !m.control && !c.chars().any(char::is_control)) {
+                Some(typed) => {
+                    let typed = typed.to_string();
+                    self.table_edit(Some(&typed), window, cx)
+                }
+                None => return,
+            },
+        }
+        cx.stop_propagation();
+    }
+
+    /// A table as a grid: columns named by letter and rows by number,
+    /// both staying in view; lines between the cells and every other row
+    /// a shade darker; the chosen cell outlined. A click chooses a cell
+    /// and a second opens it, in a field that stands in the cell's place.
+    fn render_table(&self, v: &FileView, rows: &[Vec<String>], widths: &[usize], more: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let at = self.table_at.as_ref().filter(|at| at.path == v.path);
+        let chosen = at.map(|at| (at.row, at.col));
+        let editing = at.is_some_and(|at| at.editing);
+        let off = self.file_view_scroll.offset();
+        let total: f32 = widths.iter().map(|w| table_col_w(*w)).sum();
+        let (line, head_bg, stripe) = (theme.border, theme.sidebar, theme.foreground.opacity(if theme.mode.is_dark() { 0.035 } else { 0.03 }));
+        let lit = theme.primary.opacity(0.16);
+        let field_focus = self.table_input.read(cx).focus_handle(cx);
+        let body = v_flex().pt(px(GRID_HEAD)).pl(px(GRID_NUM)).text_size(px(12.)).children(rows.iter().enumerate().map(|(ix, row)| {
+            let whole: Rc<Vec<String>> = Rc::new(row.clone());
+            h_flex()
+                .h(px(GRID_ROW))
+                .flex_shrink_0()
+                .border_b_1()
+                .border_color(line)
+                .when(ix % 2 == 1, |d| d.bg(stripe))
+                .when(ix == 0, |d| d.font_weight(FontWeight::SEMIBOLD))
+                .children(row.iter().zip(widths).enumerate().map(|(col, (cell, chars))| {
+                    let whole = whole.clone();
+                    let here = chosen == Some((ix, col));
+                    let base = div().relative().w(px(table_col_w(*chars))).h_full().flex_shrink_0().border_r_1().border_color(line).flex().items_center();
+                    if here && editing {
+                        return base
+                            .child(
+                                div()
+                                    .id("table-field")
+                                    .key_context(crate::workbench::FIND_CONTEXT)
+                                    .on_action(cx.listener(|this, _: &crate::workbench::Escape, window, cx| this.table_cancel(window, cx)))
+                                    .track_focus(&field_focus)
+                                    .role(Role::TextInput)
+                                    .aria_label("Cell")
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .bg(theme.background)
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_size(px(12.))
+                                    .child(
+                                        // A size of its own: the
+                                        // toolkit's field then pads its
+                                        // words as far as a cell pads
+                                        // its, and sets them as large.
+                                        gpui_component::input::Input::new(&self.table_input).with_size(gpui_component::Size::Size(px(12. / 0.875))).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.table_input, false, cx)),
+                                    ),
+                            )
+                            // The outline is laid over the field, not
+                            // set around it: as a border of the field
+                            // it moved the words in from where the
+                            // cell had them.
+                            .child(div().absolute().inset_0().border_2().border_color(theme.primary))
+                            .into_any_element();
+                    }
+                    base.px(px(8.))
+                        .cursor_text()
+                        .child(div().min_w_0().truncate().child(cell.clone()))
+                        .when(here, |d| d.child(div().absolute().inset_0().border_2().border_color(theme.primary).bg(theme.primary.opacity(0.08))))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                this.table_select(ix, col, window, cx);
+                                if e.click_count >= 2 {
+                                    this.table_edit(None, window, cx);
+                                }
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.table_select(ix, col, window, cx);
+                                let items = vec![("Copy Cell", MenuDo::Copy(whole[col].clone())), ("Copy Row", MenuDo::Copy(whole.join("\t")))];
+                                this.file_pane_menu(items, e.position, cx);
+                            }),
+                        )
+                        .into_any_element()
+                }))
+        }));
+        // The two heads are laid over the cells and moved against the
+        // scroll, so they stay at the pane's top and left: the numbers
+        // first, the letters over them, the corner over both.
+        let numbers = v_flex().absolute().top_0().left(-off.x).w(px(GRID_NUM)).pt(px(GRID_HEAD)).bg(head_bg).border_r_1().border_color(line).text_size(px(11.)).children((0..rows.len()).map(|ix| {
+            let here = chosen.is_some_and(|(row, _)| row == ix);
+            div().h(px(GRID_ROW)).flex_shrink_0().flex().items_center().justify_center().border_b_1().border_color(line).text_color(if here { theme.foreground } else { theme.muted_foreground }).when(here, |d| d.bg(lit)).child((ix + 1).to_string())
+        }));
+        let letters = h_flex().absolute().left_0().top(-off.y).h(px(GRID_HEAD)).pl(px(GRID_NUM)).bg(head_bg).border_b_1().border_color(line).text_size(px(11.)).children(widths.iter().enumerate().map(|(col, chars)| {
+            let here = chosen.is_some_and(|(_, c)| c == col);
+            div().w(px(table_col_w(*chars))).h_full().flex_shrink_0().flex().items_center().justify_center().border_r_1().border_color(line).text_color(if here { theme.foreground } else { theme.muted_foreground }).when(here, |d| d.bg(lit)).child(column_name(col))
+        }));
+        let corner = div().absolute().left(-off.x).top(-off.y).w(px(GRID_NUM)).h(px(GRID_HEAD)).bg(head_bg).border_r_1().border_b_1().border_color(line);
+        // The width is said outright: stretched across the scroller, the
+        // grid was as wide as the pane and nothing scrolled sideways.
+        v_flex()
+            .w(px(total + GRID_NUM))
+            .flex_shrink_0()
+            .child(div().relative().w_full().flex_shrink_0().child(body).child(numbers).child(letters).child(corner))
+            .when(more, |d| d.child(div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(format!("Only the first {TABLE_ROWS} rows are shown. Open the file for the rest."))))
+            .into_any_element()
+    }
+
     /// Markdown as it reads, or as it is written.
     fn set_file_raw(&mut self, raw: bool, cx: &mut Context<Self>) {
         if self.file_raw != raw {
             // As it reads, with changes not saved in its editor: it reads
             // as the editor has it, not as the disk does.
             if !raw {
-                let edited = self.file_editor.as_ref().filter(|ed| ed.dirty(cx)).map(|ed| (ed.path.clone(), ed.state.read(cx).value().to_string()));
+                let edited = self.file_editor.as_ref().filter(|ed| ed.saved.is_some()).map(|ed| (ed.path.clone(), ed.state.read(cx).value().to_string()));
                 if let (Some((path, text)), Some(v)) = (edited, self.file_view.as_mut()) {
                     if v.path == path {
                         v.body = edited_body(&path, &text);
@@ -2433,9 +2864,11 @@ impl Workbench {
         let Some(root) = self.files_root() else { return };
         let item = |label: &'static str, what: FileDo, path: &Path| (label, MenuDo::File(what, path.to_path_buf()));
         let rule = || ("", MenuDo::Rule);
+        // Paste is offered only with a file on the clipboard to paste.
+        let paste = !self.clipboard_files(cx).is_empty();
         // In groups, a line between them: what opens it, what it gives
         // the message or the clipboard, and what changes it on disk.
-        let items = match node {
+        let mut items = match node {
             Some(n) if n.dir => vec![
                 item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &n.path),
                 rule(),
@@ -2446,6 +2879,7 @@ impl Workbench {
                 item("Copy Path", FileDo::CopyPath, &n.path),
                 item("Copy Relative Path", FileDo::CopyRel, &n.path),
                 rule(),
+                item("Copy", FileDo::Copy, &n.path),
                 item("Rename", FileDo::Rename, &n.path),
                 item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
             ],
@@ -2462,6 +2896,7 @@ impl Workbench {
                     item("Copy Path", FileDo::CopyPath, &n.path),
                     item("Copy Relative Path", FileDo::CopyRel, &n.path),
                     rule(),
+                    item("Copy", FileDo::Copy, &n.path),
                     item("Rename", FileDo::Rename, &n.path),
                     item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
                 ]);
@@ -2469,6 +2904,11 @@ impl Workbench {
             }
             None => vec![item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &root), rule(), item("New File", FileDo::NewFile, &root), item("New Folder", FileDo::NewFolder, &root), rule(), item("Copy Path", FileDo::CopyPath, &root)],
         };
+        if paste {
+            let target = node.map(|n| n.path.clone()).unwrap_or(root);
+            let after = items.iter().position(|(label, _)| *label == "Copy").map(|at| at + 1).unwrap_or(items.len());
+            items.insert(after, item("Paste", FileDo::Paste, &target));
+        }
         self.open_menu(at, items, cx);
     }
 
@@ -2487,6 +2927,8 @@ impl Workbench {
             FileDo::CopyPath => copy(path.to_string_lossy().to_string(), self, cx),
             FileDo::CopyRel => copy(rel, self, cx),
             FileDo::Mention => self.file_mention(&path, window, cx),
+            FileDo::Copy => self.tree_copy(&path, cx),
+            FileDo::Paste => self.tree_paste(&path, cx),
             FileDo::Rename | FileDo::NewFile | FileDo::NewFolder => {
                 let (prompt, value) = match what {
                     FileDo::Rename => (FilePrompt::Rename(path.clone()), path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
@@ -2515,6 +2957,277 @@ impl Workbench {
             },
         }
         cx.notify();
+    }
+
+    /// The files the clipboard holds: what the file manager or another
+    /// app copied, else the one copied here when the clipboard still
+    /// says so (where a file cannot be put on it as a file, its path is,
+    /// and a copy made since of anything else is not pasted as that
+    /// file).
+    fn clipboard_files(&self, cx: &App) -> Vec<PathBuf> {
+        let Some(item) = cx.read_from_clipboard() else { return Vec::new() };
+        let files: Vec<PathBuf> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !files.is_empty() {
+            return files;
+        }
+        let text = item.text().unwrap_or_default();
+        self.file_clip.iter().filter(|clip| clip.to_string_lossy() == text.trim()).cloned().collect()
+    }
+
+    /// ⌘C on a row, or Copy on its menu: the file itself goes to the
+    /// clipboard, to be pasted here or in the file manager.
+    pub(crate) fn tree_copy(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !crate::sys::copy_file(path) {
+            cx.write_to_clipboard(ClipboardItem::new_string(path.to_string_lossy().to_string()));
+        }
+        self.file_clip = Some(path.to_path_buf());
+        self.notice = Some(Notice::said(format!("{} copied", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
+        cx.notify();
+    }
+
+    /// ⌘V, or Paste: every file on the clipboard is copied into the
+    /// folder `at` is, or the folder the file `at` is in, under a name
+    /// that is free there. Nothing is written over.
+    pub(crate) fn tree_paste(&mut self, at: &Path, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        let files = self.clipboard_files(cx);
+        if files.is_empty() {
+            self.notice = Some(Notice::error("there is no file on the clipboard to paste".to_string()));
+            cx.notify();
+            return;
+        }
+        let dir = if at.is_dir() { at.to_path_buf() } else { at.parent().map(Path::to_path_buf).unwrap_or(root.clone()) };
+        if !dir.starts_with(&root) {
+            return;
+        }
+        let mut last = None;
+        self.paste_last.clear();
+        for file in &files {
+            match emaki_core::files::copy_into(file, &dir) {
+                Ok(to) => {
+                    self.paste_last.push(to.clone());
+                    last = Some(to)
+                }
+                Err(why) => {
+                    self.notice = Some(Notice::error(format!("{} was not pasted: {why}", file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
+                    last = None;
+                    break;
+                }
+            }
+        }
+        // The folder pasted into is opened, and the copy is the row chosen.
+        if dir != root {
+            self.tree.open.insert(dir.clone());
+        }
+        self.tree.refresh(&root);
+        self.tree.read_at = 0.;
+        if let Some(to) = last {
+            self.notice = Some(Notice::said(format!("pasted as {}", to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
+            self.tree.picked = Some(to);
+        }
+        cx.notify();
+    }
+
+    /// The files panel's keys: ⌘C copies the row chosen, ⌘V pastes
+    /// beside it, or into it when it is a folder, or into the session's
+    /// folder with no row chosen.
+    fn tree_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
+        if !e.keystroke.modifiers.secondary() {
+            return;
+        }
+        let Some(root) = self.files_root() else { return };
+        match e.keystroke.key.as_str() {
+            "c" => {
+                let Some(path) = self.tree.picked.clone() else { return };
+                self.tree_copy(&path, cx);
+            }
+            "v" => {
+                let at = self.tree.picked.clone().unwrap_or(root);
+                self.tree_paste(&at, cx);
+            }
+            // The last paste is taken back, after a question.
+            "z" if !e.keystroke.modifiers.shift => self.ask_paste_undo(cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    /// ⌘Z in the files panel: the question whether to take the last
+    /// paste back, when what it made is still there.
+    pub(crate) fn ask_paste_undo(&mut self, cx: &mut Context<Self>) {
+        self.paste_last.retain(|p| p.exists());
+        if self.paste_last.is_empty() {
+            return;
+        }
+        self.paste_ask = Some(self.paste_ask.map(|n| n + 1).unwrap_or(0));
+        cx.notify();
+    }
+
+    /// Yes: every copy the paste made goes to the system's trash, where
+    /// it can be put back from, and whatever of it was open here goes
+    /// with it.
+    pub(crate) fn paste_undo_now(&mut self, cx: &mut Context<Self>) {
+        self.paste_ask = None;
+        let Some(root) = self.files_root() else { return };
+        let made = std::mem::take(&mut self.paste_last);
+        let mut failed = None;
+        for path in &made {
+            match crate::sys::trash_path(path) {
+                Ok(()) => {
+                    if self.file_view.as_ref().is_some_and(|v| v.path.starts_with(path)) {
+                        self.file_view = None;
+                    }
+                    self.file_editor.take_if(|ed| ed.path.starts_with(path));
+                    self.file_parked.retain(|ed| !ed.path.starts_with(path));
+                    self.file_drafts.retain(|p, _| !p.starts_with(path));
+                    if self.tree.picked.as_ref().is_some_and(|p| p.starts_with(path)) {
+                        self.tree.picked = None;
+                    }
+                }
+                Err(e) => failed = Some(e),
+            }
+        }
+        self.tree.refresh(&root);
+        self.tree.read_at = 0.;
+        self.notice = Some(match failed {
+            Some(e) => Notice::error(format!("the paste was not taken back: {e}")),
+            None => Notice::said("the paste is taken back".to_string()),
+        });
+        cx.notify();
+    }
+
+    /// The question ⌘Z asks after a paste, on the card Discard's is on.
+    pub(crate) fn render_paste_ask(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(serial) = self.paste_ask else { return div().into_any_element() };
+        let name = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let what = match self.paste_last.as_slice() {
+            [one] => name(one),
+            many => format!("{} items", many.len()),
+        };
+        let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            this.paste_ask = None;
+            cx.notify();
+        });
+        let yes = cx.listener(|this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            this.paste_undo_now(cx);
+        });
+        self.ask_card("paste-ask", serial, format!("Undo pasting {what}?"), format!("It goes to the {}, and can be put back from there.", crate::sys::TRASH_NAME), Button::new("paste-ask-no").outline().small().label("No").on_click(cancel), Button::new("paste-ask-yes").primary().small().label("Yes").on_click(yes), cx)
+    }
+
+    /// A question on the window's own card over everything: a line, a
+    /// line under it, and its two buttons.
+    #[allow(clippy::too_many_arguments)]
+    fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, no: Button, yes: Button, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        div()
+            .id(SharedString::from(format!("{id}-overlay")))
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(theme.overlay)
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(120.))
+            .on_click(|_, window, cx| swallow_click(window, cx))
+            .child(
+                v_flex()
+                    .id(id)
+                    .on_click(|_, window, cx| swallow_click(window, cx))
+                    .w(px(420.))
+                    .max_w(gpui::relative(0.94))
+                    .p(px(16.))
+                    .gap(px(10.))
+                    .rounded(px(16.))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow(float_shadow(&theme))
+                    .child(div().w_full().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child(detail))
+                    .child(h_flex().w_full().pt(px(2.)).gap(px(8.)).child(div().flex_1()).child(no).child(yes))
+                    .with_animation(ElementId::Name(format!("{id}-in-{serial}").into()), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-6. * (1. - t)))),
+            )
+            .into_any_element()
+    }
+
+    /// Discard, pressed in the comparison: the question first.
+    fn ask_discard(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let serial = self.discard_ask.as_ref().map(|(_, n)| n + 1).unwrap_or(0);
+        self.discard_ask = Some((path, serial));
+        cx.notify();
+    }
+
+    /// The question answered yes: the file is as the last commit has it
+    /// (`git::discard`), or, when that commit has no such file, in the
+    /// trash. What was typed in it here and not saved goes too. The
+    /// comparison moves to the next changed file, or closes with none.
+    fn discard_now(&mut self, cx: &mut Context<Self>) {
+        let Some((path, _)) = self.discard_ask.take() else { return };
+        let Some(root) = self.changes.as_ref().map(|c| c.root.clone()) else { return };
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let done = git::discard(&root, &path).and_then(|did| match did {
+            git::Discarded::New if path.exists() => crate::sys::trash_path(&path).map(|_| format!("{name} is in the {}", crate::sys::TRASH_NAME)),
+            _ => Ok(format!("the changes to {name} are discarded")),
+        });
+        match done {
+            Ok(said) => {
+                self.file_editor.take_if(|ed| ed.path == path);
+                self.file_parked.retain(|ed| ed.path != path);
+                self.file_drafts.remove(&path);
+                if self.file_view.as_ref().is_some_and(|v| v.path == path) {
+                    if path.exists() { self.show_file(&path, cx) } else { self.file_view = None }
+                }
+                // Git is asked again here and now, so the list is right
+                // at the next draw.
+                let status = git::status(&root).unwrap_or_default();
+                self.tree.changed = Rc::new(status.changed());
+                self.tree.git = Some((root.clone(), Rc::new(status)));
+                self.tree.refresh(&root);
+                self.tree.read_at = 0.;
+                if self.tree.changed.is_empty() {
+                    self.changes = None;
+                } else {
+                    self.open_changes(None, cx);
+                }
+                self.notice = Some(Notice::said(said));
+            }
+            Err(why) => self.notice = Some(Notice::error(format!("{name} was not discarded: {why}"))),
+        }
+        cx.notify();
+    }
+
+    /// The question Discard asks, on the window's own card over the
+    /// comparison. Nothing answers it but its two buttons and Escape.
+    pub(crate) fn render_discard_ask(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some((path, serial)) = self.discard_ask.clone() else { return div().into_any_element() };
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let new = self.tree.changed.iter().any(|(p, s)| *p == path && matches!(s, git::State::Untracked | git::State::Added));
+        let (title, detail, yes) = if new {
+            (format!("Move {name} to the {}?", crate::sys::TRASH_NAME), "The last commit has no such file, so discarding it removes it. It can be put back from there.".to_string(), crate::sys::TRASH_LABEL)
+        } else {
+            (format!("Discard the changes to {name}?"), "The file goes back to what the last commit has. This cannot be undone from here.".to_string(), "Discard Changes")
+        };
+        let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            this.discard_ask = None;
+            cx.notify();
+        });
+        let go = cx.listener(|this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            this.discard_now(cx);
+        });
+        self.ask_card("discard-ask", serial, title, detail, Button::new("discard-ask-cancel").outline().small().label("Cancel").on_click(cancel), Button::new("discard-ask-yes").danger().small().label(yes).on_click(go), cx)
     }
 
     /// "@path" at the end of what is typed, as the composer's own "@"
@@ -2693,10 +3406,15 @@ impl Workbench {
                                 // The click is the row's: the room around
                                 // the rows takes one as "choose nothing".
                                 swallow_click(window, cx);
+                                // The keyboard is the panel's from here:
+                                // ⌘C and ⌘V are this row's.
+                                window.focus(&this.tree_focus, cx);
                                 if click.dir {
+                                    this.tree.picked = Some(click.path.clone());
                                     this.tree_toggle(&click.path, cx)
                                 } else {
-                                    this.file_clicked(&click.path, window, cx)
+                                    this.file_clicked(&click.path, window, cx);
+                                    this.tree.picked = Some(click.path.clone());
                                 }
                             }))
                             .on_mouse_down(
@@ -2731,7 +3449,8 @@ impl Workbench {
                         .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.file_menu(None, ev.position, cx)))
                         // A click on the panel's empty room lets the
                         // chosen file go.
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            window.focus(&this.tree_focus, cx);
                             if this.tree.picked.take().is_some() {
                                 cx.notify();
                             }
@@ -2743,7 +3462,7 @@ impl Workbench {
         } else {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("The session's folder is gone.").into_any_element()
         };
-        let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).child(body);
+        let el = v_flex().track_focus(&self.tree_focus).on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.tree_key(e, cx))).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).child(body);
         self.panel_in(true, el)
     }
 
@@ -3581,7 +4300,7 @@ impl Workbench {
                     .into_any_element()
             }
         };
-        let (open, reveal) = (picked.clone(), picked.clone());
+        let (open, reveal, discard) = (picked.clone(), picked.clone(), picked.clone());
         let counts = shown.as_ref().filter(|d| !d.binary).map(|d| (d.added, d.removed));
         let branch = self.branches().map(|b| b.label());
         div()
@@ -3647,6 +4366,12 @@ impl Workbench {
                                                 el.child(div().flex_shrink_0().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(git_color(git::State::Added, dark)).child(format!("+{a}")))
                                                     .child(div().flex_shrink_0().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(git_color(git::State::Deleted, dark)).child(format!("\u{2212}{r}")))
                                             })
+                                            .when_some(discard, |el, p| {
+                                                let this = cx.entity().downgrade();
+                                                el.child(pill_button_danger("changes-discard", "Discard", &theme, move |_, _, cx| {
+                                                    let _ = this.update(cx, |this, cx| this.ask_discard(p.clone(), cx));
+                                                }))
+                                            })
                                             .when_some(open, |el, p| el.child(pill_button("changes-open", "Open", &theme, move |_, _, _| crate::sys::open_path(&p))))
                                             .when_some(reveal, |el, p| el.child(pill_button("changes-reveal", crate::sys::REVEAL_LABEL, &theme, move |_, _, _| crate::sys::reveal_path(&p)))),
                                     )
@@ -3699,7 +4424,9 @@ impl Workbench {
         let name = v.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let folder = v.rel.strip_suffix(&name).unwrap_or("").trim_end_matches(['/', '\\']).to_string();
         let (open, open_too, reveal, mention) = (v.path.clone(), v.path.clone(), v.path.clone(), v.path.clone());
-        let (pad_x, pad_y) = (18., 16.);
+        // A table's grid runs to the pane's edges.
+        let grid = (matches!(v.body, FileBody::Table(..)) && !self.file_raw) || matches!(v.body, FileBody::Sheets(_));
+        let (pad_x, pad_y) = if grid { (0., 0.) } else { (18., 16.) };
         // A PDF's pages give the list beside them its room.
         let beside = if matches!(v.body, FileBody::Pages(Some(_))) && self.pdf_side.is_some() { PDF_SIDE_W } else { 0. };
         let room = (f32::from(w) - beside - 2. * pad_x - 1.).max(120.);
@@ -3821,33 +4548,16 @@ impl Workbench {
             }
             FileBody::Table(rows, widths, more) => {
                 wide = true;
-                // A column is as wide as its longest cell, up to a point.
-                let cell_w = |chars: usize| px(chars as f32 * 7.8 + 22.);
-                v_flex()
-                    .text_size(px(12.))
-                    .children(rows.iter().enumerate().map(|(ix, row)| {
-                        let whole: Rc<Vec<String>> = Rc::new(row.clone());
-                        h_flex()
-                            .h(px(26.))
-                            .flex_shrink_0()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .when(ix == 0, |d| d.font_weight(FontWeight::SEMIBOLD).bg(theme.muted.opacity(0.5)))
-                            .children(row.iter().zip(widths).enumerate().map(|(col, (cell, chars))| {
-                                let whole = whole.clone();
-                                div().w(cell_w(*chars)).flex_shrink_0().px(px(10.)).truncate().child(cell.clone()).on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        let items = vec![("Copy Cell", MenuDo::Copy(whole[col].clone())), ("Copy Row", MenuDo::Copy(whole.join("\t")))];
-                                        this.file_pane_menu(items, e.position, cx);
-                                    }),
-                                )
-                            }))
-                    }))
-                    .when(*more, |d| d.child(div().pt(px(10.)).child(quiet(format!("Only the first {TABLE_ROWS} rows are shown. Open the file for the rest.")))))
-                    .into_any_element()
+                self.render_table(v, rows, widths, *more, cx)
             }
+            FileBody::Doc(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
+            FileBody::Sheets(sheets) => match sheets.get(self.sheet_of(&v.path, sheets.len())) {
+                Some((_, rows, widths, more)) if !rows.is_empty() => {
+                    wide = true;
+                    self.render_table(v, rows, widths, *more, cx)
+                }
+                _ => div().p(px(18.)).child(quiet("This sheet is empty.".into())).into_any_element(),
+            },
             FileBody::None(why) => v_flex()
                 .py(px(60.))
                 .gap(px(12.))
@@ -4047,6 +4757,51 @@ impl Workbench {
                 .child(tool("file-find-next", Icon::new(IconName::ChevronDown), "Next (↩)").on_click(cx.listener(|this, _, _, cx| this.pdf_find_step(1, cx))))
                 .child(tool("file-find-close", Icon::new(IconName::Close), "Close (esc)").on_click(cx.listener(|this, _, window, cx| this.pdf_find_close(window, cx))))
         });
+        // A workbook's sheets, by name, in a row over the grid: the one
+        // showing on a plate, as a segment is.
+        let sheets = match &v.body {
+            FileBody::Sheets(all) if all.len() > 1 && !leaving => {
+                let now = self.sheet_of(&v.path, all.len());
+                Some(
+                    h_flex()
+                        .id("file-sheets")
+                        .h(px(32.))
+                        .flex_shrink_0()
+                        .px(px(8.))
+                        .gap(px(2.))
+                        .items_center()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .overflow_x_scroll()
+                        .children(all.iter().enumerate().map(|(ix, (name, ..))| {
+                            let path = v.path.clone();
+                            div()
+                                .id(("file-sheet", ix))
+                                .h(px(22.))
+                                .px(px(9.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .text_size(px(12.))
+                                .when(ix == now, |d| d.bg(theme.muted).font_weight(FontWeight::MEDIUM).text_color(theme.foreground))
+                                .when(ix != now, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    swallow_click(window, cx);
+                                    this.sheet_at = Some((path.clone(), ix));
+                                    this.table_at = None;
+                                    this.file_serial += 1;
+                                    this.file_view_scroll.set_offset(point(px(0.), px(0.)));
+                                    cx.notify();
+                                }))
+                                .child(name.clone())
+                        }))
+                        .with_animation(ElementId::Name(format!("file-sheets-{}", v.path.display()).into()), Animation::new(FILE_ANIM), |d, t| d.opacity(t)),
+                )
+            }
+            _ => None,
+        };
         let scroller = v_flex().id("file-body").flex_1().min_h_0().px(px(pad_x)).py(px(pad_y)).track_scroll(&self.file_view_scroll).when(!pdf && !leaving, |d| {
             // A PDF's pages and a table's cells have menus of their own.
             d.on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, window, cx| this.file_body_menu(e.position, window, cx)))
@@ -4060,7 +4815,12 @@ impl Workbench {
             .border_r_1()
             .border_color(theme.border)
             .when(!leaving, |d| d.track_focus(&self.file_focus))
-            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.pdf_key(e, cx)))
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                this.pdf_key(e, cx);
+                this.table_key(e, window, cx);
+            }))
+            // A table's heads stay put: they are drawn where the scroll is.
+            .when(grid, |d| d.on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.pdf_mouse_move(e, cx)))
             // The page in view is said in the head and marked in the list.
             .when(pdf, |d| d.on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())))
@@ -4147,6 +4907,7 @@ impl Workbench {
                     }),
             )
             .children(find)
+            .children(sheets)
             .child(
                 h_flex().flex_1().min_h_0().items_stretch().children(side).child(
                     v_flex()
@@ -4158,7 +4919,12 @@ impl Workbench {
                             // The editor scrolls itself; the wrapper only
                             // says where the pane's body is.
                             Some(editor) => d.child(div().id("file-body").flex_1().min_h_0().track_scroll(&self.file_view_scroll).pt(px(6.)).font_family(theme.mono_font_family.clone()).text_size(px(12.5)).child(editor)).children(cut),
-                            None => d.child(if wide { scroller.overflow_scroll().child(body) } else { scroller.overflow_y_scroll().child(body) }).vertical_scrollbar(&self.file_view_scroll),
+                            // What is wider than the pane keeps its own
+                            // width: stretched across the scroller, as a
+                            // column's child is, it was as wide as the
+                            // pane to the scroller and never scrolled
+                            // sideways.
+                            None => d.child(if wide { scroller.items_start().overflow_scroll().child(body) } else { scroller.overflow_y_scroll().child(body) }).vertical_scrollbar(&self.file_view_scroll),
                         }),
                 ),
             )
@@ -4538,6 +5304,30 @@ impl Workbench {
                 }
             }
             "file:off" => self.close_file_view(cx),
+            // In the tree: copy a file or folder, paste at one (or at
+            // the folder itself with no path). In the comparison: ask
+            // to discard a file's changes, and say yes.
+            t if t.starts_with("treecopy:") => {
+                if let Some(p) = under(&t["treecopy:".len()..]) {
+                    self.tree_copy(&p, cx);
+                }
+            }
+            t if t.starts_with("treepaste") => {
+                let at = t.strip_prefix("treepaste:").and_then(under).or_else(|| self.files_root());
+                if let Some(at) = at {
+                    self.tree_paste(&at, cx);
+                }
+            }
+            "discard:yes" => self.discard_now(cx),
+            "treefocus" => self.pending_tree_focus = true,
+            "pasteundo" => self.ask_paste_undo(cx),
+            "pasteundo:yes" => self.paste_undo_now(cx),
+            t if t.starts_with("discard:") => {
+                if let Some(p) = under(&t["discard:".len()..]) {
+                    self.open_changes(Some(p.clone()), cx);
+                    self.ask_discard(p, cx);
+                }
+            }
             "pdf:pages" => self.pdf_side_toggle(true, cx),
             "pdf:contents" => self.pdf_side_toggle(false, cx),
             t if t.starts_with("pdf:page:") => {
@@ -4565,6 +5355,9 @@ impl Workbench {
                 }
             }
             "file:save" => self.pending_save = true,
+            // In a table: choose a cell, write in the chosen one, take
+            // the last step back.
+            t if t.starts_with("cell:") => self.pending_cell = Some(t["cell:".len()..].to_string()),
             // Answer the question a file with changes not saved asks,
             // and press Quit.
             // Open the change at a mark (from 0) on a card, and revert it.

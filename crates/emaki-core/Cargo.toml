@@ -34,6 +34,13 @@ similar = "2"
 air_r_parser = { path = "../../vendor/air_r_parser" }
 air_r_formatter = { git = "https://github.com/posit-dev/air", rev = "8d20826ccf65a0ccc1d6a82e78d308213271667c" }
 
+# Office files for the file's pane, read only. A workbook is calamine's;
+# a document and a deck are zips of XML read here. zip and quick-xml are
+# the versions calamine itself builds on, zip with deflate alone.
+calamine = "0.36"
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+quick-xml = "0.41"
+
 # Probing a pid (the inbox registry) is a Unix signal; a file's identity on
 # Windows needs the NTFS file index, which std does not expose on stable.
 [target.'cfg(unix)'.dependencies]

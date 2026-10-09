@@ -144,6 +144,26 @@ pub const REVEAL_SESSION_LABEL: &str = if cfg!(target_os = "macos") {
 pub const TRASH_LABEL: &str = if cfg!(target_os = "windows") { "Move to Recycle Bin" } else { "Move to Trash" };
 pub const TRASH_NAME: &str = if cfg!(target_os = "windows") { "Recycle Bin" } else { "Trash" };
 
+/// Put a file on the clipboard as a file, so the file manager and any
+/// other app can paste it. False where that is not done (off a Mac, for
+/// now), and the caller keeps the path itself.
+#[cfg(target_os = "macos")]
+pub fn copy_file(path: &Path) -> bool {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    let object: objc2::rc::Retained<ProtocolObject<dyn NSPasteboardWriting>> = ProtocolObject::from_retained(url);
+    let board = NSPasteboard::generalPasteboard();
+    board.clearContents();
+    board.writeObjects(&NSArray::from_retained_slice(&[object]))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn copy_file(_: &Path) -> bool {
+    false
+}
+
 /// Move `path` to the system's trash, where it can be put back from. On
 /// macOS through the file manager's own call: the crate's default asks
 /// Finder by AppleScript, which needs the person's leave to automate it.
