@@ -225,7 +225,7 @@ them. `read_suggestion` reads the screen on the clock while the session
 showing is idle in its terminal and the box is empty.
 `driver::suggestion_on_screen` takes the line between the prompt's two
 rules, after "❯", when all of it is written dim (`ESC [ 0;2 m`), which
-typed words are not. That needs the colours: WezTerm and Kaku only. A path
+typed words are not. A path
 in the words is a link (`ESC ] 8 ;; url ESC \`), whose sequences once ran
 into the rule below and hid it. Taking the words here leaves the
 terminal's own suggestion in place.

@@ -1587,6 +1587,23 @@ fn a_name_the_person_gave_is_the_title() {
     assert_eq!(pick_title(&rows[..1]), "Embed terminal session headless");
 }
 
+/// A name asked for is the session's once its transcript says it, and
+/// gives way to a name the transcript took from elsewhere meanwhile.
+#[test]
+fn a_name_asked_for_lands_or_is_overruled() {
+    use emaki_core::transcript::{custom_title, naming, Naming};
+    let rows = vec![json!({"type": "ai-title", "aiTitle": "Written by the agent"})];
+    assert_eq!(custom_title(&rows), "");
+    assert_eq!(naming("", "", "Mine"), Naming::Waiting);
+    assert_eq!(naming("Old", "Old", "Mine"), Naming::Waiting);
+    assert_eq!(naming("Mine", "Old", "Mine"), Naming::Landed);
+    assert_eq!(naming("Typed in a terminal", "Old", "Mine"), Naming::Overruled);
+    // The old name's row out of the index's reach is not a new name.
+    assert_eq!(naming("", "Old", "Mine"), Naming::Waiting);
+    // Back to the name it had: nothing to ask for.
+    assert_eq!(naming("Old", "Old", "Old"), Naming::Landed);
+}
+
 /// `/clear` starts a new transcript and carries the session's name into
 /// it. Until something is said there it is not a conversation.
 #[test]

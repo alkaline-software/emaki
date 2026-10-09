@@ -47,10 +47,11 @@ Source: `crates/emaki-core/src/driver.rs`, `pty.rs`, `peer`, `terminal.rs`;
   --resume` forks under a new id.
 - The driver's child runs with `CLAUDE_CODE_ENTRYPOINT=emaki`
   (`driver::ENTRYPOINT`), or the terminal's resume list hides the session.
-- Before System Events keys: wait until the host is frontmost
-  (`Host::wait_front`), and in an IDE focus its terminal. Activation may
-  be granted late, and early keys land in whatever is in front, Emaki's
-  composer included.
+- No terminal app is asked anything: no command line of one (`kaku cli`,
+  `wezterm cli`), no AppleScript, no System Events keys. Emaki has its own
+  terminal, most people have neither Kaku nor iTerm2, and a terminal's
+  command line can start the terminal. `sys`'s functions answer for a
+  hidden terminal of ours and for nothing else.
 - No terminal app of the person's is opened, for anything: what needs a
   terminal is done in the hidden one and shown in the terminal panel.
 - Never draw the terminal card on a screen with Claude Code's prompt on
@@ -130,10 +131,12 @@ the code that follows a terminal follows it unchanged.
 
 Every `sys` function that takes a session's pid (`terminal_text`,
 `terminal_styled`, `type_in_terminal`, `key_in_terminal`,
-`text_in_terminal`) asks `pty::for_pid` first. There the screen is in
-memory (`Pty::styled`, in the form the readers in `driver` take) and a
-key is a write: any platform, no app coming forward, no Accessibility
-access.
+`text_in_terminal`, `focus_terminal`) asks `pty::for_pid` and answers
+only there. The screen is in memory (`Pty::styled`, in the form the
+readers in `driver` take) and a key is a write: any platform, no app
+coming forward, no Accessibility access. For a session in a terminal of
+the person's the answer is nothing, or a line saying the thing is done in
+that terminal.
 
 **Start.** `Hub::start_terminal`, from a message sent on `spawn`, from
 anything `via_terminal` is asked for, and at the first sign the person means to do
@@ -416,37 +419,20 @@ session's menu copies.
 A session the person started in a terminal themselves is another matter:
 it is where it is, and the next section is how it is reached.
 
-## Reaching a real terminal app
+## A session in a terminal of the person's
 
-Used for a terminal of the person's: Stop and a dialog's answer
-mid-turn, the button's bring-forward, and everything when
-`driver.hidden_terminal` is off.
-
-`sys::focus_terminal` goes from the registry pid up the parent chain to
-the first process that is an application (`NSRunningApplication`): the
-terminal app, or the IDE holding the terminal. The tab or pane on the
-tty is picked where the app can be asked: Terminal and iTerm2 by
-AppleScript, WezTerm and Kaku by `cli list` / `activate-pane` keyed on
-`tty_name`. Anything else is only activated.
-
-`sys::type_in_terminal`: Terminal `do script`, iTerm2 `write text`,
-WezTerm and Kaku `cli send-text --no-paste` with a carriage return. Any
-other host gets System Events keystrokes, which need Accessibility
-access; refused, the text goes on the clipboard and the row under the
-composer says so.
+It is listed, read from its transcript, and sent messages through its
+inbox while a turn runs there. Nothing else reaches it: its screen is not
+read (so no working row's word, no dialog card, no mode off its footer),
+no key is pressed in it (Stop and ⇧Tab say to press it there), and its
+app is not brought forward. Between turns the session is taken up on a
+hidden terminal like any other. Reaching into terminal apps was done
+once, by `kaku cli`, AppleScript and System Events, and was removed: it
+served a few terminals on one OS, and the hidden terminal serves all.
 
 `come_back`: if the session was waiting or idle at the hand-off, the
 next change to its transcript brings the window back. If the agent was
 working, the next change would be its own, so nothing is armed.
-
-**IDE terminals.** A VS Code based IDE (any host with
-`Contents/Resources/app/product.json`) takes keys wherever its focus was
-left, and bringing the app forward does not move it: `/compact` landed
-in a file. `Host::focus_ide_terminal` asks the command palette for
-"Terminal: Focus Terminal" (⌘⇧P, the words, ↩), which is harmless from
-the panel itself, where the ⌃` toggle would close it. It focuses the
-IDE's active terminal, which may not be this session's: nothing outside
-the IDE can pick one by its tty.
 
 ## The slash list
 

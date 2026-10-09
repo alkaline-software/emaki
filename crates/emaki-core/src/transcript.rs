@@ -223,6 +223,10 @@ pub struct SessionRef {
     pub cwd: String,
     pub project_dir: String,
     pub title: String,
+    /// The name the person gave it (`custom_title`), where the rows read
+    /// say one; empty otherwise. `title` is this when there is one.
+    #[serde(default)]
+    pub named: String,
     pub started: String,
     pub updated: String,
     pub size: u64,
@@ -390,6 +394,7 @@ fn peek_into(r: &mut SessionRef, st: &fs::Metadata) {
     }
     let all: Vec<Value> = head.iter().chain(tail.iter()).cloned().collect();
     r.title = pick_title(&all);
+    r.named = custom_title(&all);
     if r.title.is_empty() {
         r.title = first_prompt_title(&head, 72);
     }
@@ -425,16 +430,47 @@ fn says_something(row: &Value) -> bool {
 
 static SLUG_SHAPED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)+$").unwrap());
 
+/// The name the person gave a session (`/rename`, or Ctrl+R in the resume
+/// list): the newest `custom-title` row, or nothing. Claude Code writes
+/// the same words as an `agent-name` row beside it, which must not
+/// disqualify them the way an agent's name does an AI title.
+pub fn custom_title(rows: &[Value]) -> String {
+    rows.iter().rev().filter(|r| str_of(r, "type") == "custom-title").map(|r| str_of(r, "customTitle").trim().to_string()).find(|s| !s.is_empty()).unwrap_or_default()
+}
+
+/// Where a name asked of a session stands, by what its transcript says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Naming {
+    /// The transcript says the name: it is the session's.
+    Landed,
+    /// The transcript took another name since this one was asked for,
+    /// in a terminal or anywhere else. The newer one stands.
+    Overruled,
+    /// Neither yet.
+    Waiting,
+}
+
+/// `named` is what the transcript says now (`SessionRef::named`), `from`
+/// what it said when `want` was asked for. A transcript that says no
+/// name overrules nothing: the index reads a file's two ends, and a
+/// name's row can be between them.
+pub fn naming(named: &str, from: &str, want: &str) -> Naming {
+    if named == want {
+        Naming::Landed
+    } else if !named.is_empty() && named != from {
+        Naming::Overruled
+    } else {
+        Naming::Waiting
+    }
+}
+
 /// A session's title from a set of rows: the person's own name for it when
 /// they gave one, else the best AI-written one, the newest `ai-title` that is
 /// neither a known agent name nor slug-shaped (when a session runs under a
 /// named agent, Claude Code writes the agent's name into that field).
 pub fn pick_title(rows: &[Value]) -> String {
-    // A name the person gave (`/rename`, or Ctrl+R in the resume list) is
-    // a `custom-title` row and beats anything written for them. Claude
-    // Code writes the same words as an `agent-name` row beside it, which
-    // must not disqualify them the way an agent's name does an AI title.
-    if let Some(named) = rows.iter().rev().filter(|r| str_of(r, "type") == "custom-title").map(|r| str_of(r, "customTitle").trim().to_string()).find(|s| !s.is_empty()) {
+    let named = custom_title(rows);
+    if !named.is_empty() {
         return named;
     }
     let agent_names: std::collections::HashSet<String> =

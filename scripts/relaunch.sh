@@ -40,6 +40,6 @@ REC="$rec" DELAY="$delay" nohup sh -c '
     fi
     pkill -x Emaki
     sleep 2
-    exec ./target/debug/Emaki
+    exec scripts/dev-app.sh
 ' >/dev/null 2>&1 &
 echo "Emaki relaunches ${delay}s from now, or when this turn ends if that is later"

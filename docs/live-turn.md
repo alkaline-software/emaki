@@ -65,9 +65,9 @@ terminal's mark, the bracket in the muted ink.
 
 - `Workbench::read_working` reads the screen of the session showing once a
   second and whenever its status line runs, one read at a time off the
-  main thread (`sys::terminal_styled`). WezTerm and Kaku give the colours
-  (`cli get-text --escapes`); Terminal and iTerm2 give plain text, and the
-  word takes the agent's colour.
+  main thread (`sys::terminal_styled`): the hidden terminal's, with its
+  colours. A session in a terminal of the person's has no screen to read
+  here.
 - `driver::working_on_screen` finds the line among the last lines: one of
   the spinner's marks, a space, words ending in "…". A finished turn's
   line has no ellipsis and a tool call's begins with another mark.
@@ -91,10 +91,9 @@ state was read from.
 
 The working row has a Stop pill (`Workbench::interrupt`). A driver takes
 an `interrupt` request. A terminal session gets Escape
-(`sys::key_in_terminal`): WezTerm and Kaku by `cli send-text` and iTerm2
-by `write text`, neither coming forward; Terminal and other hosts by a
-System Events key press after being brought forward, the front going back
-to Emaki after. The scan is then asked for twice.
+(`sys::key_in_terminal`), written to the hidden terminal; in a terminal
+of the person's the row says to press it there. The scan is then asked
+for twice.
 
 Escape in the window does the same when it has nothing to close
 (`Workbench::escape_stops`): the slash list, settings, the lightbox, the
@@ -187,9 +186,8 @@ needed" or "permission prompt"); the screen says which.
   coming forward), Next sends Tab, Cancel sends Escape.
 - The chips are the terminal's tabs, the review last. The one showing is
   ringed (`Dialog::current`), which the terminal says by a ground colour,
-  so the screen is read with `--escapes`. A click on another goes there by
-  arrow keys, one step at a time (`dialog_go`, `DialogUntil::Tab`). With
-  no colours (iTerm2) the chips take no clicks.
+  so the screen is read with its colours. A click on another goes there by
+  arrow keys, one step at a time (`dialog_go`, `DialogUntil::Tab`).
 - Words typed in the composer answer a question that offers "Type
   something" (`dialog_answer_typed`): digit, words, Return.
 - Not done: typed words on a question that takes several, whose field

@@ -133,6 +133,14 @@ designed outside this repository; this copy is the app's source.
 - `sys::install_dock_icon` gives a bare `target/debug/Emaki` the Dock icon
   at startup; a bundle has it from `Emaki.icns`; on Windows `build.rs`
   compiles `icon.ico` into the executable.
+- On a Mac the build in `target/debug` is started as a bundle,
+  `target/debug/Emaki.app`, opened through the system with a Dock launch's
+  environment (`scripts/dev-app.sh`, which `scripts/relaunch.sh` ends in).
+  A bare executable opened from the Dock or the Finder is run inside the
+  default terminal app, in a window of it, and every Emaki started from a
+  session's shell after that inherits that terminal's marks
+  (`__CFBundleIdentifier`, its ssh agent's socket) and hands them to every
+  Claude Code it starts. `pty::child_env` drops the identifier as well.
 - The conversation reads down to about 64px. At 16px the icon is two bars
   with a pale block between.
 

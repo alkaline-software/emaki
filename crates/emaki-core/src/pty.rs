@@ -163,7 +163,7 @@ pub fn shell_argv() -> Vec<String> {
 /// terminal app, and Claude Code reads that app's marks to decide which
 /// keyboard protocol to speak; here it gets the plain one.
 fn child_env() -> Vec<(String, String)> {
-    const THEIRS: &[&str] = &["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID", "LC_TERMINAL", "LC_TERMINAL_VERSION", "TMUX", "TMUX_PANE", "STY", "NO_COLOR", "FORCE_COLOR", "COLUMNS", "LINES"];
+    const THEIRS: &[&str] = &["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID", "LC_TERMINAL", "LC_TERMINAL_VERSION", "TMUX", "TMUX_PANE", "STY", "NO_COLOR", "FORCE_COLOR", "COLUMNS", "LINES", "__CFBundleIdentifier"];
     const THEIR_PREFIXES: &[&str] = &["WEZTERM_", "KITTY_", "ITERM_", "VSCODE_", "KAKU_", "GHOSTTY_", "ALACRITTY_", "KONSOLE_", "WT_"];
     let mut env: Vec<(String, String)> =
         driver::child_env().into_iter().filter(|(k, _)| !THEIRS.contains(&k.as_str()) && !THEIR_PREFIXES.iter().any(|p| k.starts_with(p))).collect();
