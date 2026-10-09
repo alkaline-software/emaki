@@ -251,6 +251,20 @@ so it is caught before the tag next time.
   repository sets `core.autocrlf false`. v0.1.9's first push to `main`
   went red on this before the tag, which is what step 4's wait is for.
 
+- **One Mac package job in `release.yml` fails right after "satisfies
+  its Designated Requirement", with no message, while the other
+  passes**: `hdiutil create` on the runner ("Resource busy").
+  `release-mac.sh` now tries it five times and says why. If it still
+  fails, re-run only that job, which keeps the tag and the images built
+  here: `gh run rerun <run-id> --failed --repo alkaline-software/emaki`.
+  The `release` job waits for all four. v0.1.9's Intel job did this.
+- **`release-mac.sh` stops with "Finder ... AppleEvent timed out
+  (-1712)"**: macOS asked whether the terminal may control Finder and
+  nobody answered. Allow it (System Settings, Privacy & Security,
+  Automation) and run the script again. Check the script's exit code and
+  that both images are in `dist/`: piped into `tail`, a failed first
+  image went unnoticed for v0.1.9 until the second was done.
+
 - **"Cargo.toml says X but the tag is vY"**: the version and the tag
   disagree. Fix `Cargo.toml`, commit, redo the tag.
 - **"CHANGELOG.md has no section '## vX.Y.Z'"**: add it, commit, redo the tag.
