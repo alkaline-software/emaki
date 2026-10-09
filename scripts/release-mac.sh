@@ -78,7 +78,19 @@ cp -R "$APP" "$STAGE/Emaki.app"
 ln -s /Applications "$STAGE/Applications"
 cp scripts/dmg/background.png "$STAGE/.background/background.png"
 mkdir -p "$STAGE/.fseventsd" && touch "$STAGE/.fseventsd/no_log"
-hdiutil create -quiet -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDRW "$RW"
+# hdiutil fails now and then with "Resource busy" on a machine that has
+# just built (a GitHub runner most of all), so it is tried a few times, and
+# without -quiet, which hid why v0.1.9's Intel job stopped here.
+made=""
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDRW "$RW"; then
+    made=1
+    break
+  fi
+  echo "release-mac: hdiutil create failed (attempt $attempt), trying again" >&2
+  sleep $((attempt * 3))
+done
+[ -n "$made" ] || { echo "release-mac: could not create the disk image" >&2; exit 1; }
 ATTACHED=$(hdiutil attach -readwrite -noverify -noautoopen "$RW")
 DEVICE=$(echo "$ATTACHED" | awk '/^\/dev\// {print $1; exit}')
 osascript >/dev/null <<APPLESCRIPT
