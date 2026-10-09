@@ -69,8 +69,10 @@ already fixed once. The doc named after a rule has the full story.
   (`docs/core.md`)
 - **One writer per transcript where we can choose.** Never start a second
   Claude Code on a running turn. (`docs/channels.md`)
-- **Nothing is sent to, typed in or ended in a terminal of the person's.**
-  The window uses its own hidden terminal. (`docs/channels.md`)
+- **Nothing is sent to, typed in or ended in a terminal of the person's,
+  and no terminal app is asked anything.** The window uses its own hidden
+  terminal: no `kaku cli`, no AppleScript, no System Events keys.
+  (`docs/channels.md`)
 - **Never `--bare` on a `claude` child** (it skips the keychain and breaks
   subscription users), and strip every `CLAUDE*` variable but
   `CLAUDE_CONFIG_DIR` from a child's environment. (`docs/channels.md`)
@@ -175,7 +177,7 @@ crates/emaki-app/         the window
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets
   src/term_panel.rs          the terminal at a conversation's right: a shell, and the agent's hidden terminal drawn whole
   src/main.rs                menus, key bindings, the window
-  src/sys.rs                 open, reveal, open in a terminal, the person's name: per OS
+  src/sys.rs                 open, reveal, the person's name: per OS; a session's hidden terminal by its pid
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers
   assets/icon/               the icon in every size, drawn by scripts/icon/icon.html
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
@@ -187,6 +189,7 @@ scripts/release-check.sh   before a tag: version, lock, changelog, tests, build,
 scripts/release-publish.sh after CI: the notarized Mac images onto the draft release, then publish
 scripts/statusline.sh      Claude Code's status line, ours: prints the line, leaves the rate limits
 scripts/relaunch.sh        quit the running Emaki and start the new build, once the agent's turn is over
+scripts/dev-app.sh         start the build in target/debug as an app: on a Mac a bundle opened through the system, never a bare executable
 scripts/anthropic-mono.py  the Claude app's code font into ~/.emaki/fonts, plus its 0.9 copy for inline code
 docs/                      how each part works and its traps; the index below says which to read
 WORKFLOW.md                how to cut a release, step by step
@@ -198,7 +201,7 @@ PLAN.md                    the detailed plan: tasks, decisions, what has landed
 ```
 
 ```
-cargo build -p emaki-app && ./target/debug/Emaki
+cargo build -p emaki-app && scripts/dev-app.sh
 cargo test -p emaki-core
 ```
 
@@ -223,7 +226,7 @@ app, build it (`cargo build -p emaki-app`) and run `scripts/relaunch.sh` as
 the last command before the final reply, without being asked. A change to
 documents alone needs no relaunch. The script returns at once; fifteen
 seconds later, or when the turn is over if that is later, it quits the
-running Emaki and starts `target/debug/Emaki`. The agent's session is a
+running Emaki and starts the new build (`scripts/dev-app.sh`). The agent's session is a
 child of the app, so quitting the app ends the session: the script waits
 while the session's registry record says `busy`. Never `pkill` by hand from
 inside the app, and look at a change before the relaunch with a probe copy.

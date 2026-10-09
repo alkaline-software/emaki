@@ -6,7 +6,7 @@
 //! (headless Claude Code children) live here too, so the window only ever
 //! sees events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, RwLock};
@@ -71,6 +71,10 @@ pub enum HubEvent {
     /// A message waits on this session's hidden terminal, which is
     /// showing something that is not its prompt: the person has to see it.
     TerminalNeeded(String),
+    /// A `/rename` was typed into the session's hidden terminal, or was
+    /// not, and why. The name is the session's only once its transcript
+    /// says so.
+    Renamed { session_id: String, error: String },
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +104,8 @@ pub struct Hub {
     /// Hidden terminals whose child went away by itself, with the last
     /// thing on its screen: said once to whoever is looking.
     lost: Mutex<HashMap<String, String>>,
+    /// The sessions whose hidden terminal is being typed into now.
+    typing: Mutex<HashSet<String>>,
     /// Sessions whose driver exited; a fresh mtime alone must not count as a
     /// process for them.
     ended: Mutex<HashMap<String, Instant>>,
@@ -145,6 +151,7 @@ impl Hub {
             terminals: Mutex::new(HashMap::new()),
             showing: Mutex::new(None),
             lost: Mutex::new(HashMap::new()),
+            typing: Mutex::new(HashSet::new()),
             ended: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             inbox_last: Mutex::new(HashMap::new()),
@@ -514,13 +521,40 @@ impl Hub {
         let hub = Arc::clone(self);
         let sid = session_id.to_string();
         thread::spawn(move || {
-            let sent = hub.type_message(&sid, &text, &images);
+            let sent = hub.type_message(&sid, &text, &images, true);
             hub.send(HubEvent::Sent { session_id: sid, queued: false, error: sent.err().unwrap_or_default() });
             hub.refresh();
         });
     }
 
-    fn type_message(&self, sid: &str, text: &str, images: &[PathBuf]) -> Result<(), String> {
+    /// Type `/rename <name>` at the hidden terminal's prompt, as a
+    /// message is typed. The caller has seen the session between turns.
+    /// A terminal that is not at its prompt is not put in front of the
+    /// person for this: a name can wait.
+    pub fn rename_in_terminal(self: &Arc<Self>, session_id: &str, name: &str) {
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        let text = format!("/rename {name}");
+        thread::spawn(move || {
+            let sent = hub.type_message(&sid, &text, &[], false);
+            hub.send(HubEvent::Renamed { session_id: sid, error: sent.err().unwrap_or_default() });
+            hub.refresh();
+        });
+    }
+
+    /// `ask` puts a terminal that is not at its prompt in front of the
+    /// person. One message at a time is typed into a terminal: a second
+    /// waits for the first to be sent, or the two arrive as one.
+    fn type_message(&self, sid: &str, text: &str, images: &[PathBuf], ask: bool) -> Result<(), String> {
+        while !self.typing.lock().unwrap().insert(sid.to_string()) {
+            thread::sleep(Duration::from_millis(60));
+        }
+        let sent = self.type_message_now(sid, text, images, ask);
+        self.typing.lock().unwrap().remove(sid);
+        sent
+    }
+
+    fn type_message_now(&self, sid: &str, text: &str, images: &[PathBuf], ask: bool) -> Result<(), String> {
         let Some(pty) = self.terminal_for(sid) else { return Err("claude is not running; try again".into()) };
         let look = Duration::from_millis(60);
         let started = Instant::now();
@@ -533,7 +567,7 @@ impl Hub {
             if registered && driver::prompt_on_screen(&pty.styled()).is_some() {
                 break;
             }
-            if !asked && started.elapsed() > Duration::from_secs(5) {
+            if ask && !asked && started.elapsed() > Duration::from_secs(5) {
                 asked = true;
                 self.send(HubEvent::TerminalNeeded(sid.to_string()));
             }

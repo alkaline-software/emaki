@@ -67,6 +67,9 @@ window remembers.
   Nothing here writes to a transcript, and a name kept only in our own file
   leaves the terminal's resume list on the old title.
 - Never type a rename into a running turn; it waits in `renames`.
+- A name asked for is never drawn as the session's title before the
+  transcript says it. The title stays the transcript's, with the mark
+  beside it. Typed is not taken: only the index puts a name away.
 - The settings panel's body is a flex column inside a flex column. A block
   wrapper around it collapsed the panel to its header.
 - A round in the conversation list is wrapped in an explicit centring
@@ -348,17 +351,41 @@ plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
 Rename opens a field over a scrim (`render_rename`, `rename_input`), the
 name there selected whole so a key replaces it: ↩ keeps
 the name, Escape or a click outside leaves it, an empty field changes
-nothing. `try_renames` types `/rename <name>` into the session's hidden
-terminal, starting one when the session has none. Claude Code writes a
-`custom-title` row, which its resume list reads and
+nothing. A field opened on a session with a name on its way holds that
+name. Giving the name the transcript already says calls a waiting one off.
+
+A name is a request, kept in `renames` and in
+`~/.emaki/state/titles.json` by session key until it is settled, so a quit
+does not lose it. For a session Claude Code can be asked about (`can_ask`)
+the title everywhere stays what the transcript says, and a pencil beside it
+on the tab, the sidebar row and the sessions page says on a hover what the
+name will be (`rename_mark`). `try_renames`, run when the index arrives and
+on the clock, types `/rename <name>` into the session's hidden terminal
+(`Hub::rename_in_terminal`), starting one when the session has none, once
+the session is between turns: not during a turn, not while a card waits
+for an answer, not while the turn runs in a terminal of the person's.
+Claude Code writes a `custom-title` row, which its resume list reads and
 `transcript::pick_title` puts before any AI title. It writes the same words
 as an `agent-name` row, which must not disqualify them.
 
-Meanwhile, and for a session that cannot be asked (another agent, one kept
-only, a folder that is gone), the name is ours:
-`~/.emaki/state/titles.json` by session key, laid over `SessionRef::title`
-as each index arrives (`HubEvent::Index`) and dropped once the transcript
-says the same. Whatever is still in that file at launch is asked for again.
+`SessionRef::named` is the transcript's own name, and `transcript::naming`
+settles a request against it as each index arrives:
+
+- The transcript says the name: it is the session's, the request is put
+  away and the mark goes out.
+- The transcript took another name since the request was made (a `/rename`
+  typed in a terminal): the newer one stands and the request is dropped.
+- Neither: it waits. One typed that the transcript still does not say once
+  the transcript has moved on is asked for again, a few times in all, and
+  then given up with a line under the composer. Nothing shown was wrong
+  meanwhile, since the title was the transcript's throughout.
+
+For a session that cannot be asked (another agent, one kept only, a folder
+that is gone, the hidden terminal off) the name is ours alone: laid over
+`SessionRef::title` at once and as each index arrives, with no mark.
+
+A terminal types one message at a time (`Hub::type_message`), so a rename
+and a message sent in the same moment do not arrive as one line.
 
 ## Scroll routing
 

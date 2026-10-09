@@ -160,11 +160,9 @@ status falls back to the status line naming another model or effort. A
 command in the hidden terminal that opens nothing and starts no turn
 (`/cost`) changes no status and is not waited on.
 
-With the person's terminal (`driver.hidden_terminal` false): a pick
-brings it forward and the window comes back when it is over (`come_back`).
-For ⇧Tab, WezTerm, Kaku and iTerm2 take the key for the pane without
-coming forward; any other host comes forward and the window takes the
-front back at once.
+With `driver.hidden_terminal` false, or mid-turn in a terminal of the
+person's, a pick and ⇧Tab are not done from here: the row under the
+composer says to do it in that terminal (`docs/channels.md`).
 
 ## What the pills show
 

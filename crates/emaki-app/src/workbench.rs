@@ -34,7 +34,7 @@ use emaki_core::limits::{Limits, SessionContext};
 use emaki_core::model::{questions_of, AgentId, Item, Session};
 use emaki_core::options::{humanize, Choice, Options};
 use emaki_core::search::Results;
-use emaki_core::transcript::SessionRef;
+use emaki_core::transcript::{Naming, SessionRef};
 
 use crate::format::{bucket, elapsed_since, now_secs, plural, relative, today_line};
 use crate::hub::{Hub, HubEvent, UpdateEvent};
@@ -180,6 +180,57 @@ impl MenuDo {
 /// Where the person's own names for sessions are kept, by session key.
 fn titles_file() -> PathBuf {
     emaki_core::paths::state_dir().join("titles.json")
+}
+
+/// A name the person gave a session that its transcript does not say.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct Rename {
+    name: String,
+    /// The name the transcript had when this one was asked for; none
+    /// for a record kept before that was written down, which takes the
+    /// first name seen.
+    #[serde(default)]
+    from: Option<String>,
+    /// How many times Claude Code has been asked since launch.
+    #[serde(skip)]
+    asked: u32,
+    /// `/rename` is being typed into the session's terminal now.
+    #[serde(skip)]
+    typing: bool,
+    /// The transcript's size when it was last asked. Asked again only
+    /// once the transcript has moved on and still says another name.
+    #[serde(skip)]
+    size_asked: u64,
+    /// Why the last asking did not go.
+    #[serde(skip)]
+    error: String,
+}
+
+/// How many times a session is asked to take a name before the name is
+/// given up, with a line saying so.
+const RENAME_TRIES: u32 = 3;
+/// The mark of a name on its way, coming in and going out.
+const RENAME_MARK_FADE: Duration = Duration::from_millis(180);
+
+/// A name as `/rename` takes it: one line.
+fn one_line(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What is in `state/titles.json`: a record a session, or the bare name
+/// that was all an older version kept.
+fn load_renames() -> HashMap<String, Rename> {
+    let Some(serde_json::Value::Object(map)) = emaki_core::paths::read_json(&titles_file()) else { return HashMap::new() };
+    map.into_iter()
+        .filter_map(|(key, v)| {
+            let mut want = match v {
+                serde_json::Value::String(name) => Rename { name, ..Default::default() },
+                v => serde_json::from_value::<Rename>(v).ok()?,
+            };
+            want.name = one_line(&want.name);
+            (!want.name.is_empty()).then_some((key, want))
+        })
+        .collect()
 }
 
 /// How long the typing has paused before the composer's text is checked,
@@ -739,12 +790,15 @@ pub struct Workbench {
     pub(crate) rename_input: Entity<InputState>,
     /// The name field in Settings.
     name_input: Entity<InputState>,
-    /// The person's own names for sessions, by session key
-    /// (`state/titles.json`); each stands in for the agent's title.
-    titles: HashMap<String, String>,
-    /// Names still to be given to the sessions themselves, by session
-    /// key: each waits for its session to be between turns.
-    renames: HashMap<String, String>,
+    /// The names the person gave that the sessions' transcripts do not
+    /// say, by session key (`state/titles.json`). One for a session that
+    /// can be asked (`can_ask`) is still to be given to it and is shown
+    /// nowhere as its title; one for a session that cannot is ours alone
+    /// and stands in for the agent's title.
+    renames: HashMap<String, Rename>,
+    /// The sessions whose name has just landed, and when: the mark of a
+    /// name on its way goes out over a moment.
+    renamed: HashMap<String, Instant>,
     /// The session showing changed on disk while it was being read; a
     /// change that came then was dropped, and a prompt whose row was
     /// half written at the read (a large pasted picture is one long
@@ -1945,6 +1999,7 @@ impl Workbench {
                     this.terminal_lost(cx);
                     this.watch_terminal(cx);
                     this.terminal_ready(cx);
+                    this.try_renames(cx);
                     this.read_working(cx);
                     this.read_dialog(cx);
                     this.read_suggestion(cx);
@@ -1970,7 +2025,6 @@ impl Workbench {
             }
         }));
 
-        let titles: HashMap<String, String> = emaki_core::paths::read_json(&titles_file()).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("A name for this session"));
         cx.subscribe_in(&rename_input, window, |this, _, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = ev {
@@ -2241,10 +2295,10 @@ impl Workbench {
             renaming: None,
             rename_input,
             name_input,
-            titles: titles.clone(),
             // A name still in our record is one its transcript does not
             // say yet: asked for again at launch.
-            renames: titles,
+            renames: load_renames(),
+            renamed: HashMap::new(),
             reload_wanted: false,
             draft_of: None,
             lightbox: None,
@@ -2517,27 +2571,44 @@ impl Workbench {
                 if self.tabs.len() != tabs {
                     self.save_ui(true);
                 }
-                // The person's own name for a session stands in for the
-                // agent's title wherever the list is drawn.
-                // Once the transcript says the same, the name is the
-                // session's own and ours is put away.
+                // A name the person gave: the session's own once the
+                // transcript says it, and then ours is put away, as it is
+                // when the transcript took another name since. Until
+                // then the title is the transcript's, except for a
+                // session that cannot be asked, where ours stands in.
                 let mut settled = false;
                 for r in refs.iter_mut() {
                     let key = key_of(r);
-                    match self.titles.get(&key) {
-                        Some(name) if *name == r.title => {
-                            self.titles.remove(&key);
+                    let Some(want) = self.renames.get(&key).cloned() else { continue };
+                    let from = want.from.clone().unwrap_or_else(|| r.named.clone());
+                    match emaki_core::transcript::naming(&r.named, &from, &want.name) {
+                        Naming::Landed => {
+                            self.renames.remove(&key);
+                            self.rename_landed(&key, cx);
                             settled = true;
                         }
-                        Some(name) => r.title = name.clone(),
-                        None => {}
+                        Naming::Overruled => {
+                            self.renames.remove(&key);
+                            settled = true;
+                        }
+                        Naming::Waiting => {
+                            if want.from.is_none() {
+                                if let Some(w) = self.renames.get_mut(&key) {
+                                    w.from = Some(from);
+                                }
+                                settled = true;
+                            }
+                            if !self.can_ask(r) {
+                                r.title = want.name.clone();
+                            }
+                        }
                     }
                 }
                 if settled {
                     self.save_titles();
                 }
                 self.refs = refs;
-                self.try_renames();
+                self.try_renames(cx);
                 // The turn showing was working and now reads as stopped
                 // (Escape in the terminal, or Stop here): its prompt goes
                 // back to the composer.
@@ -2659,6 +2730,20 @@ impl Workbench {
             HubEvent::Screen(sid) => self.on_screen(sid, cx),
             // A message waits on a hidden terminal that is not at its
             // prompt: the person has to see what it shows.
+            // The name was typed, or was not. Typed is not taken: the
+            // transcript says when it is the session's.
+            HubEvent::Renamed { session_id, error } => {
+                let size = self.refs.iter().find(|r| r.session_id == session_id).map(|r| (key_of(r), r.size));
+                if let Some((key, size)) = size {
+                    if let Some(want) = self.renames.get_mut(&key) {
+                        want.typing = false;
+                        want.size_asked = if error.is_empty() { size } else { 0 };
+                        want.error = error;
+                    }
+                }
+                self.try_renames(cx);
+                cx.notify();
+            }
             HubEvent::TerminalNeeded(sid) => {
                 if self.selected_ref().is_some_and(|r| self.page == Page::Session && r.session_id == sid) && self.dialog_seen.is_none() {
                     self.show_terminal(&sid, true, cx);
@@ -2976,7 +3061,7 @@ impl Workbench {
             }
             Some(t) if t.starts_with("name:") => {
                 if let Some(key) = self.selected.clone() {
-                    self.set_title(&key, &t["name:".len()..]);
+                    self.set_title(&key, &t["name:".len()..], cx);
                     cx.notify();
                 }
             }
@@ -6970,6 +7055,7 @@ impl Workbench {
                         )
                         .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
                         .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(r.title.clone()))
+                        .children(self.rename_mark(&r, "side", cx))
                         .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
                         .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground.opacity(0.7)))),
                 );
@@ -7302,7 +7388,12 @@ impl Workbench {
             MenuDo::Ignore(rule, words) => self.ignore_writing(rule, words, cx),
             MenuDo::Term(what) => self.term_do(what, window, cx),
             MenuDo::Rename(key) => {
-                let now = self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default();
+                // A name on its way is the one to change, not the one
+                // it replaces.
+                let now = match self.renames.get(&key) {
+                    Some(want) => want.name.clone(),
+                    None => self.refs.iter().find(|r| key_of(r) == key).map(|r| r.title.clone()).unwrap_or_default(),
+                };
                 self.renaming = Some(key);
                 // The name there is selected whole: a key replaces it,
                 // an arrow keeps it.
@@ -7324,58 +7415,172 @@ impl Workbench {
         }
         let Some(key) = self.renaming.clone() else { return };
         let name = self.rename_input.read(cx).value().trim().to_string();
-        self.set_title(&key, &name);
+        self.set_title(&key, &name, cx);
         self.close_rename(window, cx);
     }
 
-    /// The session takes a name. It shows at once, from our own record
-    /// (`state/titles.json`), and the session itself is renamed as soon
-    /// as it can be (`try_renames`).
-    fn set_title(&mut self, key: &str, name: &str) {
+    /// The person gives the session a name. The session is asked to take
+    /// it (`try_renames`), and until its transcript says it the title
+    /// everywhere stays what the transcript says, with a mark beside it
+    /// (`rename_mark`): a name is never shown as the session's before it
+    /// is. A session that cannot be asked keeps the name as ours alone,
+    /// shown at once. Either way it is kept in `state/titles.json`, so a
+    /// name asked for is not lost to a quit.
+    fn set_title(&mut self, key: &str, name: &str, cx: &mut Context<Self>) {
+        let name = one_line(name);
         if name.is_empty() {
             return;
         }
-        if let Some(r) = self.refs.iter_mut().find(|r| key_of(r) == key) {
-            r.title = name.to_string();
+        let Some(r) = self.refs.iter().find(|r| key_of(r) == key).cloned() else { return };
+        // The name the transcript already says: nothing to ask for, and
+        // a name on its way is called off.
+        if r.named == name || (r.named.is_empty() && !self.renames.contains_key(key) && r.title == name) {
+            if self.renames.remove(key).is_some() {
+                self.save_titles();
+                self.hub.refresh();
+            }
+            cx.notify();
+            return;
         }
-        self.titles.insert(key.to_string(), name.to_string());
+        // One being typed now goes on being typed; the transcript taking
+        // it is then another name than this one, and this one is asked
+        // for after it.
+        let typing = self.renames.get(key).is_some_and(|w| w.typing);
+        self.renames.insert(key.to_string(), Rename { name: name.clone(), from: Some(r.named.clone()), typing, ..Default::default() });
+        if !self.can_ask(&r) {
+            if let Some(r) = self.refs.iter_mut().find(|r| key_of(r) == key) {
+                r.title = name;
+            }
+        }
         self.save_titles();
-        self.renames.insert(key.to_string(), name.to_string());
-        self.try_renames();
+        self.try_renames(cx);
+        cx.notify();
     }
 
     fn save_titles(&self) {
         let _ = emaki_core::paths::ensure_dirs();
-        if let Ok(v) = serde_json::to_value(&self.titles) {
+        if let Ok(v) = serde_json::to_value(&self.renames) {
             let _ = emaki_core::paths::write_json(&titles_file(), &v);
         }
+    }
+
+    /// Whether Claude Code can be asked to rename the session: it is
+    /// Claude Code's, its transcript and folder are there, and the
+    /// hidden terminal is how sessions run here. A name for any other
+    /// session is ours alone.
+    fn can_ask(&self, r: &SessionRef) -> bool {
+        r.agent == AgentId::ClaudeCode && !r.archived && Self::folder_exists(r) && self.hub.hidden_terminals()
+    }
+
+    /// The name on its way to the session, if one is.
+    fn renaming_to(&self, r: &SessionRef) -> Option<&str> {
+        self.renames.get(&key_of(r)).filter(|_| self.can_ask(r)).map(|w| w.name.as_str())
     }
 
     /// The rename itself is the agent's to make: nothing here writes to
     /// a transcript, so Claude Code is asked, with its own `/rename`
     /// typed into the session's hidden terminal (one is started when the
-    /// session has none), and it writes the name where its resume list
-    /// and every other reader find it. Not typed into a running turn:
-    /// the name waits here and goes when the turn is over. A session
-    /// that cannot be asked (another agent, an archived one, a folder
-    /// that is gone) keeps the name as ours alone.
-    fn try_renames(&mut self) {
-        for (key, name) in self.renames.clone() {
+    /// session has none, an idle driver of ours stopped on the way), and
+    /// it writes the name where its resume list and every other reader
+    /// find it. Each name waits here until the session is between turns
+    /// and nothing is asked of the person there: not typed into a
+    /// running turn, a turn in a terminal of the person's, or a card
+    /// waiting for an answer. Looked at when the index arrives and on
+    /// the clock.
+    ///
+    /// Typed is not taken. A name leaves this list when the transcript
+    /// says it (`HubEvent::Index`). One typed that the transcript does
+    /// not say once it has moved on is asked for again, `RENAME_TRIES`
+    /// times in all, and then given up with a line saying so: the title
+    /// has been the transcript's all along, so nothing shown was wrong.
+    fn try_renames(&mut self, cx: &mut Context<Self>) {
+        for (key, want) in self.renames.clone() {
             let Some(r) = self.refs.iter().find(|r| key_of(r) == key).cloned() else { continue };
-            if r.agent != AgentId::ClaudeCode || r.archived || !Self::folder_exists(&r) || !self.hub.hidden_terminals() {
+            if !self.can_ask(&r) || want.typing || (want.asked > 0 && r.size == want.size_asked) {
+                continue;
+            }
+            if want.asked >= RENAME_TRIES {
                 self.renames.remove(&key);
+                self.save_titles();
+                let why = if want.error.is_empty() { "Claude Code did not take the name".to_string() } else { want.error.clone() };
+                self.notice = Some(Notice::error(format!("not renamed to \u{201c}{}\u{201d}: {why}", want.name)));
+                cx.notify();
                 continue;
             }
-            if self.is_working(&r) {
+            let between_turns = matches!(self.card_for(&r).column, Column::YourTurn | Column::Done);
+            if !between_turns || self.reply_via_for(&r).0 == "inbox" || self.terminal_check(&r).is_err() {
                 continue;
             }
-            self.renames.remove(&key);
-            if self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "").is_ok() {
-                // One line, as the command takes it.
-                let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-                self.hub.send_to_terminal(&r.session_id, format!("/rename {name}"), Vec::new());
+            if self.drivers.remove(&r.session_id).is_some() {
+                self.hub.stop_driver(&r.session_id);
+            }
+            let started = self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "");
+            let Some(w) = self.renames.get_mut(&key) else { continue };
+            w.asked += 1;
+            match started {
+                Ok(()) => {
+                    w.typing = true;
+                    w.size_asked = r.size;
+                    self.hub.rename_in_terminal(&r.session_id, &want.name);
+                }
+                Err(e) => {
+                    w.size_asked = 0;
+                    w.error = e;
+                }
             }
         }
+    }
+
+    /// The name is the session's now: the mark beside its title goes
+    /// out over a moment.
+    fn rename_landed(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.renamed.insert(key.to_string(), Instant::now());
+        let key = key.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RENAME_MARK_FADE + Duration::from_millis(40)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.renamed.get(&key).is_some_and(|at| at.elapsed() >= RENAME_MARK_FADE) {
+                    this.renamed.remove(&key);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The mark beside a title whose session has a name on its way: a
+    /// pencil, which says on a hover what the name is and what it waits
+    /// for. The title beside it is still the transcript's. `site` tells
+    /// the places a session is listed apart.
+    fn rename_mark(&self, r: &SessionRef, site: &'static str, cx: &App) -> Option<AnyElement> {
+        let key = key_of(r);
+        let color = cx.theme().muted_foreground;
+        let pencil = || Icon::default().path("icons/pencil-simple.svg").with_size(px(12.)).text_color(color);
+        if let Some(name) = self.renaming_to(r) {
+            let tip: SharedString = if self.is_working(r) {
+                format!("Renaming to \u{201c}{name}\u{201d} when this turn is over").into()
+            } else {
+                format!("Renaming to \u{201c}{name}\u{201d}").into()
+            };
+            return Some(
+                div()
+                    .id(SharedString::from(format!("rename-mark-{site}-{key}")))
+                    .flex_shrink_0()
+                    .child(pencil())
+                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                    .with_animation(SharedString::from(format!("rename-mark-in-{site}-{key}")), Animation::new(RENAME_MARK_FADE).with_easing(ease_out_quint()), |d, t| d.opacity(t))
+                    .into_any_element(),
+            );
+        }
+        let at = self.renamed.get(&key).filter(|at| at.elapsed() < RENAME_MARK_FADE)?;
+        let _ = at;
+        Some(
+            div()
+                .flex_shrink_0()
+                .child(pencil())
+                .with_animation(SharedString::from(format!("rename-mark-out-{site}-{key}")), Animation::new(RENAME_MARK_FADE).with_easing(ease_out_quint()), |d, t| d.opacity(1. - t))
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -7630,6 +7835,7 @@ impl Workbench {
                         .text_color(if active { theme.foreground } else { theme.muted_foreground })
                         .child(title),
                 )
+                .children(r.as_ref().and_then(|r| self.rename_mark(r, "tab", cx)))
                 .child(
                     div()
                         .id(("tab-close", ix))
@@ -7873,6 +8079,7 @@ impl Workbench {
                                         .gap(px(8.))
                                         .items_center()
                                         .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
+                                        .children(self.rename_mark(&r, "page", cx))
                                         .when(r.archived, |d| d.child(badge("archived", theme.muted, theme.muted_foreground)))
                                         .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
                                 )
