@@ -2203,6 +2203,19 @@ impl<M: InputModeKind> InputBaseState<M> {
         );
     }
 
+    /// Take the last step back, or do it again, as the keys for undo and
+    /// redo do, for an owner that changes the value from outside the
+    /// field (`replace_bytes`). (Emaki addition.)
+    pub fn undo_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.undo(&Undo, window, cx);
+        cx.notify();
+    }
+
+    pub fn redo_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.redo(&Redo, window, cx);
+        cx.notify();
+    }
+
     pub(super) fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
         self.undo_manager.set_ignoring(true);
         if let Some(changes) = self.undo_manager.undo() {

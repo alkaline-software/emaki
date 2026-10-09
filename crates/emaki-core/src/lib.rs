@@ -20,6 +20,7 @@ pub mod indent;
 pub mod json;
 pub mod limits;
 pub mod model;
+pub mod office;
 pub mod options;
 pub mod outline;
 pub mod paths;

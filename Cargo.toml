@@ -5,7 +5,7 @@ members = ["crates/emaki-core", "crates/emaki-app"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 license = "MIT"
 
@@ -27,6 +27,46 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Air, and the Biome crates it formats with, check their own work at every
+# step while debug assertions are on: a 6,700-line R file took half a
+# second to format in the dev build and 25 ms in a release one. The dev
+# build is the one worked in, so these are built as a release has them.
+[profile.dev.package.air_r_formatter]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.air_r_parser]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.air_r_syntax]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.air_r_factory]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.biome_formatter]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.biome_rowan]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.biome_parser]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.biome_text_size]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.biome_unicode_table]
+opt-level = 3
+debug-assertions = false
 
 [profile.release]
 strip = true

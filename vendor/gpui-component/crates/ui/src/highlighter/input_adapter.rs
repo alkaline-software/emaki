@@ -21,6 +21,12 @@ use super::{LanguageRegistry, SyntaxHighlighter};
 
 pub(crate) fn input_highlighter_factory() -> InputHighlighterFactory {
     Rc::new(|language| {
+        // Emaki: separated text has a highlighter of its own, with no
+        // grammar behind it.
+        if language == "csv" || language == "tsv" {
+            return Some(Box::new(super::delimited::DelimitedInputHighlighter::new(language))
+                as Box<dyn InputHighlighter>);
+        }
         let config = LanguageRegistry::singleton().language(language)?;
         config.has_grammar().then(|| {
             Box::new(TreeSitterInputHighlighter::new(language)) as Box<dyn InputHighlighter>

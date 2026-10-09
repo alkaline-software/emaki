@@ -36,7 +36,7 @@ use emaki_core::options::{humanize, Choice, Options};
 use emaki_core::search::Results;
 use emaki_core::transcript::{Naming, SessionRef};
 
-use crate::format::{bucket, elapsed_since, now_secs, plural, relative, today_line};
+use crate::format::{bucket, elapsed_since, now_secs, plural, relative};
 use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
@@ -151,7 +151,8 @@ impl MenuDo {
             MenuDo::File(FileDo::NewFile, _) => "icons/file-plus.svg",
             MenuDo::File(FileDo::NewFolder, _) => "icons/folder-plus.svg",
             MenuDo::File(FileDo::Trash, _) => "icons/trash.svg",
-            MenuDo::File(FileDo::CopyPath | FileDo::CopyRel, _) => "icons/copy.svg",
+            MenuDo::File(FileDo::CopyPath | FileDo::CopyRel | FileDo::Copy, _) => "icons/copy.svg",
+            MenuDo::File(FileDo::Paste, _) => "icons/file-plus.svg",
             MenuDo::Copy(_) if label.contains("Session ID") => "icons/hash.svg",
             MenuDo::Copy(_) if label.contains("Command") => "icons/terminal.svg",
             MenuDo::Copy(_) if label.contains("Branch") => "icons/git-branch.svg",
@@ -307,18 +308,45 @@ impl Default for TermShown {
 /// The sidebar floating in over the content, or back out.
 const FLOAT_ANIM: Duration = Duration::from_millis(220);
 /// A tab's width when there is room, the least it shrinks to, the gap
-/// between two, and how long a width takes to change.
+/// between two on a pill, and how long a width takes to change.
 const TAB_MAX: f32 = 200.;
 const TAB_MIN: f32 = 56.;
-const TAB_GAP: f32 = 4.;
+const TAB_GAP: f32 = 2.;
 const TAB_ANIM: Duration = Duration::from_millis(220);
+/// A pill holds one folder's tabs: a tab's height on it, the track's
+/// padding around them, the handle at its left end that the pill is moved
+/// by, and the gap between two pills.
+const TAB_H: f32 = 24.;
+const PILL_PAD: f32 = 3.;
+const PILL_HANDLE: f32 = 20.;
+const PILL_GAP: f32 = 6.;
+/// What a pill is wide besides its tabs, and where its first tab starts.
+const PILL_LEAD: f32 = PILL_PAD + PILL_HANDLE + TAB_GAP;
+fn pill_chrome(tabs: usize) -> f32 {
+    PILL_LEAD + PILL_PAD + TAB_GAP * (tabs.max(1) as f32 - 1.)
+}
 /// How long ⌘ (Ctrl elsewhere) is held, alone, before every tab shows the
 /// number that goes to it.
 const TAB_HINT_HOLD: Duration = Duration::from_millis(500);
 
-/// A tab being dragged along the row, by its key.
+/// A tab being dragged along its pill, by its key.
 #[derive(Clone)]
 struct DragTab(String);
+
+/// A pill being dragged along the row, by its folder.
+#[derive(Clone)]
+struct DragPill(String);
+
+/// The plate under the showing tab: the tab it left, the one it is under,
+/// and when that changed. Each change has a number, so its move is played
+/// once.
+#[derive(Default)]
+struct TabPlate {
+    from: Option<String>,
+    to: Option<String>,
+    at: Option<Instant>,
+    serial: u32,
+}
 
 /// What follows the pointer while a tab is dragged: its title on a plate.
 pub(crate) struct TabGhost(pub(crate) String);
@@ -346,6 +374,32 @@ impl TabWidth {
     }
 }
 
+/// A tab or a pill on its way to the place a drag gave it: how far from
+/// that place it started, and when. It is drawn that far off and comes in.
+#[derive(Clone, Copy)]
+struct TabShift {
+    from: f32,
+    at: Instant,
+}
+
+/// A probe draws the slide this many times slower, to picture it partway.
+static TAB_SHIFT_SLOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+impl TabShift {
+    fn span() -> Duration {
+        TAB_ANIM * TAB_SHIFT_SLOW.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn done(&self) -> bool {
+        self.at.elapsed() >= Self::span()
+    }
+
+    fn now(&self) -> f32 {
+        let t = (self.at.elapsed().as_secs_f32() / Self::span().as_secs_f32()).min(1.);
+        self.from * (1. - ease_out_quint()(t))
+    }
+}
+
 /// The buttons beside the traffic lights: each one's box.
 const STRIP_BTN: Pixels = px(26.);
 /// The sidebar's rows: an agent or a folder, and a session under a folder.
@@ -356,10 +410,8 @@ pub const TITLEBAR_H: Pixels = px(48.);
 pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
-/// Home-page folder cards to a row.
-pub const FOLDER_COLS: usize = 3;
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("explain", "Explanations", "icons/bot.svg"), ("updates", "Updates", "icons/redo-2.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("explain", "Explanations", "icons/bot.svg"), ("updates", "Updates", "icons/redo-2.svg")];
 /// The panel's size: wide enough for a rail beside the rows, and a fixed
 /// height so it reads as a sheet, not a second window (capped by the
 /// window when that is smaller).
@@ -385,8 +437,8 @@ const BUILTIN_COMMANDS: &[(&str, &str, &str)] = &[
     ("cost", "Show what this session has cost", ""),
     ("status", "Show the session's status", ""),
 ];
-/// How many folders the home page offers.
-pub const HOME_FOLDERS: usize = 6;
+/// How many recent folders the home page's folder list offers.
+pub const HOME_FOLDERS: usize = 4;
 /// The composer grows with its text between these row counts.
 pub const COMPOSER_MIN_ROWS: usize = 3;
 pub const COMPOSER_MAX_ROWS: usize = 12;
@@ -744,6 +796,12 @@ pub struct Workbench {
     /// A session to show once the index knows it (opened before the first
     /// scan, or a draft that has just got its file).
     pending_select: Option<String>,
+    /// Sessions begun from a folder's plus and not yet in any index
+    /// (`new_session_in`): each a record of our own making, under the
+    /// id Claude Code is started with at the first message. `sent` are
+    /// the ones a message has gone to, waiting for their transcript.
+    begun: Vec<SessionRef>,
+    begun_sent: HashSet<String>,
     pub detail: Option<Detail>,
     loading: Option<String>,
     load_task: Option<Task<()>>,
@@ -1042,8 +1100,20 @@ pub struct Workbench {
     tabs_row_w: Rc<std::cell::Cell<f32>>,
     tab_widths: HashMap<String, TabWidth>,
     tabs_n: usize,
-    /// The tab being dragged along the row.
+    /// The tabs as pills, a folder and its tabs each, in the row's order
+    /// (`group_tabs`), and when a pill that came after the first draw did.
+    tab_groups: Vec<(String, Vec<String>)>,
+    pill_born: HashMap<String, Instant>,
+    tab_plate: TabPlate,
+    /// Tabs and pills a drag has just given another place, by key and by
+    /// folder: each slides there from where it stood.
+    tab_shift: HashMap<String, TabShift>,
+    pill_shift: HashMap<String, TabShift>,
+    /// The pill a drag moved last, drawn over the others while any slides.
+    pill_top: Option<String>,
+    /// The tab being dragged along its pill, or the pill along the row.
     drag_tab: Option<String>,
+    drag_pill: Option<String>,
     /// ⌘ (Ctrl elsewhere) is down by itself, as of this press (a count,
     /// so the wait begun at an earlier press does not answer for it).
     hint_press: Option<u32>,
@@ -1203,6 +1273,16 @@ pub struct Workbench {
     pub(crate) file_ask: Option<crate::panels::FileAsk>,
     pub(crate) file_ask_serial: u64,
     pub(crate) file_ask_focus: FocusHandle,
+    /// The files panel's own focus, for ⌘C and ⌘V on its rows; the file
+    /// or folder last copied there; and the file whose changes the
+    /// comparison is asking to discard, with the question's number.
+    pub(crate) tree_focus: FocusHandle,
+    pub(crate) file_clip: Option<PathBuf>,
+    pub(crate) discard_ask: Option<(PathBuf, u32)>,
+    /// What the last paste in the files panel made, for ⌘Z to take
+    /// back, and the question that asks first, by its number.
+    pub(crate) paste_last: Vec<PathBuf>,
+    pub(crate) paste_ask: Option<u32>,
     /// The change a mark in the editor's margin opened, and a count for
     /// its animation.
     pub(crate) file_peek: Option<crate::panels::FilePeek>,
@@ -1222,6 +1302,12 @@ pub struct Workbench {
     pub(crate) pending_edit: Option<(Entity<gpui_component::input::EditorState>, String, usize)>,
     /// `EMAKI_GO=file:save`, done at the next draw for the same reason.
     pub(crate) pending_save: bool,
+    /// `EMAKI_GO=cell:<row>,<col>` and `cell:type:<words>`, likewise.
+    pub(crate) pending_cell: Option<String>,
+    /// `EMAKI_GO=treefocus`: the keyboard to the files panel, at the next draw.
+    pub(crate) pending_tree_focus: bool,
+    /// `EMAKI_GO=newin:<folder>`: the plus on that folder, at the next draw.
+    pending_new_in: Option<String>,
     /// `EMAKI_GO=file:ask:<answer>`, likewise.
     pub(crate) pending_answer: Option<crate::panels::FileAnswer>,
     /// Beside a PDF's pages: the pages small (`true`), its table of
@@ -1232,6 +1318,12 @@ pub struct Workbench {
     pub(crate) pdf_side_scroll: ScrollHandle,
     /// The pane's own focus, for its keys.
     pub(crate) file_focus: FocusHandle,
+    /// In a table: the cell chosen and whether it is being written in,
+    /// and the field it is written in.
+    pub(crate) table_at: Option<crate::panels::TableAt>,
+    pub(crate) table_input: Entity<InputState>,
+    /// Which sheet of a workbook shows, by its file.
+    pub(crate) sheet_at: Option<(PathBuf, usize)>,
     /// In a PDF: the glyphs selected, from and to; where a drag began;
     /// where each page is drawn; and its find row, the places found and
     /// the one it is on.
@@ -1671,6 +1763,27 @@ impl Workbench {
         }))
     }
 
+    /// Put the tabs in pills: one folder's tabs stand together, the pills
+    /// in the order their first tabs had and each pill's tabs in theirs.
+    /// A tab opened lands at the end of its folder's pill, and one whose
+    /// session is not listed yet is a pill by itself until it is.
+    fn group_tabs(&mut self) {
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        for key in &self.tabs {
+            let project = self.refs.iter().find(|r| key_of(r) == *key).map(|r| r.project()).unwrap_or_else(|| format!("\u{0}{key}"));
+            match groups.iter_mut().find(|(p, _)| *p == project) {
+                Some((_, keys)) => keys.push(key.clone()),
+                None => groups.push((project, vec![key.clone()])),
+            }
+        }
+        let order: Vec<String> = groups.iter().flat_map(|(_, keys)| keys.iter().cloned()).collect();
+        if order != self.tabs {
+            self.tabs = order;
+            self.save_ui(true);
+        }
+        self.tab_groups = groups;
+    }
+
     /// Give every tab its width. They share the row equally, `TAB_MAX`
     /// each while there is room and less once there is not, and a change
     /// in how many there are is a move, not a jump: a new tab grows in
@@ -1682,20 +1795,44 @@ impl Workbench {
     fn sync_tab_widths(&mut self, cx: &mut Context<Self>) {
         if !cx.has_active_drag() {
             self.drag_tab = None;
+            self.drag_pill = None;
+        }
+        self.group_tabs();
+        self.tab_shift.retain(|_, s| !s.done());
+        self.pill_shift.retain(|_, s| !s.done());
+        if self.pill_shift.is_empty() {
+            self.pill_top = None;
         }
         let n = self.tabs.len();
         let first = self.tab_widths.is_empty();
         let tabs = &self.tabs;
         self.tab_widths.retain(|k, _| tabs.contains(k));
+        let groups = &self.tab_groups;
+        self.pill_born.retain(|p, _| groups.iter().any(|(g, _)| g == p));
+        // The plate goes where the showing tab is.
+        let showing = self.selected.clone().filter(|k| tabs.contains(k));
+        if self.tab_plate.to != showing {
+            self.tab_plate.from = self.tab_plate.to.take().filter(|_| !first);
+            self.tab_plate.to = showing;
+            self.tab_plate.at = (!first).then(Instant::now);
+            self.tab_plate.serial += 1;
+        }
         if n == 0 {
             self.tabs_n = 0;
             return;
         }
+        let now = Instant::now();
+        for (project, _) in &self.tab_groups {
+            if !self.pill_born.contains_key(project) {
+                // One there from the start is given a past it is done with.
+                self.pill_born.insert(project.clone(), if first { now.checked_sub(TAB_ANIM * 2).unwrap_or(now) } else { now });
+            }
+        }
         let row = self.tabs_row_w.get();
-        let target = if row <= 0. { TAB_MAX } else { ((row - TAB_GAP * (n as f32 - 1.)) / n as f32).clamp(TAB_MIN, TAB_MAX) };
+        let chrome: f32 = self.tab_groups.iter().map(|(_, keys)| pill_chrome(keys.len())).sum::<f32>() + PILL_GAP * (self.tab_groups.len() as f32 - 1.);
+        let target = if row <= 0. { TAB_MAX } else { ((row - chrome) / n as f32).clamp(TAB_MIN, TAB_MAX) };
         let moved = n != self.tabs_n && !first;
         self.tabs_n = n;
-        let now = Instant::now();
         for key in self.tabs.iter() {
             match self.tab_widths.get_mut(key) {
                 None => {
@@ -1713,14 +1850,37 @@ impl Workbench {
         }
     }
 
-    /// A tab dragged along the row takes the place the pointer is over.
+    /// Where each pill is in the row once every width has settled: its
+    /// left edge and its width, in the window's coordinates.
+    fn pill_spans(&self, row: Bounds<Pixels>) -> Vec<(f32, f32)> {
+        let w = self.tabs.first().and_then(|k| self.tab_widths.get(k)).map(|w| w.to).unwrap_or(TAB_MAX);
+        let widths: Vec<f32> = self.tab_groups.iter().map(|(_, keys)| pill_chrome(keys.len()) + w * keys.len() as f32).collect();
+        let total = widths.iter().sum::<f32>() + PILL_GAP * (widths.len() as f32 - 1.).max(0.);
+        let mut x = f32::from(row.left()) + ((f32::from(row.size.width) - total) / 2.).max(0.);
+        widths
+            .into_iter()
+            .map(|pw| {
+                let at = x;
+                x += pw + PILL_GAP;
+                (at, pw)
+            })
+            .collect()
+    }
+
+    /// A tab dragged along its pill takes the place the pointer is over,
+    /// and goes no further than the pill's ends. The one tab of a pill
+    /// takes the pill with it.
     fn drag_tab_to(&mut self, key: &str, x: Pixels, row: Bounds<Pixels>, cx: &mut Context<Self>) {
-        let n = self.tabs.len();
+        let Some(g) = self.tab_groups.iter().position(|(_, keys)| keys.iter().any(|k| k == key)) else { return };
+        let (project, keys) = self.tab_groups[g].clone();
+        if keys.len() == 1 {
+            return self.drag_pill_to(&project, x, row, cx);
+        }
+        let Some(&(left, _)) = self.pill_spans(row).get(g) else { return };
         let Some(from) = self.tabs.iter().position(|t| t == key) else { return };
+        let first = from - keys.iter().position(|k| k == key).unwrap_or(0);
         let w = self.tab_widths.get(key).map(|w| w.to).unwrap_or(TAB_MAX);
-        let total = w * n as f32 + TAB_GAP * (n as f32 - 1.);
-        let start = f32::from(row.left()) + ((f32::from(row.size.width) - total) / 2.).max(0.);
-        let to = (((f32::from(x) - start) / (w + TAB_GAP)).floor().max(0.) as usize).min(n - 1);
+        let to = first + (((f32::from(x) - left - PILL_LEAD) / (w + TAB_GAP)).floor().max(0.) as usize).min(keys.len() - 1);
         if self.drag_tab.as_deref() != Some(key) {
             self.drag_tab = Some(key.to_string());
             cx.notify();
@@ -1728,6 +1888,54 @@ impl Workbench {
         if to != from {
             let tab = self.tabs.remove(from);
             self.tabs.insert(to, tab);
+            // Each tab that changed places slides to its new one from
+            // where it is now, which is not its old place if it was
+            // still on its way there.
+            let now = Instant::now();
+            for (old, k) in keys.iter().enumerate() {
+                let new = self.tabs.iter().position(|t| t == k).unwrap_or(first + old) - first;
+                if new != old {
+                    let rest = self.tab_shift.get(k).map(|s| s.now()).unwrap_or(0.);
+                    self.tab_shift.insert(k.clone(), TabShift { from: (old as f32 - new as f32) * (w + TAB_GAP) + rest, at: now });
+                }
+            }
+            self.save_ui(true);
+            cx.notify();
+        }
+    }
+
+    /// A tab or a pill is on its way to a place a drag gave it.
+    fn tabs_sliding(&self) -> bool {
+        self.tab_shift.values().chain(self.pill_shift.values()).any(|s| !s.done())
+    }
+
+    /// A pill dragged along the row stands after every pill whose middle
+    /// the pointer has passed. Going by the middle keeps two pills of
+    /// different widths from changing places back and forth under a
+    /// pointer that is still.
+    fn drag_pill_to(&mut self, project: &str, x: Pixels, row: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let Some(from) = self.tab_groups.iter().position(|(p, _)| p == project) else { return };
+        let spans = self.pill_spans(row);
+        let to = spans.iter().enumerate().filter(|(i, (left, w))| *i != from && left + w / 2. < f32::from(x)).count();
+        if self.drag_pill.as_deref() != Some(project) {
+            self.drag_pill = Some(project.to_string());
+            cx.notify();
+        }
+        if to != from {
+            self.pill_top = Some(project.to_string());
+            let before: HashMap<String, f32> = self.tab_groups.iter().zip(spans.iter()).map(|((p, _), (left, _))| (p.clone(), *left)).collect();
+            let pill = self.tab_groups.remove(from);
+            self.tab_groups.insert(to, pill);
+            self.tabs = self.tab_groups.iter().flat_map(|(_, keys)| keys.iter().cloned()).collect();
+            // Every pill that moved slides to where it now stands.
+            let now = Instant::now();
+            for ((p, _), (left, _)) in self.tab_groups.iter().zip(self.pill_spans(row)) {
+                let was = before.get(p).copied().unwrap_or(left);
+                if (was - left).abs() > 0.5 {
+                    let rest = self.pill_shift.get(p).map(|s| s.now()).unwrap_or(0.);
+                    self.pill_shift.insert(p.clone(), TabShift { from: was - left + rest, at: now });
+                }
+            }
             self.save_ui(true);
             cx.notify();
         }
@@ -2098,6 +2306,15 @@ impl Workbench {
             }
         })
         .detach();
+        // A table's cell: ↩ keeps what was typed and goes to the cell
+        // under it, as a spreadsheet does.
+        let table_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe_in(&table_input, window, |this, _, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                this.table_commit(Some((1, 0)), window, cx);
+            }
+        })
+        .detach();
         let pdf_find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this file"));
         cx.subscribe_in(&pdf_find_input, window, |this, _, ev: &InputEvent, _window, cx| match ev {
             InputEvent::Change => this.pdf_find(cx),
@@ -2274,6 +2491,8 @@ impl Workbench {
             sidebar_open: ui.sidebar_open.unwrap_or(true),
             selected: None,
             pending_select: None,
+            begun: Vec::new(),
+            begun_sent: HashSet::new(),
             detail: None,
             loading: None,
             load_task: None,
@@ -2476,6 +2695,11 @@ impl Workbench {
             file_ask: None,
             file_ask_serial: 0,
             file_ask_focus: cx.focus_handle(),
+            tree_focus: cx.focus_handle(),
+            file_clip: None,
+            discard_ask: None,
+            paste_last: Vec::new(),
+            paste_ask: None,
             file_peek: None,
             file_peek_serial: 0,
             pending_revert: false,
@@ -2484,6 +2708,9 @@ impl Workbench {
             file_conflict: None,
             pending_edit: None,
             pending_save: false,
+            pending_cell: None,
+            pending_tree_focus: false,
+            pending_new_in: None,
             pending_answer: None,
             pdf_side: match ui.pdf_side.as_deref() {
                 Some("pages") => Some(true),
@@ -2501,6 +2728,9 @@ impl Workbench {
             pdf_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
             pdf_find_open: false,
             pdf_find_input,
+            table_at: None,
+            sheet_at: None,
+            table_input,
             pdf_hits: Vec::new(),
             pdf_hit: 0,
             content_wheel_at: None,
@@ -2530,7 +2760,14 @@ impl Workbench {
             tabs_row_w: Rc::new(std::cell::Cell::new(0.)),
             tab_widths: HashMap::new(),
             tabs_n: 0,
+            tab_groups: Vec::new(),
+            pill_born: HashMap::new(),
+            tab_plate: TabPlate::default(),
+            tab_shift: HashMap::new(),
+            pill_shift: HashMap::new(),
+            pill_top: None,
             drag_tab: None,
+            drag_pill: None,
             hint_press: None,
             hint_presses: 0,
             tab_hints: false,
@@ -2607,6 +2844,17 @@ impl Workbench {
                 }
                 if settled {
                     self.save_titles();
+                }
+                // A session begun here that the index now has is the
+                // index's from now on. One it does not have yet stands
+                // at the head of the list while its tab is open.
+                self.begun.retain(|d| !refs.iter().any(|r| r.session_id == d.session_id));
+                let tabs = &self.tabs;
+                self.begun.retain(|d| tabs.contains(&key_of(d)));
+                let live: HashSet<&str> = self.begun.iter().map(|d| d.session_id.as_str()).collect();
+                self.begun_sent.retain(|id| live.contains(id.as_str()));
+                for d in self.begun.iter().rev() {
+                    refs.insert(0, d.clone());
                 }
                 self.refs = refs;
                 self.try_renames(cx);
@@ -2977,6 +3225,40 @@ impl Workbench {
 
     // -- navigation ----------------------------------------------------------
 
+    /// A session begun here that no message has gone to yet: there is
+    /// no Claude Code behind it and no transcript, only its tab.
+    pub(crate) fn is_draft(&self, session_id: &str) -> bool {
+        !self.begun_sent.contains(session_id) && self.begun.iter().any(|d| d.session_id == session_id)
+    }
+
+    /// The plus on a folder: a new session in that folder, on a tab of
+    /// its own like any session's, with nothing said in it. It is a
+    /// record of our own under an id made here. The first message
+    /// starts Claude Code with that id, so the transcript that follows
+    /// is this same tab's; closed with nothing sent, it leaves nothing
+    /// behind, since nothing was started. A folder's empty one is gone
+    /// back to, not made twice.
+    pub(crate) fn new_session_in(&mut self, cwd: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if cwd.is_empty() || !std::path::Path::new(cwd).is_dir() {
+            self.notice = Some(Notice::error("that folder is gone"));
+            cx.notify();
+            return;
+        }
+        let key = match self.begun.iter().find(|d| d.cwd == cwd && !self.begun_sent.contains(&d.session_id)) {
+            Some(d) => key_of(d),
+            None => {
+                let now = now_secs();
+                let stamp = chrono::Utc::now().to_rfc3339();
+                let draft = SessionRef { agent: AgentId::ClaudeCode, session_id: uuid::Uuid::new_v4().to_string(), cwd: cwd.to_string(), title: "New session".into(), started: stamp.clone(), updated: stamp, mtime: now, blank: true, ..Default::default() };
+                let key = key_of(&draft);
+                self.refs.insert(0, draft.clone());
+                self.begun.push(draft);
+                key
+            }
+        };
+        self.open_and_focus(&key, window, cx);
+    }
+
     pub fn open_session(&mut self, key: &str, cx: &mut Context<Self>) {
         if !self.tabs.iter().any(|t| t == key) {
             self.tabs.push(key.to_string());
@@ -3111,9 +3393,26 @@ impl Workbench {
                     self.open_session(&key, cx);
                 }
             }
+            // A drag in the tab row, to an x from the row's left edge:
+            // a tab by the start of its session's id, a pill by its
+            // folder.
+            // The plus on a folder, by the folder's path.
+            Some(t) if t.starts_with("newin:") => self.pending_new_in = Some(t["newin:".len()..].to_string()),
+            Some("tabslow") => TAB_SHIFT_SLOW.store(40, std::sync::atomic::Ordering::Relaxed),
+            Some(t) if t.starts_with("tabdrag:") || t.starts_with("pilldrag:") => {
+                let mut parts = t.splitn(3, ':');
+                let (what, who, x) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().and_then(|x| x.parse::<f32>().ok()).unwrap_or(0.));
+                let row = Bounds { origin: point(px(0.), px(0.)), size: size(px(self.tabs_row_w.get()), TITLEBAR_H) };
+                if what == "pilldrag" {
+                    self.drag_pill_to(who, px(x), row, cx);
+                } else if let Some(key) = self.tabs.iter().find(|k| k.split(':').next_back().is_some_and(|id| id.starts_with(who))).cloned() {
+                    self.drag_tab_to(&key, px(x), row, cx);
+                }
+            }
             Some(t) if t.starts_with("mode:") => self.set_mode(&t["mode:".len()..], cx),
             Some("pick:effort") => self.pick_toggle(PickFor::Effort, cx),
             Some("pick:model") => self.pick_toggle(PickFor::Model, cx),
+            Some("pick:folder") => self.pick_toggle(PickFor::Folder, cx),
             Some("pick:default-mode") => self.pick_toggle(PickFor::DefaultMode, cx),
             Some("pick:off") => self.close_pick(cx),
             // A sample question held on the dialog card, and taken off
@@ -3167,6 +3466,12 @@ impl Workbench {
     pub fn close_tab(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.tabs.iter().position(|t| t == key) else { return };
         self.tabs.remove(ix);
+        // A session begun here with nothing sent goes with its tab.
+        if let Some(id) = self.begun.iter().find(|d| key_of(d) == key).map(|d| d.session_id.clone()).filter(|id| !self.begun_sent.contains(id)) {
+            self.begun.retain(|d| d.session_id != id);
+            self.refs.retain(|r| r.session_id != id);
+            self.stashed.remove(key);
+        }
         if self.selected.as_deref() == Some(key) {
             self.selected = None;
             self.detail = None;
@@ -3212,8 +3517,10 @@ impl Workbench {
             outline_on: Some(self.outline_on),
             branches_by_name: Some(self.branch_by_name),
             page: page.into(),
-            tabs: self.tabs.clone(),
-            active: self.selected.clone().filter(|_| self.page == Page::Session),
+            // A session begun here with nothing sent is not kept: there
+            // is nothing on disk for its tab to come back to.
+            tabs: self.tabs.iter().filter(|t| !self.begun.iter().any(|d| key_of(d) == **t && !self.begun_sent.contains(&d.session_id))).cloned().collect(),
+            active: self.selected.clone().filter(|_| self.page == Page::Session).filter(|k| !self.begun.iter().any(|d| key_of(d) == *k && !self.begun_sent.contains(&d.session_id))),
             folders_open: self.folders_open.as_ref().map(|f| {
                 let mut v: Vec<String> = f.iter().cloned().collect();
                 v.sort();
@@ -3675,6 +3982,11 @@ impl Workbench {
         let term_ligatures = Checkbox::new("term-ligatures").checked(term.ligatures).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.ligatures = *on, cx)));
         let term_copy = Checkbox::new("term-copy").checked(term.copy_on_select).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.copy_on_select = *on, cx)));
 
+        let format_on_save = Checkbox::new("format-on-save").checked(self.cfg.app.format_on_save).on_click(cx.listener(|this, on: &bool, _, cx| {
+            this.cfg.app.format_on_save = *on;
+            this.save_app_config();
+            cx.notify();
+        }));
         let auto_cap = Checkbox::new("auto-capitalize").checked(self.cfg.app.auto_capitalize).on_click(cx.listener(|this, on: &bool, _, cx| this.set_writing(|a| a.auto_capitalize = *on, cx)));
         let check_writing = Checkbox::new("check-writing").checked(self.cfg.app.check_writing).on_click(cx.listener(|this, on: &bool, _, cx| this.set_writing(|a| a.check_writing = *on, cx)));
         let languages: Vec<&'static str> = emaki_core::check::LANGUAGES.iter().map(|l| l.0).collect();
@@ -3757,6 +4069,7 @@ impl Workbench {
             "composer" => ("Composer", "settings-composer"),
             "sessions" => ("New sessions", "settings-sessions"),
             "terminal" => ("Terminal", "settings-terminal"),
+            "files" => ("Files", "settings-files"),
             "explain" => ("Explanations", "settings-explain"),
             "updates" => ("Updates", "settings-updates"),
             _ => ("Appearance", "settings-appearance"),
@@ -3774,6 +4087,7 @@ impl Workbench {
                     .child(h_flex().child(writing_language))
                     .into_any_element(),
             ],
+            "files" => vec![row("Format on save", "A file saved from the file's pane is put in its language's standard form first. R is formatted by Air, with Air's defaults; no other language has a formatter yet.", format_on_save.into_any_element(), &theme).into_any_element()],
             "sessions" => vec![
                 row("Permission mode", "What a session started here begins in.", modes, &theme).into_any_element(),
                 row("Model", "Which model a session started here uses.", models, &theme).into_any_element(),
@@ -4410,7 +4724,10 @@ impl Workbench {
     /// there is no terminal to open: the pills show what a new session
     /// starts in, and a click opens Settings where that is chosen.
     fn pill_clicked(&mut self, pill: Pill, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page == Page::Session {
+        // A session with no message sent has no terminal to ask: its
+        // pills are the home page's.
+        let draft = self.selected_ref().is_some_and(|r| self.is_draft(&r.session_id));
+        if self.page == Page::Session && !draft {
             // The mode has no picker: a click on its pill is one ⇧Tab.
             if pill == Pill::Mode {
                 return self.cycle_mode(cx);
@@ -4426,8 +4743,6 @@ impl Workbench {
     /// A pill that opens a list of choices (`PickFor`). Where it is drawn
     /// is kept, for the list to hang off.
     fn pick_pill(&self, what: PickFor, id: &'static str, icon: &'static str, label: PillText, cx: &Context<Self>) -> AnyElement {
-        let at = self.pill_at.clone();
-        let entity = cx.entity().downgrade();
         div()
             .relative()
             .flex_shrink_0()
@@ -4435,6 +4750,17 @@ impl Workbench {
                 swallow_click(window, cx);
                 this.pick_toggle(what, cx);
             })))
+            .child(self.pick_mark(what, cx))
+            .into_any_element()
+    }
+
+    /// Laid over whatever opens a list, it keeps where that is drawn.
+    fn pick_mark(&self, what: PickFor, cx: &Context<Self>) -> impl IntoElement {
+        let at = self.pill_at.clone();
+        let entity = cx.entity().downgrade();
+        div()
+            .absolute()
+            .inset_0()
             .child(
                 canvas(
                     // A pill moves as what is beside it changes (a mode
@@ -4459,7 +4785,39 @@ impl Workbench {
                 .absolute()
                 .inset_0(),
             )
-            .into_any_element()
+    }
+
+    /// Where a new session starts: the home page's composer stands on a
+    /// tray of its own width, and the strip of the tray that shows under
+    /// the card names the folder, its own name and then the folders it
+    /// is in. A press anywhere on the strip drops its list down
+    /// (`PickFor::Folder`), and a right click offers the folder.
+    fn folder_tray(&self, card: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let cwd = self.new_cwd.clone();
+        let open = self.pick.as_ref().is_some_and(|p| p.what == PickFor::Folder);
+        let (name, parent) = if cwd.is_empty() { ("Choose a folder".to_string(), String::new()) } else { (folder_name(&cwd), folder_parent(&cwd)) };
+        let strip = h_flex()
+            .id("folder-control")
+            .relative()
+            .h(px(36.))
+            .px(px(16.))
+            .gap(px(8.))
+            .items_center()
+            .cursor_pointer()
+            .text_color(theme.muted_foreground)
+            .hover(|s| s.text_color(theme.foreground))
+            .on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.pick_toggle(PickFor::Folder, cx);
+            }))
+            .when(!cwd.is_empty(), |d| d.on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(Some(cwd.clone())))], cx))))
+            .child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(14.)).flex_shrink_0())
+            .child(div().flex_shrink_0().max_w(px(280.)).truncate().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(name))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(parent))
+            .child(Icon::new(IconName::ChevronDown).with_size(px(13.)).flex_shrink_0())
+            .child(self.pick_mark(PickFor::Folder, cx));
+        v_flex().w_full().max_w(CONTENT_W).rounded(px(20.)).bg(if theme.mode.is_dark() { theme.sidebar } else { theme.muted }).child(card).child(strip).into_any_element()
     }
 
     /// The choices of a list as they stand now, and the one that is set.
@@ -4480,6 +4838,18 @@ impl Workbench {
             PickFor::DefaultMode => {
                 let now = if self.cfg.driver.default_mode.is_empty() { "default".to_string() } else { self.cfg.driver.default_mode.clone() };
                 (self.modes(&options).into_iter().map(|m| PickRow::plain(m.key, m.label, m.detail)).collect(), now)
+            }
+            // The folders worked in last, the chosen one among them even
+            // when it is none of those, and under a line the way to any
+            // other: a row with no key, which asks the system.
+            PickFor::Folder => {
+                let mut cwds: Vec<String> = self.recent_cwds().into_iter().take(HOME_FOLDERS).collect();
+                if !self.new_cwd.is_empty() && !cwds.contains(&self.new_cwd) {
+                    cwds.insert(0, self.new_cwd.clone());
+                }
+                let mut rows: Vec<PickRow> = cwds.into_iter().map(|c| PickRow::plain(c.clone(), folder_name(&c), folder_parent(&c))).collect();
+                rows.push(PickRow::plain(String::new(), "Choose a folder…".into(), String::new()));
+                (rows, self.new_cwd.clone())
             }
             PickFor::DefaultModel => {
                 let model = if self.cfg.driver.default_model.is_empty() { options.default_model.clone() } else { self.cfg.driver.default_model.clone() };
@@ -4536,7 +4906,28 @@ impl Workbench {
             PickFor::Model => self.pill_picked(Pill::Model, key, cx),
             PickFor::DefaultMode => self.set_default_mode(key, cx),
             PickFor::DefaultModel => self.set_default_model(key, cx),
+            PickFor::Folder if key.is_empty() => self.choose_folder(cx),
+            PickFor::Folder => {
+                self.new_cwd = key.to_string();
+                cx.notify();
+            }
         }
+    }
+
+    /// Ask the system for a folder, any folder, for the new session to
+    /// start in.
+    fn choose_folder(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Choose".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(dir) = paths.into_iter().next() else { return };
+            this.update(cx, |this, cx| {
+                this.new_cwd = dir.to_string_lossy().to_string();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A pill's list, hanging off its pill: up from one in the lower half
@@ -4547,14 +4938,18 @@ impl Workbench {
         let theme = cx.theme().clone();
         let view = window.viewport_size();
         // Its left edge on the pill's, unless it would not fit that way.
-        let (up, right) = (menu.by.center().y > view.height * 0.5, menu.by.left() + px(380.) > view.width - px(8.));
+        // The folders' list always drops down: its strip is under the
+        // composer with the page's empty half below it.
+        let (up, right) = (menu.what != PickFor::Folder && menu.by.center().y > view.height * 0.5, menu.by.left() + px(380.) > view.width - px(8.));
         let gap = px(6.);
         // The list is as long as the agent makes it (a dozen models), so
         // it scrolls past the room there is.
         let room = if up { menu.by.top() - gap - px(12.) } else { view.height - menu.by.bottom() - gap - px(12.) };
+        // The folders' list is seven rows and the way to another, and
+        // shows them all where the window has the room.
         let what = menu.what;
         let (scroll, _) = self.kept_scroll(format!("pick-{}", menu.serial).into(), Inner::Over);
-        let mut rows = v_flex().id(("pick-rows", menu.serial as usize)).max_h(room.min(px(360.))).overflow_y_scroll().track_scroll(&scroll).p(px(5.)).gap(px(2.));
+        let mut rows = v_flex().id(("pick-rows", menu.serial as usize)).max_h(room.min(px(if what == PickFor::Folder { 440. } else { 360. }))).overflow_y_scroll().track_scroll(&scroll).p(px(5.)).gap(px(2.));
         let card = v_flex()
             .id(("pick-card", menu.serial as usize))
             .absolute()
@@ -4569,7 +4964,12 @@ impl Workbench {
             .map(|d| if right { d.right(view.width - menu.by.right()) } else { d.left(menu.by.left()) })
             .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
         for (ix, PickRow { key, name, detail, tint }) in menu.rows.iter().enumerate() {
-            let active = *key == menu.current;
+            let active = *key == menu.current && !key.is_empty();
+            // A row with no key is not one of the choices but the way to
+            // another: a line sets it apart.
+            if key.is_empty() && ix > 0 {
+                rows = rows.child(div().flex_shrink_0().h(px(1.)).mx(px(6.)).my(px(3.)).bg(theme.border));
+            }
             let key = key.clone();
             rows = rows.child(
                 v_flex()
@@ -4594,7 +4994,9 @@ impl Workbench {
                             })
                             .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary))),
                     )
-                    .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).whitespace_normal().child(detail.clone()))),
+                    // A choice's line is prose and wraps; a folder's is a
+                    // path, kept to one line so the list stays short.
+                    .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).map(|d| if what == PickFor::Folder { d.truncate() } else { d.whitespace_normal() }).child(detail.clone()))),
             );
         }
         let card = card.child(rows).vertical_scrollbar(&scroll);
@@ -4647,6 +5049,11 @@ impl Workbench {
     /// as the button refuses it: one writer per transcript.
     pub fn via_terminal(&mut self, action: TerminalAction, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
+        if self.is_draft(&r.session_id) {
+            self.notice = Some(Notice::said("send a first message to start this session"));
+            cx.notify();
+            return;
+        }
         if matches!(action, TerminalAction::Pick(Pill::Mode)) {
             return self.pick_in_terminal(Pill::Mode, cx);
         }
@@ -4993,7 +5400,7 @@ impl Workbench {
         let suggested = self.question_pending().is_none() && self.page != Page::New;
         let (words, accept) = if self.question_pending().is_some() {
             (PLACEHOLDER_ANSWER.to_string(), false)
-        } else if self.page == Page::New {
+        } else if self.page == Page::New || self.selected_ref().is_some_and(|r| self.is_draft(&r.session_id)) {
             (PLACEHOLDER_NEW.to_string(), false)
         } else {
             match self.suggested().filter(|_| suggested) {
@@ -5859,8 +6266,10 @@ impl Workbench {
         let via = if via != "spawn" {
             via
         } else {
+            // A session begun from a folder's plus is started, not
+            // resumed: there is nothing of it to resume.
             let (sid, cwd, resume) = match self.selected_ref().filter(|_| new_id.is_empty()) {
-                Some(r) => (r.session_id.clone(), r.cwd.clone(), true),
+                Some(r) => (r.session_id.clone(), r.cwd.clone(), !self.is_draft(&r.session_id)),
                 None => (new_id.clone(), new_cwd, false),
             };
             let started = self.hub.hidden_terminals() && self.hub.start_terminal(&sid, &cwd, resume, &self.next_mode, &self.next_model).is_ok();
@@ -5926,7 +6335,7 @@ impl Workbench {
                     (self.new_id.clone(), self.new_cwd.clone(), false)
                 } else {
                     let r = self.selected_ref().unwrap();
-                    (r.session_id.clone(), r.cwd.clone(), true)
+                    (r.session_id.clone(), r.cwd.clone(), !self.is_draft(&r.session_id))
                 };
                 self.drivers.insert(sid.clone(), DriverView { starting: true, state: "starting".into(), mode: self.next_mode.clone(), model: self.next_model.clone(), ..Default::default() });
                 self.hub.spawn_driver_and_send(sid.clone(), cwd, resume, self.next_mode.clone(), self.next_model.clone(), Some((text.clone(), images)));
@@ -5944,6 +6353,11 @@ impl Workbench {
                 cx.notify();
                 return;
             }
+        }
+        // The first message to a session begun here: it is started now.
+        if let Some(id) = self.selected_ref().map(|r| r.session_id.clone()).filter(|id| self.is_draft(id)) {
+            self.begun_sent.insert(id);
+            self.notice = Some(Notice::said("starting claude…"));
         }
         self.last_sent = self.selected.clone().map(|key| (key, typed.trim().to_string(), self.attachments.clone()));
         self.composer.update(cx, |s, cx| s.set_value("", window, cx));
@@ -6075,7 +6489,11 @@ impl Workbench {
     /// What Escape closes, nearest first: the lightbox, then the search;
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file_ask.is_some() {
+        if self.discard_ask.is_some() || self.paste_ask.is_some() {
+            self.discard_ask = None;
+            self.paste_ask = None;
+            cx.notify();
+        } else if self.file_ask.is_some() {
             self.file_answer(crate::panels::FileAnswer::Cancel, window, cx);
         } else if self.file_peek.is_some() {
             self.file_peek = None;
@@ -6861,7 +7279,8 @@ impl Workbench {
 
     /// The colour a live session's dot takes, or none when nothing is behind it.
     fn live_color(&self, r: &SessionRef, cx: &App) -> Option<Hsla> {
-        if !self.hub.is_live(r, self.now) {
+        // A session begun here with nothing sent is new, not live.
+        if self.is_draft(&r.session_id) || !self.hub.is_live(r, self.now) {
             return None;
         }
         let col = self.card_for(r).column;
@@ -7004,6 +7423,7 @@ impl Workbench {
             let name = p.clone();
             // The folder itself, from the newest session that still has it.
             let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
+            let (plus_cwd, group) = (folder_cwd.clone(), SharedString::from(format!("folder-row-{p}")));
             scroll = scroll.child(
                 h_flex()
                     .id(SharedString::from(format!("folder-{p}")))
@@ -7013,12 +7433,51 @@ impl Workbench {
                     .rounded(px(8.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                    .group(group.clone())
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_folder(&name, cx)))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))], cx)))
                     .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(p.clone()))
                     .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
-                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(list.len().to_string())),
+                    // The count, and in its place under the pointer a
+                    // plus: a new session in this folder. Both are
+                    // always there, one of them clear, so nothing moves.
+                    .child(
+                        div()
+                            .relative()
+                            .min_w(px(18.))
+                            .h(px(18.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .child(div().text_size(px(11.)).text_color(theme.muted_foreground).when(plus_cwd.is_some(), |d| d.group_hover(group.clone(), |s| s.opacity(0.))).child(list.len().to_string()))
+                            .when_some(plus_cwd, |d, cwd| {
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("folder-new-{p}")))
+                                        .absolute()
+                                        .right_0()
+                                        .top_0()
+                                        .size(px(18.))
+                                        .rounded(px(5.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .opacity(0.)
+                                        .group_hover(group.clone(), |s| s.opacity(1.))
+                                        .text_color(theme.muted_foreground)
+                                        .hover(|s| s.bg(theme.border).text_color(theme.foreground))
+                                        .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("New session here").build(window, cx))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            swallow_click(window, cx);
+                                            cx.stop_propagation();
+                                            this.new_session_in(&cwd, window, cx);
+                                        }))
+                                        .child(Icon::new(IconName::Plus).with_size(px(13.))),
+                                )
+                            }),
+                    ),
             );
             let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
             if !open && anim.is_none() {
@@ -7759,9 +8218,17 @@ impl Workbench {
 
     /// One tab per open session in the top strip: the agent's mark (turning
     /// while it works), the title, and a close button. Clicking a tab shows
-    /// that session; ⌘W closes the one showing.
+    /// that session; ⌘W closes the one showing. A folder's tabs stand on
+    /// one pill, the segmented control's track, and the showing tab is on
+    /// its raised plate: one element under the pill's tabs, which slides
+    /// to another tab of the pill, and fades out of one pill and into
+    /// another. Every width here is ours, so the plate is placed by sum
+    /// and never measured, and it keeps its tab while the widths move.
     fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let track_bg = if dark { theme.sidebar } else { theme.muted };
+        let plate_bg = if dark { theme.secondary_active } else { theme.popover };
         let row_w = self.tabs_row_w.clone();
         let entity = cx.entity().downgrade();
         let mut row = h_flex()
@@ -7771,11 +8238,15 @@ impl Workbench {
             .h_full()
             .justify_center()
             .items_center()
-            .gap(px(TAB_GAP))
+            .gap(px(PILL_GAP))
             .overflow_hidden()
             .on_drag_move::<DragTab>(cx.listener(|this, e: &DragMoveEvent<DragTab>, _, cx| {
                 let key = e.drag(cx).0.clone();
                 this.drag_tab_to(&key, e.event.position.x, e.bounds, cx);
+            }))
+            .on_drag_move::<DragPill>(cx.listener(|this, e: &DragMoveEvent<DragPill>, _, cx| {
+                let project = e.drag(cx).0.clone();
+                this.drag_pill_to(&project, e.event.position.x, e.bounds, cx);
             }))
             // The row's width, for `sync_tab_widths` at the next draw.
             .child(
@@ -7794,7 +8265,64 @@ impl Workbench {
             );
         let hints = self.tab_hints || self.tab_hints_probe;
         let last = self.tabs.len().saturating_sub(1);
-        for (ix, key) in self.tabs.clone().into_iter().enumerate() {
+        let settled = TabWidth { from: TAB_MAX, to: TAB_MAX, at: Instant::now(), serial: 0 };
+        let mut ix = 0;
+        for (project, keys) in self.tab_groups.clone() {
+            let widths: Vec<TabWidth> = keys.iter().map(|k| self.tab_widths.get(k).copied().unwrap_or(settled)).collect();
+            // A tab a drag has just moved is drawn off its place by what
+            // is left of the way, and the plate under it goes with it.
+            let shifts: Vec<Option<TabShift>> = keys.iter().map(|k| self.tab_shift.get(k).copied()).collect();
+            // The plate: from the tab left to the tab shown when both are
+            // here, else in or out where it is. A move that is over is
+            // drawn as it ended, so a pill drawn afresh does not play it.
+            let live = self.tab_plate.at.is_some_and(|at| at.elapsed() < TAB_ANIM + Duration::from_millis(80));
+            let at = |k: &Option<String>| k.as_ref().and_then(|k| keys.iter().position(|t| t == k));
+            let (a, b) = (at(&self.tab_plate.from).filter(|_| live), at(&self.tab_plate.to));
+            let plate = (a.is_some() || b.is_some()).then(|| {
+                let (ia, ib) = (a.or(b).unwrap_or(0), b.or(a).unwrap_or(0));
+                let (o_a, o_b) = (if a.is_some() || !live { 1. } else { 0. }, if b.is_some() { 1. } else { 0. });
+                let widths = widths.clone();
+                let shifts = shifts.clone();
+                div().absolute().top(px(PILL_PAD)).h(px(TAB_H)).rounded(px(7.)).bg(plate_bg).shadow_sm().with_animation(
+                    ElementId::Name(format!("tab-plate-{project}-{}", self.tab_plate.serial).into()),
+                    Animation::new(TAB_ANIM).with_easing(ease_out_quint()),
+                    move |d, t| {
+                        let place = |i: usize| (PILL_LEAD + widths[..i].iter().map(|w| w.now() + TAB_GAP).sum::<f32>() + shifts[i].map(|s| s.now()).unwrap_or(0.), widths[i].now());
+                        let ((xa, wa), (xb, wb)) = (place(ia), place(ib));
+                        d.left(px(xa + (xb - xa) * t)).w(px(wa + (wb - wa) * t)).opacity(o_a + (o_b - o_a) * t)
+                    },
+                )
+            });
+            // The pill is moved by its handle, which says whose it is.
+            let name = project.clone();
+            let ghost = project.clone();
+            let handle = div()
+                .id(ElementId::Name(format!("pill-handle-{project}").into()))
+                .w(px(PILL_HANDLE))
+                .h(px(TAB_H))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_grab()
+                .text_color(theme.muted_foreground)
+                .hover(|s| s.text_color(theme.foreground))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                .on_drag(DragPill(project.clone()), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone())))
+                .when(!name.starts_with('\u{0}'), |d| d.managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(name.clone()).build(window, cx)))
+                .child(Icon::new(IconName::Folder).with_size(px(13.)));
+            let mut pill = h_flex()
+                .relative()
+                .flex_shrink_0()
+                .p(px(PILL_PAD))
+                .gap(px(TAB_GAP))
+                .rounded(px(9.))
+                .bg(track_bg)
+                .when(self.drag_pill.as_deref() == Some(project.as_str()), |d| d.opacity(0.45))
+                .when_some(self.pill_shift.get(&project), |d, s| d.left(px(s.now())))
+                .children(plate)
+                .child(handle);
+        for ((key, width), shift) in keys.into_iter().zip(widths.iter().copied()).zip(shifts.iter().copied()) {
             let r = self.refs.iter().find(|r| key_of(r) == key).cloned();
             let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "untitled".into());
             let agent = r.as_ref().map(|r| r.agent).unwrap_or(AgentId::ClaudeCode);
@@ -7803,15 +8331,14 @@ impl Workbench {
             let dragged = self.drag_tab.as_deref() == Some(key.as_str());
             let open_key = key.clone();
             let close_key = key.clone();
-            let hover_bg = theme.muted.opacity(0.6);
+            let hover_bg = plate_bg.opacity(0.5);
             let close_bg = theme.border;
             let ghost = title.clone();
             // The same menu the session has in the sidebar.
             let menu = self.session_menu(&key);
             // A width that is over is drawn as it ended, so that a row
             // drawn afresh does not play it again.
-            let width = self.tab_widths.get(&key).copied().unwrap_or(TabWidth { from: TAB_MAX, to: TAB_MAX, at: Instant::now(), serial: 0 });
-            let (from, to) = if width.at.elapsed() < TAB_ANIM { (width.from, width.to) } else { (width.to, width.to) };
+            let fresh = width.from == 0. && width.at.elapsed() < TAB_ANIM;
             let tab = h_flex()
                 .id(ElementId::Name(format!("tab-{key}").into()))
                 .size_full()
@@ -7819,14 +8346,13 @@ impl Workbench {
                 .pr(px(5.))
                 .gap(px(6.))
                 .items_center()
-                .rounded(px(8.))
+                .rounded(px(7.))
                 // Always there, so nothing moves when it shows: the
                 // outline every tab wears while the numbers are up.
                 .border_1()
                 .border_color(if hints { theme.border } else { gpui::transparent_black() })
                 .cursor_pointer()
                 .overflow_hidden()
-                .when(active, |d| d.bg(theme.muted))
                 .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
                 .when(dragged, |d| d.opacity(0.45))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
@@ -7890,11 +8416,40 @@ impl Workbench {
                         .with_animation("tab-hint", Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
                 )
             });
-            let slot = div().relative().h(px(30.)).flex_shrink_0().child(tab).children(plate);
-            row = row.child(slot.with_animation(ElementId::Name(format!("tab-w-{key}-{}", width.serial).into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, t| {
-                let d = d.w(px(from + (to - from) * t));
-                if from == 0. { d.opacity(t) } else { d }
+            // The width is read off the clock the plate reads, so the two
+            // never part by a frame.
+            let slot = div().relative().h(px(TAB_H)).flex_shrink_0().child(tab).children(plate);
+            pill = pill.child(slot.with_animation(ElementId::Name(format!("tab-w-{key}-{}", width.serial).into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                let d = d.w(px(width.now())).left(px(shift.map(|s| s.now()).unwrap_or(0.)));
+                if fresh { d.opacity(t) } else { d }
             }));
+            ix += 1;
+        }
+            // A pill that has just come opens out from nothing, as its
+            // tab does: its track is let out with the tab's width.
+            // The wrapper stays as long as the plate's move is live: taken
+            // off sooner, the plate under it is a new element and plays
+            // its move again.
+            let born = self.pill_born.get(&project).copied().filter(|at| at.elapsed() < TAB_ANIM + Duration::from_millis(80));
+            row = row.child(match born {
+                Some(at) => {
+                    let widths = widths.clone();
+                    div()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .rounded(px(9.))
+                        .child(pill)
+                        .with_animation(ElementId::Name(format!("pill-born-{project}").into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, _| {
+                            let t = ease_out_quint()((at.elapsed().as_secs_f32() / TAB_ANIM.as_secs_f32()).min(1.));
+                            d.w(px(pill_chrome(widths.len()) * t + widths.iter().map(|w| w.now()).sum::<f32>()))
+                        })
+                        .into_any_element()
+                }
+                // The pill being moved passes over the ones it changes
+                // places with, not under them: painted after the row.
+                None if self.pill_top.as_deref() == Some(project.as_str()) => deferred(pill).into_any_element(),
+                None => pill.into_any_element(),
+            });
         }
         row.into_any_element()
     }
@@ -8477,6 +9032,9 @@ impl Workbench {
         self.sync_file_editor(window, cx);
         if let Some((state, words, caret)) = self.pending_edit.take() {
             state.update(cx, |s, cx| s.replace_bytes(0..0, &words, caret, window, cx));
+        }
+        if let Some(step) = self.pending_cell.take() {
+            self.table_probe(&step, window, cx);
         }
         if std::mem::take(&mut self.pending_save) {
             self.save_file(window, cx);
@@ -10002,7 +10560,7 @@ impl Workbench {
         // rest): the inbox reads everything as prose.
         let settable = can_send;
         let effort = self.current_effort();
-        let on_session = self.page == Page::Session;
+        let on_session = self.page == Page::Session && !self.selected_ref().is_some_and(|r| self.is_draft(&r.session_id));
         let options = self.options();
         let effort_text = effort_pill(&options, &model, &effort, &theme);
         // The right of the row under the composer: a notice while one is
@@ -10288,6 +10846,9 @@ impl Workbench {
         // commands over the card; it closes as soon as a space or a line
         // follows the name.
         let help = self.slash_open(cx).map(|at| self.render_slash_help(at, cx));
+        // On the home page the card stands on the tray that names the
+        // folder a session starts in.
+        let card = if self.page == Page::New { self.folder_tray(card.into_any_element(), cx) } else { card.into_any_element() };
         v_flex().w_full().items_center().gap(px(8.)).children(help).child(card).child(foot)
     }
 
@@ -10303,81 +10864,13 @@ impl Workbench {
 
     // -- new session: the home page -------------------------------------------
 
-    /// The greeting in the display serif, the composer, and the folders a
-    /// session can start in as a grid of cards: the folder's own name in
-    /// the foreground, its parents dimmed, ringed in the accent when
-    /// chosen. The folders used to be a cloud of full-path pills of every
-    /// width, which read as clutter.
+    /// The greeting in the display serif over the composer. The folder a
+    /// session starts in is a pill on the composer (`PickFor::Folder`).
+    /// It used to be a grid of six cards under it, and before that a cloud
+    /// of full-path pills: both took the page for one choice.
     fn render_new(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let cwds: Vec<String> = self.recent_cwds().into_iter().take(HOME_FOLDERS).collect();
-        let chosen = self.new_cwd.clone();
         let display = crate::fonts::display_family(cx);
-        let live = self.refs.iter().filter(|r| self.live_color(r, cx).is_some()).count();
-        let line = format!("{} · {} live · {} kept", today_line(), live, self.refs.len());
-        // Three cards to a row, each a third of the column, so the grid
-        // fills the width exactly whatever the window; a wrapping row of
-        // fixed widths fell to two per row with the sidebar open.
-        let folder_card = |c: String, cx: &mut Context<Self>| {
-            let active = c == chosen;
-            let theme = cx.theme().clone();
-            let path = std::path::Path::new(&c);
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| c.clone());
-            let parent = path.parent().map(|p| emaki_core::paths::tilde(&p.to_string_lossy())).filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into());
-            let hover_border = theme.muted_foreground.opacity(0.45);
-            let menu_cwd = c.clone();
-            h_flex()
-                .id(SharedString::from(format!("cwd-{c}")))
-                .flex_1()
-                .min_w_0()
-                .h(px(58.))
-                .px(px(12.))
-                .gap(px(10.))
-                .items_center()
-                .rounded(px(12.))
-                .border_1()
-                .bg(theme.popover)
-                .border_color(if active { theme.primary } else { theme.border })
-                .when(active, |d| d.bg(theme.primary.opacity(if theme.mode.is_dark() { 0.12 } else { 0.06 })))
-                .when(!active, |d| d.hover(move |s| s.border_color(hover_border)))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.new_cwd = c.clone();
-                    cx.notify();
-                }))
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(Some(menu_cwd.clone())))], cx)))
-                .child(
-                    div()
-                        .size(px(32.))
-                        .rounded(px(9.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(if active { theme.primary.opacity(0.16) } else { theme.muted })
-                        .child(Icon::new(IconName::Folder).with_size(px(15.)).text_color(if active { theme.primary } else { theme.muted_foreground })),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(1.))
-                        .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name))
-                        .child(div().truncate().text_size(px(11.)).text_color(theme.muted_foreground).child(parent)),
-                )
-        };
-        let mut folders = v_flex().w_full().gap(px(10.));
-        for row in cwds.chunks(FOLDER_COLS) {
-            let mut line = h_flex().w_full().gap(px(10.)).items_center();
-            for c in row {
-                line = line.child(folder_card(c.clone(), cx));
-            }
-            for _ in row.len()..FOLDER_COLS {
-                line = line.child(div().flex_1());
-            }
-            folders = folders.child(line);
-        }
-
         v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(v_flex().relative().flex_1().min_h_0().vertical_scrollbar(&self.home_scroll).child(
             v_flex().id("home").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.home_scroll).px(px(24.)).child(
                 page_in(
@@ -10394,10 +10887,8 @@ impl Workbench {
                                 .items_center()
                                 .gap(px(10.))
                                 .child(h_flex().gap(px(14.)).items_center().child(img("icon/app.png").size(px(44.)).flex_shrink_0()).child(div().text_size(px(36.)).font_family(display).child(greeting(&self.user_name))))
-                                .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(line)),
                         )
-                        .child(self.render_composer(cx))
-                        .child(v_flex().w_full().max_w(CONTENT_W).gap(px(10.)).pt(px(10.)).child(div().px(px(2.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("START IN")).child(folders)),
+                        .child(self.render_composer(cx)),
                 ),
             ),
         ))
@@ -10756,6 +11247,30 @@ pub fn pill_button(id: impl Into<ElementId>, label: impl Into<SharedString>, the
         .child(label.into())
 }
 
+/// `pill_button` for something that cannot be taken back: in the
+/// theme's red, at rest too.
+pub fn pill_button_danger(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: &gpui_component::Theme, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    let red = theme.danger;
+    h_flex()
+        .id(id)
+        .flex_shrink_0()
+        .h(px(24.))
+        .px(px(10.))
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(red.opacity(0.55))
+        .bg(red.opacity(0.10))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .text_color(red)
+        .hover(move |s| s.border_color(red).bg(red.opacity(0.20)))
+        .active(move |s| s.border_color(red).bg(red.opacity(0.32)))
+        .on_click(on_click)
+        .child(label.into())
+}
+
 fn kbd_hint(text: &'static str, theme: &gpui_component::Theme) -> impl IntoElement {
     div().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(text)
 }
@@ -10937,6 +11452,16 @@ impl ComeBack {
     }
 }
 
+/// A folder's own name, and the folders it is in with the home folder as
+/// "~": the two lines of a folder on the home page's list.
+fn folder_name(cwd: &str) -> String {
+    std::path::Path::new(cwd).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| cwd.to_string())
+}
+
+fn folder_parent(cwd: &str) -> String {
+    std::path::Path::new(cwd).parent().map(|p| emaki_core::paths::tilde(&p.to_string_lossy())).filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into())
+}
+
 /// The pill itself: light grey with its icon in front, darker under the
 /// pointer, darker again while pressed or open. No tooltip and no caret.
 /// (The toolkit draws a custom colour at a fifth of its strength, so the
@@ -10985,13 +11510,15 @@ fn arrow_over(button: impl IntoElement) -> Div {
 
 /// Which list a pill opens: under a session's composer its effort and
 /// its model, in the settings panel the mode and the model a new session
-/// starts in.
+/// starts in, on the home page the folder it starts in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PickFor {
     Effort,
     Model,
     DefaultMode,
     DefaultModel,
+    /// On the home page, the folder a new session starts in.
+    Folder,
 }
 
 /// A pill's list while it is open: every choice with a line on what it
@@ -11113,6 +11640,25 @@ impl Render for Workbench {
         let sidebar_open = self.sidebar_open && !self.narrow;
         let sidebar_peek = self.narrow && self.sidebar_peek;
         self.sync_tab_widths(cx);
+        // `EMAKI_FOCUS_DEBUG=1` prints where the keyboard is at every draw.
+        if std::env::var_os("EMAKI_FOCUS_DEBUG").is_some() {
+            eprintln!("focus: tree={} file={} composer={} root={}", self.tree_focus.is_focused(window), self.file_focus.is_focused(window), self.composer.read(cx).focus_handle(cx).is_focused(window), self.focus_handle.is_focused(window));
+        }
+        if let Some(cwd) = self.pending_new_in.take() {
+            self.new_session_in(&cwd, window, cx);
+        }
+        if std::mem::take(&mut self.pending_tree_focus) {
+            window.focus(&self.tree_focus, cx);
+        }
+        // The files panel put away with the keyboard in it: the focus
+        // goes to the window, or no shortcut would be heard.
+        if self.tree_focus.is_focused(window) && !(self.page == Page::Session && self.files_on) {
+            window.focus(&self.focus_handle, cx);
+        }
+        // A slide after a drag is drawn off the clock, frame by frame.
+        if self.tabs_sliding() {
+            window.request_animation_frame();
+        }
         self.view_w = window.viewport_size().width;
         self.pane_w = window.viewport_size().width - if sidebar_open { self.sidebar_w } else { px(0.) };
         if std::mem::take(&mut self.panel_fit_wanted) {
@@ -11279,6 +11825,8 @@ impl Render for Workbench {
             .when(self.branch_ask.is_some(), |d| d.child(self.render_branch_ask(cx)))
             .when(self.file_peek.is_some(), |d| d.child(self.render_file_peek(window, cx)))
             .when(self.file_ask.is_some(), |d| d.child(self.render_file_ask(window, cx)))
+            .when(self.discard_ask.is_some(), |d| d.child(self.render_discard_ask(cx)))
+            .when(self.paste_ask.is_some(), |d| d.child(self.render_paste_ask(cx)))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
             .when_some(self.pick_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))

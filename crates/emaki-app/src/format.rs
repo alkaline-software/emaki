@@ -93,11 +93,6 @@ pub fn bucket(mtime: f64) -> &'static str {
     }
 }
 
-/// "Friday, 3 October".
-pub fn today_line() -> String {
-    Local::now().format("%A, %-d %B").to_string()
-}
-
 pub fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("{n} {one}") } else { format!("{n} {many}") }
 }

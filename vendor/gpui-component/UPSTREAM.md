@@ -174,6 +174,15 @@ upstream revision finds them.
       (`crates/ui/src/highlighter/input_adapter.rs`): it starts on the
       line its first item does, and upstream's one-candidate-a-line
       folded the whole list from that item's mark.
+21. `crates/ui/src/highlighter/delimited.rs` (new), `mod.rs`,
+    `input_adapter.rs`: the languages `csv` and `tsv` get a highlighter
+    with no grammar behind it, which gives each column one of ten of the
+    theme's syntax colours in turn, as the Rainbow CSV extension does.
+    It reads the whole text again at each change, since a quoted field
+    may hold the separator and line breaks.
+22. `crates/base/src/input/base/state.rs`: `undo_step` and `redo_step`,
+    undo and redo for an owner that edits the value from outside the
+    field with `replace_bytes` (a table's cell).
 
 ## Updating
 

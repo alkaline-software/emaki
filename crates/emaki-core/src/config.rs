@@ -79,11 +79,14 @@ pub struct AppConfig {
     pub check_writing: bool,
     /// The language they are checked in; see `check::LANGUAGES`.
     pub writing_language: String,
+    /// A file saved from the file's pane is put in its language's form
+    /// first, where the language has a formatter (`format`: R, by Air).
+    pub format_on_save: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into() }
+        Self { chat_font: "serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: true }
     }
 }
 
