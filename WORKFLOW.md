@@ -245,6 +245,12 @@ so it is caught before the tag next time.
   Windows, where a file name's trailing dot is ignored, so `main.rs.`
   answered as `main.rs`; the tag and both notarized images were redone.
 
+- **A test that makes a git repository fails on Windows only, on a
+  line end**: Git for Windows has `core.autocrlf` on, so a file it
+  checks out or restores comes back with `\r\n`. A test's own
+  repository sets `core.autocrlf false`. v0.1.9's first push to `main`
+  went red on this before the tag, which is what step 4's wait is for.
+
 - **"Cargo.toml says X but the tag is vY"**: the version and the tag
   disagree. Fix `Cargo.toml`, commit, redo the tag.
 - **"CHANGELOG.md has no section '## vX.Y.Z'"**: add it, commit, redo the tag.
