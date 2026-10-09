@@ -120,6 +120,30 @@ theme is the same copy again.
 is in, read off the main thread on the tree's clock (`read_git`, and at
 the first draw of a folder not asked about yet), into a state per path.
 
+- Which git (`git::binary`, found once): the first on `PATH` that
+  answers `--version`, then Homebrew's and the system's places, or Git
+  for Windows' own. The app opened from the Finder has the system's
+  `PATH`, with no Homebrew on it, and the Mac's `/usr/bin/git` fails
+  every call without Xcode's tools and their licence; with plain `git`
+  such a machine had no branch, no marks and no changes in a real
+  repository, and nothing said why. Every call goes through
+  `git::command`, `files.rs`'s too. A search that finds none is made
+  again a few seconds on, so a licence agreed to in a terminal is seen
+  without a relaunch.
+- A checkout git says nothing of says why (`git::trouble`, the strip
+  under the panel's head, `git_trouble_strip`): a folder with a `.git`
+  in it or above it, and no git that runs (none installed, the Xcode
+  licence) or a git that refuses it (someone else's folder, a damaged
+  repository). The words are git's or the system's own, whole, since
+  they say what to do. A folder that is no checkout by its files, or
+  one its repository ignores, gets no strip.
+- The strip offers a command to copy for one trouble only, the Xcode
+  licence, and only when it is that for certain (`git::xcode_licence`:
+  a Mac, and Apple's message naming `xcodebuild -license`). Its words
+  are then ours and one line (`Trouble::licence`), since Apple's three
+  lines spell out the command the box already holds. Every other
+  trouble gets its own words and no advice of ours: a guess at the cause
+  would send someone to run `sudo` for nothing.
 - Which repository, as VS Code's explorer has it (`git::inside`): the
   one the folder is in, when the folder is its top or a tracked part of
   it. A folder that repository ignores (`target/x` under a checkout) is

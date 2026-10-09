@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The most paths a folder's list holds; a larger tree is cut here.
 pub const MAX_FILES: usize = 30_000;
@@ -65,7 +64,7 @@ pub fn list(cwd: &str) -> Vec<Entry> {
 }
 
 fn git_files(cwd: &str) -> Option<Vec<String>> {
-    let out = Command::new("git").args(["-C", cwd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"]).output().ok()?;
+    let out = crate::git::command().args(["-C", cwd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"]).output().ok()?;
     if !out.status.success() {
         return None;
     }

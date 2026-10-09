@@ -110,6 +110,12 @@ window.
   copy and paste (`corrections`): corrections only, the grammar is not explained, and
   a grammar mark Harper has no correction for is not drawn; a correction goes in as one step for undo
   (the vendored `replace_bytes`).
+- A correction is a change of the text like any other: the input says so
+  (`InputEvent::Change`, silent or not) and `writing_changed` runs inside
+  the click. So `check::typed` is handed changes no keystroke makes, with
+  the caret anywhere, and must answer `Other` for them without slicing
+  on trust. "mispelled" to "misspelled" (one letter in, the caret six
+  bytes on) once sliced backwards and took the app down.
 - A capital (`check::capital`) is given at the keystroke: the first
   letter of the message, of a line, or after ". ", "! " or "? ", and in
   English a lone "i". Not after an abbreviation or an ellipsis, not inside
@@ -180,6 +186,11 @@ script to `~/.emaki/bin/statusline.sh` and sets `statusLine` to run it
 unless it already does, touching no other key. There is no setting. The
 previous value is kept in `state/statusline.json`. If the script fails,
 the terminal's line goes blank and nothing is blocked. The tests run it.
+
+A source that has no word on a window leaves the one held, and Claude
+Code names no five-hour window between one running out and the request
+that starts the next. So the row draws a window through `Window::at`:
+past its reset it is 0% with no time, not the old window's number.
 
 What was learned is kept in `state/limits.json` with its time; the row
 says "limits as of …" once stale and `--` until a source has reported.

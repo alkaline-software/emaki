@@ -37,11 +37,23 @@ window remembers.
   session's tab, then the window.
 - Keep `on_reopen` in `main.rs`. The app stays running with no window, and
   without the handler a Dock click does nothing.
-- A new scroller takes the toolkit's `vertical_scrollbar` and nothing else,
-  so every scrollbar in the window fades with the same timing.
-- A scroller that can sit beside or over another is a pane of its own to
-  `route_scroll` (`Pane`). Otherwise momentum from a flick scrolls whatever
-  the pointer is carried over.
+- Every scroller in the window, now and later, has the same bar and keeps
+  its own wheel. Both halves hold for a list, a box, a card, a menu, a
+  page: anything that scrolls up and down.
+  - **The bar** is the toolkit's `vertical_scrollbar` on the scroller's
+    handle and nothing else. It shows while the scroller moves, stays one
+    second after the last movement and fades over half a second (the
+    vendored `scrollbar.rs`). No scroller goes without one and none draws
+    its own.
+  - **A gesture belongs to the scroller it began in**, its momentum
+    included, wherever the pointer is carried: it never scrolls anything
+    else, and stops at that scroller's edge. So a scroller is known to
+    `route_scroll`, one of two ways: as a pane (`Pane`) when it can sit
+    beside another, or by naming itself as it is drawn when it is inside
+    a pane or on a sheet or menu over the window (`inner_scroller` for a
+    handle it has, `kept_scroll` for one it needs; `Inner` says which
+    kind). A scroller that does neither leaks: a flick in it scrolls
+    whatever the pointer reaches next.
 - Rows inside a scrolling flex column go in a column of their own and never
   shrink. As direct children each gave up height once the list was longer
   than the sidebar, and the whole list changed its spacing at a click.
@@ -360,6 +372,26 @@ wheel sends no phases), owns the gesture. An event that lands in another
 pane is applied to the owner's scroll position (`ListState::scroll_by` for
 the conversation, a `ScrollHandle` elsewhere) and stopped. With a single
 pane there is nothing to do.
+
+A pane is not the only thing that scrolls: a tool call's body, a box on
+the background commands' card, the settings' rows, a pill's list, the
+search results, a PDF's page list. Each names itself at every draw
+(`inner_live`), and `route_scroll` looks for one under the pointer before
+it looks at panes:
+
+- A gesture that begins in one is that scroller's (`scroll_inner`). The
+  router moves it itself and stops the event, on the scroller or off it,
+  so nothing under or beside it ever takes the rest.
+- A gesture begun elsewhere and carried onto one does not move it. In a
+  pane the event goes to the gesture's owner; on a sheet or a menu
+  (`Inner::Over`) it goes nowhere.
+- A tool call's body is `Inner::Chained`: on the body its own handler
+  decides (`Stroke`: a stroke that starts at its edge is the
+  conversation's), and off the body the gesture stays with it only if it
+  moved it.
+
+Scrollers that only go sideways (the terminal's tabs, a question's
+preview) are not named: a sideways flick moves nothing else.
 
 ## The top strip of a session
 

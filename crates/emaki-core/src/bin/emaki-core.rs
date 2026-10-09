@@ -85,7 +85,7 @@ fn main() {
             let folder = std::fs::canonicalize(args.get(1).expect("git <folder> [path...]")).expect("a folder");
             println!("{:?}", emaki_core::git::branches(&folder));
             match emaki_core::git::status(&folder) {
-                None => println!("not in a repository"),
+                None => println!("not in a repository{}", emaki_core::git::trouble(&folder).map(|t| format!(": {}{}", t.words, t.fix.map(|f| format!(" (run: {f})")).unwrap_or_default())).unwrap_or_default()),
                 Some(st) => {
                     for p in &args[2..] {
                         let path = folder.join(p);

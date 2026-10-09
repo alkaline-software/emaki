@@ -228,6 +228,13 @@ how long it has run. A click opens a card with each command and the last
 while the card is open (`file_tail`: colour sequences out, a progress line
 that rewrites itself kept as it last read).
 
+The command and the output are both code and are drawn alike
+(`shell_box`): a labelled box, every line wrapped and none cut short, a
+copy button at its top right under the pointer. Past `SHELL_BOX_H` each
+scrolls, with the bar every scroller has (`docs/window.md`): the command
+from its start, the output from its foot, where it stays as more is
+printed unless the reader has scrolled up.
+
 ## Background subagents
 
 A subagent launched without waiting for it (`Agent`, 2.1.292) is the same

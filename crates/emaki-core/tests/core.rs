@@ -1062,7 +1062,7 @@ fn the_newest_version_is_read_off_the_release_redirect() {
 
 #[test]
 fn the_status_line_file_feeds_the_limits_when_newer() {
-    use emaki_core::limits::Limits;
+    use emaki_core::limits::{Limits, Window};
     let mut l = Limits::default();
     let v = json!({ "rate_limits": { "five_hour": { "used_percentage": 5, "resets_at": 1790000000 }, "seven_day": { "used_percentage": 11.4, "resets_at": 1790500000 } }, "seen_at": 1789990000.0 });
     assert!(l.absorb_statusline(&v));
@@ -1080,6 +1080,15 @@ fn the_status_line_file_feeds_the_limits_when_newer() {
     assert_eq!(l.five_hour.unwrap().utilization, 0.05);
     assert_eq!(l.seven_day.unwrap().utilization, 0.12);
     assert!(!l.absorb_statusline(&json!({ "seen_at": 1799999999.0 })));
+    // The value kept is the old window's: past its reset nothing of it is
+    // spent, and the row says no time. The other window is as it was.
+    let five = l.five_hour.unwrap();
+    assert_eq!(five.at(1789999999.0), five);
+    assert_eq!(five.at(1790000000.0), Window::default());
+    assert_eq!(l.seven_day.unwrap().at(1790000000.0).utilization, 0.12);
+    // A window with no reset named is never past it.
+    let open = Window { utilization: 0.3, resets_at: 0.0 };
+    assert_eq!(open.at(1790000000.0), open);
 }
 
 #[test]
@@ -1785,7 +1794,22 @@ fn git_marks_files_and_the_folders_that_hold_them() {
         assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
     };
     assert!(git::status(&root).is_none(), "a folder in no repository has no status");
+    // No checkout by its own files: nothing to explain. One whose `.git`
+    // git will not take says why, in git's words; a real one says nothing.
+    assert_eq!(git::trouble(&root), None);
+    std::fs::create_dir(root.join(".git")).unwrap();
+    assert!(git::status(&root).is_none());
+    assert!(git::trouble(&root).is_some_and(|t| t.words.contains("not a git repository") && t.fix.is_none()), "{:?}", git::trouble(&root));
+    // A command is offered for the Xcode licence alone: Apple's own
+    // message on a Mac, and nothing that only mentions Xcode or a licence.
+    let apple = "You have not agreed to the Xcode license agreements. Please run 'sudo xcodebuild -license' from within a Terminal window to review and agree to the Xcode and Apple SDKs license.";
+    assert!(git::xcode_licence(true, apple));
+    assert!(!git::xcode_licence(false, apple));
+    assert!(!git::xcode_licence(true, "xcrun: error: invalid active developer path, missing xcrun"));
+    assert!(!git::xcode_licence(true, "detected dubious ownership in repository at '/x/license'"));
+    std::fs::remove_dir(root.join(".git")).unwrap();
     run(&["init", "-q"]);
+    assert_eq!(git::trouble(&root), None);
     std::fs::create_dir_all(root.join("src/deep")).unwrap();
     std::fs::create_dir_all(root.join("docs")).unwrap();
     std::fs::write(root.join("src/deep/a.rs"), "a").unwrap();
@@ -2050,6 +2074,11 @@ fn a_sentence_typed_gets_its_capital() {
     assert_eq!(typed("hello", "helo", 3), Typed::Out(3));
     assert_eq!(typed("a long message", "h", 1), Typed::Other);
     assert_eq!(typed("", "pasted", 6), Typed::Other);
+    // A correction from the menu that adds one letter inside a word
+    // leaves the caret at the word's end, past the letter: not a
+    // keystroke, and once a panic.
+    assert_eq!(typed("mispelled", "misspelled", 10), Typed::Other);
+    assert_eq!(typed("a speling b", "a spelling b", 10), Typed::Other);
 }
 
 #[test]

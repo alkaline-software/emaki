@@ -81,8 +81,137 @@ pub struct Status {
     pub dirty: bool,
 }
 
+/// The git to run: the first on `PATH` that answers `--version`, then
+/// where the installers put one when `PATH` does not say. An app opened
+/// from the Finder or the Dock has the system's `PATH` and not the
+/// shell's, so a git from Homebrew is on no path it knows; and the Mac's
+/// own `/usr/bin/git` is a stand-in that only works with Xcode or its
+/// command line tools installed and their licence agreed to, and
+/// otherwise fails every call, so being there is not enough. That one is
+/// not even asked without the tools: asking puts up the system's offer
+/// to install them. One found is kept for the process. With none it is
+/// plain `git`, which fails as it did (`trouble` says why), and the
+/// search is made again `SEARCH_AGAIN` later: a licence agreed to in a
+/// terminal is seen without a relaunch.
+pub fn binary() -> PathBuf {
+    static FOUND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    static TRIED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if let Some(found) = FOUND.get() {
+        return found.clone();
+    }
+    let mut tried = TRIED.lock().unwrap_or_else(|e| e.into_inner());
+    if tried.is_some_and(|at| at.elapsed() < SEARCH_AGAIN) {
+        return PathBuf::from("git");
+    }
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    if cfg!(windows) {
+        for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+            if let Some(root) = std::env::var_os(var) {
+                let root = PathBuf::from(root);
+                dirs.push(if var == "LOCALAPPDATA" { root.join("Programs").join("Git").join("cmd") } else { root.join("Git").join("cmd") });
+            }
+        }
+    } else {
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].map(PathBuf::from));
+    }
+    let name = if cfg!(windows) { "git.exe" } else { "git" };
+    let answers = |p: &Path| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success());
+    let found = dirs.into_iter().map(|dir| dir.join(name)).find(|p| p.is_file() && (p.as_path() != Path::new(MAC_GIT) || mac_tools()) && answers(p));
+    match found {
+        Some(found) => FOUND.get_or_init(|| found).clone(),
+        None => {
+            *tried = Some(std::time::Instant::now());
+            PathBuf::from("git")
+        }
+    }
+}
+
+/// How long a search that found no git stands before another is made.
+const SEARCH_AGAIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The Mac's stand-in for git.
+const MAC_GIT: &str = "/usr/bin/git";
+
+/// Whether the Mac's stand-in has something to stand in for: Xcode or
+/// its command line tools. True off the Mac, where there is none.
+fn mac_tools() -> bool {
+    !cfg!(target_os = "macos") || Command::new("/usr/bin/xcode-select").arg("-p").output().is_ok_and(|o| o.status.success())
+}
+
+/// Why git says nothing of a checkout (`trouble`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trouble {
+    /// Git's or the system's own words; ours, and short, for the one
+    /// trouble that comes with a command, which says the rest.
+    pub words: String,
+    /// The command that puts it right, when the trouble is one known for
+    /// certain and has one.
+    pub fix: Option<&'static str>,
+}
+
+impl Trouble {
+    /// Xcode's licence not agreed to. Apple's message is three lines
+    /// long and spells the command out; the command is offered beside
+    /// these words, so they only say what is wrong and where to run it.
+    pub fn licence() -> Trouble {
+        Trouble { words: "The Xcode license has not been accepted. In Terminal, run:".to_string(), fix: Some(XCODE_LICENCE) }
+    }
+}
+
+/// What Apple's stand-in says to run when Xcode's licence has not been
+/// agreed to, as its own message has it.
+pub const XCODE_LICENCE: &str = "sudo xcodebuild -license";
+
+/// Whether what a git on a Mac said is the Xcode licence's refusal, and
+/// nothing else: Apple's message names the command, and no other
+/// failure does.
+pub fn xcode_licence(mac: bool, words: &str) -> bool {
+    mac && words.contains("xcodebuild -license")
+}
+
+/// Why git says nothing of `dir` though it is a checkout by its own
+/// files (a `.git` in it or above it), in git's or the system's own
+/// words; `None` when it is no checkout, or git answers for it. No git
+/// that runs: none installed, or the Mac's with Xcode's licence not
+/// agreed to. Or a git that runs and refuses the folder: one owned by
+/// someone else ("dubious ownership"), a damaged repository. Only the
+/// licence comes with a command to run.
+pub fn trouble(dir: &Path) -> Option<Trouble> {
+    if !dir.ancestors().any(|a| a.join(".git").exists()) {
+        return None;
+    }
+    let said = |err: &[u8]| {
+        let words = String::from_utf8_lossy(err).split_whitespace().collect::<Vec<_>>().join(" ");
+        let words = words.strip_prefix("fatal: ").unwrap_or(&words).to_string();
+        let words = if words.is_empty() { "Git did not run.".to_string() } else { words };
+        if xcode_licence(cfg!(target_os = "macos"), &words) {
+            return Trouble::licence();
+        }
+        Trouble { words, fix: None }
+    };
+    let none = || Trouble { words: "Git is not installed.".to_string(), fix: None };
+    let bin = binary();
+    if bin.is_absolute() {
+        let out = Command::new(&bin).arg("-C").arg(dir).args(["rev-parse", "--git-dir"]).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
+        return (!out.status.success()).then(|| said(&out.stderr));
+    }
+    if !mac_tools() {
+        return Some(none());
+    }
+    match Command::new(&bin).arg("--version").output() {
+        Err(_) => Some(none()),
+        Ok(out) if out.status.success() => None,
+        Ok(out) => Some(said(&out.stderr)),
+    }
+}
+
+/// A call of that git.
+pub fn command() -> Command {
+    Command::new(binary())
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
+    let out = command().arg("-C").arg(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
     out.status.success().then_some(out.stdout)
 }
 
@@ -302,7 +431,7 @@ pub fn branches(dir: &Path) -> Option<Branches> {
 /// Run a git command that changes the checkout; its own words when it
 /// refuses.
 fn act(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().map_err(|e| format!("git did not run: {e}"))?;
+    let out = command().arg("-C").arg(dir).args(args).output().map_err(|e| format!("git did not run: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
@@ -390,7 +519,7 @@ pub fn misfits(dir: &Path, name: &str) -> Vec<String> {
     let Some(theirs) = tip(dir, name) else { return Vec::new() };
     let mut bad = Vec::new();
     if let Some(mine) = line(dir, &["stash", "create"]) {
-        let out = Command::new("git").arg("-C").arg(dir).args(["merge-tree", "--write-tree", "--name-only", "--no-messages", "--merge-base=HEAD", &theirs, &mine]).output();
+        let out = command().arg("-C").arg(dir).args(["merge-tree", "--write-tree", "--name-only", "--no-messages", "--merge-base=HEAD", &theirs, &mine]).output();
         match out {
             // Exit 1 is "merged, with conflicts": the tree's id, then the files.
             Ok(o) if o.status.code() == Some(1) => bad.extend(String::from_utf8_lossy(&o.stdout).lines().skip(1).filter(|l| !l.is_empty()).map(str::to_string)),
@@ -493,7 +622,7 @@ pub fn restore(dir: &Path) -> Result<(), String> {
 
 /// Whether git would take `name` as a branch's name.
 pub fn valid_name(name: &str) -> bool {
-    !name.is_empty() && !name.starts_with('-') && Command::new("git").args(["check-ref-format", "--branch", name]).output().is_ok_and(|o| o.status.success())
+    !name.is_empty() && !name.starts_with('-') && command().args(["check-ref-format", "--branch", name]).output().is_ok_and(|o| o.status.success())
 }
 
 /// The most lines of a comparison that are kept, and the most of a file
@@ -531,7 +660,7 @@ pub fn diff(dir: &Path, path: &Path, state: State) -> Diff {
     if state == State::Untracked {
         return whole_file(path);
     }
-    let run = |base: &[&str]| Command::new("git").arg("-C").arg(dir).args(["diff", "--no-color", "--no-ext-diff"]).args(base).arg("--").arg(path).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+    let run = |base: &[&str]| command().arg("-C").arg(dir).args(["diff", "--no-color", "--no-ext-diff"]).args(base).arg("--").arg(path).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
     // Before the first commit there is no HEAD to compare with, and
     // what is staged is all there is.
     match run(&["HEAD"]).or_else(|| run(&["--cached"])) {

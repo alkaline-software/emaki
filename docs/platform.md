@@ -59,6 +59,9 @@ What is gated, and its fallback:
   from an appended one.
 - The `claude` lookup: `std::env::split_paths`, `claude.exe` and the npm
   `claude.cmd` shim on Windows, the installers' directories after `PATH`.
+- The `git` lookup (`git::binary`): `git.exe` under Git for Windows'
+  folders on Windows; Homebrew's folders and `/usr/bin` elsewhere, the
+  Mac's `/usr/bin/git` only with Xcode's tools there.
 - `paths::decode_project_dir` knows the `C--Users-...` shape.
 
 Without a Windows machine the closest check is a MinGW type check, which

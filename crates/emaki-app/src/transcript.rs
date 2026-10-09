@@ -880,6 +880,7 @@ impl Workbench {
             // bar survive the redraw every frame brings.
             let scroll = self.detail.as_mut().map(|d| d.body_scrolls.entry((ix, jx)).or_default().clone()).unwrap_or_default();
             let handle = scroll.handle.clone();
+            self.inner_scroller(&handle, crate::workbench::Inner::Chained);
             // The wheel over a body that scrolls belongs to the body: the
             // list would otherwise take the same event (gpui hands a scroll
             // to every scrollable under the mouse) and both would move.

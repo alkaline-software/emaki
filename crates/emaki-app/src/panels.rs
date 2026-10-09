@@ -205,6 +205,9 @@ pub struct Tree {
     changed: Rc<Vec<(PathBuf, git::State)>>,
     /// The folder's branches, none when it is in no repository.
     branches: Option<(PathBuf, Rc<git::Branches>)>,
+    /// Why git says nothing of a folder that is a checkout
+    /// (`git::trouble`), and the folder.
+    git_trouble: Option<(PathBuf, git::Trouble)>,
     git_reading: bool,
 }
 
@@ -1227,12 +1230,32 @@ impl Workbench {
         self.tree.git_reading = true;
         cx.spawn(async move |this, cx| {
             let dir = root.clone();
-            let (status, branches) = cx.background_executor().spawn(async move { (git::status(&dir).unwrap_or_default(), git::branches(&dir)) }).await;
+            let (status, branches, trouble) = cx
+                .background_executor()
+                .spawn(async move {
+                    let (status, branches) = (git::status(&dir), git::branches(&dir));
+                    // Asked only of a folder git gave nothing for.
+                    let trouble = if status.is_none() && branches.is_none() { git::trouble(&dir) } else { None };
+                    (status.unwrap_or_default(), branches, trouble)
+                })
+                .await;
+            // `EMAKI_GO=gitlicence`: the strip as a Mac whose Xcode
+            // licence has not been agreed to has it.
+            let trouble = if std::env::var("EMAKI_GO").is_ok_and(|go| go == "gitlicence") {
+                Some(git::Trouble::licence())
+            } else {
+                trouble
+            };
             this.update(cx, |this, cx| {
                 this.tree.git_reading = false;
                 if this.tree.git.as_ref().is_none_or(|(was, st)| *was != root || **st != status) {
                     this.tree.changed = Rc::new(status.changed());
                     this.tree.git = Some((root.clone(), Rc::new(status)));
+                    cx.notify();
+                }
+                let trouble = trouble.map(|t| (root.clone(), t));
+                if this.tree.git_trouble != trouble {
+                    this.tree.git_trouble = trouble;
                     cx.notify();
                 }
                 let branches = branches.map(|b| (root, Rc::new(b)));
@@ -1972,7 +1995,7 @@ impl Workbench {
         } else {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("The session's folder is gone.").into_any_element()
         };
-        let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.stash_strip(cx)).child(body);
+        let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).child(body);
         self.panel_in(true, el)
     }
 
@@ -2202,6 +2225,73 @@ impl Workbench {
             .ok();
         })
         .detach();
+    }
+
+    /// Under the files' head, in a checkout git says nothing of: why, in
+    /// git's own words, wrapped and not cut, since the words are what to
+    /// do about it. Without it such a folder only lacked its branch and
+    /// its marks, and nothing said so.
+    fn git_trouble_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let root = self.files_root()?;
+        let trouble = self.tree.git_trouble.as_ref().filter(|(of, _)| *of == root).map(|(_, trouble)| trouble.clone())?;
+        // The command that puts it right, on a line of its own with a
+        // copy button: only for a trouble known for certain
+        // (`git::xcode_licence`).
+        let fix = trouble.fix.map(|command| {
+            let key = SharedString::from("git-trouble-fix");
+            let done = self.copied.as_ref() == Some(&key);
+            let hover_bg = theme.muted;
+            h_flex()
+                .mt(px(5.))
+                .pl(px(8.))
+                .pr(px(3.))
+                .py(px(2.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(6.))
+                .bg(theme.background)
+                .border_1()
+                .border_color(theme.border.opacity(0.6))
+                .child(div().flex_1().min_w_0().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(theme.foreground).child(command))
+                .child(
+                    div()
+                        .id(key.clone())
+                        .size(px(20.))
+                        .flex_shrink_0()
+                        .rounded(px(5.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover_bg))
+                        .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.copy_text(key.clone(), command.to_string(), cx);
+                        }))
+                        .child(Icon::new(if done { IconName::Check } else { IconName::Copy }).with_size(px(12.)).text_color(theme.muted_foreground)),
+                )
+        });
+        let words = trouble.words;
+        Some(
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .px(px(12.))
+                .py(px(7.))
+                .gap(px(8.))
+                .items_start()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.warning.opacity(0.10))
+                .text_size(px(11.5))
+                .line_height(px(16.))
+                .child(div().h(px(16.)).flex().items_center().flex_shrink_0().child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.warning)))
+                .child(v_flex().flex_1().min_w_0().child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child("Git did not answer for this folder")).child(div().text_color(theme.muted_foreground).child(words)).children(fix))
+                .with_animation("git-trouble-in", Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
+                .into_any_element(),
+        )
     }
 
     /// Under the files' head, on a branch that changes were left on:
@@ -3158,12 +3248,13 @@ impl Workbench {
                 let serial = self.pdf_side_anim.map(|(_, _, n)| n).unwrap_or(0);
                 // (widens or narrows, comes or goes)
                 let play = side_live.map(|(was, _, _)| (was.is_none(), self.pdf_side.is_some()));
+                self.inner_scroller(&self.pdf_side_scroll, crate::workbench::Inner::Held);
                 Some(
                     div()
                         .h_full()
                         .flex_shrink_0()
                         .overflow_hidden()
-                        .child(div().id("pdf-side").w(px(PDF_SIDE_W)).h_full().border_r_1().border_color(theme.border).bg(theme.muted.opacity(0.25)).overflow_y_scroll().track_scroll(&self.pdf_side_scroll).px(px(6.)).py(px(8.)).child(list))
+                        .child(div().relative().h_full().child(div().id("pdf-side").w(px(PDF_SIDE_W)).h_full().border_r_1().border_color(theme.border).bg(theme.muted.opacity(0.25)).overflow_y_scroll().track_scroll(&self.pdf_side_scroll).px(px(6.)).py(px(8.)).child(list)).vertical_scrollbar(&self.pdf_side_scroll))
                         .with_animation(ElementId::Name(format!("pdf-side-{serial}").into()), Animation::new(FILE_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
                             Some((wide, comes)) if wide || !comes => {
                                 let t = if comes { t } else { 1. - t };
