@@ -21,7 +21,6 @@ use emaki_core::model::AgentId;
 use emaki_core::transcript::SessionRef;
 use emaki_core::pty::{self, Pty};
 
-use crate::panels::CONVERSATION_MIN;
 use crate::workbench::{pill_button, swallow_click, term_bytes, MenuDo, Page, TabGhost, CloseTab, TermBackTab, TermClear, TermNewTab, TermTab, Workbench, TERMINAL_CONTEXT};
 
 /// How wide the panel is to begin with, and the least it is dragged to.
@@ -366,7 +365,15 @@ impl Workbench {
             }
             _ => {
                 if let Some(pty) = step.strip_prefix("termtype:").and_then(|_| self.term_panel_pty()) {
-                    pty.write(format!("{}\r", &step["termtype:".len()..]).as_bytes());
+                    // Return comes a moment after the words: Codex's
+                    // terminal takes the two in one burst for a paste,
+                    // and a pasted Return is a new line.
+                    pty.write(step["termtype:".len()..].as_bytes());
+                    cx.spawn(async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                        pty.write(b"\r");
+                    })
+                    .detach();
                 }
             }
         }
@@ -569,7 +576,7 @@ impl Workbench {
     fn term_pty_of(&self, agent: bool) -> Option<Arc<Pty>> {
         let r = self.term_owner()?;
         if agent {
-            self.hub.terminal_for(&r.session_id)
+            self.hub.agent_screen(&r.session_id)
         } else {
             self.shells.get(&r.session_id).and_then(|s| s.current()).map(|t| t.pty.clone())
         }
@@ -783,7 +790,7 @@ impl Workbench {
     pub(crate) fn term_panel_w(&self) -> Pixels {
         let (files, outline) = self.panels_shown();
         let beside = if files || outline { self.panel_w_now() } else { px(0.) } + self.file_pane_least();
-        self.side_term_w.min(self.pane_w - beside - CONVERSATION_MIN).max(TERM_MIN)
+        self.side_term_w.min(self.pane_w - beside - self.conv_min.get()).max(TERM_MIN)
     }
 
     /// The pointer moved with the panel's edge held.
@@ -796,7 +803,7 @@ impl Workbench {
         }
         let (files, outline) = self.panels_shown();
         let beside = if files || outline { self.panel_w_now() } else { px(0.) } + self.file_pane_least();
-        let w = (self.view_w - e.position.x).clamp(TERM_MIN, (self.pane_w - beside - CONVERSATION_MIN).max(TERM_MIN));
+        let w = (self.view_w - e.position.x).clamp(TERM_MIN, (self.pane_w - beside - self.conv_min.get()).max(TERM_MIN));
         if w != self.side_term_w {
             self.side_term_w = w;
             cx.notify();
@@ -1207,7 +1214,7 @@ impl Workbench {
     /// the panel shows it, and its own size otherwise: the terminal card
     /// and the screen's readers were made for that one.
     pub(crate) fn fit_agent_pty(&self, session_id: &str) {
-        let Some(pty) = self.hub.terminal_for(session_id) else { return };
+        let Some(pty) = self.hub.agent_screen(session_id) else { return };
         let want = if self.term_panel_shown() && self.term_side_agent() { self.side_term_size.get() } else { (pty::ROWS, pty::COLS) };
         if want.0 > 0 && want.1 > 0 && pty.size() != want {
             pty.resize(want.0, want.1);
@@ -1299,10 +1306,10 @@ impl Workbench {
             // Looked at with none behind the session, the agent is
             // started, once: one that ends by itself straight away is not
             // started over and over, and the button is there for that.
-            if self.hub.terminal_for(&r.session_id).is_none() && self.agent_startable(r) && self.side_term_tried.insert(r.session_id.clone()) {
+            if self.hub.agent_screen(&r.session_id).is_none() && self.agent_startable(r) && self.side_term_tried.insert(r.session_id.clone()) {
                 self.start_hidden_terminal(cx);
             }
-            self.hub.terminal_for(&r.session_id).ok_or_else(|| self.render_agent_absent(r, cx))
+            self.hub.agent_screen(&r.session_id).ok_or_else(|| self.render_agent_absent(r, cx))
         } else {
             // The first tab is made when the side is first looked at.
             if !self.shells.get(&r.session_id).is_some_and(|s| s.begun) {
@@ -1607,14 +1614,53 @@ impl Workbench {
     /// Whether the agent's hidden terminal can be started for the
     /// session now, by the window itself.
     fn agent_startable(&self, r: &SessionRef) -> bool {
-        r.agent == AgentId::ClaudeCode && self.hub.hidden_terminals() && !self.in_own_terminal(r) && self.terminal_ok(r).is_ok()
+        match r.agent {
+            AgentId::ClaudeCode => self.hub.hidden_terminals() && !self.in_own_terminal(r) && self.terminal_ok(r).is_ok(),
+            AgentId::Codex => self.codex_terminal_ok(r).is_ok(),
+        }
+    }
+
+    /// Whether Codex's terminal can be started for the session, joined
+    /// to its driver, and why not when it cannot. A turn under way is no
+    /// bar when the driver is ours: the terminal joins it and shows it.
+    fn codex_terminal_ok(&self, r: &SessionRef) -> Result<(), String> {
+        if !cfg!(unix) {
+            return Err("Codex's terminal is not shown on Windows yet. It is driven from the composer, and what it does is in the conversation.".into());
+        }
+        if self.is_draft(&r.session_id) {
+            return Err("Codex starts with your first message.".into());
+        }
+        if self.hub.driver_for(&r.session_id).is_some() {
+            return Ok(());
+        }
+        match self.reply_via_for(r) {
+            (_, why) if !why.is_empty() => {
+                let mut why = why;
+                if let Some(first) = why.get(..1).map(str::to_uppercase) {
+                    why.replace_range(..1, &first);
+                }
+                Err(format!("{why}."))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn render_agent_absent(&self, r: &SessionRef, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let k = self.term_scheme(cx);
         let name = r.agent.display_name();
-        let (line, can): (String, bool) = if r.agent != AgentId::ClaudeCode || !self.hub.hidden_terminals() {
+        let (line, can): (String, bool) = if r.agent == AgentId::Codex {
+            // Codex's own terminal, joined to the app server its driver
+            // runs: one session, one writer.
+            if self.hub.attaching(&r.session_id) {
+                ("Starting Codex…".to_string(), false)
+            } else {
+                match self.codex_terminal_ok(r) {
+                    Err(why) => (why, false),
+                    Ok(()) => ("Codex's terminal is closed for this session.".to_string(), true),
+                }
+            }
+        } else if r.agent != AgentId::ClaudeCode || !self.hub.hidden_terminals() {
             (format!("{name} runs here only for Claude Code sessions, with the hidden terminal on."), false)
         } else if self.in_own_terminal(r) {
             (format!("A turn is running in a terminal of yours. When it is over, {name} can be started here."), false)

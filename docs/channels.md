@@ -64,8 +64,8 @@ Source: `crates/emaki-core/src/driver.rs`, `pty.rs`, `peer`, `terminal.rs`;
 
 ## The channels and their order
 
-`Workbench::reply_via_for`, for a Claude Code session (other agents are
-read-only):
+`Workbench::reply_via_for`, for a Claude Code session (Codex has one
+channel, its driver: see Codex below):
 
 1. `driver`: a headless child of ours is behind the session, or starting.
 2. `pty`: a hidden terminal of ours is behind it (`Hub::terminal_for`).
@@ -86,6 +86,75 @@ On `spawn`, `send_message` starts a hidden terminal and the channel is
 `pty`. The headless driver is the fallback when the pty cannot start or
 `driver.hidden_terminal` is false, and serves the catalogue and the
 explainer.
+
+## Codex
+
+`codex.rs`. Codex is driven through `codex app-server`, the JSON-RPC wire
+its editor extension and desktop app use, a child a session
+(`CodexDriver`). It and Claude Code's headless child are both a
+`driver::Drive`, which is all the hub and the window hold, so the cards,
+Stop, the queue and the pills' setters are the same code for both.
+
+- **The child listens on a socket of its own**
+  (`--listen unix://<run>/codex-<pid>-<n>.sock`), and the driver is a
+  client of it: the same messages, a WebSocket frame each (`codex::ws`,
+  as little of a client as that takes). Codex puts the socket somewhere
+  short and leaves a link at the name asked for; the link is followed.
+  Where the socket does not come up, and on Windows, the child speaks
+  on its stdin and stdout as it did, and there is no terminal.
+- **Codex's terminal joins that server** (`Drive::attach`:
+  `codex resume <id> --remote unix://<socket>`), on a pty the hub keeps
+  (`Hub::attach_terminal`, `agent_screen`), drawn on the terminal
+  panel's agent side. It is a second client of the one server, not a
+  second Codex: the rollout keeps its one writer. Both see every turn
+  whoever began it, either can answer what Codex asks
+  (`serverRequest/resolved` takes the card away), and a setting changed
+  in one reaches the other. Never start `codex resume` on a session
+  without `--remote`: that is a second Codex on the one file.
+- **Nothing is typed into Codex's terminal by the window.** It is the
+  person's. The composer, the pills and the cards go through the driver.
+  Codex's terminal can open on a question of its own (an update to
+  install, a folder to trust), and a Return typed blind answers it.
+- **The terminal lives as long as the driver.** Looked at with no driver
+  behind the session, one is started (`thread/resume`) and the terminal
+  joins it. A driver whose terminal is showing is not let go for being
+  idle; when the driver goes, the terminal is ended with it.
+- **A turn begun in the terminal** reaches the driver as `turn/started`,
+  which is said to the window as any turn is, and takes away a plan's
+  go-ahead card still waiting: it was answered there.
+- **A session's id is Codex's.** `thread/start` names it. The window
+  begins a new session under an id of its own, shown as begun, and
+  `HubEvent::Adopted` moves everything kept under that id to the real
+  one (`Workbench::adopt`).
+- **The channel** is `driver` with a child behind the session, else
+  `spawn`: a message, or a change of mode, model or effort
+  (`Hub::set_on_driver`), starts one with `thread/resume`. Refused while
+  the rollout reads as a turn under way with no child of ours: Codex has
+  no registry to say whose turn it is, and a second Codex must not join
+  it.
+- **What Codex asks** arrives as a request of its own and is put as the
+  tool call the cards already draw: leave to run a command as `Bash`, to
+  change files as `apply_patch` with the diff, a question
+  (`request_user_input`) as `AskUserQuestion`.
+- **A plan.** A turn in plan mode that ends on a `plan` item is followed
+  by "Implement this plan?", which Codex's terminal asks itself and the
+  wire does not: the driver makes the card (`ExitPlanMode`). Yes leaves
+  plan mode for the profile the session had and sends "Implement the
+  plan.", Codex's own words. The card is the driver's and goes with it:
+  after a relaunch the plan is in the conversation and the mode is still
+  Plan, to be changed on the pill.
+- **A new session names its model.** The pill shows Codex's first listed
+  model when none is chosen, and that is what is sent: the person's
+  config may name one their account cannot use (`gpt-5` on a ChatGPT
+  account, 0.162), and the turn then fails at once.
+- **The catalogue** (`codex::catalogue`) is a child started for the
+  question: `model/list`, `permissionProfile/list`,
+  `collaborationMode/list`, `skills/list`. No model call, no session.
+  The slash list is `/compact`, which the driver runs itself
+  (`thread/compact/start`), and the folder's skills, sent as skill items.
+- Not done: Codex's rate limits on the row under the composer and a
+  rename from the window. Its other commands (`/rename`, `/status`,
+  `/review`) are typed in its terminal on the panel.
 
 ## The inbox
 
@@ -153,7 +222,10 @@ calls `node` or an MCP server started by `npx` is "command not found".
 anything `via_terminal` is asked for, and at the first sign the person means to do
 something on a `spawn` session and not only read it: a click in the
 composer, the first character typed there, the terminal panel opened
-(`Workbench::warm_now`, `warm_terminal`). It is
+(`Workbench::warm_now`, `warm_terminal`). Only ever on a Claude Code
+session: `spawn` is Codex's word too, and an interactive `claude` resumed
+on a Codex id ends at once with "No conversation found", which was said
+under the composer. It is
 up and registered in 0.7 to 1.4 s (2.1.289), which is why the first
 keystroke is early enough and opening the session is not used. A session
 begun from a folder and not yet sent to is never started this way: there
@@ -226,7 +298,9 @@ sits in the conversation.
 ## The terminal panel
 
 `term_panel.rs`: a terminal at the conversation's right, under the top
-strip. It shows one of two things, one at a time, each with a button at
+strip. The agent's side is Claude Code's hidden terminal, or Codex's
+own terminal joined to its driver (`Hub::agent_screen`; Codex above).
+It shows one of two things, one at a time, each with a button at
 the strip's right end (`term_buttons`, the same two-segment control as
 the files and the outline at the left: the shell's first, then the
 agent's) and a key (⌘⇧T for the shell, ⌘⇧A for the agent; Ctrl off a
@@ -247,9 +321,9 @@ Whether it shows there is its own choice (`agents_shell`), which neither
 opens nor closes the panel beside a conversation. Everything in
 `term_panel.rs` asks `term_owner`, not `selected_ref`.
 
-The conversation keeps `panels::CONVERSATION_MIN` between the panels at
-its two sides, the width at which the composer's pills and send button
-still fit their card. Both panels are drawn no wider than leaves it
+The conversation keeps its least width (`Workbench::conv_min`,
+`docs/panels.md`) between the panels at its two sides, the width at
+which the composer's pills and send button still fit their card. Both panels are drawn no wider than leaves it
 (`term_panel_w`, `panel_w_now`): the terminal gives way first, down to
 its least, then the files or the outline. The conversation is never
 squeezed under that width (`Workbench::render`): where the panels asked
@@ -479,7 +553,8 @@ typing and ↩ takes the best match, the shorter name first within a rank.
   agent's hidden terminal, `term:tab+` makes a shell tab, `term:tab-`
   closes the one showing, `term:tab:<n>` shows the nth from 0, `term:w:<w>` drags the edge to that width, `term:clear` is ⌘K, `term:sel:<unit>,<row>,<col>,<row>,<col>` selects and prints the words,
   (a unit of 4 or more is a block of columns), `term:hover:<row>,<col>` puts the pointer on that cell for a link, `term:copied` shows the toast, `term:text:<size>` sets the letters' size,
-  and `termtype:<words>` types them there with Return. Several probe
+  and `termtype:<words>` types them there, then Return a moment later
+  (in one burst Codex's terminal takes them for a paste). Several probe
   copies at once run their steps late: one at a time for a sequence.
 - `EMAKI_GO=send:<words>` sends once the session or the new-session page
   is up; it carries no attachment. Also `pill:effort`, `pill:model`,

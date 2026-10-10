@@ -1270,7 +1270,7 @@ impl Workbench {
     /// `CONVERSATION_MIN` beside it.
     fn panel_max(&self) -> Pixels {
         let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
-        PANEL_MAX.min(self.pane_w - CONVERSATION_MIN - term - self.file_pane_least()).max(PANEL_MIN)
+        PANEL_MAX.min(self.pane_w - self.conv_min.get() - term - self.file_pane_least()).max(PANEL_MIN)
     }
 
     /// Whether the file's pane is drawn.
@@ -1294,7 +1294,7 @@ impl Workbench {
     /// the terminal and the panel at its left do.
     pub(crate) fn file_pane_w(&self) -> Pixels {
         let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
-        self.file_w.min(self.view_w - self.file_pane_left() - term - CONVERSATION_MIN).max(FILE_MIN)
+        self.file_w.min(self.view_w - self.file_pane_left() - term - self.conv_min.get()).max(FILE_MIN)
     }
 
     /// The pane's edge follows the pointer while it is held.
@@ -1307,7 +1307,7 @@ impl Workbench {
         }
         let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
         let left = self.file_pane_left();
-        let w = (e.position.x - left).clamp(FILE_MIN, (self.view_w - left - term - CONVERSATION_MIN).max(FILE_MIN));
+        let w = (e.position.x - left).clamp(FILE_MIN, (self.view_w - left - term - self.conv_min.get()).max(FILE_MIN));
         if w != self.file_w {
             self.file_w = w;
             cx.notify();

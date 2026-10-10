@@ -31,7 +31,6 @@ pub fn resume_argv(agent: AgentId, session_id: &str) -> Vec<String> {
             vec![bin, "--resume".into(), session_id.into()]
         }
         AgentId::Codex => vec!["codex".into(), "resume".into(), session_id.into()],
-        AgentId::Gemini => vec!["gemini".into(), "--resume".into(), session_id.into()],
     }
 }
 

@@ -40,6 +40,10 @@ pub struct UiState {
     pub file_raw: Option<bool>,
     pub pdf_side: Option<String>,
     pub term_agent: Option<bool>,
+    /// The agent a new session is begun with, and what a new Codex
+    /// session starts in: its mode, model and effort.
+    pub new_agent: Option<String>,
+    pub codex_next: Option<[String; 3]>,
     /// `sessions`, `session` or `new`.
     pub page: String,
     /// Session keys (`<agent>:<id>`) with a tab, in tab order.

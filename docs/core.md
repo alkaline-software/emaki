@@ -12,12 +12,15 @@ About `crates/emaki-core/src/`: `paths.rs`, `adapters/`, `archive.rs`,
 - If a hook is ever needed, it is a binary at a stable path outside the
   repository that never exits 2. The status line, the one thing the app
   writes into Claude Code's settings, is held to the same two rules.
-- Keep the `~/.emaki` layout. An archive made by the Python Emaki is
-  picked up as it is.
+- The archive's old shape is still taken in. One made by the Python
+  Emaki, or by any Emaki before v0.2.0, is moved into today's by renames
+  (`archive::settle_layout`); nothing in it is deleted or copied.
 - Nothing above the adapters (archive, search, the window) branches on the
   agent except to label it.
-- Another agent's archive goes under a leading underscore. A project slug
-  is `[a-z0-9-]`, so an underscore can never collide with one.
+- Nothing is read from or copied into an archive until
+  `settle_layout` says it is in shape. In the old shape a project of
+  Claude Code's could be named `codex`, and would be taken for Codex's
+  folder.
 - `fts_query` quotes every term. People type `rm -rf`, `a:b` and a lone
   `"`, all FTS5 syntax that would raise mid-keystroke.
 - The explainer's child is never `--bare`, and its `cwd` stays under
@@ -27,8 +30,8 @@ About `crates/emaki-core/src/`: `paths.rs`, `adapters/`, `archive.rs`,
 
 ## What is on disk
 
-`~/.emaki`, in the layout the Python Emaki used:
-`archive/<project>/<session>.jsonl` plus sidecars, `logs/`, the project
+`~/.emaki`, in the layout the Python Emaki used but for the archive:
+`archive/<agent>/<project>/<session>.jsonl` plus sidecars, `logs/`, the project
 registry in `state/projects.json`, `config.json`,
 `cache/explanations.json`. `~/.emaki/index.db` was the daemon's search
 index; nothing reads it now.
@@ -77,29 +80,96 @@ label, now `You (emaki)`.
 
 The shape is borrowed from Wake (`iAmCorey/Wake`): an `Adapter` knows an
 agent's data roots, lists sessions cheaply, peeks one, and parses one into
-the shared model. Claude Code, Codex and Gemini CLI exist. A new agent is a new file
+the shared model. Claude Code and Codex exist. A new agent is a new file
 under `adapters/` and a variant of `AgentId`.
 
 The agents a machine can have, read or not, are `agents.rs`
 (`docs/agents.md`).
 
-Claude Code keeps the flat `archive/<project>/` for compatibility. Codex
-lives in `archive/_codex/<project>/`, and `iter_archived(ClaudeCode)` skips
-the underscore directories.
+The archive is a folder an agent, `archive/claude/` and `archive/codex/`,
+and in each a folder a project. Until v0.2.0 Claude Code's projects were
+at the archive's top and Codex was in `_codex`, the underscore keeping it
+apart from a project's name. `settle_layout` moves that shape into this
+one in two steps, so that stopping anywhere leaves something the next
+call finishes: first every folder without an underscore goes into
+`_claude` and `.layout` is written, then the underscores come off. A
+project an older Emaki leaves at the top afterwards is taken into
+`claude/`; a file both have comes in as a generation unless its bytes are
+the same.
 
-Gemini CLI's file is a log to be replayed, not rows to be read in order
-(`adapters/gemini.rs`): a message written again takes the place of the
-one before it, `$set` changes what the session is, and `$rewindTo` takes
-messages back. The format is read off the CLI's own recorder, version
-0.63, and has been tried on hand-written files only: no session of a real
-Gemini CLI was on the machine it was written on. Its sessions do not say
-which folder they ran in; `.project_root` in the project's folder does,
-and the archive keeps a copy of that file beside the sessions
-(`archive_ref`), in `archive/_gemini/<project>/`. The file from before it
-wrote lines (`.json`, one record) is read too.
+Gemini CLI had an adapter for one commit and lost it: in June 2026 Google
+closed that program to personal accounts, so most people could not sign in
+to it.
 
-Codex and Gemini CLI have no stop reason. Their phase is derived from the built model's tail
-(`adapters::turn_state_from_session`), not from the rows.
+### Codex
+
+`adapters/codex.rs` reads a rollout
+(`~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`).
+
+- **A rollout says most things twice, and the items are the source.**
+  What the model was sent and what it answered are `response_item` rows,
+  which every Codex writes. A newer one also writes what happened as
+  `event_msg` rows of type `item_completed`: the prompt, each thing the
+  agent said (commentary and the final answer, both shown), each thought,
+  each command run, each file changed. A response row that says what an
+  item already said is dropped; one with no item to match is read as it
+  always was. This is decided row by row, not once a file: a rollout
+  moved up from an old Codex has the prompt's row before the turn starts
+  and its item after, and a session imported from Claude Code has items
+  for some turns only.
+- **A tool call is drawn as Claude Code's would be.** A command
+  (`CommandExecution`) is a `Bash` call; a patch (`FileChange`, or the
+  `apply_patch` call of an older Codex) is a call a file, `Write` for one
+  added, `Edit` for one changed, with hunks in the shape of
+  `structuredPatch`; `request_user_input` is an `AskUserQuestion` call
+  with its answers; a plan is an `ExitPlanMode` call. The window and the
+  markdown need nothing of their own for Codex.
+- **Code mode.** Codex 0.162 has the model write a script
+  (`custom_tool_call` named `exec`) and runs its tools from it. The items
+  after the script say what it ran, and the script's own call is dropped
+  once one has. What only the script has is what it printed: where it ran
+  one command and that command's own output is empty, the print is the
+  command's output. A command the sandbox refused leaves no item, so a
+  script with none is shown itself: as the command, when all it does is
+  run one, else as the script under its first line.
+- **A command that outlasts its script's wait is one call.** The
+  script that starts it gives up waiting after ten seconds and a second
+  script only waits on it (`write_stdin` with nothing typed); the
+  command's item comes under that one. The item takes the place of the
+  first script's call, where the command began, and a script that only
+  waits is no call.
+- **A setting's change is written when it is made**
+  (`thread_settings_applied`), not with the next prompt as Claude Code
+  has it, so the window says no mode of its own for Codex
+  (`Workbench::unwritten_mode`). A model is named as Codex's list
+  writes them (`driver::model_label`).
+- **A stop is written before the command it cut short.** The item of a
+  command stopped mid-run comes after `turn_aborted`; it is put above the
+  stop's line, which stays the last thing the round says.
+- **A plan has no answer in the rollout.** The last one waits
+  (`Pending`). The next prompt settles it: sent out of plan mode the plan
+  reads as approved, sent in plan mode as not approved. That is read off
+  the mode, not off anything Codex records.
+- **What a session is set to** is in `turn_context` and
+  `thread_settings_applied` rows. `Session::mode` is one key: `plan` in
+  plan mode, else the permission profile's id without its colon
+  (`read-only`, `workspace`, `danger-full-access`, or a profile of the
+  person's by its name), else the same three from the sandbox policy an
+  older row names. The first value is where the session began; a later
+  one that differs is a line at the foot of the round before, as for
+  Claude Code (`docs/modes.md`).
+- **A turn's ends are explicit**: `task_started`, then `task_complete` or
+  `turn_aborted`, kept as `Session::turn_open`. A `task_complete` with an
+  `error` is a turn that failed, and the round ends on the error.
+  `adapters::turn_state_from_session` goes by `turn_open` where there is
+  one, since words said in an open turn are commentary and not the reply;
+  a rollout without those rows is read off the model's tail as before.
+- **Tokens**: `token_count` rows are running totals with cached tokens
+  inside `input_tokens`. The last request's `input_tokens` is the context
+  in use.
+- **The title** is the thread's name when the person gave one. Names are
+  not in the rollout: `session_index.jsonl` has a row a naming, the
+  newest last. Nothing else in Codex's home is opened.
 
 ## Presence, without hooks
 

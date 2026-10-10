@@ -110,8 +110,11 @@ choice and the width are in `ui.json`.
 The edge is dragged as the sidebar's is: `render_panel_grip` holds it at
 a press (`panel_drag`), and the raw mouse-move listener that follows the
 sidebar's edge sets the width (`panel_drag_to`) between `PANEL_MIN` and
-`PANEL_MAX`, never leaving the conversation less than
-`CONVERSATION_MIN`. Narrower than `PANEL_FOLD_AT` the panel is put away,
+`PANEL_MAX`, never leaving the conversation less than its least
+(`Workbench::conv_min`: what the composer's row of pills and its send
+button take, measured where they are drawn from the room left between
+the pills, and never under `CONVERSATION_MIN`; an agent with longer
+names on its pills has a wider least). Narrower than `PANEL_FOLD_AT` the panel is put away,
 and comes back in the same drag if the pointer does, keeping the width it
 had. A double click is `panel_fit`: for the files the widest row showing,
 capped at `PANEL_FIT_MAX`; for the outline a fixed `OUTLINE_FIT`, since

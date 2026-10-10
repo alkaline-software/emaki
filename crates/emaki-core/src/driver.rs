@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::json::*;
+use crate::model::AgentId;
 use crate::options::{humanize, Catalogue, Choice, ModelChoice, Options};
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -71,6 +72,18 @@ pub fn model_label(model: &str) -> String {
         Some(base) => (base, true),
         None => (m, false),
     };
+    // A Codex model its list does not name, written as the list writes
+    // the ones it does: "GPT-5.6-Terra".
+    if let Some(rest) = m.strip_prefix("gpt-") {
+        let parts: Vec<String> = rest
+            .split('-')
+            .map(|p| {
+                let mut c = p.chars();
+                c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+            })
+            .collect();
+        return format!("GPT-{}", parts.join("-"));
+    }
     let body = m.strip_prefix("claude-").unwrap_or(m);
     let mut family = String::new();
     let mut version: Vec<&str> = Vec::new();
@@ -116,6 +129,9 @@ pub fn mode_words(key: &str) -> (String, &'static str) {
         "auto" => ("Auto", "Claude Code decides what is safe to run, and asks about the rest."),
         "bypassPermissions" => ("Bypass permissions", "Nothing asks; nothing is held."),
         "dontAsk" => ("Don't ask", "Anything not already allowed is denied without asking."),
+        // Codex's modes have other names, so a line in a conversation of
+        // its can be worded without asking whose it is.
+        "read-only" | "workspace" | "danger-full-access" => return crate::codex::mode_words(key),
         _ => return (humanize(key), ""),
     };
     (label.into(), detail)
@@ -958,6 +974,9 @@ pub struct Caps {
     pub version: String,
     pub model: String,
     pub mode: String,
+    /// The effort level, from a child that knows it.
+    #[serde(default)]
+    pub effort: String,
     pub commands: Vec<CommandInfo>,
     /// The modes, models and effort levels on offer (`options_from`).
     #[serde(default)]
@@ -1853,6 +1872,129 @@ pub fn question_decision(input: &Map<String, Value>, answers: Map<String, Value>
     let mut input = input.clone();
     input.insert("answers".into(), Value::Object(answers));
     json!({"behavior": "allow", "updatedInput": input})
+}
+
+/// A child of ours behind a session, whichever agent's: what the hub and
+/// the window ask of one. Claude Code's is `Driver`, on its stream-json
+/// wire; Codex's is `codex::CodexDriver`, on its app server's.
+pub trait Drive: Send + Sync {
+    fn agent(&self) -> AgentId;
+    /// The session's id. An agent that names its own sessions has it only
+    /// once started.
+    fn session_id(&self) -> String;
+    fn cwd(&self) -> String;
+    fn state(&self) -> State;
+    fn alive(&self) -> bool;
+    fn caps(&self) -> Caps;
+    fn mode(&self) -> String;
+    fn model(&self) -> String;
+    /// The effort level, where the child knows it; Claude Code's says it
+    /// only in the transcript.
+    fn effort(&self) -> String {
+        String::new()
+    }
+    fn error(&self) -> String;
+    fn idle_for(&self) -> Duration;
+    fn turn_elapsed(&self) -> Option<Duration>;
+    fn queued(&self) -> Vec<String>;
+    fn drop_queued(&self, index: usize) -> bool;
+    fn pending_permissions(&self) -> Vec<PermissionRequest>;
+    /// The command for the agent's own terminal on this session, joined
+    /// to this child so that the two are one session with one writer.
+    /// None where the agent has no such thing.
+    fn attach(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn stop(&self);
+    /// Send a message; true when it waits behind a running turn.
+    fn send(&self, text: &str, images: Vec<Value>) -> Result<bool, DriverError>;
+    fn interrupt(&self) -> Result<(), DriverError>;
+    /// Change the mode; the answer is the mode the agent now holds.
+    fn set_mode(&self, mode: &str) -> Result<String, DriverError>;
+    fn set_model(&self, model: &str) -> Result<(), DriverError>;
+    /// Change the effort; true when that waits behind a running turn.
+    fn set_effort(&self, effort: &str) -> Result<bool, DriverError>;
+    fn answer_permission(&self, request_id: &str, allow: bool, message: &str);
+    fn answer_question(&self, request_id: &str, answers: Map<String, Value>);
+}
+
+impl Drive for Driver {
+    fn agent(&self) -> AgentId {
+        AgentId::ClaudeCode
+    }
+    fn session_id(&self) -> String {
+        self.session_id.clone()
+    }
+    fn cwd(&self) -> String {
+        self.cwd.clone()
+    }
+    fn state(&self) -> State {
+        Driver::state(self)
+    }
+    fn alive(&self) -> bool {
+        Driver::alive(self)
+    }
+    fn caps(&self) -> Caps {
+        Driver::caps(self)
+    }
+    fn mode(&self) -> String {
+        Driver::mode(self)
+    }
+    fn model(&self) -> String {
+        Driver::model(self)
+    }
+    fn error(&self) -> String {
+        Driver::error(self)
+    }
+    fn idle_for(&self) -> Duration {
+        Driver::idle_for(self)
+    }
+    fn turn_elapsed(&self) -> Option<Duration> {
+        Driver::turn_elapsed(self)
+    }
+    fn queued(&self) -> Vec<String> {
+        Driver::queued(self)
+    }
+    fn drop_queued(&self, index: usize) -> bool {
+        Driver::drop_queued(self, index)
+    }
+    fn pending_permissions(&self) -> Vec<PermissionRequest> {
+        Driver::pending_permissions(self)
+    }
+    fn stop(&self) {
+        Driver::stop(self)
+    }
+    fn send(&self, text: &str, images: Vec<Value>) -> Result<bool, DriverError> {
+        Driver::send(self, text, images)
+    }
+    fn interrupt(&self) -> Result<(), DriverError> {
+        Driver::interrupt(self)
+    }
+    fn set_mode(&self, mode: &str) -> Result<String, DriverError> {
+        Driver::set_mode(self, mode)
+    }
+    fn set_model(&self, model: &str) -> Result<(), DriverError> {
+        Driver::set_model(self, model)
+    }
+    fn set_effort(&self, effort: &str) -> Result<bool, DriverError> {
+        Driver::set_effort(self, effort)
+    }
+    fn answer_permission(&self, request_id: &str, allow: bool, message: &str) {
+        Driver::answer_permission(self, request_id, allow, message)
+    }
+    fn answer_question(&self, request_id: &str, answers: Map<String, Value>) {
+        Driver::answer_question(self, request_id, answers)
+    }
+}
+
+/// Start a child of `agent`'s on a session: resumed by its id, or new.
+/// A new session of an agent that names its own has another id than the
+/// one asked for; `Drive::session_id` says which.
+pub fn start(agent: AgentId, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str, events: Sender<Event>) -> Result<Arc<dyn Drive>, DriverError> {
+    match agent {
+        AgentId::ClaudeCode => Driver::start(session_id, cwd, resume, mode, model, events).map(|d| d as Arc<dyn Drive>),
+        AgentId::Codex => crate::codex::CodexDriver::start(session_id, cwd, resume, mode, model, events).map(|d| d as Arc<dyn Drive>),
+    }
 }
 
 impl Drop for Driver {

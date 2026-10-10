@@ -27,7 +27,6 @@ fn isolated() -> (Home, std::sync::MutexGuard<'static, ()>) {
     std::env::set_var("EMAKI_HOME", dir.path().join("emaki"));
     std::env::set_var("CLAUDE_CONFIG_DIR", dir.path().join("claude"));
     std::env::set_var("CODEX_HOME", dir.path().join("codex"));
-    std::env::set_var("GEMINI_CLI_HOME", dir.path().join("gemini"));
     (Home { _dir: dir }, guard)
 }
 
@@ -289,7 +288,7 @@ fn archive_appends_and_rotates() {
     let r = SessionRef { agent: AgentId::ClaudeCode, session_id: "sess".into(), path: src.clone(), cwd: "/tmp/proj".into(), ..Default::default() };
     let stats = archive::sweep(std::slice::from_ref(&r));
     assert_eq!(stats.files, 1);
-    let dst = archive::archive_dir().join("proj").join("sess.jsonl");
+    let dst = archive::archive_dir().join("claude").join("proj").join("sess.jsonl");
     assert_eq!(fs::read_to_string(&dst).unwrap(), "line1\n");
 
     // Append: only the tail is copied.
@@ -308,7 +307,7 @@ fn archive_appends_and_rotates() {
     let stats = archive::sweep(std::slice::from_ref(&r));
     assert_eq!(stats.rotated, 1);
     assert_eq!(fs::read_to_string(&dst).unwrap(), "new\n");
-    assert_eq!(fs::read_to_string(archive::archive_dir().join("proj").join("sess.gen1.jsonl")).unwrap(), "line1\nline2\n");
+    assert_eq!(fs::read_to_string(archive::archive_dir().join("claude").join("proj").join("sess.gen1.jsonl")).unwrap(), "line1\nline2\n");
 
     // The archived copy is listed as a peer source once the original is gone.
     fs::remove_file(&src).unwrap();
@@ -334,7 +333,7 @@ fn a_copy_set_aside_when_earlier_rows_changed() {
     fs::write(&src, "LINE1\nline2\n").unwrap();
     let stats = archive::sweep(std::slice::from_ref(&r));
     assert_eq!(stats.rotated, 1);
-    let dir = archive::archive_dir().join("proj");
+    let dir = archive::archive_dir().join("claude").join("proj");
     assert_eq!(fs::read_to_string(dir.join("sess.jsonl")).unwrap(), "LINE1\nline2\n");
     assert_eq!(fs::read_to_string(dir.join("sess.gen1.jsonl")).unwrap(), "line1\n");
 }
@@ -348,7 +347,7 @@ fn a_copy_that_is_not_the_source_is_taken_again() {
     fs::write(&src, "a\nb\nc\n").unwrap();
     let r = SessionRef { agent: AgentId::ClaudeCode, session_id: "sess".into(), path: src.clone(), cwd: "/tmp/proj".into(), ..Default::default() };
     archive::sweep(std::slice::from_ref(&r));
-    let dir = archive::archive_dir().join("proj");
+    let dir = archive::archive_dir().join("claude").join("proj");
     let dst = dir.join("sess.jsonl");
     // As an earlier Emaki left some: a row missing, a row twice, and its
     // record saying the copy is whole and was never looked at again.
@@ -370,7 +369,7 @@ fn a_copy_that_is_not_the_source_is_taken_again() {
 #[test]
 fn a_stale_copy_is_packed_and_reads_the_same() {
     let (_home, _g) = isolated();
-    let dir = archive::archive_dir().join("proj");
+    let dir = archive::archive_dir().join("claude").join("proj");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("old.jsonl");
     let text = "{\"type\":\"user\",\"message\":\"the same words over and over\"}\n".repeat(8000);
@@ -974,6 +973,367 @@ fn a_codex_turn_stopped_says_so() {
     rows.remove(1);
     let s = build_codex(&rows, "");
     assert!(matches!(s.rounds[0].items.last(), Some(Item::Notice { text, variant: NoticeVariant::Interrupted, .. }) if text == "The user interrupted the previous turn on purpose."));
+}
+
+/// Rows of a Codex rollout as 0.162 writes them, for the tests below.
+mod cx {
+    use serde_json::{json, Value};
+
+    pub fn ev(ts: &str, payload: Value) -> Value {
+        json!({"timestamp": format!("2026-10-10T09:00:{ts}Z"), "type": "event_msg", "payload": payload})
+    }
+    pub fn item(ts: &str, item: Value) -> Value {
+        ev(ts, json!({"type": "item_completed", "turn_id": "t", "item": item}))
+    }
+    pub fn resp(ts: &str, payload: Value) -> Value {
+        json!({"timestamp": format!("2026-10-10T09:00:{ts}Z"), "type": "response_item", "payload": payload})
+    }
+    pub fn started(ts: &str) -> Value {
+        ev(ts, json!({"type": "task_started", "turn_id": "t"}))
+    }
+    pub fn complete(ts: &str) -> Value {
+        ev(ts, json!({"type": "task_complete", "turn_id": "t", "last_agent_message": null}))
+    }
+    /// A prompt, said twice as Codex says it: the row the model is sent,
+    /// then the item.
+    pub fn prompt(ts: &str, text: &str) -> [Value; 2] {
+        [
+            resp(ts, json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]})),
+            item(ts, json!({"type": "UserMessage", "id": format!("u-{ts}"), "content": [{"type": "text", "text": text, "text_elements": []}]})),
+        ]
+    }
+    /// The agent's words, likewise: the item, then the row under the same id.
+    pub fn says(ts: &str, text: &str, phase: &str) -> [Value; 2] {
+        [
+            item(ts, json!({"type": "AgentMessage", "id": format!("msg-{ts}"), "content": [{"type": "Text", "text": text}], "phase": phase})),
+            resp(ts, json!({"type": "message", "id": format!("msg-{ts}"), "role": "assistant", "content": [{"type": "output_text", "text": text}], "phase": phase})),
+        ]
+    }
+    pub fn script(ts: &str, id: &str, js: &str) -> Value {
+        resp(ts, json!({"type": "custom_tool_call", "status": "completed", "call_id": id, "name": "exec", "input": js}))
+    }
+    pub fn script_out(ts: &str, id: &str, printed: &str) -> Value {
+        resp(ts, json!({"type": "custom_tool_call_output", "call_id": id, "output": [{"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"}, {"type": "input_text", "text": printed}]}))
+    }
+    pub fn command(ts: &str, id: &str, line: &str, output: &str, status: &str, code: i64) -> Value {
+        item(ts, json!({"type": "CommandExecution", "id": id, "command": ["/bin/zsh", "-lc", line], "cwd": "file:///tmp/proj", "status": status, "aggregated_output": output, "exit_code": code, "duration": {"secs": 2, "nanos": 500000000}}))
+    }
+    pub fn context(ts: &str, payload: Value) -> Value {
+        json!({"timestamp": format!("2026-10-10T09:00:{ts}Z"), "type": "turn_context", "payload": payload})
+    }
+}
+
+/// Codex 0.162 runs tools from a script the model writes. The rollout
+/// also says what the script ran, and that is what is shown: the command
+/// as a `Bash` call, the wrapper gone, each thing said once.
+#[test]
+fn a_codex_script_is_shown_by_what_it_ran() {
+    let mut rows = vec![json!({"timestamp": "2026-10-10T09:00:00Z", "type": "session_meta", "payload": {"id": "c2", "cwd": "/tmp/proj", "cli_version": "0.162.0"}}), cx::started("00")];
+    rows.extend(cx::prompt("01", "say hello"));
+    rows.extend(cx::says("02", "I will run it.", "commentary"));
+    rows.push(cx::script("03", "call_1", "const r = await tools.exec_command({cmd:\"echo hello\",\"max_output_tokens\":200});\ntext(r.output);\n"));
+    rows.push(cx::command("04", "exec-1", "echo hello", "", "completed", 0));
+    rows.push(cx::script_out("04", "call_1", "hello\n"));
+    rows.push(cx::ev("05", json!({"type": "token_count", "info": {"total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 50}, "last_token_usage": {"input_tokens": 700, "cached_input_tokens": 600, "output_tokens": 20}}})));
+    // Mid-turn: the words so far are commentary, and the turn is running.
+    let s = build_codex(&rows, "");
+    assert_eq!(emaki_core::adapters::turn_state_from_session(&s).phase, Phase::Working);
+
+    rows.extend(cx::says("06", "It printed hello.", "final_answer"));
+    rows.push(cx::complete("07"));
+    let s = build_codex(&rows, "");
+    assert_eq!(s.rounds.len(), 1);
+    let r = &s.rounds[0];
+    assert_eq!(r.prompt, "say hello");
+    assert_eq!(r.items.len(), 3, "commentary, the command, the answer");
+    assert!(matches!(&r.items[0], Item::Text { md, .. } if md == "I will run it."));
+    assert!(matches!(&r.items[2], Item::Text { md, .. } if md == "It printed hello."));
+    let call = r.tool_calls().next().unwrap();
+    assert_eq!((call.name.as_str(), call.tool_kind, call.status), ("Bash", emaki_core::model::ToolKind::Bash, CallStatus::Ok));
+    assert_eq!(call.input["command"], "echo hello");
+    assert_eq!(call.subject, "echo hello");
+    // The command's own output was empty; the one thing the script
+    // printed is it.
+    assert_eq!(call.stdout, "hello\n");
+    assert_eq!(call.duration_ms, 2500);
+    // Cached tokens are inside input_tokens.
+    assert_eq!((s.usage.input_tokens, s.usage.cache_read, s.usage.output_tokens), (400, 600, 50));
+    assert_eq!(r.usage.output_tokens, 50);
+    assert_eq!(s.context_tokens, 700);
+    let st = emaki_core::adapters::turn_state_from_session(&s);
+    assert_eq!((st.phase, st.activity_kind.as_str(), st.reply.as_str()), (Phase::YourTurn, "reply", "It printed hello."));
+
+    // A script that printed the tool's whole return: the output is in it.
+    let n = rows.iter().position(|r| r["payload"]["type"] == "custom_tool_call_output").unwrap();
+    rows[n] = cx::script_out("04", "call_1", "{\"chunk_id\":\"a\",\"exit_code\":0,\"output\":\"hello\\n\"}");
+    assert_eq!(build_codex(&rows, "").rounds[0].tool_calls().next().unwrap().stdout, "hello\n");
+}
+
+/// A script whose command left no item (the sandbox refused it) is still
+/// a command; one that only computes is shown as the script it is, by its
+/// first line. Neither is raw JSON under a tool named "exec".
+#[test]
+fn a_codex_script_with_no_item_is_one_call() {
+    let mut rows = vec![cx::started("00")];
+    rows.extend(cx::prompt("01", "make it"));
+    rows.push(cx::script("02", "call_1", "const r = await tools.exec_command({cmd:\"cat > hi.sh <<'EOF'\\nhi\\nEOF\",max_output_tokens:1000});\ntext(r.output);\n"));
+    rows.push(cx::script_out("03", "call_1", "zsh:1: operation not permitted: hi.sh\n"));
+    rows.push(cx::script("04", "call_2", "// add them up\nconst n = [1, 2].reduce((a, b) => a + b);\ntext(String(n));\n"));
+    rows.push(cx::script_out("05", "call_2", "3"));
+    rows.push(cx::complete("06"));
+    let s = build_codex(&rows, "");
+    let calls: Vec<_> = s.rounds[0].tool_calls().collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].name, "Bash");
+    assert_eq!(calls[0].input["command"], "cat > hi.sh <<'EOF'\nhi\nEOF");
+    assert_eq!(calls[0].stdout, "zsh:1: operation not permitted: hi.sh\n");
+    assert_eq!(calls[1].name, "exec");
+    assert_eq!(calls[1].subject, "const n = [1, 2].reduce((a, b) => a + b);");
+    assert_eq!(calls[1].stdout, "3");
+    assert_eq!(calls[1].status, CallStatus::Ok);
+}
+
+/// A patch is a call a file, with hunks in the shape Claude Code's
+/// `structuredPatch` has, from the item of a new rollout and from the
+/// `apply_patch` call of an old one.
+#[test]
+fn a_codex_patch_is_a_call_a_file() {
+    use emaki_core::model::ToolKind;
+    use emaki_core::render_md::{patch_stat, render_patch};
+    let mut rows = vec![json!({"timestamp": "2026-10-10T09:00:00Z", "type": "session_meta", "payload": {"id": "c3", "cwd": "/tmp/proj"}}), cx::started("00")];
+    rows.extend(cx::prompt("01", "patch them"));
+    rows.push(cx::script("02", "call_1", "const p = await tools.apply_patch(\"*** Begin Patch\\n*** End Patch\");\ntext(p);\n"));
+    rows.push(cx::item("03", json!({"type": "FileChange", "id": "exec-9", "status": "completed", "stdout": "Success.", "stderr": "", "changes": {
+        "/tmp/proj/a.txt": {"type": "add", "content": "one\ntwo\n"},
+        "/tmp/proj/b.txt": {"type": "update", "unified_diff": "--- a/b.txt\n+++ b/b.txt\n@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n", "move_path": null},
+        "/tmp/proj/c.txt": {"type": "delete", "content": "gone\n"},
+    }})));
+    rows.push(cx::script_out("03", "call_1", "{}"));
+    rows.push(cx::complete("04"));
+    let s = build_codex(&rows, "");
+    let calls: Vec<_> = s.rounds[0].tool_calls().collect();
+    assert_eq!(calls.iter().map(|c| (c.name.as_str(), c.tool_kind, c.subject.as_str())).collect::<Vec<_>>(), [("Write", ToolKind::Write, "a.txt"), ("Edit", ToolKind::Edit, "b.txt"), ("Delete", ToolKind::Edit, "c.txt")]);
+    assert_eq!(calls.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["exec-9", "exec-9:1", "exec-9:2"]);
+    assert!(calls.iter().all(|c| c.status == CallStatus::Ok));
+    assert_eq!(calls[0].input["content"], "one\ntwo\n");
+    assert_eq!(calls[0].file_path, "/tmp/proj/a.txt");
+    assert_eq!(calls[1].patch, vec![json!({"oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 3, "lines": [" keep", "-old", "+new", " keep"]})]);
+    assert_eq!(render_patch(&calls[1].patch, 12), "@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep");
+    assert_eq!(patch_stat(&calls[2].patch), "+0 −1");
+
+    // An older Codex: the patch is the call's argument, its result one row.
+    let rows = vec![
+        json!({"timestamp": "2026-03-02T02:38:02Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "patch them"}]}}),
+        json!({"timestamp": "2026-03-02T02:38:03Z", "type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "p1", "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Add File: a.txt\n+one\n*** Update File: b.txt\n*** Move to: d.txt\n@@ fn main\n keep\n-old\n+new\n*** End Patch"}}),
+        json!({"timestamp": "2026-03-02T02:38:04Z", "type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "p1", "output": "{\"output\":\"Success.\",\"metadata\":{\"exit_code\":0}}"}}),
+    ];
+    let s = build_codex(&rows, "/tmp/proj");
+    let calls: Vec<_> = s.rounds[0].tool_calls().collect();
+    assert_eq!(calls.iter().map(|c| (c.name.as_str(), c.subject.as_str(), c.status)).collect::<Vec<_>>(), [("Write", "a.txt", CallStatus::Ok), ("Edit", "b.txt → d.txt", CallStatus::Ok)]);
+    assert_eq!(calls[0].input["content"], "one\n");
+    assert_eq!(patch_stat(&calls[1].patch), "+1 −1");
+    assert_eq!(calls[1].result_text, "Success.");
+}
+
+/// The mode is one key, the first settings a session names are where it
+/// began, and a later change is a line at the foot of the round before.
+#[test]
+fn a_codex_command_that_outlasts_its_scripts_wait_is_one_call() {
+    // The script that starts it gives up waiting; a second script only
+    // waits, and the command's item comes under that one.
+    let mut rows = vec![cx::started("00")];
+    rows.extend(cx::prompt("01", "sleep"));
+    rows.push(cx::script("02", "c1", "const r = await tools.exec_command({cmd:\"sleep 12\"});\ntext(JSON.stringify(r));"));
+    rows.push(cx::script_out("12", "c1", "{\"chunk_id\":\"a\",\"wall_time_seconds\":10.0}"));
+    rows.push(cx::script("13", "c2", "const r = await tools.write_stdin({session_id:1,yield_time_ms:5000});\ntext(JSON.stringify(r));"));
+    rows.push(cx::command("14", "exec-1", "sleep 12", "", "completed", 0));
+    rows.push(cx::script_out("14", "c2", "{\"exit_code\":0}"));
+    rows.extend(cx::says("15", "done", "final_answer"));
+    rows.push(cx::complete("16"));
+    let s = build_codex(&rows, "");
+    let calls: Vec<&emaki_core::model::ToolCall> = s.rounds[0].items.iter().filter_map(|i| if let Item::Tool(c) = i { Some(c) } else { None }).collect();
+    assert_eq!(calls.len(), 1, "{:?}", calls.iter().map(|c| (&c.name, &c.subject)).collect::<Vec<_>>());
+    assert_eq!((calls[0].name.as_str(), calls[0].input.get("command").and_then(|c| c.as_str())), ("Bash", Some("sleep 12")));
+    // It stands where the command began.
+    assert_eq!(calls[0].ts, "2026-10-10T09:00:02Z");
+}
+
+#[test]
+fn codex_settings_are_read_and_their_changes_said() {
+    use emaki_core::model::NoticeVariant;
+    let ctx = |ts: &str, extra: Value| {
+        let mut p = json!({"cwd": "/tmp/proj", "model": "gpt-a", "effort": "low", "collaboration_mode": {"mode": "default", "settings": {"model": "gpt-a", "reasoning_effort": "low"}}});
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        cx::context(ts, p)
+    };
+    let mut rows = vec![cx::started("00"), ctx("00", json!({"sandbox_policy": {"type": "read-only"}}))];
+    rows.extend(cx::prompt("01", "one"));
+    rows.extend(cx::says("02", "Done.", "final_answer"));
+    rows.push(cx::complete("03"));
+    let s = build_codex(&rows, "");
+    assert_eq!((s.mode.as_str(), s.effort.as_str(), s.models.clone()), ("read-only", "low", vec!["gpt-a".to_string()]));
+    assert_eq!(s.rounds[0].items.len(), 1, "where a session began is not a change");
+
+    // Set between turns, twice: the same profile again, then another.
+    rows.push(cx::ev("10", json!({"type": "thread_settings_applied", "thread_settings": {"model": "gpt-a", "reasoning_effort": "low", "active_permission_profile": {"id": ":read-only"}, "collaboration_mode": {"mode": "default"}}})));
+    rows.push(cx::ev("11", json!({"type": "thread_settings_applied", "thread_settings": {"model": "gpt-a", "reasoning_effort": "low", "active_permission_profile": {"id": ":workspace"}, "collaboration_mode": {"mode": "default"}}})));
+    rows.push(cx::started("12"));
+    rows.push(ctx("12", json!({"sandbox_policy": {"type": "workspace-write"}, "active_permission_profile": {"id": ":workspace"}, "model": "gpt-b", "effort": "high"})));
+    rows.extend(cx::prompt("13", "two"));
+    let s = build_codex(&rows, "");
+    assert_eq!((s.mode.as_str(), s.effort.as_str()), ("workspace", "high"));
+    assert_eq!(s.models, ["gpt-a", "gpt-b"]);
+    let said: Vec<(NoticeVariant, String)> = s.rounds[0].items.iter().filter_map(|i| if let Item::Notice { variant, text, .. } = i { Some((*variant, text.clone())) } else { None }).collect();
+    assert_eq!(said, [(NoticeVariant::Mode, emaki_core::driver::mode_words("workspace").0), (NoticeVariant::Model, "GPT-B".into()), (NoticeVariant::Effort, emaki_core::driver::effort_words("high").0)]);
+    // The change is not when the round before ended.
+    assert_eq!(s.rounds[0].end_ts, "2026-10-10T09:00:02Z");
+
+    // Plan mode wins over the profile; an old row has only the sandbox.
+    for (extra, key) in [
+        (json!({"active_permission_profile": {"id": ":workspace"}, "collaboration_mode": {"mode": "plan"}}), "plan"),
+        (json!({"active_permission_profile": {"id": ":danger-full-access"}}), "danger-full-access"),
+        (json!({"sandbox_policy": {"type": "workspace-write"}}), "workspace"),
+        (json!({"sandbox_policy": {"type": "danger-full-access"}}), "danger-full-access"),
+    ] {
+        assert_eq!(build_codex(&[ctx("00", extra)], "").mode, key);
+    }
+}
+
+/// A turn that failed ends on the error, in the notice Claude Code's
+/// errors use, and reads as over. A stop is said once, under the command
+/// it cut short, which Codex writes after the stop.
+#[test]
+fn a_codex_turn_that_failed_or_was_stopped_says_so() {
+    use emaki_core::model::NoticeVariant;
+    let mut rows = vec![cx::started("00")];
+    rows.extend(cx::prompt("01", "run it"));
+    let s = build_codex(&rows, "");
+    assert_eq!(emaki_core::adapters::turn_state_from_session(&s).phase, Phase::Working);
+
+    let mut failed = rows.clone();
+    failed.push(cx::ev("02", json!({"type": "task_complete", "turn_id": "t", "last_agent_message": null, "error": {"message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5' model is not supported.\"}}", "codex_error_info": "other"}})));
+    let s = build_codex(&failed, "");
+    assert!(matches!(s.rounds[0].items.as_slice(), [Item::Notice { variant: NoticeVariant::Error, text, .. }] if text == "The 'gpt-5' model is not supported."));
+    let st = emaki_core::adapters::turn_state_from_session(&s);
+    assert_eq!((st.phase, st.activity.as_str()), (Phase::YourTurn, "failed"));
+
+    rows.push(cx::script("02", "call_1", "const r = await tools.exec_command({cmd:\"sleep 30\"});\ntext(JSON.stringify(r));\n"));
+    rows.push(cx::resp("03", json!({"type": "custom_tool_call_output", "call_id": "call_1", "output": "aborted by user after 0.2s"})));
+    rows.push(cx::resp("03", json!({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<turn_aborted>\nThe previous turn was interrupted on purpose.\n</turn_aborted>"}]})));
+    rows.push(cx::ev("03", json!({"type": "turn_aborted", "turn_id": "t", "reason": "interrupted"})));
+    rows.push(cx::command("03", "exec-1", "sleep 30", "", "failed", -1));
+    let s = build_codex(&rows, "");
+    let r = &s.rounds[0];
+    assert_eq!(r.items.len(), 2);
+    let call = r.tool_calls().next().unwrap();
+    assert_eq!((call.name.as_str(), call.subject.as_str(), call.status), ("Bash", "sleep 30", CallStatus::Interrupted));
+    assert!(matches!(r.items.last(), Some(Item::Notice { variant: NoticeVariant::Interrupted, text, .. }) if text == "Interrupted"));
+    let st = emaki_core::adapters::turn_state_from_session(&s);
+    assert_eq!((st.phase, st.activity_kind.as_str()), (Phase::YourTurn, "stop"));
+}
+
+/// A question and a plan are the calls the window already draws for
+/// Claude Code. The plan, said as an item and again inside the reply's
+/// row, is one call; it waits until the next prompt, which sent out of
+/// plan mode is the go-ahead.
+#[test]
+fn a_codex_question_and_plan_are_drawn_as_claudes() {
+    use emaki_core::model::{questions_of, ToolKind};
+    let plan_mode = |ts: &str, mode: &str| cx::context(ts, json!({"model": "gpt-a", "collaboration_mode": {"mode": mode}, "active_permission_profile": {"id": ":workspace"}}));
+    let mut rows = vec![cx::started("00"), plan_mode("00", "plan")];
+    rows.extend(cx::prompt("01", "a greeting script"));
+    rows.push(cx::resp("02", json!({"type": "function_call", "name": "request_user_input", "call_id": "q1",
+        "arguments": "{\"questions\":[{\"header\":\"Language\",\"id\":\"lang\",\"question\":\"Which language?\",\"options\":[{\"label\":\"Python\",\"description\":\"No setup.\"},{\"label\":\"Shell\",\"description\":\"Minimal.\"}]}]}"})));
+    let s = build_codex(&rows, "");
+    let st = emaki_core::adapters::turn_state_from_session(&s);
+    assert_eq!((st.phase, st.activity.as_str(), st.activity_kind.as_str()), (Phase::NeedsYou, "Which language?", "ask"));
+
+    rows.push(cx::resp("03", json!({"type": "function_call_output", "call_id": "q1", "output": "{\"answers\":{\"lang\":{\"answers\":[\"Python\"]}}}"})));
+    rows.push(cx::item("04", json!({"type": "Plan", "id": "t-plan", "text": "# Greeting\n\n- Create `hi.py`."})));
+    rows.push(cx::resp("04", json!({"type": "message", "id": "msg-4", "role": "assistant", "phase": "final_answer", "content": [{"type": "output_text", "text": "<proposed_plan>\n# Greeting\n\n- Create `hi.py`.\n</proposed_plan>"}]})));
+    rows.push(cx::complete("05"));
+    let s = build_codex(&rows, "");
+    assert_eq!(s.mode, "plan");
+    let r = &s.rounds[0];
+    assert_eq!(r.items.len(), 2, "the question and the plan, once each");
+    let ask = r.tool_calls().next().unwrap();
+    assert_eq!((ask.name.as_str(), ask.tool_kind, ask.status), ("AskUserQuestion", ToolKind::Ask, CallStatus::Ok));
+    let qs = questions_of(&ask.input);
+    assert_eq!((qs[0].question.as_str(), qs[0].header.as_str(), qs[0].options.len(), qs[0].multi), ("Which language?", "Language", 2, false));
+    assert_eq!(ask.answers, [("Which language?".to_string(), "Python".to_string())]);
+    let plan = r.tool_calls().nth(1).unwrap();
+    assert_eq!((plan.name.as_str(), plan.tool_kind, plan.status), ("ExitPlanMode", ToolKind::Plan, CallStatus::Pending));
+    assert_eq!(plan.input["plan"], "# Greeting\n\n- Create `hi.py`.");
+    let st = emaki_core::adapters::turn_state_from_session(&s);
+    assert_eq!((st.phase, st.activity_kind.as_str()), (Phase::YourTurn, "plan"));
+
+    rows.push(cx::started("10"));
+    rows.push(plan_mode("10", "default"));
+    rows.extend(cx::prompt("11", "Implement the plan."));
+    let s = build_codex(&rows, "");
+    assert_eq!(s.rounds[0].tool_calls().nth(1).unwrap().status, CallStatus::Ok);
+    assert_eq!(s.mode, "workspace");
+}
+
+/// A rollout moved up from an old Codex: the prompt's row comes before
+/// the turn starts and its item after, a thought is written again each
+/// time it grows, and rows repeat what the items said. Each is read once.
+#[test]
+fn a_codex_rollout_said_twice_is_read_once() {
+    let (_home, _guard) = isolated();
+    let picture = std::env::temp_dir().join("emaki-codex-shot.png");
+    let thought = |parts: &[&str]| cx::item("03", json!({"type": "Reasoning", "id": "item-2", "summary_text": parts, "raw_content": []}));
+    let rows = vec![
+        cx::resp("01", json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"}]})),
+        cx::resp("02", json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "is it true?"}, {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]})),
+        cx::started("02"),
+        cx::item("02", json!({"type": "UserMessage", "id": "item-1", "content": [{"type": "text", "text": "is it true?", "text_elements": []}, {"type": "localImage", "path": picture.to_string_lossy()}]})),
+        thought(&["**One**"]),
+        thought(&["**One**", "**Two**"]),
+        cx::item("04", json!({"type": "AgentMessage", "id": "item-3", "content": [{"type": "Text", "text": "Not natively."}]})),
+        cx::resp("04", json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "**One**"}, {"type": "summary_text", "text": "**Two**"}], "content": null})),
+        cx::resp("04", json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Not natively."}]})),
+        cx::complete("05"),
+    ];
+    let s = build_codex(&rows, "");
+    assert_eq!(s.rounds.len(), 1);
+    let r = &s.rounds[0];
+    assert_eq!((r.prompt.as_str(), r.images), ("is it true?", 1));
+    assert_eq!(r.attachments.len(), 1);
+    assert_eq!((r.attachments[0].kind.as_str(), r.attachments[0].name.as_str(), r.attachments[0].media_type.as_str()), ("image", "emaki-codex-shot.png", "image/png"));
+    assert_eq!(r.items.len(), 2);
+    assert!(matches!(&r.items[0], Item::Thinking { md, .. } if md == "**One**\n\n**Two**"));
+    assert!(matches!(&r.items[1], Item::Text { md, .. } if md == "Not natively."));
+}
+
+/// A thread the person named is listed and opened under that name; one
+/// they did not, under its first prompt.
+#[test]
+fn a_codex_thread_named_takes_the_name() {
+    use emaki_core::adapters::{codex::CodexAdapter, Adapter};
+    let (_home, _guard) = isolated();
+    let home = PathBuf::from(std::env::var("CODEX_HOME").unwrap());
+    let dir = home.join("sessions/2026/10/10");
+    fs::create_dir_all(&dir).unwrap();
+    let write = |id: &str| {
+        let mut rows = vec![json!({"timestamp": "2026-10-10T09:00:00Z", "type": "session_meta", "payload": {"id": id, "cwd": "/tmp/proj"}}), cx::started("00")];
+        rows.extend(cx::prompt("01", "run the trial"));
+        rows.extend(cx::says("02", "Done.", "final_answer"));
+        rows.push(cx::complete("03"));
+        let path = dir.join(format!("rollout-2026-10-10T09-00-00-{id}.jsonl"));
+        fs::write(&path, rows.iter().map(|r| r.to_string() + "\n").collect::<String>()).unwrap();
+        path
+    };
+    let (named, plain) = (write("aaaa"), write("bbbb"));
+    fs::write(home.join("session_index.jsonl"), "{\"id\":\"aaaa\",\"thread_name\":\"First name\",\"updated_at\":\"2026-10-10T09:01:00Z\"}\n{\"id\":\"aaaa\",\"thread_name\":\"Wire trial\",\"updated_at\":\"2026-10-10T09:02:00Z\"}\n").unwrap();
+    let a = CodexAdapter::new();
+    let r = a.peek(&named);
+    assert_eq!((r.title.as_str(), r.named.as_str(), r.state.phase), ("Wire trial", "Wire trial", Phase::YourTurn));
+    assert_eq!(a.load_path(&named, "").title, "Wire trial");
+    let r = a.peek(&plain);
+    assert_eq!((r.title.as_str(), r.named.as_str()), ("run the trial", ""));
+    assert_eq!(a.list(0).len(), 2);
 }
 
 /// `/plan` leaves no mode row until the next prompt; its output says it.
@@ -2786,7 +3146,7 @@ fn the_catalogue_of_agents_holds_together() {
     assert_eq!(agents::source_of(&way("curl -fsSL https://claude.ai/install.sh | bash")).as_deref(), Some("https://claude.ai/install.sh"));
     assert_eq!(agents::source_of(&way("powershell -ExecutionPolicy ByPass -c \"irm https://aider.chat/install.ps1 | iex\"")).as_deref(), Some("https://aider.chat/install.ps1"));
     assert_eq!(agents::source_of(&way("brew install --cask codex")).as_deref(), Some("https://formulae.brew.sh/api/cask/codex.json"));
-    assert_eq!(agents::source_of(&way("brew install gemini-cli")).as_deref(), Some("https://formulae.brew.sh/api/formula/gemini-cli.json"));
+    assert_eq!(agents::source_of(&way("brew install aider")).as_deref(), Some("https://formulae.brew.sh/api/formula/aider.json"));
     assert_eq!(agents::source_of(&way("brew install anomalyco/tap/opencode")), None);
     assert_eq!(agents::source_of(&way("npm install -g @qwen-code/qwen-code@latest")).as_deref(), Some("https://registry.npmjs.org/@qwen-code/qwen-code"));
     assert_eq!(agents::source_of(&way("npm install -g droid")).as_deref(), Some("https://registry.npmjs.org/droid"));
@@ -2927,79 +3287,46 @@ fn git_publishes_fetches_and_branches_from_another_branch() {
     assert_eq!(git::host_of("/a/local/folder.git"), (String::new(), false));
 }
 
+/// An archive from before each agent had a folder: Claude Code's projects
+/// at its top, one of them named as an agent is, and Codex under an
+/// underscore. It is moved into today's shape and nothing in it is lost.
 #[test]
-fn gemini_sessions_are_read_as_their_log_leaves_them() {
-    use emaki_core::adapters;
-    use emaki_core::model::{AgentId, CallStatus, Item};
-    let (_home, _guard) = isolated();
-    let project = emaki_core::paths::gemini_home().join("tmp").join("my-project");
-    let chats = project.join("chats");
-    std::fs::create_dir_all(chats.join("parent-session")).unwrap();
-    std::fs::write(project.join(".project_root"), "/work/my-project\n").unwrap();
-    let sid = "0a1b2c3d-1111-2222-3333-444455556666";
-    let rows = [
-        json!({"sessionId": sid, "projectHash": "abc", "startTime": "2026-10-01T10:00:00.000Z", "lastUpdated": "2026-10-01T10:00:00.000Z", "kind": "main"}),
-        json!({"id": "m1", "timestamp": "2026-10-01T10:00:01.000Z", "type": "user", "content": [{"text": "Read @a.txt and say what it holds\n--- a.txt ---\none"}], "displayContent": [{"text": "Read @a.txt and say what it holds"}]}),
-        // Written first with no result, then again with one: the second takes its place.
-        json!({"id": "m2", "timestamp": "2026-10-01T10:00:03.000Z", "type": "gemini", "content": "", "model": "gemini-3-pro",
-            "thoughts": [{"subject": "Reading the file", "description": "The file is small.", "timestamp": "2026-10-01T10:00:02.000Z"}],
-            "toolCalls": [{"id": "c1", "name": "run_shell_command", "args": {"command": "cat a.txt"}, "status": "executing", "timestamp": "2026-10-01T10:00:03.000Z"}]}),
-        json!({"id": "m2", "timestamp": "2026-10-01T10:00:03.000Z", "type": "gemini", "content": "", "model": "gemini-3-pro",
-            "thoughts": [{"subject": "Reading the file", "description": "The file is small.", "timestamp": "2026-10-01T10:00:02.000Z"}],
-            "tokens": {"input": 120, "output": 10, "cached": 100, "thoughts": 5, "total": 135},
-            "toolCalls": [{"id": "c1", "name": "run_shell_command", "args": {"command": "cat a.txt"}, "status": "success", "timestamp": "2026-10-01T10:00:05.000Z",
-                "result": [{"functionResponse": {"id": "other", "name": "read_file", "response": {"output": "not this one"}}}, {"functionResponse": {"id": "c1", "name": "run_shell_command", "response": {"output": "one"}}}]}]}),
-        // The tool's answer handed back to the model is not a prompt.
-        json!({"id": "m3", "timestamp": "2026-10-01T10:00:05.500Z", "type": "user", "content": [{"functionResponse": {"id": "c1", "name": "run_shell_command", "response": {"output": "one"}}}]}),
-        json!({"id": "m4", "timestamp": "2026-10-01T10:00:06.000Z", "type": "gemini", "content": [{"text": "It holds the word **one**."}], "model": "gemini-3-pro", "tokens": {"input": 200, "output": 8, "cached": 150, "total": 208}}),
-        json!({"$set": {"summary": "What a.txt holds", "lastUpdated": "2026-10-01T10:00:06.000Z"}}),
-        // A second prompt and its reply, then taken back.
-        json!({"id": "m5", "timestamp": "2026-10-01T10:01:00.000Z", "type": "user", "content": "And now delete it"}),
-        json!({"id": "m6", "timestamp": "2026-10-01T10:01:02.000Z", "type": "gemini", "content": "Deleting.", "model": "gemini-3-pro"}),
-        json!({"$rewindTo": "m5"}),
-    ];
-    let file = chats.join("session-2026-10-01T10-00-0a1b2c3d.jsonl");
-    std::fs::write(&file, rows.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("\n") + "\n").unwrap();
-    // A subagent's file is in a folder of its parent's and is no session of its own.
-    std::fs::write(chats.join("parent-session").join("sub.jsonl"), json!({"sessionId": "sub", "projectHash": "abc", "kind": "subagent"}).to_string() + "\n").unwrap();
-
-    let adapter = adapters::for_agent(AgentId::Gemini);
-    assert!(adapter.owns(&file) && adapters::agent_for_path(&file) == AgentId::Gemini);
-    let refs = adapter.list(0);
-    assert_eq!(refs.len(), 1);
-    let r = &refs[0];
-    assert_eq!((r.session_id.as_str(), r.cwd.as_str(), r.title.as_str(), r.project().as_str()), (sid, "/work/my-project", "What a.txt holds", "my-project"));
-
-    let s = adapter.load(r);
-    assert_eq!(s.rounds.len(), 1, "the prompt taken back is gone, and a tool's answer is no prompt");
-    let round = &s.rounds[0];
-    assert_eq!(round.prompt, "Read @a.txt and say what it holds", "as typed, not as sent");
-    let kinds: Vec<&str> = round.items.iter().map(|i| match i { Item::Thinking { .. } => "thought", Item::Tool(_) => "tool", Item::Text { .. } => "text", _ => "other" }).collect();
-    assert_eq!(kinds, ["thought", "tool", "text"]);
-    let call = round.tool_calls().next().unwrap();
-    assert_eq!((call.name.as_str(), call.subject.as_str(), call.status, call.result_text.as_str(), call.duration_ms), ("run_shell_command", "cat a.txt", CallStatus::Ok, "one", 2000));
-    assert_eq!(call.tool_kind, emaki_core::model::ToolKind::Bash);
-    assert_eq!((s.usage.input_tokens, s.usage.output_tokens, s.usage.cache_read), (70, 23, 250));
-    assert_eq!(s.models, ["gemini-3-pro"]);
-    assert_eq!(adapters::turn_state_from_session(&s).phase, emaki_core::build::Phase::YourTurn);
-
-    // Kept: with Gemini's own copy gone, the archive still lists it, in
-    // the folder it ran in.
-    emaki_core::archive::sweep(&refs);
-    std::fs::remove_dir_all(&project).unwrap();
-    let all = adapters::index_all(0, &[]);
-    let kept = all.iter().find(|r| r.agent == AgentId::Gemini).expect("the archived session is listed");
-    assert!(kept.archived);
-    assert_eq!((kept.session_id.as_str(), kept.cwd.as_str(), kept.title.as_str()), (sid, "/work/my-project", "What a.txt holds"));
-    assert_eq!(adapters::load_path(&kept.path).rounds.len(), 1);
-
-    // The old format: one record, every message in it.
-    let old = emaki_core::paths::gemini_home().join("tmp").join("0123abcd").join("chats");
-    std::fs::create_dir_all(&old).unwrap();
-    let whole = json!({"sessionId": "old-1", "projectHash": "0123abcd", "startTime": "2025-08-01T09:00:00.000Z", "lastUpdated": "2025-08-01T09:00:05.000Z",
-        "messages": [{"id": "a", "timestamp": "2025-08-01T09:00:00.000Z", "type": "user", "content": "hello"}, {"id": "b", "timestamp": "2025-08-01T09:00:05.000Z", "type": "gemini", "content": "Hello."}]});
-    std::fs::write(old.join("session-2025-08-01T09-00-old1.json"), serde_json::to_string_pretty(&whole).unwrap()).unwrap();
-    let refs = adapter.list(0);
-    assert_eq!(refs.len(), 1);
-    assert_eq!((refs[0].session_id.as_str(), refs[0].title.as_str(), refs[0].project().as_str()), ("old-1", "hello", "0123abcd"));
+fn an_archive_of_the_old_shape_is_moved_into_the_new() {
+    let _g = isolated();
+    let root = archive::archive_dir();
+    let put = |rel: &str, text: &str| {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, text).unwrap();
+    };
+    put("proj/a.jsonl", "a\n");
+    put("proj/a/subagents/agent-1.jsonl", "sub\n");
+    put("codex/b.jsonl", "b\n");
+    put("_codex/work/rollout-1.jsonl", "c\n");
+    put("state.json", "{}");
+    assert!(archive::settle_layout());
+    let read = |rel: &str| fs::read_to_string(root.join(rel)).unwrap_or_default();
+    assert_eq!(read("claude/proj/a.jsonl"), "a\n");
+    assert_eq!(read("claude/proj/a/subagents/agent-1.jsonl"), "sub\n");
+    // A project of Claude Code's named "codex" is not taken for Codex's folder.
+    assert_eq!(read("claude/codex/b.jsonl"), "b\n");
+    assert_eq!(read("codex/work/rollout-1.jsonl"), "c\n");
+    let top = |root: &std::path::Path| {
+        let mut v: Vec<String> = fs::read_dir(root).unwrap().filter_map(Result::ok).filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(top(&root), ["claude", "codex"]);
+    assert_eq!(archive::iter_archived(AgentId::ClaudeCode).len(), 2);
+    assert_eq!(archive::iter_archived(AgentId::Codex).len(), 1);
+    // Again changes nothing, and a project an older Emaki leaves at the
+    // top afterwards is taken in beside what is there.
+    put("proj/a.jsonl", "a\n");
+    put("proj/later.jsonl", "d\n");
+    put("proj/a/subagents/agent-1.jsonl", "sub, rewritten\n");
+    assert!(archive::settle_layout());
+    assert_eq!(top(&root), ["claude", "codex"]);
+    assert_eq!(read("claude/proj/later.jsonl"), "d\n");
+    assert_eq!(read("claude/proj/a/subagents/agent-1.jsonl"), "sub\n");
+    assert_eq!(read("claude/proj/a/subagents/agent-1.gen1.jsonl"), "sub, rewritten\n");
 }

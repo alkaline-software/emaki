@@ -276,7 +276,7 @@ impl Workbench {
                 // A command the prompt names (`/compact`, or a skill in a
                 // sentence) is set as inline code, so it wears the accent.
                 let cwd = &session.cwd;
-                let prompt = if rnd.prompt.contains('/') { emaki_core::driver::mark_commands(&rnd.prompt, |name| self.hub.knows_command(cwd, name)) } else { rnd.prompt.clone() };
+                let prompt = if rnd.prompt.contains('/') { emaki_core::driver::mark_commands(&rnd.prompt, |name| self.hub.knows_command(session.agent, cwd, name)) } else { rnd.prompt.clone() };
                 // And an "@" that names a file under the folder.
                 let prompt = if prompt.contains('@') { emaki_core::files::mark_mentions(&prompt, cwd) } else { prompt };
                 bubble = bubble.child(md_view(format!("p-{ix}"), prompt, cx));
@@ -299,7 +299,7 @@ impl Workbench {
                         // time: it is the one thing under a prompt worth
                         // reading without being asked.
                         .when(!rnd.queued, |d| d.opacity(0.).group_hover(group, |s| s.opacity(1.)))
-                        .when(rnd.queued, |d| d.child(div().child("Queued, Claude will read it at its next step")))
+                        .when(rnd.queued, |d| d.child(div().child(format!("Queued, {} will read it at its next step", session.agent.speaker()))))
                         .children(who.map(|w| div().child(w)))
                         .child(div().child(sent))
                         .children(copy),

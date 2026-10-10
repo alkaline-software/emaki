@@ -336,11 +336,89 @@ pub fn mirror_tree(src_dir: &Path, dst_dir: &Path, state: &mut State, stats: &mu
 
 /// Where one session's main file lives in the archive.
 pub fn session_archive_path(agent: AgentId, project_slug: &str, file_name: &str) -> PathBuf {
-    let mut base = archive_dir();
-    if !agent.archive_subdir().is_empty() {
-        base = base.join(agent.archive_subdir());
+    archive_dir().join(agent.archive_subdir()).join(paths::safe_component(project_slug)).join(paths::safe_component(file_name))
+}
+
+/// The file that says the archive is a folder an agent.
+const LAYOUT_FILE: &str = ".layout";
+
+/// One mover at a time: the scan and the watcher both come here.
+static SETTLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Put an archive from before v0.2.0 in today's shape, by renames alone.
+/// It had Claude Code's projects at its top and every other agent under
+/// an underscore (`_codex`); now each agent has a folder (`claude`,
+/// `codex`). Whether it is in shape: nothing is read from or copied into
+/// an archive that is not, since a project's folder would be taken for
+/// an agent's.
+///
+/// In two steps, so that stopping anywhere leaves something the next
+/// call finishes. Until the mark is written no folder has an agent's
+/// plain name, so everything without an underscore is a project of
+/// Claude Code's, one named `codex` too, and goes into `_claude`. With
+/// the mark written the underscores come off.
+pub fn settle_layout() -> bool {
+    let root = archive_dir();
+    let _one = SETTLING.lock();
+    let folders = || -> Vec<(String, PathBuf)> {
+        let Ok(rd) = fs::read_dir(&root) else { return Vec::new() };
+        let mut v: Vec<(String, PathBuf)> = rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).map(|p| (p.file_name().unwrap_or_default().to_string_lossy().to_string(), p)).collect();
+        v.sort();
+        v
+    };
+    let mark = root.join(LAYOUT_FILE);
+    let claude = AgentId::ClaudeCode.archive_subdir();
+    if !mark.exists() {
+        let stage = root.join(format!("_{claude}"));
+        let mut done = true;
+        for (name, dir) in folders().into_iter().filter(|(n, _)| !n.starts_with('_')) {
+            done &= move_into(&dir, &stage.join(name));
+        }
+        if !done || fs::create_dir_all(&root).is_err() || fs::write(&mark, "2\n").is_err() {
+            return false;
+        }
     }
-    base.join(paths::safe_component(project_slug)).join(paths::safe_component(file_name))
+    let mut done = true;
+    for home in AgentId::ALL.map(AgentId::archive_subdir) {
+        let old = root.join(format!("_{home}"));
+        if old.is_dir() {
+            done &= move_into(&old, &root.join(home));
+        }
+    }
+    // A project left at the top since: an Emaki from before the change
+    // was run on this archive again.
+    for (name, dir) in folders() {
+        if !name.starts_with('_') && AgentId::ALL.iter().all(|a| a.archive_subdir() != name) {
+            done &= move_into(&dir, &root.join(claude).join(name));
+        }
+    }
+    done
+}
+
+/// Move `src` to `dst`, into what is already there when something is.
+/// Nothing is lost for a name both have: a file with the same bytes is
+/// one file, and any other comes in beside it as a generation.
+fn move_into(src: &Path, dst: &Path) -> bool {
+    if !dst.exists() {
+        if let Some(parent) = dst.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        return fs::rename(src, dst).is_ok();
+    }
+    if src.is_dir() && dst.is_dir() {
+        let Ok(rd) = fs::read_dir(src) else { return false };
+        let mut done = true;
+        for entry in rd.filter_map(Result::ok) {
+            done &= move_into(&entry.path(), &dst.join(entry.file_name()));
+        }
+        return done && fs::remove_dir(src).is_ok();
+    }
+    if src.is_file() && dst.is_file() && same_bytes(src, dst) {
+        return fs::remove_file(src).is_ok();
+    }
+    let stem = dst.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let ext = dst.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    (1..1000).map(|n| dst.with_file_name(format!("{stem}.gen{n}{ext}"))).find(|free| !free.exists()).is_some_and(|free| fs::rename(src, free).is_ok())
 }
 
 /// Mirror one session: its main file and every sidecar it owns.
@@ -360,13 +438,6 @@ pub fn archive_ref(r: &SessionRef, state: &mut State, stats: &mut Stats) {
     let target = session_archive_path(r.agent, &slug, &file_name);
     mirror_file(&r.path, &target, state, stats);
 
-    // Gemini's sessions do not say which folder they ran in; the file
-    // that does goes with them, one for the project's folder here.
-    if r.agent == AgentId::Gemini {
-        if let (Some(src), Some(dir)) = (crate::adapters::gemini::project_root_file(&r.path), target.parent()) {
-            mirror_file(&src, &dir.join(crate::adapters::gemini::PROJECT_ROOT_FILE), state, stats);
-        }
-    }
     if r.agent == AgentId::ClaudeCode {
         let sidecar_src = r.path.with_extension("");
         if sidecar_src.is_dir() {
@@ -382,8 +453,12 @@ pub fn archive_ref(r: &SessionRef, state: &mut State, stats: &mut Stats) {
 /// Archive every session given. Cheap when nothing has changed.
 pub fn sweep(refs: &[SessionRef]) -> Stats {
     let _ = paths::ensure_dirs();
-    let mut state = load_state();
     let mut stats = Stats::default();
+    if !settle_layout() {
+        stats.errors += 1;
+        return stats;
+    }
+    let mut state = load_state();
     for r in refs {
         archive_ref(r, &mut state, &mut stats);
     }
@@ -489,26 +564,21 @@ fn pack_file(path: &Path) -> bool {
 /// files (`*.gen1.jsonl`) are surfaced too: they are earlier incarnations of a
 /// rewritten session and still real history.
 pub fn iter_archived(agent: AgentId) -> Vec<(String, PathBuf)> {
-    let mut root = archive_dir();
-    if !agent.archive_subdir().is_empty() {
-        root = root.join(agent.archive_subdir());
-    }
     let mut out = Vec::new();
+    if !settle_layout() {
+        return out;
+    }
+    let root = archive_dir().join(agent.archive_subdir());
     let Ok(projects) = fs::read_dir(&root) else { return out };
     let mut dirs: Vec<PathBuf> = projects.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect();
     dirs.sort();
     for project in dirs {
         let name = project.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        // Other agents' subtrees sit beside Claude's project folders.
-        if agent == AgentId::ClaudeCode && name.starts_with('_') {
-            continue;
-        }
         let Ok(files) = fs::read_dir(&project) else { continue };
         let mut jsonls: Vec<PathBuf> = files
             .filter_map(Result::ok)
             .map(|e| e.path())
-            // Gemini's sessions from before it wrote lines are `.json`.
-            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "jsonl" || (agent == AgentId::Gemini && e == "json" && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("session-")))))
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "jsonl"))
             .collect();
         jsonls.sort();
         for j in jsonls {
@@ -535,7 +605,7 @@ pub fn summary() -> Summary {
             let p = e.path();
             if p.is_dir() {
                 walk(&p, s);
-            } else if p.is_file() && p.file_name().map(|n| n != "state.json").unwrap_or(true) {
+            } else if p.is_file() && p.file_name().map(|n| n != "state.json" && n != LAYOUT_FILE).unwrap_or(true) {
                 s.files += 1;
                 s.bytes += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
             }

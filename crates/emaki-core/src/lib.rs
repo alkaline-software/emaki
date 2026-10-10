@@ -10,6 +10,7 @@ pub mod agents;
 pub mod archive;
 pub mod build;
 pub mod check;
+pub mod codex;
 pub mod config;
 pub mod driver;
 pub mod explain;

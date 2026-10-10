@@ -17,7 +17,7 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use emaki_core::adapters;
 use emaki_core::archive;
 use emaki_core::config::Config;
-use emaki_core::driver::{self, Driver};
+use emaki_core::driver::{self, Drive};
 use emaki_core::explain::Explainer;
 use emaki_core::model::AgentId;
 use emaki_core::options::Options;
@@ -48,6 +48,9 @@ pub enum HubEvent {
     Index(Vec<SessionRef>),
     Changed(PathBuf),
     DriverStarted { session_id: String },
+    /// A new session's agent gave it an id of its own: what the window
+    /// began under `from` is the session `to`.
+    Adopted { agent: AgentId, from: String, to: String },
     DriverFailed { session_id: String, error: String },
     Driver { session_id: String, event: driver::Event },
     /// A message left through `via` ("driver" or "inbox").
@@ -77,6 +80,14 @@ pub enum HubEvent {
     Renamed { session_id: String, error: String },
 }
 
+/// One thing a session can be set to, for `Hub::set_on_driver`.
+#[derive(Debug, Clone)]
+pub enum Setting {
+    Mode(String),
+    Model(String),
+    Effort(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum UpdateEvent {
     Checking,
@@ -94,10 +105,18 @@ pub struct Hub {
     tx: UnboundedSender<HubEvent>,
     wake: Mutex<mpsc::Sender<()>>,
     search_tx: Mutex<mpsc::Sender<Vec<SessionRef>>>,
-    drivers: Mutex<HashMap<String, Arc<Driver>>>,
+    drivers: Mutex<HashMap<String, Arc<dyn Drive>>>,
+    /// Sessions a driver is being started on for a setting.
+    starting: Mutex<HashSet<String>>,
     /// The terminals of our own, with no window, each running an
     /// interactive Claude Code on one session (`emaki_core::pty`).
     terminals: Mutex<HashMap<String, Arc<Pty>>>,
+    /// Terminals of an agent's own joined to its driver's child
+    /// (`Drive::attach`): Codex's, a session each. One is a second view
+    /// of the session the driver holds, and goes when the driver does.
+    attached: Mutex<HashMap<String, Arc<Pty>>>,
+    /// Sessions one of those is being started for.
+    attaching: Mutex<HashSet<String>>,
     /// The session showing in the window: its hidden terminal is kept
     /// for as long as it shows, however idle.
     showing: Mutex<Option<String>>,
@@ -120,7 +139,7 @@ pub struct Hub {
     /// The slash commands known in each folder asked about, for the list
     /// over the composer on a session no driver of ours is behind; an
     /// empty entry is a folder being asked about now.
-    commands: Mutex<HashMap<String, Vec<driver::CommandInfo>>>,
+    commands: Mutex<HashMap<(AgentId, String), Vec<driver::CommandInfo>>>,
     /// What each agent said a session can be set to (its modes, models
     /// and effort levels), by folder as each is asked; under the empty
     /// folder, the last answer from anywhere, which at launch is the one
@@ -147,6 +166,9 @@ impl Hub {
             tx,
             wake: Mutex::new(wake_tx),
             search_tx: Mutex::new(search_tx),
+            starting: Mutex::new(HashSet::new()),
+            attached: Mutex::new(HashMap::new()),
+            attaching: Mutex::new(HashSet::new()),
             drivers: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
             showing: Mutex::new(None),
@@ -308,7 +330,7 @@ impl Hub {
 
     // -- presence ---------------------------------------------------------
 
-    pub fn driver_for(&self, session_id: &str) -> Option<Arc<Driver>> {
+    pub fn driver_for(&self, session_id: &str) -> Option<Arc<dyn Drive>> {
         self.drivers.lock().unwrap().get(session_id).cloned()
     }
 
@@ -356,24 +378,25 @@ impl Hub {
     /// The inbox of a terminal session, if Claude Code has one registered.
     /// The commands known in `cwd`, once read; asking starts the read on a
     /// thread the first time, and `HubEvent::Commands` says when it is in.
-    pub fn commands_for(self: &Arc<Self>, cwd: &str) -> Option<Vec<driver::CommandInfo>> {
+    pub fn commands_for(self: &Arc<Self>, agent: AgentId, cwd: &str) -> Option<Vec<driver::CommandInfo>> {
+        let key = (agent, cwd.to_string());
         let mut g = self.commands.lock().unwrap();
-        if let Some(list) = g.get(cwd) {
+        if let Some(list) = g.get(&key) {
             return (!list.is_empty()).then(|| list.clone());
         }
-        g.insert(cwd.to_string(), Vec::new());
+        g.insert(key.clone(), Vec::new());
         drop(g);
         let hub = Arc::clone(self);
         let cwd = cwd.to_string();
         thread::spawn(move || {
-            let catalogue = adapters::for_agent(AgentId::ClaudeCode).catalogue(&cwd);
-            hub.learn_options(AgentId::ClaudeCode, &cwd, catalogue.options);
+            let catalogue = adapters::for_agent(agent).catalogue(&cwd);
+            hub.learn_options(agent, &cwd, catalogue.options);
             if catalogue.commands.is_empty() {
                 // Ask again next time rather than remember a failure.
-                hub.commands.lock().unwrap().remove(&cwd);
+                hub.commands.lock().unwrap().remove(&key);
                 return;
             }
-            hub.commands.lock().unwrap().insert(cwd, catalogue.commands);
+            hub.commands.lock().unwrap().insert(key, catalogue.commands);
             hub.send(HubEvent::Commands);
         });
         None
@@ -408,8 +431,8 @@ impl Hub {
     /// Whether `/name` is a command: one that acts by itself, or one the
     /// folder's catalogue lists, when it has been read. Never starts a
     /// read, so the conversation can ask on every draw.
-    pub fn knows_command(&self, cwd: &str, name: &str) -> bool {
-        driver::acts_alone(name) || self.commands.lock().unwrap().get(cwd).is_some_and(|list| list.iter().any(|c| c.name == name))
+    pub fn knows_command(&self, agent: AgentId, cwd: &str, name: &str) -> bool {
+        (agent == AgentId::ClaudeCode && driver::acts_alone(name)) || self.commands.lock().unwrap().get(&(agent, cwd.to_string())).is_some_and(|list| list.iter().any(|c| c.name == name))
     }
 
     /// Have the window read a terminal session again, as when its status
@@ -450,7 +473,7 @@ impl Hub {
         // someone's, which writes as it goes, or a process that died part
         // way through a turn. A short quiet tells the two apart; the long
         // grace kept a killed session "working" with its clock running.
-        let working = r.agent == AgentId::ClaudeCode && matches!(r.state.phase, emaki_core::build::Phase::Working);
+        let working = matches!(r.state.phase, emaki_core::build::Phase::Working);
         now - r.mtime < if working { WORKING_GRACE_S } else { LIVE_GRACE_S }
     }
 
@@ -459,6 +482,70 @@ impl Hub {
     /// The hidden terminal behind a session, while its child lives.
     pub fn terminal_for(&self, session_id: &str) -> Option<Arc<Pty>> {
         self.terminals.lock().unwrap().get(session_id).filter(|p| p.alive()).cloned()
+    }
+
+    /// The agent's terminal the panel draws for a session: the hidden
+    /// one it runs in, or one joined to its driver.
+    pub fn agent_screen(&self, session_id: &str) -> Option<Arc<Pty>> {
+        self.terminal_for(session_id).or_else(|| self.attached.lock().unwrap().get(session_id).filter(|p| p.alive()).cloned())
+    }
+
+    /// Whether a joined terminal is on its way for the session.
+    pub fn attaching(&self, session_id: &str) -> bool {
+        self.attaching.lock().unwrap().contains(session_id)
+    }
+
+    /// Start the agent's own terminal on a session, joined to its
+    /// driver, which is started first when none is behind it. Nothing is
+    /// typed there by the window: it is the person's to use, and what
+    /// they do in it reaches the driver as the agent's own events.
+    pub fn attach_terminal(self: &Arc<Self>, agent: AgentId, session_id: &str, cwd: &str) {
+        if self.agent_screen(session_id).is_some() || !self.attaching.lock().unwrap().insert(session_id.to_string()) {
+            return;
+        }
+        let hub = Arc::clone(self);
+        let (sid, cwd) = (session_id.to_string(), cwd.to_string());
+        thread::spawn(move || {
+            let made = hub.driver_or_start(agent, &sid, &cwd).and_then(|d| d.attach()).map(|argv| Pty::spawn(&argv, &cwd, Arc::new(|| {})));
+            match made {
+                Some(Ok(pty)) => {
+                    hub.attached.lock().unwrap().insert(sid.clone(), pty);
+                }
+                Some(Err(e)) => hub.send(HubEvent::Note(format!("could not start {}'s terminal: {e}", agent.display_name()))),
+                None => hub.send(HubEvent::Note(format!("{} has no terminal to show here", agent.display_name()))),
+            }
+            hub.attaching.lock().unwrap().remove(&sid);
+            hub.send(HubEvent::Screen(sid));
+        });
+    }
+
+    /// Let a session's joined terminal go.
+    fn stop_attached(&self, session_id: &str) {
+        if let Some(pty) = self.attached.lock().unwrap().remove(session_id) {
+            pty.kill();
+        }
+    }
+
+    /// The driver behind a session, started on it and waited for when
+    /// there is none. One starting already is waited for, not started
+    /// twice. Blocks: for a thread of its own.
+    fn driver_or_start(self: &Arc<Self>, agent: AgentId, sid: &str, cwd: &str) -> Option<Arc<dyn Drive>> {
+        loop {
+            if let Some(d) = self.driver_for(sid) {
+                return Some(d);
+            }
+            if !self.starting.lock().unwrap().insert(sid.to_string()) {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            self.spawn_driver_and_send(agent, sid.to_string(), cwd.to_string(), true, String::new(), String::new(), String::new(), None);
+            let began = Instant::now();
+            while self.driver_for(sid).is_none() && began.elapsed() < Duration::from_secs(40) && self.starting.lock().unwrap().contains(sid) {
+                thread::sleep(Duration::from_millis(50));
+            }
+            self.starting.lock().unwrap().remove(sid);
+            return self.driver_for(sid);
+        }
     }
 
     /// Which session the window shows, or none.
@@ -677,20 +764,26 @@ impl Hub {
     /// deliver `first` through it. Events arrive as `HubEvent::Driver`.
     pub fn spawn_driver_and_send(
         self: &Arc<Self>,
+        agent: AgentId,
         session_id: String,
         cwd: String,
         resume: bool,
         mode: String,
         model: String,
+        effort: String,
         first: Option<(String, Vec<serde_json::Value>)>,
     ) {
         let hub = Arc::clone(self);
         thread::spawn(move || {
             let (ev_tx, ev_rx) = mpsc::channel::<driver::Event>();
-            let sid = session_id.clone();
+            // The id events go out under: the one asked for, until an
+            // agent that names its own sessions has said another.
+            let named = Arc::new(Mutex::new(session_id.clone()));
+            let named2 = Arc::clone(&named);
             let hub2 = Arc::clone(&hub);
             thread::spawn(move || {
                 while let Ok(ev) = ev_rx.recv() {
+                    let sid = named2.lock().unwrap().clone();
                     let exit = matches!(ev, driver::Event::Exit { .. });
                     // The explanation is asked for the moment the card
                     // exists: reading it while you decide is the point.
@@ -700,6 +793,7 @@ impl Hub {
                     }
                     hub2.send(HubEvent::Driver { session_id: sid.clone(), event: ev });
                     if exit {
+                        hub2.stop_attached(&sid);
                         hub2.drivers.lock().unwrap().remove(&sid);
                         hub2.ended.lock().unwrap().insert(sid.clone(), Instant::now());
                         hub2.refresh();
@@ -707,11 +801,25 @@ impl Hub {
                     }
                 }
             });
-            match Driver::start(&session_id, &cwd, resume, &mode, &model, ev_tx) {
+            match driver::start(agent, &session_id, &cwd, resume, &mode, &model, ev_tx) {
                 Ok(d) => {
-                    hub.learn_options(AgentId::ClaudeCode, &cwd, d.caps().options);
+                    let asked = session_id.clone();
+                    let session_id = d.session_id();
+                    *named.lock().unwrap() = session_id.clone();
+                    if session_id != asked {
+                        hub.send(HubEvent::Adopted { agent, from: asked, to: session_id.clone() });
+                    }
+                    let caps = d.caps();
+                    hub.learn_options(agent, &cwd, caps.options);
+                    if !caps.commands.is_empty() {
+                        hub.commands.lock().unwrap().insert((agent, cwd.clone()), caps.commands);
+                    }
                     hub.drivers.lock().unwrap().insert(session_id.clone(), Arc::clone(&d));
                     hub.ended.lock().unwrap().remove(&session_id);
+                    // A level chosen before the session existed.
+                    if !effort.is_empty() {
+                        let _ = d.set_effort(&effort);
+                    }
                     hub.send(HubEvent::DriverStarted { session_id: session_id.clone() });
                     if let Some((text, images)) = first {
                         let r = d.send(&text, images);
@@ -723,8 +831,34 @@ impl Hub {
                     }
                     hub.refresh();
                 }
-                Err(e) => hub.send(HubEvent::DriverFailed { session_id, error: e.0 }),
+                Err(e) => {
+                    hub.starting.lock().unwrap().remove(&session_id);
+                    hub.send(HubEvent::DriverFailed { session_id, error: e.0 })
+                }
             }
+        });
+    }
+
+    /// Change what a session is set to through a driver, started first
+    /// when none is behind it: for an agent whose settings are its
+    /// driver's to hold and nothing is typed anywhere. What the agent
+    /// then holds comes back as `Driver` events.
+    pub fn set_on_driver(self: &Arc<Self>, agent: AgentId, session_id: &str, cwd: &str, what: Setting) {
+        let hub = Arc::clone(self);
+        let (sid, cwd) = (session_id.to_string(), cwd.to_string());
+        thread::spawn(move || {
+            let Some(d) = hub.driver_or_start(agent, &sid, &cwd) else { return };
+            let options = hub.options_for(agent, &d.cwd());
+            let failed = match &what {
+                Setting::Mode(m) => d.set_mode(m).err().map(|e| (options.mode(m).map(|c| c.label.clone()).unwrap_or_else(|| m.clone()), e)),
+                Setting::Model(m) => d.set_model(m).err().map(|e| (options.model(m).map(|c| c.label.clone()).unwrap_or_else(|| m.clone()), e)),
+                Setting::Effort(e) => d.set_effort(e).err().map(|err| (format!("{} effort", options.effort_label(&d.model(), e)), err)),
+            };
+            if let Some((name, e)) = failed {
+                hub.send(HubEvent::Note(format!("could not switch to {name}: {}", e.0)));
+            }
+            hub.send(HubEvent::Driver { session_id: sid.clone(), event: driver::Event::Mode(d.mode()) });
+            hub.send(HubEvent::Driver { session_id: sid, event: driver::Event::Init(d.caps()) });
         });
     }
 
@@ -777,7 +911,7 @@ impl Hub {
             let now = match d.set_mode(&mode) {
                 Ok(now) => now,
                 Err(e) => {
-                    hub.send(HubEvent::Note(format!("could not switch to {}: {}", hub.options_for(AgentId::ClaudeCode, &d.cwd).mode(&mode).map(|m| m.label.clone()).unwrap_or_else(|| mode.clone()), e.0)));
+                    hub.send(HubEvent::Note(format!("could not switch to {}: {}", hub.options_for(d.agent(), &d.cwd()).mode(&mode).map(|m| m.label.clone()).unwrap_or_else(|| mode.clone()), e.0)));
                     d.mode()
                 }
             };
@@ -794,7 +928,7 @@ impl Hub {
         let sid = session_id.to_string();
         thread::spawn(move || {
             if let Err(e) = d.set_model(&model) {
-                hub.send(HubEvent::Note(format!("could not switch to {}: {}", hub.options_for(AgentId::ClaudeCode, &d.cwd).model(&model).map(|m| m.label.clone()).unwrap_or_else(|| driver::model_label(&model)), e.0)));
+                hub.send(HubEvent::Note(format!("could not switch to {}: {}", hub.options_for(d.agent(), &d.cwd()).model(&model).map(|m| m.label.clone()).unwrap_or_else(|| driver::model_label(&model)), e.0)));
             }
             hub.send(HubEvent::Driver { session_id: sid, event: driver::Event::Init(d.caps()) });
         });
@@ -810,6 +944,7 @@ impl Hub {
         let sid = session_id.to_string();
         thread::spawn(move || {
             let r = d.set_effort(&effort);
+            hub.send(HubEvent::Driver { session_id: sid.clone(), event: driver::Event::Init(d.caps()) });
             hub.send(HubEvent::Sent {
                 session_id: sid,
                 queued: r.as_ref().map(|q| *q).unwrap_or(false),
@@ -872,6 +1007,7 @@ impl Hub {
 
     pub fn stop_driver(&self, session_id: &str) {
         let d = self.drivers.lock().unwrap().remove(session_id);
+        self.stop_attached(session_id);
         if let Some(d) = d {
             thread::spawn(move || d.stop());
         }
@@ -886,11 +1022,14 @@ impl Hub {
     }
 
     pub fn stop_all(&self) {
-        let all: Vec<Arc<Driver>> = self.drivers.lock().unwrap().drain().map(|(_, d)| d).collect();
+        let all: Vec<Arc<dyn Drive>> = self.drivers.lock().unwrap().drain().map(|(_, d)| d).collect();
         for d in all {
             d.stop();
         }
         for (_, pty) in self.terminals.lock().unwrap().drain() {
+            pty.kill();
+        }
+        for (_, pty) in self.attached.lock().unwrap().drain() {
             pty.kill();
         }
     }
@@ -898,12 +1037,17 @@ impl Hub {
     fn reap_drivers(&self) {
         let idle_min = self.cfg.read().unwrap().driver.idle_min;
         let limit = Duration::from_secs(idle_min.max(1) * 60);
+        // A driver whose joined terminal is in front of the person is
+        // kept, however idle: the terminal would go with it.
+        let showing = self.showing.lock().unwrap().clone();
+        let attached: HashSet<String> = self.attached.lock().unwrap().iter().filter(|(_, p)| p.alive()).map(|(k, _)| k.clone()).collect();
+        let watched = |sid: &String| showing.as_ref() == Some(sid) && attached.contains(sid);
         let stale: Vec<String> = self
             .drivers
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, d)| d.idle_for() > limit || !d.alive())
+            .filter(|(sid, d)| !d.alive() || (d.idle_for() > limit && !watched(sid)))
             .map(|(k, _)| k.clone())
             .collect();
         for k in stale {
