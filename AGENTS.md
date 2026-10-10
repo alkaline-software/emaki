@@ -131,7 +131,7 @@ handed work on one of these files is told to read the doc too.
 | `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs`, `indent.rs`, `format.rs`, `office.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/anthropic-mono.py` | `docs/look.md` |
-| `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the agents' card in the sidebar | `docs/agents.md` |
+| `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
 | `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs` | `docs/core.md` |
 | `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, any `cfg` for an OS | `docs/platform.md` |
@@ -148,7 +148,7 @@ rows: go by what the code you are changing does.
 Cargo.toml                 workspace; the zed revision is pinned in Cargo.lock
 crates/emaki-core/        everything without a window
   src/model.rs               Session / Round / Item / ToolCall, plus AgentId
-  src/adapters/              one per agent: claude.rs, codex.rs; index_all()
+  src/adapters/              one per agent: claude.rs, codex.rs, gemini.rs; index_all()
   src/transcript.rs          JSONL tail-by-offset, peek(), the cheap index
   src/build.rs               Claude rows -> model, turn_state()
   src/archive.rs             copy-first mirror; runs before anything renders

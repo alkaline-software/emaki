@@ -99,7 +99,7 @@ way between sessions.
 
 ## The sidebar
 
-A name, three places and two cards (`render_sidebar`).
+A name, three entries and a card (`render_sidebar`).
 
 - The wordmark (the app's icon, served as `icon/app.png`, and "Emaki") is in
   the sidebar's own top strip, right of the two buttons, in
@@ -111,14 +111,12 @@ A name, three places and two cards (`render_sidebar`).
   in the content pane, so one line crosses the window. Tried and dropped: a
   row of its own for the wordmark, which put the two lines at different
   heights.
-- New session, All Projects. The All Projects entry is still ⌘L and
-  `GoSessions`; its icon is a briefcase so it does not read as a folder row.
-- Two cards (`card`), Agents and Projects, each under a name that does not
-  scroll. The agents' card shows `SIDE_AGENTS` rows and scrolls for the rest
-  (`agents_scroll`); the projects' takes the height left (`side_scroll`).
-  They are `Pane::Agents` and `Pane::Sidebar` to `route_scroll`.
-  The agents' card lists the agents installed and its head goes to the
-  agents page (`docs/agents.md`).
+- New session, All Projects, Agents. The All Projects entry is still ⌘L
+  and `GoSessions`; its icon is a briefcase so it does not read as a
+  folder row. Agents is ⌘E and goes to the agents page
+  (`docs/agents.md`).
+- One card (`card`), Projects, under a name that does not scroll, taking
+  the height left (`side_scroll`, `Pane::Sidebar` to `route_scroll`).
 - The footer is the person's name and a settings gear, nothing else.
 
 The Projects card lists the `SIDE_FOLDERS` newest projects, then "N more". A
@@ -177,9 +175,8 @@ has no category of its own: a row a kind of session beside a row an agent
 read as a second sort of agent.
 
 "N more" under a folder in the sidebar goes inside that folder; "N more" at
-the foot of the folders and the All Projects entry go to the top; an agent's
-row goes to that agent on the agents page, whose projects go inside a
-folder narrowed to the agent. A right click is Open in Finder
+the foot of the folders and the All Projects entry go to the top; a project
+on an agent's page goes inside that folder narrowed to the agent. A right click is Open in Finder
 on a folder and the session's menu on a session.
 
 ## Motion

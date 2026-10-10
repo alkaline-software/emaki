@@ -360,6 +360,13 @@ pub fn archive_ref(r: &SessionRef, state: &mut State, stats: &mut Stats) {
     let target = session_archive_path(r.agent, &slug, &file_name);
     mirror_file(&r.path, &target, state, stats);
 
+    // Gemini's sessions do not say which folder they ran in; the file
+    // that does goes with them, one for the project's folder here.
+    if r.agent == AgentId::Gemini {
+        if let (Some(src), Some(dir)) = (crate::adapters::gemini::project_root_file(&r.path), target.parent()) {
+            mirror_file(&src, &dir.join(crate::adapters::gemini::PROJECT_ROOT_FILE), state, stats);
+        }
+    }
     if r.agent == AgentId::ClaudeCode {
         let sidecar_src = r.path.with_extension("");
         if sidecar_src.is_dir() {
@@ -500,7 +507,8 @@ pub fn iter_archived(agent: AgentId) -> Vec<(String, PathBuf)> {
         let mut jsonls: Vec<PathBuf> = files
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.is_file() && p.extension().map(|e| e == "jsonl").unwrap_or(false))
+            // Gemini's sessions from before it wrote lines are `.json`.
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "jsonl" || (agent == AgentId::Gemini && e == "json" && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("session-")))))
             .collect();
         jsonls.sort();
         for j in jsonls {

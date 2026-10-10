@@ -41,7 +41,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, NewBranch, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -257,7 +257,6 @@ const FOLDER_ROWS: usize = 5;
 /// How many folders the sidebar lists before "N more".
 const SIDE_FOLDERS: usize = 10;
 /// How many agents the sidebar's card shows before it scrolls.
-const SIDE_AGENTS: usize = 4;
 /// How long a folder takes to unfold or fold away.
 const FOLDER_ANIM: Duration = Duration::from_millis(200);
 /// How long the terminal card takes to come, and to go.
@@ -493,9 +492,7 @@ pub struct Notice {
 /// then; they belong to the pane the gesture began in. See `route_scroll`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
-    /// The sidebar's agents card, which scrolls by itself.
-    Agents,
-    /// The rest of the sidebar: the folders card is what scrolls there.
+    /// The sidebar: the projects' card is what scrolls there.
     Sidebar,
     Content,
     /// The two panels beside a conversation.
@@ -868,11 +865,20 @@ pub struct Workbench {
     pub(crate) agents_found: HashMap<&'static str, emaki_core::agents::Found>,
     pub(crate) agents_checking: bool,
     pub(crate) agents_checked: Option<Instant>,
+    /// The install commands whose source is no longer published, and
+    /// when the network was last asked (`agents::stale_commands`).
+    pub(crate) agents_stale: HashSet<&'static str>,
+    pub(crate) agents_commands_checked: Option<Instant>,
     /// The agent the agents page is inside; none is its cards.
     pub(crate) agent_open: Option<&'static str>,
     /// The system whose install commands an agent's page shows.
     pub(crate) agent_os: emaki_core::agents::Os,
     pub(crate) agents_page_scroll: ScrollHandle,
+    /// How many texts of the page have been drawn selectable in this
+    /// draw: each needs a name of its own.
+    pub(crate) selectable_n: std::cell::Cell<usize>,
+    /// The shell at an agent's page's right is asked for.
+    pub(crate) agents_shell: bool,
     pub page: Page,
     pub sidebar_open: bool,
     pub selected: Option<String>,
@@ -1162,7 +1168,6 @@ pub struct Workbench {
     inner_kept: std::cell::RefCell<HashMap<SharedString, (ScrollHandle, bool)>>,
     /// The scroll positions momentum may be forwarded to.
     side_scroll: ScrollHandle,
-    agents_scroll: ScrollHandle,
     sessions_scroll: ScrollHandle,
     home_scroll: ScrollHandle,
     /// The settings body's scroll position, for its scrollbar.
@@ -2632,9 +2637,13 @@ impl Workbench {
             agents_found: HashMap::new(),
             agents_checking: false,
             agents_checked: None,
+            agents_stale: HashSet::new(),
+            agents_commands_checked: None,
             agent_open: None,
             agent_os: emaki_core::agents::Os::here(),
             agents_page_scroll: ScrollHandle::new(),
+            selectable_n: std::cell::Cell::new(0),
+            agents_shell: false,
             page,
             sidebar_open: ui.sidebar_open.unwrap_or(true),
             selected: None,
@@ -2774,7 +2783,6 @@ impl Workbench {
             scroll_inner: None,
             inner_kept: Default::default(),
             side_scroll: ScrollHandle::new(),
-            agents_scroll: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
             home_scroll: ScrollHandle::new(),
             sidebar_peek: false,
@@ -6472,8 +6480,6 @@ impl Workbench {
             Pane::Outline
         } else if !inline_sidebar || e.position.x >= self.sidebar_w {
             Pane::Content
-        } else if self.agents_scroll.bounds().contains(&e.position) {
-            Pane::Agents
         } else {
             Pane::Sidebar
         };
@@ -6542,9 +6548,8 @@ impl Workbench {
         match owner {
             // A handle takes any offset it is given, so each is held to
             // what its list has.
-            Pane::Agents | Pane::Sidebar | Pane::Files | Pane::Outline | Pane::File => {
+            Pane::Sidebar | Pane::Files | Pane::Outline | Pane::File => {
                 let handle = match owner {
-                    Pane::Agents => &self.agents_scroll,
                     Pane::Files => &self.files_scroll,
                     Pane::File => &self.file_view_scroll,
                     Pane::Outline => &self.outline_scroll,
@@ -7775,64 +7780,15 @@ impl Workbench {
         let sessions_active = page == Page::Sessions;
         let top = top
             .child(new_row)
-            .child(nav("nav-sessions", Icon::default().path("icons/briefcase.svg"), "All Projects", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))));
+            .child(nav("nav-sessions", Icon::default().path("icons/briefcase.svg"), "All Projects", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
+            .child(nav("nav-agents", Icon::default().path("icons/sparkles.svg"), "Agents", "⌘E", page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
 
-        // The agents on this machine: the ones installed, and any whose
-        // sessions are kept though it is gone. A row goes inside that
-        // agent on the agents page, where its sessions are too.
-        let on_agents = page == Page::Agents;
-        let listed: Vec<(&'static emaki_core::agents::Agent, usize)> = emaki_core::agents::all()
-            .iter()
-            .map(|a| (a, a.reads.map(|id| self.refs.iter().filter(|r| r.agent == id).count()).unwrap_or(0)))
-            .filter(|(a, n)| *n > 0 || self.agent_found(a.id).is_some_and(|f| f.installed()))
-            .collect();
-        let more_agents = !self.agents_found.is_empty() && listed.len() < emaki_core::agents::all().len();
         // The rows sit in a column of their own inside the scroller. As
         // the scroller's children they were flex items of a column too
         // short for them, and every row gave up height to fit, down to
         // its text: 30px rows drew at about 21, and at 24 with a folder
         // closed, so the list changed its spacing as a folder opened.
-        let mut agent_rows = v_flex().flex_shrink_0();
         let mut scroll = v_flex().flex_shrink_0();
-        agent_rows = agent_rows.children(listed.into_iter().map(|(a, n)| {
-            let active = on_agents && self.agent_open == Some(a.id);
-            let theme = cx.theme().clone();
-            let live = a.reads.is_some_and(|id| self.refs.iter().any(|r| r.agent == id && self.live_color(r, cx).is_some()));
-            let ink = if a.id == "claude-code" { theme.primary } else { theme.muted_foreground };
-            let id = a.id;
-            h_flex()
-                .id(SharedString::from(format!("agent-{id}")))
-                .h(SIDE_ROW_H)
-                .px(px(10.))
-                .gap(px(10.))
-                .rounded(px(8.))
-                .cursor_pointer()
-                .when(active, |d| d.bg(theme.sidebar_accent))
-                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                .on_click(cx.listener(move |this, _, _, cx| this.show_agents(Some(id), cx)))
-                .child(div().w(px(22.)).flex().justify_center().child(crate::agents_page::agent_mark(a, px(15.), ink)))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(a.name))
-                .when(live, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.green).flex_shrink_0()))
-                .when(n > 0, |d| d.child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(n.to_string())))
-        }));
-        // The way to the agents not here yet.
-        if more_agents {
-            let theme = cx.theme().clone();
-            agent_rows = agent_rows.child(
-                h_flex()
-                    .id("agent-add")
-                    .h(SIDE_ROW_H)
-                    .px(px(10.))
-                    .gap(px(10.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                    .on_click(cx.listener(|this, _, _, cx| this.show_agents(None, cx)))
-                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(IconName::Plus).with_size(px(14.)).text_color(theme.muted_foreground)))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child("Add an agent")),
-            );
-        }
         // Folders: every project as a row that opens onto its sessions,
         // newest folder first, the sessions under each headed by when
         // (today, yesterday, this week, this month, earlier). A folder
@@ -8104,12 +8060,10 @@ impl Workbench {
                 cx.notify();
             }));
 
-        // Agents and Folders each sit on a card of their own, a shade off
-        // the sidebar's ground, and each scrolls by itself under its
-        // name with the toolkit's fading scrollbar at its edge, as the
-        // conversation has. The agents' card shows `SIDE_AGENTS` rows
-        // and scrolls for the rest; the folders' takes what height is
-        // left.
+        // The projects sit on a card a shade off the sidebar's ground,
+        // which scrolls by itself under its name with the toolkit's
+        // fading scrollbar at its edge, as the conversation has, and
+        // takes what height is left.
         let card = |label: &'static str| {
             v_flex()
                 .mx(px(8.))
@@ -8120,43 +8074,7 @@ impl Workbench {
                 .overflow_hidden()
                 .child(h_flex().h(px(28.)).flex_shrink_0().px(px(14.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(label))
         };
-        // The agents' card is headed by the way to their page: every
-        // agent there is, and how to set one up.
-        let agents_head = {
-            let ink = theme.foreground;
-            h_flex()
-                .id("side-agents-head")
-                .h(px(28.))
-                .flex_shrink_0()
-                .px(px(14.))
-                .gap(px(4.))
-                .items_center()
-                .cursor_pointer()
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if on_agents && self.agent_open.is_none() { theme.foreground } else { theme.muted_foreground })
-                .hover(move |s| s.text_color(ink))
-                .on_click(cx.listener(|this, _, _, cx| this.show_agents(None, cx)))
-                .child(div().flex_1().child("Agents"))
-                .child(Icon::new(IconName::ChevronRight).with_size(px(12.)))
-        };
-        let agents_card = v_flex()
-            .mx(px(8.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(theme.sidebar_border)
-            .bg(theme.background.opacity(0.55))
-            .overflow_hidden()
-            .child(agents_head)
-            .flex_shrink_0()
-            .mt(px(10.))
-            .child(
-            v_flex()
-                .relative()
-                .child(v_flex().id("side-agents").max_h(SIDE_ROW_H * SIDE_AGENTS as f32 + px(4.)).overflow_y_scroll().track_scroll(&self.agents_scroll).px(px(4.)).pb(px(4.)).child(agent_rows))
-                .vertical_scrollbar(&self.agents_scroll),
-        );
-        let folders_card = card("Projects").flex_1().min_h_0().mt(px(8.)).mb(px(8.)).child(
+        let folders_card = card("Projects").flex_1().min_h_0().mt(px(10.)).mb(px(8.)).child(
             v_flex()
                 .relative()
                 .flex_1()
@@ -8165,7 +8083,7 @@ impl Workbench {
                 .vertical_scrollbar(&self.side_scroll),
         );
 
-        v_flex().w(self.sidebar_w).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(agents_card).child(folders_card).child(footer)
+        v_flex().w(self.sidebar_w).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(folders_card).child(footer)
     }
 
     /// Whether a folder in the sidebar shows its sessions: the person's
@@ -8315,7 +8233,7 @@ impl Workbench {
     /// there. The text under the pointer selects its word at the same
     /// press (the vendored `inline.rs`), so what is selected is asked
     /// once the press has been handed round.
-    fn conversation_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn conversation_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
         window.defer(cx, move |window, cx| {
             let text = gpui_base::TextSelection::selected_text(window, cx);
@@ -11710,6 +11628,7 @@ pub(crate) fn agent_icon_path(agent: AgentId) -> &'static str {
     match agent {
         AgentId::ClaudeCode => "icons/claude.svg",
         AgentId::Codex => "icons/agents/codex.svg",
+        AgentId::Gemini => "icons/agents/gemini.svg",
     }
 }
 
@@ -11717,7 +11636,7 @@ pub(crate) fn agent_icon_path(agent: AgentId) -> &'static str {
 pub fn agent_icon(agent: AgentId, size: Pixels, color: Hsla) -> Icon {
     match agent {
         AgentId::ClaudeCode => claude_icon(size, color),
-        AgentId::Codex => Icon::default().path("icons/agents/codex.svg").with_size(size).text_color(color),
+        AgentId::Codex | AgentId::Gemini => Icon::default().path(agent_icon_path(agent)).with_size(size).text_color(color),
     }
 }
 
@@ -11726,7 +11645,7 @@ pub fn agent_icon(agent: AgentId, size: Pixels, color: Hsla) -> Icon {
 pub fn agent_color(agent: AgentId, theme: &gpui_component::Theme) -> Hsla {
     match agent {
         AgentId::ClaudeCode => theme.primary,
-        AgentId::Codex => theme.muted_foreground,
+        AgentId::Codex | AgentId::Gemini => theme.muted_foreground,
     }
 }
 
@@ -11753,7 +11672,7 @@ pub fn agent_glyph(agent: AgentId, size: Pixels, color: Hsla, working: bool, id:
                 icon.rotate(gpui::Radians(t * std::f32::consts::TAU)).with_size(size * (1.0 - 0.18 * breath)).opacity(1.0 - 0.45 * breath)
             }))
             .into_any_element(),
-        AgentId::Codex => div()
+        AgentId::Codex | AgentId::Gemini => div()
             .child(agent_icon(agent, size, color))
             .with_animation(ElementId::Name(id), Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.3, 1.0)), |d, t| d.opacity(t))
             .into_any_element(),
@@ -12159,7 +12078,7 @@ impl Render for Workbench {
         // to give its room up.
         let on_session = self.page == Page::Session && self.detail.is_some();
         let want_left = on_session && (self.files_on || self.outline_on);
-        let want_term = on_session && self.side_term;
+        let want_term = (on_session && self.side_term) || (self.page == Page::Agents && self.agent_open.is_some() && self.agents_shell);
         let want_file = on_session && self.file_view.is_some();
         let (left_min, term_min, file_min) = (if want_left { crate::panels::PANEL_MIN } else { px(0.) }, if want_term { crate::term_panel::TERM_MIN } else { px(0.) }, if want_file { crate::panels::FILE_MIN } else { px(0.) });
         let least = crate::panels::CONVERSATION_MIN + left_min + term_min;
@@ -12297,6 +12216,7 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
             .on_action(cx.listener(|this, _: &NewBranch, window, cx| this.branch_new_open(None, window, cx)))
+            .on_action(cx.listener(|this, _: &GoAgents, _, cx| this.show_agents(None, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {
                 // ⌘W closes the nearest thing: a file shown beside the
                 // conversation first, then the session's tab, then the
@@ -12355,7 +12275,7 @@ impl Render for Workbench {
                     Page::New => this.child(self.render_new(cx)),
                     Page::Sessions => this.child(self.render_sessions(cx)),
                     Page::Session => this.child(self.render_detail(window, cx)),
-                    Page::Agents => this.child(self.render_agents(cx)),
+                    Page::Agents => this.child(self.render_agents(window, cx)),
                 }),
             )
             .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))

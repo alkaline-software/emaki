@@ -2,7 +2,7 @@
 
 About `crates/emaki-core/src/agents.rs` and
 `crates/emaki-app/src/agents_page.rs`: the catalogue of coding agents,
-looking for them on the machine, the agents page, and the agents' card in
+looking for them on the machine, the agents page, and its entry in
 the sidebar.
 
 ## Rules
@@ -30,10 +30,16 @@ the sidebar.
 ## Two lists
 
 `agents::all()` is every agent the window can speak of; `AgentId` and
-`adapters` are the two whose sessions are read. `Agent::reads` joins
+`adapters` are the ones whose sessions are read, which today is all
+three. `Agent::reads` joins
 them. An agent with no adapter gets a card and a page, and its page says
 its sessions are not read. A new adapter sets `reads` on its entry and
 nothing else here changes.
+
+The catalogue is three on purpose: Claude Code, Codex and Gemini CLI.
+Twelve were listed at first, and nine were cut: a card for an agent whose
+sessions are not read promised more than the app does. After the last
+card the page draws one that is no agent's, saying more are coming.
 
 ## Looking
 
@@ -44,17 +50,39 @@ version managers use), its version (`version_from` takes the dotted
 number out of whatever is printed), and the sign-in.
 
 The window looks once at launch, when the agents page is gone to and what
-it has is older than `AGENTS_FRESH`, at "Check again", and whenever the
+it has is older than `AGENTS_FRESH`, at the refresh button, and whenever the
 window becomes the active one with the agents page showing: that is what
 a person does after installing something in a terminal.
+
+## Whether a command still works
+
+The commands are part of the build and change only with a release. What
+can be asked between releases is whether the thing a command fetches is
+still published (`agents::stale_commands`, `source_of`): the script's
+address, Homebrew's page for the formula or cask, npm's or PyPI's for
+the package. A host that answers "not found" marks the command on the
+agent's page; no network, or a host that will not say, marks nothing.
+It cannot tell that a maker now recommends another way. The network is
+asked at "Check again", and otherwise on a visit to the page when the
+last answer is a day old; never at launch.
 
 ## The page
 
 Two levels, as the sessions page has (`Workbench::agent_open`).
 
-- The cards: the installed under one head and the rest under another, in
-  the catalogue's order. A card says the maker, what the agent is, and at
+- The cards: one grid in the catalogue's order, whatever is installed,
+  so a card stays where it is when that changes. The head is the name
+  and the refresh button and nothing else; a line under it appears only
+  when an install command's source is gone. A card says the maker, what the agent is, and at
   its foot the version, a sign-in and the sessions kept, or "Set up".
+- Inside one, the page's words can be selected and copied as a
+  conversation's can (`Workbench::selectable`: each is drawn by the
+  markdown view with markdown's marks escaped, and a right click is the
+  conversation's own menu). The agents' names and the cards are not.
+- Inside one, a button at the strip's right opens a shell in the home
+  folder at the page's right, for the commands the page gives: the
+  conversation's terminal panel with its shell side alone
+  (`docs/channels.md`, The terminal panel).
 - Inside one: three steps on a rail, each with a tick once done. Install
   shows where the program is, or the ways to get it for the system
   chosen (`agent_os`, this machine's to begin with), the maker's first
@@ -64,20 +92,18 @@ Two levels, as the sessions page has (`Workbench::agent_open`).
   projects: a click goes to the sessions page inside that project,
   narrowed to the agent.
 
-## The sidebar's card
+## The sidebar
 
-The card's head goes to the page. Its rows are the agents installed, and
-any with sessions kept though the program is gone; a row goes inside that
-agent. "Add an agent" under them goes to the cards, and is there while
-the catalogue holds one that is not installed.
+"Agents" is an entry under All Projects (⌘E, `GoAgents`), which goes to
+the cards. There was a card of agents in the sidebar, a row an agent
+with its sessions' count; it was removed for the entry, since the page
+says the same and more.
 
 ## Marks
 
 `agent_mark`: Claude's own, then a file in `assets/icons/agents/` for
 the agents in `MARKS` (Simple Icons' drawings of the makers' marks, CC0),
-then the first letter of the name. Simple Icons' "amp" is another
-product's and its Alibaba and AWS marks are the companies', not Qwen's or
-Kiro's, so those agents wear a letter.
+then the first letter of the name, for an agent added with no mark yet.
 
 ## Probing
 

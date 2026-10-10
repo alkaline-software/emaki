@@ -9,6 +9,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod gemini;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -62,13 +63,14 @@ pub trait Adapter: Send + Sync {
 }
 
 pub fn all() -> Vec<Box<dyn Adapter>> {
-    vec![Box::new(claude::ClaudeAdapter::new()), Box::new(codex::CodexAdapter::new())]
+    vec![Box::new(claude::ClaudeAdapter::new()), Box::new(codex::CodexAdapter::new()), Box::new(gemini::GeminiAdapter::new())]
 }
 
 pub fn for_agent(agent: AgentId) -> Box<dyn Adapter> {
     match agent {
         AgentId::ClaudeCode => Box::new(claude::ClaudeAdapter::new()),
         AgentId::Codex => Box::new(codex::CodexAdapter::new()),
+        AgentId::Gemini => Box::new(gemini::GeminiAdapter::new()),
     }
 }
 

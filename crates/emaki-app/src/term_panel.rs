@@ -217,15 +217,51 @@ fn row_cells(row: &[pty::Span]) -> Vec<char> {
 #[derive(Clone)]
 struct DragShell(u64);
 
+/// The name the agents page's shells are kept under, where a session's
+/// are kept under its id: no session's id has a tilde in it.
+const AGENTS_SHELLS: &str = "~agents";
+
 impl Workbench {
     /// Whether the panel is drawn: asked for, on a conversation.
     pub(crate) fn term_panel_shown(&self) -> bool {
-        self.side_term && self.page == Page::Session && self.detail.is_some() && !self.fold_term
+        self.term_on().is_some() && self.term_stage() && !self.fold_term
+    }
+
+    /// Whether the page showing can have the panel: a conversation, or
+    /// inside an agent on the agents page.
+    fn term_stage(&self) -> bool {
+        (self.page == Page::Session && self.detail.is_some()) || self.term_at_agents()
+    }
+
+    /// Inside an agent on the agents page, where the panel is a shell in
+    /// the home folder and nothing else: there is no session there, so
+    /// no agent's terminal to show.
+    fn term_at_agents(&self) -> bool {
+        self.page == Page::Agents && self.agent_open.is_some()
+    }
+
+    /// Whose terminals the panel shows: the session showing, or, inside
+    /// an agent on the agents page, a session that is none, in the home
+    /// folder, which keeps that page's shells under a name no session
+    /// has.
+    pub(crate) fn term_owner(&self) -> Option<SessionRef> {
+        if self.term_at_agents() {
+            return Some(SessionRef { session_id: AGENTS_SHELLS.into(), cwd: emaki_core::paths::home().to_string_lossy().to_string(), ..Default::default() });
+        }
+        self.selected_ref().cloned()
+    }
+
+    /// Whether the side asked for is the agent's.
+    fn term_side_agent(&self) -> bool {
+        self.side_term_agent && !self.term_at_agents()
     }
 
     /// Which side is asked for: the agent's is `true`, the shell's
     /// `false`, none when the panel is away.
     pub(crate) fn term_on(&self) -> Option<bool> {
+        if self.term_at_agents() {
+            return self.agents_shell.then_some(false);
+        }
         self.side_term.then_some(self.side_term_agent)
     }
 
@@ -239,7 +275,7 @@ impl Workbench {
 
     /// ⌘⇧T and ⌘⇧A, the buttons' keys: beside a conversation only.
     pub(crate) fn toggle_term_key(&mut self, agent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page == Page::Session && self.detail.is_some() {
+        if self.term_stage() && !(agent && self.term_at_agents()) {
             self.toggle_term(agent, window, cx);
         }
     }
@@ -250,9 +286,15 @@ impl Workbench {
         if from == to {
             return;
         }
-        self.side_term = to.is_some();
-        if let Some(agent) = to {
-            self.side_term_agent = agent;
+        // The agents page's shell is its own choice: it neither opens
+        // the panel beside a conversation nor closes it.
+        if self.term_at_agents() {
+            self.agents_shell = to.is_some();
+        } else {
+            self.side_term = to.is_some();
+            if let Some(agent) = to {
+                self.side_term_agent = agent;
+            }
         }
         self.side_term_anim = Some((from, to, Instant::now(), self.side_term_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
         self.side_back = 0;
@@ -312,13 +354,13 @@ impl Workbench {
             }
             _ if step.starts_with("term:w:") => self.side_term_w = px(step["term:w:".len()..].parse().unwrap_or(520.)),
             "term:tab-" => {
-                if let Some(id) = self.selected_ref().and_then(|r| self.shells.get(&r.session_id).map(|s| s.on)) {
+                if let Some(id) = self.term_owner().and_then(|r| self.shells.get(&r.session_id).map(|s| s.on)) {
                     self.shell_close(id, cx);
                 }
             }
             _ if step.starts_with("term:tab:") => {
                 let ix = step["term:tab:".len()..].parse::<usize>().unwrap_or(0);
-                if let Some(id) = self.selected_ref().and_then(|r| self.shells.get(&r.session_id).and_then(|s| s.tabs.get(ix).map(|t| t.id))) {
+                if let Some(id) = self.term_owner().and_then(|r| self.shells.get(&r.session_id).and_then(|s| s.tabs.get(ix).map(|t| t.id))) {
                     self.shell_pick(id, cx);
                 }
             }
@@ -393,6 +435,52 @@ impl Workbench {
             .into_any_element()
     }
 
+    /// The shell's button by itself, for a page with no agent's terminal
+    /// to show (inside an agent on the agents page): the same track and
+    /// plate as the two buttons over a conversation, the plate fading in
+    /// under the one segment and out again.
+    pub(crate) fn term_shell_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let (seg_w, seg_h, pad) = (30., 24., 3.);
+        let on = self.term_on().is_some();
+        let (was, serial) = self.side_term_anim.map(|(from, _, _, n)| (from.is_some(), n + 1)).unwrap_or((on, 0));
+        let plate = (on || was).then(|| {
+            let (a, b) = (if was { 1. } else { 0. }, if on { 1. } else { 0. });
+            div().absolute().top(px(pad)).left(px(pad)).w(px(seg_w)).h(px(seg_h)).rounded(px(7.)).bg(if dark { theme.secondary_active } else { theme.popover }).shadow_sm().with_animation(
+                ElementId::Name(format!("term-shell-plate-{serial}").into()),
+                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                move |d, t| d.opacity(a + (b - a) * t),
+            )
+        });
+        let lit = theme.foreground;
+        h_flex()
+            .relative()
+            .flex_shrink_0()
+            .p(px(pad))
+            .rounded(px(9.))
+            .bg(if dark { theme.sidebar } else { theme.muted })
+            .children(plate)
+            .child(
+                h_flex()
+                    .id("term-shell-only")
+                    .w(px(seg_w))
+                    .h(px(seg_h))
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .text_color(if on { lit } else { theme.muted_foreground })
+                    .hover(move |s| s.text_color(lit))
+                    .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Shell in your home folder (⌘⇧T)").build(window, cx))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
+                    .child(Icon::default().path("icons/terminal.svg").with_size(px(15.))),
+            )
+            .into_any_element()
+    }
+
     /// While the panel shows, the window is drawn again whenever the
     /// screen it shows has changed: a pty writes from a thread of its
     /// own and says nothing to the window.
@@ -400,7 +488,7 @@ impl Workbench {
         self.side_term_poll = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(POLL).await;
             let on = this.update(cx, |this, cx| {
-                if !this.side_term {
+                if this.term_on().is_none() {
                     return false;
                 }
                 // The cursor's blink is a draw too, while the panel has the keyboard.
@@ -474,12 +562,12 @@ impl Workbench {
 
     /// The pty the panel shows now, when there is one.
     fn term_panel_pty(&self) -> Option<Arc<Pty>> {
-        self.term_pty_of(self.side_term_agent)
+        self.term_pty_of(self.term_side_agent())
     }
 
     /// The pty of one side, when there is one.
     fn term_pty_of(&self, agent: bool) -> Option<Arc<Pty>> {
-        let r = self.selected_ref()?;
+        let r = self.term_owner()?;
         if agent {
             self.hub.terminal_for(&r.session_id)
         } else {
@@ -492,7 +580,7 @@ impl Workbench {
     /// the folder is gone), with no `CLAUDE*` variable of ours in it.
     /// `at` is where in the row, the end when none.
     pub(crate) fn shell_new(&mut self, at: Option<usize>, cx: &mut Context<Self>) {
-        let Some(r) = self.selected_ref() else { return };
+        let Some(r) = self.term_owner() else { return };
         let cwd = if Self::folder_exists(&r) { r.cwd.clone() } else { emaki_core::paths::home().to_string_lossy().to_string() };
         let made = Pty::spawn(&pty::shell_argv(), &cwd, Arc::new(|| {}));
         let set = self.shells.entry(r.session_id.clone()).or_default();
@@ -515,7 +603,7 @@ impl Workbench {
 
     /// Another tab shows.
     fn shell_pick(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(sid) = self.selected_ref().map(|r| r.session_id.clone()) else { return };
+        let Some(sid) = self.term_owner().map(|r| r.session_id) else { return };
         let Some(set) = self.shells.get_mut(&sid) else { return };
         if set.on == id || !set.tabs.iter().any(|t| t.id == id) {
             return;
@@ -528,7 +616,7 @@ impl Workbench {
     /// A tab is closed and its shell let go. The one after it shows in
     /// its place, the one before when it was the last.
     fn shell_close(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(sid) = self.selected_ref().map(|r| r.session_id.clone()) else { return };
+        let Some(sid) = self.term_owner().map(|r| r.session_id) else { return };
         let Some(set) = self.shells.get_mut(&sid) else { return };
         let Some(ix) = set.tabs.iter().position(|t| t.id == id) else { return };
         set.tabs.remove(ix).pty.kill();
@@ -562,7 +650,7 @@ impl Workbench {
             self.shell_drag = Some(id);
             cx.notify();
         }
-        let Some(sid) = self.selected_ref().map(|r| r.session_id.clone()) else { return };
+        let Some(sid) = self.term_owner().map(|r| r.session_id) else { return };
         let Some(set) = self.shells.get_mut(&sid) else { return };
         let Some(from) = set.tabs.iter().position(|t| t.id == id) else { return };
         let to = ((f32::from(x - row.left() - self.shell_scroll.offset().x) / (tab_w + TAB_GAP)).floor().max(0.) as usize).min(set.tabs.len() - 1);
@@ -831,7 +919,7 @@ impl Workbench {
                 }
                 items.push(("Paste", MenuDo::Term(TermDo::Paste)));
                 items.push(("Clear", MenuDo::Term(TermDo::Clear)));
-                if !self.side_term_agent {
+                if !self.term_side_agent() {
                     items.push(("", MenuDo::Rule));
                     items.push(("New Tab", MenuDo::Term(TermDo::NewTab)));
                     if self.term_panel_pty().is_some() {
@@ -873,7 +961,7 @@ impl Workbench {
     /// The link the cell is part of, when it is part of one.
     fn term_link_at(&self, pty: &Pty, row: u16, col: u16) -> Option<Link> {
         let (rows, _) = pty.rows_back(self.side_back);
-        let cwd = self.selected_ref().map(|r| std::path::PathBuf::from(&r.cwd)).unwrap_or_default();
+        let cwd = self.term_owner().map(|r| std::path::PathBuf::from(&r.cwd)).unwrap_or_default();
         let (from, to, target) = link_at(&row_cells(rows.get(row as usize)?), col as usize, &cwd)?;
         Some(Link { row, from, to, target })
     }
@@ -898,7 +986,7 @@ impl Workbench {
             TermDo::Clear => self.term_clear(),
             TermDo::NewTab => self.shell_new(None, cx),
             TermDo::CloseTab => {
-                if let Some(id) = self.selected_ref().and_then(|r| self.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
+                if let Some(id) = self.term_owner().and_then(|r| self.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
                     self.shell_close(id, cx);
                 }
             }
@@ -1031,7 +1119,7 @@ impl Workbench {
 
     /// The shell tab beside the one that shows, round the row's end.
     fn shell_step(&mut self, by: isize, cx: &mut Context<Self>) {
-        let Some(set) = self.selected_ref().and_then(|r| self.shells.get(&r.session_id)) else { return };
+        let Some(set) = self.term_owner().and_then(|r| self.shells.get(&r.session_id)) else { return };
         let Some(ix) = set.tabs.iter().position(|t| t.id == set.on) else { return };
         let n = set.tabs.len() as isize;
         let id = set.tabs[(ix as isize + by).rem_euclid(n) as usize].id;
@@ -1066,11 +1154,11 @@ impl Workbench {
                     true
                 }
                 "c" => self.term_copy(cx),
-                "[" | "{" if k.modifiers.shift && !self.side_term_agent => {
+                "[" | "{" if k.modifiers.shift && !self.term_side_agent() => {
                     self.shell_step(-1, cx);
                     true
                 }
-                "]" | "}" if k.modifiers.shift && !self.side_term_agent => {
+                "]" | "}" if k.modifiers.shift && !self.term_side_agent() => {
                     self.shell_step(1, cx);
                     true
                 }
@@ -1120,7 +1208,7 @@ impl Workbench {
     /// and the screen's readers were made for that one.
     pub(crate) fn fit_agent_pty(&self, session_id: &str) {
         let Some(pty) = self.hub.terminal_for(session_id) else { return };
-        let want = if self.term_panel_shown() && self.side_term_agent { self.side_term_size.get() } else { (pty::ROWS, pty::COLS) };
+        let want = if self.term_panel_shown() && self.term_side_agent() { self.side_term_size.get() } else { (pty::ROWS, pty::COLS) };
         if want.0 > 0 && want.1 > 0 && pty.size() != want {
             pty.resize(want.0, want.1);
         }
@@ -1133,7 +1221,7 @@ impl Workbench {
     /// it, as the files and the outline do. The wrapper is there at rest
     /// too, under the same name (`docs/panels.md`).
     pub(crate) fn render_term_panel(&mut self, r: &SessionRef, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if self.page != Page::Session || self.detail.is_none() || self.fold_term {
+        if !self.term_stage() || self.fold_term {
             return Vec::new();
         }
         let live = self.side_term_anim.filter(|(_, _, at, _)| at.elapsed() < TERM_PANEL_ANIM);
@@ -1468,7 +1556,7 @@ impl Workbench {
                         cx.notify();
                     }))
                     .on_action(cx.listener(|this, _: &TermNewTab, window, cx| {
-                        if this.side_term_agent {
+                        if this.term_side_agent() {
                             return cx.propagate();
                         }
                         this.shell_new(None, cx);
@@ -1482,9 +1570,9 @@ impl Workbench {
                         // does nothing, so it never reaches a file shown or
                         // the session's tab. On the agent's side it is the
                         // window's.
-                        if this.side_term_agent {
+                        if this.term_side_agent() {
                             cx.propagate();
-                        } else if let Some(id) = this.selected_ref().and_then(|r| this.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
+                        } else if let Some(id) = this.term_owner().and_then(|r| this.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
                             this.shell_close(id, cx);
                         }
                     }))

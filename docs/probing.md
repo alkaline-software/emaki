@@ -79,6 +79,12 @@ Debug prints: `EMAKI_TIMING=1` (load and hand-over per open),
 `EMAKI_OUTLINE_DEBUG=1`, `EMAKI_PTY_LOG=<file>` (the hidden terminal's raw
 output).
 
+A variable that steers one launch (`EMAKI_PAGE`, `EMAKI_GO`, `EMAKI_SHOT`
+and the rest above) is not handed to the agent's child
+(`driver::child_env`). Set on a relaunch, one used to reach the session's
+shell and every relaunch from there, so the window opened on the same
+page from then on.
+
 ## The core from a terminal
 
 `emaki-core` has a subcommand for most of what the window does, and none

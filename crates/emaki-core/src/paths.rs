@@ -100,6 +100,12 @@ pub fn codex_home() -> PathBuf {
     env_path("CODEX_HOME").unwrap_or_else(|| home().join(".codex"))
 }
 
+/// The folder Gemini CLI keeps everything in: `.gemini` in the home
+/// folder, or in the one `GEMINI_CLI_HOME` names in the home's place.
+pub fn gemini_home() -> PathBuf {
+    env_path("GEMINI_CLI_HOME").unwrap_or_else(home).join(".gemini")
+}
+
 pub fn config_file() -> PathBuf {
     root().join("config.json")
 }
