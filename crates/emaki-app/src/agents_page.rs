@@ -31,10 +31,17 @@ const AGENT_PROJECTS: usize = 5;
 /// rest wear the first letter of their name.
 const MARKS: &[&str] = &["codex"];
 
-/// An agent's mark at `size` in `color`.
-pub fn agent_mark(a: &Agent, size: Pixels, color: Hsla) -> AnyElement {
-    if a.id == "claude-code" {
-        return crate::workbench::claude_icon(size, color).into_any_element();
+/// The colour everything of an agent's wears on this page where the
+/// accent would stand: its own, or the accent for one with none.
+fn agent_ink(a: &Agent, theme: &gpui_component::Theme) -> Hsla {
+    a.reads.map(|agent| crate::workbench::agent_color(agent, theme)).unwrap_or(theme.primary)
+}
+
+/// An agent's mark at `size`: in the agent's own colour for one whose
+/// sessions are read, else in `color`.
+pub fn agent_mark(a: &Agent, size: Pixels, color: Hsla, theme: &gpui_component::Theme) -> AnyElement {
+    if let Some(agent) = a.reads {
+        return crate::workbench::agent_icon(agent, size, crate::workbench::agent_color(agent, theme)).into_any_element();
     }
     if MARKS.contains(&a.id) {
         return Icon::default().path(SharedString::from(format!("icons/agents/{}.svg", a.id))).with_size(size).text_color(color).into_any_element();
@@ -181,7 +188,7 @@ impl Workbench {
         let theme = cx.theme();
         let (color, words, dot) = match self.agent_found(a.id) {
             None => (theme.muted_foreground, "Looking…", false),
-            Some(f) if f.installed() => (theme.green, "Installed", true),
+            Some(f) if f.installed() => (agent_ink(a, theme), "Installed", true),
             Some(_) => (theme.muted_foreground, "Not installed", false),
         };
         h_flex()
@@ -201,11 +208,7 @@ impl Workbench {
     fn agent_tile(&self, a: &Agent, side: Pixels, cx: &App) -> Div {
         let theme = cx.theme();
         let installed = self.agent_found(a.id).is_some_and(|f| f.installed());
-        let ink = match (installed, a.id) {
-            (true, "claude-code") => theme.primary,
-            (true, _) => theme.foreground,
-            _ => theme.muted_foreground,
-        };
+        let ink = if installed { theme.foreground } else { theme.muted_foreground };
         div()
             .size(side)
             .flex_shrink_0()
@@ -214,7 +217,7 @@ impl Workbench {
             .flex()
             .items_center()
             .justify_center()
-            .child(agent_mark(a, side * 0.5, ink))
+            .child(agent_mark(a, side * 0.5, ink, theme))
     }
 
     /// The page's top level: the agents side by side, a tall card each.
@@ -241,7 +244,7 @@ impl Workbench {
 
     /// One line of a card's standing: a tick on a disc when it is so, a
     /// ring when it is not, and what there is to say of it at the right.
-    fn agent_fact(&self, done: bool, label: &'static str, value: String, cx: &App) -> Div {
+    fn agent_fact(&self, done: bool, label: &'static str, value: String, ink: Hsla, cx: &App) -> Div {
         let theme = cx.theme();
         let disc = div()
             .size(px(18.))
@@ -250,7 +253,7 @@ impl Workbench {
             .flex()
             .items_center()
             .justify_center()
-            .map(|d| if done { d.bg(theme.green.opacity(0.16)).child(Icon::new(IconName::Check).with_size(px(11.)).text_color(theme.green)) } else { d.border_1().border_color(theme.border) });
+            .map(|d| if done { d.bg(ink.opacity(0.16)).child(Icon::new(IconName::Check).with_size(px(11.)).text_color(ink)) } else { d.border_1().border_color(theme.border) });
         h_flex()
             .h(px(26.))
             .gap(px(10.))
@@ -263,6 +266,7 @@ impl Workbench {
     fn agent_card(&self, a: &'static Agent, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let display = crate::fonts::display_family(cx);
+        let ink = agent_ink(a, &theme);
         let found = self.agent_found(a.id);
         let installed = found.is_some_and(|f| f.installed());
         let signed = found.is_some_and(|f| f.signed);
@@ -276,15 +280,15 @@ impl Workbench {
             .border_t_1()
             .border_b_1()
             .border_color(theme.border)
-            .child(self.agent_fact(installed, if found.is_none() { "Looking…" } else if installed { "Installed" } else { "Not installed" }, version, cx))
-            .child(self.agent_fact(signed, if signed { "Signed in" } else { "No sign-in seen" }, String::new(), cx))
-            .child(self.agent_fact(sessions > 0, if sessions > 0 { "Sessions kept" } else { "No sessions yet" }, if sessions > 0 { sessions.to_string() } else { String::new() }, cx));
+            .child(self.agent_fact(installed, if found.is_none() { "Looking…" } else if installed { "Installed" } else { "Not installed" }, version, ink, cx))
+            .child(self.agent_fact(signed, if signed { "Signed in" } else { "No sign-in seen" }, String::new(), ink, cx))
+            .child(self.agent_fact(sessions > 0, if sessions > 0 { "Sessions kept" } else { "No sessions yet" }, if sessions > 0 { sessions.to_string() } else { String::new() }, ink, cx));
         let ready = installed && signed;
         let foot = h_flex()
             .gap(px(6.))
             .items_center()
-            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(if ready { theme.muted_foreground } else { theme.primary }).child(if ready { "Details" } else { "Set up" }))
-            .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(if ready { theme.muted_foreground.opacity(0.7) } else { theme.primary }));
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(if ready { theme.muted_foreground } else { ink }).child(if ready { "Details" } else { "Set up" }))
+            .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(if ready { theme.muted_foreground.opacity(0.7) } else { ink }));
         let id = a.id;
         v_flex()
             .id(SharedString::from(format!("agent-card-{id}")))
@@ -297,7 +301,7 @@ impl Workbench {
             .border_color(theme.border)
             .bg(if theme.mode.is_dark() { theme.muted.opacity(0.35) } else { theme.popover })
             .cursor_pointer()
-            .hover(|s| s.border_color(theme.primary.opacity(0.55)).bg(theme.primary.opacity(0.05)))
+            .hover(move |s| s.border_color(ink.opacity(0.55)).bg(ink.opacity(0.05)))
             .on_click(cx.listener(move |this, _, _, cx| this.show_agents(Some(id), cx)))
             .child(self.agent_tile(a, px(52.), cx))
             .child(
@@ -318,6 +322,8 @@ impl Workbench {
         let theme = cx.theme().clone();
         let key = SharedString::from(key);
         let done = self.copied.as_ref() == Some(&key);
+        // Inside an agent's page the tick is in that agent's colour.
+        let tick = Some(self.page == Page::Agents).filter(|on| *on).and(self.agent_open).and_then(agents::by_id).map(|a| agent_ink(a, &theme)).unwrap_or(theme.green);
         let hover_bg = theme.foreground.opacity(0.08);
         let copy = div()
             .id(key.clone())
@@ -331,7 +337,7 @@ impl Workbench {
             .hover(move |s| s.bg(hover_bg))
             .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| this.copy_text(key.clone(), command.to_string(), cx)))
-            .child(Icon::new(if done { IconName::Check } else { IconName::Copy }).with_size(px(14.)).text_color(if done { theme.green } else { theme.muted_foreground }));
+            .child(Icon::new(if done { IconName::Check } else { IconName::Copy }).with_size(px(14.)).text_color(if done { tick } else { theme.muted_foreground }));
         h_flex()
             .w_full()
             .min_h(px(38.))
@@ -351,7 +357,7 @@ impl Workbench {
 
     /// One step of setting an agent up: its number on a disc, a tick
     /// once it is done, and a line down to the next.
-    fn agent_step(&self, n: usize, done: bool, last: bool, title: String, note: Option<String>, body: Div, cx: &App) -> Div {
+    fn agent_step(&self, n: usize, done: bool, last: bool, title: String, note: Option<String>, body: Div, ink: Hsla, cx: &App) -> Div {
         let theme = cx.theme();
         let disc = div()
             .size(px(24.))
@@ -362,7 +368,7 @@ impl Workbench {
             .justify_center()
             .text_size(px(12.))
             .font_weight(FontWeight::SEMIBOLD)
-            .map(|d| if done { d.bg(theme.green.opacity(0.16)).child(Icon::new(IconName::Check).with_size(px(13.)).text_color(theme.green)) } else { d.border_1().border_color(theme.border).text_color(theme.muted_foreground).child(n.to_string()) });
+            .map(|d| if done { d.bg(ink.opacity(0.16)).child(Icon::new(IconName::Check).with_size(px(13.)).text_color(ink)) } else { d.border_1().border_color(theme.border).text_color(theme.muted_foreground).child(n.to_string()) });
         let rail = v_flex().w(px(24.)).flex_shrink_0().items_center().gap(px(6.)).child(disc).when(!last, |d| d.child(div().w(px(1.)).flex_1().min_h(px(12.)).bg(theme.border)));
         let head = h_flex()
             .min_h(px(24.))
@@ -378,6 +384,10 @@ impl Workbench {
     fn agent_inside(&self, a: &'static Agent, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let display = crate::fonts::display_family(cx);
+        let ink = agent_ink(a, &theme);
+        // The pills here light up in the agent's colour, not the accent.
+        let mut tinted = theme.clone();
+        tinted.primary = ink;
         let found = self.agent_found(a.id).cloned();
         let installed = found.as_ref().is_some_and(|f| f.installed());
         let prose = |words: String, cx: &App| div().text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.85)).child(self.selectable(&words, cx));
@@ -406,7 +416,7 @@ impl Workbench {
                     .child(h_flex().gap(px(12.)).items_center().child(div().min_w_0().truncate().text_size(px(30.)).font_family(display).child(a.name)).child(self.agent_chip(a, cx)))
                     .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(a.maker)),
             );
-        let links = h_flex().gap(px(8.)).items_center().child(link("agent-site", "Website", a.site, &theme)).child(link("agent-docs", "Documentation", a.docs, &theme)).child(div().flex_1()).child(self.check_button(cx));
+        let links = h_flex().gap(px(8.)).items_center().child(link("agent-site", "Website", a.site, &tinted)).child(link("agent-docs", "Documentation", a.docs, &tinted)).child(div().flex_1()).child(self.check_button(cx));
 
         // Installing: where it is once it is there; the ways to get it
         // until then, for the system chosen.
@@ -472,9 +482,9 @@ impl Workbench {
             .border_1()
             .border_color(theme.border)
             .bg(if theme.mode.is_dark() { theme.muted.opacity(0.35) } else { theme.popover })
-            .child(self.agent_step(1, installed, false, format!("Install {}", a.name), installed.then(|| "Done".to_string()), install, cx))
-            .child(self.agent_step(2, signed, false, "Sign in".into(), signed.then(|| "Done".to_string()), sign, cx))
-            .child(self.agent_step(3, a.reads.is_some() && installed, true, "Use it with Emaki".into(), None, v_flex().child(emaki), cx));
+            .child(self.agent_step(1, installed, false, format!("Install {}", a.name), installed.then(|| "Done".to_string()), install, ink, cx))
+            .child(self.agent_step(2, signed, false, "Sign in".into(), signed.then(|| "Done".to_string()), sign, ink, cx))
+            .child(self.agent_step(3, a.reads.is_some() && installed, true, "Use it with Emaki".into(), None, v_flex().child(emaki), ink, cx));
 
         let mut page = v_flex().w_full().max_w(CONTENT_W).pt(px(20.)).pb(px(40.)).gap(px(16.)).child(crumb).child(head).child(prose(a.about.to_string(), cx)).child(links).child(steps);
 
@@ -514,7 +524,7 @@ impl Workbench {
                         .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(theme.muted_foreground.opacity(0.7))),
                 );
             }
-            let all = h_flex().child(pill_button("agent-all-sessions", format!("All {} in {}", plural(sessions.len(), "session", "sessions"), plural(total, "project", "projects")), &theme, {
+            let all = h_flex().child(pill_button("agent-all-sessions", format!("All {} in {}", plural(sessions.len(), "session", "sessions"), plural(total, "project", "projects")), &tinted, {
                 let entity = cx.entity().downgrade();
                 move |_, _, cx| {
                     let _ = entity.update(cx, |this, cx| this.show_sessions_in(Scope::Agent(agent), None, cx));

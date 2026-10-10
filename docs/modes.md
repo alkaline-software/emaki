@@ -13,7 +13,12 @@ and `render_notice` in `crates/emaki-app/src/transcript.rs`.
   flags nothing outside can read (`isBypassPermissionsModeAvailable`,
   `isAutoModeAvailable`, a gate), and a mode after plan can be bypass.
   Counting twice ended in the wrong mode on a live session. One press for
-  one press, and the pill shows where it landed.
+  one press, and the pill shows where it landed. A mode picked from the
+  list is walked to the same way (`walk_mode`): one press, the screen
+  read, and another press only once the screen names another mode that
+  is not the one picked.
+- Nothing is sent while a walk is on its way. A mode it passes through
+  is not one the person chose, and can be the one that asks nothing.
 - No wait here is a length of time. `terminal_ready` and `watch_terminal`
   wait on states; a slow machine takes as long as it takes.
 - Never type into a terminal whose registry record says `waiting`: a
@@ -106,15 +111,47 @@ there, and what asked for that was not found.
 
 `Workbench::pill_clicked`:
 
-- No session yet: the pills show what a new session starts in, and a click
-  opens Settings on New sessions, which has the two remaining lists
-  (`picker`).
-- Mode: one ⇧Tab (`cycle_mode`). The mode has no command and no picker;
-  Claude Code's key bindings offer only `chat:cycleMode`.
+- No session yet (the home page, or a session begun from a folder with
+  nothing sent): the three pills are lists of what a new session of
+  that agent starts in, and Settings on New sessions has the same
+  lists for one agent at a time, whichever agent the composer is on
+  (`new_options`): a segmented control of the agents' marks at the right
+  of the section's title chooses, and the agent is named over its rows. Claude Code's are in `config.json`
+  (`driver.default_mode`, `default_model`, `default_effort`), Codex's in
+  `ui.json` (`codex_next`). A hidden terminal is started with
+  `--permission-mode`, `--model` and `--effort`; the headless driver
+  takes the first two as options and the effort as its first `/effort`
+  turn. An effort's list there begins with "Default", which asks for
+  none and leaves the agent its own level: the one row on any list that
+  is ours, since nothing else undoes a pick. A level the model chosen
+  does not take is dropped when the model changes. A pill with no list
+  to show (the agent not asked yet) opens Settings.
+- Mode: a list, as the other two are, each mode in its pill's colour.
+  Claude Code lists more modes than its ⇧Tab reaches (`dontAsk` is set
+  by a flag or a setting only, and which of the rest are in the round
+  goes by the session), and nothing says which. So the round is learned
+  from the key itself (`learn_cycle`): the modes it lands on in a row,
+  closed when one comes up a second time, kept in `ui.json`
+  (`mode_cycle`). Once a round is known, the list on a session whose
+  mode the key moves offers that round and the mode it is in; until
+  then, every mode listed. No mode's name is written here for this. The
+  mode has no command and no picker of Claude Code's own; its key
+  bindings offer only `chat:cycleMode`. So a pick with a terminal behind
+  the session is a walk (`walk_mode`, `walk_on`): ⇧Tab once, and each
+  time the screen is read and names a new mode that is not the one
+  picked, once more. It ends on the mode picked; back where it began,
+  which means this session's ⇧Tab does not reach that mode, and the row
+  says so; or when the screen stays unread after a press (`walk_look`
+  looks again a bounded number of times). The modes passed through are
+  not said in the conversation. The person's own ⇧Tab ends a walk. With
+  a headless driver behind the session a pick is the driver's to set.
+  ⇧Tab in the composer is still one step (`cycle_mode`).
 - Model, effort: a list each, opening up from its pill (`pick_pill`,
   `PickMenu`, the one the settings panel's two pills have): the agent's
   own choices with its line on each, an effort in its colour, the current
-  one ticked. It follows its pill (`pill_at`, measured at each draw) and
+  one ticked. A row under the pointer and the current one are a wash
+  of the ink in the dark appearance, whose own hover colour is a shade
+  off the card and was not seen. It follows its pill (`pill_at`, measured at each draw) and
   comes and goes in motion (`docs/window.md`, Motion). A pick is
   `pill_picked`: the agent's command with the value, `/model <key>` or
   `/effort <key>`, through `run_in_terminal`, which starts the hidden
@@ -249,7 +286,7 @@ tinted plate.
 ## Probing
 
 - `EMAKI_GO=pill:mode` clicks the mode pill; `pill:model` and `pill:effort`
-  open Claude Code's own picker on the card. `EMAKI_GO=pick:effort`, `pick:model` or
+  open Claude Code's own picker on the card. `EMAKI_GO=pickmode:<key>` picks a mode from the list (on a terminal session, the walk). `EMAKI_GO=pick:effort`, `pick:model` or
   `pick:default-mode` (with `EMAKI_SETTINGS=sessions`) opens that pill's
   list and `pick:off` closes it; `effort:<key>` or `model:<key>` picks
   from it. `dialogdemo` holds a sample question on the dialog card

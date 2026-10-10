@@ -44,6 +44,9 @@ pub struct UiState {
     /// session starts in: its mode, model and effort.
     pub new_agent: Option<String>,
     pub codex_next: Option<[String; 3]>,
+    /// The modes Claude Code's ⇧Tab goes round, as last seen to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_cycle: Option<Vec<String>>,
     /// `sessions`, `session` or `new`.
     pub page: String,
     /// Session keys (`<agent>:<id>`) with a tab, in tab order.

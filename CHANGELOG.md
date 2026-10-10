@@ -5,6 +5,21 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.0
+
+- Codex joins Claude Code: its sessions are kept, read and searched, and you can start, continue and stop one from the window, with its approvals, questions and plans on the same cards.
+- Codex's own terminal is on the terminal panel, joined to the same session, so a turn typed there shows in the conversation and the other way round.
+- An Agents page (⌘E) says which agents are installed and signed in, with the commands to set one up and a shell beside them.
+- A new session's agent is chosen on the strip under the composer, also on one begun from a project's plus. Its mode, effort and model are lists there, and Settings, New sessions has them for each agent.
+- The mode pill opens a list for Claude Code too, in each mode's colour; ⇧Tab still steps as in the terminal.
+- The row under the composer shows context and usage for Codex, with whatever windows its plan has.
+- Each agent has its colour: Claude's terracotta and Codex's green, on its mark and on its page.
+- Tabs keep a readable width and scroll once they no longer fit, the tab you are on stays in view, and ⌘ shows 1 to 9 on the tabs those keys go to.
+- Branches: fetch, make a branch from the list, publish a local one, and see how to sign in when the remote refuses.
+- A plan is shown on its approval card and stays in the conversation, and tool calls, thoughts and rows open and close in motion.
+- The archive is a folder an agent; an older one is moved into place at launch.
+- Fixes: a session begun from a folder no longer ends with "No conversation found", and lists in the dark appearance show the row under the pointer.
+
 ## v0.1.9
 
 - Edit files in the pane beside the conversation and save with ⌘S. Unsaved changes are never lost without asking, and git's changes are marked in the margin, each with a card to see or revert it.

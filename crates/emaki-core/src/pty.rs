@@ -136,9 +136,9 @@ pub fn for_pid(pid: i32) -> Option<Arc<Pty>> {
 }
 
 /// The command for an interactive Claude Code on `session_id`: resumed,
-/// or begun under that id in the mode and with the model given ("" for
-/// Claude Code's own defaults).
-pub fn claude_argv(session_id: &str, resume: bool, mode: &str, model: &str) -> Vec<String> {
+/// or begun under that id in the mode, with the model and at the effort
+/// level given ("" for Claude Code's own defaults).
+pub fn claude_argv(session_id: &str, resume: bool, mode: &str, model: &str, effort: &str) -> Vec<String> {
     let bin = driver::claude_binary().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "claude".into());
     let mut argv = vec![bin, if resume { "--resume".into() } else { "--session-id".to_string() }, session_id.to_string()];
     if !resume {
@@ -147,6 +147,9 @@ pub fn claude_argv(session_id: &str, resume: bool, mode: &str, model: &str) -> V
         }
         if !model.is_empty() && model != "default" {
             argv.extend(["--model".to_string(), model.to_string()]);
+        }
+        if !effort.is_empty() {
+            argv.extend(["--effort".to_string(), effort.to_string()]);
         }
     }
     argv

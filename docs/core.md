@@ -166,7 +166,11 @@ to it.
   a rollout without those rows is read off the model's tail as before.
 - **Tokens**: `token_count` rows are running totals with cached tokens
   inside `input_tokens`. The last request's `input_tokens` is the context
-  in use.
+  in use, and `model_context_window` the size it is in. The same row
+  carries the account's usage windows (`rate_limits`: `primary` and
+  `secondary`, each with its length in minutes, either of which can be
+  null), kept as `Session::usage_windows` for the row under the composer
+  (`docs/composer.md`). A row can have the windows with `info` null.
 - **The title** is the thread's name when the person gave one. Names are
   not in the rollout: `session_index.jsonl` has a row a naming, the
   newest last. Nothing else in Codex's home is opened.

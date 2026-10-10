@@ -1034,9 +1034,14 @@ fn a_codex_script_is_shown_by_what_it_ran() {
     rows.push(cx::script("03", "call_1", "const r = await tools.exec_command({cmd:\"echo hello\",\"max_output_tokens\":200});\ntext(r.output);\n"));
     rows.push(cx::command("04", "exec-1", "echo hello", "", "completed", 0));
     rows.push(cx::script_out("04", "call_1", "hello\n"));
-    rows.push(cx::ev("05", json!({"type": "token_count", "info": {"total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 50}, "last_token_usage": {"input_tokens": 700, "cached_input_tokens": 600, "output_tokens": 20}}})));
+    rows.push(cx::ev("05", json!({"type": "token_count", "info": {"total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 50}, "last_token_usage": {"input_tokens": 700, "cached_input_tokens": 600, "output_tokens": 20}, "model_context_window": 258400}, "rate_limits": {"primary": {"used_percent": 20.0, "window_minutes": 300, "resets_at": 1794215254}, "secondary": {"used_percent": 5.0, "window_minutes": 10080, "resets_at": 1794815254}}})));
     // Mid-turn: the words so far are commentary, and the turn is running.
     let s = build_codex(&rows, "");
+    // The row under the composer: the window's size, and the account's
+    // windows named by their own lengths.
+    assert_eq!((s.context_tokens, s.context_window), (700, 258400));
+    assert_eq!(s.usage_windows.iter().map(|w| (w.label(), w.used)).collect::<Vec<_>>(), vec![("5h".to_string(), 0.2), ("7d".to_string(), 0.05)]);
+    assert!(s.usage_windows_at > 0.0);
     assert_eq!(emaki_core::adapters::turn_state_from_session(&s).phase, Phase::Working);
 
     rows.extend(cx::says("06", "It printed hello.", "final_answer"));

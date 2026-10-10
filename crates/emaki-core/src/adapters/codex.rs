@@ -993,7 +993,28 @@ impl Builder {
                 }
             }
             "token_count" => {
+                // The account's windows ride on the same row, with or
+                // without the tokens: a primary and a secondary, each of
+                // whatever length the plan has.
+                if let Some(limits) = payload.get("rate_limits").filter(|l| !l.is_null()) {
+                    let windows: Vec<UsageWindow> = ["primary", "secondary"]
+                        .iter()
+                        .filter_map(|k| limits.get(*k).filter(|w| !w.is_null()))
+                        .filter_map(|w| {
+                            let used = w.get("used_percent").and_then(Value::as_f64)?;
+                            Some(UsageWindow { minutes: u64_of(w, "window_minutes"), used: used / 100.0, resets_at: w.get("resets_at").and_then(Value::as_f64).unwrap_or(0.0) })
+                        })
+                        .collect();
+                    if !windows.is_empty() {
+                        self.s.usage_windows = windows;
+                        self.s.usage_windows_at = crate::build::parse_ts(ts).map(|t| t.timestamp() as f64).unwrap_or(0.0);
+                    }
+                }
                 let Some(info) = payload.get("info").filter(|i| !i.is_null()) else { return };
+                let window = u64_of(info, "model_context_window");
+                if window > 0 {
+                    self.s.context_window = window;
+                }
                 // Cumulative totals: the latest is the session's, and what
                 // it grew by since a round began is that round's.
                 if let Some(u) = info.get("total_token_usage") {

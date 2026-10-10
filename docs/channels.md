@@ -152,8 +152,7 @@ Stop, the queue and the pills' setters are the same code for both.
   `collaborationMode/list`, `skills/list`. No model call, no session.
   The slash list is `/compact`, which the driver runs itself
   (`thread/compact/start`), and the folder's skills, sent as skill items.
-- Not done: Codex's rate limits on the row under the composer and a
-  rename from the window. Its other commands (`/rename`, `/status`,
+- Not done: a rename from the window. Its other commands (`/rename`, `/status`,
   `/review`) are typed in its terminal on the panel.
 
 ## The inbox
