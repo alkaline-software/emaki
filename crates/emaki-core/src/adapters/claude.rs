@@ -40,18 +40,12 @@ impl Adapter for ClaudeAdapter {
             return false;
         }
         let s = path.to_string_lossy();
-        // Sidecars are not sessions; the archive's `_agent` subtrees are not ours.
+        // Sidecars are not sessions.
         if s.contains("/subagents/") || s.contains("/tool-results/") {
             return false;
         }
         let in_projects = path.starts_with(&self.projects);
-        let in_archive = path.starts_with(paths::archive_dir())
-            && path
-                .strip_prefix(paths::archive_dir())
-                .ok()
-                .and_then(|r| r.components().next())
-                .map(|c| !c.as_os_str().to_string_lossy().starts_with('_'))
-                .unwrap_or(false);
+        let in_archive = path.starts_with(paths::archive_dir().join(AgentId::ClaudeCode.archive_subdir()));
         in_projects || in_archive
     }
 

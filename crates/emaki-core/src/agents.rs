@@ -183,28 +183,6 @@ const ALL: &[Agent] = &[
         docs: "https://developers.openai.com/codex/cli",
         reads: Some(AgentId::Codex),
     },
-    Agent {
-        id: "gemini",
-        name: "Gemini CLI",
-        maker: "Google",
-        about: "Google's open-source agent for the terminal, with the Gemini models.",
-        bins: &["gemini"],
-        install: &[
-            Way { os: ANY, by: "npm (needs Node.js)", command: "npm install -g @google/gemini-cli" },
-            Way { os: MAC, by: "Homebrew", command: "brew install gemini-cli" },
-        ],
-        sign_in: "gemini",
-        sign_in_how: "The first run asks how to sign in. Choose Sign in with Google and a browser opens.",
-        plans: "Takes a Google account with a paid Gemini plan, or a Gemini API key. Google's documentation says accounts on the unpaid tier were moved to its Antigravity CLI in June 2026.",
-        key_env: &["GEMINI_API_KEY"],
-        home: "~/.gemini",
-        signed: &["~/.gemini/oauth_creds.json"],
-        keychain: "",
-        version_arg: "--version",
-        site: "https://geminicli.com",
-        docs: "https://geminicli.com/docs",
-        reads: Some(AgentId::Gemini),
-    },
 ];
 
 /// What looking for one agent found.

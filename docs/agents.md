@@ -30,16 +30,17 @@ the sidebar.
 ## Two lists
 
 `agents::all()` is every agent the window can speak of; `AgentId` and
-`adapters` are the ones whose sessions are read, which today is all
-three. `Agent::reads` joins
-them. An agent with no adapter gets a card and a page, and its page says
+`adapters` are the ones whose sessions are read, which today is both.
+`Agent::reads` joins them. An agent with no adapter gets a card and a page, and its page says
 its sessions are not read. A new adapter sets `reads` on its entry and
 nothing else here changes.
 
-The catalogue is three on purpose: Claude Code, Codex and Gemini CLI.
-Twelve were listed at first, and nine were cut: a card for an agent whose
-sessions are not read promised more than the app does. After the last
-card the page draws one that is no agent's, saying more are coming.
+The catalogue is two on purpose: Claude Code and Codex. Twelve were
+listed at first, and nine were cut: a card for an agent whose sessions
+are not read promised more than the app does. Gemini CLI was the third
+and was cut too, once Google closed it to personal accounts (June 2026):
+its sign-in fails for most people, and a saved sign-in file says nothing
+of whether Google still serves the account.
 
 ## Looking
 
@@ -63,18 +64,22 @@ address, Homebrew's page for the formula or cask, npm's or PyPI's for
 the package. A host that answers "not found" marks the command on the
 agent's page; no network, or a host that will not say, marks nothing.
 It cannot tell that a maker now recommends another way. The network is
-asked at "Check again", and otherwise on a visit to the page when the
+asked at the refresh button, and otherwise on a visit to the page when the
 last answer is a day old; never at launch.
 
 ## The page
 
 Two levels, as the sessions page has (`Workbench::agent_open`).
 
-- The cards: one grid in the catalogue's order, whatever is installed,
-  so a card stays where it is when that changes. The head is the name
-  and the refresh button and nothing else; a line under it appears only
-  when an install command's source is gone. A card says the maker, what the agent is, and at
-  its foot the version, a sign-in and the sessions kept, or "Set up".
+- The cards: side by side in the catalogue's order, whatever is
+  installed, so a card stays where it is when that changes. The head is
+  the name and the refresh button and nothing else; a line under it
+  appears only when an install command's source is gone. A card is the
+  mark, the name, the maker, what the agent is, then three lines of where
+  it stands (the program and its version, a sign-in, the sessions kept),
+  each with a tick when it is so, and at its foot "Set up" in the accent
+  until it is installed and signed in, "Details" after. The sign-in line
+  without a tick says "No sign-in seen", never "signed out".
 - Inside one, the page's words can be selected and copied as a
   conversation's can (`Workbench::selectable`: each is drawn by the
   markdown view with markdown's marks escaped, and a right click is the

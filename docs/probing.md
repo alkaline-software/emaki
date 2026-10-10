@@ -42,7 +42,8 @@ EMAKI_GO=terminal EMAKI_OPEN=<id> ./target/debug/Emaki  # press "go to the termi
 EMAKI_GO=type:/status EMAKI_OPEN=<id> ./target/debug/Emaki  # type that into its terminal and send
 EMAKI_GO=pill:effort EMAKI_OPEN=<id> ./target/debug/Emaki  # click a pill: pill:mode, pill:model, pill:effort; step:mode is ⇧Tab
 EMAKI_GO="step:mode;button:terminal" EMAKI_OPEN=<id> ./target/debug/Emaki  # several steps, five seconds apart; button:terminal is the top-right button
-EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value without the picker: effort:, model:
+EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value without the picker: effort:, model:, mode:
+EMAKI_GO="page:new;newfolder:<path>;newagent:codex;say:<words>" EMAKI_OPEN=<id> ./target/debug/Emaki  # a new Codex session: the folder, the agent, a message (a real model call); allow, deny and stop answer the oldest card and stop the turn; pick:mode and pick:agent open those lists
 EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to another session, or to the new-session page
 EMAKI_GO="page:new;pick:folder" EMAKI_OPEN=<id> ./target/debug/Emaki  # the new-session page's list of folders (steps wait for a session to be open, so name one)
 EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar

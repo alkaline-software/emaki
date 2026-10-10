@@ -16,7 +16,6 @@ pub struct Assets;
 const OWN: &[(&str, &[u8])] = &[
     ("icon/app.png", include_bytes!("../assets/icon/icon-128.png")),
     ("icons/agents/codex.svg", include_bytes!("../assets/icons/agents/codex.svg")),
-    ("icons/agents/gemini.svg", include_bytes!("../assets/icons/agents/gemini.svg")),
     ("icons/sparkles.svg", include_bytes!("../assets/icons/sparkles.svg")),
     ("icons/refresh.svg", include_bytes!("../assets/icons/refresh.svg")),
     ("icons/briefcase.svg", include_bytes!("../assets/icons/briefcase.svg")),

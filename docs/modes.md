@@ -77,6 +77,24 @@ conversation's lines (`PillText`, `render_notice`) the value is semibold.
 Tried and dropped: the mode's colour read off the terminal and used in
 both appearances; effort levels coloured by their place alone.
 
+## Codex's modes
+
+One key for two things Codex keeps apart (`codex.rs`): a permission
+profile (`read-only`, `workspace`, `danger-full-access`, or one the
+person's config adds; each sent with the approval policy Codex's own
+presets pair it with) and its plan collaboration mode (`plan`), which
+sits over a profile and goes back to it. Every change sends the
+collaboration mode whole, since it carries a model and an effort that win
+over the plain ones.
+
+All three pills are lists for Codex, on the home page too: a session not
+started keeps the choices for when it is (`codex_next`, in `ui.json`),
+and a started one is told through its driver (`codex_set`). The mode is
+picked, not stepped to: a click that could land on Full Access by its
+place in a list is not offered. ⇧Tab is Codex's own: into plan and back.
+A new session starts in `workspace`; left to itself Codex starts one in
+a folder it does not know read-only.
+
 ## The three pills
 
 `composer_pill`: an icon and the value, no tooltip, caret or list. The

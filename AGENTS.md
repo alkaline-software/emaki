@@ -4,7 +4,7 @@
 
 **Emaki** is a desktop app (Rust + GPUI, `crates/`) that keeps every
 coding-agent session on this machine byte for byte, renders each to markdown,
-searches all of them, and lets you continue a Claude Code session from the
+searches all of them, and lets you continue a Claude Code or Codex session from the
 window. Nothing here enters a session's context window, and nothing ever
 writes to a transcript. It grew out of a Python CLI and web daemon, removed
 on 2026-09-29; git before that date has them.
@@ -126,7 +126,7 @@ handed work on one of these files is told to read the doc too.
 | The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, the notice and limits row in `workbench.rs`; `a11y.rs`; `emaki-core/src/files.rs`, `check.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
 | The pills, pickers, mode/model/effort notices; `emaki-core/src/options.rs`; `mode_*`, `effort_*`, `model_*`, `options_from` in `driver.rs` | `docs/modes.md` |
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
-| `emaki-core/src/driver.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
+| `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs`, `indent.rs`, `format.rs`, `office.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
@@ -148,13 +148,14 @@ rows: go by what the code you are changing does.
 Cargo.toml                 workspace; the zed revision is pinned in Cargo.lock
 crates/emaki-core/        everything without a window
   src/model.rs               Session / Round / Item / ToolCall, plus AgentId
-  src/adapters/              one per agent: claude.rs, codex.rs, gemini.rs; index_all()
+  src/adapters/              one per agent: claude.rs, codex.rs; index_all()
   src/transcript.rs          JSONL tail-by-offset, peek(), the cheap index
   src/build.rs               Claude rows -> model, turn_state()
   src/archive.rs             copy-first mirror; runs before anything renders
   src/render_md.rs store.rs  model -> CommonMark on disk
   src/search.rs              FTS5 over every item, ~/.emaki/search.db
-  src/driver.rs              a headless `claude -p` child on stream-json
+  src/driver.rs              a headless `claude -p` child on stream-json, and `Drive`, what any agent's child answers to
+  src/codex.rs               Codex driven through its app server: turns, approvals, questions, its modes and models
   src/outline.rs             a conversation's outline: an entry a round, and the labels a small model writes for them
   src/agents.rs              the coding agents there are: whether each is installed here, and how to install one and sign in
   src/options.rs             the modes, models and effort levels an agent offers, as it lists them

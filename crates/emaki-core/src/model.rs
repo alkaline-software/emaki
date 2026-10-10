@@ -17,17 +17,15 @@ use serde_json::{Map, Value};
 pub enum AgentId {
     ClaudeCode,
     Codex,
-    Gemini,
 }
 
 impl AgentId {
-    pub const ALL: [AgentId; 3] = [AgentId::ClaudeCode, AgentId::Codex, AgentId::Gemini];
+    pub const ALL: [AgentId; 2] = [AgentId::ClaudeCode, AgentId::Codex];
 
     pub fn as_str(self) -> &'static str {
         match self {
             AgentId::ClaudeCode => "claude-code",
             AgentId::Codex => "codex",
-            AgentId::Gemini => "gemini",
         }
     }
 
@@ -35,7 +33,6 @@ impl AgentId {
         match self {
             AgentId::ClaudeCode => "Claude Code",
             AgentId::Codex => "Codex",
-            AgentId::Gemini => "Gemini CLI",
         }
     }
 
@@ -43,20 +40,18 @@ impl AgentId {
         match s {
             "claude-code" => Some(AgentId::ClaudeCode),
             "codex" => Some(AgentId::Codex),
-            "gemini" => Some(AgentId::Gemini),
             _ => None,
         }
     }
 
-    /// Where this agent's sessions live inside `~/.emaki/archive`. Claude Code
-    /// keeps the original flat layout (`archive/<project>/`) so an archive made
-    /// by the Python Emaki is read unchanged; every other agent gets a
-    /// leading-underscore directory, which no project slug can ever be.
+    /// Where this agent's sessions live inside `~/.emaki/archive`: a folder
+    /// an agent, and in it a folder a project. An archive from before
+    /// Claude Code had a folder of its own is moved into this shape
+    /// (`archive::settle_layout`).
     pub fn archive_subdir(self) -> &'static str {
         match self {
-            AgentId::ClaudeCode => "",
-            AgentId::Codex => "_codex",
-            AgentId::Gemini => "_gemini",
+            AgentId::ClaudeCode => "claude",
+            AgentId::Codex => "codex",
         }
     }
 
@@ -65,7 +60,6 @@ impl AgentId {
         match self {
             AgentId::ClaudeCode => "Claude",
             AgentId::Codex => "Codex",
-            AgentId::Gemini => "Gemini",
         }
     }
 }
@@ -473,6 +467,12 @@ pub struct Session {
     /// then is not in the file until the next turn.
     #[serde(default)]
     pub mode: String,
+    /// Whether a turn is running, for an agent whose transcript says
+    /// when one starts and ends (Codex: `task_started`, then
+    /// `task_complete` or `turn_aborted`). None where the rows do not
+    /// say, and the state is read off the model's tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_open: Option<bool>,
     /// The last prompt, when it was stopped before the agent did anything
     /// with it: taken out of `rounds`, as Claude Code's own terminal takes
     /// it back into its input, and kept here so the window can hand it

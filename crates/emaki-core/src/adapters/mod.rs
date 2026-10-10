@@ -9,7 +9,6 @@
 
 pub mod claude;
 pub mod codex;
-pub mod gemini;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -63,14 +62,13 @@ pub trait Adapter: Send + Sync {
 }
 
 pub fn all() -> Vec<Box<dyn Adapter>> {
-    vec![Box::new(claude::ClaudeAdapter::new()), Box::new(codex::CodexAdapter::new()), Box::new(gemini::GeminiAdapter::new())]
+    vec![Box::new(claude::ClaudeAdapter::new()), Box::new(codex::CodexAdapter::new())]
 }
 
 pub fn for_agent(agent: AgentId) -> Box<dyn Adapter> {
     match agent {
         AgentId::ClaudeCode => Box::new(claude::ClaudeAdapter::new()),
         AgentId::Codex => Box::new(codex::CodexAdapter::new()),
-        AgentId::Gemini => Box::new(gemini::GeminiAdapter::new()),
     }
 }
 
@@ -129,29 +127,58 @@ pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
 }
 
 /// Where a session stands, for agents whose transcripts carry no stop reason:
-/// derived from the built model's tail.
+/// derived from the built model's tail. Where the transcript says when a
+/// turn starts and ends (`Session::turn_open`), that decides between
+/// working and not: words said in an open turn are commentary on the way,
+/// and a call left pending in a turn that is over is not running.
 pub fn turn_state_from_session(s: &Session) -> TurnState {
+    use crate::model::{Item, NoticeVariant, ToolKind};
     let mut st = TurnState::default();
     let Some(last) = s.rounds.last() else { return st };
     st.turn_started = last.ts.clone();
     st.since = if last.end_ts.is_empty() { last.ts.clone() } else { last.end_ts.clone() };
-    if let Some(call) = last.tool_calls().filter(|c| c.status == CallStatus::Pending).last() {
-        st.phase = Phase::Working;
+    let pending = last.tool_calls().filter(|c| c.status == CallStatus::Pending).last();
+    if let Some(call) = pending.filter(|_| s.turn_open != Some(false)) {
+        st.phase = if call.tool_kind == ToolKind::Ask { Phase::NeedsYou } else { Phase::Working };
         st.activity = if call.subject.is_empty() { call.name.clone() } else { call.subject.clone() };
-        st.activity_kind = call.tool_kind.as_str().into();
+        st.activity_kind = if call.tool_kind == ToolKind::Ask { "ask".into() } else { call.tool_kind.as_str().into() };
         st.tool = call.name.clone();
         return st;
     }
-    // Stopped by the person, as the transcript says at the round's foot:
-    // a prompt with no reply under it would read as working for ever.
-    if matches!(last.items.last(), Some(crate::model::Item::Notice { variant: crate::model::NoticeVariant::Interrupted, .. })) {
-        st.phase = Phase::YourTurn;
-        st.activity = "interrupted".into();
-        st.activity_kind = "stop".into();
+    if s.turn_open == Some(true) {
+        st.phase = Phase::Working;
+        st.activity = if last.items.is_empty() { "reading the prompt" } else { "thinking" }.into();
+        st.activity_kind = "wait".into();
         return st;
     }
+    // Stopped by the person, as the transcript says at the round's foot:
+    // a prompt with no reply under it would read as working for ever. A
+    // setting changed since is said under the stop and is not what the
+    // round ended on.
+    let foot = last.items.iter().rev().find(|i| !matches!(i, Item::Notice { variant, .. } if variant.setting().is_some()));
+    match foot {
+        Some(Item::Notice { variant: NoticeVariant::Interrupted, .. }) => {
+            st.phase = Phase::YourTurn;
+            st.activity = "interrupted".into();
+            st.activity_kind = "stop".into();
+            return st;
+        }
+        Some(Item::Notice { variant: NoticeVariant::Error, .. }) if s.turn_open == Some(false) => {
+            st.phase = Phase::YourTurn;
+            st.activity = "failed".into();
+            st.activity_kind = "stop".into();
+            return st;
+        }
+        Some(Item::Tool(call)) if s.turn_open == Some(false) && call.tool_kind == ToolKind::Plan && call.status == CallStatus::Pending => {
+            st.phase = Phase::YourTurn;
+            st.activity = "plan ready".into();
+            st.activity_kind = "plan".into();
+            return st;
+        }
+        _ => {}
+    }
     if let Some(text) = last.items.iter().rev().find_map(|i| match i {
-        crate::model::Item::Text { md, .. } => Some(md),
+        Item::Text { md, .. } => Some(md),
         _ => None,
     }) {
         st.phase = Phase::YourTurn;
@@ -161,7 +188,11 @@ pub fn turn_state_from_session(s: &Session) -> TurnState {
         st.reply = crate::build::one_line(&first.replace("**", "").replace('`', ""), 160);
         return st;
     }
-    if !last.prompt.is_empty() {
+    if s.turn_open == Some(false) {
+        st.phase = Phase::YourTurn;
+        st.activity = "done".into();
+        st.activity_kind = "reply".into();
+    } else if !last.prompt.is_empty() {
         st.phase = Phase::Working;
         st.activity = "reading the prompt".into();
         st.activity_kind = "wait".into();

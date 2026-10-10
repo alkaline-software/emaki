@@ -29,7 +29,7 @@ const AGENT_PROJECTS: usize = 5;
 
 /// The agents with a mark of their own in `assets/icons/agents`; the
 /// rest wear the first letter of their name.
-const MARKS: &[&str] = &["codex", "gemini"];
+const MARKS: &[&str] = &["codex"];
 
 /// An agent's mark at `size` in `color`.
 pub fn agent_mark(a: &Agent, size: Pixels, color: Hsla) -> AnyElement {
@@ -217,117 +217,98 @@ impl Workbench {
             .child(agent_mark(a, side * 0.5, ink))
     }
 
-    /// The page's top level: a card an agent, the installed first.
+    /// The page's top level: the agents side by side, a tall card each.
     fn agents_cards(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let display = crate::fonts::display_family(cx);
-        let all = agents::all();
         // Said only when there is something to say: a command whose
         // source is gone.
         let stale = self.agents_stale.len();
         let warn = (stale > 0).then(|| div().text_size(px(12.5)).text_color(theme.danger).child(format!("{} no longer {} and may have changed; the agent's page says which.", plural(stale, "install command", "install commands"), if stale == 1 { "works" } else { "work" })));
-        // After the agents there are, a card that is no agent's: the
-        // catalogue is short on purpose, and says more are on the way.
-        let coming = || {
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .p(px(16.))
-                .gap(px(12.))
-                .rounded(px(14.))
-                .border_1()
-                .border_dashed()
-                .border_color(theme.border)
-                .child(
-                    h_flex()
-                        .gap(px(12.))
-                        .items_center()
-                        .child(div().size(px(40.)).flex_shrink_0().rounded(px(10.4)).border_1().border_dashed().border_color(theme.border).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(18.)).text_color(theme.muted_foreground)))
-                        .child(v_flex().flex_1().min_w_0().gap(px(1.)).child(div().truncate().text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child("More are coming")).child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child("In a later release"))),
-                )
-                .child(div().flex_1().min_h(px(38.)).text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child("Emaki starts with the three most used. Other coding agents will be added here as it learns to read their sessions."))
-        };
-        let grid = |list: Vec<&'static Agent>, last: bool, this: &Self, cx: &mut Context<Self>| {
-            let mut cells: Vec<AnyElement> = list.into_iter().map(|a| this.agent_card(a, cx)).collect();
-            if last {
-                cells.push(coming().into_any_element());
-            }
-            let mut rows = v_flex().w_full().gap(px(12.));
-            let mut cells = cells.into_iter();
-            while let Some(first) = cells.next() {
-                let second = cells.next().unwrap_or_else(|| div().flex_1().min_w_0().into_any_element());
-                rows = rows.child(h_flex().w_full().gap(px(12.)).items_stretch().child(first).child(second));
-            }
-            rows
-        };
-        // One grid in the catalogue's order, whatever is installed: a
+        // One row in the catalogue's order, whatever is installed: a
         // card says so itself, and stays where it is when that changes.
+        let cards: Vec<AnyElement> = agents::all().iter().map(|a| self.agent_card(a, cx)).collect();
         v_flex()
             .w_full()
             .max_w(CONTENT_W)
             .pt(px(20.))
             .pb(px(40.))
-            .gap(px(16.))
+            .gap(px(20.))
             .child(h_flex().items_center().gap(px(12.)).child(div().flex_1().min_w_0().text_size(px(30.)).font_family(display).child("Agents")).child(self.check_button(cx)))
             .children(warn)
-            .child(grid(all.iter().collect(), true, self, cx))
+            .child(h_flex().w_full().gap(px(16.)).items_stretch().children(cards))
+    }
+
+    /// One line of a card's standing: a tick on a disc when it is so, a
+    /// ring when it is not, and what there is to say of it at the right.
+    fn agent_fact(&self, done: bool, label: &'static str, value: String, cx: &App) -> Div {
+        let theme = cx.theme();
+        let disc = div()
+            .size(px(18.))
+            .flex_shrink_0()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .map(|d| if done { d.bg(theme.green.opacity(0.16)).child(Icon::new(IconName::Check).with_size(px(11.)).text_color(theme.green)) } else { d.border_1().border_color(theme.border) });
+        h_flex()
+            .h(px(26.))
+            .gap(px(10.))
+            .items_center()
+            .child(disc)
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if done { theme.foreground } else { theme.muted_foreground }).child(label))
+            .child(div().flex_shrink_0().text_size(px(12.)).text_color(theme.muted_foreground).child(value))
     }
 
     fn agent_card(&self, a: &'static Agent, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let display = crate::fonts::display_family(cx);
         let found = self.agent_found(a.id);
         let installed = found.is_some_and(|f| f.installed());
+        let signed = found.is_some_and(|f| f.signed);
         let sessions = self.agent_sessions(a).len();
-        // The card's foot: what is known of an installed one, or the way
-        // in for one that is not.
-        let mut facts: Vec<String> = Vec::new();
-        if let Some(f) = found.filter(|f| f.installed()) {
-            if !f.version.is_empty() {
-                facts.push(format!("v{}", f.version));
-            }
-            if f.signed {
-                facts.push("signed in".into());
-            }
-        }
-        if sessions > 0 {
-            facts.push(plural(sessions, "session", "sessions"));
-        }
-        let foot = if installed || sessions > 0 {
-            div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(facts.join(" · "))
-        } else {
-            div().flex_1().min_w_0().truncate().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(theme.primary).child(if found.is_some() { "Set up" } else { "" })
-        };
+        let version = found.filter(|f| !f.version.is_empty()).map(|f| format!("v{}", f.version)).unwrap_or_default();
+        // What stands: the program, a sign-in when one is seen (one not
+        // seen is not "signed out", so the line says only that), and the
+        // sessions kept.
+        let facts = v_flex()
+            .py(px(10.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(self.agent_fact(installed, if found.is_none() { "Looking…" } else if installed { "Installed" } else { "Not installed" }, version, cx))
+            .child(self.agent_fact(signed, if signed { "Signed in" } else { "No sign-in seen" }, String::new(), cx))
+            .child(self.agent_fact(sessions > 0, if sessions > 0 { "Sessions kept" } else { "No sessions yet" }, if sessions > 0 { sessions.to_string() } else { String::new() }, cx));
+        let ready = installed && signed;
+        let foot = h_flex()
+            .gap(px(6.))
+            .items_center()
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(if ready { theme.muted_foreground } else { theme.primary }).child(if ready { "Details" } else { "Set up" }))
+            .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(if ready { theme.muted_foreground.opacity(0.7) } else { theme.primary }));
         let id = a.id;
         v_flex()
             .id(SharedString::from(format!("agent-card-{id}")))
             .flex_1()
             .min_w_0()
-            .p(px(16.))
-            .gap(px(12.))
-            .rounded(px(14.))
+            .p(px(24.))
+            .gap(px(18.))
+            .rounded(px(16.))
             .border_1()
             .border_color(theme.border)
             .bg(if theme.mode.is_dark() { theme.muted.opacity(0.35) } else { theme.popover })
             .cursor_pointer()
             .hover(|s| s.border_color(theme.primary.opacity(0.55)).bg(theme.primary.opacity(0.05)))
             .on_click(cx.listener(move |this, _, _, cx| this.show_agents(Some(id), cx)))
+            .child(self.agent_tile(a, px(52.), cx))
             .child(
-                h_flex()
-                    .gap(px(12.))
-                    .items_center()
-                    .child(self.agent_tile(a, px(40.), cx))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(1.))
-                            .child(div().truncate().text_size(px(14.5)).font_weight(FontWeight::MEDIUM).child(a.name))
-                            .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(a.maker)),
-                    )
-                    .child(self.agent_chip(a, cx)),
+                v_flex()
+                    .gap(px(2.))
+                    .child(div().truncate().text_size(px(24.)).line_height(px(30.)).font_family(display).child(a.name))
+                    .child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(a.maker)),
             )
-            .child(div().flex_1().min_h(px(38.)).text_size(px(12.5)).line_height(px(19.)).text_color(theme.foreground.opacity(0.82)).child(a.about))
-            .child(h_flex().gap(px(8.)).items_center().child(foot).child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(theme.muted_foreground.opacity(0.7))))
+            .child(div().flex_1().min_h(px(40.)).text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.82)).child(a.about))
+            .child(facts)
+            .child(foot)
             .into_any_element()
     }
 

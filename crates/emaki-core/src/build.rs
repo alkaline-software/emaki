@@ -260,7 +260,7 @@ pub fn elapsed_ms(start: &str, end: &str) -> u64 {
 /// else the path with a `~`. The cwd is matched as a string prefix in either
 /// separator style, not through `Path`: Windows does not count a POSIX path
 /// as absolute, and a transcript written on one OS is read on another.
-pub(crate) fn rel(path: &str, cwd: &str) -> String {
+fn rel(path: &str, cwd: &str) -> String {
     if path.is_empty() {
         return String::new();
     }

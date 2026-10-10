@@ -445,6 +445,111 @@ fn main() {
                 println!("rounds={} title={:?} state={:?}", s.rounds.len(), s.title, emaki_core::build::turn_state(&emaki_core::transcript::read_all(&p), "").phase);
             }
         }
+        "codex" => {
+            // emaki-core codex options [cwd]: what a Codex session can be
+            // set to and the commands it takes; no model call.
+            // emaki-core codex drive <cwd> [--resume <id>] [--mode <m>]
+            // [--model <m>] [--effort <e>] [--deny] [--stop <secs>] <message...>:
+            // one turn through the app server (a real model call),
+            // printing each event; leave is given, or with --deny refused,
+            // and a question is answered with its first option.
+            use emaki_core::driver::Event;
+            match args.get(1).map(String::as_str) {
+                Some("options") => {
+                    let cwd = args.get(2).cloned().unwrap_or_default();
+                    match emaki_core::codex::catalogue(&cwd) {
+                        Ok(c) => {
+                            println!("{}", serde_json::to_string_pretty(&c.options).unwrap());
+                            for cmd in c.commands.iter().take(12) {
+                                println!("/{}  {}", cmd.name, cmd.description.chars().take(70).collect::<String>());
+                            }
+                            println!("{} commands", c.commands.len());
+                        }
+                        Err(e) => println!("error: {e}"),
+                    }
+                }
+                Some("drive") => {
+                    let cwd = args.get(2).expect("codex drive <cwd> <message>").clone();
+                    let mut rest: Vec<String> = args[3..].to_vec();
+                    let mut take = |flag: &str| -> Option<String> {
+                        let i = rest.iter().position(|a| a == flag)?;
+                        rest.remove(i);
+                        (i < rest.len()).then(|| rest.remove(i))
+                    };
+                    let (resume, mode, model, effort, stop) = (take("--resume"), take("--mode"), take("--model"), take("--effort"), take("--stop"));
+                    // A picture goes as the window sends one: base64 in a block.
+                    let images: Vec<serde_json::Value> = take("--image").and_then(|p| emaki_core::driver::image_block(std::path::Path::new(&p), "image/png")).into_iter().collect();
+                    let deny = rest.iter().position(|a| a == "--deny").map(|i| rest.remove(i)).is_some();
+                    let text = rest.join(" ");
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let started = std::time::Instant::now();
+                    let d = match emaki_core::driver::start(emaki_core::model::AgentId::Codex, resume.as_deref().unwrap_or(""), &cwd, resume.is_some(), mode.as_deref().unwrap_or(""), model.as_deref().unwrap_or(""), tx) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            println!("could not start: {e}");
+                            return;
+                        }
+                    };
+                    println!("session {} in {:.1}s; mode={} model={} effort={}", d.session_id(), started.elapsed().as_secs_f64(), d.mode(), d.model(), d.effort());
+                    if let Some(e) = effort {
+                        println!("effort {e}: {:?}", d.set_effort(&e).map_err(|e| e.0));
+                    }
+                    println!("terminal: {}", d.attach().map(|a| a.join(" ")).unwrap_or_else(|| "none".into()));
+                    println!("send: {:?}", d.send(&text, images).map_err(|e| e.0));
+                    let stop_at = stop.and_then(|s| s.parse::<u64>().ok()).map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+                    let mut plans = 0;
+                    loop {
+                        if stop_at.is_some_and(|at| std::time::Instant::now() > at) {
+                            println!("interrupt: {:?}", d.interrupt().map_err(|e| e.0));
+                        }
+                        match rx.recv_timeout(std::time::Duration::from_secs(if stop_at.is_some() { 1 } else { 240 })) {
+                            Ok(Event::Permission(p)) => {
+                                println!("asks: {} {}", p.tool_name, serde_json::to_string(&p.input).unwrap().chars().take(600).collect::<String>());
+                                if p.is_question() {
+                                    let mut answers = serde_json::Map::new();
+                                    for q in emaki_core::model::questions_of(&p.input) {
+                                        if let Some((label, _)) = q.options.first() {
+                                            answers.insert(q.question.clone(), serde_json::Value::String(label.clone()));
+                                        }
+                                    }
+                                    println!("answering: {}", serde_json::to_string(&answers).unwrap());
+                                    d.answer_question(&p.request_id, answers);
+                                } else {
+                                    if p.tool_name == "ExitPlanMode" {
+                                        plans += 1;
+                                    }
+                                    d.answer_permission(&p.request_id, !deny, "");
+                                }
+                            }
+                            Ok(Event::Result(r)) => {
+                                println!("result: {} error={} {}ms queued={} state={:?} mode={}", r.subtype, r.is_error, r.duration_ms, r.queued, d.state(), d.mode());
+                                // A plan's go-ahead starts one more turn.
+                                std::thread::sleep(std::time::Duration::from_millis(300));
+                                if d.state() != emaki_core::driver::State::Running && d.pending_permissions().is_empty() && plans != 1 {
+                                    break;
+                                }
+                                plans += 1;
+                            }
+                            Ok(Event::Exit { code, error }) => {
+                                println!("exit: {code:?} {error}");
+                                break;
+                            }
+                            Ok(Event::Init(c)) => println!("now: mode={} model={}", c.mode, c.model),
+                            Ok(other) => println!("event: {other:?}"),
+                            Err(_) if stop_at.is_some() => {}
+                            Err(_) => {
+                                println!("timeout");
+                                break;
+                            }
+                        }
+                    }
+                    let id = d.session_id();
+                    d.stop();
+                    println!("session {id}");
+                }
+                _ => eprintln!("usage: emaki-core codex options [cwd] | codex drive <cwd> [--resume <id>] [--mode <m>] [--model <m>] [--effort <e>] [--deny] [--stop <secs>] <message>"),
+            }
+        }
         _ => {
             eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | explain <command> | update | statusline [install|restore] | drive <cwd> <text> | pty <cwd> [--resume <id>] [--secs <n>] [--keys <text>]");
         }
