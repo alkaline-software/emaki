@@ -24,6 +24,18 @@ About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
   touch no file). Do not replace the check with trying it and looking.
 - A refused switch is said on a dialog (`BranchAsk::stop`), not only on
   the row under the composer, which a sheet can cover.
+- A call to a remote may never wait on a question (`git::net`): no
+  prompt in a terminal, no window of a credential helper's, a time
+  limit. Nobody is at one, and the list of branches would hang. A
+  remote that refuses comes back as words, and `git::why_net` says
+  whether to check the network or to sign in.
+- Nothing is pushed, published or merged without a click on a button
+  that says so. A fetch is the one call to the remote made unasked: it
+  changes what is known of the remote and nothing checked out. The
+  default branch is brought up to the remote's only by a fast-forward
+  (`git::fast_forward`); where that takes a merge it is left alone.
+- Nothing here signs in. The sign-in sheet gives commands to paste, as
+  the agents page does, and "Check again" asks the remote.
 - A branch switch is refused while a turn runs in the session showing: the
   agent is writing the files a switch would change.
 - Nothing is staged or committed from the comparison. The one thing it
@@ -183,8 +195,47 @@ repository. It is read with the status (`git::branches`). A click opens
 `render_branch_menu`, laid out as GitHub's list is: a field that narrows
 the list, the local branches with the default first (what `origin/HEAD`
 names, else `main` or `master`) and a tick on the one checked out, then
-the branches only a remote has. Words that name no branch add a row,
-"Create branch x from y". No tags.
+the branches only a remote has. No tags.
+
+Each row is the name, a column for its one tag, and the time, so the
+tags start under one another: "default", "remote" for a branch only the
+remote has, and "local", in the accent, for a branch made here that no
+remote has (`Branches::unpublished`). A tag says what a branch is and is
+never a button; beside "local" an up arrow, in the accent too, sends the
+branch to the remote and has it follow its copy there (`branch_publish`,
+`git::publish`). Tried and dropped: a "publish" tag that was the button,
+which named an action in a column of states. The branch checked out says the same on a strip under
+the head (`publish_strip`).
+
+**The remote.** "remote" means the remote had the branch at the last
+fetch; nothing of it is checked out here. Opening the list fetches when
+the last word is more than a minute old (`branch_fetch`), and the line at
+the list's foot says when the remote last answered or why it did not. A
+switch to a remote's branch fetches first, so what is checked out is what
+the remote has now; when the remote cannot be asked the branch is checked
+out as last fetched and the row under the composer says so.
+
+**Making a branch** is one sheet (`render_branch_new`, `BranchNew`),
+reached three ways: the New Branch button beside the field, words that
+leave no branch (the list says it cannot find one and offers to make it)
+or leave some and name none exactly (a row at the foot), and ⌘⇧N
+anywhere. It asks the name (spaces become hyphens, as GitHub Desktop
+has it) and what to start from: the default branch, chosen to begin
+with, or the branch checked out. On the default branch there is nothing
+to choose. With the default branch chosen the remote is asked how it
+stands (`BaseSync`): behind, a box, ticked to begin with, has it brought
+up first; with commits of its own not pushed, a button pushes them;
+gone separate ways, it is left as it is and the sheet says why. A
+remote that cannot be asked is said, and the branch is made from what is
+here. The making is `git::create_from`, all or nothing as a switch is.
+
+**Signing in** (`open_gate`, `render_git_gate`): when the remote refuses
+who is asking, a sheet says what was refused in git's words and what to
+type, by how the machine stands (`git::account`): GitHub's `gh` to
+install, to sign in with, or to hand git its sign-in when it is signed
+in already; a key to check for a remote reached over ssh; and where to
+make an account. GitHub Desktop's own sign-in does not reach git
+elsewhere, and the sheet says so.
 
 The default branch is first in either order. After it the list is ordered
 by when each branch was last committed to, the newest first (`Branches::by_recency`, from `Branches::when`, the committer date
@@ -651,6 +702,11 @@ this the mark fell back to the last entry when the move ended.
   `panelfit` is the double click on it.
 - `EMAKI_GO=branches` opens the branch list, `branchq:<words>` types in
   its field; `changes` opens the comparison, `changes:<path>` on a file.
+- `branchnew` opens the sheet a branch is made on, `branchnew:<name>`
+  with that name, and `branchnewgo` presses Create Branch. `branchpublish`
+  publishes the branch checked out, `branchfetch` fetches, and `gitgate`
+  shows the sign-in sheet as after a refusal. Use a scratch repository
+  whose remote is a bare one beside it: these steps push for real.
 - `branchask:<name>` goes to that branch as a click does, held until git's
   status is in, so with changes it shows the question (or the refusal); `branchgo:<name>:leave`
   or `:bring` answers it, and `branchrestore` is the strip's button. Put a

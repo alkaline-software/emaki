@@ -2763,3 +2763,152 @@ fn a_plans_dialog_names_its_file() {
     let asked = dialog_on_screen(&format!("{rule}\nWhich fruit?\n❯ 1. Apple\n     Crisp and sweet\n  2. Banana\n{rule}\n  3. Chat about this\nEnter to select · Esc to cancel\n")).unwrap();
     assert_eq!(plan_file_on_dialog(&asked), None);
 }
+
+#[test]
+fn the_catalogue_of_agents_holds_together() {
+    use emaki_core::agents::{self, Os};
+    let all = agents::all();
+    let mut ids = std::collections::HashSet::new();
+    for a in all {
+        assert!(ids.insert(a.id), "{} is listed twice", a.id);
+        assert!(!a.bins.is_empty() && !a.name.is_empty() && !a.about.is_empty(), "{}", a.id);
+        assert!(a.site.starts_with("https://") && a.docs.starts_with("https://"), "{}", a.id);
+        assert!(!a.install.is_empty() && !a.sign_in.is_empty() && !a.plans.is_empty(), "{}", a.id);
+        // Every agent can be installed on a Mac, and a way's command is
+        // one line to paste.
+        assert!(!a.ways(Os::Mac).is_empty(), "{}", a.id);
+        assert!(a.install.iter().all(|w| !w.command.contains('\n') && !w.by.is_empty()), "{}", a.id);
+    }
+    // Every agent whose sessions are read is in the catalogue.
+    for id in emaki_core::model::AgentId::ALL {
+        assert!(agents::of(id).is_some(), "{}", id.as_str());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_is_found_by_its_program_and_asked_its_version() {
+    use emaki_core::agents::{self, Agent};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("pretend");
+    std::fs::write(&program, "#!/bin/sh\necho 'pretend-cli 1.4.2 (build 9)'\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let signed: &'static str = Box::leak(dir.path().join("auth.json").to_string_lossy().to_string().into_boxed_str());
+    let home: &'static str = Box::leak(dir.path().to_string_lossy().to_string().into_boxed_str());
+    let a = Agent { id: "pretend", bins: &["pretend"], key_env: &[], home, signed: Box::leak(Box::new([signed])), keychain: "", ..*agents::by_id("codex").unwrap() };
+    let dirs = vec![std::path::PathBuf::from("/bin"), std::path::PathBuf::from("/usr/bin"), bin.clone()];
+
+    let found = agents::detect_in(&a, &dirs);
+    assert_eq!(found.path.as_deref(), Some(program.as_path()));
+    assert_eq!(found.version, "1.4.2");
+    assert!(found.home);
+    assert!(!found.signed);
+    std::fs::write(signed, "{}").unwrap();
+    assert!(agents::detect_in(&a, &dirs).signed);
+
+    // A settings folder with no program is not an installed agent.
+    let none = agents::detect_in(&a, &[dir.path().join("nowhere")]);
+    assert!(!none.installed() && none.home && !none.signed && none.version.is_empty());
+
+    assert_eq!(agents::version_from("2.1.296 (Claude Code)"), "2.1.296");
+    assert_eq!(agents::version_from("codex-cli 0.162.0"), "0.162.0");
+    assert_eq!(agents::version_from("v1.4"), "1.4");
+    assert_eq!(agents::version_from("no number here"), "");
+}
+
+#[test]
+fn git_publishes_fetches_and_branches_from_another_branch() {
+    use emaki_core::git;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let run = |at: &std::path::Path, args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", "-c", "core.autocrlf=false"]).args(args).output().unwrap();
+        assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+    };
+    let commit = |at: &std::path::Path, file: &str, text: &str| {
+        std::fs::write(at.join(file), text).unwrap();
+        run(at, &["add", "."]);
+        run(at, &["commit", "-q", "-m", file]);
+    };
+    // A remote with no checkout, a clone that works in it, and a second
+    // clone standing in for somebody else.
+    run(&root, &["init", "-q", "--bare", "origin.git"]);
+    let (work, other) = (root.join("work"), root.join("other"));
+    run(&root, &["clone", "-q", "origin.git", "work"]);
+    commit(&work, "a.txt", "one\n");
+    run(&work, &["push", "-q", "-u", "origin", "main"]);
+    run(&root, &["clone", "-q", "origin.git", "other"]);
+
+    // A branch made here is on no remote until it is published.
+    run(&work, &["switch", "-q", "-c", "mine"]);
+    commit(&work, "b.txt", "two\n");
+    let b = git::branches(&work).unwrap();
+    assert_eq!((b.origin.as_deref(), b.unpublished.as_slice()), (Some("origin"), &["mine".to_string()][..]));
+    assert_eq!(git::publish(&work, "mine"), Ok(()));
+    assert!(git::branches(&work).unwrap().unpublished.is_empty());
+    assert_eq!(git::ahead_behind(&work, "mine"), Some((0, 0)));
+    assert_eq!(git::reach(&work), Ok(()));
+
+    // Somebody else pushes to main: a fetch says how far behind it is
+    // here, and it is brought up while another branch is checked out.
+    commit(&other, "c.txt", "three\n");
+    run(&other, &["push", "-q", "origin", "main"]);
+    assert_eq!(git::ahead_behind(&work, "main"), Some((0, 0)), "nothing is known before a fetch");
+    assert_eq!(git::fetch(&work), Ok(()));
+    assert_eq!(git::ahead_behind(&work, "main"), Some((0, 1)));
+    assert_eq!(git::fast_forward(&work, "main"), Ok(()));
+    assert_eq!(git::ahead_behind(&work, "main"), Some((0, 0)));
+    assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("mine"), "the checkout did not move");
+
+    // A new branch from main, not from the branch checked out: it has
+    // main's file and lacks this branch's, and a change not committed
+    // comes along when it fits there.
+    std::fs::write(work.join("a.txt"), "one\nand more\n").unwrap();
+    assert_eq!(git::create_from(&work, "from-main", "main", git::Carry::Bring), Ok(()));
+    assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("from-main"));
+    assert!(work.join("c.txt").exists() && !work.join("b.txt").exists());
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "one\nand more\n");
+    run(&work, &["checkout", "-q", "--", "a.txt"]);
+
+    // Left behind, the changes stay on the branch that was checked out.
+    run(&work, &["switch", "-q", "mine"]);
+    std::fs::write(work.join("b.txt"), "two, changed\n").unwrap();
+    assert_eq!(git::create_from(&work, "from-main-2", "main", git::Carry::Leave), Ok(()));
+    assert!(!work.join("b.txt").exists());
+    run(&work, &["switch", "-q", "mine"]);
+    assert_eq!(git::restore(&work), Ok(()));
+    assert_eq!(std::fs::read_to_string(work.join("b.txt")).unwrap(), "two, changed\n");
+    run(&work, &["checkout", "-q", "--", "b.txt"]);
+
+    // A main with commits of its own cannot be brought up without a
+    // merge, and is left as it is.
+    run(&work, &["switch", "-q", "main"]);
+    commit(&work, "d.txt", "mine alone\n");
+    commit(&other, "e.txt", "theirs alone\n");
+    run(&other, &["push", "-q", "origin", "main"]);
+    git::fetch(&work).unwrap();
+    assert_eq!(git::ahead_behind(&work, "main"), Some((1, 1)));
+    assert!(git::fast_forward(&work, "main").is_err());
+    assert!(work.join("d.txt").exists() && !work.join("e.txt").exists());
+
+    // A remote that is not there says so, and nothing waits on a prompt.
+    run(&work, &["remote", "set-url", "origin", root.join("gone.git").to_str().unwrap()]);
+    assert!(git::fetch(&work).is_err());
+
+    // What git's words say went wrong.
+    use git::NetTrouble::*;
+    assert_eq!(git::why_net("unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com"), Offline);
+    assert_eq!(git::why_net("ssh: Could not resolve hostname github.com: nodename nor servname provided"), Offline);
+    assert_eq!(git::why_net("could not read Username for 'https://github.com': terminal prompts disabled"), SignIn);
+    assert_eq!(git::why_net("Authentication failed for 'https://github.com/a/b.git/'"), SignIn);
+    assert_eq!(git::why_net("unable to access 'https://github.com/a/b.git/': The requested URL returned error: 403"), SignIn);
+    assert_eq!(git::why_net("git@github.com: Permission denied (publickey)."), SignIn);
+    assert_eq!(git::why_net("failed to push some refs to 'origin'"), Other);
+    assert_eq!(git::host_of("https://github.com/a/b.git"), ("github.com".to_string(), false));
+    assert_eq!(git::host_of("git@github.com:a/b.git"), ("github.com".to_string(), true));
+    assert_eq!(git::host_of("ssh://git@example.org:22/a/b.git"), ("example.org".to_string(), true));
+    assert_eq!(git::host_of("/a/local/folder.git"), (String::new(), false));
+}

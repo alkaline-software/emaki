@@ -117,6 +117,8 @@ A name, three places and two cards (`render_sidebar`).
   scroll. The agents' card shows `SIDE_AGENTS` rows and scrolls for the rest
   (`agents_scroll`); the projects' takes the height left (`side_scroll`).
   They are `Pane::Agents` and `Pane::Sidebar` to `route_scroll`.
+  The agents' card lists the agents installed and its head goes to the
+  agents page (`docs/agents.md`).
 - The footer is the person's name and a settings gear, nothing else.
 
 The Projects card lists the `SIDE_FOLDERS` newest projects, then "N more". A
@@ -176,7 +178,8 @@ read as a second sort of agent.
 
 "N more" under a folder in the sidebar goes inside that folder; "N more" at
 the foot of the folders and the All Projects entry go to the top; an agent's
-row goes to the top narrowed to that agent. A right click is Open in Finder
+row goes to that agent on the agents page, whose projects go inside a
+folder narrowed to the agent. A right click is Open in Finder
 on a folder and the session's menu on a session.
 
 ## Motion

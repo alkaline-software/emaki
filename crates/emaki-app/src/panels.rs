@@ -64,6 +64,9 @@ const TREE_ROW_H: Pixels = px(24.);
 /// for the rest.
 const BRANCH_ROWS: usize = 10;
 const BRANCH_ROW_H: Pixels = px(30.);
+/// The column a branch's tag stands in, and the one its time does.
+const BRANCH_TAG_W: Pixels = px(72.);
+const BRANCH_WHEN_W: Pixels = px(84.);
 /// The comparison: how wide its list of files is, and how tall a row of
 /// that list.
 const CHANGES_LIST_W: Pixels = px(300.);
@@ -1058,11 +1061,16 @@ pub(crate) struct BranchAsk {
     pub(crate) fit: Option<Vec<String>>,
     /// Not a question but a refusal to read: its title and its words.
     pub(crate) stop: Option<(String, String)>,
+    /// A new branch is made from this branch, not from the one checked
+    /// out.
+    pub(crate) base: Option<String>,
+    /// That branch is brought up to the remote's first.
+    pub(crate) update: bool,
 }
 
 impl BranchAsk {
-    fn stop(title: &str, words: String) -> Self {
-        BranchAsk { name: String::new(), create: false, leave: false, fit: None, stop: Some((title.to_string(), words)) }
+    pub(crate) fn stop(title: &str, words: String) -> Self {
+        BranchAsk { name: String::new(), create: false, leave: false, fit: None, stop: Some((title.to_string(), words)), base: None, update: false }
     }
 }
 
@@ -1097,7 +1105,7 @@ fn panel_head(label: &'static str, after: Option<AnyElement>, right: Option<AnyE
 
 impl Workbench {
     /// The folder whose files the panel shows: the session's own.
-    fn files_root(&self) -> Option<PathBuf> {
+    pub(crate) fn files_root(&self) -> Option<PathBuf> {
         let d = self.detail.as_ref()?;
         let cwd = if d.session.cwd.is_empty() { self.selected_ref()?.cwd.clone() } else { d.session.cwd.clone() };
         (!cwd.is_empty()).then(|| PathBuf::from(cwd))
@@ -1488,7 +1496,7 @@ impl Workbench {
 
     /// Ask git about the folder, off the main thread, one asking at a
     /// time; the tree is drawn again when the answer differs.
-    fn read_git(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn read_git(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         if self.tree.git_reading {
             return;
         }
@@ -1524,6 +1532,10 @@ impl Workbench {
                     cx.notify();
                 }
                 let branches = branches.map(|b| (root, Rc::new(b)));
+                if branches.is_none() && this.branch_new_wait.take().is_some() {
+                    this.notice = Some(Notice::error("this folder is not in a git repository"));
+                    cx.notify();
+                }
                 if this.tree.branches != branches {
                     this.tree.branches = branches;
                     cx.notify();
@@ -3462,7 +3474,7 @@ impl Workbench {
         } else {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("The session's folder is gone.").into_any_element()
         };
-        let el = v_flex().track_focus(&self.tree_focus).on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.tree_key(e, cx))).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).child(body);
+        let el = v_flex().track_focus(&self.tree_focus).on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.tree_key(e, cx))).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).child(body);
         self.panel_in(true, el)
     }
 
@@ -3475,7 +3487,7 @@ impl Workbench {
         self.files_root().filter(|root| self.tree.git.as_ref().is_some_and(|(of, _)| of == root)).map_or(0, |_| self.tree.changed.len())
     }
 
-    fn branches(&self) -> Option<Rc<git::Branches>> {
+    pub(crate) fn branches(&self) -> Option<Rc<git::Branches>> {
         let root = self.files_root()?;
         self.tree.branches.as_ref().filter(|(of, _)| *of == root).map(|(_, b)| b.clone())
     }
@@ -3525,10 +3537,12 @@ impl Workbench {
                 s.set_value("", window, cx);
                 s.focus(window, cx);
             });
-            // The list as it is now, not as the clock last read it.
+            // The list as it is now, not as the clock last read it, and
+            // as the remote has it now, not as it was last fetched.
             if let Some(root) = self.files_root() {
                 self.read_git(root, cx);
             }
+            self.branch_fetch(false, cx);
         } else {
             window.focus(&self.focus_handle, cx);
         }
@@ -3562,7 +3576,7 @@ impl Workbench {
         let typed = self.branch_input.read(cx).value().trim().to_string();
         match (rows.iter().find(|(n, _)| *n == typed).or(rows.first()), fresh) {
             (Some((name, _)), _) => self.branch_go(name.clone(), false, window, cx),
-            (None, Some(name)) => self.branch_go(name, true, window, cx),
+            (None, Some(name)) => self.branch_new_open(Some(name), window, cx),
             _ => {}
         }
     }
@@ -3571,6 +3585,13 @@ impl Workbench {
     /// and git may refuse; nothing is forced. Not under a running turn:
     /// the agent is writing to the files a switch would change.
     pub(crate) fn branch_go(&mut self, name: String, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.branch_begin(name, create, None, false, window, cx);
+    }
+
+    /// `branch_go`, for a new branch that may start from `base`, a
+    /// branch other than the one checked out, brought up to the
+    /// remote's first when `update`.
+    pub(crate) fn branch_begin(&mut self, name: String, create: bool, base: Option<String>, update: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.close_branch_menu(window, cx);
         let Some(root) = self.files_root() else { return };
         if self.branches().is_some_and(|b| b.current.as_deref() == Some(&name)) || self.branch_busy {
@@ -3601,10 +3622,12 @@ impl Workbench {
             // Whether the changes would fit on the other branch is asked
             // of git while the question is up; a new branch starts from
             // here, so they always do.
-            self.branch_ask = Some(BranchAsk { name: name.clone(), create, leave: true, fit: create.then(Vec::new), stop: None });
-            if !create {
+            self.branch_ask = Some(BranchAsk { name: name.clone(), create, leave: true, fit: (create && base.is_none()).then(Vec::new), stop: None, base: base.clone(), update });
+            if !create || base.is_some() {
                 cx.spawn(async move |this, cx| {
-                    let (dir, to) = (root.clone(), name.clone());
+                    // Where the changes have to fit: the branch gone to,
+                    // or the one a new branch starts from.
+                    let (dir, to) = (root.clone(), base.clone().unwrap_or_else(|| name.clone()));
                     let bad = cx.background_executor().spawn(async move { git::misfits(&dir, &to) }).await;
                     this.update(cx, |this, cx| {
                         if let Some(a) = this.branch_ask.as_mut().filter(|a| a.name == name && a.stop.is_none()) {
@@ -3619,12 +3642,17 @@ impl Workbench {
             cx.notify();
             return;
         }
-        self.branch_run(name, create, git::Carry::Bring, cx);
+        self.branch_run_from(name, create, base, update, git::Carry::Bring, cx);
     }
 
     /// The switch itself, off the main thread, with the changes going
     /// where `carry` says.
     pub(crate) fn branch_run(&mut self, name: String, create: bool, carry: git::Carry, cx: &mut Context<Self>) {
+        let (base, update) = self.branch_ask.as_ref().map(|a| (a.base.clone(), a.update)).unwrap_or_default();
+        self.branch_run_from(name, create, base, update, carry, cx);
+    }
+
+    fn branch_run_from(&mut self, name: String, create: bool, base: Option<String>, update: bool, carry: git::Carry, cx: &mut Context<Self>) {
         self.branch_ask = None;
         let Some(root) = self.files_root() else { return };
         if self.branch_busy {
@@ -3635,23 +3663,69 @@ impl Workbench {
             return;
         }
         let from = self.branches().map(|b| b.label()).unwrap_or_default();
+        let origin = self.branches().and_then(|b| b.origin.clone()).unwrap_or_else(|| "origin".into());
+        // A branch only the remote has is asked for again first: what
+        // is checked out is then what the remote has now, not what it
+        // had at the last fetch.
+        let theirs = !create && self.branches().is_some_and(|b| b.remote.contains(&name));
         self.branch_busy = true;
         cx.spawn(async move |this, cx| {
-            let (dir, to) = (root.clone(), name.clone());
-            let done = cx.background_executor().spawn(async move { (git::dirty(&dir), git::switch_with(&dir, &to, create, carry)) }).await;
+            let (dir, to, start) = (root.clone(), name.clone(), base.clone());
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    let was_dirty = git::dirty(&dir);
+                    let stale = if theirs { git::fetch(&dir).err() } else { None };
+                    // The branch a new one starts from, brought up to the
+                    // remote's: refused, nothing is made.
+                    if let (true, Some(b)) = (update, &start) {
+                        if let Err(why) = git::fetch(&dir).and_then(|_| git::fast_forward(&dir, b)) {
+                            return (was_dirty, Err(why), stale, true);
+                        }
+                    }
+                    let went = match (&start, create) {
+                        (Some(b), true) => git::create_from(&dir, &to, b, carry),
+                        _ => git::switch_with(&dir, &to, create, carry),
+                    };
+                    (was_dirty, went, stale, false)
+                })
+                .await;
             this.update(cx, |this, cx| {
                 this.branch_busy = false;
-                let made = if create { format!("made {name} and switched to it") } else { format!("switched to {name}") };
-                this.notice = Some(match &done {
-                    (false, Ok(())) => Notice::said(made),
-                    (true, Ok(())) if carry == git::Carry::Leave => Notice::said(format!("{made}; your changes stay on {from}")),
-                    (true, Ok(())) => Notice::said(format!("{made}, with your changes")),
-                    (_, Err(why)) => Notice::error(format!("not switched: {why}")),
+                let (was_dirty, went, stale, at_update) = done;
+                let made = match (create, &base) {
+                    (true, Some(b)) => format!("made {name} from {b} and switched to it"),
+                    (true, None) => format!("made {name} and switched to it"),
+                    _ => format!("switched to {name}"),
+                };
+                this.notice = Some(match (&went, was_dirty) {
+                    (Ok(()), false) => Notice::said(made),
+                    (Ok(()), true) if carry == git::Carry::Leave => Notice::said(format!("{made}; your changes stay on {from}")),
+                    (Ok(()), true) => Notice::said(format!("{made}, with your changes")),
+                    (Err(why), _) => Notice::error(format!("not switched: {why}")),
                 });
-                // A refusal is also said where it cannot be missed: the
-                // row under the composer may be under a sheet.
-                if let (_, Err(why)) = done {
-                    this.branch_ask = Some(BranchAsk::stop("Not switched", format!("Nothing was changed. {}{}.", why[..1].to_uppercase(), &why[1..])));
+                match went {
+                    // The branch was checked out as last fetched, and the
+                    // remote was not reached: said, since what is here
+                    // may be behind.
+                    Ok(()) => {
+                        if let Some(why) = stale {
+                            this.notice = Some(Notice::error(format!("switched to {name} as it was last fetched; {origin} could not be asked: {why}")));
+                            if git::why_net(&why) == git::NetTrouble::SignIn {
+                                this.open_gate(format!("fetch {name}"), why, cx);
+                            }
+                        }
+                    }
+                    Err(why) if at_update => {
+                        let b = base.clone().unwrap_or_default();
+                        match git::why_net(&why) {
+                            git::NetTrouble::Other => this.branch_ask = Some(BranchAsk::stop("Not created", format!("{b} could not be brought up to {origin}, so no branch was made and nothing was changed. Git said: {why}."))),
+                            _ => this.net_failed("Not created", format!("update {b}"), why, cx),
+                        }
+                    }
+                    // A refusal is also said where it cannot be missed: the
+                    // row under the composer may be under a sheet.
+                    Err(why) => this.branch_ask = Some(BranchAsk::stop(if create { "Not created" } else { "Not switched" }, format!("Nothing was changed. {}{}.", why[..1].to_uppercase(), &why[1..]))),
                 }
                 // The files are another branch's now.
                 this.tree.refresh(&root);
@@ -3951,12 +4025,13 @@ impl Workbench {
         let focus = self.branch_input.read(cx).focus_handle(cx);
         let typed = self.branch_input.read(cx).value().to_string();
         let view = window.viewport_size();
-        let w = px(340.).min(view.width - px(16.));
+        let w = px(420.).min(view.width - px(16.));
         let x = (at.x - px(40.)).min(view.width - w - px(8.)).max(px(8.));
         let y = (at.y + px(16.)).min(view.height - px(200.)).max(px(8.));
         // The outline is a thinned ink, not the border colour: that is the
         // row's own ground under the pointer, and the pill went with it.
         let chip = |word: &'static str| div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.muted_foreground.opacity(0.4)).text_size(px(10.5)).text_color(theme.muted_foreground).child(word);
+        let origin = b.origin.clone().unwrap_or_else(|| "origin".into());
         let mut list = v_flex().w_full();
         for (ix, (name, remote)) in rows.iter().enumerate() {
             let here = b.current.as_deref() == Some(name.as_str());
@@ -3986,18 +4061,77 @@ impl Workbench {
                         }),
                     )
                     .child(div().w(px(14.)).flex_shrink_0().when(here, |d| d.child(Icon::new(IconName::Check).with_size(px(13.)))))
-                    // The name, its tags straight after it, and the time at
-                    // the row's far end.
-                    .child(div().min_w_0().truncate().when(here, |d| d.font_weight(FontWeight::MEDIUM)).child(name.clone()))
-                    .when(b.default.as_deref() == Some(name.as_str()), |d| d.child(chip("default")))
-                    .when(*remote, |d| d.child(chip("remote")))
-                    .child(div().flex_1())
-                    .when_some(b.when.get(name).filter(|at| **at > 0), |d, at| d.child(div().flex_shrink_0().text_size(px(11.5)).text_color(theme.muted_foreground).child(crate::format::ago(*at as f64, self.now)))),
+                    // The name, then a column of its own for the tag, each
+                    // starting where the others do, and the time at the
+                    // row's far end.
+                    .child(div().flex_1().min_w_0().truncate().when(here, |d| d.font_weight(FontWeight::MEDIUM)).child(name.clone()))
+                    .child(h_flex().w(BRANCH_TAG_W).flex_shrink_0().map(|d| {
+                        if b.default.as_deref() == Some(name.as_str()) {
+                            d.child(chip("default"))
+                        } else if *remote {
+                            d.child(chip("remote"))
+                        } else if b.unpublished.contains(name) {
+                            // Made here and on no remote yet: a tag that
+                            // says so, as the others say what a branch is,
+                            // and beside it the arrow that sends it there.
+                            // Both in the accent, since it is the one row
+                            // with something left to do.
+                            let busy = self.branch_publishing.as_deref() == Some(name.as_str());
+                            let (to, tip) = (name.clone(), if busy { format!("Publishing to {origin}…") } else { format!("Publish this branch to {origin}") });
+                            d.gap(px(4.)).child(div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.primary.opacity(0.6)).text_size(px(10.5)).text_color(theme.primary).child("local")).child(
+                                div()
+                                    .id(("branch-publish", ix))
+                                    .size(px(18.))
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(theme.primary.opacity(0.12))
+                                    .when(!busy, |d| d.cursor_pointer().hover(|s| s.bg(theme.primary.opacity(0.28))))
+                                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        // Not the row's own click, which switches.
+                                        cx.stop_propagation();
+                                        swallow_click(window, cx);
+                                        this.branch_publish(to.clone(), cx);
+                                    }))
+                                    .child(if busy {
+                                        Icon::new(IconName::LoaderCircle).with_size(px(11.)).text_color(theme.primary).with_animation(("branch-publishing", ix), Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))).into_any_element()
+                                    } else {
+                                        Icon::new(IconName::ArrowUp).with_size(px(11.)).text_color(theme.primary).into_any_element()
+                                    }),
+                            )
+                        } else {
+                            d
+                        }
+                    }))
+                    .child(div().w(BRANCH_WHEN_W).flex_shrink_0().text_right().text_size(px(11.5)).text_color(theme.muted_foreground).children(b.when.get(name).filter(|at| **at > 0).map(|at| crate::format::ago(*at as f64, self.now)))),
             );
         }
-        if rows.is_empty() && fresh.is_none() {
-            list = list.child(div().px(px(8.)).py(px(8.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("No branch of that name."));
+        // Words that leave no branch: said, with the way to make one of
+        // that name, as GitHub Desktop has it.
+        if rows.is_empty() {
+            let typed = self.branch_input.read(cx).value().trim().to_string();
+            list = list.child(
+                v_flex()
+                    .w_full()
+                    .px(px(16.))
+                    .py(px(18.))
+                    .gap(px(6.))
+                    .items_center()
+                    .child(div().size(px(36.)).rounded_full().bg(theme.primary.opacity(0.10)).flex().items_center().justify_center().child(Icon::default().path("icons/git-branch.svg").with_size(px(17.)).text_color(theme.primary)))
+                    .child(div().pt(px(4.)).text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child("Sorry, I can't find that branch"))
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("Do you want to create a new branch instead?"))
+                    .child(div().pt(px(8.)).w_full().child(Button::new("branch-make-new").primary().small().w_full().label("Create New Branch").on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.branch_new_open(Some(typed.clone()).filter(|t| !t.is_empty()), window, cx);
+                    }))))
+                    .child(div().pt(px(6.)).text_size(px(11.5)).text_color(theme.muted_foreground).child("Press ⌘⇧N to create a branch from anywhere in the app")),
+            );
         }
+        let fresh = fresh.filter(|_| !rows.is_empty());
         let make = fresh.map(|name| {
             let to = name.clone();
             h_flex()
@@ -4012,9 +4146,9 @@ impl Workbench {
                 .cursor_pointer()
                 .text_size(px(12.5))
                 .hover(|s| s.bg(theme.sidebar_accent))
-                .on_click(cx.listener(move |this, _, window, cx| this.branch_go(to.clone(), true, window, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.branch_new_open(Some(to.clone()), window, cx)))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
-                .child(div().min_w_0().child(StyledText::new(format!("Create branch {name} from {}", b.label())).with_highlights([(14..14 + name.len(), HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() })])))
+                .child(div().min_w_0().child(StyledText::new(format!("Create branch {name}…")).with_highlights([(14..14 + name.len(), HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() })])))
         });
         // How the list is ordered: the settings panel's segmented
         // control in a small size, its plate sliding to the choice.
@@ -4060,16 +4194,15 @@ impl Workbench {
                     .child(sort)
                     .child(Button::new("branch-close").ghost().xsmall().icon(IconName::Close).on_click(cx.listener(|this, _, window, cx| this.close_branch_menu(window, cx)))),
             )
-            .child(
+            .child(h_flex().flex_shrink_0().mx(px(10.)).mb(px(10.)).gap(px(8.)).items_center().child(
                 h_flex()
                     .id("branch-field")
                     .track_focus(&focus)
                     .role(Role::TextInput)
                     .aria_label("Find or create a branch")
                     .aria_value(typed)
-                    .flex_shrink_0()
-                    .mx(px(10.))
-                    .mb(px(10.))
+                    .flex_1()
+                    .min_w_0()
                     .px(px(8.))
                     .h(px(32.))
                     .gap(px(4.))
@@ -4079,8 +4212,13 @@ impl Workbench {
                     .text_size(px(13.))
                     .child(Icon::new(IconName::Search).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
                     .child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.branch_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.branch_input, false, cx)))),
-            )
-            .when(!(rows.is_empty() && make.is_some()), |d| {
+            ).child(Button::new("branch-new-button").outline().small().label("New Branch").on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                let typed = this.branch_input.read(cx).value().trim().to_string();
+                let fresh = this.branches().is_some_and(|b| !typed.is_empty() && !b.has(&typed));
+                this.branch_new_open(fresh.then_some(typed), window, cx);
+            }))))
+            .when(true, |d| {
                 d.child(
                     v_flex()
                         .relative()
@@ -4092,7 +4230,8 @@ impl Workbench {
                         .vertical_scrollbar(&self.branch_scroll),
                 )
             })
-            .children(make);
+            .children(make)
+            .children(self.branch_fetch_line(cx));
         let shut = |this: &mut Self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>| this.close_branch_menu(window, cx);
         div().id("branch-sheet").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(shut)).on_mouse_down(MouseButton::Right, cx.listener(shut)).child(card).into_any_element()
     }
@@ -5285,6 +5424,21 @@ impl Workbench {
                 self.branch_run(name.to_string(), false, if how == "leave" { git::Carry::Leave } else { git::Carry::Bring }, cx)
             }
             "branchrestore" => self.branch_restore(cx),
+            // The sheet a branch is made on, with a name in its field;
+            // and the sheet that says how to sign in, as after a remote
+            // that refused.
+            "branchnew" => self.branch_new_probe = Some(String::new()),
+            t if t.starts_with("branchnew:") => self.branch_new_probe = Some(t["branchnew:".len()..].to_string()),
+            "gitgate" => self.open_gate("publish this branch".into(), "could not read Username for 'https://github.com': terminal prompts disabled".into(), cx),
+            "branchfetch" => self.branch_fetch(true, cx),
+            // Create Branch on that sheet, and Publish on the branch
+            // checked out.
+            "branchnewgo" => self.branch_new_go_probe = true,
+            "branchpublish" => {
+                if let Some(cur) = self.branches().and_then(|b| b.current.clone()) {
+                    self.branch_publish(cur, cx);
+                }
+            }
             t if t.starts_with("branchq:") => self.branch_probe = Some(t["branchq:".len()..].to_string()),
             "outline" => self.toggle_panel(false, cx),
             // The panel's edge dragged to that width and let go, and the

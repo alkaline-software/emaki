@@ -6,6 +6,7 @@
 //! app draws the same rounds the file gets.
 
 pub mod adapters;
+pub mod agents;
 pub mod archive;
 pub mod build;
 pub mod check;

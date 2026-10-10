@@ -393,6 +393,12 @@ pub struct Branches {
     /// How many sets of changes were left behind on the branch checked
     /// out (`Carry::Leave`) and are still waiting to be put back.
     pub stashed: usize,
+    /// The remote a branch is published to and fetched from: `origin`,
+    /// else the only one there is. None in a repository with no remote.
+    pub origin: Option<String>,
+    /// Local branches no remote has: made here and not yet published.
+    /// Empty with no remote, where there is nowhere to publish to.
+    pub unpublished: Vec<String>,
 }
 
 impl Branches {
@@ -451,6 +457,10 @@ pub fn branches(dir: &Path) -> Option<Branches> {
             b.local.push(cur.clone());
         }
     }
+    b.origin = remote(dir);
+    if b.origin.is_some() {
+        b.unpublished = b.local.iter().filter(|l| !b.remote.contains(l)).cloned().collect();
+    }
     b.remote.retain(|r| !b.local.contains(r));
     b.remote.sort();
     b.remote.dedup();
@@ -475,6 +485,213 @@ fn act(dir: &Path, args: &[&str]) -> Result<(), String> {
     // "error: …" is the reason; the lines after it list files and advice.
     let why = lines.iter().find(|l| l.starts_with("error:") || l.starts_with("fatal:")).or(lines.first()).copied().unwrap_or("git refused");
     Err(why.trim_start_matches("error:").trim_start_matches("fatal:").trim().to_string())
+}
+
+/// The remote this repository publishes to: `origin` when there is one,
+/// else the first git lists.
+pub fn remote(dir: &Path) -> Option<String> {
+    let all = String::from_utf8_lossy(&git(dir, &["remote"])?).lines().map(str::to_string).collect::<Vec<_>>();
+    all.iter().find(|r| *r == "origin").or(all.first()).cloned()
+}
+
+/// How long a call that goes to a remote may take before it is given
+/// up: a host that does not answer would otherwise hold the list of
+/// branches for as long as the system's own timeout.
+const NET_WAIT: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// Run a git command that talks to a remote; its own words when it
+/// fails. Git may not ask for a name or a password here, in a terminal
+/// or in a window of a helper's: there is nobody at one, and the call
+/// would wait for ever. A failure to sign in comes back as one
+/// (`why_net`), and the window says how to sign in.
+fn net(dir: &Path, args: &[&str]) -> Result<(), String> {
+    let mut child = command()
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=15")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git did not run: {e}"))?;
+    let mut err = child.stderr.take().ok_or("git did not run")?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut err, &mut text);
+        text
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if started.elapsed() < NET_WAIT => std::thread::sleep(std::time::Duration::from_millis(30)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the remote did not answer in time".to_string());
+            }
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let said = reader.join().unwrap_or_default();
+    let lines: Vec<&str> = said.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    // The last "fatal:" is git's own verdict; a "remote:" line before it
+    // is the host's reason, which says more ("Permission to x denied").
+    let host = lines.iter().find(|l| l.starts_with("remote:")).map(|l| l.trim_start_matches("remote:").trim());
+    let why = lines.iter().rev().find(|l| l.starts_with("fatal:") || l.starts_with("error:") || l.starts_with("ssh:")).or(lines.last()).copied().unwrap_or("git refused");
+    let why = why.trim_start_matches("fatal:").trim_start_matches("error:").trim();
+    Err(match host {
+        Some(h) if !h.is_empty() && !why.contains(h) => format!("{why} ({h})"),
+        _ => why.to_string(),
+    })
+}
+
+/// Why a call to a remote failed, as far as its words say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetTrouble {
+    /// The host could not be reached: no network, no such host, no
+    /// answer.
+    Offline,
+    /// The host was reached and did not take who was asking: not signed
+    /// in, a sign-in that has run out, or an account with no right to
+    /// the repository.
+    SignIn,
+    /// Something else, in git's own words.
+    Other,
+}
+
+/// What kind of failure git's words name.
+pub fn why_net(words: &str) -> NetTrouble {
+    let w = words.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| w.contains(n));
+    if has(&["could not resolve host", "could not resolve hostname", "unable to access", "network is unreachable", "connection timed out", "operation timed out", "failed to connect", "connection refused", "did not answer in time", "no route to host", "couldn't connect"]) && !has(&["403", "401"]) {
+        NetTrouble::Offline
+    } else if has(&["authentication failed", "could not read username", "could not read password", "terminal prompts disabled", "permission denied", "invalid credentials", "403", "401", "repository not found", "logon failed", "host key verification failed", "invalid username or", "access denied", "permission to "]) {
+        NetTrouble::SignIn
+    } else {
+        NetTrouble::Other
+    }
+}
+
+/// Ask the remote what it has now, and forget the branches it no longer
+/// has. Nothing to do, and no failure, in a repository with no remote.
+pub fn fetch(dir: &Path) -> Result<(), String> {
+    match remote(dir) {
+        Some(r) => net(dir, &["fetch", "--prune", "--quiet", &r]),
+        None => Ok(()),
+    }
+}
+
+/// Whether the remote takes who is asking: the smallest question there
+/// is, which moves nothing.
+pub fn reach(dir: &Path) -> Result<(), String> {
+    let r = remote(dir).ok_or("this repository has no remote")?;
+    net(dir, &["ls-remote", "--quiet", "--heads", &r, "HEAD"])
+}
+
+/// How far the local branch `name` and the remote's copy of it are
+/// apart, as last fetched: commits here the remote lacks, and commits
+/// there that are not here. None when either does not exist.
+pub fn ahead_behind(dir: &Path, name: &str) -> Option<(usize, usize)> {
+    let r = remote(dir)?;
+    let out = line(dir, &["rev-list", "--left-right", "--count", &format!("refs/heads/{name}...refs/remotes/{r}/{name}")])?;
+    let mut n = out.split_whitespace().filter_map(|x| x.parse::<usize>().ok());
+    Some((n.next()?, n.next()?))
+}
+
+/// Bring the local branch `name` up to the remote's copy as last
+/// fetched, when that only adds commits. Git refuses when the branch
+/// has commits of its own the remote lacks: that takes a merge, which
+/// is not made here. The branch need not be the one checked out.
+pub fn fast_forward(dir: &Path, name: &str) -> Result<(), String> {
+    let r = remote(dir).ok_or("this repository has no remote")?;
+    if line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).as_deref() == Some(name) {
+        act(dir, &["merge", "--ff-only", "--quiet", &format!("refs/remotes/{r}/{name}")])
+    } else {
+        act(dir, &["fetch", "--quiet", ".", &format!("refs/remotes/{r}/{name}:refs/heads/{name}")])
+    }
+}
+
+/// Send the branch `name` to the remote, and have it follow its copy
+/// there from now on: what publishes a branch made here, and what
+/// pushes one already there.
+pub fn publish(dir: &Path, name: &str) -> Result<(), String> {
+    let r = remote(dir).ok_or("this repository has no remote to publish to")?;
+    net(dir, &["push", "--quiet", "--set-upstream", &r, &format!("refs/heads/{name}:refs/heads/{name}")])
+}
+
+/// Where the remote is, and how the machine would sign in to it: what
+/// the window goes by to say how.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Account {
+    /// The remote's address as git has it.
+    pub url: String,
+    /// Its host: "github.com".
+    pub host: String,
+    /// Reached over ssh, with a key, and not over https, with a token.
+    pub ssh: bool,
+    /// The helpers git asks for a name and a password, as configured.
+    pub helpers: Vec<String>,
+    /// GitHub's own command line tool, when it is installed.
+    pub gh: Option<PathBuf>,
+    /// Whether that tool says someone is signed in to the host.
+    pub gh_signed: bool,
+}
+
+impl Account {
+    pub fn github(&self) -> bool {
+        self.host == "github.com" || self.host.is_empty()
+    }
+}
+
+/// The host of a remote's address: `https://host/x`, `ssh://git@host/x`
+/// and `git@host:x` all name one.
+pub fn host_of(url: &str) -> (String, bool) {
+    if let Some(rest) = url.split_once("://").map(|(_, r)| r) {
+        let host = rest.split('/').next().unwrap_or("");
+        let host = host.rsplit('@').next().unwrap_or(host).split(':').next().unwrap_or("");
+        return (host.to_string(), url.starts_with("ssh://"));
+    }
+    match url.split_once(':') {
+        Some((before, _)) if !before.contains('/') && !before.is_empty() => (before.rsplit('@').next().unwrap_or(before).to_string(), true),
+        _ => (String::new(), false),
+    }
+}
+
+/// How this machine would sign in to the repository's remote. It asks
+/// the tools and opens no credential.
+pub fn account(dir: &Path) -> Account {
+    let url = remote(dir).and_then(|r| line(dir, &["remote", "get-url", &r])).unwrap_or_default();
+    let (host, ssh) = host_of(&url);
+    let helpers = git(dir, &["config", "--get-all", "credential.helper"]).map(|o| String::from_utf8_lossy(&o).lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+    let gh = gh_binary();
+    let gh_signed = gh.as_ref().is_some_and(|g| {
+        let mut c = Command::new(g);
+        c.args(["auth", "status"]);
+        if !host.is_empty() {
+            c.args(["--hostname", &host]);
+        }
+        c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    });
+    Account { url, host, ssh, helpers, gh, gh_signed }
+}
+
+/// GitHub's command line tool, on `PATH` or where Homebrew puts it.
+fn gh_binary() -> Option<PathBuf> {
+    let names: &[&str] = if cfg!(windows) { &["gh.exe"] } else { &["gh"] };
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    if !cfg!(windows) {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+    }
+    dirs.into_iter().flat_map(|d| names.iter().map(move |n| d.join(n))).find(|p| p.is_file())
 }
 
 /// Check `name` out. A branch only a remote has becomes a local one
@@ -585,11 +802,28 @@ pub fn misfits(dir: &Path, name: &str) -> Vec<String> {
 /// nothing has moved and the reason comes back. No path leaves a
 /// conflict behind, and none throws a change away.
 pub fn switch_with(dir: &Path, name: &str, create: bool, carry: Carry) -> Result<(), String> {
+    switch_how(dir, name, create, None, carry)
+}
+
+/// Make the branch `name` from the branch `base`, which need not be the
+/// one checked out, and check it out, with the changes not yet
+/// committed going where `carry` says: all or nothing, as `switch_with`
+/// is. Brought along, they have to fit on `base`.
+pub fn create_from(dir: &Path, name: &str, base: &str, carry: Carry) -> Result<(), String> {
+    let here = line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    switch_how(dir, name, true, Some(base).filter(|b| here.as_deref() != Some(*b)), carry)
+}
+
+fn switch_how(dir: &Path, name: &str, create: bool, base: Option<&str>, carry: Carry) -> Result<(), String> {
     let open = unmerged(dir);
     if !open.is_empty() {
         return Err(format!("{} to resolve first: {}", if open.len() == 1 { "a file has a conflict".to_string() } else { format!("{} files have conflicts", open.len()) }, name_some(&open)));
     }
-    let go = |dir: &Path| if create { self::create(dir, name) } else { switch(dir, name) };
+    let go = |dir: &Path| match (create, base) {
+        (true, Some(base)) => act(dir, &["switch", "-c", name, base]),
+        (true, None) => self::create(dir, name),
+        _ => switch(dir, name),
+    };
     if !dirty(dir) {
         return go(dir);
     }
@@ -605,10 +839,13 @@ pub fn switch_with(dir: &Path, name: &str, create: bool, carry: Carry) -> Result
             })
         }
         Carry::Bring => {
-            if !create {
-                let bad = misfits(dir, name);
+            // A branch made from here starts with what is here, so the
+            // changes always fit; made from another branch, they have to
+            // fit on that one.
+            if let Some(onto) = if create { base } else { Some(name) } {
+                let bad = misfits(dir, onto);
                 if !bad.is_empty() {
-                    return Err(format!("your changes do not fit on {name}: {} would conflict", name_some(&bad)));
+                    return Err(format!("your changes do not fit on {onto}: {} would conflict", name_some(&bad)));
                 }
             }
             // Git takes changes along by itself when none of them is to
