@@ -278,7 +278,12 @@ so it is caught before the tag next time.
   line end**: Git for Windows has `core.autocrlf` on, so a file it
   checks out or restores comes back with `\r\n`. A test's own
   repository sets `core.autocrlf false`. v0.1.9's first push to `main`
-  went red on this before the tag, which is what step 4's wait is for.
+  went red on this before the tag, which is what step 4's wait is for. It
+  has to be set in the repository (`git config`), not passed with `-c`
+  to the test's own commands: the code under test runs git itself and
+  reads the repository's settings. v0.2.0's first push went red on a
+  test that passed `-c` only ("local changes would be overwritten by
+  checkout").
 
 - **One Mac package job in `release.yml` fails right after "satisfies
   its Designated Requirement", with no message, while the other
