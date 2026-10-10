@@ -80,6 +80,9 @@ agent's data roots, lists sessions cheaply, peeks one, and parses one into
 the shared model. Claude Code and Codex exist. A new agent is a new file
 under `adapters/` and a variant of `AgentId`.
 
+The agents a machine can have, read or not, are `agents.rs`
+(`docs/agents.md`).
+
 Claude Code keeps the flat `archive/<project>/` for compatibility. Codex
 lives in `archive/_codex/<project>/`, and `iter_archived(ClaudeCode)` skips
 the underscore directories.

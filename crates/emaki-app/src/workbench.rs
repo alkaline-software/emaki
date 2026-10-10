@@ -41,7 +41,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, NewBranch, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -454,6 +454,8 @@ pub enum Page {
     Sessions,
     Session,
     New,
+    /// The agents on this machine (`agents_page.rs`).
+    Agents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -861,6 +863,16 @@ pub struct Workbench {
     /// The folder the sessions page is inside; none is its top level,
     /// the folders themselves.
     sessions_folder: Option<String>,
+    /// What looking for each agent of the catalogue found, by its id;
+    /// empty until the first look is in (`check_agents`).
+    pub(crate) agents_found: HashMap<&'static str, emaki_core::agents::Found>,
+    pub(crate) agents_checking: bool,
+    pub(crate) agents_checked: Option<Instant>,
+    /// The agent the agents page is inside; none is its cards.
+    pub(crate) agent_open: Option<&'static str>,
+    /// The system whose install commands an agent's page shows.
+    pub(crate) agent_os: emaki_core::agents::Os,
+    pub(crate) agents_page_scroll: ScrollHandle,
     pub page: Page,
     pub sidebar_open: bool,
     pub selected: Option<String>,
@@ -1155,7 +1167,7 @@ pub struct Workbench {
     home_scroll: ScrollHandle,
     /// The settings body's scroll position, for its scrollbar.
     settings_scroll: ScrollHandle,
-    sidebar_peek: bool,
+    pub(crate) sidebar_peek: bool,
     /// How wide the sidebar is, as dragged; kept in `ui.json`.
     pub(crate) sidebar_w: Pixels,
     /// The sidebar's edge is being dragged.
@@ -1452,6 +1464,23 @@ pub struct Workbench {
     /// A switch is waiting on a choice: what becomes of the changes not
     /// yet committed.
     pub(crate) branch_ask: Option<crate::panels::BranchAsk>,
+    /// The sheet a branch is made on, and the field its name is typed
+    /// in (`branches.rs`).
+    pub(crate) branch_new: Option<crate::branches::BranchNew>,
+    pub(crate) branch_name_input: Entity<InputState>,
+    /// That sheet was asked for before git had been asked about the
+    /// folder: the name to open it with once it has.
+    pub(crate) branch_new_wait: Option<String>,
+    pub(crate) branch_new_probe: Option<String>,
+    pub(crate) branch_new_go_probe: bool,
+    /// The remote is being asked what it has; and for which folder it
+    /// was last asked, when, or why it did not answer.
+    pub(crate) branch_fetching: bool,
+    pub(crate) branch_fetched: Option<(PathBuf, Result<Instant, String>)>,
+    /// The branch being sent to the remote.
+    pub(crate) branch_publishing: Option<String>,
+    /// The sheet that says how to sign in to the remote.
+    pub(crate) git_gate: Option<crate::branches::GitGate>,
     pub(crate) branch_probe: Option<String>,
     /// A probe's switch to that branch, held until git's status is in:
     /// it is for looking at the question, and with no changes known the
@@ -2243,6 +2272,21 @@ impl Workbench {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search every conversation, live and archived"));
         let find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this conversation"));
 
+        // Which agents are installed: looked for once at launch, and
+        // again whenever the person comes back to the window with the
+        // agents page showing, which is what they do after installing
+        // one in a terminal.
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |this, cx| this.check_agents(false, cx));
+        })
+        .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && this.page == Page::Agents {
+                this.check_agents(true, cx);
+            }
+        })
+        .detach();
+
         // Every headless child is ours to close: a driver left running after
         // the window is gone would keep writing to a transcript nobody reads.
         let hub_for_quit = Arc::clone(&hub);
@@ -2334,6 +2378,13 @@ impl Workbench {
         let branch_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find or create a branch…"));
         cx.subscribe_in(&branch_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { .. } => this.branch_enter(window, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        })
+        .detach();
+        let branch_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("a-new-branch"));
+        cx.subscribe_in(&branch_name_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => this.branch_new_go(window, cx),
             InputEvent::Change => cx.notify(),
             _ => {}
         })
@@ -2569,6 +2620,7 @@ impl Workbench {
         let settings_section = std::env::var("EMAKI_SETTINGS").ok().and_then(|v| SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == v).map(|(k, _, _)| *k)).unwrap_or("appearance");
         let page = match std::env::var("EMAKI_PAGE").as_deref() {
             Ok("sessions") => Page::Sessions,
+            Ok("agents") => Page::Agents,
             _ => Page::New,
         };
         Self {
@@ -2577,6 +2629,12 @@ impl Workbench {
             refs: Vec::new(),
             scope: Scope::All,
             sessions_folder: None,
+            agents_found: HashMap::new(),
+            agents_checking: false,
+            agents_checked: None,
+            agent_open: None,
+            agent_os: emaki_core::agents::Os::here(),
+            agents_page_scroll: ScrollHandle::new(),
             page,
             sidebar_open: ui.sidebar_open.unwrap_or(true),
             selected: None,
@@ -2844,6 +2902,15 @@ impl Workbench {
             branch_busy: false,
             branch_by_name: ui.branches_by_name.unwrap_or(false),
             branch_ask: None,
+            branch_new: None,
+            branch_name_input,
+            branch_new_wait: None,
+            branch_new_probe: None,
+            branch_new_go_probe: false,
+            branch_fetching: false,
+            branch_fetched: None,
+            branch_publishing: None,
+            git_gate: None,
             branch_probe: None,
             branch_ask_probe: None,
             changes: None,
@@ -3642,6 +3709,16 @@ impl Workbench {
                 cx.notify();
             }
             Some("page:sessions") => self.show_sessions(Scope::All, cx),
+            // The agents page, and inside one agent of it by its id.
+            Some("page:agents") => self.show_agents(None, cx),
+            Some("agents:check") => self.check_agents(true, cx),
+            Some(t) if t.starts_with("agent:") => self.show_agents(emaki_core::agents::by_id(&t["agent:".len()..]).map(|a| a.id), cx),
+            Some(t) if t.starts_with("agentos:") => {
+                if let Some(os) = emaki_core::agents::Os::parse(&t["agentos:".len()..]) {
+                    self.agent_os = os;
+                    cx.notify();
+                }
+            }
             Some(t) if t.starts_with("sessions:") => self.show_sessions_in(Scope::All, Some(t["sessions:".len()..].to_string()), cx),
             Some("page:new") => {
                 self.page = Page::New;
@@ -3792,6 +3869,7 @@ impl Workbench {
             Page::Sessions => "sessions",
             Page::Session => "session",
             Page::New => "new",
+            Page::Agents => "agents",
         };
         UiState {
             window: self.window_rect,
@@ -3843,7 +3921,7 @@ impl Workbench {
 
     /// The sessions page has two levels: the folders, and one folder's
     /// sessions. `scope` narrows either.
-    fn show_sessions_in(&mut self, scope: Scope, folder: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn show_sessions_in(&mut self, scope: Scope, folder: Option<String>, cx: &mut Context<Self>) {
         if self.sessions_folder != folder {
             self.sessions_scroll.set_offset(point(px(0.), px(0.)));
         }
@@ -6483,6 +6561,7 @@ impl Workbench {
                 }
                 Page::Sessions => self.sessions_scroll.set_offset(self.sessions_scroll.offset() + delta),
                 Page::New => self.home_scroll.set_offset(self.home_scroll.offset() + delta),
+                Page::Agents => self.agents_page_scroll.set_offset(self.agents_page_scroll.offset() + delta),
             },
             // Momentum left over from a card or sheet that has gone.
             Pane::Branches | Pane::ChangeFiles | Pane::ChangeLines | Pane::Nowhere | Pane::Terminal => {}
@@ -6835,9 +6914,14 @@ impl Workbench {
             self.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx);
         } else if self.menu.is_some() {
             self.close_menu(cx);
+        } else if self.git_gate.is_some() {
+            self.git_gate = None;
+            cx.notify();
         } else if self.branch_ask.is_some() {
             self.branch_ask = None;
             cx.notify();
+        } else if self.branch_new.is_some() {
+            self.branch_new_close(window, cx);
         } else if self.branch_menu.is_some() {
             self.close_branch_menu(window, cx);
         } else if self.renaming.is_some() || self.file_prompt.is_some() {
@@ -7608,7 +7692,7 @@ impl Workbench {
     }
 
     /// The colour a live session's dot takes, or none when nothing is behind it.
-    fn live_color(&self, r: &SessionRef, cx: &App) -> Option<Hsla> {
+    pub(crate) fn live_color(&self, r: &SessionRef, cx: &App) -> Option<Hsla> {
         // A session begun here with nothing sent is new, not live.
         if self.is_draft(&r.session_id) || !self.hub.is_live(r, self.now) {
             return None;
@@ -7693,13 +7777,16 @@ impl Workbench {
             .child(new_row)
             .child(nav("nav-sessions", Icon::default().path("icons/briefcase.svg"), "All Projects", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))));
 
-        let mut agents: Vec<(AgentId, usize)> = Vec::new();
-        for a in AgentId::ALL {
-            let n = self.refs.iter().filter(|r| r.agent == a).count();
-            if n > 0 {
-                agents.push((a, n));
-            }
-        }
+        // The agents on this machine: the ones installed, and any whose
+        // sessions are kept though it is gone. A row goes inside that
+        // agent on the agents page, where its sessions are too.
+        let on_agents = page == Page::Agents;
+        let listed: Vec<(&'static emaki_core::agents::Agent, usize)> = emaki_core::agents::all()
+            .iter()
+            .map(|a| (a, a.reads.map(|id| self.refs.iter().filter(|r| r.agent == id).count()).unwrap_or(0)))
+            .filter(|(a, n)| *n > 0 || self.agent_found(a.id).is_some_and(|f| f.installed()))
+            .collect();
+        let more_agents = !self.agents_found.is_empty() && listed.len() < emaki_core::agents::all().len();
         // The rows sit in a column of their own inside the scroller. As
         // the scroller's children they were flex items of a column too
         // short for them, and every row gave up height to fit, down to
@@ -7707,12 +7794,14 @@ impl Workbench {
         // closed, so the list changed its spacing as a folder opened.
         let mut agent_rows = v_flex().flex_shrink_0();
         let mut scroll = v_flex().flex_shrink_0();
-        agent_rows = agent_rows.children(agents.into_iter().map(|(a, n)| {
-            let active = sessions_active && scope == Scope::Agent(a);
+        agent_rows = agent_rows.children(listed.into_iter().map(|(a, n)| {
+            let active = on_agents && self.agent_open == Some(a.id);
             let theme = cx.theme().clone();
-            let live = self.refs.iter().filter(|r| r.agent == a && self.live_color(r, cx).is_some()).count();
+            let live = a.reads.is_some_and(|id| self.refs.iter().any(|r| r.agent == id && self.live_color(r, cx).is_some()));
+            let ink = if a.id == "claude-code" { theme.primary } else { theme.muted_foreground };
+            let id = a.id;
             h_flex()
-                .id(SharedString::from(format!("agent-{}", a.as_str())))
+                .id(SharedString::from(format!("agent-{id}")))
                 .h(SIDE_ROW_H)
                 .px(px(10.))
                 .gap(px(10.))
@@ -7720,12 +7809,30 @@ impl Workbench {
                 .cursor_pointer()
                 .when(active, |d| d.bg(theme.sidebar_accent))
                 .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                .on_click(cx.listener(move |this, _, _, cx| this.show_sessions(Scope::Agent(a), cx)))
-                .child(div().w(px(22.)).flex().justify_center().child(agent_icon(a, px(15.), agent_color(a, &theme))))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(a.display_name()))
-                .when(live > 0, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.green).flex_shrink_0()))
-                .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(n.to_string()))
+                .on_click(cx.listener(move |this, _, _, cx| this.show_agents(Some(id), cx)))
+                .child(div().w(px(22.)).flex().justify_center().child(crate::agents_page::agent_mark(a, px(15.), ink)))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(a.name))
+                .when(live, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.green).flex_shrink_0()))
+                .when(n > 0, |d| d.child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(n.to_string())))
         }));
+        // The way to the agents not here yet.
+        if more_agents {
+            let theme = cx.theme().clone();
+            agent_rows = agent_rows.child(
+                h_flex()
+                    .id("agent-add")
+                    .h(SIDE_ROW_H)
+                    .px(px(10.))
+                    .gap(px(10.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_agents(None, cx)))
+                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(IconName::Plus).with_size(px(14.)).text_color(theme.muted_foreground)))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child("Add an agent")),
+            );
+        }
         // Folders: every project as a row that opens onto its sessions,
         // newest folder first, the sessions under each headed by when
         // (today, yesterday, this week, this month, earlier). A folder
@@ -8013,7 +8120,37 @@ impl Workbench {
                 .overflow_hidden()
                 .child(h_flex().h(px(28.)).flex_shrink_0().px(px(14.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(label))
         };
-        let agents_card = card("Agents").flex_shrink_0().mt(px(10.)).child(
+        // The agents' card is headed by the way to their page: every
+        // agent there is, and how to set one up.
+        let agents_head = {
+            let ink = theme.foreground;
+            h_flex()
+                .id("side-agents-head")
+                .h(px(28.))
+                .flex_shrink_0()
+                .px(px(14.))
+                .gap(px(4.))
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if on_agents && self.agent_open.is_none() { theme.foreground } else { theme.muted_foreground })
+                .hover(move |s| s.text_color(ink))
+                .on_click(cx.listener(|this, _, _, cx| this.show_agents(None, cx)))
+                .child(div().flex_1().child("Agents"))
+                .child(Icon::new(IconName::ChevronRight).with_size(px(12.)))
+        };
+        let agents_card = v_flex()
+            .mx(px(8.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.sidebar_border)
+            .bg(theme.background.opacity(0.55))
+            .overflow_hidden()
+            .child(agents_head)
+            .flex_shrink_0()
+            .mt(px(10.))
+            .child(
             v_flex()
                 .relative()
                 .child(v_flex().id("side-agents").max_h(SIDE_ROW_H * SIDE_AGENTS as f32 + px(4.)).overflow_y_scroll().track_scroll(&self.agents_scroll).px(px(4.)).pb(px(4.)).child(agent_rows))
@@ -8579,7 +8716,7 @@ impl Workbench {
     /// The strip along the top of the content pane: room for the traffic
     /// lights when the sidebar is hidden, a title in the middle, actions on
     /// the right.
-    fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let centre = div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title).into_any_element();
         self.render_topbar_with(centre, right, cx)
@@ -11572,7 +11709,7 @@ pub fn claude_icon(size: Pixels, color: Hsla) -> Icon {
 pub(crate) fn agent_icon_path(agent: AgentId) -> &'static str {
     match agent {
         AgentId::ClaudeCode => "icons/claude.svg",
-        AgentId::Codex => "icons/square-terminal.svg",
+        AgentId::Codex => "icons/agents/codex.svg",
     }
 }
 
@@ -11580,7 +11717,7 @@ pub(crate) fn agent_icon_path(agent: AgentId) -> &'static str {
 pub fn agent_icon(agent: AgentId, size: Pixels, color: Hsla) -> Icon {
     match agent {
         AgentId::ClaudeCode => claude_icon(size, color),
-        AgentId::Codex => Icon::new(IconName::SquareTerminal).with_size(size).text_color(color),
+        AgentId::Codex => Icon::default().path("icons/agents/codex.svg").with_size(size).text_color(color),
     }
 }
 
@@ -11990,6 +12127,15 @@ impl Render for Workbench {
                 self.branch_go(name, false, window, cx);
             }
         }
+        // The sheet a branch is made on, asked for before git had said
+        // anything of the folder (⌘⇧N with the files panel never shown).
+        if (self.branch_new_wait.is_some() || self.branch_new_probe.is_some()) && self.branches().is_some() {
+            let name = self.branch_new_wait.take().or(self.branch_new_probe.take()).filter(|n| !n.is_empty());
+            self.branch_new_open(name, window, cx);
+        }
+        if std::mem::take(&mut self.branch_new_go_probe) {
+            self.branch_new_go(window, cx);
+        }
         if let Some(typed) = self.branch_probe.take() {
             if self.branch_menu.is_none() {
                 self.branch_menu_toggle(point(px(230.), px(66.)), window, cx);
@@ -12150,6 +12296,7 @@ impl Render for Workbench {
                 this.hub.refresh();
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
+            .on_action(cx.listener(|this, _: &NewBranch, window, cx| this.branch_new_open(None, window, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {
                 // ⌘W closes the nearest thing: a file shown beside the
                 // conversation first, then the session's tab, then the
@@ -12208,6 +12355,7 @@ impl Render for Workbench {
                     Page::New => this.child(self.render_new(cx)),
                     Page::Sessions => this.child(self.render_sessions(cx)),
                     Page::Session => this.child(self.render_detail(window, cx)),
+                    Page::Agents => this.child(self.render_agents(cx)),
                 }),
             )
             .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))
@@ -12223,7 +12371,9 @@ impl Render for Workbench {
             .when_some(self.lightbox.clone(), |d, lb| d.child(fade_in("lightbox-in", self.render_lightbox(lb, cx))))
             .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(fade_in("rename-in", self.render_rename(cx))))
             .when_some(self.branch_menu, |d, at| d.child(fade_in("branch-menu-in", self.render_branch_menu(at, window, cx))))
+            .when(self.branch_new.is_some(), |d| d.child(fade_in("branch-new-in", self.render_branch_new(cx))))
             .when(self.branch_ask.is_some(), |d| d.child(fade_in("branch-ask-in", self.render_branch_ask(cx))))
+            .when(self.git_gate.is_some(), |d| d.child(fade_in("git-gate-in", self.render_git_gate(cx))))
             .when(self.file_peek.is_some(), |d| d.child(self.render_file_peek(window, cx)))
             .when(self.file_ask.is_some(), |d| d.child(self.render_file_ask(window, cx)))
             .when(self.discard_ask.is_some(), |d| d.child(fade_in("discard-ask-in", self.render_discard_ask(cx))))

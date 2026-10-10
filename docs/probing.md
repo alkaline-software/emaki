@@ -33,7 +33,7 @@ hands. Read this before checking a change to the app by eye.
 cargo build -p emaki-app && ./target/debug/Emaki
 cargo test -p emaki-core
 EMAKI_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launch
-EMAKI_PAGE=new|sessions ./target/debug/Emaki     # land on a page
+EMAKI_PAGE=new|sessions|agents ./target/debug/Emaki     # land on a page
 EMAKI_FIND=<text> ./target/debug/Emaki                 # open the find bar on that query
 EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings panel (=updates: on that section)
 EMAKI_TYPE=/co ./target/debug/Emaki                    # put that text in the composer

@@ -128,9 +128,10 @@ handed work on one of these files is told to read the doc too.
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
-| `emaki-app/src/panels.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs`, `indent.rs`, `format.rs`, `office.rs`; a table's cells in `files.rs` | `docs/panels.md` |
+| `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs`, `indent.rs`, `format.rs`, `office.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/anthropic-mono.py` | `docs/look.md` |
+| `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the agents' card in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
 | `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs` | `docs/core.md` |
 | `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, any `cfg` for an OS | `docs/platform.md` |
@@ -155,6 +156,7 @@ crates/emaki-core/        everything without a window
   src/search.rs              FTS5 over every item, ~/.emaki/search.db
   src/driver.rs              a headless `claude -p` child on stream-json
   src/outline.rs             a conversation's outline: an entry a round, and the labels a small model writes for them
+  src/agents.rs              the coding agents there are: whether each is installed here, and how to install one and sign in
   src/options.rs             the modes, models and effort levels an agent offers, as it lists them
   src/explain.rs             opaque tool calls in plain words, via `claude -p`
   src/check.rs               the composer's writing: Harper's English, what counts as prose, the capital a sentence starts with
@@ -168,13 +170,15 @@ crates/emaki-core/        everything without a window
   src/terminal.rs            the agent's resume command as a script a terminal can be handed
   src/pty.rs                 a terminal of our own with no window: an interactive `claude` on a pty, its screen kept in memory
   src/watcher.rs             notify over every agent's data roots
-  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | shells | outline | git | files | peers | inbox | options | explain | update | statusline | drive | pty
+  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | shells | outline | git | files | peers | inbox | options | explain | update | statusline | agents | drive | pty
   tests/core.rs
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
   src/workbench.rs           sidebar, session list, search, composer
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/panels.rs              beside a conversation: the folder's files as a tree, and the outline
+  src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions
+  src/branches.rs            the list of branches and its remote: fetching, making a branch on its sheet, publishing one, the sign-in sheet
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets
   src/term_panel.rs          the terminal at a conversation's right: a shell, and the agent's hidden terminal drawn whole
   src/main.rs                menus, key bindings, the window

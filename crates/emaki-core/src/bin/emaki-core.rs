@@ -201,6 +201,17 @@ fn main() {
                 }
             }
         }
+        "agents" => {
+            // Every agent the catalogue knows, and what looking for it
+            // here finds: where its program is, its version, and whether
+            // a sign-in was seen.
+            for (id, f) in emaki_core::agents::detect_all() {
+                match &f.path {
+                    Some(p) => println!("{id:<12} {:<10} {}  {}", if f.version.is_empty() { "?" } else { f.version.as_str() }, if f.signed { "signed in" } else { "no sign-in seen" }, p.display()),
+                    None => println!("{id:<12} not installed{}", if f.home { " (its settings folder is here)" } else { "" }),
+                }
+            }
+        }
         "peers" => {
             // Every session with an inbox right now, and whether a message
             // could be delivered to it.
