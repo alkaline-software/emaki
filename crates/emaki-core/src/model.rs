@@ -17,15 +17,17 @@ use serde_json::{Map, Value};
 pub enum AgentId {
     ClaudeCode,
     Codex,
+    Gemini,
 }
 
 impl AgentId {
-    pub const ALL: [AgentId; 2] = [AgentId::ClaudeCode, AgentId::Codex];
+    pub const ALL: [AgentId; 3] = [AgentId::ClaudeCode, AgentId::Codex, AgentId::Gemini];
 
     pub fn as_str(self) -> &'static str {
         match self {
             AgentId::ClaudeCode => "claude-code",
             AgentId::Codex => "codex",
+            AgentId::Gemini => "gemini",
         }
     }
 
@@ -33,6 +35,7 @@ impl AgentId {
         match self {
             AgentId::ClaudeCode => "Claude Code",
             AgentId::Codex => "Codex",
+            AgentId::Gemini => "Gemini CLI",
         }
     }
 
@@ -40,6 +43,7 @@ impl AgentId {
         match s {
             "claude-code" => Some(AgentId::ClaudeCode),
             "codex" => Some(AgentId::Codex),
+            "gemini" => Some(AgentId::Gemini),
             _ => None,
         }
     }
@@ -52,6 +56,7 @@ impl AgentId {
         match self {
             AgentId::ClaudeCode => "",
             AgentId::Codex => "_codex",
+            AgentId::Gemini => "_gemini",
         }
     }
 
@@ -60,6 +65,7 @@ impl AgentId {
         match self {
             AgentId::ClaudeCode => "Claude",
             AgentId::Codex => "Codex",
+            AgentId::Gemini => "Gemini",
         }
     }
 }

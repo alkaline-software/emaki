@@ -27,6 +27,7 @@ fn isolated() -> (Home, std::sync::MutexGuard<'static, ()>) {
     std::env::set_var("EMAKI_HOME", dir.path().join("emaki"));
     std::env::set_var("CLAUDE_CONFIG_DIR", dir.path().join("claude"));
     std::env::set_var("CODEX_HOME", dir.path().join("codex"));
+    std::env::set_var("GEMINI_CLI_HOME", dir.path().join("gemini"));
     (Home { _dir: dir }, guard)
 }
 
@@ -2779,6 +2780,19 @@ fn the_catalogue_of_agents_holds_together() {
         assert!(!a.ways(Os::Mac).is_empty(), "{}", a.id);
         assert!(a.install.iter().all(|w| !w.command.contains('\n') && !w.by.is_empty()), "{}", a.id);
     }
+    // Where a way's command gets what it installs, for asking whether it
+    // is still published; the test asks nothing of the network.
+    let way = |command: &'static str| agents::Way { os: &[Os::Mac], by: "x", command };
+    assert_eq!(agents::source_of(&way("curl -fsSL https://claude.ai/install.sh | bash")).as_deref(), Some("https://claude.ai/install.sh"));
+    assert_eq!(agents::source_of(&way("powershell -ExecutionPolicy ByPass -c \"irm https://aider.chat/install.ps1 | iex\"")).as_deref(), Some("https://aider.chat/install.ps1"));
+    assert_eq!(agents::source_of(&way("brew install --cask codex")).as_deref(), Some("https://formulae.brew.sh/api/cask/codex.json"));
+    assert_eq!(agents::source_of(&way("brew install gemini-cli")).as_deref(), Some("https://formulae.brew.sh/api/formula/gemini-cli.json"));
+    assert_eq!(agents::source_of(&way("brew install anomalyco/tap/opencode")), None);
+    assert_eq!(agents::source_of(&way("npm install -g @qwen-code/qwen-code@latest")).as_deref(), Some("https://registry.npmjs.org/@qwen-code/qwen-code"));
+    assert_eq!(agents::source_of(&way("npm install -g droid")).as_deref(), Some("https://registry.npmjs.org/droid"));
+    assert_eq!(agents::source_of(&way("pipx install aider-chat")).as_deref(), Some("https://pypi.org/pypi/aider-chat/json"));
+    assert_eq!(agents::source_of(&way("winget install GitHub.Copilot")), None);
+
     // Every agent whose sessions are read is in the catalogue.
     for id in emaki_core::model::AgentId::ALL {
         assert!(agents::of(id).is_some(), "{}", id.as_str());
@@ -2911,4 +2925,81 @@ fn git_publishes_fetches_and_branches_from_another_branch() {
     assert_eq!(git::host_of("git@github.com:a/b.git"), ("github.com".to_string(), true));
     assert_eq!(git::host_of("ssh://git@example.org:22/a/b.git"), ("example.org".to_string(), true));
     assert_eq!(git::host_of("/a/local/folder.git"), (String::new(), false));
+}
+
+#[test]
+fn gemini_sessions_are_read_as_their_log_leaves_them() {
+    use emaki_core::adapters;
+    use emaki_core::model::{AgentId, CallStatus, Item};
+    let (_home, _guard) = isolated();
+    let project = emaki_core::paths::gemini_home().join("tmp").join("my-project");
+    let chats = project.join("chats");
+    std::fs::create_dir_all(chats.join("parent-session")).unwrap();
+    std::fs::write(project.join(".project_root"), "/work/my-project\n").unwrap();
+    let sid = "0a1b2c3d-1111-2222-3333-444455556666";
+    let rows = [
+        json!({"sessionId": sid, "projectHash": "abc", "startTime": "2026-10-01T10:00:00.000Z", "lastUpdated": "2026-10-01T10:00:00.000Z", "kind": "main"}),
+        json!({"id": "m1", "timestamp": "2026-10-01T10:00:01.000Z", "type": "user", "content": [{"text": "Read @a.txt and say what it holds\n--- a.txt ---\none"}], "displayContent": [{"text": "Read @a.txt and say what it holds"}]}),
+        // Written first with no result, then again with one: the second takes its place.
+        json!({"id": "m2", "timestamp": "2026-10-01T10:00:03.000Z", "type": "gemini", "content": "", "model": "gemini-3-pro",
+            "thoughts": [{"subject": "Reading the file", "description": "The file is small.", "timestamp": "2026-10-01T10:00:02.000Z"}],
+            "toolCalls": [{"id": "c1", "name": "run_shell_command", "args": {"command": "cat a.txt"}, "status": "executing", "timestamp": "2026-10-01T10:00:03.000Z"}]}),
+        json!({"id": "m2", "timestamp": "2026-10-01T10:00:03.000Z", "type": "gemini", "content": "", "model": "gemini-3-pro",
+            "thoughts": [{"subject": "Reading the file", "description": "The file is small.", "timestamp": "2026-10-01T10:00:02.000Z"}],
+            "tokens": {"input": 120, "output": 10, "cached": 100, "thoughts": 5, "total": 135},
+            "toolCalls": [{"id": "c1", "name": "run_shell_command", "args": {"command": "cat a.txt"}, "status": "success", "timestamp": "2026-10-01T10:00:05.000Z",
+                "result": [{"functionResponse": {"id": "other", "name": "read_file", "response": {"output": "not this one"}}}, {"functionResponse": {"id": "c1", "name": "run_shell_command", "response": {"output": "one"}}}]}]}),
+        // The tool's answer handed back to the model is not a prompt.
+        json!({"id": "m3", "timestamp": "2026-10-01T10:00:05.500Z", "type": "user", "content": [{"functionResponse": {"id": "c1", "name": "run_shell_command", "response": {"output": "one"}}}]}),
+        json!({"id": "m4", "timestamp": "2026-10-01T10:00:06.000Z", "type": "gemini", "content": [{"text": "It holds the word **one**."}], "model": "gemini-3-pro", "tokens": {"input": 200, "output": 8, "cached": 150, "total": 208}}),
+        json!({"$set": {"summary": "What a.txt holds", "lastUpdated": "2026-10-01T10:00:06.000Z"}}),
+        // A second prompt and its reply, then taken back.
+        json!({"id": "m5", "timestamp": "2026-10-01T10:01:00.000Z", "type": "user", "content": "And now delete it"}),
+        json!({"id": "m6", "timestamp": "2026-10-01T10:01:02.000Z", "type": "gemini", "content": "Deleting.", "model": "gemini-3-pro"}),
+        json!({"$rewindTo": "m5"}),
+    ];
+    let file = chats.join("session-2026-10-01T10-00-0a1b2c3d.jsonl");
+    std::fs::write(&file, rows.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+    // A subagent's file is in a folder of its parent's and is no session of its own.
+    std::fs::write(chats.join("parent-session").join("sub.jsonl"), json!({"sessionId": "sub", "projectHash": "abc", "kind": "subagent"}).to_string() + "\n").unwrap();
+
+    let adapter = adapters::for_agent(AgentId::Gemini);
+    assert!(adapter.owns(&file) && adapters::agent_for_path(&file) == AgentId::Gemini);
+    let refs = adapter.list(0);
+    assert_eq!(refs.len(), 1);
+    let r = &refs[0];
+    assert_eq!((r.session_id.as_str(), r.cwd.as_str(), r.title.as_str(), r.project().as_str()), (sid, "/work/my-project", "What a.txt holds", "my-project"));
+
+    let s = adapter.load(r);
+    assert_eq!(s.rounds.len(), 1, "the prompt taken back is gone, and a tool's answer is no prompt");
+    let round = &s.rounds[0];
+    assert_eq!(round.prompt, "Read @a.txt and say what it holds", "as typed, not as sent");
+    let kinds: Vec<&str> = round.items.iter().map(|i| match i { Item::Thinking { .. } => "thought", Item::Tool(_) => "tool", Item::Text { .. } => "text", _ => "other" }).collect();
+    assert_eq!(kinds, ["thought", "tool", "text"]);
+    let call = round.tool_calls().next().unwrap();
+    assert_eq!((call.name.as_str(), call.subject.as_str(), call.status, call.result_text.as_str(), call.duration_ms), ("run_shell_command", "cat a.txt", CallStatus::Ok, "one", 2000));
+    assert_eq!(call.tool_kind, emaki_core::model::ToolKind::Bash);
+    assert_eq!((s.usage.input_tokens, s.usage.output_tokens, s.usage.cache_read), (70, 23, 250));
+    assert_eq!(s.models, ["gemini-3-pro"]);
+    assert_eq!(adapters::turn_state_from_session(&s).phase, emaki_core::build::Phase::YourTurn);
+
+    // Kept: with Gemini's own copy gone, the archive still lists it, in
+    // the folder it ran in.
+    emaki_core::archive::sweep(&refs);
+    std::fs::remove_dir_all(&project).unwrap();
+    let all = adapters::index_all(0, &[]);
+    let kept = all.iter().find(|r| r.agent == AgentId::Gemini).expect("the archived session is listed");
+    assert!(kept.archived);
+    assert_eq!((kept.session_id.as_str(), kept.cwd.as_str(), kept.title.as_str()), (sid, "/work/my-project", "What a.txt holds"));
+    assert_eq!(adapters::load_path(&kept.path).rounds.len(), 1);
+
+    // The old format: one record, every message in it.
+    let old = emaki_core::paths::gemini_home().join("tmp").join("0123abcd").join("chats");
+    std::fs::create_dir_all(&old).unwrap();
+    let whole = json!({"sessionId": "old-1", "projectHash": "0123abcd", "startTime": "2025-08-01T09:00:00.000Z", "lastUpdated": "2025-08-01T09:00:05.000Z",
+        "messages": [{"id": "a", "timestamp": "2025-08-01T09:00:00.000Z", "type": "user", "content": "hello"}, {"id": "b", "timestamp": "2025-08-01T09:00:05.000Z", "type": "gemini", "content": "Hello."}]});
+    std::fs::write(old.join("session-2025-08-01T09-00-old1.json"), serde_json::to_string_pretty(&whole).unwrap()).unwrap();
+    let refs = adapter.list(0);
+    assert_eq!(refs.len(), 1);
+    assert_eq!((refs[0].session_id.as_str(), refs[0].title.as_str(), refs[0].project().as_str()), ("old-1", "hello", "0123abcd"));
 }

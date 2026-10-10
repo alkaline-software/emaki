@@ -239,6 +239,14 @@ as it was, with nothing started, sized or measured for it). The side and
 the width are in `ui.json`. A double click on the panel's edge puts the
 width back to the one it began with.
 
+Inside an agent on the agents page the same panel shows with its shell
+side alone, under a one-segment button (`term_shell_button`). There is
+no session there, so `term_owner` answers with one that is none: the
+home folder, and a name no session has to keep that page's shells under.
+Whether it shows there is its own choice (`agents_shell`), which neither
+opens nor closes the panel beside a conversation. Everything in
+`term_panel.rs` asks `term_owner`, not `selected_ref`.
+
 The conversation keeps `panels::CONVERSATION_MIN` between the panels at
 its two sides, the width at which the composer's pills and send button
 still fit their card. Both panels are drawn no wider than leaves it

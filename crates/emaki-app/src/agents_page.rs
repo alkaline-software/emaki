@@ -21,12 +21,15 @@ use crate::workbench::{page_in, pill_button, Page, Scope, Workbench, CONTENT_W};
 /// How old what was found may be before a visit to the page looks again.
 const AGENTS_FRESH: Duration = Duration::from_secs(20);
 
+/// How long the network's word on the install commands stands.
+const COMMANDS_FRESH: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// How many of an agent's projects its page lists.
 const AGENT_PROJECTS: usize = 5;
 
 /// The agents with a mark of their own in `assets/icons/agents`; the
 /// rest wear the first letter of their name.
-const MARKS: &[&str] = &["codex", "gemini", "copilot", "cursor"];
+const MARKS: &[&str] = &["codex", "gemini"];
 
 /// An agent's mark at `size` in `color`.
 pub fn agent_mark(a: &Agent, size: Pixels, color: Hsla) -> AnyElement {
@@ -63,6 +66,21 @@ impl Workbench {
         }
         self.agents_checking = true;
         cx.notify();
+        // Whether what each install command fetches is still published:
+        // asked of the network at the button, and otherwise once a day,
+        // on a visit to the page. Never at launch.
+        if self.page == Page::Agents && (force || self.agents_commands_checked.is_none_or(|at| at.elapsed() > COMMANDS_FRESH)) {
+            self.agents_commands_checked = Some(Instant::now());
+            let asked = cx.background_spawn(async move { agents::stale_commands() });
+            cx.spawn(async move |this, cx| {
+                let stale = asked.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.agents_stale = stale.into_iter().collect();
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         let task = cx.background_spawn(async move { agents::detect_all() });
         cx.spawn(async move |this, cx| {
             let found = task.await;
@@ -89,44 +107,73 @@ impl Workbench {
         }
     }
 
-    pub(crate) fn render_agents(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let open = self.agent_open.and_then(agents::by_id);
+        self.selectable_n.set(0);
         let body = match open {
             Some(a) => page_in("page-agent", self.agent_inside(a, cx)),
             None => page_in("page-agents", self.agents_cards(cx)),
         };
-        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(
-            v_flex()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .vertical_scrollbar(&self.agents_page_scroll)
-                .child(v_flex().id("agents-page").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.agents_page_scroll).px(px(24.)).items_center().child(body)),
-        )
+        // Inside an agent, a shell in the home folder at the page's
+        // right, for the commands the page gives: the conversation's own
+        // terminal panel, its shell side alone (`term_owner`).
+        let right = if open.is_some() { vec![self.term_shell_button(cx)] } else { Vec::new() };
+        let term = match self.term_owner() {
+            Some(r) if open.is_some() => self.render_term_panel(&r, window, cx),
+            _ => Vec::new(),
+        };
+        let page = v_flex()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .vertical_scrollbar(&self.agents_page_scroll)
+            .child(v_flex().id("agents-page").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.agents_page_scroll).px(px(24.)).items_center().child(body))
+            // What is selected on the page is copied as it is in a
+            // conversation: a right click on a word selects it first.
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.conversation_menu(ev.position, window, cx)));
+        v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), right, cx)).child(h_flex().flex_1().min_h_0().w_full().items_stretch().child(page).children(term))
     }
 
-    /// "Check again", turning while the look is under way.
+    /// Words of the page as text that can be selected and copied: drawn
+    /// by the markdown view, as a conversation's are, with every mark of
+    /// markdown's taken as the letter it is. The size, ink and face are
+    /// the element's it stands in.
+    fn selectable(&self, words: &str, cx: &App) -> AnyElement {
+        let n = self.selectable_n.get();
+        self.selectable_n.set(n + 1);
+        let mut plain = String::with_capacity(words.len() + 8);
+        for c in words.chars() {
+            if matches!(c, '\\' | '`' | '*' | '_' | '<' | '>' | '[' | ']' | '#' | '|' | '~' | '&' | '!' | '-' | '+' | '.' | '(' | ')' | '{' | '}' | '=') {
+                plain.push('\\');
+            }
+            plain.push(c);
+        }
+        crate::transcript::md_view(format!("agents-text-{n}"), plain, cx).into_any_element()
+    }
+
+    /// The button that looks again: the refresh mark, which turns
+    /// while the look is under way.
     fn check_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        if self.agents_checking {
-            return h_flex()
-                .h(px(24.))
-                .px(px(10.))
-                .gap(px(6.))
-                .items_center()
-                .flex_shrink_0()
-                .text_size(px(12.))
-                .text_color(theme.muted_foreground)
-                .child(Icon::new(IconName::LoaderCircle).with_size(px(13.)).text_color(theme.muted_foreground).with_animation("agents-checking", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
-                .child("Looking…")
-                .into_any_element();
-        }
-        let entity = cx.entity().downgrade();
-        pill_button("agents-check", "Check again", &theme, move |_, _, cx| {
-            let _ = entity.update(cx, |this, cx| this.check_agents(true, cx));
-        })
-        .into_any_element()
+        let busy = self.agents_checking;
+        let hover_bg = theme.muted;
+        let icon = Icon::default().path("icons/refresh.svg").with_size(px(15.)).text_color(theme.muted_foreground);
+        div()
+            .id("agents-check")
+            .size(px(28.))
+            .flex_shrink_0()
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(!busy, |d| d.cursor_pointer().hover(move |s| s.bg(hover_bg)))
+            .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if busy { "Refreshing…" } else { "Refresh status" }).build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| this.check_agents(true, cx)))
+            .child(if busy { icon.with_animation("agents-checking", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))).into_any_element() } else { icon.into_any_element() })
+            .into_any_element()
     }
 
     /// The chip that says where an agent stands.
@@ -175,48 +222,55 @@ impl Workbench {
         let theme = cx.theme().clone();
         let display = crate::fonts::display_family(cx);
         let all = agents::all();
-        let looked = !self.agents_found.is_empty();
-        let (here, rest): (Vec<&'static Agent>, Vec<&'static Agent>) = all.iter().partition(|a| self.agent_found(a.id).is_some_and(|f| f.installed()));
-        let line = if looked {
-            format!("{} of {} installed on this machine. Open one to see how to install it and sign in.", here.len(), all.len())
-        } else {
-            "Looking for the agents on this machine.".to_string()
+        // Said only when there is something to say: a command whose
+        // source is gone.
+        let stale = self.agents_stale.len();
+        let warn = (stale > 0).then(|| div().text_size(px(12.5)).text_color(theme.danger).child(format!("{} no longer {} and may have changed; the agent's page says which.", plural(stale, "install command", "install commands"), if stale == 1 { "works" } else { "work" })));
+        // After the agents there are, a card that is no agent's: the
+        // catalogue is short on purpose, and says more are on the way.
+        let coming = || {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .p(px(16.))
+                .gap(px(12.))
+                .rounded(px(14.))
+                .border_1()
+                .border_dashed()
+                .border_color(theme.border)
+                .child(
+                    h_flex()
+                        .gap(px(12.))
+                        .items_center()
+                        .child(div().size(px(40.)).flex_shrink_0().rounded(px(10.4)).border_1().border_dashed().border_color(theme.border).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(18.)).text_color(theme.muted_foreground)))
+                        .child(v_flex().flex_1().min_w_0().gap(px(1.)).child(div().truncate().text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child("More are coming")).child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child("In a later release"))),
+                )
+                .child(div().flex_1().min_h(px(38.)).text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child("Emaki starts with the three most used. Other coding agents will be added here as it learns to read their sessions."))
         };
-
-        let head = |label: &'static str| div().pt(px(10.)).px(px(2.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(label);
-        let grid = |list: Vec<&'static Agent>, this: &Self, cx: &mut Context<Self>| {
+        let grid = |list: Vec<&'static Agent>, last: bool, this: &Self, cx: &mut Context<Self>| {
+            let mut cells: Vec<AnyElement> = list.into_iter().map(|a| this.agent_card(a, cx)).collect();
+            if last {
+                cells.push(coming().into_any_element());
+            }
             let mut rows = v_flex().w_full().gap(px(12.));
-            for pair in list.chunks(2) {
-                let mut row = h_flex().w_full().gap(px(12.)).items_stretch();
-                for a in pair {
-                    row = row.child(this.agent_card(a, cx));
-                }
-                if pair.len() == 1 {
-                    row = row.child(div().flex_1().min_w_0());
-                }
-                rows = rows.child(row);
+            let mut cells = cells.into_iter();
+            while let Some(first) = cells.next() {
+                let second = cells.next().unwrap_or_else(|| div().flex_1().min_w_0().into_any_element());
+                rows = rows.child(h_flex().w_full().gap(px(12.)).items_stretch().child(first).child(second));
             }
             rows
         };
-
-        let mut page = v_flex()
+        // One grid in the catalogue's order, whatever is installed: a
+        // card says so itself, and stays where it is when that changes.
+        v_flex()
             .w_full()
             .max_w(CONTENT_W)
             .pt(px(20.))
             .pb(px(40.))
-            .gap(px(12.))
-            .child(h_flex().items_end().gap(px(12.)).child(div().flex_1().min_w_0().text_size(px(30.)).font_family(display).child("Agents")).child(self.check_button(cx)))
-            .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(line));
-        if !looked {
-            return page.child(grid(all.iter().collect(), self, cx));
-        }
-        if !here.is_empty() {
-            page = page.child(head("Installed")).child(grid(here, self, cx));
-        }
-        if !rest.is_empty() {
-            page = page.child(head("Not installed")).child(grid(rest, self, cx));
-        }
-        page
+            .gap(px(16.))
+            .child(h_flex().items_center().gap(px(12.)).child(div().flex_1().min_w_0().text_size(px(30.)).font_family(display).child("Agents")).child(self.check_button(cx)))
+            .children(warn)
+            .child(grid(all.iter().collect(), true, self, cx))
     }
 
     fn agent_card(&self, a: &'static Agent, cx: &mut Context<Self>) -> AnyElement {
@@ -309,7 +363,7 @@ impl Workbench {
             .border_1()
             .border_color(theme.border)
             .bg(if theme.mode.is_dark() { theme.background } else { theme.muted.opacity(0.6) })
-            .child(div().flex_1().min_w_0().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).line_height(px(19.)).child(command))
+            .child(div().flex_1().min_w_0().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).line_height(px(19.)).child(self.selectable(command, cx)))
             .child(copy)
             .into_any_element()
     }
@@ -345,8 +399,8 @@ impl Workbench {
         let display = crate::fonts::display_family(cx);
         let found = self.agent_found(a.id).cloned();
         let installed = found.as_ref().is_some_and(|f| f.installed());
-        let prose = |words: String| div().text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.85)).child(words);
-        let quiet = |words: String| div().text_size(px(12.)).line_height(px(18.)).text_color(theme.muted_foreground).child(words);
+        let prose = |words: String, cx: &App| div().text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.85)).child(self.selectable(&words, cx));
+        let quiet = |words: String, cx: &App| div().text_size(px(12.)).line_height(px(18.)).text_color(theme.muted_foreground).child(self.selectable(&words, cx));
 
         let hover = theme.foreground;
         let crumb = h_flex()
@@ -377,8 +431,8 @@ impl Workbench {
         // until then, for the system chosen.
         let install = match found.as_ref().and_then(|f| f.path.as_ref().map(|p| (f, p))) {
             Some((f, path)) => {
-                let mut lines = v_flex().gap(px(4.)).child(prose(if f.version.is_empty() { format!("{} is on this machine.", a.name) } else { format!("{} {} is on this machine.", a.name, f.version) }));
-                lines = lines.child(div().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(theme.muted_foreground).child(tilde(&path.to_string_lossy())));
+                let mut lines = v_flex().gap(px(4.)).child(prose(if f.version.is_empty() { format!("{} is on this machine.", a.name) } else { format!("{} {} is on this machine.", a.name, f.version) }, cx));
+                lines = lines.child(div().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(theme.muted_foreground).child(self.selectable(&tilde(&path.to_string_lossy()), cx)));
                 lines
             }
             None => {
@@ -394,33 +448,40 @@ impl Workbench {
                 let ways = a.ways(os);
                 let any = !ways.is_empty();
                 if !any {
-                    col = col.child(quiet(format!("No installer for {} is listed here. See {}'s documentation.", os.label(), a.name)));
+                    col = col.child(quiet(format!("No installer for {} is listed here. See {}'s documentation.", os.label(), a.name), cx));
                 }
                 for (i, w) in ways.into_iter().enumerate() {
                     let label = if i == 0 { format!("{} (recommended)", w.by) } else { w.by.to_string() };
-                    col = col.child(v_flex().gap(px(5.)).child(div().text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(label)).child(self.command_box(format!("agent-way-{}-{i}", os.as_str()), w.command, cx)));
+                    let gone = self.agents_stale.contains(w.command);
+                    col = col.child(
+                        v_flex()
+                            .gap(px(5.))
+                            .child(div().text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(label))
+                            .child(self.command_box(format!("agent-way-{}-{i}", os.as_str()), w.command, cx))
+                            .when(gone, |d| d.child(div().text_size(px(12.)).line_height(px(18.)).text_color(theme.danger).child(format!("What this command installs is no longer published, so it has likely changed. See {}'s documentation for the current one.", a.name)))),
+                    );
                 }
-                col.when(any, |c| c.child(quiet("Paste the command into a terminal. When it has finished, come back to this window: Emaki looks again.".into())))
+                col.when(any, |c| c.child(quiet("Open the shell with the button at the top right, paste the command there and press Return. When it has finished, press the refresh button above.".into(), cx)))
             }
         };
 
         let signed = found.as_ref().is_some_and(|f| f.signed);
         let mut sign = v_flex().gap(px(10.));
         if signed {
-            sign = sign.child(prose("A sign-in is on this machine.".into()));
+            sign = sign.child(prose("A sign-in is on this machine.".into(), cx));
         } else {
-            sign = sign.child(self.command_box("agent-sign-in".into(), a.sign_in, cx)).child(prose(a.sign_in_how.to_string()));
+            sign = sign.child(self.command_box("agent-sign-in".into(), a.sign_in, cx)).child(prose(format!("Type it in the shell at the top right. {}", a.sign_in_how), cx));
         }
-        sign = sign.child(quiet(a.plans.to_string()));
+        sign = sign.child(quiet(a.plans.to_string(), cx));
         if !signed && !a.key_env.is_empty() {
-            sign = sign.child(quiet(format!("With a key and no browser: set {} in your shell's profile.", a.key_env.join(" or "))));
+            sign = sign.child(quiet(format!("With a key and no browser: set {} in your shell's profile.", a.key_env.join(" or ")), cx));
         }
 
         let sessions = self.agent_sessions(a);
         let emaki = match a.reads {
-            Some(_) if sessions.is_empty() => prose(format!("Emaki keeps every session of {} and shows it here. There are none yet.", a.name)),
-            Some(_) => prose(format!("Emaki keeps every session of {} and shows it here, the ones {} has since deleted too.", a.name, a.name)),
-            None => prose(format!("Emaki does not read {}'s sessions yet. It says here whether {} is installed; its conversations stay where {} keeps them.", a.name, a.name, a.name)),
+            Some(_) if sessions.is_empty() => prose(format!("Emaki keeps every session of {} and shows it here. There are none yet.", a.name), cx),
+            Some(_) => prose(format!("Emaki keeps every session of {} and shows it here, the ones {} has since deleted too.", a.name, a.name), cx),
+            None => prose(format!("Emaki does not read {}'s sessions yet. It says here whether {} is installed; its conversations stay where {} keeps them.", a.name, a.name, a.name), cx),
         };
 
         let steps = v_flex()
@@ -434,7 +495,7 @@ impl Workbench {
             .child(self.agent_step(2, signed, false, "Sign in".into(), signed.then(|| "Done".to_string()), sign, cx))
             .child(self.agent_step(3, a.reads.is_some() && installed, true, "Use it with Emaki".into(), None, v_flex().child(emaki), cx));
 
-        let mut page = v_flex().w_full().max_w(CONTENT_W).pt(px(20.)).pb(px(40.)).gap(px(16.)).child(crumb).child(head).child(prose(a.about.to_string())).child(links).child(steps);
+        let mut page = v_flex().w_full().max_w(CONTENT_W).pt(px(20.)).pb(px(40.)).gap(px(16.)).child(crumb).child(head).child(prose(a.about.to_string(), cx)).child(links).child(steps);
 
         // The sessions kept of it, by project, as the sessions page has
         // them: a click goes there, inside that project.

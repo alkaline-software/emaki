@@ -77,7 +77,7 @@ label, now `You (emaki)`.
 
 The shape is borrowed from Wake (`iAmCorey/Wake`): an `Adapter` knows an
 agent's data roots, lists sessions cheaply, peeks one, and parses one into
-the shared model. Claude Code and Codex exist. A new agent is a new file
+the shared model. Claude Code, Codex and Gemini CLI exist. A new agent is a new file
 under `adapters/` and a variant of `AgentId`.
 
 The agents a machine can have, read or not, are `agents.rs`
@@ -87,7 +87,18 @@ Claude Code keeps the flat `archive/<project>/` for compatibility. Codex
 lives in `archive/_codex/<project>/`, and `iter_archived(ClaudeCode)` skips
 the underscore directories.
 
-Codex has no stop reason. Its phase is derived from the built model's tail
+Gemini CLI's file is a log to be replayed, not rows to be read in order
+(`adapters/gemini.rs`): a message written again takes the place of the
+one before it, `$set` changes what the session is, and `$rewindTo` takes
+messages back. The format is read off the CLI's own recorder, version
+0.63, and has been tried on hand-written files only: no session of a real
+Gemini CLI was on the machine it was written on. Its sessions do not say
+which folder they ran in; `.project_root` in the project's folder does,
+and the archive keeps a copy of that file beside the sessions
+(`archive_ref`), in `archive/_gemini/<project>/`. The file from before it
+wrote lines (`.json`, one record) is read too.
+
+Codex and Gemini CLI have no stop reason. Their phase is derived from the built model's tail
 (`adapters::turn_state_from_session`), not from the rows.
 
 ## Presence, without hooks

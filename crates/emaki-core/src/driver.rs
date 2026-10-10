@@ -1162,6 +1162,9 @@ pub fn login_shell_path() -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
+/// The variables that steer one launch of the window and no later one.
+const ONE_LAUNCH: &[&str] = &["EMAKI_PAGE", "EMAKI_OPEN", "EMAKI_GO", "EMAKI_SHOT", "EMAKI_SHOT_AFTER", "EMAKI_FIND", "EMAKI_SETTINGS", "EMAKI_TYPE", "EMAKI_QUESTION", "EMAKI_KEYS", "EMAKI_TERM_KEYS"];
+
 /// The environment for a Claude Code child that must be its own session. The
 /// app may itself be a grandchild of a session (started from a hook) and
 /// would otherwise hand the child its parent's id, inbox and token.
@@ -1169,6 +1172,10 @@ pub fn child_env() -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(k, _)| !(k.starts_with("CLAUDE") && k != "CLAUDE_CONFIG_DIR"))
         .filter(|(k, _)| k != "EMAKI_DISABLE")
+        // What a launch was told for one look (`docs/probing.md`) is that
+        // launch's alone. Handed on, it reached the session's shell, and
+        // a relaunch from there opened on the same page for ever.
+        .filter(|(k, _)| !ONE_LAUNCH.contains(&k.as_str()))
         .collect()
 }
 

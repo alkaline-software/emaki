@@ -205,6 +205,18 @@ fn main() {
             // Every agent the catalogue knows, and what looking for it
             // here finds: where its program is, its version, and whether
             // a sign-in was seen.
+            // `emaki-core agents --commands`: ask the network whether what
+            // each install command fetches is still published.
+            if args.get(1).is_some_and(|a| a == "--commands") {
+                for a in emaki_core::agents::all() {
+                    for w in a.install {
+                        println!("{:<12} {}", a.id, emaki_core::agents::source_of(w).unwrap_or_else(|| format!("(nothing to ask) {}", w.command)));
+                    }
+                }
+                let stale = emaki_core::agents::stale_commands();
+                println!("{} no longer published{}", stale.len(), stale.iter().map(|c| format!("\n  {c}")).collect::<String>());
+                return;
+            }
             for (id, f) in emaki_core::agents::detect_all() {
                 match &f.path {
                     Some(p) => println!("{id:<12} {:<10} {}  {}", if f.version.is_empty() { "?" } else { f.version.as_str() }, if f.signed { "signed in" } else { "no sign-in seen" }, p.display()),

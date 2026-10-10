@@ -203,208 +203,7 @@ const ALL: &[Agent] = &[
         version_arg: "--version",
         site: "https://geminicli.com",
         docs: "https://geminicli.com/docs",
-        reads: None,
-    },
-    Agent {
-        id: "copilot",
-        name: "Copilot CLI",
-        maker: "GitHub",
-        about: "GitHub Copilot as an agent in the terminal, with the models a Copilot plan offers and GitHub close at hand.",
-        bins: &["copilot"],
-        install: &[
-            Way { os: UNIX, by: "Script", command: "curl -fsSL https://gh.io/copilot-install | bash" },
-            Way { os: MAC, by: "Homebrew", command: "brew install --cask copilot-cli" },
-            Way { os: WINDOWS, by: "winget", command: "winget install GitHub.Copilot" },
-            Way { os: ANY, by: "npm (needs Node.js 22 or later)", command: "npm install -g @github/copilot" },
-        ],
-        sign_in: "copilot login",
-        sign_in_how: "A code is shown to enter on github.com. Inside a session, /login does the same.",
-        plans: "Takes a GitHub account with an active Copilot subscription.",
-        key_env: &["COPILOT_GITHUB_TOKEN"],
-        home: "~/.copilot",
-        signed: &[],
-        keychain: "copilot-cli",
-        version_arg: "--version",
-        site: "https://github.com/features/copilot/cli",
-        docs: "https://docs.github.com/en/copilot/how-tos/copilot-cli",
-        reads: None,
-    },
-    Agent {
-        id: "cursor",
-        name: "Cursor CLI",
-        maker: "Cursor",
-        about: "The agent of the Cursor editor, run from a terminal with no editor open.",
-        bins: &["cursor-agent"],
-        install: &[
-            Way { os: UNIX, by: "Script", command: "curl https://cursor.com/install -fsS | bash" },
-            Way { os: WINDOWS, by: "PowerShell", command: "irm 'https://cursor.com/install?win32=true' | iex" },
-        ],
-        sign_in: "cursor-agent login",
-        sign_in_how: "A browser opens to sign in to Cursor. cursor-agent status says who is signed in.",
-        plans: "Takes a Cursor account, or a Cursor API key.",
-        key_env: &["CURSOR_API_KEY"],
-        home: "~/.cursor",
-        signed: &["~/.cursor/auth.json"],
-        keychain: "cursor-access-token",
-        version_arg: "--version",
-        site: "https://cursor.com/cli",
-        docs: "https://cursor.com/docs/cli",
-        reads: None,
-    },
-    Agent {
-        id: "opencode",
-        name: "opencode",
-        maker: "Anomaly",
-        about: "An open-source agent for the terminal that works with many model providers, a ChatGPT or Copilot plan among them.",
-        bins: &["opencode"],
-        install: &[
-            Way { os: UNIX, by: "Script", command: "curl -fsSL https://opencode.ai/install | bash" },
-            Way { os: MAC, by: "Homebrew", command: "brew install anomalyco/tap/opencode" },
-            Way { os: WINDOWS, by: "Scoop", command: "scoop install opencode" },
-            Way { os: WINDOWS, by: "Chocolatey", command: "choco install opencode" },
-            Way { os: ANY, by: "npm (needs Node.js)", command: "npm install -g opencode-ai" },
-        ],
-        sign_in: "opencode",
-        sign_in_how: "In a session, type /connect and choose a provider. opencode auth list says which are connected.",
-        plans: "Takes a ChatGPT Plus or Pro plan, a GitHub Copilot plan, opencode's own Zen, or a provider's API key.",
-        key_env: &[],
-        home: "~/.config/opencode",
-        signed: &["~/.local/share/opencode/auth.json"],
-        keychain: "",
-        version_arg: "--version",
-        site: "https://opencode.ai",
-        docs: "https://opencode.ai/docs",
-        reads: None,
-    },
-    Agent {
-        id: "amp",
-        name: "Amp",
-        maker: "Amp",
-        about: "An agent for the terminal that picks its own models, with threads kept on Amp's server to share.",
-        bins: &["amp"],
-        install: &[Way { os: UNIX, by: "Script", command: "curl -fsSL https://ampcode.com/install.sh | bash" }],
-        sign_in: "amp login",
-        sign_in_how: "A browser opens to sign in to Amp.",
-        plans: "Takes an Amp account: a free tier, a monthly plan, or credits paid for by use.",
-        key_env: &["AMP_API_KEY"],
-        home: "~/.config/amp",
-        signed: &[],
-        keychain: "",
-        version_arg: "version",
-        site: "https://ampcode.com",
-        docs: "https://ampcode.com/docs/cli",
-        reads: None,
-    },
-    Agent {
-        id: "qwen",
-        name: "Qwen Code",
-        maker: "Alibaba",
-        about: "Alibaba's open-source agent for the terminal, with the Qwen models.",
-        bins: &["qwen"],
-        install: &[
-            Way { os: UNIX, by: "Script", command: "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash" },
-            Way { os: MAC, by: "Homebrew", command: "brew install qwen-code" },
-            Way { os: ANY, by: "npm (needs Node.js 22 or later)", command: "npm install -g @qwen-code/qwen-code@latest" },
-        ],
-        sign_in: "qwen",
-        sign_in_how: "In a session, type /auth and choose how to sign in.",
-        plans: "Takes an Alibaba Cloud Coding Plan or an API key. The free tier by Qwen sign-in ended in April 2026.",
-        key_env: &["DASHSCOPE_API_KEY", "BAILIAN_CODING_PLAN_API_KEY"],
-        home: "~/.qwen",
-        signed: &[],
-        keychain: "",
-        version_arg: "--version",
-        site: "https://github.com/QwenLM/qwen-code",
-        docs: "https://qwenlm.github.io/qwen-code-docs",
-        reads: None,
-    },
-    Agent {
-        id: "aider",
-        name: "Aider",
-        maker: "Aider",
-        about: "Open-source pair programming in the terminal. It edits the files of a git repository and commits as it goes, with a model of any provider.",
-        bins: &["aider"],
-        install: &[
-            Way { os: UNIX, by: "Script", command: "curl -LsSf https://aider.chat/install.sh | sh" },
-            Way { os: WINDOWS, by: "PowerShell", command: "powershell -ExecutionPolicy ByPass -c \"irm https://aider.chat/install.ps1 | iex\"" },
-            Way { os: ANY, by: "pipx (needs Python)", command: "pipx install aider-chat" },
-        ],
-        sign_in: "aider --api-key anthropic=<your key>",
-        sign_in_how: "Aider has no account of its own. It is given a key of the model provider's: on the command line as here, in a .env file, or in the environment.",
-        plans: "Takes an API key of a model provider, billed by use.",
-        key_env: &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
-        home: "",
-        signed: &[],
-        keychain: "",
-        version_arg: "--version",
-        site: "https://aider.chat",
-        docs: "https://aider.chat/docs",
-        reads: None,
-    },
-    Agent {
-        id: "goose",
-        name: "Goose",
-        maker: "Agentic AI Foundation",
-        about: "An open-source agent, begun at Block, that runs on the machine with a model of any provider and extensions over MCP.",
-        bins: &["goose"],
-        install: &[
-            Way { os: UNIX, by: "Script", command: "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash" },
-            Way { os: MAC, by: "Homebrew", command: "brew install block-goose-cli" },
-            Way { os: WINDOWS, by: "PowerShell", command: "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1\" -OutFile \"download_cli.ps1\"; .\\download_cli.ps1" },
-        ],
-        sign_in: "goose configure",
-        sign_in_how: "It asks for a model provider and that provider's key, and keeps the key in the system's keyring.",
-        plans: "Takes an API key of a model provider, billed by use.",
-        key_env: &[],
-        home: "~/.config/goose",
-        signed: &[],
-        keychain: "",
-        version_arg: "--version",
-        site: "https://goose-docs.ai",
-        docs: "https://goose-docs.ai/docs/getting-started/installation",
-        reads: None,
-    },
-    Agent {
-        id: "kiro",
-        name: "Kiro CLI",
-        maker: "Amazon Web Services",
-        about: "AWS's agent for the terminal, which took the place of the Amazon Q Developer CLI.",
-        bins: &["kiro-cli"],
-        install: &[Way { os: UNIX, by: "Script", command: "curl -fsSL https://cli.kiro.dev/install | bash" }],
-        sign_in: "kiro-cli login",
-        sign_in_how: "A browser opens to sign in with Google, GitHub, an AWS Builder ID or an organization's identity. kiro-cli doctor checks the set-up.",
-        plans: "Takes a Kiro plan, which includes the CLI.",
-        key_env: &[],
-        home: "~/.kiro",
-        signed: &[],
-        keychain: "",
-        version_arg: "--version",
-        site: "https://kiro.dev/cli",
-        docs: "https://kiro.dev/docs/cli",
-        reads: None,
-    },
-    Agent {
-        id: "droid",
-        name: "Droid",
-        maker: "Factory",
-        about: "Factory's agent for the terminal, which works with the models of several providers.",
-        bins: &["droid"],
-        install: &[
-            Way { os: UNIX, by: "Script", command: "curl -fsSL https://app.factory.ai/cli | sh" },
-            Way { os: WINDOWS, by: "PowerShell", command: "irm https://app.factory.ai/cli/windows | iex" },
-            Way { os: ANY, by: "npm (needs Node.js)", command: "npm install -g droid" },
-        ],
-        sign_in: "droid",
-        sign_in_how: "The first run opens a browser to sign in to Factory.",
-        plans: "Takes a Factory account.",
-        key_env: &["FACTORY_API_KEY"],
-        home: "~/.factory",
-        signed: &[],
-        keychain: "",
-        version_arg: "--version",
-        site: "https://factory.ai",
-        docs: "https://docs.factory.ai",
-        reads: None,
+        reads: Some(AgentId::Gemini),
     },
 ];
 
@@ -557,5 +356,51 @@ pub fn detect_all() -> Vec<(&'static str, Found)> {
     std::thread::scope(|s| {
         let jobs: Vec<_> = ALL.iter().map(|a| (a.id, s.spawn(|| detect_in(a, &dirs)))).collect();
         jobs.into_iter().map(|(id, j)| (id, j.join().unwrap_or_default())).collect()
+    })
+}
+
+/// Where the thing a way's command installs is published, when that is
+/// an address that can be asked whether it is still there: the script a
+/// command downloads, Homebrew's page for a formula or a cask, npm's or
+/// PyPI's for a package. None for a way with no such address (winget,
+/// Scoop, a tap of somebody's own).
+pub fn source_of(way: &Way) -> Option<String> {
+    let words: Vec<&str> = way.command.split_whitespace().map(|w| w.trim_matches(|c| c == '"' || c == '\'' || c == ';')).collect();
+    if let Some(url) = words.iter().find(|w| w.starts_with("https://")) {
+        return Some(url.to_string());
+    }
+    let last = words.last().copied()?;
+    match words.as_slice() {
+        ["brew", "install", "--cask", _] => Some(format!("https://formulae.brew.sh/api/cask/{last}.json")),
+        ["brew", "install", name] if !name.contains('/') => Some(format!("https://formulae.brew.sh/api/formula/{last}.json")),
+        ["npm", "install", "-g", pkg] => Some(format!("https://registry.npmjs.org/{}", pkg.rsplit_once('@').filter(|(name, _)| !name.is_empty()).map_or(*pkg, |(name, _)| name))),
+        ["pipx", "install", pkg] => Some(format!("https://pypi.org/pypi/{pkg}/json")),
+        _ => None,
+    }
+}
+
+/// Whether a way's source is still published: asked of the network,
+/// with no body read. `Some(false)` only when the host says for certain
+/// that it is gone; an address that could not be asked, or a host that
+/// will not say, is `None`, since no network is not a stale command.
+fn published(url: &str) -> Option<bool> {
+    let agent = ureq::AgentBuilder::new().redirects(8).timeout(Duration::from_secs(12)).user_agent(&format!("emaki/{}", crate::version())).build();
+    match agent.head(url).call() {
+        Ok(_) => Some(true),
+        Err(ureq::Error::Status(404 | 410, _)) => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// The commands of the catalogue whose source is gone: the ones a maker
+/// has since renamed or withdrawn. Blocking on the network, each
+/// address on a thread of its own. This says a command no longer works;
+/// it cannot say a maker now recommends another, which only a new
+/// release of the catalogue does.
+pub fn stale_commands() -> Vec<&'static str> {
+    let asked: Vec<(&'static str, String)> = ALL.iter().flat_map(|a| a.install.iter()).filter_map(|w| source_of(w).map(|u| (w.command, u))).collect();
+    std::thread::scope(|s| {
+        let jobs: Vec<_> = asked.iter().map(|(command, url)| (*command, s.spawn(|| published(url)))).collect();
+        jobs.into_iter().filter_map(|(command, j)| (j.join().ok().flatten() == Some(false)).then_some(command)).collect()
     })
 }
