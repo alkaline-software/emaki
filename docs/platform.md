@@ -21,7 +21,9 @@ About `vendor/`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/`,
   in Finder, the switcher and Spotlight.
 - Upload the notarized Mac images after CI's release job, which replaces
   same-named assets.
-- Leave no second `Emaki.app` on disk, or Launchpad lists two.
+- Leave no second `Emaki.app` where Spotlight indexes, or Launchpad
+  lists two. The dev build's bundle is in a folder named `.noindex` for
+  this, and `cargo clean` after a release takes the rest (WORKFLOW.md).
 - Only Finder writes a `.DS_Store` Finder honours, so the disk image's
   layout runs through AppleScript on a mounted image.
 - A sweep for the old name must use word boundaries: "describe",
@@ -134,7 +136,7 @@ designed outside this repository; this copy is the app's source.
   at startup; a bundle has it from `Emaki.icns`; on Windows `build.rs`
   compiles `icon.ico` into the executable.
 - On a Mac the build in `target/debug` is started as a bundle,
-  `target/debug/Emaki.app`, opened through the system with a Dock launch's
+  `target/debug/dev.noindex/Emaki.app`, opened through the system with a Dock launch's
   environment (`scripts/dev-app.sh`, which `scripts/relaunch.sh` ends in).
   A bare executable opened from the Dock or the Finder is run inside the
   default terminal app, in a window of it, and every Emaki started from a

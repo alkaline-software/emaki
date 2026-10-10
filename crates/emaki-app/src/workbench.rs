@@ -535,6 +535,77 @@ const SCROLL_GAP: Duration = Duration::from_millis(150);
 /// Why neither the terminal nor the project folder button can do anything.
 const FOLDER_GONE: &str = "The session's folder is gone";
 
+/// `el`, which lies over the whole window, fading in over a moment when
+/// it first appears. The id is the element's own: it is forgotten once
+/// the element is no longer drawn, so each appearing plays once.
+fn fade_in(id: &'static str, el: impl IntoElement) -> impl IntoElement {
+    div().absolute().inset_0().child(el).with_animation(id, Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| d.opacity(t))
+}
+
+/// No less than the find bar's height: what its opening runs up to.
+const FIND_BAR_MOST: f32 = 64.;
+
+/// How long a fold in the conversation takes to open or shut, and a
+/// session's row in the sidebar to come or go.
+const FOLD_ANIM: Duration = Duration::from_millis(200);
+
+/// One thing that folds in the conversation, as it last stood.
+struct Fold {
+    open: bool,
+    at: Instant,
+    serial: u32,
+    /// How tall what it holds is, measured as it is drawn.
+    h: Rc<std::cell::Cell<f32>>,
+}
+
+/// A fold to be drawn: open, or shutting for a moment more.
+pub(crate) struct FoldDraw {
+    what: (u8, usize, usize),
+    opening: bool,
+    moving: bool,
+    serial: u32,
+    h: Rc<std::cell::Cell<f32>>,
+}
+
+/// A session's row in the sidebar, as much of it as is drawn once it
+/// has gone.
+#[derive(Clone, PartialEq)]
+struct SideRow {
+    key: String,
+    title: String,
+    agent: AgentId,
+}
+
+/// A row that has just left a folder's list: where it stood (after the
+/// row with that key, or first) and since when.
+struct SideGone {
+    folder: String,
+    after: Option<String>,
+    row: SideRow,
+    at: Instant,
+}
+
+/// The room kept between what was just opened and the conversation's
+/// edge it is brought to.
+const REVEAL_GAP: Pixels = px(12.);
+
+/// The words Claude Code's dialog asks with when what it wants is the
+/// go-ahead on a plan (2.1.296).
+const PLAN_ASKS: &str = "written up a plan";
+
+/// How tall the plan on the dialog card is before it scrolls, at most:
+/// in a low window it has a fifth or so of the window's height, so the
+/// choices and the composer under it stay in view.
+const PLAN_BOX_H: Pixels = px(360.);
+
+/// The name a session begun from a folder's plus goes by until it has
+/// one of its own.
+const NEW_TITLE: &str = "New Session";
+
+/// Why nothing that needs Claude Code is done on a session begun here
+/// and not yet sent to: there is none behind it until then.
+const DRAFT_WAITS: &str = "send a first message to start this session";
+
 /// How long the terminal's last word for what it is doing is kept once
 /// its screen stops showing one.
 const WORKING_KEPT_SECS: f64 = 3.0;
@@ -918,6 +989,10 @@ pub struct Workbench {
     suggestion: Option<(String, String)>,
     suggestion_reading: bool,
     dialog_seen: Option<(String, emaki_core::driver::Dialog)>,
+    /// The plan the dialog asks about, by session, when the dialog is a
+    /// plan's (`plan_for_dialog`). Kept after the dialog is gone, for
+    /// the card to close with what it showed.
+    dialog_plan: Option<(String, String)>,
     /// The dialog card as last drawn, for its coming and going, and how
     /// tall it was measured to be.
     dialog_shown: std::cell::RefCell<DialogShown>,
@@ -1210,6 +1285,8 @@ pub struct Workbench {
     pub(crate) shell_reveal: Option<Instant>,
     /// The window's width at the last draw.
     pub(crate) view_w: Pixels,
+    /// The window's height at the last draw.
+    view_h: Pixels,
     pub(crate) tree: crate::panels::Tree,
     pub(crate) files_scroll: ScrollHandle,
     pub(crate) outline_scroll: ScrollHandle,
@@ -1344,6 +1421,19 @@ pub struct Workbench {
     /// the item, until the place has been drawn and gone to; where that
     /// place is in the window; and whether the next draw of it should go.
     pub(crate) unread_go: Option<(usize, usize)>,
+    /// What was just opened in the conversation (a tool call, a run, a
+    /// thought: its kind, round and item), until it has been drawn open
+    /// and brought into view (`reveal_mark`).
+    pub(crate) reveal: Option<((u8, usize, usize), Instant)>,
+    /// What folds open and shut in the conversation, by kind, round and
+    /// item: how each last stood, and since when (`fold_state`).
+    folds: std::cell::RefCell<HashMap<(u8, usize, usize), Fold>>,
+    /// The sidebar's session rows as last drawn, a folder's at a time,
+    /// and the ones that have just come and just gone: a row grows in
+    /// and shrinks out (`side_rows_changed`).
+    side_prev: std::cell::RefCell<HashMap<String, Vec<SideRow>>>,
+    side_born: std::cell::RefCell<HashMap<String, Instant>>,
+    side_gone: std::cell::RefCell<Vec<SideGone>>,
     pub(crate) unread_y: Rc<std::cell::Cell<Option<Pixels>>>,
     pub(crate) unread_due: Rc<std::cell::Cell<bool>>,
     /// The grammar marks the person has ignored (`check::ignore_key`).
@@ -2543,6 +2633,8 @@ impl Workbench {
             suggestion: None,
             suggestion_reading: false,
             dialog_seen: None,
+            view_h: px(0.),
+            dialog_plan: None,
             dialog_shown: std::cell::RefCell::new(DialogShown::default()),
             dialog_unsettled: None,
             dialog_h: Rc::new(std::cell::Cell::new(0.)),
@@ -2738,6 +2830,11 @@ impl Workbench {
             unread_anim: None,
             unread_go: None,
             unread_y: Rc::new(std::cell::Cell::new(None)),
+            reveal: None,
+            folds: Default::default(),
+            side_prev: Default::default(),
+            side_born: Default::default(),
+            side_gone: Default::default(),
             unread_due: Rc::new(std::cell::Cell::new(false)),
             ignored: emaki_core::check::ignored(),
             file_prompt: None,
@@ -3150,6 +3247,165 @@ impl Workbench {
         }
     }
 
+    /// A click opened this: it is brought into view as it opens.
+    pub(crate) fn reveal_now(&mut self, what: (u8, usize, usize)) {
+        self.reveal = Some((what, Instant::now() + FOLD_ANIM + Duration::from_millis(120)));
+    }
+
+    /// Over what was just opened, while it opens: where it stands is
+    /// taken at each draw and handed to `reveal_arrive`. For a box that
+    /// is `relative`.
+    pub(crate) fn reveal_mark(&self, what: (u8, usize, usize), cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.reveal.is_some_and(|(w, _)| w == what) {
+            return None;
+        }
+        let entity = cx.entity().downgrade();
+        Some(
+            canvas(
+                move |b, _, cx| {
+                    if let Some(e) = entity.upgrade() {
+                        cx.defer(move |cx| e.update(cx, |this, cx| this.reveal_arrive(b, cx)));
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element(),
+        )
+    }
+
+    /// What was opened runs past the foot of the conversation: the
+    /// conversation is moved up until its end is in view, and no further
+    /// than brings its head to the top, so a tall one is read from its
+    /// start. Done at each draw while it opens, so the conversation
+    /// moves with it and does not jump when it is done.
+    fn reveal_arrive(&mut self, b: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let Some((_, until)) = self.reveal else { return };
+        if Instant::now() > until {
+            self.reveal = None;
+        }
+        let Some(d) = self.detail.as_ref() else { return };
+        let view = d.list.viewport_bounds();
+        let over = b.bottom() + REVEAL_GAP - view.bottom();
+        let room = b.top() - REVEAL_GAP - view.top();
+        if std::env::var("EMAKI_SCROLL_DEBUG").is_ok() {
+            eprintln!("reveal: {:.0} to {:.0} in a view {:.0} to {:.0}, over {:.0}, room {:.0}", f32::from(b.top()), f32::from(b.bottom()), f32::from(view.top()), f32::from(view.bottom()), f32::from(over), f32::from(room));
+        }
+        // At the conversation's very end the list hangs from its foot,
+        // and what opens there grows upward: its head is kept from
+        // leaving by the top.
+        if room < px(-0.5) {
+            d.list.scroll_by(room);
+            cx.notify();
+        } else if over > px(0.5) && room > px(0.5) {
+            d.list.scroll_by(over.min(room));
+            cx.notify();
+        }
+    }
+
+    /// How a fold in the conversation stands at this draw: nothing when
+    /// it is shut and at rest, else what `fold_wrap` needs to draw it
+    /// open, opening or shutting. Asked at every draw of what holds the
+    /// fold, shut or open, so that a change is seen as one: the first
+    /// sight of a fold is never played.
+    pub(crate) fn fold_state(&self, what: (u8, usize, usize), open: bool, cx: &mut Context<Self>) -> Option<FoldDraw> {
+        let mut folds = self.folds.borrow_mut();
+        let now = Instant::now();
+        let f = folds.entry(what).or_insert_with(|| Fold { open, at: now.checked_sub(FOLD_ANIM * 2).unwrap_or(now), serial: 0, h: Default::default() });
+        if f.open != open {
+            f.open = open;
+            f.at = now;
+            f.serial += 1;
+            if !open {
+                // Shut, it is drawn once more when it is over, as nothing.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(FOLD_ANIM + Duration::from_millis(20)).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        }
+        let moving = f.at.elapsed() < FOLD_ANIM && f.serial > 0;
+        (open || moving).then(|| FoldDraw { what, opening: open, moving, serial: f.serial, h: f.h.clone() })
+    }
+
+    /// What a fold holds, in a box whose height runs up from nothing as
+    /// it opens and back as it shuts, the content fading with it. The
+    /// content keeps its own height and is cut by the box, and says how
+    /// tall it is as it is drawn. `gap` is the room between the fold
+    /// and what is over it, and is part of the height that runs: as the
+    /// gap of the column the two are in, it was still there when the
+    /// box had shut to nothing, and the closing stopped short and then
+    /// jumped.
+    pub(crate) fn fold_wrap(&self, f: FoldDraw, gap: f32, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let (tall, entity, moving) = (f.h.clone(), cx.entity().downgrade(), f.moving);
+        let inner = div().w_full().flex_shrink_0().relative().pt(px(gap)).child(content).child(
+            canvas(
+                move |b, _, cx| {
+                    let h = f32::from(b.size.height);
+                    if (tall.get() - h).abs() > 0.5 {
+                        tall.set(h);
+                        if moving {
+                            if let Some(e) = entity.upgrade() {
+                                cx.defer(move |cx| e.update(cx, |_, cx| cx.notify()));
+                            }
+                        }
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
+        let outer = v_flex().w_full().overflow_hidden().child(inner);
+        if !f.moving {
+            return outer.into_any_element();
+        }
+        let (tall, opening) = (f.h.clone(), f.opening);
+        outer
+            .with_animation(ElementId::Name(format!("fold-{}-{}-{}-{}", f.what.0, f.what.1, f.what.2, f.serial).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                if opening && t >= 1. {
+                    return d;
+                }
+                let t = if opening { t } else { 1. - t };
+                let h = tall.get();
+                if h <= 0. { d.h(px(0.)).opacity(0.) } else { d.h(px(h * t)).opacity(t) }
+            })
+            .into_any_element()
+    }
+
+    /// A folder's session rows as they are about to be drawn, against
+    /// how they were last: a row that was not there has just come, one
+    /// that is no longer has just gone. A folder drawn for the first
+    /// time has neither.
+    fn side_rows_changed(&self, folder: &str, rows: Vec<SideRow>, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let mut prev = self.side_prev.borrow_mut();
+        let mut changed = false;
+        if let Some(was) = prev.get(folder) {
+            for r in rows.iter().filter(|r| !was.iter().any(|w| w.key == r.key)) {
+                self.side_born.borrow_mut().insert(r.key.clone(), now);
+                changed = true;
+            }
+            for (ix, w) in was.iter().enumerate().filter(|(_, w)| !rows.iter().any(|r| r.key == w.key)) {
+                let after = was[..ix].iter().rev().find(|a| rows.iter().any(|r| r.key == a.key)).map(|a| a.key.clone());
+                self.side_gone.borrow_mut().push(SideGone { folder: folder.to_string(), after, row: w.clone(), at: now });
+                changed = true;
+            }
+        }
+        prev.insert(folder.to_string(), rows);
+        self.side_born.borrow_mut().retain(|_, at| at.elapsed() < FOLD_ANIM);
+        self.side_gone.borrow_mut().retain(|g| g.at.elapsed() < FOLD_ANIM);
+        if changed {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(FOLD_ANIM + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+    }
+
     /// With the scope on `all`, every opaque call in the tail of a live
     /// session is explained as it appears. Only the last two rounds are
     /// looked at, and only on a reload of the session already showing, so
@@ -3231,6 +3487,12 @@ impl Workbench {
         !self.begun_sent.contains(session_id) && self.begun.iter().any(|d| d.session_id == session_id)
     }
 
+    /// Whether the session still goes by the name it was begun under,
+    /// which is ours and not one anybody gave it: drawn in italics.
+    fn unnamed(&self, r: &SessionRef) -> bool {
+        r.title == NEW_TITLE && self.begun.iter().any(|d| d.session_id == r.session_id)
+    }
+
     /// The plus on a folder: a new session in that folder, on a tab of
     /// its own like any session's, with nothing said in it. It is a
     /// record of our own under an id made here. The first message
@@ -3249,7 +3511,7 @@ impl Workbench {
             None => {
                 let now = now_secs();
                 let stamp = chrono::Utc::now().to_rfc3339();
-                let draft = SessionRef { agent: AgentId::ClaudeCode, session_id: uuid::Uuid::new_v4().to_string(), cwd: cwd.to_string(), title: "New session".into(), started: stamp.clone(), updated: stamp, mtime: now, blank: true, ..Default::default() };
+                let draft = SessionRef { agent: AgentId::ClaudeCode, session_id: uuid::Uuid::new_v4().to_string(), cwd: cwd.to_string(), title: NEW_TITLE.into(), started: stamp.clone(), updated: stamp, mtime: now, blank: true, ..Default::default() };
                 let key = key_of(&draft);
                 self.refs.insert(0, draft.clone());
                 self.begun.push(draft);
@@ -3423,6 +3685,39 @@ impl Workbench {
                 let screen = format!("{rule}\nWhich fruit?\n❯ 1. Apple\n     Crisp and sweet\n  2. Banana\n{rule}\n  3. Chat about this\nEnter to select · Esc to cancel\n");
                 self.dialog_demo = true;
                 self.dialog_seen = emaki_core::driver::dialog_on_screen(&screen).map(|d| (sid, d));
+                cx.notify();
+            }
+            // A click on the head of the last tool call that is not in
+            // a folded run: it opens, and is brought into view.
+            Some("toolopen") => {
+                self.pin_scroll();
+                if let Some(d) = self.detail.as_mut() {
+                    let last = d.session.rounds.iter().enumerate().rev().find_map(|(ix, r)| {
+                        (0..r.items.len()).rev().find(|jx| matches!(&r.items[*jx], Item::Tool(c) if c.name == "Bash" || c.name == "Write") && crate::transcript::run_start(r, *jx).is_none()).map(|jx| (ix, jx))
+                    });
+                    if let Some((ix, jx)) = last {
+                        d.open_tools.insert((ix, jx));
+                        self.reveal_now((0, ix, jx));
+                    }
+                }
+                cx.notify();
+            }
+            // A plan's dialog, with the plan of the session showing.
+            Some("dialogdemo:plan") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let rule = "─".repeat(60);
+                let screen = format!("{rule}\n Claude has written up a plan and is ready to execute. Would\n you like to proceed?\n\n❯ 1. Yes, and use auto mode\n  2. Yes, manually approve edits\n  3. Tell Claude what to change\n     shift+tab to approve with this feedback\n\n Esc to cancel\n");
+                self.dialog_demo = true;
+                self.dialog_seen = emaki_core::driver::dialog_on_screen(&screen).map(|d| (sid, d));
+                // The plan is read once the conversation is in.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.dialog_plan = this.dialog_seen.as_ref().and_then(|(sid, d)| this.plan_for_dialog(sid, d));
+                        cx.notify();
+                    });
+                })
+                .detach();
                 cx.notify();
             }
             // The same with a preview for each choice, as the terminal
@@ -3701,6 +3996,7 @@ impl Workbench {
                 // while the reply grew below the view.
                 let list = ListState::new(n, ListAlignment::Bottom, px(512.));
                 list.set_follow_mode(FollowMode::Tail);
+                self.folds.borrow_mut().clear();
                 self.detail = Some(Detail {
                     key,
                     path,
@@ -5050,7 +5346,7 @@ impl Workbench {
     pub fn via_terminal(&mut self, action: TerminalAction, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
         if self.is_draft(&r.session_id) {
-            self.notice = Some(Notice::said("send a first message to start this session"));
+            self.notice = Some(Notice::said(DRAFT_WAITS));
             cx.notify();
             return;
         }
@@ -5537,8 +5833,10 @@ impl Workbench {
                     _ => {}
                 }
                 let seen = seen.map(|d| (sid, d));
-                if this.dialog_seen != seen {
+                let plan = seen.as_ref().and_then(|(sid, d)| this.plan_for_dialog(sid, d));
+                if this.dialog_seen != seen || (seen.is_some() && this.dialog_plan != plan) {
                     this.dialog_seen = seen;
+                    this.dialog_plan = plan;
                     cx.notify();
                 }
                 if this.dialog_seen.is_some() {
@@ -5554,6 +5852,29 @@ impl Workbench {
             });
         })
         .detach();
+    }
+
+    /// The plan a terminal's dialog asks to go ahead with, as markdown.
+    /// The terminal prints the plan over the question, most of it off
+    /// the screen by the time it asks, and the transcript does not have
+    /// it yet: the `ExitPlanMode` row is written once it is answered,
+    /// and so is the row of a `Write` asked for in the same breath. The
+    /// dialog names the plan's file, and that is read. A screen that did
+    /// not say leaves the last plan the transcript shows being written.
+    fn plan_for_dialog(&self, sid: &str, d: &emaki_core::driver::Dialog) -> Option<(String, String)> {
+        if !d.body.iter().any(|l| l.contains(PLAN_ASKS)) {
+            return None;
+        }
+        let read = |p: &std::path::Path| std::fs::read_to_string(p).ok().filter(|t| !t.trim().is_empty());
+        let named = emaki_core::driver::plan_file_on_dialog(d).and_then(|p| read(&emaki_core::paths::expand_tilde(&p)).or_else(|| read(&emaki_core::paths::expand_tilde(&p.replace(' ', "")))));
+        let written = || {
+            let session = self.detail.as_ref().map(|d| &d.session).filter(|s| s.id == sid)?;
+            session.rounds.iter().rev().flat_map(|r| r.items.iter().rev()).find_map(|it| match it {
+                Item::Tool(c) if matches!(c.name.as_str(), "Write" | "Edit" | "MultiEdit") => c.input.get("file_path").and_then(|v| v.as_str()).map(std::path::Path::new).filter(|p| p.extension().is_some_and(|e| e == "md") && p.parent().and_then(|d| d.file_name()).is_some_and(|d| d == "plans")).and_then(read),
+                _ => None,
+            })
+        };
+        Some((sid.to_string(), named.or_else(written)?))
     }
 
     /// Answer the terminal's dialog from the card: `steps` are sent to
@@ -5703,6 +6024,11 @@ impl Workbench {
             return;
         }
         let Some(r) = self.selected_ref().cloned() else { return };
+        // One begun here and not sent to has nothing to resume: its
+        // first message starts it.
+        if self.is_draft(&r.session_id) {
+            return;
+        }
         if self.reply_via_for(&r).0 == "spawn" && self.hub.hidden_terminals() {
             let _ = self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "");
         }
@@ -5925,6 +6251,10 @@ impl Workbench {
     }
 
     fn terminal_check(&self, r: &SessionRef) -> Result<(), &'static str> {
+        // Resumed, Claude Code ends at once with "No conversation found".
+        if self.is_draft(&r.session_id) {
+            return Err(DRAFT_WAITS);
+        }
         if r.archived {
             return Err("Archived: the agent no longer has this transcript");
         }
@@ -7338,7 +7668,7 @@ impl Workbench {
             .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
             .on_click(cx.listener(|this, _, window, cx| this.show_new(None, window, cx)))
             .child(div().size(px(22.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.primary_foreground)))
-            .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child("New session"))
+            .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(NEW_TITLE))
             .child(kbd_hint("⌘N", &theme));
 
         let nav = |id: &'static str, icon: Icon, label: &'static str, hint: &'static str, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
@@ -7481,6 +7811,7 @@ impl Workbench {
             );
             let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
             if !open && anim.is_none() {
+                self.side_prev.borrow_mut().remove(&p);
                 continue;
             }
             // The sessions, in a box whose height is the sum of its rows,
@@ -7489,6 +7820,32 @@ impl Workbench {
             let mut body = v_flex().overflow_hidden();
             let mut body_h = 0.;
             let mut last_bucket = "";
+            self.side_rows_changed(&p, list.iter().take(FOLDER_ROWS).map(|r| SideRow { key: key_of(r), title: r.title.clone(), agent: r.agent }).collect(), cx);
+            // A row that has just gone, shrinking away where it stood.
+            let ghosts = |after: Option<&str>| -> Vec<AnyElement> {
+                self.side_gone
+                    .borrow()
+                    .iter()
+                    .filter(|g| g.folder == p && g.after.as_deref() == after)
+                    .map(|g| {
+                        let row = h_flex()
+                            .h(SIDE_SESSION_H)
+                            .flex_shrink_0()
+                            .ml(px(18.))
+                            .px(px(10.))
+                            .gap(px(8.))
+                            .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(g.row.agent, px(13.), theme.muted_foreground.opacity(0.75), false, SharedString::from(format!("gone-glyph-{}", g.row.key)))))
+                            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme.sidebar_foreground).child(g.row.title.clone()));
+                        div()
+                            .overflow_hidden()
+                            .flex_shrink_0()
+                            .child(row)
+                            .with_animation(ElementId::Name(format!("side-out-{}", g.row.key).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), |d, t| d.h(SIDE_SESSION_H * (1. - t)).opacity(1. - t))
+                            .into_any_element()
+                    })
+                    .collect()
+            };
+            body = body.children(ghosts(None));
             for r in list.into_iter().take(FOLDER_ROWS) {
                 let b = bucket(r.mtime);
                 if b != last_bucket {
@@ -7504,7 +7861,8 @@ impl Workbench {
                 let glyph_id = SharedString::from(format!("recent-glyph-{key}"));
                 let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
                 let menu_key = key.clone();
-                body = body.child(
+                let (born, after) = (self.side_born.borrow().contains_key(&key), key.clone());
+                let row =
                     h_flex()
                         .id(SharedString::from(format!("recent-{key}")))
                         .h(SIDE_SESSION_H)
@@ -7522,11 +7880,22 @@ impl Workbench {
                             cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key), cx)),
                         )
                         .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
-                        .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(r.title.clone()))
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).when(self.unnamed(&r), |d| d.italic()).child(r.title.clone()))
                         .children(self.rename_mark(&r, "side", cx))
                         .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
-                        .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground.opacity(0.7)))),
-                );
+                        .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground.opacity(0.7))));
+                // One that has just come grows in from nothing.
+                body = body.child(if born {
+                    div()
+                        .overflow_hidden()
+                        .flex_shrink_0()
+                        .child(row)
+                        .with_animation(ElementId::Name(format!("side-in-{after}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), |d, t| d.h(SIDE_SESSION_H * t).opacity(t))
+                        .into_any_element()
+                } else {
+                    row.into_any_element()
+                });
+                body = body.children(ghosts(Some(after.as_str())));
                 body_h += f32::from(SIDE_SESSION_H);
             }
             if more > 0 {
@@ -8326,6 +8695,7 @@ impl Workbench {
             let r = self.refs.iter().find(|r| key_of(r) == key).cloned();
             let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "untitled".into());
             let agent = r.as_ref().map(|r| r.agent).unwrap_or(AgentId::ClaudeCode);
+            let unnamed = r.as_ref().is_some_and(|r| self.unnamed(r));
             let working = r.as_ref().map(|r| self.is_working(r)).unwrap_or(false);
             let active = self.selected.as_deref() == Some(key.as_str());
             let dragged = self.drag_tab.as_deref() == Some(key.as_str());
@@ -8368,6 +8738,7 @@ impl Workbench {
                         .text_size(px(12.5))
                         .font_weight(if active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
                         .text_color(if active { theme.foreground } else { theme.muted_foreground })
+                        .when(unnamed, |d| d.italic())
                         .child(title),
                 )
                 .children(r.as_ref().and_then(|r| self.rename_mark(r, "tab", cx)))
@@ -8642,7 +9013,7 @@ impl Workbench {
                                     h_flex()
                                         .gap(px(8.))
                                         .items_center()
-                                        .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(r.title.clone()))
+                                        .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).when(self.unnamed(&r), |d| d.italic()).child(r.title.clone()))
                                         .children(self.rename_mark(&r, "page", cx))
                                         .when(r.archived, |d| d.child(badge("archived", theme.muted, theme.muted_foreground)))
                                         .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
@@ -9054,7 +9425,9 @@ impl Workbench {
             .min_w_0()
             .h_full()
             .children(path_line)
-            .when(self.find_open, |d| d.child(self.render_find_bar(cx)))
+            // The find bar opens down from the strip, what is under it
+            // moving with it.
+            .when(self.find_open, |d| d.child(div().w_full().flex_shrink_0().overflow_hidden().child(self.render_find_bar(cx)).with_animation("find-bar-in", Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| if t >= 1. { d } else { d.max_h(px(FIND_BAR_MOST * t)).opacity(t) })))
             .child(transcript)
             // The working or waiting line gets air above it: without any,
             // it sat against the conversation's clipped edge and read as
@@ -9548,18 +9921,37 @@ impl Workbench {
         };
         let d = &d;
         let theme = cx.theme().clone();
+        // What the agent says (the plan, the question, the choices) is
+        // in the conversation's face, as it will be once it is in the
+        // conversation; the card's own words stay in the window's.
+        let chat_font = crate::fonts::chat_family(&self.cfg.app.chat_font, cx);
         let approval = d.body.last().is_some_and(|l| l.starts_with("Do you want"));
         let review = d.body.first().is_some_and(|l| l.starts_with("Review your answers"));
         // What is asked is the last line over the choices; what stands
         // before it is the command, or the answers under review.
-        let (title, before) = match d.body.split_last() {
+        let (mut title, mut before) = match d.body.split_last() {
             Some((last, rest)) => (last.clone(), rest.to_vec()),
             None => (String::new(), Vec::new()),
         };
+        // A plan's dialog: the question runs over two lines of the
+        // screen and is one sentence here, and the plan is drawn from
+        // its file, whole, in place of the lines of it the screen has.
+        let plan_at = d.body.iter().position(|l| l.contains(PLAN_ASKS));
+        let plan = self.dialog_plan.as_ref().filter(|(sid, _)| plan_at.is_some() && *sid == r.session_id).map(|(_, text)| text.clone());
+        if let Some(at) = plan_at {
+            title = d.body[at..].join(" ");
+            before = if plan.is_some() { Vec::new() } else { d.body[..at].to_vec() };
+        }
         let typed = !d.multi && d.options.iter().any(|o| o.label.starts_with("Type something"));
         let busy = self.dialog_sending || leaving;
-        let head = if approval { "approval" } else if review { "review" } else { "question" };
-        let says = if approval { format!("{} asks to go ahead", r.agent.speaker()) } else { format!("{} asks", r.agent.speaker()) };
+        let head = if plan_at.is_some() { "plan" } else if approval { "approval" } else if review { "review" } else { "question" };
+        let says = if plan_at.is_some() { format!("{} has a plan", r.agent.speaker()) } else if approval { format!("{} asks to go ahead", r.agent.speaker()) } else { format!("{} asks", r.agent.speaker()) };
+        // The plan scrolls in a box of its own, so the choices under it
+        // stay in view however long it is.
+        let plan_box = plan.map(|text| {
+            let (scroll, _) = self.kept_scroll("dialog-plan".into(), Inner::Held);
+            div().id("dialog-plan").w_full().max_h(PLAN_BOX_H.min(self.view_h * 0.22).max(px(120.))).overflow_y_scroll().track_scroll(&scroll).rounded(px(8.)).border_1().border_color(theme.border).px(px(14.)).py(px(10.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).text_size(px(self.cfg.app.chat_px())).line_height(gpui::relative(1.5)).child(crate::transcript::md_view("dialog-plan-md".into(), text, cx))
+        });
         // With previews the terminal's pointer is the choice so far: a
         // digit moves it, and Return takes the one it is on.
         let previews = d.preview.is_some();
@@ -9699,6 +10091,7 @@ impl Workbench {
                             .bg(theme.muted)
                             .text_size(px(12.))
                             .when(approval, |d| d.font_family(theme.mono_font_family.clone()))
+                            .when_some(chat_font.clone().filter(|_| !approval), |d, f| d.font_family(f))
                             .children(before.into_iter().filter(|l| !(review && l.starts_with("Review your answers"))).map(|l| match l.strip_prefix("→ ") {
                                 // An answer under review, under its question.
                                 Some(answer) => div().pb(px(4.)).whitespace_normal().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.primary).child(answer.to_string()),
@@ -9706,8 +10099,9 @@ impl Workbench {
                             })),
                     )
                 })
-                .child(div().text_size(px(14.)).child(title))
-                .when(!review, |el| el.child(v_flex().gap(px(4.)).children(rows)))
+                .children(plan_box)
+                .child(div().text_size(px(14.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).child(title))
+                .when(!review, |el| el.child(v_flex().gap(px(4.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).children(rows)))
                 // The picture of the choice the pointer is on, as the
                 // terminal draws it: text in columns, so in the mono
                 // face and never wrapped.
@@ -9841,6 +10235,9 @@ impl Workbench {
         let by_button = qs.len() > 1 || qs.iter().any(|q| q.multi);
         let ready = qs.iter().all(|q| picks.get(&q.question).map(|l| !l.is_empty()).unwrap_or(false));
         let rid = p.request_id.clone();
+        // The agent's words in the conversation's face, as on the
+        // terminal's dialog card.
+        let chat_font = crate::fonts::chat_family(&self.cfg.app.chat_font, cx);
         v_flex()
             .p(px(14.))
             .gap(px(12.))
@@ -9860,6 +10257,7 @@ impl Workbench {
                 let chosen = picks.get(&q.question).cloned().unwrap_or_default();
                 v_flex()
                     .gap(px(6.))
+                    .when_some(chat_font.clone(), |d, f| d.font_family(f))
                     .child(
                         h_flex()
                             .gap(px(8.))
@@ -10849,6 +11247,7 @@ impl Workbench {
         // On the home page the card stands on the tray that names the
         // folder a session starts in.
         let card = if self.page == Page::New { self.folder_tray(card.into_any_element(), cx) } else { card.into_any_element() };
+        let help = help.map(|h| v_flex().w_full().items_center().child(h).with_animation("slash-help-in", Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| d.opacity(t)));
         v_flex().w_full().items_center().gap(px(8.)).children(help).child(card).child(foot)
     }
 
@@ -11660,6 +12059,7 @@ impl Render for Workbench {
             window.request_animation_frame();
         }
         self.view_w = window.viewport_size().width;
+        self.view_h = window.viewport_size().height;
         self.pane_w = window.viewport_size().width - if sidebar_open { self.sidebar_w } else { px(0.) };
         if std::mem::take(&mut self.panel_fit_wanted) {
             self.panel_w = self.panel_fit(window, cx);
@@ -11785,7 +12185,8 @@ impl Render for Workbench {
                 }
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &FindInPage, window, cx| this.open_find(window, cx)))
+            // ⌘F a second time puts the bar away, as Escape does.
+            .on_action(cx.listener(|this, _: &FindInPage, window, cx| if this.find_open && this.find_input.read(cx).focus_handle(cx).is_focused(window) { this.close_find(window, cx) } else { this.open_find(window, cx) }))
             .on_action(cx.listener(|this, _: &SaveFile, window, cx| this.save_file(window, cx)))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_step(1, cx)))
             .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.find_step(-1, cx)))
@@ -11818,14 +12219,14 @@ impl Render for Workbench {
             .child(self.render_strip(cx))
             .when(search_open, |d| d.child(self.render_search(cx)))
             .when(self.settings_open, |d| d.child(self.render_settings(cx)))
-            .when(self.changes.is_some(), |d| d.child(self.render_changes(cx)))
-            .when_some(self.lightbox.clone(), |d, lb| d.child(self.render_lightbox(lb, cx)))
-            .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(self.render_rename(cx)))
-            .when_some(self.branch_menu, |d, at| d.child(self.render_branch_menu(at, window, cx)))
-            .when(self.branch_ask.is_some(), |d| d.child(self.render_branch_ask(cx)))
+            .when(self.changes.is_some(), |d| d.child(fade_in("changes-in", self.render_changes(cx))))
+            .when_some(self.lightbox.clone(), |d, lb| d.child(fade_in("lightbox-in", self.render_lightbox(lb, cx))))
+            .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(fade_in("rename-in", self.render_rename(cx))))
+            .when_some(self.branch_menu, |d, at| d.child(fade_in("branch-menu-in", self.render_branch_menu(at, window, cx))))
+            .when(self.branch_ask.is_some(), |d| d.child(fade_in("branch-ask-in", self.render_branch_ask(cx))))
             .when(self.file_peek.is_some(), |d| d.child(self.render_file_peek(window, cx)))
             .when(self.file_ask.is_some(), |d| d.child(self.render_file_ask(window, cx)))
-            .when(self.discard_ask.is_some(), |d| d.child(self.render_discard_ask(cx)))
+            .when(self.discard_ask.is_some(), |d| d.child(fade_in("discard-ask-in", self.render_discard_ask(cx))))
             .when(self.paste_ask.is_some(), |d| d.child(self.render_paste_ask(cx)))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))

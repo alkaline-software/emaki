@@ -84,6 +84,24 @@ count and tokens.
   last subject, the total time, and the turning mark with "running…" while
   one is going. Opened, each call folds on its own. Fewer stay inline.
 
+## Opening a card brings it into view
+
+A tool call, a run or a thought opens over a moment (`docs/window.md`,
+Motion), and may run past the foot of the conversation. It is moved up
+until its end is in view, and no further than brings its head to the
+top, so one taller than the view is read from its start
+(`Workbench::reveal_now`, `reveal_mark`, `reveal_arrive`).
+
+- The click names what was opened, and for as long as it opens a canvas
+  over it takes its bounds at each draw and the list is moved by what
+  is over. So the conversation moves with the card, at the card's own
+  pace, and there is no second animation to keep in step.
+- At the conversation's very end the list hangs from its foot and goes
+  on following it while the card grows a little at a time, so the card
+  grows upward. Its head is then held at the top, by the same step.
+- Closing moves nothing, and neither does a card opened by the find
+  bar, which goes to its hit itself.
+
 ## The agent's mark
 
 `agent_glyph` turns Claude's starburst (`assets/icons/claude.svg`) and
@@ -100,7 +118,10 @@ one too many beside the status row.
 output, a subagent's rounds counted against the Task call) once per session
 load. A query is a substring scan over that, so the answer is what the page
 shows and needs no index. ↩ and ⇧↩ step from the field, ⌘G and ⌘⇧G from
-anywhere, Escape closes.
+anywhere, Escape closes, and so does ⌘F with the keyboard in the bar.
+⌘F opens it from the composer too: the toolkit's field binds the key to
+a search of its own and, with none, passes it on (a change of ours in
+`vendor/`; upstream ended the key there).
 
 - Stepping scrolls the hit's round to the top (`ListState::scroll_to`, item
   offset zero; the list cannot address a point inside an item) and unfolds
@@ -125,6 +146,10 @@ distinct text, and `md_view` shows an unsafe text as a code block.
 this one call.
 
 ## Probing
+
+- `EMAKI_GO=toolopen` opens the last `Bash` or `Write` call that is not
+  in a folded run, as a click does; with `EMAKI_SCROLL_DEBUG=1` it
+  prints where the card stood and how far the view was moved.
 
 - A `mouseMoved` `CGEvent` sent with `postToPid` moves gpui's hover without
   moving the real pointer, so a hover state is one event and a window

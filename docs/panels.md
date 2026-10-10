@@ -456,15 +456,23 @@ far from the tree.
   names a file's language and `editor_language` is the toolkit's name
   for it. R is not in the toolkit's set: `look::install_languages`
   registers the `tree-sitter-r` crate's grammar and queries.
+- A file has its colours at its first draw. The toolkit parses in the
+  editor's own thread for a moment and, past that, in the background
+  after a wait, both sized for a keystroke; a text with no tree yet (a
+  file just opened) is given 60 ms in the vendored `input_adapter.rs`,
+  which a file of some tens of kilobytes takes a quarter of, and its
+  background parse starts with no wait. A file past 256 kB is parsed in
+  the background from the start and is still one colour for a moment.
 - A `.csv` or `.tsv` as written has each column in a colour of its own,
   as the Rainbow CSV extension does: the vendored `delimited.rs`, a
   highlighter with no grammar behind it for the languages `csv` and
   `tsv`, which gives the columns ten of the theme's syntax colours in
   turn. A quoted cell keeps its column across the separators and line
   breaks inside it.
-- The palette is VS Code's Dark+ and Light+ on the window's own
-  grounds: the `highlight` part of each theme in `themes/emaki.json`.
-  Without one the toolkit keeps its light palette in a dark window. The
+- The palette is the window's own inks (`docs/look.md`, Code's
+  colours), named in the `highlight` part of each theme in
+  `themes/emaki.json`. Without one the toolkit keeps its light palette
+  in a dark window. The
   names it reads are a fixed list (`SyntaxColors`); note `comment_doc`,
   with an underscore.
 - Markdown has two segments in the pane's head, as the files and the

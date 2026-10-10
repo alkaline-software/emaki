@@ -10,8 +10,12 @@
 # that terminal's marks from then on: its bundle identifier, its ssh
 # agent's socket. Started from a session's shell it inherits the same from
 # whatever started the app before it. So the build goes in a bundle of its
-# own, target/debug/Emaki.app, and is opened through the system with an
-# environment that holds only what a Dock launch has.
+# own, target/debug/dev.noindex/Emaki.app, and is opened through the
+# system with an environment that holds only what a Dock launch has.
+#
+# The folder's name ends in ".noindex", which Spotlight passes by: in
+# target/debug itself the bundle was indexed, and Launchpad and Spotlight
+# listed a second Emaki beside the installed one.
 #
 # The bundle is signed with a signing identity of the developer's when the
 # keychain has one (EMAKI_SIGN_IDENTITY, else the first "Developer ID
@@ -28,7 +32,9 @@ bin=target/debug/Emaki
 [ -x "$bin" ] || { echo "no $bin: cargo build -p emaki-app" >&2; exit 1; }
 [ "$(uname)" = Darwin ] || exec "./$bin"
 
-app=target/debug/Emaki.app
+app=target/debug/dev.noindex/Emaki.app
+# The bundle as it was before it had a folder of its own.
+rm -rf target/debug/Emaki.app
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 rm -f "$app/Contents/MacOS/Emaki"
 cp -c "$bin" "$app/Contents/MacOS/Emaki" 2>/dev/null || cp "$bin" "$app/Contents/MacOS/Emaki"

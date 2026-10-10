@@ -2743,3 +2743,23 @@ fn discarding_goes_back_to_the_last_commit() {
     let status = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&dir).args(["status", "--porcelain"]).output().unwrap().stdout).unwrap();
     assert_eq!(status, "?? new.txt\n?? staged.txt\n");
 }
+
+/// A plan's dialog, as 2.1.296 draws it under a plan too long for the
+/// screen: the question, the three choices, and the plan's file on the
+/// last line, which is where the plan is read from.
+#[test]
+fn a_plans_dialog_names_its_file() {
+    use emaki_core::driver::{dialog_on_screen, plan_file_on_dialog};
+    let rule = "─".repeat(92);
+    let screen = format!(
+        "   - It has a decision with trade-offs, so there is a table.\n{}↓\n  {rule}\n   Claude has written up a plan and is ready to execute. Would you like to proceed?\n\n   ❯ 1. Yes, and use auto mode\n     2. Yes, manually approve edits\n     3. Tell Claude what to change\n        shift+tab to approve with this feedback\n\n   ctrl+g to edit in VS Code · ~/.claude/plans/peaceful-sprouting-moth.md\n",
+        " ".repeat(94)
+    );
+    let d = dialog_on_screen(&screen).unwrap();
+    assert_eq!(d.body, vec!["Claude has written up a plan and is ready to execute. Would you like to proceed?"]);
+    assert_eq!(d.options.len(), 3);
+    assert_eq!(plan_file_on_dialog(&d).as_deref(), Some("~/.claude/plans/peaceful-sprouting-moth.md"));
+    // A question is no plan, and names no file.
+    let asked = dialog_on_screen(&format!("{rule}\nWhich fruit?\n❯ 1. Apple\n     Crisp and sweet\n  2. Banana\n{rule}\n  3. Chat about this\nEnter to select · Esc to cancel\n")).unwrap();
+    assert_eq!(plan_file_on_dialog(&asked), None);
+}

@@ -197,6 +197,11 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     pub(super) fn on_action_search(&mut self, _: &Search, _: &mut Window, cx: &mut Context<Self>) {
         if !self.searchable {
+            // Emaki: a field with no search of its own passes the key
+            // on, so the window's own find answers it. Upstream ended
+            // the key here, and ⌘F did nothing with the keyboard in the
+            // composer.
+            cx.propagate();
             return;
         }
         self.open_search(false, cx);

@@ -206,6 +206,35 @@ The patterns, each in use and to be used again:
 - **A choice that moves** (a segmented control, the strip's buttons): one
   plate slides from the old to the new.
 
+- **A fold in the conversation** (a tool call's body, a run's calls, a
+  thought, a subagent's rounds): `fold_state` and `fold_wrap`. The box's
+  height runs up from nothing and back, the content fading with it. The
+  content keeps its own height, cut by the box, and says how tall it is
+  as it is drawn. `fold_state` is asked at every draw, shut or open, so
+  a change is seen as one and the first sight of a fold is not played;
+  shut, the content is drawn for that moment more. The room between
+  a fold and its head is inside the fold (`fold_wrap`'s `gap`), in a
+  column with no gap, as it is under a card over the composer: a
+  column's gap outlives a box shut to nothing, and the closing stopped
+  short and then jumped.
+- **A row that comes or goes in a list** (a session in a sidebar
+  folder): `side_rows_changed` sets a folder's rows against how they
+  were last drawn. One that was not there grows in; one that is no
+  longer is drawn a moment more where it stood, shrinking
+  (`side_gone`). A folder drawn for the first time plays nothing, and a
+  row that only changes place is not moved in motion.
+- **Something that lies over the window and has no way out of its own**
+  (the rename sheet, the lightbox, the comparison, the branch list and
+  its question, the discard question): `fade_in`, on a static id, which
+  plays once each time it appears. These still go at once.
+- **A bar in the flow** (the find bar): its height opens with what is
+  under it moving, by a `max_h` no less than its own.
+
+Left as they are, on purpose: a tab's page changing (the conversation
+is the content, and a cross-fade of two long lists is a blur), text
+arriving in a live reply, a hover's ground, and a row changing place in
+a list when its session is written to.
+
 The toolkit's own popover has no way out but at once, which is why a
 pill's list is ours (`PickMenu`) and not a `Popover`.
 
@@ -402,7 +431,8 @@ and a message sent in the same moment do not arrive as one line.
 A folder's row in the sidebar shows a plus in place of its count while the
 pointer is on it (both always there, one clear, so nothing moves). It
 begins a session in that folder (`new_session_in`) on a tab like any
-other's: the conversation page with nothing said, named "New session".
+other's: the conversation page with nothing said, named "New Session" in
+italics, the name being ours and not one anybody gave it (`unnamed`).
 ⌘N and the home page are as they were.
 
 - It is a record of our own (`begun`), put at the head of every index
@@ -419,8 +449,12 @@ other's: the conversation page with nothing said, named "New session".
   make a second.
 - Until its first message it has no terminal to ask anything of: its
   pills are the home page's (they open Settings), the composer says
-  "Start a session…", the terminal's button says to send a message
-  first, and it is not shown as live.
+  "Start a session…", the terminal panel's agent side says Claude Code
+  starts with the first message, and it is not shown as live.
+- Nothing starts a hidden terminal for it before that message
+  (`terminal_check` refuses it, `warm_now` passes it by). Every other
+  start is a resume, and `claude --resume` on an id with no transcript
+  ends at once with "No conversation found with session ID".
 
 ## Scroll routing
 

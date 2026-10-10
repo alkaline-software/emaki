@@ -1530,6 +1530,8 @@ impl Workbench {
             (format!("{name} runs here only for Claude Code sessions, with the hidden terminal on."), false)
         } else if self.in_own_terminal(r) {
             (format!("A turn is running in a terminal of yours. When it is over, {name} can be started here."), false)
+        } else if self.is_draft(&r.session_id) {
+            (format!("{name} starts with your first message."), false)
         } else if let Err(why) = self.terminal_ok(r) {
             (why.to_string(), false)
         } else {
@@ -1679,7 +1681,10 @@ static KAKU_DARK: Scheme = Scheme {
     tab_hover: 0x1f1d28,
     tab_off: 0x6d6d6d,
     toast: (0x8e6ad9, 0xffffff),
-    ansi: [0xc8c6cc, 0xd85d5d, 0x58d8ad, 0xdaae76, 0x68afda, 0x8e6ad9, 0x58d8ad, 0xd5d4d6, 0x6d6d6d, 0xd85d5d, 0x58d8ad, 0xdaae76, 0x90c9e6, 0x8e6ad9, 0x58d8ad, 0xd5d4d6],
+    ansi: {
+        let k = &crate::look::INKS_DARK;
+        [0xc8c6cc, k.red, k.green, k.gold, k.blue, k.violet, k.teal, 0xd5d4d6, 0x6d6d6d, k.red, k.green, k.gold, k.blue, k.violet, k.teal, 0xd5d4d6]
+    },
     grounds: &[(0xc8c6cc, 0x15141b), (0x6d6d6d, 0x3a3942), (0x6e6e6e, 0x3a3942), (0x8ec3ff, 0x3a3942), (0xd5d4d6, 0x4a4954)],
     inks: &[(0x000000, 0xd5d4d6), (0x110f18, 0xd5d4d6), (0x15141b, 0xd5d4d6), (0x1a1a1a, 0xd5d4d6), (0x1c1c1c, 0xd5d4d6)],
     wash: 0x3a3942,
@@ -1698,8 +1703,11 @@ static KAKU_LIGHT: Scheme = Scheme {
     tab_hover: 0xe8e6db,
     tab_off: 0x4a4946,
     toast: (0x8e6b02, 0x1a1a1a),
-    ansi: [0x100f0f, 0xaf3029, 0x536907, 0x8e6b02, 0x205ea6, 0xa02f6f, 0x1c6c66, 0x575653, 0x6f6e69, 0xc03e35, 0x66790d, 0x8e6b02, 0x3171b2, 0xb74583, 0x277c75, 0x403e3c],
-    grounds: &[(0x575653, 0xf2f0eb), (0x585754, 0xf2f0eb), (0x225fa6, 0xf2f0eb), (0x1c6c66, 0xf2f0eb), (0x536907, 0xf2f0eb), (0x8e6b02, 0xf2f0eb), (0x205ea6, 0xc9ddf0), (0x403e3c, 0xe8e6db)],
+    ansi: {
+        let k = &crate::look::INKS_LIGHT;
+        [0x100f0f, k.red, k.green, k.gold, k.blue, k.violet, k.teal, 0x575653, 0x6f6e69, k.red, k.green, k.gold, k.blue, k.violet, k.teal, 0x403e3c]
+    },
+    grounds: &[(0x575653, 0xf2f0eb), (0x585754, 0xf2f0eb), (0x225fa6, 0xf2f0eb), (crate::look::INKS_LIGHT.teal, 0xf2f0eb), (crate::look::INKS_LIGHT.green, 0xf2f0eb), (crate::look::INKS_LIGHT.gold, 0xf2f0eb), (crate::look::INKS_LIGHT.blue, 0xd3e3ea), (0x403e3c, 0xe8e6db)],
     inks: &[(0xffffdb, 0x575653), (0xffffdc, 0x575653)],
     wash: 0xf2f0eb,
     plain: FontWeight::MEDIUM,

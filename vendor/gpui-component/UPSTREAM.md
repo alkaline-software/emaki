@@ -183,6 +183,15 @@ upstream revision finds them.
 22. `crates/base/src/input/base/state.rs`: `undo_step` and `redo_step`,
     undo and redo for an owner that edits the value from outside the
     field with `replace_bytes` (a table's cell).
+23. `crates/base/src/input/editor/search.rs`: a field that is not
+    `searchable` passes ⌘F on (`cx.propagate()`), where upstream ended
+    it there. The window's find is bound to the same key, and with the
+    keyboard in the composer it never heard it.
+24. `crates/ui/src/highlighter/input_adapter.rs`: a text parsed for
+    the first time gets 60 ms before the first draw (upstream: the 2 ms
+    a keystroke gets) and, past that, a background parse with no wait
+    before it (upstream: the 150 ms that follows typing). A file opened
+    was drawn in one colour for a moment first.
 
 ## Updating
 
