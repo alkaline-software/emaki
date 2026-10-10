@@ -354,7 +354,7 @@ fn main() {
                 }
             }
             let id = resume.clone().unwrap_or_else(uuid_v4);
-            let argv = emaki_core::pty::claude_argv(&id, resume.is_some(), "", "");
+            let argv = emaki_core::pty::claude_argv(&id, resume.is_some(), "", "", "");
             let started = std::time::Instant::now();
             let pty = emaki_core::pty::Pty::spawn(&argv, &cwd, std::sync::Arc::new(|| {})).expect("spawn");
             println!("session {id} pid {}", pty.pid);

@@ -62,6 +62,10 @@ pub struct Limits {
     pub seen_at: f64,
     /// Context window size per model id, as `modelUsage` reported it.
     pub context_windows: BTreeMap<String, u64>,
+    /// Codex's windows for the account, the shorter first, and when a
+    /// rollout last recorded them.
+    pub codex: Vec<crate::model::UsageWindow>,
+    pub codex_seen_at: f64,
 }
 
 /// What the status line was last handed about one session:
@@ -170,6 +174,18 @@ impl Limits {
             self.seven_day = seven;
         }
         self.seen_at = now;
+        true
+    }
+
+    /// What a Codex session's rollout last recorded of the account's
+    /// windows. They are the account's, so the newest of any session's
+    /// stands for all. Returns whether anything was learned.
+    pub fn absorb_codex(&mut self, windows: &[crate::model::UsageWindow], at: f64) -> bool {
+        if windows.is_empty() || at <= self.codex_seen_at {
+            return false;
+        }
+        self.codex = windows.to_vec();
+        self.codex_seen_at = at;
         true
     }
 

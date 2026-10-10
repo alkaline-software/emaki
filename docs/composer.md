@@ -199,6 +199,16 @@ Code names no five-hour window between one running out and the request
 that starts the next. So the row draws a window through `Window::at`:
 past its reset it is 0% with no time, not the old window's number.
 
+**Codex.** Its rollout says all of it, on each `token_count` row
+(`docs/core.md`), so there is no script and nothing is asked of Codex.
+The context is the last request's input against `model_context_window`;
+a session that has not named a window yet shows no context rather than
+a share of a guess. The windows are the account's, a primary and a
+secondary of whatever length its plan has, and the row names each by its
+length: `5h:` and `7d:` on a paid plan, `30d:` alone on a free one. The
+newest any session's rollout recorded stands for all
+(`Limits::absorb_codex`), taken in when a session is loaded.
+
 What was learned is kept in `state/limits.json` with its time; the row
 says "limits as of …" once stale and `--` until a source has reported.
 Tried and dropped: a hand-patched script outside the repository, whose

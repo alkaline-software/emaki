@@ -559,13 +559,13 @@ impl Hub {
     /// has made sure no other process is behind the session. The screen
     /// changing arrives as `HubEvent::Screen`, a moment after it does,
     /// so a burst of drawing is one event.
-    pub fn start_terminal(self: &Arc<Self>, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str) -> Result<(), String> {
+    pub fn start_terminal(self: &Arc<Self>, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str, effort: &str) -> Result<(), String> {
         if self.terminal_for(session_id).is_some() {
             return Ok(());
         }
         let (tx, rx) = mpsc::channel::<()>();
         let tx = Mutex::new(tx);
-        let argv = emaki_core::pty::claude_argv(session_id, resume, mode, model);
+        let argv = emaki_core::pty::claude_argv(session_id, resume, mode, model, effort);
         let pty = Pty::spawn(&argv, cwd, Arc::new(move || {
             let _ = tx.lock().map(|t| t.send(()));
         }))?;

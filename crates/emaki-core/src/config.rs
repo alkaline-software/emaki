@@ -31,6 +31,8 @@ pub struct Driver {
     pub default_mode: String,
     /// "" = the account default.
     pub default_model: String,
+    /// "" = Claude Code's own level.
+    pub default_effort: String,
     pub allow_bypass: bool,
     /// Where `claude` is, when `PATH` and the installers' folders do not
     /// say. "" = search.
@@ -43,7 +45,7 @@ pub struct Driver {
 
 impl Default for Driver {
     fn default() -> Self {
-        Self { enabled: true, idle_min: 30, default_mode: String::new(), default_model: String::new(), allow_bypass: false, claude_path: String::new(), hidden_terminal: true }
+        Self { enabled: true, idle_min: 30, default_mode: String::new(), default_model: String::new(), default_effort: String::new(), allow_bypass: false, claude_path: String::new(), hidden_terminal: true }
     }
 }
 

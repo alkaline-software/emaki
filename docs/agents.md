@@ -110,6 +110,22 @@ says the same and more.
 the agents in `MARKS` (Simple Icons' drawings of the makers' marks, CC0),
 then the first letter of the name, for an agent added with no mark yet.
 
+A mark's colour is its agent's and never the accent's: Claude's
+terracotta, Codex's green (`workbench::agent_color`, the two accents of
+those names in `look::ACCENTS`, each with its shade for the appearance).
+The words beside a mark that say the agent is at work wear the same.
+Two places keep a mark grey until there is a reason: an idle session's
+row, and the terminal button in the top strip until it is pointed at or
+its side shows. A folder is not a mark and follows the accent. The list
+of agents on a new session has the mark before each name, and the
+maker's line under it starts where the name does.
+
+On the agents page everything of an agent's that would wear the accent
+or the green of "done" wears the agent's colour instead (`agent_ink`):
+the ticks, the "Installed" chip, "Set up", a card's border under the
+pointer, the pills' wash, the tick of a command copied. An agent whose
+sessions are not read has no colour and keeps the accent.
+
 ## Probing
 
 - `emaki-core agents` prints what looking finds.

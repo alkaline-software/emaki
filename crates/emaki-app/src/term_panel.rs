@@ -1419,7 +1419,7 @@ impl Workbench {
                         .font_family(theme.font_family.clone())
                         .text_size(px(12.5))
                         .text_color(hsla(mix(ink, ground, 0.35)))
-                        .child(crate::workbench::agent_glyph(r.agent, px(13.), hsla(mix(ink, ground, 0.35)), true, "term-panel-starting"))
+                        .child(crate::workbench::agent_glyph(r.agent, px(13.), crate::workbench::agent_color(r.agent, &theme), true, "term-panel-starting"))
                         .child(format!("Starting {}, one moment…", r.agent.display_name()))
                 });
                 let ended = (!pty.alive()).then(|| {

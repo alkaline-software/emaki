@@ -310,7 +310,10 @@ const FLOAT_ANIM: Duration = Duration::from_millis(220);
 /// A tab's width when there is room, the least it shrinks to, the gap
 /// between two on a pill, and how long a width takes to change.
 const TAB_MAX: f32 = 200.;
-const TAB_MIN: f32 = 56.;
+const TAB_MIN: f32 = 112.;
+/// The room kept clear between the tabs and the buttons at either end of
+/// the strip, however many tabs there are.
+const STRIP_GAP: f32 = 14.;
 const TAB_GAP: f32 = 2.;
 const TAB_ANIM: Duration = Duration::from_millis(220);
 /// A pill holds one folder's tabs: a tab's height on it, the track's
@@ -974,6 +977,8 @@ pub struct Workbench {
     pub settings_open: bool,
     /// Which section of the settings panel is showing; see `SETTINGS_SECTIONS`.
     pub settings_section: &'static str,
+    /// Whose new sessions the New sessions section is showing.
+    settings_agent: AgentId,
     pub search_results: Option<Results>,
     search_task: Option<Task<()>>,
     /// Find inside the conversation showing (⌘F): the field, whether the
@@ -1075,6 +1080,17 @@ pub struct Workbench {
     /// The terminal session ⇧Tab was last sent to from here, until its
     /// screen has been read back.
     mode_pressed: Option<String>,
+    /// A mode picked from the list on a terminal session, on its way
+    /// there a key at a time (`walk_mode`).
+    mode_walk: Option<ModeWalk>,
+    /// The session ⇧Tab was last pressed in from here and has not been
+    /// read since, and the modes that key has landed on there in a row
+    /// (`learn_cycle`).
+    mode_stepped: Option<String>,
+    mode_trail: (String, Vec<String>),
+    /// The modes ⇧Tab goes round, once a whole round has been seen; in
+    /// `ui.json`. Claude Code lists more modes than its key reaches.
+    mode_cycle: Vec<String>,
     /// The session whose mode was changed since its last turn, from here
     /// or in its terminal, whatever it is now.
     mode_touched: Option<(String, Vec<(String, f64)>)>,
@@ -1097,6 +1113,9 @@ pub struct Workbench {
     pub new_id: String,
     pub next_mode: String,
     pub next_model: String,
+    /// The effort level a new Claude Code session is started at; empty
+    /// for Claude Code's own.
+    pub next_effort: String,
     /// The account's usage windows and the models' context sizes, as the
     /// last driver turn reported them; kept in `state/limits.json`.
     pub limits: Limits,
@@ -1206,6 +1225,14 @@ pub struct Workbench {
     /// The tab row's width as last laid out, each tab's width (see
     /// `sync_tab_widths`), and how many tabs those were worked out for.
     tabs_row_w: Rc<std::cell::Cell<f32>>,
+    /// The tab row's scroll, once the tabs at their least width are wider
+    /// than the row.
+    tabs_scroll: ScrollHandle,
+    /// The showing tab changed and has not been brought into the row
+    /// yet: the row's width was not known.
+    tabs_reveal: bool,
+    /// The row's width when the showing tab was last looked for in it.
+    tabs_row_seen: f32,
     tab_widths: HashMap<String, TabWidth>,
     tabs_n: usize,
     /// The tabs as pills, a folder and its tabs each, in the row's order
@@ -1951,6 +1978,7 @@ impl Workbench {
         self.pill_born.retain(|p, _| groups.iter().any(|(g, _)| g == p));
         // The plate goes where the showing tab is.
         let showing = self.selected.clone().filter(|k| tabs.contains(k));
+        self.tabs_reveal |= self.tab_plate.to != showing;
         if self.tab_plate.to != showing {
             self.tab_plate.from = self.tab_plate.to.take().filter(|_| !first);
             self.tab_plate.to = showing;
@@ -1971,6 +1999,34 @@ impl Workbench {
         let row = self.tabs_row_w.get();
         let chrome: f32 = self.tab_groups.iter().map(|(_, keys)| pill_chrome(keys.len())).sum::<f32>() + PILL_GAP * (self.tab_groups.len() as f32 - 1.);
         let target = if row <= 0. { TAB_MAX } else { ((row - chrome) / n as f32).clamp(TAB_MIN, TAB_MAX) };
+        // The tab gone to is brought into the row when the tabs are wider
+        // than it and it stands outside: by sum, as every place here is.
+        // Also when the row itself changes width (the sidebar folded,
+        // the window resized): the tab shown stays in it.
+        let reveal = (self.tabs_reveal || (row - self.tabs_row_seen).abs() > 0.5) && row > 0.;
+        if reveal {
+            self.tabs_reveal = false;
+            self.tabs_row_seen = row;
+        }
+        if reveal && chrome + target * n as f32 > row {
+            let mut x = 0.;
+            let mut span = None;
+            for (_, keys) in &self.tab_groups {
+                if let Some(i) = keys.iter().position(|k| Some(k) == self.tab_plate.to.as_ref()) {
+                    let left = x + PILL_LEAD + i as f32 * (target + TAB_GAP);
+                    span = Some((left - PILL_LEAD, left + target + PILL_PAD));
+                }
+                x += pill_chrome(keys.len()) + target * keys.len() as f32 + PILL_GAP;
+            }
+            if let Some((left, right)) = span {
+                let at = self.tabs_scroll.offset();
+                let seen = -f32::from(at.x);
+                let to = if left < seen { left } else if right > seen + row { right - row } else { seen };
+                if (to - seen).abs() > 0.5 {
+                    self.tabs_scroll.set_offset(point(px(-to), at.y));
+                }
+            }
+        }
         let moved = n != self.tabs_n && !first;
         self.tabs_n = n;
         for key in self.tabs.iter() {
@@ -1996,7 +2052,9 @@ impl Workbench {
         let w = self.tabs.first().and_then(|k| self.tab_widths.get(k)).map(|w| w.to).unwrap_or(TAB_MAX);
         let widths: Vec<f32> = self.tab_groups.iter().map(|(_, keys)| pill_chrome(keys.len()) + w * keys.len() as f32).collect();
         let total = widths.iter().sum::<f32>() + PILL_GAP * (widths.len() as f32 - 1.).max(0.);
-        let mut x = f32::from(row.left()) + ((f32::from(row.size.width) - total) / 2.).max(0.);
+        // Centred while they fit, else from the row's left, moved by how
+        // far the row is scrolled.
+        let mut x = f32::from(row.left()) + ((f32::from(row.size.width) - total) / 2.).max(0.) + f32::from(self.tabs_scroll.offset().x);
         widths
             .into_iter()
             .map(|pw| {
@@ -2493,6 +2551,7 @@ impl Workbench {
 
         let next_mode = cfg.driver.default_mode.clone();
         let next_model = cfg.driver.default_model.clone();
+        let next_effort = cfg.driver.default_effort.clone();
         // Last time's tabs and sidebar come back; the window opens on the
         // new-session page, as the Claude app opens on a new chat.
         // `EMAKI_OPEN=<session-id prefix>` opens a session on launch instead
@@ -2702,6 +2761,7 @@ impl Workbench {
             search_open: false,
             settings_open,
             settings_section,
+            settings_agent: ui.new_agent.as_deref().and_then(AgentId::parse).unwrap_or(AgentId::ClaudeCode),
             search_results: None,
             search_task: None,
             find_input,
@@ -2746,6 +2806,10 @@ impl Workbench {
             term_keys_probe: std::env::var("EMAKI_TERM_KEYS").ok(),
             mode_read_again: None,
             mode_pressed: None,
+            mode_walk: None,
+            mode_stepped: None,
+            mode_trail: (String::new(), Vec::new()),
+            mode_cycle: ui.mode_cycle.clone().unwrap_or_default(),
             mode_touched: None,
             slash_sel: 0,
             slash_closed: false,
@@ -2759,6 +2823,7 @@ impl Workbench {
             new_id: String::new(),
             next_mode,
             next_model,
+            next_effort,
             limits: {
                 let mut l = Limits::load();
                 l.refresh_from_statusline();
@@ -2951,6 +3016,9 @@ impl Workbench {
             float_anim: None,
             stashed: HashMap::new(),
             tabs_row_w: Rc::new(std::cell::Cell::new(0.)),
+            tabs_scroll: ScrollHandle::new(),
+            tabs_reveal: true,
+            tabs_row_seen: 0.,
             tab_widths: HashMap::new(),
             tabs_n: 0,
             tab_groups: Vec::new(),
@@ -3622,19 +3690,7 @@ impl Workbench {
     /// driver, which is started for the purpose when none is behind it.
     fn codex_set(&mut self, pill: Pill, key: &str, cx: &mut Context<Self>) {
         if self.codex_unstarted() {
-            let slot = match pill {
-                Pill::Mode => 0,
-                Pill::Model => 1,
-                Pill::Effort => 2,
-            };
-            self.codex_next[slot] = key.to_string();
-            // A level the model chosen does not take is not kept.
-            if pill == Pill::Model && !self.options().efforts_for(key).iter().any(|e| e.key == self.codex_next[2]) {
-                self.codex_next[2] = String::new();
-            }
-            self.save_ui(true);
-            cx.notify();
-            return;
+            return self.codex_next_set(pill, key, cx);
         }
         let Some(r) = self.selected_ref().cloned() else { return };
         let (via, why) = self.reply_via_for(&r);
@@ -3700,6 +3756,35 @@ impl Workbench {
             }
         };
         self.open_and_focus(&key, window, cx);
+    }
+
+    /// The session showing, when it is one begun here with nothing sent.
+    fn begun_showing(&self) -> Option<SessionRef> {
+        self.selected_ref().filter(|r| self.page == Page::Session && self.is_draft(&r.session_id)).cloned()
+    }
+
+    /// Give the session begun and showing to another agent. Nothing has
+    /// been started for it, so it is the same record under that agent:
+    /// its tab stays where it is and what is typed stays typed.
+    fn begun_agent(&mut self, agent: AgentId, cx: &mut Context<Self>) {
+        let Some(r) = self.begun_showing().filter(|r| r.agent != agent) else { return };
+        let old = key_of(&r);
+        for d in self.begun.iter_mut().chain(self.refs.iter_mut()).filter(|d| d.session_id == r.session_id && d.agent == r.agent) {
+            d.agent = agent;
+        }
+        let key = key_of(&SessionRef { agent, ..r });
+        for t in self.tabs.iter_mut().filter(|t| **t == old) {
+            *t = key.clone();
+        }
+        if self.draft_of.as_ref() == Some(&old) {
+            self.draft_of = Some(key.clone());
+        }
+        if let Some(kept) = self.drafts.remove(&old) {
+            self.drafts.insert(key.clone(), kept);
+        }
+        self.stashed.remove(&old);
+        self.detail = None;
+        self.open_session(&key, cx);
     }
 
     pub fn open_session(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -3869,6 +3954,7 @@ impl Workbench {
             Some("pick:default-mode") => self.pick_toggle(PickFor::DefaultMode, cx),
             Some("pick:off") => self.close_pick(cx),
             Some("pick:mode") => self.pick_toggle(PickFor::Mode, cx),
+            Some(t) if t.starts_with("pickmode:") => self.pill_picked(Pill::Mode, &t["pickmode:".len()..], cx),
             Some("pick:agent") => self.pick_toggle(PickFor::Agent, cx),
             // The agent a new session is begun with, and words to send
             // from wherever the composer is, a step among others.
@@ -3958,6 +4044,7 @@ impl Workbench {
                 cx.notify();
             }
             Some(t) if t.starts_with("model:") => self.pill_picked(Pill::Model, &t["model:".len()..], cx),
+            Some(t) if t.starts_with("neweffort:") => self.pick_chosen(PickFor::DefaultEffort, &t["neweffort:".len()..], cx),
             Some(t) if t.starts_with("effort:") => self.pill_picked(Pill::Effort, &t["effort:".len()..], cx),
             _ => {}
         }
@@ -4022,6 +4109,7 @@ impl Workbench {
             outline_on: Some(self.outline_on),
             branches_by_name: Some(self.branch_by_name),
             new_agent: Some(self.new_agent.as_str().to_string()),
+            mode_cycle: Some(self.mode_cycle.clone()).filter(|c| !c.is_empty()),
             codex_next: Some(self.codex_next.clone()),
             page: page.into(),
             // A session begun here with nothing sent is not kept: there
@@ -4155,7 +4243,7 @@ impl Workbench {
                 _ => self.handed_back = None,
             }
         }
-        if self.limits.refresh_from_statusline() {
+        if self.limits.refresh_from_statusline() | self.limits.absorb_codex(&session.usage_windows, session.usage_windows_at) {
             let _ = self.limits.save();
         }
         self.refresh_context(&session.id);
@@ -4373,9 +4461,50 @@ impl Workbench {
         cx.notify();
     }
 
+    /// The effort level a new Claude Code session starts at. "default"
+    /// is none asked for: Claude Code's own.
+    fn set_default_effort(&mut self, choice: &str, cx: &mut Context<Self>) {
+        let v = if choice == "default" { String::new() } else { choice.to_string() };
+        self.cfg.driver.default_effort = v.clone();
+        self.next_effort = v.clone();
+        if let Err(e) = Config::edit(move |c| c.driver.default_effort = v) {
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+        }
+        cx.notify();
+    }
+
+    /// What a new session of `agent` can be set to, in the folder one
+    /// would start in.
+    fn new_options(&self, agent: AgentId) -> Options {
+        let cwd = self.begun_showing().map(|d| d.cwd).unwrap_or_else(|| self.new_cwd.clone());
+        self.hub.options_for(agent, &cwd)
+    }
+
+    /// Keep one of the three a new Codex session starts in. "default"
+    /// for the effort is none asked for.
+    fn codex_next_set(&mut self, pill: Pill, key: &str, cx: &mut Context<Self>) {
+        let slot = match pill {
+            Pill::Mode => 0,
+            Pill::Model => 1,
+            Pill::Effort => 2,
+        };
+        self.codex_next[slot] = if pill == Pill::Effort && key == "default" { String::new() } else { key.to_string() };
+        // A level the model chosen does not take is not kept.
+        if pill == Pill::Model && !self.new_options(AgentId::Codex).efforts_for(key).iter().any(|e| e.key == self.codex_next[2]) {
+            self.codex_next[2] = String::new();
+        }
+        self.save_ui(true);
+        cx.notify();
+    }
+
     fn set_default_model(&mut self, choice: &str, cx: &mut Context<Self>) {
         // The agent's stand-in for its own default is "no model asked for".
-        let v = if choice == self.options().default_model { String::new() } else { choice.to_string() };
+        let options = self.new_options(AgentId::ClaudeCode);
+        let v = if choice == options.default_model { String::new() } else { choice.to_string() };
+        // A level the model chosen does not take is not kept.
+        if !self.next_effort.is_empty() && !options.efforts_for(choice).iter().any(|e| e.key == self.next_effort) {
+            self.set_default_effort("default", cx);
+        }
         self.cfg.driver.default_model = v.clone();
         self.next_model = v.clone();
         if let Err(e) = Config::edit(move |c| c.driver.default_model = v) {
@@ -4464,11 +4593,37 @@ impl Workbench {
 
         let default_mode = if self.cfg.driver.default_mode.is_empty() { "default".to_string() } else { self.cfg.driver.default_mode.clone() };
         // The same lists the pills under the composer open, since both
-        // are whatever the agent offers.
-        let options = self.options();
+        // are whatever the agent offers: each agent's own three.
+        let options = self.new_options(AgentId::ClaudeCode);
         let modes = self.pick_pill(PickFor::DefaultMode, "default-mode", "icons/shield.svg", PillText { tail: "", ..mode_pill(&options, &default_mode, &theme) }, cx);
         let default_model = if self.cfg.driver.default_model.is_empty() { options.default_model.clone() } else { self.cfg.driver.default_model.clone() };
         let models = self.pick_pill(PickFor::DefaultModel, "default-model", "icons/box.svg", PillText::plain(model_name(&options, &default_model)), cx);
+        let efforts = self.pick_pill(PickFor::DefaultEffort, "default-effort", "icons/gauge.svg", PillText { tail: "", ..effort_pill(&options, &default_model, &self.next_effort, &theme) }, cx);
+        let codex = self.new_options(AgentId::Codex);
+        let codex_model = if self.codex_next[1].is_empty() { codex.models.first().map(|m| m.key.clone()).unwrap_or_default() } else { self.codex_next[1].clone() };
+        let codex_modes = self.pick_pill(PickFor::CodexMode, "codex-mode", "icons/shield.svg", PillText { tail: "", ..mode_pill(&codex, &self.codex_next[0], &theme) }, cx);
+        let codex_efforts = self.pick_pill(PickFor::CodexEffort, "codex-effort", "icons/gauge.svg", PillText { tail: "", ..effort_pill(&codex, &codex_model, &self.codex_next[2], &theme) }, cx);
+        let codex_models = self.pick_pill(PickFor::CodexModel, "codex-model", "icons/box.svg", PillText::plain(model_name(&codex, &codex_model)), cx);
+        // Whose three are showing: a segment an agent, by its mark, at
+        // the right of the section's title, and the agent named over
+        // its rows.
+        let settings_agent = self.settings_agent;
+        let agent_head = h_flex().gap(px(7.)).items_center().child(agent_icon(settings_agent, px(14.), agent_color(settings_agent, &theme))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(settings_agent.display_name())).into_any_element();
+        let agent_pick = h_flex()
+            .child(self.segmented(
+                "new-sessions-agent",
+                AgentId::ALL.iter().map(|a| (a.as_str(), String::new(), None)).collect(),
+                settings_agent.as_str(),
+                Rc::new(|this, key, _, cx| {
+                    if let Some(agent) = AgentId::parse(key) {
+                        this.settings_agent = agent;
+                        this.close_pick(cx);
+                        cx.notify();
+                    }
+                }),
+                cx,
+            ))
+            .into_any_element();
 
         // The terminal's rows: each a choice of Kaku's own or another.
         let term = self.cfg.terminal.clone();
@@ -4597,8 +4752,10 @@ impl Workbench {
             ],
             "files" => vec![row("Format on save", "A file saved from the file's pane is put in its language's standard form first. R is formatted by Air, with Air's defaults; no other language has a formatter yet.", format_on_save.into_any_element(), &theme).into_any_element()],
             "sessions" => vec![
-                row("Permission mode", "What a session started here begins in.", modes, &theme).into_any_element(),
-                row("Model", "Which model a session started here uses.", models, &theme).into_any_element(),
+                agent_head,
+                row("Permission mode", "What a session started here begins in.", if settings_agent == AgentId::Codex { codex_modes } else { modes }, &theme).into_any_element(),
+                row("Effort", if settings_agent == AgentId::Codex { "How hard it thinks. Default asks for none, and Codex uses its own." } else { "How hard it thinks. Default asks for none, and Claude Code uses its own." }, if settings_agent == AgentId::Codex { codex_efforts } else { efforts }, &theme).into_any_element(),
+                row("Model", "Which model a session started here uses.", if settings_agent == AgentId::Codex { codex_models } else { models }, &theme).into_any_element(),
                 div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes.").into_any_element(),
             ],
             "terminal" => vec![
@@ -4785,7 +4942,7 @@ impl Workbench {
                                 .track_scroll(&self.settings_scroll)
                                 .px(px(24.))
                                 .py(px(20.))
-                                .child(page_in(section_anim, v_flex().gap(px(16.)).child(div().pb(px(2.)).text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(section_title)).children(rows))),
+                                .child(page_in(section_anim, v_flex().gap(px(16.)).child(h_flex().pb(px(2.)).items_center().justify_between().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(section_title)).when(section == "sessions", |d| d.child(agent_pick))).children(rows))),
                         )
                         .vertical_scrollbar(&self.settings_scroll)
                     })),
@@ -4914,6 +5071,25 @@ impl Workbench {
             .children(options.into_iter().map(|(key, label, family)| {
                 let active = key == current;
                 let on = on.clone();
+                // A segment with no word is an agent's, by its mark: in
+                // the agent's colour while it is the one chosen or under
+                // the pointer, as its mark on the terminal's button is.
+                if let Some(agent) = AgentId::parse(key).filter(|_| label.is_empty()) {
+                    let own = agent_color(agent, &theme);
+                    return h_flex()
+                        .id(SharedString::from(format!("{control}-{key}")))
+                        .h(seg_h)
+                        .px(seg_px)
+                        .items_center()
+                        .rounded(round)
+                        .cursor_pointer()
+                        .when(active && !measured, |d| d.bg(plate_bg).shadow_sm())
+                        .text_color(if active { own } else { theme.muted_foreground })
+                        .hover(move |s| s.text_color(own))
+                        .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(agent.display_name()).build(window, cx))
+                        .on_click(cx.listener(move |this, _, window, cx| on(this, key, window, cx)))
+                        .child(Icon::default().path(agent_icon_path(agent)).with_size(px(14.)));
+                }
                 h_flex()
                     .id(SharedString::from(format!("{control}-{key}")))
                     .h(seg_h)
@@ -5248,13 +5424,15 @@ impl Workbench {
             );
         }
         if self.page == Page::Session && !draft {
-            // The mode has no picker: a click on its pill is one ⇧Tab.
+            // The mode is a list too (`pick_pill`); this is the click
+            // on a pill that had no list to offer.
             if pill == Pill::Mode {
                 return self.cycle_mode(cx);
             }
             return self.via_terminal(TerminalAction::Pick(pill), cx);
         }
         self.settings_section = "sessions";
+        self.settings_agent = self.agent_now();
         self.settings_open = true;
         window.focus(&self.focus_handle, cx);
         cx.notify();
@@ -5314,10 +5492,14 @@ impl Workbench {
     /// (`PickFor::Folder`), and a right click offers the folder.
     fn folder_tray(&self, card: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let cwd = self.new_cwd.clone();
+        // On a session begun from a folder the folder is that session's
+        // and is not chosen again; the agent is its own until it is sent.
+        let begun = self.selected_ref().filter(|r| self.page == Page::Session && self.is_draft(&r.session_id));
+        let settled = begun.is_some();
+        let cwd = begun.as_ref().map(|r| r.cwd.clone()).unwrap_or_else(|| self.new_cwd.clone());
         let open = self.pick.as_ref().is_some_and(|p| p.what == PickFor::Folder);
         let (name, parent) = if cwd.is_empty() { ("Choose a folder".to_string(), String::new()) } else { (folder_name(&cwd), folder_parent(&cwd)) };
-        let agent = self.new_agent;
+        let agent = self.agent_now();
         let agent_open = self.pick.as_ref().is_some_and(|p| p.what == PickFor::Agent);
         // The agent the session is begun with, at the strip's right: its
         // mark and name, and a press lists the agents there are.
@@ -5350,18 +5532,18 @@ impl Workbench {
             .px(px(16.))
             .gap(px(8.))
             .items_center()
-            .cursor_pointer()
             .text_color(theme.muted_foreground)
-            .hover(|s| s.text_color(theme.foreground))
-            .on_click(cx.listener(|this, _, window, cx| {
-                swallow_click(window, cx);
-                this.pick_toggle(PickFor::Folder, cx);
-            }))
+            .when(!settled, |d| {
+                d.cursor_pointer().hover(|s| s.text_color(theme.foreground)).on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.pick_toggle(PickFor::Folder, cx);
+                }))
+            })
             .when(!cwd.is_empty(), |d| d.on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(Some(cwd.clone())))], cx))))
             .child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(14.)).flex_shrink_0())
             .child(div().flex_shrink_0().max_w(px(280.)).truncate().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(name))
             .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(parent))
-            .child(Icon::new(IconName::ChevronDown).with_size(px(13.)).flex_shrink_0())
+            .when(!settled, |d| d.child(Icon::new(IconName::ChevronDown).with_size(px(13.)).flex_shrink_0()))
             .child(self.pick_mark(PickFor::Folder, cx));
         let strip = h_flex().w_full().items_center().child(strip).child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(theme.border)).child(agent_control);
         v_flex().w_full().max_w(CONTENT_W).rounded(px(20.)).bg(if theme.mode.is_dark() { theme.sidebar } else { theme.muted }).child(card).child(strip).into_any_element()
@@ -5369,20 +5551,59 @@ impl Workbench {
 
     /// The choices of a list as they stand now, and the one that is set.
     fn pick_rows(&self, what: PickFor, cx: &App) -> (Vec<PickRow>, String) {
-        let options = self.options();
+        // A new session's lists are the agent's they are for, whichever
+        // agent the composer is on.
+        let options = match what {
+            PickFor::DefaultMode | PickFor::DefaultModel | PickFor::DefaultEffort => self.new_options(AgentId::ClaudeCode),
+            PickFor::CodexMode | PickFor::CodexModel | PickFor::CodexEffort => self.new_options(AgentId::Codex),
+            _ => self.options(),
+        };
         let theme = cx.theme();
-        match what {
-            PickFor::Effort => {
-                let (model, effort) = (self.current_model(), self.current_effort());
-                let levels = options.efforts_for(&model).to_vec();
-                let now = levels.iter().find(|e| e.key.eq_ignore_ascii_case(&effort) || e.label.eq_ignore_ascii_case(&effort)).map(|e| e.key.clone()).unwrap_or_default();
-                (levels.iter().enumerate().map(|(ix, e)| PickRow { key: e.key.clone(), name: e.label.clone(), detail: e.detail.clone(), tint: tint_of(&levels, ix, theme) }).collect(), now)
+        // An effort's list. For a session not started it begins with the
+        // way back to none asked for, which is the agent's own level.
+        let efforts = |model: &str, effort: &str, unset: bool| {
+            let levels = options.efforts_for(model).to_vec();
+            let now = levels.iter().find(|e| e.key.eq_ignore_ascii_case(effort) || e.label.eq_ignore_ascii_case(effort)).map(|e| e.key.clone()).unwrap_or_else(|| if unset { "default".into() } else { String::new() });
+            let mut rows: Vec<PickRow> = Vec::new();
+            if unset {
+                rows.push(PickRow::plain("default".into(), "Default".into(), "The agent's own level; none is asked for.".into()));
             }
+            rows.extend(levels.iter().enumerate().map(|(ix, e)| PickRow::tinted(e.key.clone(), e.label.clone(), e.detail.clone(), tint_of(&levels, ix, theme))));
+            (rows, now)
+        };
+        let codex_model = |this: &Self| {
+            let chosen = this.codex_next[1].clone();
+            if chosen.is_empty() { options.models.first().map(|m| m.key.clone()).unwrap_or_default() } else { chosen }
+        };
+        match what {
+            PickFor::Effort => efforts(&self.current_model(), &self.current_effort(), self.codex_unstarted()),
+            PickFor::DefaultEffort => {
+                let model = if self.next_model.is_empty() { options.default_model.clone() } else { self.next_model.clone() };
+                efforts(&model, &self.next_effort, true)
+            }
+            PickFor::CodexEffort => efforts(&codex_model(self), &self.codex_next[2], true),
+            PickFor::CodexModel => {
+                let now = codex_model(self);
+                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), m.label.clone(), m.detail.clone())).collect(), now)
+            }
+            PickFor::CodexMode => (options.modes.iter().map(|m| PickRow::tinted(m.key.clone(), m.label.clone(), m.detail.clone(), mode_color(&options, &m.key, theme))).collect(), self.codex_next[0].clone()),
             PickFor::Model => {
                 let now = options.model(&self.current_model()).map(|m| m.key.clone()).unwrap_or_default();
                 (options.models.iter().map(|m| PickRow::plain(m.key.clone(), m.label.clone(), m.detail.clone())).collect(), now)
             }
-            PickFor::Mode => (self.modes(&options).into_iter().map(|m| PickRow::plain(m.key, m.label, m.detail)).collect(), self.current_mode()),
+            // Each in the colour its pill wears. On a session whose mode
+            // only ⇧Tab moves, the ones that key has been seen to reach.
+            PickFor::Mode => {
+                let now = self.current_mode();
+                let stepped = self.agent_now() == AgentId::ClaudeCode && self.page == Page::Session && self.selected_ref().is_some_and(|r| !self.is_draft(&r.session_id) && (self.terminal_peer().is_some() || !self.driven(&r.session_id)));
+                let rows = self
+                    .modes(&options)
+                    .into_iter()
+                    .filter(|m| !stepped || self.mode_cycle.is_empty() || m.key == now || self.mode_cycle.contains(&m.key))
+                    .map(|m| PickRow::tinted(m.key.clone(), m.label, m.detail, mode_color(&options, &m.key, theme)))
+                    .collect();
+                (rows, now)
+            }
             PickFor::Agent => {
                 let rows = AgentId::ALL
                     .iter()
@@ -5390,14 +5611,14 @@ impl Workbench {
                         let known = emaki_core::agents::by_id(a.as_str());
                         let here = self.agent_found(a.as_str()).is_none_or(|f| f.installed());
                         let line = if here { known.map(|k| k.maker.to_string()).unwrap_or_default() } else { "Not installed; set it up on the Agents page".to_string() };
-                        PickRow::plain(a.as_str().to_string(), a.display_name().to_string(), line)
+                        PickRow { mark: Some(*a), ..PickRow::plain(a.as_str().to_string(), a.display_name().to_string(), line) }
                     })
                     .collect();
-                (rows, self.new_agent.as_str().to_string())
+                (rows, self.agent_now().as_str().to_string())
             }
             PickFor::DefaultMode => {
                 let now = if self.cfg.driver.default_mode.is_empty() { "default".to_string() } else { self.cfg.driver.default_mode.clone() };
-                (self.modes(&options).into_iter().map(|m| PickRow::plain(m.key, m.label, m.detail)).collect(), now)
+                (self.modes(&options).into_iter().map(|m| PickRow::tinted(m.key.clone(), m.label, m.detail, mode_color(&options, &m.key, theme))).collect(), now)
             }
             // The folders worked in last, the chosen one among them even
             // when it is none of those, and under a line the way to any
@@ -5469,15 +5690,21 @@ impl Workbench {
                 if let Some(agent) = AgentId::parse(key) {
                     self.new_agent = agent;
                     // Its lists, asked for now so the pills have them.
-                    if !self.new_cwd.is_empty() {
-                        let _ = self.hub.commands_for(agent, &self.new_cwd);
+                    let cwd = self.begun_showing().map(|d| d.cwd).unwrap_or_else(|| self.new_cwd.clone());
+                    if !cwd.is_empty() {
+                        let _ = self.hub.commands_for(agent, &cwd);
                     }
+                    self.begun_agent(agent, cx);
                     self.save_ui(true);
                     cx.notify();
                 }
             }
             PickFor::DefaultMode => self.set_default_mode(key, cx),
             PickFor::DefaultModel => self.set_default_model(key, cx),
+            PickFor::DefaultEffort => self.set_default_effort(key, cx),
+            PickFor::CodexMode => self.codex_next_set(Pill::Mode, key, cx),
+            PickFor::CodexModel => self.codex_next_set(Pill::Model, key, cx),
+            PickFor::CodexEffort => self.codex_next_set(Pill::Effort, key, cx),
             PickFor::Folder if key.is_empty() => self.choose_folder(cx),
             PickFor::Folder => {
                 self.new_cwd = key.to_string();
@@ -5535,7 +5762,8 @@ impl Workbench {
             .shadow(float_shadow(&theme))
             .map(|d| if right { d.right(view.width - menu.by.right()) } else { d.left(menu.by.left()) })
             .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
-        for (ix, PickRow { key, name, detail, tint }) in menu.rows.iter().enumerate() {
+        let dark = theme.mode.is_dark();
+        for (ix, PickRow { key, name, detail, tint, mark }) in menu.rows.iter().enumerate() {
             let active = *key == menu.current && !key.is_empty();
             // A row with no key is not one of the choices but the way to
             // another: a line sets it apart.
@@ -5552,13 +5780,16 @@ impl Workbench {
                     .gap(px(1.))
                     .rounded(px(8.))
                     .cursor_pointer()
-                    .when(active, |d| d.bg(theme.muted))
-                    .hover(|s| s.bg(theme.list_hover))
+                    // The dark palette's own hover is a shade off the
+                    // card and cannot be seen on it: a wash of the ink.
+                    .when(active, |d| d.bg(if dark { theme.foreground.opacity(0.06) } else { theme.muted }))
+                    .hover(|s| s.bg(if dark { theme.foreground.opacity(0.11) } else { theme.list_hover }))
                     .when(!gone, |d| d.on_click(cx.listener(move |this, _, _, cx| this.pick_chosen(what, &key, cx))))
                     .child(
                         h_flex()
                             .gap(px(6.))
                             .items_center()
+                            .when_some(*mark, |d, agent| d.child(agent_icon(agent, px(13.), agent_color(agent, &theme)).flex_shrink_0()))
                             // A choice the agent shows in a colour wears it here too.
                             .child(match tint {
                                 Tint::Plain => div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()),
@@ -5568,7 +5799,7 @@ impl Workbench {
                     )
                     // A choice's line is prose and wraps; a folder's is a
                     // path, kept to one line so the list stays short.
-                    .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).map(|d| if what == PickFor::Folder { d.truncate() } else { d.whitespace_normal() }).child(detail.clone()))),
+                    .when(!detail.is_empty(), |d| d.child(div().when(mark.is_some(), |d| d.pl(px(19.))).text_size(px(11.5)).text_color(theme.muted_foreground).map(|d| if what == PickFor::Folder { d.truncate() } else { d.whitespace_normal() }).child(detail.clone()))),
             );
         }
         let card = card.child(rows).vertical_scrollbar(&scroll);
@@ -5600,13 +5831,13 @@ impl Workbench {
             return match pill {
                 Pill::Model => self.set_model(key, cx),
                 Pill::Effort => self.set_effort(key, cx),
-                Pill::Mode => {}
+                Pill::Mode => self.set_mode(key, cx),
             };
         }
         let command = match pill {
             Pill::Model => format!("/model {key}"),
             Pill::Effort => format!("/effort {key}"),
-            Pill::Mode => return,
+            Pill::Mode => return self.walk_mode(&r, key, cx),
         };
         self.ctx_watch_until = self.now + 20.0;
         self.run_in_terminal(command, cx);
@@ -5665,7 +5896,7 @@ impl Workbench {
         // of the person's is ever opened: where ours cannot be had
         // (another agent, the setting off), the thing is not done.
         let opened = if r.agent == AgentId::ClaudeCode && self.hub.hidden_terminals() {
-            self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "")
+            self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "", "")
         } else if r.agent != AgentId::ClaudeCode {
             Err(format!("that needs {}'s own terminal, which Emaki does not run yet", r.agent.display_name()))
         } else {
@@ -6313,7 +6544,7 @@ impl Workbench {
         // once with "No conversation found". Codex has no warming to do,
         // its driver starts in a tenth of a second.
         if r.agent == AgentId::ClaudeCode && self.reply_via_for(&r).0 == "spawn" && self.hub.hidden_terminals() {
-            let _ = self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "");
+            let _ = self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "", "");
         }
     }
 
@@ -6487,7 +6718,19 @@ impl Workbench {
                         Some((s, m, _)) if *s == sid => m.clone(),
                         _ => r.map(|r| r.state.mode.clone()).filter(|m| !m.is_empty()),
                     };
-                    if mode.is_some() && before.is_some() && mode != before {
+                    if let (Some(to), Some(from)) = (mode.as_deref(), before.as_deref()) {
+                        if to != from && this.mode_stepped.as_deref() == Some(sid.as_str()) {
+                            this.mode_stepped = None;
+                            this.learn_cycle(&sid, from, to);
+                        }
+                    }
+                    // A mode a walk only passes through is not a change
+                    // to say in the conversation.
+                    let passing = mode.as_deref().is_some_and(|m| this.walk_on(&sid, m, cx));
+                    if mode.is_none() {
+                        this.walk_look(&sid);
+                    }
+                    if mode.is_some() && before.is_some() && mode != before && !passing {
                         this.touch_mode(&sid, mode.clone().unwrap_or_default());
                     }
                     let seen = Some((sid, mode, mtime));
@@ -6532,7 +6775,7 @@ impl Workbench {
         if self.drivers.remove(&r.session_id).is_some() {
             self.hub.stop_driver(&r.session_id);
         }
-        match self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "") {
+        match self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "", "") {
             Ok(()) => self.hub.refresh(),
             Err(e) => self.notice = Some(Notice::error(format!("could not start it: {e}"))),
         }
@@ -6862,6 +7105,17 @@ impl Workbench {
         if typed.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
+        // A mode picked and not yet reached: the one the terminal is in
+        // now is one on the way, and a turn would run in it.
+        if self.mode_walk.as_ref().is_some_and(|w| self.selected_ref().is_some_and(|r| r.session_id == w.sid)) {
+            self.notice = Some(Notice::said("the mode is still being set; send once the pill shows it"));
+            // Looked at again, in case the key's own look came too soon.
+            if let Some(sid) = self.mode_walk.as_ref().map(|w| w.sid.clone()) {
+                self.read_terminal_mode(&sid, cx);
+            }
+            cx.notify();
+            return;
+        }
         let (via, why) = self.reply_via();
         // A slash command reaches a headless session as the command it is
         // (`/compact` runs; Claude Code marks it as fine without a
@@ -6908,7 +7162,7 @@ impl Workbench {
                 Some(r) => (r.session_id.clone(), r.cwd.clone(), !self.is_draft(&r.session_id)),
                 None => (new_id.clone(), new_cwd, false),
             };
-            let started = self.agent_now() == AgentId::ClaudeCode && self.hub.hidden_terminals() && self.hub.start_terminal(&sid, &cwd, resume, &self.next_mode, &self.next_model).is_ok();
+            let started = self.agent_now() == AgentId::ClaudeCode && self.hub.hidden_terminals() && self.hub.start_terminal(&sid, &cwd, resume, &self.next_mode, &self.next_model, &self.next_effort).is_ok();
             if started { "pty" } else { "spawn" }
         };
         let (text, images) = self.fold_attachments(&typed, via == "driver" || via == "spawn");
@@ -6981,7 +7235,7 @@ impl Workbench {
                     // The model the pill shows, said outright: Codex's config
                     // may name one the account cannot use.
                     AgentId::Codex => (self.codex_next[0].clone(), self.current_model(), self.codex_next[2].clone()),
-                    AgentId::ClaudeCode => (self.next_mode.clone(), self.next_model.clone(), String::new()),
+                    AgentId::ClaudeCode => (self.next_mode.clone(), self.next_model.clone(), if resume { String::new() } else { self.next_effort.clone() }),
                 };
                 self.drivers.insert(sid.clone(), DriverView { starting: true, state: "starting".into(), mode: mode.clone(), model: model.clone(), effort: effort.clone(), ..Default::default() });
                 self.hub.spawn_driver_and_send(agent, sid.clone(), cwd, resume, mode, model, effort, Some((text.clone(), images)));
@@ -7553,6 +7807,10 @@ impl Workbench {
         if self.codex_unstarted() {
             return self.codex_next[2].clone();
         }
+        // A Claude Code session not started: what one starts at.
+        if self.page != Page::Session || self.begun_showing().is_some() {
+            return self.next_effort.clone();
+        }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         if let Some(e) = self.drivers.get(&sid).map(|v| v.effort.clone()).filter(|e| !e.is_empty()) {
             return e;
@@ -7585,19 +7843,18 @@ impl Workbench {
     /// the transcript's; the windows are what the last driver turn saw,
     /// which a terminal turn does not refresh, so the row says how old
     /// they are.
-    /// The left of the row under the composer, on a Claude conversation.
+    /// The left of the row under the composer. Codex's rollout says all
+    /// of it: the window's size, and the account's windows, of whatever
+    /// lengths its plan has.
     fn render_limits(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let theme = cx.theme().clone();
         let s = self.shown_session()?;
-        if s.agent != AgentId::ClaudeCode {
-            return None;
-        }
         let now = self.now;
         let muted = theme.muted_foreground;
         // The terminal's line, word for word: `Context 32% | 5h: 5% (4h45m)
         // | 7d: 11% (6d2h)`, the same colours at the same thresholds as
         // scripts/statusline.sh. No tooltip: the line is the whole story.
-        let part = |label: &'static str, pct: u64, color: Hsla, tail: String| {
+        let part = |label: String, pct: u64, color: Hsla, tail: String| {
             h_flex()
                 .gap(px(4.))
                 .items_center()
@@ -7609,13 +7866,30 @@ impl Workbench {
         let mut row = h_flex().flex_shrink_0().gap(px(8.)).items_center();
         let model = s.models.last().map(String::as_str).unwrap_or("");
         let own = self.session_ctx.as_ref().filter(|(id, _)| *id == s.id).map(|(_, c)| c);
-        let window = self.limits.window_for(model, s.context_tokens, own);
+        let window = match s.agent {
+            AgentId::ClaudeCode => self.limits.window_for(model, s.context_tokens, own),
+            AgentId::Codex => s.context_window,
+        };
         let ctx_pct = if s.context_tokens > 0 { (s.context_tokens * 100 / window.max(1)).min(999) } else { 0 };
         let ctx_color = if ctx_pct >= 85 { theme.danger } else if ctx_pct >= 70 { theme.warning } else { theme.success };
-        row = row.child(part("Context", ctx_pct, ctx_color, String::new()));
+        // A Codex session that has not yet named its window says nothing
+        // of its context rather than a share of a guess.
+        let ctx_known = s.agent == AgentId::ClaudeCode || window > 0;
+        if ctx_known {
+            row = row.child(part("Context".into(), ctx_pct, ctx_color, String::new()));
+        }
         let usage_color = |pct: u64| if pct >= 90 { theme.danger } else if pct >= 70 { theme.magenta } else { theme.blue };
-        for (label, w) in [("5h:", self.limits.five_hour), ("7d:", self.limits.seven_day)] {
-            row = row.child(bar());
+        let windows: Vec<(String, Option<emaki_core::limits::Window>)> = match s.agent {
+            AgentId::ClaudeCode => vec![("5h:".into(), self.limits.five_hour), ("7d:".into(), self.limits.seven_day)],
+            AgentId::Codex => self.limits.codex.iter().map(|w| (format!("{}:", w.label()), Some(emaki_core::limits::Window { utilization: w.used, resets_at: w.resets_at }))).collect(),
+        };
+        if !ctx_known && windows.is_empty() {
+            return None;
+        }
+        for (i, (label, w)) in windows.into_iter().enumerate() {
+            if i > 0 || ctx_known {
+                row = row.child(bar());
+            }
             match w {
                 Some(w) => {
                     let w = w.at(now);
@@ -7675,6 +7949,8 @@ impl Workbench {
                 return;
             }
         }
+        // The person's own key ends a walk to a mode picked before it.
+        self.mode_walk = None;
         if let Some((sid, peer)) = self.terminal_peer() {
             return self.step_mode(sid, peer, cx);
         }
@@ -7692,6 +7968,98 @@ impl Workbench {
         self.set_mode(&modes[i].key, cx);
     }
 
+    /// A mode picked from the list, for a session whose mode only its
+    /// terminal's ⇧Tab moves. The order of the modes is Claude Code's and
+    /// cannot be known from here, so nothing is counted: the key is
+    /// pressed once, and `walk_on` presses it again each time the screen
+    /// names another mode that is not the one picked. Nothing is sent
+    /// from here while it is on its way (`send_message`), since a mode
+    /// passed through is not one the person chose.
+    fn walk_mode(&mut self, r: &SessionRef, to: &str, cx: &mut Context<Self>) {
+        let from = self.current_mode();
+        if from == to || self.theirs_busy(r, cx) {
+            return;
+        }
+        self.mode_walk = Some(ModeWalk { sid: r.session_id.clone(), to: to.to_string(), from: from.clone(), last: from, presses: 1, looks: 0 });
+        match self.terminal_peer() {
+            Some((sid, peer)) => self.step_mode(sid, peer, cx),
+            None => self.via_terminal(TerminalAction::StepMode, cx),
+        }
+    }
+
+    /// The screen of `sid` now names `mode`: go on with a walk there, or
+    /// end it. Returns whether the mode is one only passed through.
+    fn walk_on(&mut self, sid: &str, mode: &str, cx: &mut Context<Self>) -> bool {
+        let Some(walk) = self.mode_walk.clone().filter(|w| w.sid == sid) else { return false };
+        // The same as before the key: the screen has not moved yet.
+        if mode == walk.last {
+            self.walk_look(sid);
+            return true;
+        }
+        if mode == walk.to {
+            self.mode_walk = None;
+            return false;
+        }
+        let modes = self.hub.options_for(AgentId::ClaudeCode, &self.selected_ref().map(|r| r.cwd.clone()).unwrap_or_default()).modes.len();
+        let peer = self.terminal_peer().filter(|(s, _)| s == sid);
+        // Round to where it began, or further than the list is long:
+        // this session's ⇧Tab does not reach that mode.
+        if mode == walk.from || walk.presses > modes + 1 || peer.is_none() {
+            self.mode_walk = None;
+            if peer.is_some() {
+                self.notice = Some(Notice::said("⇧Tab does not reach that mode in this session"));
+            }
+            // Back where it began is no change to say.
+            return mode == walk.from;
+        }
+        let Some((sid, peer)) = peer else { return false };
+        self.mode_walk = Some(ModeWalk { last: mode.to_string(), presses: walk.presses + 1, looks: 0, ..walk });
+        self.step_mode(sid, peer, cx);
+        true
+    }
+
+    /// ⇧Tab took `sid` from one mode to another. The modes it lands on
+    /// in a row are kept, and the first one met a second time closes the
+    /// round: those are the modes the key reaches, which is what the
+    /// list offers. A change the key did not make (a plan approved)
+    /// breaks the row, and it starts again.
+    fn learn_cycle(&mut self, sid: &str, from: &str, to: &str) {
+        let (at, trail) = &mut self.mode_trail;
+        if at != sid || trail.last().map(String::as_str) != Some(from) {
+            *at = sid.to_string();
+            *trail = vec![from.to_string()];
+        }
+        if let Some(i) = trail.iter().position(|m| m == to) {
+            let round: Vec<String> = trail[i..].to_vec();
+            *trail = vec![to.to_string()];
+            if round.len() > 1 && round != self.mode_cycle {
+                self.mode_cycle = round;
+                self.save_ui(true);
+            }
+            return;
+        }
+        trail.push(to.to_string());
+    }
+
+    /// A look during a walk that showed nothing new: the screen was read
+    /// between the key and its redraw, or could not be read. Looked at
+    /// again a moment on, a bounded number of times a press; a screen
+    /// that never says (an IDE's terminal) ends the walk where it is.
+    fn walk_look(&mut self, sid: &str) {
+        let Some(walk) = self.mode_walk.as_mut().filter(|w| w.sid == sid) else { return };
+        if walk.looks >= 12 {
+            self.mode_walk = None;
+            self.notice = Some(Notice::said("the terminal's mode could not be read; ⇧Tab moves it a step"));
+            return;
+        }
+        walk.looks += 1;
+        let (hub, sid) = (Arc::clone(&self.hub), sid.to_string());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            hub.look_at(&sid);
+        });
+    }
+
     /// ⇧Tab from the composer, for a terminal session: the same key,
     /// pressed once in its terminal, which is the only thing that moves
     /// its mode. The order is Claude Code's, whatever it is for that
@@ -7707,6 +8075,7 @@ impl Workbench {
     fn step_mode(&mut self, sid: String, peer: emaki_core::peer::Peer, cx: &mut Context<Self>) {
         self.come_back = None;
         self.mode_pressed = Some(sid.clone());
+        self.mode_stepped = Some(sid.clone());
         let hub = Arc::clone(&self.hub);
         std::thread::spawn(move || match crate::sys::key_in_terminal(peer.pid, crate::sys::TerminalKey::ShiftTab) {
             Ok(_) => {
@@ -8119,7 +8488,7 @@ impl Workbench {
             let open = self.folder_open(&p);
             let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
             let dot = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| self.column_color(*c, cx));
-            let tint = live.first().map(|(r, _)| agent_color(r.agent, &theme)).unwrap_or(theme.muted_foreground);
+            let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
             let name = p.clone();
             // The folder itself, from the newest session that still has it.
             let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
@@ -8713,7 +9082,7 @@ impl Workbench {
             if self.drivers.remove(&r.session_id).is_some() {
                 self.hub.stop_driver(&r.session_id);
             }
-            let started = self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "");
+            let started = self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "", "");
             let Some(w) = self.renames.get_mut(&key) else { continue };
             w.asked += 1;
             match started {
@@ -8962,15 +9331,23 @@ impl Workbench {
         let plate_bg = if dark { theme.secondary_active } else { theme.popover };
         let row_w = self.tabs_row_w.clone();
         let entity = cx.entity().downgrade();
+        // The tabs at their widths, against the row: in the middle while
+        // they fit, and from the left with the row scrolling once they
+        // do not, since a tab is never narrower than `TAB_MIN`.
+        let wide: f32 = self.tab_groups.iter().map(|(_, keys)| pill_chrome(keys.len()) + keys.iter().map(|k| self.tab_widths.get(k).map(|w| w.to).unwrap_or(TAB_MAX)).sum::<f32>()).sum::<f32>() + PILL_GAP * (self.tab_groups.len() as f32 - 1.).max(0.);
+        let fits = wide <= self.tabs_row_w.get() + 0.5;
         let mut row = h_flex()
             .id("tabs")
             .flex_1()
             .min_w_0()
             .h_full()
-            .justify_center()
+            // Clear of the buttons at both ends, whatever is there.
+            .mx(px(STRIP_GAP))
+            .when(fits, |d| d.justify_center())
             .items_center()
             .gap(px(PILL_GAP))
-            .overflow_hidden()
+            .overflow_x_scroll()
+            .track_scroll(&self.tabs_scroll)
             .on_drag_move::<DragTab>(cx.listener(|this, e: &DragMoveEvent<DragTab>, _, cx| {
                 let key = e.drag(cx).0.clone();
                 this.drag_tab_to(&key, e.event.position.x, e.bounds, cx);
@@ -8995,9 +9372,8 @@ impl Workbench {
                 .size_full(),
             );
         let hints = self.tab_hints || self.tab_hints_probe;
-        let last = self.tabs.len().saturating_sub(1);
         let settled = TabWidth { from: TAB_MAX, to: TAB_MAX, at: Instant::now(), serial: 0 };
-        let mut ix = 0;
+        let mut ix: usize = 0;
         for (project, keys) in self.tab_groups.clone() {
             let widths: Vec<TabWidth> = keys.iter().map(|k| self.tab_widths.get(k).copied().unwrap_or(settled)).collect();
             // A tab a drag has just moved is drawn off its place by what
@@ -9127,7 +9503,8 @@ impl Workbench {
             // last has no key. The tab clips what it holds, so the plate
             // is beside it in a box of the tab's size, which is what the
             // row lays out and what a change of width moves.
-            let digit = if ix < 8 { Some(ix + 1) } else if ix == last { Some(9) } else { None };
+            // The number that goes to it (`go_tab`): the first nine.
+            let digit = (ix < 9).then_some(ix + 1);
             let plate = digit.filter(|_| hints).map(|n| {
                 div().absolute().left_0().right_0().bottom(px(-8.)).flex().justify_center().child(
                     div()
@@ -9199,7 +9576,10 @@ impl Workbench {
     /// stand after the room kept for the traffic lights when the sidebar
     /// is away.
     fn render_topbar_ends(&self, left: Vec<AnyElement>, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut left_end = h_flex().min_w(px(120.)).flex_shrink_0().items_center().gap(px(6.));
+        // An end with nothing at it keeps 120px so the centre stays
+        // centred; one with buttons is as wide as they are, so the tabs
+        // stand the same way off both.
+        let mut left_end = h_flex().when(left.is_empty(), |d| d.min_w(px(120.))).flex_shrink_0().items_center().gap(px(6.));
         if !self.sidebar_open || self.narrow {
             let room = Self::strip_right() - px(4.);
             left_end = if left.is_empty() { left_end.w(room) } else { left_end.pl(room) };
@@ -9212,7 +9592,7 @@ impl Workbench {
             .items_center()
             .child(left_end)
             .child(centre)
-            .child(h_flex().min_w(px(120.)).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
+            .child(h_flex().when(right.is_empty(), |d| d.min_w(px(120.))).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
     }
 
     // -- the sessions page ----------------------------------------------------
@@ -9288,7 +9668,7 @@ impl Workbench {
                 let theme = cx.theme().clone();
                 let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
                 let chip = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| (*c, self.column_color(*c, cx)));
-                let tint = live.first().map(|(r, _)| agent_color(r.agent, &theme)).unwrap_or(theme.muted_foreground);
+                let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
                 let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
                 let mut sub = vec![plural(list.len(), "session", "sessions")];
                 if let Some(c) = list.iter().map(|r| r.cwd.as_str()).find(|c| !c.is_empty()) {
@@ -11629,18 +12009,27 @@ impl Workbench {
                         // has no list to show.
                         let model_text = PillText::plain(model_name(&options, &model));
                         let codex = self.agent_now() == AgentId::Codex;
+                        // A Claude Code session not started: its three
+                        // are what one starts in, the lists Settings has.
+                        let fresh = !on_session && !codex;
                         let on_session = on_session || codex;
-                        let effort_el: AnyElement = if on_session && !options.efforts_for(&model).is_empty() {
+                        let effort_el: AnyElement = if fresh && !options.efforts_for(&model).is_empty() {
+                            self.pick_pill(PickFor::DefaultEffort, "effort", "icons/gauge.svg", effort_text.clone(), cx)
+                        } else if on_session && !options.efforts_for(&model).is_empty() {
                             self.pick_pill(PickFor::Effort, "effort", "icons/gauge.svg", effort_text.clone(), cx)
                         } else {
                             composer_pill("effort", "icons/gauge.svg", effort_text.clone(), cx).on_click(to(Pill::Effort)).into_any_element()
                         };
-                        let model_el: AnyElement = if on_session && !options.models.is_empty() {
+                        let model_el: AnyElement = if fresh && !options.models.is_empty() {
+                            self.pick_pill(PickFor::DefaultModel, "model", "icons/box.svg", model_text, cx)
+                        } else if on_session && !options.models.is_empty() {
                             self.pick_pill(PickFor::Model, "model", "icons/box.svg", model_text, cx)
                         } else {
                             composer_pill("model", "icons/box.svg", model_text, cx).on_click(to(Pill::Model)).into_any_element()
                         };
-                        let mode_el: AnyElement = if codex && !options.modes.is_empty() {
+                        let mode_el: AnyElement = if fresh && !options.modes.is_empty() {
+                            self.pick_pill(PickFor::DefaultMode, "mode", "icons/shield.svg", mode_text, cx)
+                        } else if on_session && !options.modes.is_empty() {
                             self.pick_pill(PickFor::Mode, "mode", "icons/shield.svg", mode_text, cx)
                         } else {
                             composer_pill("mode", "icons/shield.svg", mode_text, cx).on_click(to(Pill::Mode)).into_any_element()
@@ -11668,7 +12057,7 @@ impl Workbench {
                         )
                         .size_full();
                         d.child(arrow_over(mode_el))
-                            .when(on_session, |d| d.child(arrow_over(effort_el)))
+                            .child(arrow_over(effort_el))
                             .child(div().flex_1().h(px(1.)).child(slack))
                             .child(arrow_over(model_el))
                     })
@@ -11694,7 +12083,10 @@ impl Workbench {
         let help = self.slash_open(cx).map(|at| self.render_slash_help(at, cx));
         // On the home page the card stands on the tray that names the
         // folder a session starts in.
-        let card = if self.page == Page::New { self.folder_tray(card.into_any_element(), cx) } else { card.into_any_element() };
+        // A session begun from a folder stands on it too, until its first
+        // message: the folder is settled, the agent can still be chosen.
+        let draft = self.page == Page::Session && self.selected_ref().is_some_and(|r| self.is_draft(&r.session_id));
+        let card = if self.page == Page::New || draft { self.folder_tray(card.into_any_element(), cx) } else { card.into_any_element() };
         let help = help.map(|h| v_flex().w_full().items_center().child(h).with_animation("slash-help-in", Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| d.opacity(t)));
         v_flex().w_full().items_center().gap(px(8.)).children(help).child(card).child(foot)
     }
@@ -12010,11 +12402,6 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Claude's own mark, the starburst, for the agent's glyph.
-pub fn claude_icon(size: Pixels, color: Hsla) -> Icon {
-    Icon::default().path("icons/claude.svg").with_size(size).text_color(color)
-}
-
 /// The file of the glyph that says which agent a session belongs to, for
 /// an icon that takes its ink from where it stands.
 pub(crate) fn agent_icon_path(agent: AgentId) -> &'static str {
@@ -12024,21 +12411,21 @@ pub(crate) fn agent_icon_path(agent: AgentId) -> &'static str {
     }
 }
 
-/// The glyph that says which agent a session belongs to.
+/// The glyph that says which agent a session belongs to. Its colour is
+/// the agent's own (`agent_color`), or the muted ink where it is quiet.
 pub fn agent_icon(agent: AgentId, size: Pixels, color: Hsla) -> Icon {
-    match agent {
-        AgentId::ClaudeCode => claude_icon(size, color),
-        AgentId::Codex => Icon::default().path(agent_icon_path(agent)).with_size(size).text_color(color),
-    }
+    Icon::default().path(agent_icon_path(agent)).with_size(size).text_color(color)
 }
 
-/// Claude wears the accent; every other agent is drawn in the muted ink, so
-/// a glance down the recents tells them apart.
+/// An agent's own colour, its maker's: Claude's terracotta and Codex's
+/// green, whatever accent the window wears. Both are accents of ours
+/// (`look::ACCENTS`), so each has its shade for the appearance showing.
 pub fn agent_color(agent: AgentId, theme: &gpui_component::Theme) -> Hsla {
-    match agent {
-        AgentId::ClaudeCode => theme.primary,
-        AgentId::Codex => theme.muted_foreground,
-    }
+    let key = match agent {
+        AgentId::ClaudeCode => "terracotta",
+        AgentId::Codex => "green",
+    };
+    gpui::Rgba::try_from(crate::look::accent_hex(key, theme.mode.is_dark())).map(Hsla::from).unwrap_or(theme.primary)
 }
 
 /// The agent's glyph, turning (Claude) or breathing (Codex) while the agent
@@ -12221,6 +12608,23 @@ pub(crate) fn term_bytes(k: &Keystroke) -> Option<Vec<u8>> {
     Some(typed.into_bytes())
 }
 
+/// A mode being walked to on a terminal session: ⇧Tab is the only thing
+/// that moves it, so the key is pressed once, the screen read, and
+/// pressed again only when what is read is another mode and not yet the
+/// one wanted.
+#[derive(Debug, Clone)]
+struct ModeWalk {
+    sid: String,
+    to: String,
+    /// Where the walk began: read again, the order has no such mode.
+    from: String,
+    /// What the screen said before the last press.
+    last: String,
+    presses: usize,
+    /// Looks at the screen since the last press that showed nothing new.
+    looks: usize,
+}
+
 /// What a session's terminal is wanted for (`Workbench::via_terminal`).
 #[derive(Debug, Clone)]
 pub enum TerminalAction {
@@ -12372,8 +12776,15 @@ pub(crate) enum PickFor {
     Mode,
     /// On the home page, the agent a new session is begun with.
     Agent,
+    /// What a new Claude Code session starts in: in Settings, and on
+    /// the pills of a session not started.
     DefaultMode,
     DefaultModel,
+    DefaultEffort,
+    /// The same three for Codex, in Settings.
+    CodexMode,
+    CodexModel,
+    CodexEffort,
     /// On the home page, the folder a new session starts in.
     Folder,
 }
@@ -12397,11 +12808,17 @@ pub(crate) struct PickRow {
     name: String,
     detail: String,
     tint: Tint,
+    /// The agent whose mark stands before the name, on the agents' list.
+    mark: Option<AgentId>,
 }
 
 impl PickRow {
     fn plain(key: String, name: String, detail: String) -> Self {
-        PickRow { key, name, detail, tint: Tint::Plain }
+        PickRow { key, name, detail, tint: Tint::Plain, mark: None }
+    }
+
+    fn tinted(key: String, name: String, detail: String, tint: Tint) -> Self {
+        PickRow { key, name, detail, tint, mark: None }
     }
 }
 

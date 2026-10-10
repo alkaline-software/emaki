@@ -131,6 +131,28 @@ pub fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
+/// One of an account's usage windows, as an agent's transcript names it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// How long the window is, in minutes: 300 is five hours.
+    pub minutes: u64,
+    /// How much of it is spent, 0 to 1.
+    pub used: f64,
+    /// When it resets, Unix seconds.
+    pub resets_at: f64,
+}
+
+impl UsageWindow {
+    /// The window's name on the row under the composer: "5h", "7d", "30d".
+    pub fn label(&self) -> String {
+        match self.minutes {
+            m if m >= 1440 && m % 1440 == 0 => format!("{}d", m / 1440),
+            m if m >= 60 && m % 60 == 0 => format!("{}h", m / 60),
+            m => format!("{m}m"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
@@ -460,6 +482,16 @@ pub struct Session {
     /// What the last request carried (input, cache read, cache creation):
     /// the context in use, against the model's window.
     pub context_tokens: u64,
+    /// The size of the model's window, where the transcript says it
+    /// (Codex); 0 where it does not.
+    #[serde(default)]
+    pub context_window: u64,
+    /// The account's usage windows as the transcript last recorded them
+    /// (Codex), the shorter first, and when that was, Unix seconds.
+    #[serde(default)]
+    pub usage_windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub usage_windows_at: f64,
     /// The effort level the session was last set to with `/effort`, or
     /// empty when it never was.
     pub effort: String,

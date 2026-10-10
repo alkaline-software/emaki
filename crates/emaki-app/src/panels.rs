@@ -5387,7 +5387,7 @@ impl Workbench {
                 .gap(px(6.))
                 .items_center()
                 .text_color(theme.muted_foreground)
-                .child(crate::workbench::agent_glyph(emaki_core::model::AgentId::ClaudeCode, px(11.), theme.primary, true, "outline-summing"))
+                .child(crate::workbench::agent_glyph(emaki_core::model::AgentId::ClaudeCode, px(11.), crate::workbench::agent_color(emaki_core::model::AgentId::ClaudeCode, &theme), true, "outline-summing"))
                 .child("Summarizing…")
                 .into_any_element()
         } else {

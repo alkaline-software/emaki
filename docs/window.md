@@ -130,7 +130,9 @@ if it was opened that way and not clicked since. A click is the person's
 choice and stays until the folder next goes live or quiet.
 
 A session's mark is in the muted ink unless it is live, so many rows do not
-read as many accents, with a dot in its phase's colour. A folder
+read as many colours, and then in its agent's colour (`docs/agents.md`,
+Marks) with a dot in its phase's colour. A folder with a live session is
+in the accent, whichever agent's it is. A folder
 wears the most pressing of its sessions' (needs you, then working, then
 your turn).
 
@@ -447,6 +449,13 @@ italics, the name being ours and not one anybody gave it (`unnamed`).
   message typed and not sent is the composer's draft and goes with it.
 - A folder's plus pressed twice goes back to the one begun and does not
   make a second.
+- It begins with the agent last chosen for a new session, and its
+  composer stands on the home page's tray until the first message: the
+  folder named and not to be chosen again, the agent to be chosen
+  (`begun_agent`). Nothing has been started, so the other agent takes
+  the same record: the tab is re-keyed where it stands and what is
+  typed stays. Without this a plus could only begin what the home page
+  was last set to.
 - Until its first message it has no terminal to ask anything of: its
   pills are the home page's (they open Settings), the composer says
   "Start a session…", the terminal panel's agent side says Claude Code
@@ -558,7 +567,19 @@ the tabs' widths do (`TabWidth::now`), so it keeps its tab while they move.
 
 Every tab has the same width (`sync_tab_widths`, at every draw): `TAB_MAX`
 while the row has room, the row less the pills' own room divided among them
-once it has not, down to `TAB_MIN`. A new tab grows in from nothing while
+once it has not, down to `TAB_MIN`, which still shows a few letters of the
+title. Past that the tabs keep their width and the row scrolls sideways
+(`tabs_scroll`), as the shell's tabs do: centred while they fit, from the
+left once they do not, since a centred row wider than its box cannot be
+scrolled to its start. The tab gone to is brought into the row, and again
+when the row's own width changes (the sidebar, the window), and a drag's
+places take the scroll into account (`pill_spans`).
+
+The row keeps `STRIP_GAP` clear at both ends, whatever stands there and
+whether the sidebar is open: the end of the strip with buttons at it is as
+wide as they are, and only an end with nothing keeps the 120px that
+centres a title. With the 120px on both, the tabs stood far off the
+buttons with the sidebar open and against them with it away. A new tab grows in from nothing while
 the others give way, and a closed one's room is taken up the same way, over
 `TAB_ANIM` (`tab_widths`). A new pill's track is let out with its tab
 (`pill_born`), in a wrapper that clips it and stays until the plate's move
@@ -592,8 +613,8 @@ They go when the key is let go or another modifier joins it
 (`modifiers_changed`, from `on_modifiers_changed`). The timer from the press
 is answered only if that press is still the one held, so a quick ⌘C never
 shows them. A release the window never hears (⌘Tab away) is caught at the
-next draw, which asks the window what is held. The last tab says 9 once
-there are more than eight, and one between has no number. The tab clips what
+next draw, which asks the window what is held. The first nine tabs
+have a number, the one `go_tab` takes to them, and any after have none. The tab clips what
 it holds, so the plate is beside it in a box of the tab's size, and the
 outline is always there, clear until then, so nothing shifts.
 

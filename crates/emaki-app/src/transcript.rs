@@ -414,7 +414,6 @@ impl Workbench {
             e += 1;
         }
         if any {
-            let mark_color = if session.agent == emaki_core::model::AgentId::ClaudeCode { theme.primary } else { theme.muted_foreground };
             // The reply's copy button and the time of its last words, under
             // its last line and shown while the pointer is over the reply.
             // The button's icon lines up with the text.
@@ -439,7 +438,7 @@ impl Workbench {
                     .group(group)
                     .w_full()
                     .gap(px(8.))
-                    .child(h_flex().gap(px(7.)).items_center().child(agent_icon(session.agent, px(15.), mark_color)).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
+                    .child(h_flex().gap(px(7.)).items_center().child(agent_icon(session.agent, px(15.), agent_color(session.agent, &theme))).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
                     // The reply stops short of the column's right edge, where
                     // the prompt bubbles end: the two voices sit at different
                     // widths, as in the Claude app, and read apart at a glance.
