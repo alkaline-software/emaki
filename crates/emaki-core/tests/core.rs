@@ -3217,9 +3217,14 @@ fn git_publishes_fetches_and_branches_from_another_branch() {
     run(&root, &["init", "-q", "--bare", "origin.git"]);
     let (work, other) = (root.join("work"), root.join("other"));
     run(&root, &["clone", "-q", "origin.git", "work"]);
+    // The commands under test run with the repository's own settings:
+    // Git for Windows would hand their checkouts back with `\r\n`, and
+    // a file would read as changed.
+    run(&work, &["config", "core.autocrlf", "false"]);
     commit(&work, "a.txt", "one\n");
     run(&work, &["push", "-q", "-u", "origin", "main"]);
     run(&root, &["clone", "-q", "origin.git", "other"]);
+    run(&other, &["config", "core.autocrlf", "false"]);
 
     // A branch made here is on no remote until it is published.
     run(&work, &["switch", "-q", "-c", "mine"]);
