@@ -75,7 +75,15 @@ impl InputHighlighter for TreeSitterInputHighlighter {
         const SYNC_PARSE_TIMEOUT: Duration = Duration::from_millis(2);
         const SYNC_PARSE_MAX_BYTES: usize = 256 * 1024;
         const PARSE_DEBOUNCE: Duration = Duration::from_millis(150);
+        // Emaki: a text read for the first time (a file just opened) is
+        // given long enough to be parsed before it is first drawn, and
+        // where that is not enough the parse in the background starts at
+        // once. Upstream gave it the two milliseconds a keystroke gets
+        // and then the wait that follows typing, so every file was drawn
+        // in one colour for a moment before its colours came.
+        const FIRST_PARSE_TIMEOUT: Duration = Duration::from_millis(60);
 
+        let first = self.inner.borrow().tree().is_none() && self.parse_task.borrow().is_none();
         let edit = edit.map(to_tree_sitter_edit);
         let completed = {
             let mut highlighter = self.inner.borrow_mut();
@@ -83,7 +91,7 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                 highlighter.edit_tree(edit, text);
                 false
             } else {
-                highlighter.update(edit, text, Some(SYNC_PARSE_TIMEOUT))
+                highlighter.update(edit, text, Some(if first { FIRST_PARSE_TIMEOUT } else { SYNC_PARSE_TIMEOUT }))
             }
         };
         if completed {
@@ -108,7 +116,9 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                 }
             }
             let _cancel_guard = CancelOnDrop(cancel.clone());
-            cx.background_executor().timer(PARSE_DEBOUNCE).await;
+            if !first {
+                cx.background_executor().timer(PARSE_DEBOUNCE).await;
+            }
 
             let parse_cancel = cancel.clone();
             let result = cx

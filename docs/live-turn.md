@@ -143,6 +143,11 @@ and options, the chosen one ticked once the result's sidecar carries
 `answers` (`ToolCall::answers`), typed words quoted, "not answered" when
 declined. It never folds into a run of tool calls.
 
+`ExitPlanMode` is drawn the same way once its row is written
+(`transcript::render_plan_call`): the plan whole, as markdown, with
+"approved" or "not approved", and never folded into a run. As a plain
+tool card the plan was shut inside it.
+
 A driver gets the question as a `can_use_tool` request like any permission
 (2.1.288). The reply is allow with the input completed by `answers`,
 question text to the label chosen, as Claude Code's own dialog answers
@@ -196,6 +201,20 @@ needed" or "permission prompt"); the screen says which.
 - Not shown while a command typed in the terminal is watched (`/model`,
   `/effort`, with a value or bare): what it opens is the terminal's, on
   its card.
+- A plan's dialog ("Claude has written up a plan…", 2.1.296) carries
+  the plan, as markdown in a box that scrolls, over the question. The
+  terminal prints the plan and then asks, most of it off the screen by
+  then, and the transcript does not have it: the `ExitPlanMode` row is
+  written once it is answered, and so is the row of a `Write` the agent
+  asked for in the same message, which is how the plan's file is
+  usually written. The dialog's last line names the file ("ctrl+g to
+  edit in VS Code · ~/.claude/plans/<name>.md",
+  `driver::plan_file_on_dialog`), and `plan_for_dialog` reads it at each
+  read of the dialog. Where the screen did not say, the last plan the
+  transcript shows being written is read, and with neither the card
+  shows the lines the screen has. Tried and dropped: the transcript
+  alone, which had the file only when another call came between the
+  `Write` and the question.
 - The card comes and goes in motion (`DialogShown`; `docs/window.md`,
   Motion).
 - The registry says `waiting` before the question is on the screen, by
@@ -270,6 +289,10 @@ answering. Stacked cards: the first also offers "Allow all".
 
 - `EMAKI_GO=dialogdemo:preview` holds a sample question with previews on
   the card.
+- `EMAKI_GO=dialogdemo:plan` holds a plan's dialog, with the plan the
+  session showing last wrote. For the real one: `emaki-core pty <cwd>
+  --keys "/plan" --keys "\r" --keys "<a prompt>" --keys "\r"` prints the
+  screen and what the reader makes of it (a real model call).
 - `EMAKI_GO=dialog:<digit>` or `dialog:tab` presses that in the terminal's
   dialog; `answer:<words>` types an answer; `goto:<n>` goes to that tab.
 - `EMAKI_GO=shells` opens the background commands' card, `EMAKI_GO=agents`

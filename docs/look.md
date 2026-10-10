@@ -47,9 +47,32 @@ window draws.
 
 ## Code's colours
 
-The `highlight` part of each theme in `themes/emaki.json`: VS Code's
-Dark+ and Light+, on the window's own grounds, for the editor in the
-file's pane and a conversation's code blocks (`docs/panels.md`).
+One set of inks an appearance, `look::Inks` (`INKS_LIGHT`, `INKS_DARK`):
+blue, violet, gold, rose, teal, green, red and a grey for comments.
+Everything that colours code or a terminal takes them from there.
+
+- The hues are Rosé Pine's (pine, iris, gold, rose, foam, love) with a
+  sage green beside them, each taken darker or lighter until it reads
+  on the window's own grounds: 4.5 to 1 or more against the page in
+  either appearance, the grey a step quieter. They took the place of VS
+  Code's Light+ and Dark+, whose crimson and pure blue were loud on the
+  cream page.
+- The `highlight` part of each theme in `themes/emaki.json` names an ink
+  where it wants one ("@l-blue", "@d-rose"), and `look::install` puts
+  the colour in before the file is parsed. It serves the editor in the
+  file's pane and a conversation's code blocks alike: `md_view` takes
+  `theme.highlight_theme`, not the toolkit's default, which was a
+  second set of colours.
+- Which token gets which ink: keywords, tags and a markdown title blue;
+  control keywords, numbers, constants and attributes violet; strings
+  and a markdown code span gold; functions rose; types and properties
+  teal; comments and the marks of markdown grey. Variables, operators
+  and brackets are the page's ink, so a line is not all colour.
+- The terminals' sixteen named colours are the same inks
+  (`term_panel`'s two schemes): red, green, yellow (gold), blue, magenta
+  (violet), cyan (teal), normal and bright alike. Green and red are
+  there for a terminal's "added" and "failed"; code does not use them.
+  The terminals' ground, ink, cursor and tabs are still Kaku's.
 
 ## Inline code
 
@@ -114,9 +137,14 @@ install under `LOCALAPPDATA` on Windows).
   platform's text system learns variable fonts.
 - Without a Claude app the serif falls back to Georgia and the sans to the
   window's face, and the settings panel says so.
-- The face is applied to the transcript container only (`render_detail`),
-  which the markdown view inherits. Code stays in the mono face, the chrome
-  and the composer in the UI face.
+- The face is applied to the transcript container (`render_detail`),
+  which the markdown view inherits, and to what the agent says on the
+  cards under it: a plan, a question and its choices (`render_dialog`,
+  `render_question`). Those are the conversation's words before the
+  transcript has them, and in the window's face a plan changed face the
+  moment it was answered. Code stays in the mono face; the cards' own
+  words (their heads, badges, tabs and buttons), the chrome and the
+  composer in the UI face.
 
 ## The look settings
 

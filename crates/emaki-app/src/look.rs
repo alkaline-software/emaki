@@ -42,6 +42,41 @@ pub fn accent_hex(key: &str, dark: bool) -> &'static str {
     if dark { a.dark[0] } else { a.light[0] }
 }
 
+/// The inks code is written in, one set an appearance: every place that
+/// colours code or a terminal takes them from here. The editor in the
+/// file's pane and a conversation's code blocks name them in
+/// `themes/emaki.json` ("@l-blue", "@d-rose"), and the terminals' named
+/// colours are these same ones (`term_panel::scheme`).
+///
+/// The hues are Rosé Pine's (pine, iris, gold, rose, foam, love), with a
+/// sage green beside them for a terminal's "added", each taken darker or
+/// lighter until it reads on the window's own grounds: 4.5 to 1 or more
+/// against the page, and the grey, for comments, a step quieter.
+pub struct Inks {
+    pub blue: u32,
+    pub violet: u32,
+    pub gold: u32,
+    pub rose: u32,
+    pub teal: u32,
+    pub green: u32,
+    pub red: u32,
+    pub grey: u32,
+}
+
+pub const INKS_LIGHT: Inks = Inks { blue: 0x286983, violet: 0x7A6398, gold: 0x8A6A1E, rose: 0xA3566F, teal: 0x357783, green: 0x4C7B58, red: 0xB0505F, grey: 0x85818F };
+pub const INKS_DARK: Inks = Inks { blue: 0x7FB4D0, violet: 0xC4A7E7, gold: 0xE9C083, rose: 0xE8B0AE, teal: 0x9CCFD8, green: 0xA3CCA4, red: 0xEB8FA6, grey: 0x8F8BA0 };
+
+/// The theme file with each ink's name replaced by its colour.
+fn inked(json: &str) -> String {
+    let mut out = json.to_string();
+    for (p, inks) in [("l", &INKS_LIGHT), ("d", &INKS_DARK)] {
+        for (name, c) in [("blue", inks.blue), ("violet", inks.violet), ("gold", inks.gold), ("rose", inks.rose), ("teal", inks.teal), ("green", inks.green), ("red", inks.red), ("grey", inks.grey)] {
+            out = out.replace(&format!("\"@{p}-{name}\""), &format!("\"#{c:06X}\""));
+        }
+    }
+    out
+}
+
 fn paint(cfg: &mut ThemeConfig, a: &Accent) {
     let dark = cfg.mode.is_dark();
     let [base, hover, active] = if dark { a.dark } else { a.light };
@@ -66,7 +101,7 @@ fn paint(cfg: &mut ThemeConfig, a: &Accent) {
 /// Hand the toolkit both palettes with `accent_key` painted in. Called at
 /// start and again whenever the accent changes; `apply` then draws it.
 pub fn install(accent_key: &str, cx: &mut App) {
-    let set: ThemeSet = match serde_json::from_str(include_str!("../themes/emaki.json")) {
+    let set: ThemeSet = match serde_json::from_str(&inked(include_str!("../themes/emaki.json"))) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("emaki: theme file is invalid, using the default look: {e}");

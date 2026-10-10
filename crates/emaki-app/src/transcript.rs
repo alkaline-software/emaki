@@ -5,7 +5,6 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::tooltip::ManagedTooltipExt as _;
-use gpui_component::highlighter::HighlightTheme;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
@@ -74,8 +73,21 @@ pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
         .style(
             TextViewStyle {
                 heading_base_font_size: px(15.),
+                // The toolkit's sizes, but for the first level: twice
+                // the text's was a poster's headline over a reply.
+                heading_font_size: Some(std::sync::Arc::new(|level, base| {
+                    base * match level {
+                        1 => 1.7,
+                        2 => 1.5,
+                        3 => 1.25,
+                        4 => 1.125,
+                        _ => 1.,
+                    }
+                })),
                 paragraph_gap: rems(0.6),
-                highlight_theme: if dark { HighlightTheme::default_dark() } else { HighlightTheme::default_light() },
+                // The window's own code colours, the same the file's
+                // editor has (`look::Inks`).
+                highlight_theme: theme.highlight_theme.clone(),
                 // As the Claude app sets them: strong text at 600, not the
                 // font's true Bold; inline code in the mono face. These and
                 // the plate are Emaki's additions to the vendored toolkit.
@@ -148,11 +160,17 @@ fn mono_block(id: String, text: &str, lang: &str, cx: &App) -> impl IntoElement 
     md_view(id, md, cx)
 }
 
+/// The plan an `ExitPlanMode` call asks to go ahead with, as markdown.
+fn plan_of(call: &ToolCall) -> Option<&str> {
+    (call.name == "ExitPlanMode").then(|| call.input.get("plan").and_then(|v| v.as_str())).flatten().filter(|p| !p.trim().is_empty())
+}
+
 /// What folds into a run: tool calls and the thoughts between them. A
-/// question is never one of them, so it is never hidden in "n tool calls".
+/// question is never one of them, so it is never hidden in "n tool
+/// calls", and neither is a plan.
 fn is_run_item(it: &Item) -> bool {
     match it {
-        Item::Tool(c) => c.tool_kind != ToolKind::Ask,
+        Item::Tool(c) => c.tool_kind != ToolKind::Ask && plan_of(c).is_none(),
         Item::Thinking { .. } => true,
         _ => false,
     }
@@ -538,6 +556,7 @@ impl Workbench {
                 if let Some(d) = this.detail.as_mut() {
                     if !d.open_runs.remove(&(ix, start)) {
                         d.open_runs.insert((ix, start));
+                        this.reveal_now((1, ix, start));
                     }
                 }
                 cx.notify();
@@ -554,8 +573,8 @@ impl Workbench {
             .when(errors > 0, |d| d.child(div().text_size(px(11.5)).text_color(theme.danger).flex_shrink_0().child(format!("{errors} failed"))))
             .when(running, |d| d.child(div().text_size(px(11.5)).text_color(agent_color(session.agent, &theme)).flex_shrink_0().child("running…")))
             .when(!running && total_ms > 1500, |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).flex_shrink_0().child(human_duration(total_ms))));
-        let mut v = v_flex().w_full().gap(px(6.)).child(head);
-        if open {
+        let mut v = v_flex().w_full().relative().child(head).children(self.reveal_mark((1, ix, start), cx));
+        if let Some(fold) = self.fold_state((1, ix, start), open, cx) {
             let mut inner = v_flex().w_full().gap(px(6.)).pl(px(12.)).border_l_2().border_color(theme.border);
             let session_rc = session.clone();
             for jx in start..end {
@@ -563,7 +582,7 @@ impl Workbench {
                 let el = self.render_item(ix, jx, &item, open_tools, open_thoughts, open_subagents, session, cx);
                 inner = inner.child(self.find_wrap(ix, jx, el, &theme));
             }
-            v = v.child(inner);
+            v = v.child(self.fold_wrap(fold, 6., inner.into_any_element(), cx));
         }
         v.into_any_element()
     }
@@ -749,7 +768,8 @@ impl Workbench {
         let label = if seconds >= 2.0 { format!("Thought for {}", human_duration((seconds * 1000.0) as u64)) } else { "Thinking".to_string() };
         v_flex()
             .w_full()
-            .gap(px(4.))
+            .relative()
+            .children(self.reveal_mark((2, ix, jx), cx))
             .child(
                 h_flex()
                     .id(SharedString::from(format!("th-{ix}-{jx}")))
@@ -759,9 +779,11 @@ impl Workbench {
                     .text_size(px(12.))
                     .text_color(theme.muted_foreground)
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pin_scroll();
                         if let Some(d) = this.detail.as_mut() {
                             if !d.open_thoughts.remove(&(ix, jx)) {
                                 d.open_thoughts.insert((ix, jx));
+                                this.reveal_now((2, ix, jx));
                             }
                         }
                         cx.notify();
@@ -769,17 +791,16 @@ impl Workbench {
                     .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)))
                     .child(div().italic().child(label)),
             )
-            .when(open, |d| {
-                d.child(
-                    div()
-                        .pl(px(14.))
-                        .border_l_2()
-                        .border_color(theme.border)
-                        .text_size(px(body_px - 2.))
-                        .text_color(theme.muted_foreground)
-                        .line_height(relative(1.55))
-                        .child(md_view(format!("tk-{ix}-{jx}"), md.to_string(), cx)),
-                )
+            .when_some(self.fold_state((2, ix, jx), open, cx), |d, fold| {
+                let body = div()
+                    .pl(px(14.))
+                    .border_l_2()
+                    .border_color(theme.border)
+                    .text_size(px(body_px - 2.))
+                    .text_color(theme.muted_foreground)
+                    .line_height(relative(1.55))
+                    .child(md_view(format!("tk-{ix}-{jx}"), md.to_string(), cx));
+                d.child(self.fold_wrap(fold, 4., body.into_any_element(), cx))
             })
             .into_any_element()
     }
@@ -787,6 +808,9 @@ impl Workbench {
     fn render_tool(&mut self, ix: usize, jx: usize, call: &ToolCall, open: bool, sub_open: bool, cwd: &str, cx: &mut Context<Self>) -> AnyElement {
         if call.tool_kind == ToolKind::Ask {
             return self.render_question_call(call, cx);
+        }
+        if let Some(plan) = plan_of(call) {
+            return self.render_plan_call(ix, jx, call, plan, cx);
         }
         let theme = cx.theme().clone();
         let (status_text, status_color) = match call.status {
@@ -836,7 +860,7 @@ impl Workbench {
                 })
         };
 
-        let mut card = v_flex().w_full().rounded(px(10.)).border_1().border_color(theme.border).bg(theme.popover).overflow_hidden();
+        let mut card = v_flex().w_full().relative().rounded(px(10.)).border_1().border_color(theme.border).bg(theme.popover).overflow_hidden().children(self.reveal_mark((0, ix, jx), cx));
         card = card.child(
             h_flex()
                 .id(SharedString::from(format!("tool-{ix}-{jx}")))
@@ -854,6 +878,7 @@ impl Workbench {
                     if let Some(d) = this.detail.as_mut() {
                         if !d.open_tools.remove(&(ix, jx)) {
                             d.open_tools.insert((ix, jx));
+                            this.reveal_now((0, ix, jx));
                         }
                     }
                     cx.notify();
@@ -871,7 +896,7 @@ impl Workbench {
             let size = px(self.cfg.app.chat_px());
             card = card.child(div().w_full().px(px(10.)).pb(px(8.)).child(explain_card(format!("ex-{ix}-{jx}"), text, explaining, size, cx)));
         }
-        if open && has_body {
+        if let Some(fold) = self.fold_state((0, ix, jx), open && has_body, cx) {
             // The body is bounded and scrolls inside the card, so a long
             // output never takes the whole window; the clip's "n more
             // lines" note still says what was left out entirely.
@@ -892,7 +917,7 @@ impl Workbench {
             // everything on.
             let wheel_handle = handle.clone();
             let stroke = scroll.stroke.clone();
-            card = card.child(
+            let body =
                 div()
                     .relative()
                     .w_full()
@@ -935,8 +960,8 @@ impl Workbench {
                             .track_scroll(&handle)
                             .child(div().w_full().px(px(10.)).pt(px(8.)).pb(px(10.)).child(body)),
                     )
-                    .vertical_scrollbar(&handle),
-            );
+                    .vertical_scrollbar(&handle);
+            card = card.child(self.fold_wrap(fold, 0., body.into_any_element(), cx));
         }
         card.into_any_element()
     }
@@ -1015,6 +1040,37 @@ impl Workbench {
                     }))
                     .when(typed, |d| d.child(div().pl(px(24.)).text_size(px(12.5)).child(format!("↳ {answer}"))))
             }))
+            .into_any_element()
+    }
+
+    /// A plan in the conversation, whole and as markdown, with what
+    /// became of it: the terminal prints a plan and then asks, and a
+    /// tool card folded shut said only that a tool had run.
+    fn render_plan_call(&self, ix: usize, jx: usize, call: &ToolCall, plan: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let pending = call.status == CallStatus::Pending;
+        let state = match call.status {
+            CallStatus::Pending => "waiting for your go-ahead",
+            CallStatus::Ok => "approved",
+            _ => "not approved",
+        };
+        v_flex()
+            .w_full()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(if pending { theme.primary.opacity(0.5) } else { theme.border })
+            .bg(theme.popover)
+            .px(px(14.))
+            .py(px(10.))
+            .gap(px(10.))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(badge_str("plan".into(), theme.primary.opacity(0.14), theme.primary))
+                    .child(div().text_size(px(11.5)).text_color(if pending { theme.primary } else { theme.muted_foreground }).child(state)),
+            )
+            .child(div().w_full().text_size(px(self.cfg.app.chat_px())).line_height(relative(1.5)).child(md_view(format!("plan-{ix}-{jx}"), plan.to_string(), cx)))
             .into_any_element()
     }
 
@@ -1115,7 +1171,9 @@ impl Workbench {
                 }
                 if !call.subagent.is_empty() {
                     let n = call.subagent.len();
-                    parts = parts.child(
+                    // The head and what folds under it in a column of
+                    // their own with no gap: the gap is in the fold.
+                    let mut sub = v_flex().w_full().child(
                         h_flex()
                             .id(SharedString::from(format!("sub-{ix}-{jx}")))
                             .gap(px(6.))
@@ -1135,13 +1193,14 @@ impl Workbench {
                             .child(Icon::new(if sub_open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)))
                             .child(div().child(format!("{}{} · {} round{}", if call.agent_name.is_empty() { "subagent" } else { &call.agent_name }, "", n, if n == 1 { "" } else { "s" }))),
                     );
-                    if sub_open {
+                    if let Some(fold) = self.fold_state((3, ix, jx), sub_open, cx) {
                         let mut nested = v_flex().w_full().gap(px(10.)).pl(px(10.)).border_l_2().border_color(theme.border);
                         for (k, sub) in call.subagent.iter().enumerate() {
                             nested = nested.child(self.render_subround(ix, jx, k, sub, cx));
                         }
-                        parts = parts.child(nested);
+                        sub = sub.child(self.fold_wrap(fold, 8., nested.into_any_element(), cx));
                     }
+                    parts = parts.child(sub);
                 } else if !call.result_text.is_empty() {
                     parts = parts.child(mono_block(format!("res-{ix}-{jx}"), &call.result_text, "text", cx));
                 }

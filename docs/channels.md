@@ -155,7 +155,9 @@ something on a `spawn` session and not only read it: a click in the
 composer, the first character typed there, the terminal panel opened
 (`Workbench::warm_now`, `warm_terminal`). It is
 up and registered in 0.7 to 1.4 s (2.1.289), which is why the first
-keystroke is early enough and opening the session is not used.
+keystroke is early enough and opening the session is not used. A session
+begun from a folder and not yet sent to is never started this way: there
+is nothing to resume (`docs/window.md`, A session begun from a folder).
 
 **`via_terminal`** is the one way in for what only a terminal takes
 (`TerminalAction`: a pick from `/model` or `/effort`, a typed command,
@@ -257,8 +259,9 @@ no close button: the strip's button puts the panel away.
 **The look is Kaku's** (tw93/kaku, MIT), the same for both sides:
 
 - The scheme is Kaku Dark or Kaku Light by the window's appearance
-  (`scheme`): ground, ink, cursor, selection, tabs, toast and the sixteen
-  named colours. A span keeps which named colour it asked for
+  (`scheme`): ground, ink, cursor, selection, tabs and toast. The sixteen
+  named colours are the window's own inks for code (`docs/look.md`,
+  Code's colours), no longer Kaku's. A span keeps which named colour it asked for
   (`Span::fg_ix`, `bg_ix`), so those are drawn from the scheme and not
   from the screen model's own table.
 - The grounds and inks Kaku swaps (`grounds`, `inks`) are swapped, and an

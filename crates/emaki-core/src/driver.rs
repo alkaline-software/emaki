@@ -614,6 +614,16 @@ pub fn dialog_on_screen(text: &str) -> Option<Dialog> {
     (!d.options.is_empty() && !d.body.is_empty()).then_some(d)
 }
 
+/// The file a plan's dialog names as the plan, as the screen has it
+/// (2.1.296): the dialog's last line, "ctrl+g to edit in VS Code ·
+/// ~/.claude/plans/<name>.md", which the reader takes as the end of the
+/// last choice's lines. A path too long for the screen's width runs on
+/// into the next line, and the join put a space there.
+pub fn plan_file_on_dialog(d: &Dialog) -> Option<String> {
+    let path = d.options.last()?.detail.rsplit("· ").next()?.trim();
+    (path.ends_with(".md") && path.contains('/')).then(|| path.to_string())
+}
+
 /// The escape sequence `s` begins with: how many bytes it takes, and its
 /// parameters when it is one that sets how text is drawn (`ESC [ … m`).
 /// The others are skipped whole: any other CSI, an OSC up to its

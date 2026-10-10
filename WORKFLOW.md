@@ -2,9 +2,9 @@
 
 Everything about cutting a release: bumping the version, the changelog,
 the tag, what CI builds, signing and notarizing the Mac images on this
-machine, uploading them, redoing a release, and the pieces that feed it
-(the icon, the disk-image background). AGENTS.md says how the pieces fit;
-this file says what to run, in order.
+machine, uploading them, cleaning up, redoing a release, and the pieces
+that feed it (the icon, the disk-image background). AGENTS.md says how
+the pieces fit; this file says what to run, in order.
 
 ## What a release is
 
@@ -172,6 +172,35 @@ hdiutil detach "/Volumes/Emaki vX.Y.Z"
 
 Keep no other `Emaki.app` on the disk (`dist/`, a scratch folder,
 `scripts/make-app.sh`'s output): Launchpad and Spotlight list each one.
+Step 8 removes the ones a release leaves.
+
+### 8. Clean up
+
+Only once the release is confirmed done: step 6 printed "published with
+notarized Mac images", the installed copy opens, and `spctl -a -vv
+/Applications/Emaki.app` says "Notarized Developer ID". Then:
+
+```
+cargo clean
+rm -rf dist
+mdfind "kMDItemFSName == 'Emaki.app'"
+```
+
+- `cargo clean` deletes `target/`: every build made while developing and
+  for the release (debug, release, the Intel and Windows targets), and
+  with it the dev build's bundle. Months of incremental builds had grown
+  it past 80 GB by v0.1.9.
+- `dist/` holds the two disk images, which are on the release by now.
+- `mdfind` must list `/Applications/Emaki.app` and nothing else.
+
+Nothing here can be lost: all of it is rebuilt from the source. The cost
+is time. The next `cargo build -p emaki-app` starts from nothing and takes
+some minutes, and so does the next release build. Do not clean before
+step 6 has succeeded: a redo of the release wants the release builds.
+
+If an Emaki started from this repository is running (the dev build,
+`scripts/dev-app.sh`), quit it first and work from the installed one, or
+build again straight after: its bundle is in `target/`.
 
 ## Redoing a release under the same tag
 
@@ -279,8 +308,12 @@ so it is caught before the tag next time.
   mounted, or Finder had no session. The script detaches a stale volume
   first; `hdiutil info` shows what is mounted.
 - **Two Emakis in Launchpad or Spotlight**: a second bundle somewhere on
-  disk. `mdfind "kMDItemCFBundleIdentifier == 'com.pingfanhu.emaki'"` lists
-  them; keep only `/Applications/Emaki.app`.
+  disk. `mdfind "kMDItemFSName == 'Emaki.app'"` lists them; keep only
+  `/Applications/Emaki.app`. The one found after v0.1.9 was the dev
+  build's, in `target/debug`, which is not a release's doing: it is made
+  again at every `scripts/dev-app.sh`. It is now made in
+  `target/debug/dev.noindex/`, which Spotlight passes by, and step 8
+  removes it with the rest of `target/`.
 - **The Mac images on the release are ad-hoc signed**, or macOS says the
   app "cannot be opened" after an update: step 6 was skipped. Run
   `scripts/release-publish.sh X.Y.Z`. To check an installed copy:

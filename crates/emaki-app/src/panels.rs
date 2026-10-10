@@ -4205,7 +4205,7 @@ impl Workbench {
         let root = c.root.clone();
         let picked = c.picked.clone();
         let entity = cx.weak_entity();
-        let (hover, chosen_bg, ink, quiet, mono) = (theme.muted.opacity(0.7), theme.primary.opacity(if dark { 0.18 } else { 0.12 }), theme.foreground, theme.muted_foreground, theme.mono_font_family.clone());
+        let (hover, chosen_bg, ink, quiet, mono) = (row_hover(&theme, dark), theme.primary.opacity(if dark { 0.18 } else { 0.12 }), theme.foreground, theme.muted_foreground, theme.mono_font_family.clone());
         let files = uniform_list("changes-files", changed.len(), {
             let (changed, root, picked) = (changed.clone(), root.clone(), picked.clone());
             move |range: std::ops::Range<usize>, _: &mut Window, _: &mut App| {
