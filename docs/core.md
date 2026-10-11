@@ -212,6 +212,22 @@ second.
   reach a model.
 - The call: `claude -p --model claude-haiku-4-5` with a fixed system
   prompt, no settings, no MCP servers, no tools.
+- Whose model answers (`explain::helper`), for the explanations and the
+  outline's labels alike: Claude Code's Haiku whenever Claude Code is
+  installed, with Codex or without, and Codex's light model for someone
+  who has Codex alone. `run_child` is the one place that chooses, so a
+  caller builds Claude Code's command line and nothing else.
+- The Codex call (`codex_argv`): `codex exec`, ephemeral so no session
+  is kept, without the person's config or rules, in the read-only
+  sandbox, at low effort, with the system prompt and the message as one
+  prompt, and the answer read from the file `--output-last-message`
+  names. The model is the first Codex's own list calls fast
+  (`codex_light_model`, from `cache/options.json`), since its names
+  change with every release; with no list yet it is Codex's default.
+- Explanations are asked for the calls waiting on a card and nothing
+  else. Settings had a section to choose "off" or "every new call"; it
+  was removed and `Workbench::new` sets the scope whatever the file
+  says.
 - Answers are keyed by a hash of the call's name and sorted arguments and
   kept in `~/.emaki/cache/explanations.json`, bounded. `Explainer::lookup`
   is cache-only and `attach` folds cached answers into a loaded session, so
@@ -232,3 +248,4 @@ second.
   transcript (the five largest by default).
 - `EMAKI_TIMING=1` makes the app print load and hand-over time per open.
 - `emaki-core explain <command>` makes one real model call from a terminal.
+  `EMAKI_HELPER=codex` asks Codex whatever is installed.

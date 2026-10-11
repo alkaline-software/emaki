@@ -34,6 +34,15 @@ similar = "2"
 air_r_parser = { path = "../../vendor/air_r_parser" }
 air_r_formatter = { git = "https://github.com/posit-dev/air", rev = "8d20826ccf65a0ccc1d6a82e78d308213271667c" }
 
+# dprint's formatters, in the process as Air is: TypeScript and
+# JavaScript, JSON, Markdown and TOML. Each is a library as well as a
+# plugin of dprint's, so nothing is downloaded or run.
+dprint-core = "0.70"
+dprint-plugin-typescript = "0.96"
+dprint-plugin-json = "0.25"
+dprint-plugin-markdown = "0.26"
+dprint-plugin-toml = "0.9"
+
 # Office files for the file's pane, read only. A workbook is calamine's;
 # a document and a deck are zips of XML read here. zip and quick-xml are
 # the versions calamine itself builds on, zip with deflate alone.

@@ -67,10 +67,11 @@ window, whose words followed the person into the next session.
 
 ## Spelling, grammar and capitals
 
-Three settings under Composer: auto-capitalization, spelling and grammar,
-and the language (`app.auto_capitalize`, `check_writing`,
-`writing_language`). `emaki-core/src/check.rs` is the part without a
-window.
+Two entries under Composer: Auto-capitalization, and Spelling Check,
+whose tick turns the check on and whose languages stand under it, dimmed
+and out of the pointer's reach while it is off (`app.auto_capitalize`,
+`check_writing`, `writing_language`). `emaki-core/src/check.rs` is the
+part without a window.
 
 - English, US or UK, is Harper's (`harper-core`): spelling and grammar,
   in the process, nothing sent anywhere (`check::english`).

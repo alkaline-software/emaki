@@ -356,7 +356,10 @@ no close button: the strip's button puts the panel away.
 **The look is Kaku's** (tw93/kaku, MIT), the same for both sides:
 
 - The scheme is Kaku Dark or Kaku Light by the window's appearance
-  (`scheme`): ground, ink, cursor, selection, tabs and toast. The light
+  (`scheme`): ground, ink, cursor, selection, tabs and toast. The dark
+  scheme's ground, tabs and quiet ground are warm greys of the window's
+  own, a step up from the page: Kaku's blue-black stood cold beside a
+  warm-black page. Its ink and its violet cursor are still Kaku's. The light
   scheme keeps Kaku's cream beside a page that is near white: the page's
   own ground was tried there and the terminal stopped reading as one. The sixteen
   named colours are the window's own inks for code (`docs/look.md`,
@@ -373,16 +376,18 @@ no close button: the strip's button puts the panel away.
   the scheme's ink. Claude Code set to a dark theme draws a near-black
   band behind each prompt, which on the light scheme was a black bar
   across the screen, as it is in Kaku.
-- The face is JetBrains Mono with Kaku's fallbacks, built in
+- The face is the window's one monospace face (Settings, Fonts;
+  `docs/look.md`, The code font), to begin with JetBrains Mono with Kaku's fallbacks, built in
   (`fonts::TERM_FAMILY`, `assets/fonts`), no ligatures, no italic, plain
   and bold a weight heavier on the light scheme, a row 1.28 of the font's
   own line. The size is 13, smaller than Kaku's 17: the panel is a part
   of a window.
-- Those are Kaku's own; ours begin at the middle step of the row's
-  height and of the room around the screen. `terminal` in `config.json`
+- Those are Kaku's own; ours are the middle step of the row's
+  height and of the room around the screen, and stay there: Settings
+  asked for both and for the text's size once, and no longer does
+  (`docs/window.md`, The settings panel). `terminal` in `config.json`
   (`config::Terminal`), changed in Settings, Terminal, chooses the scheme
-  (the window's, or one kept), the face (`fonts::term_family`), the
-  size, the row's height, the room around the screen, the cursor's shape
+  (the window's, or one kept), the cursor's shape
   and whether it blinks, ligatures, and whether a selection is copied
   when the button is let go. `set_terminal` saves a change and the panel
   reads the settings at each draw, so nothing is restarted.

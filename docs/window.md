@@ -223,6 +223,9 @@ The patterns, each in use and to be used again:
   `Button` uses: it comes in, and slides to the next element hovered on
   the same row. Not gpui's plain `.tooltip`, which jumps in and out; a
   row with both kinds read as two different controls.
+- A row under the pointer on a card in the dark appearance is a wash of
+  the ink (a menu's, a list's, the tree's): the palette's own hover is a
+  shade off the card and could not be seen.
 - **A menu or a list over the window** (`render_menu`, `render_pick`):
   it comes in over `MENU_IN`, rising a few pixels into place as it
   fades in, and goes out over `MENU_OUT`, fading where it was. What was
@@ -332,6 +335,10 @@ Laid out like the Claude desktop app.
   its own, and the content is a card on it with rounded corners: `FRAME`
   of the ground shows over, under and right of the card, and left of it
   when the sidebar is away.
+- The card's corner is the window's less the frame (`CARD_R`): the two
+  curves then run side by side. With a rounder window than card the
+  frame thinned to a third of its width at each corner. The window's own
+  corner is the system's and not ours to set.
 - A clip in gpui is a rectangle, so the card is square and its corners are
   painted over in the frame's colour after what it holds (`card_corners`).
   A panel's ground stood square in a rounded corner otherwise.
@@ -346,16 +353,29 @@ Laid out like the Claude desktop app.
   left of the window: the conversation, the sessions page, the home page.
 - The content pane has a top strip with actions on the right. When the
   sidebar is hidden the strip makes room for the traffic lights.
-- The home page is a greeting in `fonts::display_family` (the Claude app's
-  serif when present, so titles and the conversation agree) behind the app's
-  icon, over the composer. The composer's card stands on a tray of its own
+- The home page is a drawing of a handscroll, an emaki, over a greeting
+  in `fonts::display_family` (the chat font, so titles and the
+  conversation agree), over the composer. The drawing (`home_scroll`) is the scroll seen from the
+  front, as the icon is, in three line layers a colour each: the ink,
+  the ink dimmed and the accent, so it follows the appearance and the
+  accent with nothing drawn twice. It is in the manner of hairline's
+  figures (github.com/lucasmarkes/hairline): a solid as its outline and
+  one dim line inside, no fill, no words, one bright mark.
+  `scripts/home-scroll.py` writes the three files. Tried and dropped:
+  hairline's own 2:1 view, which set the picture on the sheet at a
+  slant. The app's icon stood beside the greeting until the drawing
+  did its work; a dark drawing of the icon for the dark appearance was
+  made and dropped, the icon being one thing everywhere.
+- The composer's card stands on a tray of its own
   width (`folder_tray`), and the strip of it that shows under the card
   names the folder a new session starts in: its name, then the folders it
   is in. A press anywhere on the strip drops its list down
   (`PickFor::Folder`, the one list that never opens upward): the
   `HOME_FOLDERS` folders worked in last, the chosen one among them even when
   it is none of those, and under a line "Choose a folder…", a row with no
-  key, which asks the system for any folder (`choose_folder`). Tried and
+  key, which asks the system for any folder (`choose_folder`). ⌘O is
+  that row from the keyboard (`ChooseFolder`), on this page only: on any
+  other page it does nothing. Tried and
   dropped: a grid of six cards under the composer, and before it full-path
   pills of every width, which took the page for one choice; a pill beside
   the mode's on the composer's row, where it read as one more setting of
@@ -380,6 +400,35 @@ A fixed sheet (`SETTINGS_W` by `SETTINGS_H`, capped by the window) with a
 rail of sections on the left (`SETTINGS_SECTIONS`; `settings_section` is the
 one showing) and that section's rows on the right, fading in as the section
 changes. The rows scroll under the header (`settings_scroll`).
+
+A row is a title and its control. A line under the title is there only
+where the title does not say it all: most rows have none, and one that
+does is a few words. A new row gets no line unless a person would
+otherwise not know what it does.
+
+Settings asks for one text size (Fonts): the conversation's, and the
+terminal's and the file editor's go with it (`set_chat_size`,
+`term_px`, `editor_px`). The terminal's
+own size, its line spacing and its padding were rows once; they are the
+middle step now, set at launch whatever `config.json` says. The
+terminal's section sends a person to Fonts for its face and size.
+
+A choice is named as the agent names it, less the "(recommended)"
+Claude Code writes after its default (`plain_default`).
+
+On the new-session page, a machine with neither agent on it says so
+over the composer and sends the person to the agents page
+(`no_agent_note`). It waits until the machine has been looked at.
+
+A key is written as the Mac has it and drawn through `shortcut`
+(`kbd_hint`), which makes ⌘ "Ctrl+" off a Mac. The tooltips that name a
+key still say ⌘ everywhere.
+
+The three looks in Appearance have an icon each (`choice_icon`).
+
+A language in the Composer section has its flag before its name
+(`flag_of`, drawn as a picture so it keeps its colours; the flags are
+drawn here, in `assets/icons/flags`).
 
 Choices are segmented controls (`Workbench::segmented`): a muted track, the
 choice on a raised plate. The plate is one element under the row and slides

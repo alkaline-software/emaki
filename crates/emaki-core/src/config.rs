@@ -83,12 +83,19 @@ pub struct AppConfig {
     pub writing_language: String,
     /// A file saved from the file's pane is put in its language's form
     /// first, where the language has a formatter (`format`: R, by Air).
+    /// Kept under a name of its own in the file: `format_on_save` was
+    /// the switch when it formatted R alone and began on, and a file
+    /// that still says so is not asked whether ten languages should be.
+    #[serde(rename = "format_saved_files")]
     pub format_on_save: bool,
+    /// The languages a save formats, by `format::LANGS`' keys, while
+    /// `format_on_save` is on.
+    pub format_langs: Vec<String>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: true }
+        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys() }
     }
 }
 

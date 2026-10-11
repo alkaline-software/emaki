@@ -200,6 +200,8 @@ pub struct Tree {
     kids: HashMap<PathBuf, Listing>,
     /// The file last shown, which its row marks.
     picked: Option<PathBuf>,
+    /// The rows chosen together, by ⌘A or a rectangle dragged over them.
+    marked: Vec<PathBuf>,
     read_at: f64,
     /// What git says of the folder it was last asked about, and whether
     /// it is being asked now.
@@ -1079,7 +1081,7 @@ impl BranchAsk {
 /// but that same colour, so the row takes a wash of the ink there.
 fn row_hover(theme: &gpui_component::Theme, dark: bool) -> Hsla {
     if dark {
-        theme.muted.opacity(0.7)
+        theme.foreground.opacity(0.08)
     } else {
         theme.foreground.opacity(0.07)
     }
@@ -1180,7 +1182,7 @@ impl Workbench {
     pub(crate) fn panel_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let dark = theme.mode.is_dark();
-        let track_bg = if dark { theme.sidebar } else { theme.muted };
+        let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
         let plate_bg = if dark { theme.secondary_active } else { theme.popover };
         let (seg_w, seg_h, pad, gap) = (30., 24., 3., 2.);
         let x_of = |which: bool| pad + if which { 0. } else { seg_w + gap };
@@ -2349,7 +2351,7 @@ impl Workbench {
                 let kept = self.file_parked.iter().find(|p| p.path == ask.path).map(|p| (p.state.read(cx).value().to_string(), p.lang));
                 let lang = emaki_core::render_md::lang_for_path(&ask.path.to_string_lossy());
                 let Some((text, lang)) = kept.or_else(|| self.file_drafts.get(&ask.path).map(|d| (d.text.clone(), lang))) else { return };
-                let text = if self.cfg.app.format_on_save { emaki_core::format::format(lang, &text).ok().flatten().unwrap_or(text) } else { text };
+                let text = if self.cfg.app.format_on_save { emaki_core::format::format(lang, &ask.path, &text, &self.cfg.app.format_langs).ok().flatten().unwrap_or(text) } else { text };
                 if let Err(e) = std::fs::write(&ask.path, &text) {
                     let name = ask.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     self.notice = Some(Notice::error(format!("could not save {name}: {e}")));
@@ -2482,7 +2484,7 @@ impl Workbench {
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut unformatted = None;
         // Off in Settings, a file is saved as typed.
-        match if self.cfg.app.format_on_save { emaki_core::format::format(ed.lang, &text) } else { Ok(None) } {
+        match if self.cfg.app.format_on_save { emaki_core::format::format(ed.lang, &path, &text, &self.cfg.app.format_langs) } else { Ok(None) } {
             Ok(Some(formed)) => {
                 ed.state.update(cx, |s, cx| {
                     let caret = s.cursor().min(formed.len());
@@ -2946,6 +2948,80 @@ impl Workbench {
     }
 
     /// A choice from the files panel's menu.
+    /// The rectangle follows the pointer, and the rows it lies over are
+    /// the ones chosen. A press that has not moved a few points is still
+    /// a click. Every row is one height and the list starts at the
+    /// scroller's top, so a row's place is its number.
+    fn tree_band_to(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((from, _)) = self.tree_band else { return };
+        if !self.tree_band_live && (at.x - from.x).abs() < px(4.) && (at.y - from.y).abs() < px(4.) {
+            return;
+        }
+        self.tree_band = Some((from, at));
+        self.tree_band_live = true;
+        let Some(root) = self.files_root() else { return };
+        let top = self.files_scroll.bounds().top() + self.files_scroll.offset().y + px(6.);
+        let (first, last) = (from.y.min(at.y), from.y.max(at.y));
+        self.tree.picked = None;
+        self.tree.marked = self
+            .tree
+            .rows(&root)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(ix, row)| {
+                let y = top + TREE_ROW_H * ix as f32;
+                match row {
+                    Row::Node(node, _, _) if y < last && y + TREE_ROW_H > first => Some(node.path),
+                    _ => None,
+                }
+            })
+            .collect();
+        cx.notify();
+    }
+
+    fn tree_band_end(&mut self, cx: &mut Context<Self>) {
+        if self.tree_band.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A right click on one of several rows chosen together: what can be
+    /// asked of them all at once.
+    fn files_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let paths = self.tree.marked.clone();
+        let item = |label: &'static str, what: FileDo| (label, MenuDo::Files(what, paths.clone()));
+        let items = vec![item("Add to Message", FileDo::Mention), item("Copy Paths", FileDo::CopyPath), item("Copy Relative Paths", FileDo::CopyRel), ("", MenuDo::Rule), item(crate::sys::TRASH_LABEL, FileDo::Trash)];
+        self.open_menu(at, items, cx);
+    }
+
+    /// What `files_menu` offers, done to each: the paths go to the
+    /// clipboard a line each, and the rest is `file_do` in turn.
+    pub(crate) fn files_do(&mut self, what: FileDo, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        match what {
+            FileDo::CopyPath | FileDo::CopyRel => {
+                let lines: Vec<String> = paths.iter().map(|p| if what == FileDo::CopyRel { p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string() } else { p.to_string_lossy().to_string() }).collect();
+                cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+                self.notice = Some(Notice::said("copied"));
+            }
+            FileDo::Mention | FileDo::Trash => {
+                // A folder chosen takes what is in it along: what is
+                // under one of the others is not asked of twice.
+                let tops: Vec<PathBuf> = paths.iter().filter(|p| !paths.iter().any(|other| other != *p && p.starts_with(other))).cloned().collect();
+                let n = tops.len();
+                for path in tops {
+                    self.file_do(what, path, window, cx);
+                }
+                if what == FileDo::Trash {
+                    self.tree.marked.clear();
+                    self.notice = Some(Notice::said(format!("{} in the {}", plural(n, "item is", "items are"), crate::sys::TRASH_NAME)));
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
     pub(crate) fn file_do(&mut self, what: FileDo, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.files_root() else { return };
         let rel = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().to_string();
@@ -3078,6 +3154,15 @@ impl Workbench {
         }
         let Some(root) = self.files_root() else { return };
         match e.keystroke.key.as_str() {
+            // Every row showing, as a file manager's ⌘A has it.
+            "a" => {
+                self.tree.marked = self.tree.rows(&root).into_iter().filter_map(|row| match row {
+                    Row::Node(node, _, _) => Some(node.path),
+                    Row::More(..) => None,
+                }).collect();
+                self.tree.picked = None;
+                cx.notify();
+            }
             "c" => {
                 let Some(path) = self.tree.picked.clone() else { return };
                 self.tree_copy(&path, cx);
@@ -3401,7 +3486,11 @@ impl Workbench {
             }
         }
         let picked = self.tree.picked.clone();
+        let marked = self.tree.marked.clone();
         let mut list = v_flex().w_full();
+        // Which rows are lit, known before any is drawn: rows lit one
+        // under another are one block, round at its two ends alone.
+        let lit: Vec<bool> = rows.iter().map(|row| matches!(row, Row::Node(node, _, _) if picked.as_ref() == Some(&node.path) || marked.contains(&node.path))).collect();
         for (ix, row) in rows.into_iter().enumerate() {
             let pad = |depth: usize| px(8. + 12. * depth as f32);
             match row {
@@ -3409,7 +3498,8 @@ impl Workbench {
                     list = list.child(h_flex().h(TREE_ROW_H).flex_shrink_0().pl(pad(depth) + px(15.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("{n} more")));
                 }
                 Row::Node(node, depth, open) => {
-                    let chosen = picked.as_ref() == Some(&node.path);
+                    let chosen = lit[ix];
+                    let (above, below) = (ix > 0 && lit[ix - 1], lit.get(ix + 1).copied().unwrap_or(false));
                     let mark = status.as_ref().and_then(|st| st.mark(&node.path, node.dir));
                     let tint = mark.map(|m| git_color(m.state, dark));
                     let ink = tint.unwrap_or(theme.foreground);
@@ -3432,6 +3522,8 @@ impl Workbench {
                             .gap(px(5.))
                             .items_center()
                             .rounded(px(6.))
+                            .when(chosen && above, |d| d.rounded_t(px(0.)))
+                            .when(chosen && below, |d| d.rounded_b(px(0.)))
                             .cursor_pointer()
                             .when(chosen, |d| d.bg(theme.primary.opacity(0.12)))
                             .when(!chosen, |d| d.hover(|s| s.bg(row_hover(&theme, dark))))
@@ -3442,6 +3534,12 @@ impl Workbench {
                                 // The keyboard is the panel's from here:
                                 // ⌘C and ⌘V are this row's.
                                 window.focus(&this.tree_focus, cx);
+                                // The end of a rectangle's drag is not
+                                // a click on the row it ended over.
+                                if std::mem::take(&mut this.tree_band_live) {
+                                    return;
+                                }
+                                this.tree.marked.clear();
                                 if click.dir {
                                     this.tree.picked = Some(click.path.clone());
                                     this.tree_toggle(&click.path, cx)
@@ -3454,6 +3552,14 @@ impl Workbench {
                                 MouseButton::Right,
                                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
+                                    // The row asked about is the one lit:
+                                    // itself, or with the others chosen
+                                    // when it is one of them.
+                                    if this.tree.marked.len() > 1 && this.tree.marked.contains(&menu.path) {
+                                        return this.files_menu(ev.position, cx);
+                                    }
+                                    this.tree.marked.clear();
+                                    this.tree.picked = Some(menu.path.clone());
                                     this.file_menu(Some(&menu), ev.position, cx)
                                 }),
                             )
@@ -3480,16 +3586,45 @@ impl Workbench {
                         .px(px(6.))
                         .py(px(6.))
                         .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.file_menu(None, ev.position, cx)))
-                        // A click on the panel's empty room lets the
-                        // chosen file go.
+                        // A press anywhere in the panel may become a
+                        // rectangle dragged over the rows (`tree_band_to`).
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, ev: &MouseDownEvent, _, _| {
+                                this.tree_band = Some((ev.position, ev.position));
+                                this.tree_band_live = false;
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
+                            if ev.pressed_button == Some(MouseButton::Left) {
+                                this.tree_band_to(ev.position, cx);
+                                if this.tree_band_live {
+                                    window.focus(&this.tree_focus, cx);
+                                }
+                            }
+                        }))
+                        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.tree_band_end(cx)))
+                        .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.tree_band_end(cx)))
+                        // A click on the panel's empty room lets what
+                        // is chosen go.
                         .on_click(cx.listener(|this, _, window, cx| {
                             window.focus(&this.tree_focus, cx);
-                            if this.tree.picked.take().is_some() {
-                                cx.notify();
+                            if std::mem::take(&mut this.tree_band_live) {
+                                return;
                             }
+                            this.tree.marked.clear();
+                            this.tree.picked = None;
+                            cx.notify();
                         }))
                         .child(list),
                 )
+                // The rectangle, over the rows, cut to the panel.
+                .children(self.tree_band.filter(|_| self.tree_band_live).map(|(a, b)| {
+                    let room = self.files_scroll.bounds();
+                    let (left, top) = (a.x.min(b.x).max(room.left()), a.y.min(b.y).max(room.top()));
+                    let (right, bottom) = (a.x.max(b.x).min(room.right()), a.y.max(b.y).min(room.bottom()));
+                    div().absolute().left(left - room.left()).top(top - room.top()).w((right - left).max(px(0.))).h((bottom - top).max(px(0.))).rounded(px(3.)).border_1().border_color(theme.primary.opacity(0.7)).bg(theme.primary.opacity(0.10))
+                }))
                 .vertical_scrollbar(&self.files_scroll)
                 .into_any_element()
         } else {
@@ -4771,23 +4906,26 @@ impl Workbench {
                 move |at: Point<Pixels>, window: &mut Window, cx: &mut App| {
                     let (this, state) = (this.clone(), state.clone());
                     // Asked from inside the editor's own update.
-                    window.defer(cx, move |_, cx| {
-                        let (selection, focus) = {
-                            let s = state.read(cx);
-                            (!s.selected_range().is_empty(), gpui::Focusable::focus_handle(s, cx))
-                        };
+                    window.defer(cx, move |window, cx| {
+                        // With nothing selected, the word under the
+                        // pointer is, as a conversation's is, so the
+                        // menu has Copy for it.
+                        let selection = state.update(cx, |s, cx| s.select_word_at(at, window, cx));
+                        let focus = gpui::Focusable::focus_handle(state.read(cx), cx);
                         let _ = this.update(cx, |this, cx| {
                             let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
                             if selection {
                                 items.push(("Copy", MenuDo::Edit(crate::workbench::EditDo::Copy, focus.clone())));
                             }
                             items.push(("Select All", MenuDo::Edit(crate::workbench::EditDo::SelectAll, focus)));
-                            this.file_pane_menu(items, at, cx);
+                            // The text's own two and no more: what is
+                            // asked of the file is on its row's menu.
+                            this.open_menu(at, items, cx);
                         });
                     });
                 }
             };
-            gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).on_secondary_click(menu).into_any_element()
+            gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(crate::workbench::editor_px(&self.cfg.app.chat_size))).on_secondary_click(menu).into_any_element()
         });
         let cut = match &v.body {
             FileBody::Code(_, _, dropped) if *dropped > 0 => Some(div().flex_shrink_0().px(px(pad_x)).py(px(8.)).border_t_1().border_color(theme.border).child(quiet(format!("Only the first {PREVIEW_LINES} lines are shown. Open the file for the rest.")))),
@@ -4814,7 +4952,7 @@ impl Workbench {
                     move |d, t| d.left(px(a + (b - a) * t)).opacity(o_a + (o_b - o_a) * t),
                 )
             });
-            let mut row = h_flex().relative().flex_shrink_0().p(px(pad)).gap(px(gap)).rounded(px(8.)).bg(if dark { theme.sidebar } else { theme.muted }).children(plate);
+            let mut row = h_flex().relative().flex_shrink_0().p(px(pad)).gap(px(gap)).rounded(px(8.)).bg(if dark { theme.tab_bar_segmented } else { theme.muted }).children(plate);
             for (which, (icon, tip)) in [(true, first), (false, second)] {
                 row = row.child(
                     h_flex()
@@ -5534,6 +5672,21 @@ impl Workbench {
             t if t.starts_with("pdf:page:") => {
                 if let Ok(page) = t["pdf:page:".len()..].parse::<usize>() {
                     self.pdf_go_page(page, cx);
+                }
+            }
+            // A right click in the pane: on the first line's word when the
+            // editor shows, which takes it as the mouse's (the window is
+            // needed, so it is made at the next draw).
+            "file:menu" if self.file_editor.is_some() => self.file_menu_probe = true,
+            // ⌘A in the files tree, and a rectangle dragged down it from
+            // one height to another, in points from the tree's top.
+            "treeall" => self.tree_key(&KeyDownEvent { keystroke: Keystroke::parse("secondary-a").unwrap(), is_held: false, prefer_character_input: false }, cx),
+            t if t.starts_with("treeband:") => {
+                let mut ys = t["treeband:".len()..].split(':').filter_map(|y| y.parse::<f32>().ok());
+                if let (Some(a), Some(b)) = (ys.next(), ys.next()) {
+                    let room = self.files_scroll.bounds();
+                    self.tree_band = Some((point(room.left() + px(30.), room.top() + px(a)), point(room.left() + px(30.), room.top() + px(a))));
+                    self.tree_band_to(point(room.left() + px(170.), room.top() + px(b)), cx);
                 }
             }
             "file:menu" => {

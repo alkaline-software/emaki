@@ -258,13 +258,105 @@ pub fn prune_transcripts(max_age: Duration) -> usize {
     removed
 }
 
+/// Whose small model does the window's own asking: the explanations and
+/// the outline's labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Helper {
+    Claude,
+    Codex,
+}
+
+/// Claude Code whenever it is installed, so its Haiku is what answers
+/// for anyone who has it, with Codex or without; Codex for someone who
+/// has Codex alone; nobody when neither is here. `EMAKI_HELPER=codex`
+/// asks Codex whatever is installed, for a look at that path.
+pub fn helper() -> Option<Helper> {
+    if std::env::var("EMAKI_HELPER").is_ok_and(|v| v == "codex") {
+        return crate::codex::codex_binary().map(|_| Helper::Codex);
+    }
+    if driver::claude_binary().is_some() {
+        return Some(Helper::Claude);
+    }
+    crate::codex::codex_binary().map(|_| Helper::Codex)
+}
+
+/// Codex's light model, by what Codex says of its own: the first it
+/// calls fast, of the list it last gave (`cache/options.json`). None
+/// leaves the choice to Codex, which is its default model.
+pub fn codex_light_model() -> Option<String> {
+    let options = crate::options::Options::cached(crate::model::AgentId::Codex);
+    light_of(options.models.iter().map(|m| (m.key.as_str(), m.detail.as_str())))
+}
+
+/// The first of those models whose own description says it is fast.
+pub fn light_of<'a>(models: impl Iterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    let models: Vec<(&str, &str)> = models.collect();
+    let says = |word: &str| models.iter().find(|(_, detail)| detail.to_lowercase().contains(word)).map(|(key, _)| key.to_string());
+    says("fast").or_else(|| says("affordable")).or_else(|| says("efficient"))
+}
+
+/// The command line that asks Codex what a Claude Code child would have
+/// been asked: `argv` is that child's, whose system prompt and message
+/// are the two halves of the one prompt `codex exec` takes. Nothing is
+/// kept of the run (`--ephemeral`), the person's config and rules are
+/// left out as their settings are for Claude Code, and the sandbox reads
+/// only. The answer is written to `out`.
+pub fn codex_argv(argv: &[String], model: Option<&str>, out: &std::path::Path) -> Vec<String> {
+    let system = argv.iter().position(|a| a == "--system-prompt").and_then(|i| argv.get(i + 1)).map(String::as_str).unwrap_or("");
+    let message = argv.last().map(String::as_str).unwrap_or("");
+    let mut cmd: Vec<String> = ["exec", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "--color", "never", "-c", "model_reasoning_effort=\"low\""].iter().map(|s| s.to_string()).collect();
+    if let Some(model) = model {
+        cmd.push("--model".into());
+        cmd.push(model.into());
+    }
+    cmd.push("--output-last-message".into());
+    cmd.push(out.to_string_lossy().to_string());
+    cmd.push(format!("{system}\n\nRun no command and read no file: answer from the words below alone.\n\n{message}"));
+    cmd
+}
+
+/// `run_child`, asked of Codex. It is slower to start than Claude Code,
+/// so it gets a minute at the least.
+fn run_codex(argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let codex = crate::codex::codex_binary()?;
+    let out = workdir().join(format!("codex-{}-{}.txt", std::process::id(), SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let mut cmd = Command::new(codex);
+    cmd.args(codex_argv(argv, codex_light_model().as_deref(), &out)).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.env_clear();
+    cmd.envs(driver::child_env());
+    cmd.env("EMAKI_DISABLE", "1");
+    cmd.envs(env.iter().copied());
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + timeout.max(Duration::from_secs(60));
+    let done = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s.success(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+        }
+    };
+    let said = std::fs::read_to_string(&out).ok();
+    let _ = std::fs::remove_file(&out);
+    said.filter(|_| done)
+}
+
 /// Run one small-model child with that command line and answer what it
 /// printed, or nothing when it failed or took longer than `timeout`. The
 /// child is isolated as every explainer child is: our scratch folder, no
 /// `CLAUDE*` variable of a parent session, `EMAKI_DISABLE` set, and
 /// whatever `env` adds.
 pub fn run_child(argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
-    let claude = driver::claude_binary()?;
+    // Claude Code's small model when Claude Code is here, and Codex's
+    // only for someone who has Codex alone (`helper`).
+    let claude = match helper()? {
+        Helper::Claude => driver::claude_binary()?,
+        Helper::Codex => return run_codex(argv, env, timeout),
+    };
     let mut cmd = Command::new(claude);
     cmd.args(argv).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     cmd.env_clear();

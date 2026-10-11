@@ -192,6 +192,10 @@ upstream revision finds them.
     a keystroke gets) and, past that, a background parse with no wait
     before it (upstream: the 150 ms that follows typing). A file opened
     was drawn in one colour for a moment first.
+25. `crates/base/src/input/base/state.rs`: `select_word_at`, the word
+   under a point selected as a double click selects it, for a right
+   click in the file's editor to offer Copy for the word under it, as a
+   conversation's does.
 
 ## Updating
 

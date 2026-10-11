@@ -1,199 +1,179 @@
-//! The conversation's typefaces. Anthropic Serif and Anthropic Sans are the
-//! Claude desktop app's own fonts and not ours to ship, so they are loaded
-//! at start from a Claude app installed on this machine, when there is one.
-//! Without it the serif falls back to Georgia and the sans to the window's
-//! own face, and the settings panel says so.
-
-use std::path::PathBuf;
+//! The window's typefaces, every one built in (`assets/fonts`): four
+//! serifs and four sans serifs for a conversation, four monospace faces
+//! for code and the terminal (three built in, and the Mac's Monaco from
+//! the system). Each built in is under the SIL Open Font License,
+//! which lets an app carry it, with its licence beside its files. Nothing
+//! is loaded from another app or fetched: the Claude desktop app's own
+//! faces were used when that app was installed, and are not, being
+//! Anthropic's and not ours to use.
+//!
+//! A face is a file a weight (regular, semibold, bold and an italic; the
+//! monospace ones a medium too), which the text system takes as bytes on
+//! every platform. A variable font handed over as bytes is held as its
+//! regular alone, and every bold drawn as regular.
 
 use gpui::{App, Global, SharedString};
 
-pub const SERIF_FALLBACK: &str = "Georgia";
+/// A face Settings offers: what `config.json` names it by, the name
+/// shown, and the family the text system knows it by.
+pub struct Face {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub family: &'static str,
+}
 
-/// macOS's monospaced system face, SF Mono, by the name CoreText knows it
-/// under. "SF Mono" itself is a family only where someone installed it.
-const SYSTEM_MONO: &str = ".AppleSystemUIFontMonospaced";
+pub const SERIFS: &[Face] = &[
+    Face { key: "source-serif", name: "Source Serif", family: "Source Serif 4" },
+    Face { key: "newsreader", name: "Newsreader", family: "Newsreader" },
+    Face { key: "literata", name: "Literata", family: "Literata" },
+    Face { key: "lora", name: "Lora", family: "Lora" },
+];
 
-/// Anthropic Mono with a larger em, so it draws at 0.9 of the size asked
-/// for: `scripts/anthropic-mono.py` makes it. See `inline_code_family`.
-const INLINE_MONO: &str = "Inline Anthropic Mono";
+pub const SANS: &[Face] = &[
+    Face { key: "inter", name: "Inter", family: "Inter" },
+    Face { key: "plex-sans", name: "IBM Plex Sans", family: "IBM Plex Sans" },
+    Face { key: "source-sans", name: "Source Sans", family: "Source Sans 3" },
+    Face { key: "geist", name: "Geist", family: "Geist" },
+];
+
+/// The monospace faces, JetBrains Mono first and the one a file that
+/// names none gets. The second is the system's where it has one worth
+/// having: Monaco on a Mac, which is Apple's and is used from the system
+/// there, never carried. Elsewhere it is IBM Plex Mono, built in.
+pub const MONOS: &[Face] = &[
+    Face { key: "jetbrains", name: "JetBrains Mono", family: "JetBrains Mono" },
+    if cfg!(target_os = "macos") { Face { key: "monaco", name: "Monaco", family: "Monaco" } } else { Face { key: "plex-mono", name: "IBM Plex Mono", family: "IBM Plex Mono" } },
+    Face { key: "maple", name: "Maple Mono", family: "Maple Mono" },
+    Face { key: "geist-mono", name: "Geist Mono", family: "Geist Mono" },
+];
+
+/// The monospace faces this system offers.
+pub fn monos() -> &'static [Face] {
+    MONOS
+}
 
 /// The faces the name in the sidebar is tried in, most wanted first: a
 /// light, elegant sans (Optima's flared strokes, else Avenir Next; both
-/// come with macOS). With none of them, the window's face.
-const WORDMARK_FACES: &[&str] = &["Optima", "Avenir Next", "Avenir"];
+/// come with macOS and are the system's, not carried here). With none of
+/// them, the window's face.
+const WORDMARK_FACES: &[&str] = &["Optima", "Avenir Next", "Avenir", WORDMARK_OWN];
 
-/// The terminal panel's face, and what it falls back on for the letters
-/// it lacks: Kaku's own list. JetBrains Mono and the symbols are built in
-/// (`assets/fonts`, each under the SIL Open Font License beside it).
-pub const TERM_FAMILY: &str = "JetBrains Mono";
+/// The face of that kind the window carries, for a system with none of
+/// the Mac's: Belleza (etunni/belleza), a sans with Optima's flared
+/// strokes, under the SIL Open Font License.
+const WORDMARK_OWN: &str = "Belleza";
+
+/// What the terminal falls back on for the letters its face lacks:
+/// Kaku's own list. The symbols are built in.
 pub const TERM_FALLBACKS: &[&str] = &["PingFang SC", "Apple Symbols", "Apple Color Emoji", "Symbols Nerd Font Mono"];
-const TERM_FACES: &[&[u8]] = &[
-    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+
+const FACES: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/Belleza-Regular.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/Geist-Bold.ttf"),
+    include_bytes!("../assets/fonts/Geist-Italic.ttf"),
+    include_bytes!("../assets/fonts/Geist-Regular.ttf"),
+    include_bytes!("../assets/fonts/Geist-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-Bold.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-Italic.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+    include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+    include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Literata-Bold.ttf"),
+    include_bytes!("../assets/fonts/Literata-Italic.ttf"),
+    include_bytes!("../assets/fonts/Literata-Regular.ttf"),
+    include_bytes!("../assets/fonts/Literata-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Lora-Bold.ttf"),
+    include_bytes!("../assets/fonts/Lora-Italic.ttf"),
+    include_bytes!("../assets/fonts/Lora-Regular.ttf"),
+    include_bytes!("../assets/fonts/Lora-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/MapleMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/MapleMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/MapleMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/MapleMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/MapleMono-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Newsreader-Bold.ttf"),
+    include_bytes!("../assets/fonts/Newsreader-Italic.ttf"),
+    include_bytes!("../assets/fonts/Newsreader-Regular.ttf"),
+    include_bytes!("../assets/fonts/Newsreader-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/SourceSans3-Bold.ttf"),
+    include_bytes!("../assets/fonts/SourceSans3-Italic.ttf"),
+    include_bytes!("../assets/fonts/SourceSans3-Regular.ttf"),
+    include_bytes!("../assets/fonts/SourceSans3-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/SourceSerif4-Bold.ttf"),
+    include_bytes!("../assets/fonts/SourceSerif4-Italic.ttf"),
+    include_bytes!("../assets/fonts/SourceSerif4-Regular.ttf"),
+    include_bytes!("../assets/fonts/SourceSerif4-SemiBold.ttf"),
     include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf"),
 ];
 
-/// The family the terminal is set in, for a choice in the settings:
-/// `code` is the face the window sets code in, `system` the system's
-/// monospaced face where it has a name here, anything else JetBrains Mono.
-pub fn term_family(choice: &str, cx: &App) -> SharedString {
-    match choice {
-        "code" => code_family(cx).unwrap_or_else(|| TERM_FAMILY.into()),
-        "system" if cfg!(target_os = "macos") => SYSTEM_MONO.into(),
-        _ => TERM_FAMILY.into(),
-    }
+/// The chat face `choice` names. A file from before the faces were built
+/// in says `serif` or `sans`, which are the first of each.
+pub fn chat_face(choice: &str) -> &'static Face {
+    let choice = match choice {
+        "sans" => SANS[0].key,
+        "serif" | "" => SERIFS[0].key,
+        other => other,
+    };
+    SERIFS.iter().chain(SANS).find(|f| f.key == choice).unwrap_or(&SERIFS[0])
 }
 
-/// The family names the text system knows the two fonts by, once loaded.
+/// The monospace face `choice` names: JetBrains Mono for anything else,
+/// which is also what a file that chose a face no longer here gets.
+pub fn mono_face(choice: &str) -> &'static Face {
+    // The second place is one choice with a face a system: a file that
+    // names the Mac's on a PC, or the PC's on a Mac, means that place.
+    if matches!(choice, "monaco" | "plex-mono") {
+        return &MONOS[1];
+    }
+    MONOS.iter().find(|f| f.key == choice).unwrap_or(&MONOS[0])
+}
+
+/// What the window keeps of its faces while it runs.
 #[derive(Debug, Clone, Default)]
 pub struct ChatFonts {
-    pub serif: Option<String>,
-    pub sans: Option<String>,
-    /// The face code is set in, when it is not the toolkit's own.
-    pub code: Option<String>,
-    /// The face for inline code, when the machine has the smaller copy.
-    pub inline_code: Option<String>,
     /// The first of `WORDMARK_FACES` the system has.
     pub wordmark: Option<String>,
-    /// Where they came from, for the settings panel.
-    pub source: Option<PathBuf>,
+    /// The family titles and the greeting are set in: the chat's.
+    pub display: String,
 }
 
 impl Global for ChatFonts {}
 
-/// Where a Claude desktop app keeps its fonts, per OS.
-fn font_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if cfg!(target_os = "macos") {
-        dirs.push(PathBuf::from("/Applications/Claude.app/Contents/Resources/fonts"));
-        dirs.push(emaki_core::paths::home().join("Applications/Claude.app/Contents/Resources/fonts"));
-    } else if cfg!(target_os = "windows") {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            let local = PathBuf::from(local);
-            // Squirrel installs: AnthropicClaude/app-<version>/resources/fonts
-            if let Ok(rd) = std::fs::read_dir(local.join("AnthropicClaude")) {
-                let mut versions: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("app-")).unwrap_or(false)).collect();
-                versions.sort();
-                for v in versions.into_iter().rev() {
-                    dirs.push(v.join("resources").join("fonts"));
-                }
-            }
-            dirs.push(local.join("Programs").join("Claude").join("resources").join("fonts"));
-        }
-    }
-    dirs
-}
-
-fn pick(names: &[String], family: &str) -> Option<String> {
-    if names.iter().any(|n| n == family) {
-        return Some(family.into());
-    }
-    names.iter().find(|n| n.starts_with(family)).cloned()
-}
-
-/// The font files in `dir`, if any.
-fn font_files(dir: &std::path::Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut files: Vec<PathBuf> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf")).unwrap_or(false))
-        .collect();
-    files.sort();
-    files
-}
-
-/// Make the fonts in `files` known to the text system. The Claude app ships
-/// each face as one variable font, and gpui matches a weight against the
-/// faces it holds, so handed the bytes it would hold one face per file (the
-/// default instance, Regular) and draw every bold as regular. On macOS the
-/// files are registered with CoreText for this process instead: CoreText
-/// lists a variable font's named instances (Light, Medium, Semibold, Bold,
-/// their italics) as faces of their own, and gpui's family lookup falls
-/// through to the system source when it was not handed a family, so bold
-/// finds a bold. Elsewhere the bytes go in as they are.
-fn load(files: &[PathBuf], cx: &mut App) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSString, NSURL};
-        #[link(name = "CoreText", kind = "framework")]
-        unsafe extern "C" {
-            fn CTFontManagerRegisterFontsForURL(url: *const std::ffi::c_void, scope: u32, error: *mut *const std::ffi::c_void) -> u8;
-        }
-        const SCOPE_PROCESS: u32 = 1;
-        let mut any = false;
-        for f in files {
-            let url = NSURL::fileURLWithPath(&NSString::from_str(&f.to_string_lossy()));
-            // A file already registered (the app's own fonts installed by hand,
-            // say) answers false and is usable all the same; the family check
-            // afterwards is what counts.
-            let ok = unsafe { CTFontManagerRegisterFontsForURL(&*url as *const NSURL as *const std::ffi::c_void, SCOPE_PROCESS, std::ptr::null_mut()) };
-            any |= ok != 0;
-        }
-        let _ = cx;
-        any || !files.is_empty()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        use std::borrow::Cow;
-        let data: Vec<Cow<'static, [u8]>> = files.iter().filter_map(|p| std::fs::read(p).ok()).map(Cow::Owned).collect();
-        !data.is_empty() && cx.text_system().add_fonts(data).is_ok()
-    }
-}
-
-/// Load the Claude app's fonts into the text system, if the app is here.
-pub fn install(cx: &mut App) {
-    let mut fonts = ChatFonts::default();
-    // The terminal's faces are a file a weight, which the text system
-    // takes as bytes on every platform.
-    let _ = cx.text_system().add_fonts(TERM_FACES.iter().map(|b| std::borrow::Cow::Borrowed(*b)).collect());
-    for dir in font_dirs() {
-        let files = font_files(&dir);
-        if files.is_empty() || !load(&files, cx) {
-            continue;
-        }
-        fonts.source = Some(dir);
-        break;
-    }
-    // Fonts the person keeps for Emaki alone, in `~/.emaki/fonts`. This is
-    // where Anthropic Mono goes: the Claude app fetches it from Anthropic's
-    // servers when it runs and keeps no file for it in its bundle, so
-    // there is nothing to load it from the way the serif and the sans are.
-    let own = font_files(&emaki_core::paths::root().join("fonts"));
-    if !own.is_empty() {
-        load(&own, cx);
-    }
+/// Hand the built-in faces to the text system. `chat` is the chat font
+/// `config.json` asks for, which titles follow.
+pub fn install(chat: &str, cx: &mut App) {
+    let _ = cx.text_system().add_fonts(FACES.iter().map(|b| std::borrow::Cow::Borrowed(*b)).collect());
     let names = cx.text_system().all_font_names();
-    if fonts.source.is_some() {
-        fonts.serif = pick(&names, "Anthropic Serif");
-        fonts.sans = pick(&names, "Anthropic Sans");
-    }
-    fonts.code = pick(&names, "Anthropic Mono").or_else(|| cfg!(target_os = "macos").then(|| SYSTEM_MONO.to_string()));
-    fonts.inline_code = pick(&names, INLINE_MONO);
-    fonts.wordmark = WORDMARK_FACES.iter().find(|f| names.iter().any(|n| n == *f)).map(|f| f.to_string());
-    cx.set_global(fonts);
+    // `EMAKI_WORDMARK=<family>` draws the name in that face, for a look
+    // at the one Windows and Linux get.
+    let asked = std::env::var("EMAKI_WORDMARK").ok();
+    let wordmark = asked.or_else(|| WORDMARK_FACES.iter().find(|f| names.iter().any(|n| n == *f)).map(|f| f.to_string()));
+    cx.set_global(ChatFonts { wordmark, display: chat_face(chat).family.to_string() });
 }
 
-/// The family code is drawn in, inline and in blocks, or None to leave the
-/// toolkit's (Menlo, Consolas, DejaVu Sans Mono). The Claude app sets code
-/// in Anthropic Mono, a web font its stylesheet names `anthropic-mono` and
-/// fetches from Anthropic's servers (the file calls itself "Anthropic Mono
-/// Web"), with `ui-monospace, monospace` behind it. So: Anthropic Mono
-/// when this machine has it, installed or in `~/.emaki/fonts`, else on
-/// macOS the system's monospaced face, which is what `ui-monospace` is
-/// there.
-pub fn code_family(cx: &App) -> Option<SharedString> {
-    cx.global::<ChatFonts>().code.clone().map(SharedString::from)
+/// The chat font changed: titles go with it.
+pub fn set_chat(chat: &str, cx: &mut App) {
+    cx.global_mut::<ChatFonts>().display = chat_face(chat).family.to_string();
 }
 
-/// The family for inline code, or None for the same face as code blocks.
-/// The Claude app draws inline code at 0.9 of the body size, and a gpui
-/// text run carries a face but no size, so the smaller size has to be a
-/// font of its own.
-pub fn inline_code_family(cx: &App) -> Option<SharedString> {
-    cx.global::<ChatFonts>().inline_code.clone().map(SharedString::from)
+/// The family the terminal and all code are set in, for a choice in the
+/// settings.
+pub fn term_family(choice: &str, _: &App) -> SharedString {
+    mono_face(choice).family.into()
 }
 
 /// The family the app's name is set in, in the sidebar, or None to leave
@@ -202,19 +182,13 @@ pub fn wordmark_family(cx: &App) -> Option<SharedString> {
     cx.global::<ChatFonts>().wordmark.clone().map(SharedString::from)
 }
 
-/// The face titles and the greeting are set in: the Claude app's serif
-/// when this machine has it, else the fallback. One display face for the
-/// whole window, so a page title and the conversation agree.
+/// The face titles and the greeting are set in: the conversation's, so a
+/// page title and the conversation agree.
 pub fn display_family(cx: &App) -> SharedString {
-    SharedString::from(cx.global::<ChatFonts>().serif.clone().unwrap_or_else(|| SERIF_FALLBACK.into()))
+    SharedString::from(cx.global::<ChatFonts>().display.clone())
 }
 
-/// The family a conversation is drawn in for `choice` (`serif` or `sans`),
-/// or None to leave the window's own face.
-pub fn chat_family(choice: &str, cx: &App) -> Option<SharedString> {
-    let fonts = cx.global::<ChatFonts>();
-    match choice {
-        "sans" => fonts.sans.clone().map(SharedString::from),
-        _ => Some(SharedString::from(fonts.serif.clone().unwrap_or_else(|| SERIF_FALLBACK.into()))),
-    }
+/// The family a conversation is drawn in for `choice`.
+pub fn chat_family(choice: &str, _: &App) -> Option<SharedString> {
+    Some(chat_face(choice).family.into())
 }

@@ -257,6 +257,18 @@ fn main() {
             println!("suggestion: {:?}", emaki_core::driver::suggestion_on_screen(&text));
             println!("dialog: {:#?}", emaki_core::driver::dialog_on_screen(&text));
         }
+        "format" => {
+            // emaki-core format <file>: the file as a save would write
+            // it with every language on, or why it was not formatted.
+            let path = std::path::PathBuf::from(args.get(1).cloned().unwrap_or_default());
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lang = emaki_core::render_md::lang_for_path(&path.to_string_lossy());
+            match emaki_core::format::format(lang, &path, &text, &emaki_core::format::all_keys()) {
+                Ok(Some(formed)) => print!("{formed}"),
+                Ok(None) => eprintln!("(as it is)"),
+                Err(why) => eprintln!("not formatted: {why}"),
+            }
+        }
         "explain" => {
             // emaki-core explain <command...>: put one shell command into
             // plain words the way a permission card does, cached by content.

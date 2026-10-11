@@ -5,6 +5,21 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.1
+
+- A new look: the sidebar and a thin frame around the content in graphite, the page near white, and in the dark appearance a darker page in a lighter frame.
+- Settings, Fonts: eight chat fonts and four monospace fonts, all built into the app, and one font size for the conversation, the file editor and the terminal.
+- Format on save covers ten languages: R, Python, Rust, Go, C and C++, TypeScript, JavaScript, JSON, Markdown and TOML. It is off until you turn it on.
+- A message shows in the conversation the moment it is sent, a prompt's bubble has a tail, and tool badges are in colour.
+- Pin a project to the top of the sidebar, start a session in the current project with ⌘T, and choose a folder with ⌘O.
+- /clear is followed to the session it starts.
+- In the files panel: ⌘A selects everything, and a drag over the rows selects the ones it covers.
+- A right click in the file editor selects the word under it.
+- Explanations work with Codex alone: when Claude Code is not installed, a light Codex model writes them.
+- The home page says so when no agent is installed, and points to the Agents page, which lists GitHub Desktop too.
+- Settings is shorter: one Spelling Check entry with its languages, flags on the languages, icons on the themes, and fewer notes.
+- Fixes: "New messages" glides to the end, buttons and menu rows show in the dark appearance, and a small window shows one pane at a time.
+
 ## v0.2.0
 
 - Codex joins Claude Code: its sessions are kept, read and searched, and you can start, continue and stop one from the window, with its approvals, questions and plans on the same cards.

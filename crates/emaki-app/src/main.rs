@@ -24,7 +24,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, ChooseFolder, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -32,6 +32,7 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-r", Refresh, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-n", NewSession, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-t", NewSessionHere, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-o", ChooseFolder, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-n", NewBranch, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-l", GoSessions, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-e", GoAgents, Some(KEY_CONTEXT)),
@@ -115,6 +116,7 @@ fn app_menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("New Session", NewSession),
                 MenuItem::action("New Session in This Project", NewSessionHere),
+                MenuItem::action("Choose Folder…", ChooseFolder),
                 MenuItem::action("New Branch…", NewBranch),
                 MenuItem::action("Refresh", Refresh),
                 MenuItem::separator(),
@@ -213,7 +215,7 @@ fn filled(b: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
 fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
     let bounds = remembered_bounds(cx).unwrap_or_else(|| Bounds::centered(None, size(px(1180.), px(760.)), cx));
     let titlebar = if cfg!(target_os = "macos") {
-        TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(17.), px(21.))) }
+        TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(17.), px(19.5))) }
     } else {
         TitlebarOptions { title: Some("Emaki".into()), appears_transparent: false, traffic_light_position: None }
     };
@@ -276,11 +278,12 @@ fn main() {
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         sys::install_dock_icon();
-        fonts::install(cx);
         // The palette (cream and charcoal, one config per appearance) with
         // the accent from config painted in, then the appearance it asks for.
-        let app_cfg = emaki_core::config::Config::load().app;
-        look::install(&app_cfg.accent, cx);
+        let cfg = emaki_core::config::Config::load();
+        let app_cfg = cfg.app;
+        fonts::install(&app_cfg.chat_font, cx);
+        look::install(&app_cfg.accent, &cfg.terminal.font, cx);
         look::install_languages();
         look::apply(&app_cfg.appearance, None, cx);
 

@@ -962,6 +962,21 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.handle_right_click_menu(position, offset, window, cx);
     }
 
+    /// Select the word under a point of the window, as a double click
+    /// there does, unless something is selected already: a right click
+    /// inside a selection keeps it, and one outside has put the caret at
+    /// the point by now. Answers whether anything is selected after.
+    /// (Emaki addition.)
+    pub fn select_word_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.selected_range.is_empty() {
+            let offset = self.index_for_mouse_position(position);
+            self.select_word(offset, window, cx);
+            // The word is not one a drag is extending.
+            self.selected_word_range = None;
+        }
+        !self.selected_range.is_empty()
+    }
+
     /// Fold or unfold the section a line of the buffer heads, as a click
     /// on its mark in the gutter does, for a probe. (Emaki addition.)
     pub fn toggle_fold_at(&mut self, line: usize, cx: &mut Context<Self>) {

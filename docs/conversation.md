@@ -45,6 +45,11 @@ up. Two things are ours, for prompts and replies alike:
   before that item (`render_round`, `unread_go`), and when it has been
   drawn the list is moved by how far it is from the top
   (`unread_arrive`).
+- **The arrival is in motion** (`glide_to`, `glide_step`). The list is
+  put a stretch short of where it is going and runs the rest off the
+  clock, then is set exactly on the place. The whole way cannot be run:
+  the rounds between have no height until they are drawn, so a distance
+  to cover is not known. The click used to land in one frame.
 
 ## A message sent, before it is written
 

@@ -50,6 +50,14 @@ pub(crate) fn choice_icon(control: &str, key: &str) -> Option<&'static str> {
             _ => "icons/os/linux.svg",
         });
     }
+    // Settings, Appearance: what each look is.
+    if control == "appearance" || control == "term-theme" {
+        return Some(match key {
+            "light" => "icons/sun.svg",
+            "dark" => "icons/moon.svg",
+            _ => "icons/device-desktop.svg",
+        });
+    }
     if !control.starts_with("agent-way") {
         return None;
     }
@@ -287,7 +295,7 @@ impl Workbench {
         // Said only when there is something to say: a command whose
         // source is gone.
         let stale = self.agents_stale.len();
-        let warn = (stale > 0).then(|| div().text_size(px(12.5)).text_color(theme.danger).child(format!("{} no longer {} and may have changed; the agent's page says which.", plural(stale, "install command", "install commands"), if stale == 1 { "works" } else { "work" })));
+        let warn = (stale > 0).then(|| div().text_size(px(12.5)).text_color(theme.danger).child(format!("{} may be out of date; the agent's page says which.", plural(stale, "install command", "install commands"))));
         // One row in the catalogue's order, whatever is installed: a
         // card says so itself, and stays where it is when that changes.
         let cards: Vec<AnyElement> = agents::all().iter().map(|a| self.agent_card(a, cx)).collect();
@@ -308,8 +316,8 @@ impl Workbench {
                     v_flex()
                         .pt(px(12.))
                         .gap(px(4.))
-                        .child(div().text_size(px(20.)).font_family(display).child("Beside the agents"))
-                        .child(div().text_size(px(13.)).line_height(px(20.)).text_color(theme.muted_foreground).child("Worth having with them: what the agents write ends up in git.")),
+                        .child(div().text_size(px(20.)).font_family(display).child("GitHub"))
+                        .child(div().text_size(px(13.)).line_height(px(20.)).text_color(theme.muted_foreground).child("For continuous development and version control.")),
                 )
                 .child(v_flex().w_full().gap(px(16.)).children(tools))
             })
@@ -607,7 +615,7 @@ impl Workbench {
                         col.child(
                             v_flex()
                                 .gap(px(8.))
-                                .child(prose("download", format!("Download the installer from {} and open it. When it is installed, press the refresh button above.", a.maker), cx))
+                                .child(prose("download", format!("Download the installer from {} and open it, then press refresh above.", a.maker), cx))
                                 .child(h_flex().child(pill_button("agent-download", "Download", &tinted, move |_, _, cx| cx.open_url(url)))),
                         )
                     }
@@ -621,9 +629,9 @@ impl Workbench {
                                 .gap(px(5.))
                                 .child(div().text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(label))
                                 .child(self.command_box(format!("agent-way-{}-{}-{i}", a.id, os.as_str()), w.command, cx))
-                                .when(gone, |d| d.child(div().text_size(px(12.)).line_height(px(18.)).text_color(theme.danger).child(format!("What this command installs is no longer published, so it has likely changed. See {}'s documentation for the current one.", a.name)))),
+                                .when(gone, |d| d.child(div().text_size(px(12.)).line_height(px(18.)).text_color(theme.danger).child(format!("This command's source is no longer published. See {}'s documentation.", a.name)))),
                         )
-                        .child(quiet("shell", "Open the shell with the button at the top right, paste the command there and press Return. When it has finished, press the refresh button above.".into(), cx))
+                        .child(quiet("shell", "Run it in the shell (top right), then press refresh above.".into(), cx))
                     }
                 }
             };
@@ -654,25 +662,25 @@ impl Workbench {
         // What to do stays under the word that it is done, for signing
         // in again or as someone else.
         if signed {
-            sign = sign.child(prose("A sign-in is on this machine.".into(), cx));
+            sign = sign.child(prose("Signed in on this machine.".into(), cx));
         }
         if a.sign_in.is_empty() {
             // Signed in to in its own window, with nothing to type.
             sign = sign.child(prose(a.sign_in_how.to_string(), cx));
         } else {
-            sign = sign.child(self.command_box("agent-sign-in".into(), a.sign_in, cx)).child(prose(format!("Type it in the shell at the top right. {}", a.sign_in_how), cx));
+            sign = sign.child(self.command_box("agent-sign-in".into(), a.sign_in, cx)).child(prose(format!("Run it in the shell (top right). {}", a.sign_in_how), cx));
         }
         sign = sign.child(quiet(a.plans.to_string(), cx));
         if !signed && !a.key_env.is_empty() {
-            sign = sign.child(quiet(format!("With a key and no browser: set {} in your shell's profile.", a.key_env.join(" or ")), cx));
+            sign = sign.child(quiet(format!("Or set {} in your shell's profile.", a.key_env.join(" or ")), cx));
         }
 
         let sessions = self.agent_sessions(a);
         let emaki = match a.reads {
             None if !a.with_emaki.is_empty() => prose(a.with_emaki.to_string(), cx),
-            Some(_) if sessions.is_empty() => prose(format!("Emaki keeps every session of {} and lists it under All Projects. There are none yet.", a.name), cx),
-            Some(_) => prose(format!("Emaki keeps every session of {} and lists it under All Projects, the ones {} has since deleted too.", a.name, a.name), cx),
-            None => prose(format!("Emaki does not read {}'s sessions yet. It says here whether {} is installed; its conversations stay where {} keeps them.", a.name, a.name, a.name), cx),
+            Some(_) if sessions.is_empty() => prose(format!("{}'s sessions appear under All Projects. None yet.", a.name), cx),
+            Some(_) => prose(format!("Its sessions are under All Projects, including ones {} has deleted.", a.name), cx),
+            None => prose(format!("Emaki does not read {}'s sessions yet.", a.name), cx),
         };
 
         let steps = v_flex()
