@@ -356,7 +356,9 @@ no close button: the strip's button puts the panel away.
 **The look is Kaku's** (tw93/kaku, MIT), the same for both sides:
 
 - The scheme is Kaku Dark or Kaku Light by the window's appearance
-  (`scheme`): ground, ink, cursor, selection, tabs and toast. The sixteen
+  (`scheme`): ground, ink, cursor, selection, tabs and toast. The light
+  scheme keeps Kaku's cream beside a page that is near white: the page's
+  own ground was tried there and the terminal stopped reading as one. The sixteen
   named colours are the window's own inks for code (`docs/look.md`,
   Code's colours), no longer Kaku's. A span keeps which named colour it asked for
   (`Span::fg_ix`, `bg_ix`), so those are drawn from the scheme and not

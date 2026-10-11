@@ -1435,6 +1435,8 @@ pub struct Workbench {
     pub(crate) shell_reveal: Option<Instant>,
     /// The window's width at the last draw.
     pub(crate) view_w: Pixels,
+    /// The frame's colour as the native window last had it.
+    window_ground: Cell<Option<Hsla>>,
     /// The window's height at the last draw.
     view_h: Pixels,
     pub(crate) tree: crate::panels::Tree,
@@ -1971,7 +1973,10 @@ impl Workbench {
     /// there and over the top strip when it is not, so the sidebar button
     /// never moves: the sidebar and search.
     fn render_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        // Over the sidebar the buttons are in its inks, over the card's
+        // strip in the page's.
+        let over_side = self.side_t() > 0.5 || self.sidebar_float || (self.narrow && self.sidebar_peek);
+        let theme = if over_side { Self::shell_theme(cx) } else { cx.theme().clone() };
         let button = |id: &'static str, icon: IconName, tip: &'static str, lit: bool| {
             let hover = theme.foreground.opacity(0.07);
             div()
@@ -3081,6 +3086,7 @@ impl Workbench {
             shell_scroll: ScrollHandle::new(),
             shell_reveal: None,
             view_w: px(1280.),
+            window_ground: Cell::new(None),
             tree: Default::default(),
             files_scroll: ScrollHandle::new(),
             outline_scroll: ScrollHandle::new(),
@@ -8722,15 +8728,31 @@ impl Workbench {
 
     // -- sidebar --------------------------------------------------------------
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // The sidebar stands on the window's frame, a shade under the
-        // panels beside a conversation, which keep the theme's own
-        // sidebar colours. What lights a row and rules a line here is
-        // the ink thinned, so it reads on that ground.
+    /// The theme as the sidebar draws with it. The sidebar stands on the
+    /// window's frame, which is set against the page: near black beside
+    /// a light page, and lighter than a dark one. Beside a light page it
+    /// takes the dark appearance's inks, and says it is dark, so whatever
+    /// goes by the mode picks the shade that reads there. What lights a
+    /// row and rules a line is the ink thinned.
+    fn shell_theme(cx: &App) -> gpui_component::Theme {
         let mut theme = cx.theme().clone();
         theme.sidebar = theme.title_bar;
-        theme.sidebar_accent = theme.foreground.opacity(if theme.mode.is_dark() { 0.09 } else { 0.075 });
-        theme.sidebar_border = theme.foreground.opacity(if theme.mode.is_dark() { 0.1 } else { 0.09 });
+        if !theme.mode.is_dark() {
+            theme.foreground = rgb(0xF3F1EA).into();
+            theme.muted_foreground = rgb(0xA09D94).into();
+            theme.mode = gpui_component::theme::ThemeMode::Dark;
+        }
+        theme.sidebar_foreground = theme.foreground;
+        theme.sidebar_accent = theme.foreground.opacity(0.1);
+        theme.sidebar_border = theme.foreground.opacity(0.1);
+        theme.border = theme.sidebar_border;
+        theme
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Self::shell_theme(cx);
+        // The Projects card: a well in the frame, a little off its ground.
+        let card_bg = if cx.theme().mode.is_dark() { cx.theme().background.opacity(0.55) } else { theme.foreground.opacity(0.045) };
         let page = self.page;
         let scope = self.scope.clone();
 
@@ -8779,7 +8801,7 @@ impl Workbench {
             .child(kbd_hint("⌘N", &theme));
 
         let nav = |id: &'static str, icon: Icon, label: &'static str, hint: &'static str, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
-            let theme = cx.theme().clone();
+            let theme = Self::shell_theme(cx);
             h_flex()
                 .id(id)
                 .h(px(32.))
@@ -8855,7 +8877,7 @@ impl Workbench {
         };
         let mut before: Option<String> = None;
         for (at, (p, list)) in folders.into_iter().enumerate() {
-            let theme = cx.theme().clone();
+            let theme = Self::shell_theme(cx);
             if before.is_some() && before == rule_after {
                 scroll = scroll.child(rule_line(&theme));
             }
@@ -9184,11 +9206,28 @@ impl Workbench {
             )
             // Settings live behind ⌘, and the app menu; the gear says so
             // for anyone who looks for them where every app keeps them.
-            .child(icon_button("settings-gear", IconName::Settings, "Settings (⌘,)", cx, |this, window, cx| {
-                this.settings_open = true;
-                window.focus(&this.focus_handle, cx);
-                cx.notify();
-            }));
+            // Drawn here and not as the toolkit's button, whose ground
+            // under the pointer is the page's and not the frame's.
+            .child(
+                div()
+                    .id("settings-gear")
+                    .size(px(26.))
+                    .flex_shrink_0()
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.sidebar_accent))
+                    .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Settings (⌘,)").build(window, cx))
+                    .child(Icon::new(IconName::Settings).with_size(px(16.)).text_color(theme.muted_foreground))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.settings_open = true;
+                        window.focus(&this.focus_handle, cx);
+                        cx.notify();
+                    })),
+            );
 
         // The projects sit on a card a shade off the sidebar's ground,
         // which scrolls by itself under its name with the toolkit's
@@ -9200,7 +9239,7 @@ impl Workbench {
                 .rounded(px(10.))
                 .border_1()
                 .border_color(theme.sidebar_border)
-                .bg(theme.background.opacity(0.55))
+                .bg(card_bg)
                 .overflow_hidden()
                 .child(h_flex().h(px(28.)).flex_shrink_0().px(px(14.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(label))
         };
@@ -13441,6 +13480,11 @@ impl Render for Workbench {
             window.defer(cx, move |window, cx| this.update(cx, |this, cx| this.restore_prompt(window, cx)));
         }
         let theme = cx.theme().clone();
+        // The native window's ground follows the frame (`sys::set_window_ground`).
+        if self.window_ground.get() != Some(theme.title_bar) {
+            self.window_ground.set(Some(theme.title_bar));
+            crate::sys::set_window_ground(window, theme.title_bar.into());
+        }
         let search_open = self.search_open;
         // Below `NARROW_W` the sidebar leaves the row and comes back only as
         // an overlay, the way the Claude app folds its sidebar away when the
