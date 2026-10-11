@@ -421,6 +421,16 @@ const STRIP_BTN: Pixels = px(26.);
 const SIDE_ROW_H: Pixels = px(26.);
 const SIDE_SESSION_H: Pixels = px(24.);
 pub const TITLEBAR_H: Pixels = px(48.);
+/// The frame's width: the window's own ground, the sidebar's, showing
+/// around the content's card at its top, right and foot, and at its left
+/// when the sidebar is away.
+pub const FRAME: Pixels = px(6.);
+/// The card's strip at its two ends: what its tracks of buttons, 30
+/// high in a strip of 42, have over and under them, so a track is as far
+/// from the card's side as from its top.
+const STRIP_PAD: Pixels = px(6.);
+/// The card's corners.
+const CARD_R: Pixels = px(10.);
 /// Room for the traffic lights on a transparent title bar.
 pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
@@ -1838,8 +1848,8 @@ impl Workbench {
             .id("side-grip")
             .group("side-grip")
             .absolute()
-            .top_0()
-            .h_full()
+            .top(FRAME)
+            .bottom(FRAME)
             .left(self.sidebar_w - SIDEBAR_GRIP / 2.)
             .w(SIDEBAR_GRIP)
             .occlude()
@@ -1858,7 +1868,7 @@ impl Workbench {
                     cx.notify();
                 }),
             )
-            .child(div().absolute().top_0().h_full().left(SIDEBAR_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("side-grip", move |s| s.bg(line)))
+            .child(div().absolute().top(CARD_R).bottom(CARD_R).left(SIDEBAR_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("side-grip", move |s| s.bg(line)))
     }
 
     /// The sidebar is beside the content, or over it because it was asked
@@ -1980,8 +1990,9 @@ impl Workbench {
         };
         h_flex()
             .absolute()
-            // A pixel down: the lights' centres are at 24.75, measured.
-            .top(px(1.))
+            // The lights' centres are at 27.75, measured: the middle of
+            // the card's strip, which starts a frame down.
+            .top(px(1.) + FRAME / 2.)
             .left(Self::strip_left())
             .h(TITLEBAR_H)
             .items_center()
@@ -2326,6 +2337,12 @@ impl Workbench {
     /// The room the sidebar takes of the row as it is drawn now.
     pub(crate) fn side_w_now(&self) -> Pixels {
         self.sidebar_w * self.side_t()
+    }
+
+    /// Where the content's card begins: at the sidebar's edge, or a
+    /// frame in from the window's when the sidebar is away.
+    pub(crate) fn content_left(&self) -> Pixels {
+        self.side_w_now().max(FRAME)
     }
 
     /// A change in whether something shows starts its coming or going,
@@ -8706,7 +8723,14 @@ impl Workbench {
     // -- sidebar --------------------------------------------------------------
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        // The sidebar stands on the window's frame, a shade under the
+        // panels beside a conversation, which keep the theme's own
+        // sidebar colours. What lights a row and rules a line here is
+        // the ink thinned, so it reads on that ground.
+        let mut theme = cx.theme().clone();
+        theme.sidebar = theme.title_bar;
+        theme.sidebar_accent = theme.foreground.opacity(if theme.mode.is_dark() { 0.09 } else { 0.075 });
+        theme.sidebar_border = theme.foreground.opacity(if theme.mode.is_dark() { 0.1 } else { 0.09 });
         let page = self.page;
         let scope = self.scope.clone();
 
@@ -8735,12 +8759,9 @@ impl Workbench {
 
         // The window's buttons (`render_strip`) are drawn over the left of
         // this strip, and the name takes the room to their right, centred
-        // on the traffic lights as they are. The hairline under it is at
-        // the foot of the content's strip, where the folder's band begins.
-        let header = Self::drag_region(h_flex().h(TITLEBAR_H).flex_shrink_0().pt(px(2.)).pr(px(20.)).justify_end().items_center().child(brand), cx);
-        // The hairline runs the sidebar's whole width, into the line over
-        // the folder's band, so one line crosses the window.
-        let header = v_flex().flex_shrink_0().child(header).child(div().h(px(1.)).flex_shrink_0().bg(theme.sidebar_border));
+        // on the traffic lights as they are. No line under it: the
+        // content's card is what the sidebar ends against.
+        let header = Self::drag_region(h_flex().h(TITLEBAR_H).flex_shrink_0().pt(px(2.) + FRAME).pr(px(20.)).justify_end().items_center().child(brand), cx);
         let top = v_flex().px(px(10.)).pt(px(8.)).gap(px(2.));
 
         let new_row = h_flex()
@@ -9192,7 +9213,7 @@ impl Workbench {
                 .vertical_scrollbar(&self.side_scroll),
         );
 
-        v_flex().w(self.sidebar_w).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).border_r_1().border_color(theme.sidebar_border).child(header).child(top).child(folders_card).child(footer)
+        v_flex().w(self.sidebar_w).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).child(header).child(top).child(folders_card).child(footer)
     }
 
     /// Whether a folder in the sidebar shows its sessions: the person's
@@ -10084,14 +10105,16 @@ impl Workbench {
         // jump at either end of it.
         let away = 1. - self.side_t();
         if away > 0. {
-            let room = (Self::strip_right() - px(4.)) * away;
+            let room = (Self::strip_right() - px(4.) - FRAME + px(12.) - STRIP_PAD) * away;
             left_end = if left.is_empty() { left_end.w(room.max(px(120.))) } else { left_end.pl(room) };
         }
         let left_end = left_end.children(left);
+        // The card starts a frame down, and its strip ends where the
+        // sidebar's does.
         Self::drag_region(h_flex(), cx)
-            .h(TITLEBAR_H)
+            .h(TITLEBAR_H - FRAME)
             .flex_shrink_0()
-            .px(px(12.))
+            .px(STRIP_PAD)
             .items_center()
             .child(left_end)
             .child(centre)
@@ -12832,6 +12855,31 @@ fn kind_static(k: &str) -> &'static str {
 /// A page's content as it arrives: it fades and settles in over a moment,
 /// once, keyed on the page so switching back plays it again. Pages only;
 /// the conversation's list items are never animated.
+/// The four corners of a card, painted in the ground it stands on over
+/// whatever the card holds there: each the square corner less a quarter
+/// circle of `r`. It takes no click and no hover.
+fn card_corners(r: Pixels, ground: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |b, _, window, _| {
+            // A circle's quarter as one cubic curve.
+            let k = r * (1. - 0.5523);
+            for (c, sx, sy) in [(b.origin, 1., 1.), (b.top_right(), -1., 1.), (b.bottom_right(), -1., -1.), (b.bottom_left(), 1., -1.)] {
+                let mut p = PathBuilder::fill();
+                p.move_to(c);
+                p.line_to(point(c.x + r * sx, c.y));
+                p.cubic_bezier_to(point(c.x, c.y + r * sy), point(c.x + k * sx, c.y), point(c.x, c.y + k * sy));
+                p.close();
+                if let Ok(path) = p.build() {
+                    window.paint_path(path, ground);
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 pub fn page_in(id: &'static str, el: Div) -> AnyElement {
     el.with_animation(ElementId::Name(id.into()), Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()), |d, t| d.opacity(t).pt(px(8. * (1. - t)))).into_any_element()
 }
@@ -13405,7 +13453,8 @@ impl Render for Workbench {
             window.resize(size(px(w), window.viewport_size().height));
         }
         let on_session = self.page == Page::Session && self.detail.is_some();
-        let vw = window.viewport_size().width;
+        // What the content has of the window: up to the frame at the right.
+        let vw = window.viewport_size().width - FRAME;
         // The window narrowed past where the panel at the left and the
         // terminal both fit: the terminal is put away, always the
         // terminal, so it is known beforehand which goes. Through
@@ -13439,7 +13488,7 @@ impl Render for Workbench {
         // until it is wide enough again. The panel at the left or the
         // terminal always has room: the window is never narrower than
         // the conversation and one of them (`main::MIN_W`).
-        let room = vw - if self.sidebar_open && !self.narrow { self.sidebar_w } else { px(0.) };
+        let room = vw - if self.sidebar_open && !self.narrow { self.sidebar_w } else { FRAME };
         self.fold_file = want_file && room < least + file_min;
         if !self.narrow {
             self.sidebar_peek = false;
@@ -13514,9 +13563,10 @@ impl Render for Workbench {
         if self.tabs_sliding() {
             window.request_animation_frame();
         }
-        self.view_w = window.viewport_size().width;
+        // The content's right edge, and its width: the frame is not its.
+        self.view_w = window.viewport_size().width - FRAME;
         self.view_h = window.viewport_size().height;
-        self.pane_w = window.viewport_size().width - self.side_w_now();
+        self.pane_w = self.view_w - self.content_left();
         if std::mem::take(&mut self.panel_fit_wanted) {
             self.panel_w = self.panel_fit(window, cx);
         }
@@ -13659,7 +13709,8 @@ impl Render for Workbench {
             }))
             .size_full()
             .relative()
-            .bg(theme.background)
+            // The frame: the sidebar's ground, under the whole window.
+            .bg(theme.title_bar)
             .text_color(theme.foreground)
             .text_size(px(13.))
             .child(
@@ -13668,12 +13719,26 @@ impl Render for Workbench {
                 h_flex().size_full().when(side_t > 0., |d| {
                     let w = self.sidebar_w;
                     d.child(div().h_full().flex_shrink_0().overflow_hidden().w((w * side_t).round()).when(!side_kept, |d| d.child(div().h_full().w(w).ml(w * (side_t - 1.)).child(self.render_sidebar(cx)))))
-                }).map(|this| match self.page {
-                    Page::New => this.child(self.render_new(cx)),
-                    Page::Sessions => this.child(self.render_sessions(cx)),
-                    Page::Session => this.child(self.render_detail(window, cx)),
-                    Page::Agents => this.child(self.render_agents(window, cx)),
-                }),
+                })
+                // The content is a card on the frame. Its corners are
+                // painted over what is in them (`card_corners`): a clip
+                // in gpui is a rectangle, and a panel's ground would
+                // stand square in a rounded corner.
+                .child(
+                    div().flex_1().min_w_0().h_full().pt(FRAME).pb(FRAME).pr(FRAME).pl(self.content_left() - (self.sidebar_w * side_t).round()).child(
+                        h_flex()
+                            .relative()
+                            .size_full()
+                            .bg(theme.background)
+                            .map(|this| match self.page {
+                                Page::New => this.child(self.render_new(cx)),
+                                Page::Sessions => this.child(self.render_sessions(cx)),
+                                Page::Session => this.child(self.render_detail(window, cx)),
+                                Page::Agents => this.child(self.render_agents(window, cx)),
+                            })
+                            .child(card_corners(CARD_R, theme.title_bar)),
+                    ),
+                ),
             )
             .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))
             .children(self.render_panel_grip(cx))

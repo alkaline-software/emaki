@@ -107,10 +107,13 @@ A name, three entries and a card (`render_sidebar`).
   Settings. Optima has only regular and bold, so the regular is drawn twice
   half a pixel apart for a weight between. Tried and dropped: serif faces, a
   bold sans, a fixed gold.
-- The hairline at the strip's foot meets the hairline over the folder's band
-  in the content pane, so one line crosses the window. Tried and dropped: a
-  row of its own for the wordmark, which put the two lines at different
-  heights.
+- The strip has no line under it: the sidebar ends against the content's
+  card (Layout). Its foot is still level with the foot of the card's own
+  strip.
+- The sidebar stands on the window's frame and takes its colours there
+  (`render_sidebar` sets them over the theme's): the frame's ground, and
+  the ink thinned for a lit row and a line. The theme's sidebar colours
+  are the panels' beside a conversation, a shade lighter.
 - New session, All Projects, Agents. The All Projects entry is still ⌘L
   and `GoSessions`; its icon is a briefcase so it does not read as a
   folder row. Agents is ⌘E and goes to the agents page
@@ -318,6 +321,21 @@ died before this launch.
 
 Laid out like the Claude desktop app.
 
+- The window's ground is the frame (`title_bar.background` in the theme),
+  a shade darker than the page. The sidebar stands on it with no edge of
+  its own, and the content is a card on it with rounded corners: `FRAME`
+  of the ground shows over, under and right of the card, and left of it
+  when the sidebar is away.
+- A clip in gpui is a rectangle, so the card is square and its corners are
+  painted over in the frame's colour after what it holds (`card_corners`).
+  A panel's ground stood square in a rounded corner otherwise.
+- Whatever is placed by the window's edges goes by the card's:
+  `content_left`, `view_w` (its right edge) and `pane_w`. The card's strip
+  is `FRAME` shorter than `TITLEBAR_H` and starts that much lower, so what
+  is under it is where it was, and the traffic lights and the two buttons
+  are moved down to the strip's middle (`main.rs`, `render_strip`).
+- The buttons at the two ends of the card's strip are as far from the
+  card's side as from its top (`STRIP_PAD`).
 - Everything readable sits in one column of `CONTENT_W`, centred in what is
   left of the window: the conversation, the sessions page, the home page.
 - The content pane has a top strip with actions on the right. When the

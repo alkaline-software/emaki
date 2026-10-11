@@ -1284,7 +1284,7 @@ impl Workbench {
     /// Where the panel begins: after the sidebar when that is beside the
     /// content.
     fn panel_left(&self) -> Pixels {
-        self.side_w_now()
+        self.content_left()
     }
 
     /// The widest the panel may be dragged: the conversation keeps
@@ -1349,7 +1349,7 @@ impl Workbench {
                 .group("file-grip")
                 .absolute()
                 .top(crate::workbench::TITLEBAR_H)
-                .bottom_0()
+                .bottom(crate::workbench::FRAME)
                 .left(self.file_pane_left() + self.file_pane_w() - PANEL_GRIP / 2.)
                 .w(PANEL_GRIP)
                 .occlude()
@@ -1462,7 +1462,7 @@ impl Workbench {
                 .group("panel-grip")
                 .absolute()
                 .top(crate::workbench::TITLEBAR_H)
-                .bottom_0()
+                .bottom(crate::workbench::FRAME)
                 .left(self.panel_left() + self.panel_w_now() - PANEL_GRIP / 2.)
                 .w(PANEL_GRIP)
                 .occlude()
