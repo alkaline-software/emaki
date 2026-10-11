@@ -176,8 +176,8 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
 /// Where the window was last time, if that spot is still on a screen.
 /// The least the window is dragged to: the conversation at its least
 /// with one pane beside it, the wider of the two there are, so a pane
-/// asked for always has room.
-const MIN_W: Pixels = px(780.);
+/// asked for always has room, and the frame at both sides of them.
+const MIN_W: Pixels = px(792.);
 
 fn remembered_bounds(cx: &App) -> Option<Bounds<Pixels>> {
     let r = ui_state::UiState::load().window?;
@@ -189,7 +189,7 @@ fn remembered_bounds(cx: &App) -> Option<Bounds<Pixels>> {
 fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
     let bounds = remembered_bounds(cx).unwrap_or_else(|| Bounds::centered(None, size(px(1180.), px(760.)), cx));
     let titlebar = if cfg!(target_os = "macos") {
-        TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(17.), px(18.))) }
+        TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(17.), px(21.))) }
     } else {
         TitlebarOptions { title: Some("Emaki".into()), appears_transparent: false, traffic_light_position: None }
     };
