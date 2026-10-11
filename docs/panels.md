@@ -120,6 +120,44 @@ had. A double click is `panel_fit`: for the files the widest row showing,
 capped at `PANEL_FIT_MAX`; for the outline a fixed `OUTLINE_FIT`, since
 its lines are cut at any width.
 
+## A narrow window
+
+The window is never dragged narrower than the conversation at its least
+with one pane beside it (`main::MIN_W`, the conversation's
+`CONVERSATION_MIN` and the terminal's least, the wider of the two
+panes). So the files, the outline or the terminal, asked for, always
+has room, and its button never lights over nothing.
+
+Under the width at which the panel at the left and the terminal both
+fit (`room_for_both`), there is one of them at a time: asking for one
+puts the other away, in motion (`toggle_panel`, `term_go`). A window
+dragged narrower with both showing puts the terminal away, always the
+terminal, so it is known beforehand which goes (`Workbench::render`,
+through `term_go` so its button goes out with it). Either way it is put away for
+good, not kept for a wider window: what the buttons say is what is
+there. The sidebar has given its room up before any of this.
+
+- What puts a pane away goes by `conv_need`, the conversation's need as
+  last measured with room to spare, never by `conv_min`. `conv_min` is
+  raised whenever the composer's row is squeezed, which it is for a
+  moment while the sidebar and a pane are both in motion, and a pane
+  put away on that reading stayed away: which of the two went came out
+  differently from one time to the next.
+- The room of a terminal put away for the window's width still counts
+  against the sidebar (`term_folded`), until the window is `FOLD_SLACK`
+  wider than where both fit, or a panel's button is pressed. Without
+  it, a window dragged narrower lost the sidebar, then the terminal,
+  then got the sidebar back in the terminal's room, then lost it again.
+- A terminal put away takes the keyboard to the window with it, whoever
+  put it away (`Workbench::render`). Left in a terminal not drawn, no
+  key binding was heard until a click.
+
+The file shown is the one thing still not drawn for want of room
+(`fold_file`), with a line under the composer saying so.
+
+Tried and dropped: a pane with no room drawn over the conversation. It
+covered the composer, and two of them lay on each other.
+
 ## The files tree
 
 `Tree` is the session's folder. A folder is read from disk when it is

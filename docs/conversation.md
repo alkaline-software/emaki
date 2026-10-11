@@ -46,6 +46,48 @@ up. Two things are ours, for prompts and replies alike:
   drawn the list is moved by how far it is from the top
   (`unread_arrive`).
 
+## A message sent, before it is written
+
+An agent writes a prompt to its transcript a moment after it takes it,
+and one that has to be started first takes a second or more. Until then
+the message stands at the conversation's end as it left the window
+(`Workbench::outgoing`, a message a tab; `show_outgoing`).
+
+- It is a round put on the session in `set_detail` (`wear_outgoing`),
+  with `OUTGOING` for its `uuid`, and never on disk. It goes when the
+  transcript has a round written since it was sent, past the rounds
+  there were then, or a prompt withdrawn since. The transcript's round
+  is then the same item of the list, so nothing is spliced.
+- A session started from the home page has no file to read yet: it gets
+  a record of our own and an empty conversation to stand the message in
+  (`show_begun`; `docs/window.md`, A session begun from a folder).
+- A message that did not go (`HubEvent::Sent` with an error,
+  `DriverFailed`) keeps its bubble, and the line under it says "Not
+  delivered" in the danger colour, all the time, with the reason under
+  the pointer and the copy button beside it. The next message sent on
+  the tab takes its place.
+- `restore_prompt` passes it by: it is not a round the agent was
+  stopped on.
+- A slash command gets none. It has no round to wait for.
+
+## The two voices
+
+A prompt's bubble has a tail at its foot on the right, as a message
+sent has in iMessage: `icons/bubble-tail.svg` in the bubble's colour,
+an absolute child hanging past the bubble's edge.
+
+The bubble stops short of the column's left edge and a reply as short
+of its right (`REPLY_INSET`), a share of the column, which is as narrow
+as the panes beside the conversation leave it. A long prompt fills the
+width it is given, and without the inset it sat edge to edge like a
+reply. The bubble has no most of its own: it had one, and in a wide
+column stood further from its edge than a reply from its own.
+
+The bubble is the one item of a row, which shrinks it to the room there
+is (`min_w_0`). As an item of a column aligned to its end it took the
+width of its words up to its most, and in a pane narrower than that ran
+off the left edge, with its height still that of the narrow wrap.
+
 ## Copy buttons and times
 
 A block of code has a copy button at its top right while the pointer is on
@@ -69,9 +111,19 @@ count and tokens.
 
 ## Tool cards and runs
 
+- An Explain button's change between off and on is drawn in motion on
+  the button pressed and no other (`explain_flip`). gpui plays an
+  animation whenever its element is first drawn, so with the animation
+  on every button, each one in a run of calls flashed the accent as the
+  run opened or shut.
+
 - The badge at a card's left is the tool's own name in lower case
   (`tool_label`; for an MCP tool the last part of its name), then the
-  subject. A subagent's calls are drawn the same way. Tried and dropped: a
+  subject. Its colour is what the call does (`tool_badge`, by
+  `ToolKind`): a command gold, a read blue, a search teal, an edit
+  violet, a written file green, the web rose, an agent or a skill the
+  accent, each one of code's inks (`docs/look.md`) on a wash of itself.
+  Anything else is the muted grey. A subagent's calls are drawn the same way. Tried and dropped: a
   kind badge ("run") beside the name ("Bash"), the same word twice.
 - `tool_has_body` says yes whenever a result came back, a Read included.
   Text shows clipped in the file's language. A picture is read back out of

@@ -223,7 +223,7 @@ const AGENTS_SHELLS: &str = "~agents";
 impl Workbench {
     /// Whether the panel is drawn: asked for, on a conversation.
     pub(crate) fn term_panel_shown(&self) -> bool {
-        self.term_on().is_some() && self.term_stage() && !self.fold_term
+        self.term_on().is_some() && self.term_stage()
     }
 
     /// Whether the page showing can have the panel: a conversation, or
@@ -280,10 +280,16 @@ impl Workbench {
     }
 
     /// The panel goes to that side, or away, and the change is drawn.
-    fn term_go(&mut self, to: Option<bool>, cx: &mut Context<Self>) {
+    pub(crate) fn term_go(&mut self, to: Option<bool>, cx: &mut Context<Self>) {
         let from = self.term_on();
         if from == to {
             return;
+        }
+        self.term_folded = false;
+        // With room for one of the two beside the conversation, the
+        // files or the outline give their place up.
+        if to.is_some() && !self.term_at_agents() && !self.room_for_both() {
+            self.panel_go(None, cx);
         }
         // The agents page's shell is its own choice: it neither opens
         // the panel beside a conversation nor closes it.
@@ -1228,7 +1234,7 @@ impl Workbench {
     /// it, as the files and the outline do. The wrapper is there at rest
     /// too, under the same name (`docs/panels.md`).
     pub(crate) fn render_term_panel(&mut self, r: &SessionRef, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if !self.term_stage() || self.fold_term {
+        if !self.term_stage() {
             return Vec::new();
         }
         let live = self.side_term_anim.filter(|(_, _, at, _)| at.elapsed() < TERM_PANEL_ANIM);

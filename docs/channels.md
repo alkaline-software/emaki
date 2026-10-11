@@ -327,9 +327,9 @@ which the composer's pills and send button still fit their card. Both panels are
 its least, then the files or the outline. The conversation is never
 squeezed under that width (`Workbench::render`): where the panels asked
 for do not fit beside it at their least, the sidebar folds away as it
-does in a narrow window, and in a window too narrow even so a panel is
-not drawn until there is room again, the files or the outline first and
-then the terminal (`fold_left`, `fold_term`). What was asked for is kept.
+does in a narrow window, and in a window too narrow even so for the
+panel at the left and the terminal together, there is one of them at a
+time (`docs/panels.md`, A narrow window).
 
 A side's head is as tall as the path bar over the conversation, so the
 heads read as one line across the window, and it is a row of tabs on the

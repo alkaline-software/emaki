@@ -17,14 +17,20 @@ use std::time::Duration;
 
 use std::collections::HashSet;
 
-use crate::workbench::{agent_color, agent_glyph, agent_icon, badge_str, file_icon, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W};
+use crate::workbench::{agent_color, agent_glyph, agent_icon, badge_str, file_icon, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W, OUTGOING};
 
 const MAX_BODY: usize = 6000;
 /// An opened tool call shows at most this much before it scrolls inside
 /// its card, so one long output never takes the whole window.
 const MAX_BODY_H: Pixels = px(400.);
 /// How far a reply's right edge stays inside the prompts' right edge.
-const REPLY_INSET: Pixels = px(40.);
+/// A prompt's bubble stops as short of the left edge, so a long
+/// prompt, which fills the width it is given, still reads as coming from
+/// the right. It is a share of the column, which is as narrow as the
+/// panes beside the conversation leave it.
+const REPLY_INSET: f32 = 0.1;
+/// How long an Explain button takes to change between off and on.
+const EXPLAIN_FLIP: Duration = Duration::from_millis(160);
 /// The line under a prompt or a reply that shows on hover: the time and
 /// the copy button. It is always laid out at this height.
 const HOVER_ROW_H: Pixels = px(24.);
@@ -206,6 +212,29 @@ fn tool_label(name: &str) -> String {
     name.rsplit("__").next().unwrap_or(name).to_lowercase()
 }
 
+/// A tool call's badge, in the colour of what the call does: running a
+/// command, reading, searching, changing a file, writing one, the web, an
+/// agent. The inks are code's own (`look::Inks`), each on a wash of
+/// itself, so a run of calls reads by colour before it is read by word.
+/// What is none of those keeps the muted grey.
+fn tool_badge(call: &ToolCall, theme: &gpui_component::Theme) -> impl IntoElement {
+    let k = if theme.mode.is_dark() { &crate::look::INKS_DARK } else { &crate::look::INKS_LIGHT };
+    let ink: Option<Hsla> = match call.tool_kind {
+        ToolKind::Bash => Some(rgb(k.gold).into()),
+        ToolKind::Read => Some(rgb(k.blue).into()),
+        ToolKind::Search => Some(rgb(k.teal).into()),
+        ToolKind::Edit => Some(rgb(k.violet).into()),
+        ToolKind::Write => Some(rgb(k.green).into()),
+        ToolKind::Web => Some(rgb(k.rose).into()),
+        ToolKind::Task => Some(theme.primary),
+        _ => None,
+    };
+    match ink {
+        Some(ink) => badge_str(tool_label(&call.name), ink.opacity(0.14), ink),
+        None => badge_str(tool_label(&call.name), theme.muted, theme.muted_foreground),
+    }
+}
+
 impl Workbench {
     pub fn render_round(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(detail) = &self.detail else { return div().into_any_element() };
@@ -232,6 +261,9 @@ impl Workbench {
             _ => None,
         };
         let sent = stamp(&rnd.ts);
+        // A message sent from here that the transcript does not have yet,
+        // and why it did not go when it did not.
+        let undelivered = (rnd.uuid == OUTGOING).then(|| self.outgoing.get(&detail.key).map(|o| o.error.clone())).flatten().filter(|e| !e.is_empty());
 
         let mut column = v_flex().w_full().max_w(CONTENT_W).px(px(24.)).pt(px(14.)).pb(if is_last { px(28.) } else { px(6.) }).gap(px(12.));
 
@@ -240,7 +272,8 @@ impl Workbench {
         // with a picture reads in the Claude app.
         if !rnd.prompt.is_empty() || rnd.images > 0 || !rnd.attachments.is_empty() {
             let mut bubble = v_flex()
-                .max_w(px(600.))
+                .relative()
+                .min_w_0()
                 .px(px(16.))
                 .py(px(11.))
                 .gap(px(4.))
@@ -251,7 +284,11 @@ impl Workbench {
                 // A prompt the find bar matched wears the accent on its
                 // edge; the one the bar is on now, a full ring.
                 .when(prompt_mark == 1, |d| d.border_1().border_color(theme.primary.opacity(0.45)))
-                .when(prompt_mark == 2, |d| d.border_2().border_color(theme.primary));
+                .when(prompt_mark == 2, |d| d.border_2().border_color(theme.primary))
+                // The tail at its foot, which says the bubble is from the
+                // right: a drawing of the bubble's own colour, hanging
+                // past its edge.
+                .child(svg().path("icons/bubble-tail.svg").absolute().right(px(-7.)).bottom_0().w(px(20.)).h(px(25.)).text_color(theme.muted));
             let has_text = !rnd.prompt.is_empty();
             if !rnd.attachments.is_empty() {
                 let (pics, files): (Vec<&Attachment>, Vec<&Attachment>) = rnd.attachments.iter().partition(|a| a.kind == "image");
@@ -287,7 +324,10 @@ impl Workbench {
             let group = SharedString::from(format!("prompt-{ix}"));
             let copy = has_text.then(|| self.copy_button(ix, false, cx));
             column = column.child(
-                v_flex().group(group.clone()).w_full().items_end().gap(px(2.)).child(bubble).child(
+                // The bubble is in a row of its own, which it shrinks to
+                // fit. As an item of this column it took the width of
+                // its words up to its most, whatever the column had.
+                v_flex().group(group.clone()).w_full().pl(relative(REPLY_INSET)).items_end().gap(px(2.)).child(h_flex().w_full().justify_end().items_start().child(bubble)).child(
                     h_flex()
                         .h(HOVER_ROW_H)
                         .gap(px(6.))
@@ -298,7 +338,22 @@ impl Workbench {
                         // A message still in the queue says so, all the
                         // time: it is the one thing under a prompt worth
                         // reading without being asked.
-                        .when(!rnd.queued, |d| d.opacity(0.).group_hover(group, |s| s.opacity(1.)))
+                        .when(!rnd.queued && undelivered.is_none(), |d| d.opacity(0.).group_hover(group, |s| s.opacity(1.)))
+                        // So does one that did not go, with the reason
+                        // under the pointer. Its words are still here to
+                        // be copied.
+                        .when_some(undelivered, |d, why| {
+                            d.child(
+                                h_flex()
+                                    .id(SharedString::from(format!("undelivered-{ix}")))
+                                    .gap(px(4.))
+                                    .items_center()
+                                    .text_color(theme.danger)
+                                    .child(Icon::default().path("icons/circle-x.svg").with_size(px(14.)).text_color(theme.danger))
+                                    .child("Not delivered")
+                                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(why.clone()).build(window, cx)),
+                            )
+                        })
                         .when(rnd.queued, |d| d.child(div().child(format!("Queued, {} will read it at its next step", session.agent.speaker()))))
                         .children(who.map(|w| div().child(w)))
                         .child(div().child(sent))
@@ -442,7 +497,7 @@ impl Workbench {
                     // The reply stops short of the column's right edge, where
                     // the prompt bubbles end: the two voices sit at different
                     // widths, as in the Claude app, and read apart at a glance.
-                    .child(div().w_full().pl(px(22.)).pr(REPLY_INSET).child(body))
+                    .child(div().w_full().pl(px(22.)).pr(relative(REPLY_INSET)).child(body))
                     .children(copy),
             );
         }
@@ -819,7 +874,6 @@ impl Workbench {
             CallStatus::NoResult => ("not run", theme.muted_foreground),
             CallStatus::Pending => ("running…", theme.primary),
         };
-        let label = tool_label(&call.name);
         let stat = if call.tool_kind == ToolKind::Edit { patch_stat(&call.patch) } else { String::new() };
         let duration = if call.duration_ms > 1500 { human_duration(call.duration_ms) } else { String::new() };
         let has_body = self.tool_has_body(call);
@@ -832,11 +886,15 @@ impl Workbench {
             let (id, cname, input, has_text) = (call.id.clone(), call.name.clone(), call.input.clone(), !explanation.is_empty());
             // Off is an outline in the muted ink; on is filled with the
             // accent tint. The switch between them is drawn over a moment,
-            // keyed on the state so each click plays it once.
+            // keyed on the state so each click plays it once, and only
+            // on the button pressed (`explain_flip`): an animation plays
+            // whenever its element is first drawn, so every button of a
+            // run of calls flashed the accent as the run opened or shut.
             let (off_border, off_bg, off_ink) = (theme.border, theme.transparent, theme.muted_foreground);
             let (on_border, on_bg, on_ink) = (theme.primary.opacity(0.6), theme.primary.opacity(0.14), theme.primary);
             let anim: SharedString = format!("explain-{ix}-{jx}-{}", if ex_open { "on" } else { "off" }).into();
-            h_flex()
+            let flipped = self.explain_flip.as_ref().is_some_and(|(id, at)| *id == call.id && at.elapsed() < EXPLAIN_FLIP);
+            let button = h_flex()
                 .id(SharedString::from(format!("explain-{ix}-{jx}")))
                 .flex_shrink_0()
                 .h(px(20.))
@@ -852,11 +910,19 @@ impl Workbench {
                     swallow_click(window, cx);
                     this.toggle_explain(&id, &cname, &input, has_text, cx);
                 }))
-                .child(if ex_open && explaining && !has_text { "Explaining…" } else { "Explain" })
-                .with_animation(ElementId::Name(anim), Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()), move |d, t| {
-                    let t = if ex_open { t } else { 1. - t };
-                    d.border_color(mix(off_border, on_border, t)).bg(mix(off_bg, on_bg, t)).text_color(mix(off_ink, on_ink, t))
-                })
+                .child(if ex_open && explaining && !has_text { "Explaining…" } else { "Explain" });
+            if flipped {
+                button
+                    .with_animation(ElementId::Name(anim), Animation::new(EXPLAIN_FLIP).with_easing(ease_out_quint()), move |d, t| {
+                        let t = if ex_open { t } else { 1. - t };
+                        d.border_color(mix(off_border, on_border, t)).bg(mix(off_bg, on_bg, t)).text_color(mix(off_ink, on_ink, t))
+                    })
+                    .into_any_element()
+            } else if ex_open {
+                button.border_color(on_border).bg(on_bg).text_color(on_ink).into_any_element()
+            } else {
+                button.border_color(off_border).bg(off_bg).text_color(off_ink).into_any_element()
+            }
         };
 
         let mut card = v_flex().w_full().relative().rounded(px(10.)).border_1().border_color(theme.border).bg(theme.popover).overflow_hidden().children(self.reveal_mark((0, ix, jx), cx));
@@ -883,7 +949,7 @@ impl Workbench {
                     cx.notify();
                 }))
                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(if has_body { theme.muted_foreground } else { theme.border }))
-                .child(div().flex_shrink_0().child(badge_str(label, theme.muted, theme.muted_foreground)))
+                .child(div().flex_shrink_0().child(tool_badge(call, &theme)))
                 .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(theme.muted_foreground).child(subject))
                 .when(!stat.is_empty(), |d| d.child(div().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(stat)))
                 .when(!status_text.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(status_color).child(status_text)))
@@ -1239,7 +1305,7 @@ impl Workbench {
                             .gap(px(6.))
                             .text_size(px(11.5))
                             .text_color(theme.muted_foreground)
-                            .child(div().flex_shrink_0().child(badge_str(tool_label(&c.name), theme.muted, theme.muted_foreground)))
+                            .child(div().flex_shrink_0().child(tool_badge(c, &theme)))
                             .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).child(c.subject.clone())),
                     );
                 }

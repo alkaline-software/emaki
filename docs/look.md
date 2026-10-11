@@ -40,7 +40,8 @@ the `@tabler/icons` package (`icons/outline/<name>.svg`; `star-fill` from
 `icons/filled`), MIT, with `TABLER-LICENSE` beside them. Each is written
 on one line without Tabler's empty bounding path.
 
-Not Tabler: `claude.svg`, Claude's own mark, the other agents' marks in
+Not Tabler: `bubble-tail.svg`, the tail of a prompt's bubble
+(`docs/conversation.md`), `claude.svg`, Claude's own mark, the other agents' marks in
 `icons/agents/` (`docs/agents.md`; Codex wears OpenAI's everywhere), `mark.svg`, and eleven toolkit icons
 that were never replaced (the window controls, the right and bottom
 panels, `inspector`, `resize-corner`, `star-off`), none of which the

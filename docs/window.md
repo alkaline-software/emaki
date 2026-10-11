@@ -143,7 +143,7 @@ drawn until the time is up.
 
 Narrower than `NARROW_W` the sidebar leaves the row and comes back only as
 an overlay over a scrim (the strip button, ⌘⇧S), which any click or Escape
-puts away. `sidebar_open` keeps the preference for when the window is wide
+puts away. Each of these is in motion (Motion, below). `sidebar_open` keeps the preference for when the window is wide
 again.
 
 ### The sidebar's edge
@@ -204,7 +204,23 @@ The patterns, each in use and to be used again:
   card whose height is its content's measures itself as it is drawn
   (`dialog_h`) and takes no room until that is known.
 - **A panel at the conversation's side**: its width opens and closes
-  (`docs/panels.md`, `docs/channels.md`).
+  (`docs/panels.md`, `docs/channels.md`). One put away for want of room
+  goes the same way, through the call its button makes (`term_go`,
+  `panel_go`), never by its flag alone: the flag alone left the button
+  lit and the panel gone between two frames.
+- **The sidebar**: it slides in from the window's edge as its room in
+  the row opens, and out as it closes, whoever asked: its button, the
+  key, a window dragged narrower or wider, a panel that needed its
+  room. `Workbench::render` sees the change (`side_was`) and starts it
+  (`side_anim`); nothing that shows or hides the sidebar has to. It is
+  drawn off the clock (`side_t`, `shown_t`) and not as one element's
+  animation, because the top strip's room for the buttons, the panels'
+  left and their edges all stand by the sidebar's width
+  (`side_w_now`). Over the scrim in a narrow window it slides the same
+  way and the scrim fades (`peek_anim`). A floating sidebar that is
+  kept stays where it is while the row makes room under it
+  (`float_kept`). Not played: a drag of its own edge, and the first
+  draw.
 - **A choice that moves** (a segmented control, the strip's buttons): one
   plate slides from the old to the new.
 
@@ -444,6 +460,10 @@ italics, the name being ours and not one anybody gave it (`unnamed`).
   starts where it would resume, `is_draft`), so the transcript that
   follows has the tab's key and the tab goes on as that session, title
   and all, with no hand-over.
+- A session started from the home page gets the same record at its
+  first message (`show_begun`), so its tab and its row are there at
+  once and the message shows in it (`docs/conversation.md`). It waited
+  for the index to find the file, on a bare pane.
 - Closed with nothing sent, it is gone with its tab. It is not written
   to `ui.json`, since a launch would find nothing for its tab. A
   message typed and not sent is the composer's draft and goes with it.
