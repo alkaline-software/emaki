@@ -66,7 +66,7 @@ const BRANCH_ROWS: usize = 10;
 const BRANCH_ROW_H: Pixels = px(30.);
 /// The column a branch's tag stands in, and the one its time does.
 const BRANCH_TAG_W: Pixels = px(72.);
-const BRANCH_WHEN_W: Pixels = px(84.);
+const BRANCH_WHEN_W: Pixels = px(100.);
 /// The comparison: how wide its list of files is, and how tall a row of
 /// that list.
 const CHANGES_LIST_W: Pixels = px(300.);
@@ -4128,7 +4128,7 @@ impl Workbench {
                             d
                         }
                     }))
-                    .child(div().w(BRANCH_WHEN_W).flex_shrink_0().text_right().text_size(px(11.5)).text_color(theme.muted_foreground).children(b.when.get(name).filter(|at| **at > 0).map(|at| crate::format::ago(*at as f64, self.now)))),
+                    .child(div().w(BRANCH_WHEN_W).flex_shrink_0().whitespace_nowrap().text_right().text_size(px(11.5)).text_color(theme.muted_foreground).children(b.when.get(name).filter(|at| **at > 0).map(|at| crate::format::ago(*at as f64, self.now)))),
             );
         }
         // Words that leave no branch: said, with the way to make one of
@@ -4233,7 +4233,33 @@ impl Workbench {
                     .text_size(px(13.))
                     .child(Icon::new(IconName::Search).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
                     .child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.branch_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.branch_input, false, cx)))),
-            ).child(Button::new("branch-new-button").outline().small().label("New Branch").on_click(cx.listener(|this, _, window, cx| {
+            ).child(div()
+                .id("branch-new-button")
+                .role(Role::Button)
+                .aria_label("New Branch")
+                .flex_shrink_0()
+                // A button, beside a field: the field is a hollow in
+                // the sheet, this stands on it, with an edge and a
+                // shadow under it that a press takes away.
+                .h(px(32.))
+                .pl(px(9.))
+                .pr(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.foreground.opacity(0.16))
+                .bg(theme.background)
+                .shadow_xs()
+                .text_size(px(13.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.muted).border_color(theme.foreground.opacity(0.28)))
+                .active(|s| s.bg(theme.foreground.opacity(0.16)).shadow_none())
+                .child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
+                .child("New Branch")
+                .on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 let typed = this.branch_input.read(cx).value().trim().to_string();
                 let fresh = this.branches().is_some_and(|b| !typed.is_empty() && !b.has(&typed));

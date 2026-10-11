@@ -24,13 +24,14 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, OpenSettings, Refresh, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
         KeyBinding::new("secondary-k", ToggleSearch, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-r", Refresh, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-n", NewSession, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-t", NewSessionHere, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-n", NewBranch, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-l", GoSessions, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-e", GoAgents, Some(KEY_CONTEXT)),
@@ -113,6 +114,7 @@ fn app_menus() -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action("New Session", NewSession),
+                MenuItem::action("New Session in This Project", NewSessionHere),
                 MenuItem::action("New Branch…", NewBranch),
                 MenuItem::action("Refresh", Refresh),
                 MenuItem::separator(),

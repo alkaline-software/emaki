@@ -23,8 +23,15 @@ question, dialog, shells and permission cards), the screen readers in
   under the same parent. `build::taken_back` drops such a row; until the
   next prompt is written nothing in the transcript tells it from a prompt
   just sent, so the window takes the round out itself when it hands the
-  words back (`handed_back`, applied in `set_detail`). A prompt the agent
-  began on has rows under it and stays, as in the terminal.
+  words back (`handed_back`, applied in `set_detail`, and kept while the
+  conversation showing is set again with the round already out). A prompt
+  the agent began on has rows of the agent's under it and stays, as in
+  the terminal.
+- Rows under a prompt are not all the agent's. A prompt sent with a
+  picture has an `isMeta` row under it saying where the picture came
+  from, and `attachment` rows hang under that. Counting those as the
+  agent having begun kept a prompt taken back with a picture in the
+  conversation, beside the one sent after it. They go with the prompt.
 - "[Request interrupted by user]" is Claude Code's marker, never a round
   of the person's.
 - A stop's words are read out of the transcript, never written here, and

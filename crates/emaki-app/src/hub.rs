@@ -51,6 +51,10 @@ pub enum HubEvent {
     /// A new session's agent gave it an id of its own: what the window
     /// began under `from` is the session `to`.
     Adopted { agent: AgentId, from: String, to: String },
+    /// The Claude Code in a hidden terminal of ours went on to another
+    /// session (`/clear`, `/resume`): the terminal that was `from`'s is
+    /// `to`'s, and `from` is a session with nothing behind it.
+    Moved { from: String, to: String },
     DriverFailed { session_id: String, error: String },
     Driver { session_id: String, event: driver::Event },
     /// A message left through `via` ("driver" or "inbox").
@@ -353,9 +357,11 @@ impl Hub {
         // A session may be in a hidden terminal of ours and in a terminal
         // of the person's at once, which is theirs to do: ours is the
         // record the window keeps.
+        let all = peer::registry_all();
+        let moved = self.follow_terminals(&all);
         let ours: Vec<i32> = self.terminals.lock().unwrap().values().map(|p| p.pid).collect();
         let mut fresh: HashMap<String, Peer> = HashMap::new();
-        for p in peer::registry_all() {
+        for p in all {
             if ours.contains(&p.pid) || !fresh.contains_key(&p.session_id) {
                 fresh.insert(p.session_id.clone(), p);
             }
@@ -373,6 +379,45 @@ impl Hub {
             ended.remove(sid);
         }
         *peers = fresh;
+        drop((peers, ended));
+        for (from, to) in moved {
+            self.send(HubEvent::Moved { from, to });
+        }
+    }
+
+    /// A hidden terminal is kept under the session its Claude Code is
+    /// on, and Claude Code can go on to another without ending: `/clear`
+    /// begins a new session in the same process, `/resume` takes up an
+    /// old one. The registry record of the process says which, so the
+    /// terminal is moved to it. Left under the session it was started
+    /// on, that session had a terminal with no record, nothing typed
+    /// there was read back, and the conversation went dead.
+    fn follow_terminals(&self, registry: &[Peer]) -> Vec<(String, String)> {
+        let mut terminals = self.terminals.lock().unwrap();
+        let mut moved = Vec::new();
+        for p in registry.iter().filter(|p| !p.session_id.is_empty()) {
+            let Some(from) = terminals.iter().find(|(sid, pty)| pty.pid == p.pid && pty.alive() && **sid != p.session_id).map(|(sid, _)| sid.clone()) else { continue };
+            if terminals.contains_key(&p.session_id) {
+                continue;
+            }
+            if let Some(pty) = terminals.remove(&from) {
+                terminals.insert(p.session_id.clone(), pty);
+                moved.push((from, p.session_id.clone()));
+            }
+        }
+        drop(terminals);
+        let mut showing = self.showing.lock().unwrap();
+        for (from, to) in &moved {
+            if showing.as_ref() == Some(from) {
+                *showing = Some(to.clone());
+            }
+        }
+        moved
+    }
+
+    /// The session a hidden terminal is behind now, by its process.
+    fn terminal_session(&self, pid: i32) -> Option<String> {
+        self.terminals.lock().unwrap().iter().find(|(_, pty)| pty.pid == pid).map(|(sid, _)| sid.clone())
     }
 
     /// The inbox of a terminal session, if Claude Code has one registered.
@@ -569,16 +614,20 @@ impl Hub {
         let pty = Pty::spawn(&argv, cwd, Arc::new(move || {
             let _ = tx.lock().map(|t| t.send(()));
         }))?;
+        let pid = pty.pid;
         self.terminals.lock().unwrap().insert(session_id.to_string(), pty);
         self.ended.lock().unwrap().remove(session_id);
         let hub = Arc::clone(self);
         let sid = session_id.to_string();
         thread::spawn(move || {
+            // The session is asked for each time: the terminal may have
+            // gone on to another (`follow_terminals`).
             while rx.recv().is_ok() {
                 thread::sleep(Duration::from_millis(40));
                 while rx.try_recv().is_ok() {}
-                hub.send(HubEvent::Screen(sid.clone()));
+                hub.send(HubEvent::Screen(hub.terminal_session(pid).unwrap_or_else(|| sid.clone())));
             }
+            let sid = hub.terminal_session(pid).unwrap_or(sid);
             // The child is gone. Still held here, nobody let it go: it
             // went by itself, and the foot of its screen says why.
             if let Some(pty) = hub.terminals.lock().unwrap().remove(&sid) {

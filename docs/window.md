@@ -124,6 +124,22 @@ click opens a folder onto its sessions and closes it again (`folders_open`,
 kept in `ui.json`): `FOLDER_ROWS` of them, headed by when (`format::bucket`,
 as on the sessions page), then "N more".
 
+A project can be pinned (the pin beside the plus under the pointer, or a
+right click on its row; `toggle_pin`, `pinned` in `ui.json`). The row
+keeps room for the pin and the plus whether they show or not, and a
+pinned project wears its pin, filled, at all times: a click lets it go.
+The line under the pinned ones closes where it stood
+(`pin_rule_after`), after the project it was last drawn after. Drawn at
+the head of the list as it closed, it pushed a project let go at the
+top down for a moment and the row shook. The pinned ones head the list in the order they
+were pinned, with a line under them, and one dragged onto another takes
+its place (`DragPin`, `drag_pin_to`: each pinned row hears the drag and
+answers when the pointer is on it). `side_order` is the one place the
+order is made, for the list and for the fitted width. A pin only moves
+the row: let go, the project is where the index has it. The pinned ones
+are all listed, and the rest fill what is left of `SIDE_FOLDERS`, never
+fewer than `SIDE_FOLDERS_LEAST`.
+
 A folder with a live session is open without being asked (`sync_folders`):
 it opens when one of its sessions goes live and closes when the last stops,
 if it was opened that way and not clicked since. A click is the person's
@@ -135,6 +151,15 @@ Marks) with a dot in its phase's colour. A folder with a live session is
 in the accent, whichever agent's it is. A folder
 wears the most pressing of its sessions' (needs you, then working, then
 your turn).
+
+A folder lists its `FOLDER_ROWS` newest sessions, and under them any
+older one that has a tab, with no heading of its own: opened from
+further back it is in the list while its tab is, and goes with it,
+growing in and shrinking out as any row does (`side_rows_changed`).
+
+A session with a tab wears a short bar at its row's left: in the accent
+for the one showing, grey for the others. The dot at the right is the
+session's phase and says nothing of tabs.
 
 A folder's sessions unfold and fold over `FOLDER_ANIM`: a box whose height
 is the sum of its fixed-height rows (`SIDE_ROW_H`, `SIDE_SESSION_H`), which
@@ -241,6 +266,10 @@ The patterns, each in use and to be used again:
   longer is drawn a moment more where it stood, shrinking
   (`side_gone`). A folder drawn for the first time plays nothing, and a
   row that only changes place is not moved in motion.
+- **Something small in the sidebar that is there or is not** (the bar
+  of a session with a tab, the line under the pinned projects):
+  `presence`, asked at every draw, which plays a change over
+  `FOLD_ANIM` and not the first sight.
 - **Something that lies over the window and has no way out of its own**
   (the rename sheet, the lightbox, the comparison, the branch list and
   its question, the discard question): `fade_in`, on a static id, which
@@ -451,7 +480,9 @@ pointer is on it (both always there, one clear, so nothing moves). It
 begins a session in that folder (`new_session_in`) on a tab like any
 other's: the conversation page with nothing said, named "New Session" in
 italics, the name being ours and not one anybody gave it (`unnamed`).
-⌘N and the home page are as they were.
+⌘N and the home page are as they were. ⌘T is the plus of the folder the
+session showing is in (`new_session_here`), and ⌘N where no session is
+showing. In the terminal panel ⌘T is a new terminal tab, as it was.
 
 - It is a record of our own (`begun`), put at the head of every index
   until the index has one of its own for it, under a session id made

@@ -87,7 +87,9 @@ that begins and ends as a rule and is mostly one.
 A session nothing was said in is listed nowhere. `/clear` starts a new
 transcript under a new id and carries the session's name into it
 (`custom-title` and `agent-name` rows, then the `/clear` rows), which
-otherwise shows as two sessions of one name, the second empty.
+otherwise shows as two sessions of one name, the second empty. The
+process stays the same and its registry record moves to the new id; the
+window follows it (`docs/channels.md`, Going on to another session).
 
 `peek` marks a transcript `blank` (`SessionRef::blank`,
 `transcript::says_something`) when the whole file fits in the head it

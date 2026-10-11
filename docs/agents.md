@@ -7,6 +7,15 @@ the sidebar.
 
 ## Rules
 
+- Words drawn by `selectable` that come and go have an id of their own
+  (`selectable_as`), and nothing with an id is wrapped around them for
+  a while and taken off again. The markdown view keeps what it parsed
+  under its id and the ids of everything it stands in, and parses off
+  the main thread: under a new id its words are blank for a frame. An
+  animation's element has an id, so the install step's change is drawn
+  off the clock in plain boxes. Wrapped in an animation, its words
+  blinked when it began and again when it ended.
+
 - Nothing here installs an agent, signs in to one, or runs a command the
   page shows. The person pastes it into a terminal of their own. An
   install needs what a new machine may lack, asks for a password, and
@@ -42,6 +51,28 @@ and was cut too, once Google closed it to personal accounts (June 2026):
 its sign-in fails for most people, and a saved sign-in file says nothing
 of whether Google still serves the account.
 
+## Beside the agents
+
+`agents::tools()` is what is worth having with the agents and is not
+one: GitHub Desktop, today. It is an `Agent` in every way the page
+needs (a card, a page of steps, looked for with the rest, found by
+`by_id`) and is in no list of agents: `all()` does not have it, so a new
+session cannot be given to it. What sets it apart is in four fields:
+
+- `apps`: where the app is installed, a path a system. It has a window
+  and no program on `PATH`, so it is found there (`find_in`) and never
+  run to be asked its version, which would open it.
+- `download`: where its installer is got, shown as a button before the
+  commands, which are the other way.
+- `with_emaki`: what having it does for Emaki, in place of the step
+  about sessions. It says GitHub Desktop's sign-in does not reach git,
+  as the sign-in sheet does (`docs/panels.md`).
+- `accent`: the accent of `look::ACCENTS` it wears where an agent wears
+  its own colour (`agent_ink`): violet, GitHub Desktop's purple.
+
+Its sign-in is seen as any is, by its keychain item's name on a Mac.
+Elsewhere none is seen and the line says so.
+
 ## Looking
 
 `detect_all` looks for every agent on a thread each, since each waits on
@@ -71,6 +102,9 @@ last answer is a day old; never at launch.
 
 Two levels, as the sessions page has (`Workbench::agent_open`).
 
+- Under the agents' row, a second headed "Beside the agents": a
+  tool's card (`tool_card`), low and as wide as the row over it, so the
+  page has no empty half.
 - The cards: side by side in the catalogue's order, whatever is
   installed, so a card stays where it is when that changes. The head is
   the name and the refresh button and nothing else; a line under it
@@ -89,13 +123,30 @@ Two levels, as the sessions page has (`Workbench::agent_open`).
   conversation's terminal panel with its shell side alone
   (`docs/channels.md`, The terminal panel).
 - Inside one: three steps on a rail, each with a tick once done. Install
-  shows where the program is, or the ways to get it for the system
-  chosen (`agent_os`, this machine's to begin with), the maker's first
-  choice first. Sign in shows what to type and what happens then, what
-  account it takes, and the key variable. The third says whether Emaki
-  reads its sessions. Under the steps, for an agent that is read, its
-  projects: a click goes to the sessions page inside that project,
-  narrowed to the agent.
+  shows where the program is, and two choices on one row with a
+  chevron between, read as a path: the system (`agent_os`, this
+  machine's to begin with), then the way on it (`agent_way`: a download
+  where there is one, and each command), the maker's first choice to
+  begin with. Under the row, what the way says to do. Tried and
+  dropped: the ways in a bordered box under the system, which read as
+  one border too many and set the two controls out of line. A change of
+  either choice is in motion (`agent_choose`, `AgentSwap`): what was
+  there fades out where it stood as the new fades in, and their room
+  runs from the old height to the new, measured as it is drawn, so the
+  steps under it slide. One way shows at a time, since
+  they are one or the other. The way's control has an id a system, so
+  its plate does not slide between two systems' lists. Each choice has
+  an icon before its word (`choice_icon`, by the control and the key):
+  a system's mark, and for a way what does the installing. The penguin
+  is drawn here; the rest are Tabler's. Sign in shows what to type and what happens then, what
+  account it takes, and the key variable. What to do stays under a step
+  that is done: for another machine, or to do it again.
+- A command's words are escaped down to the colon (`selectable`): the
+  markdown view made a link of an address in a command and drew the
+  escapes inside it. The third says whether Emaki
+  reads its sessions. The sessions themselves are not listed here: All
+  Projects has them, and narrows to an agent. A list of an agent's
+  projects stood under the steps and was removed for saying it twice.
 
 ## The sidebar
 
@@ -130,5 +181,6 @@ sessions are not read has no colour and keeps the accent.
 
 - `emaki-core agents` prints what looking finds.
 - `EMAKI_PAGE=agents` lands on the page. `EMAKI_GO=page:agents`,
-  `agent:<id>` (inside one), `agentos:mac|linux|windows` and
-  `agents:check` are the clicks.
+  `agent:<id>` (inside one), `agentos:mac|linux|windows`,
+  `agentway:<name>` (a way as the catalogue names it, or `Download`)
+  and `agents:check` are the clicks.

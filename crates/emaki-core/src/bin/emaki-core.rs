@@ -208,7 +208,7 @@ fn main() {
             // `emaki-core agents --commands`: ask the network whether what
             // each install command fetches is still published.
             if args.get(1).is_some_and(|a| a == "--commands") {
-                for a in emaki_core::agents::all() {
+                for a in emaki_core::agents::all().iter().chain(emaki_core::agents::tools()) {
                     for w in a.install {
                         println!("{:<12} {}", a.id, emaki_core::agents::source_of(w).unwrap_or_else(|| format!("(nothing to ask) {}", w.command)));
                     }
@@ -219,7 +219,7 @@ fn main() {
             }
             for (id, f) in emaki_core::agents::detect_all() {
                 match &f.path {
-                    Some(p) => println!("{id:<12} {:<10} {}  {}", if f.version.is_empty() { "?" } else { f.version.as_str() }, if f.signed { "signed in" } else { "no sign-in seen" }, p.display()),
+                    Some(p) => println!("{id:<14} {:<10} {}  {}", if f.version.is_empty() { "?" } else { f.version.as_str() }, if f.signed { "signed in" } else { "no sign-in seen" }, p.display()),
                     None => println!("{id:<12} not installed{}", if f.home { " (its settings folder is here)" } else { "" }),
                 }
             }

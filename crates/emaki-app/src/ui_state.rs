@@ -56,6 +56,9 @@ pub struct UiState {
     /// The sidebar's folders showing their sessions; absent until one
     /// has been opened or closed.
     pub folders_open: Option<Vec<String>>,
+    /// The projects pinned to the head of the sidebar's list, in the
+    /// order they stand there.
+    pub pinned: Vec<String>,
 }
 
 fn file() -> std::path::PathBuf {

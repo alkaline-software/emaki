@@ -814,26 +814,49 @@ pub struct BuildInput<'a> {
     pub nested: bool,
 }
 
-/// The prompts taken back before the agent began on them, by `uuid`.
-/// Escape pressed at once leaves no "[Request interrupted by user]"
-/// (2.1.293): the prompt's row stays, nothing is ever written under it,
-/// and the next prompt is written beside it, under the same parent. The
-/// terminal takes such a prompt off its screen and back into its input,
-/// so it is no round here either. A prompt the agent had started on has
-/// rows under it and is not one of these.
+/// The prompts taken back before the agent began on them, and the rows
+/// written with each, by `uuid`. Escape pressed at once leaves no
+/// "[Request interrupted by user]" (2.1.293): the prompt's row stays,
+/// nothing of the agent's is ever written under it, and the next prompt
+/// is written beside it, under the same parent. The terminal takes such
+/// a prompt off its screen and back into its input, so it is no round
+/// here either. What Claude Code writes with a prompt hangs under it all
+/// the same (where a picture came from, in an `isMeta` row, and its
+/// `attachment` rows), and goes with it. A prompt the agent had started
+/// on has a row of another kind under it and is not one of these.
 fn taken_back(rows: &[Value]) -> HashSet<&str> {
-    let parents: HashSet<&str> = rows.iter().map(|r| str_of(r, "parentUuid")).filter(|p| !p.is_empty()).collect();
     let prompt = |r: &Value| str_of(r, "type") == "user" && !bool_of(r, "isSidechain") && !bool_of(r, "isMeta") && !blocks(r).iter().any(|x| block_type(x) == "tool_result");
+    let with_prompt = |r: &Value| str_of(r, "type") == "attachment" || str_of(r, "type") == "user" && bool_of(r, "isMeta");
+    let mut under: HashMap<&str, Vec<&Value>> = HashMap::new();
     // The last prompt written under each parent.
     let mut last: HashMap<&str, usize> = HashMap::new();
-    for (ix, r) in rows.iter().enumerate().filter(|(_, r)| prompt(r) && !str_of(r, "parentUuid").is_empty()) {
-        last.insert(str_of(r, "parentUuid"), ix);
+    for (ix, r) in rows.iter().enumerate().filter(|(_, r)| !str_of(r, "parentUuid").is_empty()) {
+        under.entry(str_of(r, "parentUuid")).or_default().push(r);
+        if prompt(r) {
+            last.insert(str_of(r, "parentUuid"), ix);
+        }
     }
-    rows.iter()
-        .enumerate()
-        .filter(|(ix, r)| prompt(r) && !str_of(r, "uuid").is_empty() && !parents.contains(str_of(r, "uuid")) && last.get(str_of(r, "parentUuid")).is_some_and(|l| l > ix))
-        .map(|(_, r)| str_of(r, "uuid"))
-        .collect()
+    let mut taken = HashSet::new();
+    for (ix, r) in rows.iter().enumerate().filter(|(_, r)| prompt(r) && !str_of(r, "uuid").is_empty()) {
+        if !last.get(str_of(r, "parentUuid")).is_some_and(|l| *l > ix) {
+            continue;
+        }
+        let (mut its, mut todo) = (vec![str_of(r, "uuid")], vec![str_of(r, "uuid")]);
+        let mut begun = false;
+        while let Some(uuid) = todo.pop() {
+            for row in under.get(uuid).into_iter().flatten() {
+                begun |= !with_prompt(row);
+                if !str_of(row, "uuid").is_empty() {
+                    its.push(str_of(row, "uuid"));
+                    todo.push(str_of(row, "uuid"));
+                }
+            }
+        }
+        if !begun {
+            taken.extend(its);
+        }
+    }
+    taken
 }
 
 pub fn build(input: BuildInput) -> Session {
@@ -904,7 +927,7 @@ pub fn build(input: BuildInput) -> Session {
         }
         match rtype {
             "system" => handle_system(&mut b, row, ts, &mut session),
-            "user" if taken_back.contains(str_of(row, "uuid")) => {}
+            "user" | "attachment" if taken_back.contains(str_of(row, "uuid")) => {}
             "user" => handle_user(&mut b, row, ts),
             "assistant" => handle_assistant(&mut b, row, ts, &mut session),
             "attachment" => {

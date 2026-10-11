@@ -390,6 +390,11 @@ pub struct Branches {
     pub remote: Vec<String>,
     /// When each branch's last commit was made, in seconds since 1970.
     pub when: std::collections::HashMap<String, i64>,
+    /// When each local branch was made here, in seconds: the first line
+    /// of its reflog, which is all git keeps of that. A branch only a
+    /// remote has, and one whose reflog has been pruned to nothing, has
+    /// none.
+    pub made: std::collections::HashMap<String, i64>,
     /// How many sets of changes were left behind on the branch checked
     /// out (`Carry::Leave`) and are still waiting to be put back.
     pub stashed: usize,
@@ -401,6 +406,26 @@ pub struct Branches {
     pub unpublished: Vec<String>,
 }
 
+/// A name in pieces that order as a person reads it: a run of digits
+/// is its number, anything else its letters.
+fn natural(name: &str) -> Vec<(u64, String)> {
+    let mut out: Vec<(u64, String)> = Vec::new();
+    let mut was_digit = None;
+    for c in name.chars() {
+        let digit = c.is_ascii_digit();
+        if was_digit != Some(digit) {
+            out.push((0, String::new()));
+            was_digit = Some(digit);
+        }
+        let last = out.last_mut().unwrap();
+        match c.to_digit(10).filter(|_| digit) {
+            Some(d) => last.0 = last.0.saturating_mul(10).saturating_add(d as u64),
+            None => last.1.push(c),
+        }
+    }
+    out
+}
+
 impl Branches {
     /// What a button naming the place says: the branch, else the commit.
     pub fn label(&self) -> String {
@@ -409,10 +434,15 @@ impl Branches {
 
     /// Every branch by the time of its last commit, the newest first,
     /// after the default branch, which is first in any order; each with
-    /// whether only a remote has it.
+    /// whether only a remote has it. Branches at one commit have one
+    /// time (a branch just made from the default one, and the branch
+    /// last merged into it): the one made later is first then (`made`).
+    /// Where that does not say, the later name is, a number in a name
+    /// read as a number, so "v0.2.10" is above "v0.2.9" and that above
+    /// "v0.2.1".
     pub fn by_recency(&self) -> Vec<(String, bool)> {
         let mut all: Vec<(String, bool)> = self.local.iter().map(|n| (n.clone(), false)).chain(self.remote.iter().map(|n| (n.clone(), true))).collect();
-        all.sort_by_key(|(n, _)| (Some(n) != self.default.as_ref(), std::cmp::Reverse(self.when.get(n).copied().unwrap_or(0)), n.clone()));
+        all.sort_by_key(|(n, _)| (Some(n) != self.default.as_ref(), std::cmp::Reverse(self.when.get(n).copied().unwrap_or(0)), std::cmp::Reverse(self.made.get(n).copied().unwrap_or(0)), std::cmp::Reverse(natural(n))));
         all
     }
 
@@ -424,6 +454,15 @@ impl Branches {
 fn line(dir: &Path, args: &[&str]) -> Option<String> {
     let out = String::from_utf8_lossy(&git(dir, args)?).trim().to_string();
     (!out.is_empty()).then_some(out)
+}
+
+/// The time on a reflog's first line: "<old> <new> <who> <seconds>
+/// <zone>", then a tab and what was done.
+fn first_logged(log: &Path) -> Option<i64> {
+    use std::io::BufRead;
+    let mut first = String::new();
+    std::io::BufReader::new(std::fs::File::open(log).ok()?).read_line(&mut first).ok()?;
+    first.split('\t').next()?.split_whitespace().rev().nth(1)?.parse().ok()
 }
 
 /// The branches of the repository `dir` is in, or `None` when it is in
@@ -455,6 +494,13 @@ pub fn branches(dir: &Path) -> Option<Branches> {
     if let Some(cur) = &b.current {
         if !b.local.contains(cur) {
             b.local.push(cur.clone());
+        }
+    }
+    if let Some(logs) = line(dir, &["rev-parse", "--git-common-dir"]).map(|d| dir.join(d).join("logs").join("refs").join("heads")) {
+        for name in &b.local {
+            if let Some(at) = first_logged(&logs.join(name)) {
+                b.made.insert(name.clone(), at);
+            }
         }
     }
     b.origin = remote(dir);
