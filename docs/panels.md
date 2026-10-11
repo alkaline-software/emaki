@@ -281,7 +281,14 @@ elsewhere, and the sheet says so.
 The default branch is first in either order. After it the list is ordered
 by when each branch was last committed to, the newest first (`Branches::by_recency`, from `Branches::when`, the committer date
 `for-each-ref` gives; a branch here and on a remote takes its local
-time), with that time at the row's right in words (`format::ago`). Two
+time), with that time at the row's right in words (`format::ago`), on
+one line: the column holds the longest of them. Branches at one commit
+have one time, as a branch just made from the default one and the one
+last merged into it do; the one made later is first then
+(`Branches::made`, the first line of the branch's reflog, the only
+record git keeps of when a branch was made, and only for a branch
+here). Where that does not say, the later name is first, a number in a
+name read as a number. Two
 words in the head, Recent and Name, change the order (`branch_by_name`,
 kept in `ui.json`); by name it is the default branch, the rest by name,
 then the branches only a remote has.

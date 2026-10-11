@@ -947,6 +947,18 @@ fn a_prompt_taken_back_at_once_is_no_round() {
     rows.push(chained(user("another way", "2026-01-01T10:03:00Z"), "u4", "a1"));
     let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
     assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["hello", "try again, and also this", "another way"]);
+    // A prompt sent with a picture has rows of its own under it, which
+    // are not the agent's: it is taken back all the same, and its
+    // picture is not left on the round before.
+    let mut meta = chained(user("[Image: source: /x/shot.png]", "2026-01-01T10:04:00Z"), "m5", "u5");
+    meta["isMeta"] = json!(true);
+    rows.push(chained(user("[Image #1] look", "2026-01-01T10:04:00Z"), "u5", "a2"));
+    rows.push(meta);
+    rows.push(chained(json!({"type": "attachment", "timestamp": "2026-01-01T10:04:00Z", "attachment": {"type": "date"}}), "t5", "m5"));
+    rows.push(chained(user("look here", "2026-01-01T10:04:20Z"), "u6", "a2"));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["hello", "try again, and also this", "another way", "look here"]);
+    assert!(s.rounds.iter().all(|r| r.attachments.is_empty()));
 }
 
 /// Codex says a stop twice, as an event and inside the next user row;
@@ -2322,6 +2334,26 @@ fn git_lists_branches_and_switches_between_them() {
     let recent = git::branches(&work).unwrap().by_recency();
     assert_eq!((recent[0].0.as_str(), recent[1].0.as_str()), ("main", "zeta"));
     assert_eq!(recent.len(), 4);
+    // Branches at one commit: the later name first, a number as a number.
+    for name in ["v0.2.1-b", "v0.2.9-a", "v0.2.10-c"] {
+        run(&work, &["branch", name, "main"]);
+    }
+    let recent: Vec<String> = git::branches(&work).unwrap().by_recency().into_iter().map(|(n, _)| n).filter(|n| n.starts_with('v')).collect();
+    assert_eq!(recent, ["v0.2.10-c", "v0.2.9-a", "v0.2.1-b"]);
+    for name in ["v0.2.1-b", "v0.2.9-a", "v0.2.10-c"] {
+        run(&work, &["branch", "-D", name]);
+    }
+    // Made at different times, the one made later is first, whatever
+    // the names say.
+    for (name, date) in [("v9-older", "2001-01-01T00:00:00Z"), ("v1-newer", "2002-01-01T00:00:00Z")] {
+        let made = std::process::Command::new("git").arg("-C").arg(&work).args(["-c", "user.name=t", "-c", "user.email=t@t", "branch", name, "main"]).env("GIT_COMMITTER_DATE", date).output().unwrap();
+        assert!(made.status.success());
+    }
+    let recent: Vec<String> = git::branches(&work).unwrap().by_recency().into_iter().map(|(n, _)| n).filter(|n| n.starts_with('v')).collect();
+    assert_eq!(recent, ["v1-newer", "v9-older"]);
+    for name in ["v9-older", "v1-newer"] {
+        run(&work, &["branch", "-D", name]);
+    }
 
     git::switch(&work, "alpha").unwrap();
     assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("alpha"));
@@ -3162,6 +3194,32 @@ fn the_catalogue_of_agents_holds_together() {
     for id in emaki_core::model::AgentId::ALL {
         assert!(agents::of(id).is_some(), "{}", id.as_str());
     }
+
+    // What stands beside the agents is in no list of agents, is found
+    // by its id, and says what it is to Emaki and how it is got.
+    for t in agents::tools() {
+        assert!(ids.insert(t.id) && all.iter().all(|a| a.id != t.id), "{}", t.id);
+        assert!(agents::by_id(t.id).is_some() && t.reads.is_none(), "{}", t.id);
+        assert!(!t.with_emaki.is_empty() && !t.accent.is_empty() && !t.sign_in_how.is_empty() && !t.plans.is_empty(), "{}", t.id);
+        assert!(t.download.starts_with("https://") && !t.apps.is_empty(), "{}", t.id);
+        assert!(t.install.iter().all(|w| !w.command.contains('\n') && !w.by.is_empty()), "{}", t.id);
+    }
+}
+
+/// An app with a window is found where it is installed, with no program
+/// of its name on `PATH`, and is not run to be asked its version.
+#[test]
+fn an_app_is_found_where_it_is_installed() {
+    use emaki_core::agents::{self, Agent};
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("Pretend.app");
+    let path: &'static str = Box::leak(app.to_string_lossy().into_owned().into_boxed_str());
+    let a = Agent { id: "pretend", bins: &["pretend-nowhere"], apps: Box::leak(Box::new([path])), keychain: "", ..*agents::by_id("github-desktop").unwrap() };
+    assert!(!agents::detect_in(&a, &[]).installed());
+    std::fs::create_dir(&app).unwrap();
+    let found = agents::detect_in(&a, &[]);
+    assert_eq!(found.path.as_deref(), Some(app.as_path()));
+    assert!(found.version.is_empty());
 }
 
 #[cfg(unix)]

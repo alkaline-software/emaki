@@ -42,7 +42,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, NewSessionHere, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -98,6 +98,9 @@ pub(crate) enum EditDo {
 pub(crate) enum MenuDo {
     /// Open this folder in the file manager; none when it is gone.
     OpenFolder(Option<String>),
+    /// Pin the project to the head of the sidebar's list, or let it go
+    /// back to where it stands by itself.
+    Pin(String),
     /// Give the session, by its key, a name of the person's own.
     Rename(String),
     /// Show the session's transcript in the file manager.
@@ -143,6 +146,8 @@ impl MenuDo {
         match self {
             MenuDo::Rename(_) | MenuDo::File(FileDo::Rename, _) => "icons/pencil-simple.svg",
             MenuDo::OpenFolder(_) => "icons/folder-open.svg",
+            MenuDo::Pin(_) if label.starts_with("Unpin") => "icons/pinned-off.svg",
+            MenuDo::Pin(_) => "icons/pin.svg",
             MenuDo::Reveal(_) if label.contains("Transcript") => "icons/file-text.svg",
             MenuDo::Reveal(_) | MenuDo::File(FileDo::Reveal, _) => "icons/folder-open.svg",
             MenuDo::File(FileDo::Changes, _) => "icons/git-diff.svg",
@@ -339,6 +344,13 @@ struct DragTab(String);
 /// A pill being dragged along the row, by its folder.
 #[derive(Clone)]
 struct DragPill(String);
+
+/// A pinned project being dragged to another place among the pinned.
+#[derive(Clone)]
+struct DragPin(String);
+
+/// The fewest projects the sidebar lists under the pinned ones.
+const SIDE_FOLDERS_LEAST: usize = 3;
 
 /// The plate under the showing tab: the tab it left, the one it is under,
 /// and when that changed. Each change has a number, so its move is played
@@ -898,6 +910,13 @@ pub struct Workbench {
     pub(crate) agent_open: Option<&'static str>,
     /// The system whose install commands an agent's page shows.
     pub(crate) agent_os: emaki_core::agents::Os,
+    /// The way of installing an agent's page shows, by its name; the
+    /// first there is when the system chosen has none of that name.
+    pub(crate) agent_way: &'static str,
+    /// The last change of the install step's choices.
+    pub(crate) agent_swap: Option<crate::agents_page::AgentSwap>,
+    /// How tall what the install step shows was last drawn.
+    pub(crate) agent_way_h: Rc<Cell<f32>>,
     pub(crate) agents_page_scroll: ScrollHandle,
     /// How many texts of the page have been drawn selectable in this
     /// draw: each needs a name of its own.
@@ -1298,6 +1317,19 @@ pub struct Workbench {
     /// The tab being dragged along its pill, or the pill along the row.
     drag_tab: Option<String>,
     drag_pill: Option<String>,
+    /// The projects pinned to the head of the sidebar's list, in the
+    /// order they were pinned or have been dragged to.
+    pinned: Vec<String>,
+    /// The pinned project being dragged, drawn dimmed.
+    drag_pin: Option<String>,
+    /// Small things of the sidebar that are there or are not (the mark
+    /// of a session with a tab, the line under the pinned projects), as
+    /// each was last drawn: whether it was there, when that changed and
+    /// which change it was.
+    presences: std::cell::RefCell<HashMap<String, (bool, Instant, u32)>>,
+    /// The project the line under the pinned ones was last drawn
+    /// after, so it closes where it stood when the last pin is let go.
+    pin_rule_after: std::cell::RefCell<Option<String>>,
     /// ⌘ (Ctrl elsewhere) is down by itself, as of this press (a count,
     /// so the wait begun at an earlier press does not answer for it).
     hint_press: Option<u32>,
@@ -1769,7 +1801,7 @@ impl Workbench {
         // Around the words: the card's margin, outline and padding on
         // both sides (26), then each row's own indent, icon, gaps, dot
         // and count.
-        const FOLDER_CHROME: f32 = 26. + 20. + 22. + 10. + 17. + 10.;
+        const FOLDER_CHROME: f32 = 26. + 20. + 22. + 10. + 17. + 10. + 22.;
         const SESSION_CHROME: f32 = 26. + 18. + 20. + 18. + 8. + 15.;
         let mut folders: Vec<(String, Vec<&SessionRef>)> = Vec::new();
         for r in &self.refs {
@@ -1784,7 +1816,9 @@ impl Workbench {
         // always ask for the most.
         let mut widest = 0f32;
         let mut take = |need: f32| widest = widest.max(need);
-        for (p, list) in folders.into_iter().take(SIDE_FOLDERS) {
+        let names: Vec<String> = folders.iter().map(|(p, _)| p.clone()).collect();
+        let (shown, _, _) = self.side_order(&names);
+        for (p, list) in folders.into_iter().filter(|(p, _)| shown.contains(p)) {
             take(FOLDER_CHROME + measure(&p, 13.) + measure(&list.len().to_string(), 11.));
             if self.folder_open(&p) {
                 for r in list.into_iter().take(FOLDER_ROWS) {
@@ -2034,6 +2068,7 @@ impl Workbench {
         if !cx.has_active_drag() {
             self.drag_tab = None;
             self.drag_pill = None;
+            self.drag_pin = None;
         }
         self.group_tabs();
         self.tab_shift.retain(|_, s| !s.done());
@@ -2826,6 +2861,9 @@ impl Workbench {
             agents_commands_checked: None,
             agent_open: None,
             agent_os: emaki_core::agents::Os::here(),
+            agent_way: "",
+            agent_swap: None,
+            agent_way_h: Rc::new(Cell::new(0.)),
             agents_page_scroll: ScrollHandle::new(),
             selectable_n: std::cell::Cell::new(0),
             agents_shell: false,
@@ -3149,6 +3187,10 @@ impl Workbench {
             pill_top: None,
             drag_tab: None,
             drag_pill: None,
+            pinned: ui.pinned.clone(),
+            drag_pin: None,
+            presences: std::cell::RefCell::new(HashMap::new()),
+            pin_rule_after: std::cell::RefCell::new(None),
             hint_press: None,
             hint_presses: 0,
             tab_hints: false,
@@ -3327,6 +3369,7 @@ impl Workbench {
                 cx.notify();
             }
             HubEvent::Adopted { agent, from, to } => self.adopt(agent, &from, &to, cx),
+            HubEvent::Moved { from, to } => self.follow(&from, &to, cx),
             HubEvent::DriverFailed { session_id, error } => {
                 let view = self.drivers.entry(session_id.clone()).or_default();
                 view.starting = false;
@@ -3815,6 +3858,66 @@ impl Workbench {
         cx.notify();
     }
 
+    /// The Claude Code behind a session went on to another in the same
+    /// process: `/clear` began a new one, `/resume` took up an old one.
+    /// The tab goes with it, as the terminal's screen does, and the
+    /// session left is one in the list like any other, with nothing
+    /// behind it. A new session has no prompt in it yet, which the
+    /// index lists nowhere, so it stands here as one begun does until
+    /// the index has it.
+    fn follow(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        let agent = AgentId::ClaudeCode;
+        let (old, new) = (format!("{}:{from}", agent.as_str()), format!("{}:{to}", agent.as_str()));
+        if !self.refs.iter().any(|r| key_of(r) == new) {
+            let Some(left) = self.refs.iter().find(|r| key_of(r) == old) else { return };
+            let stamp = chrono::Utc::now().to_rfc3339();
+            let title = if left.named.is_empty() { NEW_TITLE.to_string() } else { left.title.clone() };
+            let draft = SessionRef {
+                agent,
+                session_id: to.to_string(),
+                cwd: left.cwd.clone(),
+                project_dir: left.project_dir.clone(),
+                git_branch: left.git_branch.clone(),
+                named: left.named.clone(),
+                title,
+                started: stamp.clone(),
+                updated: stamp,
+                mtime: now_secs(),
+                blank: true,
+                ..Default::default()
+            };
+            self.refs.insert(0, draft.clone());
+            self.begun.push(draft);
+            self.begun_sent.insert(to.to_string());
+        }
+        // The same tab, or the one the session already had.
+        match self.tabs.iter().position(|t| *t == new) {
+            Some(_) => self.tabs.retain(|t| *t != old),
+            None => {
+                for t in self.tabs.iter_mut().filter(|t| **t == old) {
+                    *t = new.clone();
+                }
+            }
+        }
+        if self.term_open.as_deref() == Some(from) {
+            self.term_open = Some(to.to_string());
+        }
+        if self.pending_select.as_ref() == Some(&old) {
+            self.pending_select = Some(new.clone());
+        }
+        if self.selected.as_ref() == Some(&old) {
+            self.come_back = None;
+            if self.page == Page::Session {
+                self.open_session(&new, cx);
+            } else {
+                self.selected = Some(new);
+            }
+        }
+        self.hub.refresh();
+        self.save_ui(true);
+        cx.notify();
+    }
+
     /// Set what a Codex session is set to. One not started keeps it for
     /// when it is (`codex_next`); a started one is told through its
     /// driver, which is started for the purpose when none is behind it.
@@ -3886,6 +3989,16 @@ impl Workbench {
             }
         };
         self.open_and_focus(&key, window, cx);
+    }
+
+    /// ⌘T: the plus of the folder the session showing is in. Pressed
+    /// again it is the same empty session, as the plus is. With no
+    /// session showing there is no folder to mean, and it is ⌘N.
+    fn new_session_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected_ref().filter(|_| self.page == Page::Session).map(|r| r.cwd.clone()) {
+            Some(cwd) => self.new_session_in(&cwd, window, cx),
+            None => self.show_new(None, window, cx),
+        }
     }
 
     /// The session showing, when it is one begun here with nothing sent.
@@ -3985,6 +4098,14 @@ impl Workbench {
             Some("step:mode") => self.cycle_mode(cx),
             // A click on a folder in the sidebar, by its name.
             Some(t) if t.starts_with("folder:") => self.toggle_folder(&t["folder:".len()..], cx),
+            // Pin or unpin a project, and drag one pinned project onto
+            // another: `pindrag:<project>:<onto>`.
+            Some(t) if t.starts_with("pin:") => self.toggle_pin(&t["pin:".len()..], cx),
+            Some(t) if t.starts_with("pindrag:") => {
+                if let Some((project, onto)) = t["pindrag:".len()..].split_once(':') {
+                    self.drag_pin_to(project, onto, cx);
+                }
+            }
             // The right-click menu of the session showing, the field it
             // is renamed in, and a name given without the field.
             Some("menu") => {
@@ -4044,9 +4165,16 @@ impl Workbench {
             Some(t) if t.starts_with("agent:") => self.show_agents(emaki_core::agents::by_id(&t["agent:".len()..]).map(|a| a.id), cx),
             Some(t) if t.starts_with("agentos:") => {
                 if let Some(os) = emaki_core::agents::Os::parse(&t["agentos:".len()..]) {
-                    self.agent_os = os;
-                    cx.notify();
+                    self.agent_choose(Some(os), None, cx);
                 }
+            }
+            // The way of installing an agent's page shows, by its name
+            // as the catalogue has it, or "Download".
+            Some(t) if t.starts_with("agentway:") => {
+                let want = &t["agentway:".len()..];
+                let all = emaki_core::agents::all().iter().chain(emaki_core::agents::tools());
+                let way = all.flat_map(|a| a.install.iter()).map(|w| w.by).find(|by| *by == want).unwrap_or("Download");
+                self.agent_choose(None, Some(way), cx);
             }
             Some(t) if t.starts_with("sessions:") => self.show_sessions_in(Scope::All, Some(t["sessions:".len()..].to_string()), cx),
             Some("page:new") => {
@@ -4264,6 +4392,7 @@ impl Workbench {
                 v.sort();
                 v
             }),
+            pinned: self.pinned.clone(),
         }
         .save();
         self.last_ui_save = std::time::Instant::now();
@@ -4428,6 +4557,8 @@ impl Workbench {
             let untouched = |r: &emaki_core::model::Round| !r.items.iter().any(|it| !matches!(it, Item::Notice { .. }));
             match session.rounds.last() {
                 Some(last) if last.uuid == uuid && untouched(last) => session.withdrawn = session.rounds.pop(),
+                // Already taken out: the conversation showing, set again.
+                _ if session.withdrawn.as_ref().is_some_and(|w| w.uuid == uuid) => {}
                 _ => self.handed_back = None,
             }
         }
@@ -5292,6 +5423,9 @@ impl Workbench {
                     .when(!active, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
                     .when_some(family, |d, f| d.font_family(f))
                     .on_click(cx.listener(move |this, _, window, cx| on(this, key, window, cx)))
+                    // A choice of the agents page's install step has an
+                    // icon before its word, in the word's ink.
+                    .when_some(crate::agents_page::choice_icon(control, key), |d, icon| d.gap(px(4.)).child(Icon::default().path(icon).with_size(seg_text + px(1.5))))
                     .child(label)
             }));
         h_flex().relative().p(pad).rounded(round + px(2.)).bg(track_bg).flex_shrink_0().children(plate).child(row).into_any_element()
@@ -8669,9 +8803,43 @@ impl Workbench {
                 None => folders.push((p, vec![r.clone()])),
             }
         }
-        let more_folders = folders.len().saturating_sub(SIDE_FOLDERS);
-        for (p, list) in folders.into_iter().take(SIDE_FOLDERS) {
+        // The pinned projects first, in their own order, with a line
+        // under them; then the rest, as the index has them.
+        let names: Vec<String> = folders.iter().map(|(p, _)| p.clone()).collect();
+        let (shown, pinned_n, more_folders) = self.side_order(&names);
+        let mut by_name: HashMap<String, Vec<SessionRef>> = folders.into_iter().collect();
+        let folders: Vec<(String, Vec<SessionRef>)> = shown.into_iter().filter_map(|p| by_name.remove(&p).map(|list| (p, list))).collect();
+        let divided = pinned_n > 0 && folders.len() > pinned_n;
+        let rule = self.presence("pin-rule", divided, cx);
+        // The line stands after the last pinned project. Going, it
+        // closes where it stood: after the project it was last drawn
+        // after, wherever that one now is. Drawn at the head of the
+        // list instead, it pushed a project let go at the top down
+        // for a moment, and the row shook.
+        if divided {
+            *self.pin_rule_after.borrow_mut() = folders.get(pinned_n - 1).map(|(p, _)| p.clone());
+        }
+        let rule_after = self.pin_rule_after.borrow().clone().filter(|_| divided || rule.is_some());
+        let rule_line = |theme: &gpui_component::Theme| {
+            let line = div().flex_shrink_0().overflow_hidden().child(div().h(px(9.)).flex().items_center().px(px(10.)).child(div().h(px(1.)).w_full().bg(theme.sidebar_border)));
+            match rule {
+                Some((coming, serial)) => line
+                    .with_animation(ElementId::Name(format!("pin-rule-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                        let t = if coming { t } else { 1. - t };
+                        d.h(px(9. * t)).opacity(t)
+                    })
+                    .into_any_element(),
+                None => line.into_any_element(),
+            }
+        };
+        let mut before: Option<String> = None;
+        for (at, (p, list)) in folders.into_iter().enumerate() {
             let theme = cx.theme().clone();
+            if before.is_some() && before == rule_after {
+                scroll = scroll.child(rule_line(&theme));
+            }
+            before = Some(p.clone());
+            let is_pinned = at < pinned_n;
             let open = self.folder_open(&p);
             let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
             let dot = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| self.column_color(*c, cx));
@@ -8691,7 +8859,28 @@ impl Workbench {
                     .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
                     .group(group.clone())
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_folder(&name, cx)))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))], cx)))
+                    .on_mouse_down(MouseButton::Right, {
+                        let project = p.clone();
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let pin = if this.pinned.contains(&project) { "Unpin Project" } else { "Pin Project" };
+                            this.open_menu(ev.position, vec![(pin, MenuDo::Pin(project.clone())), (crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))], cx)
+                        })
+                    })
+                    // A pinned project is dragged onto another pinned
+                    // one to take its place.
+                    .when(is_pinned, |d| {
+                        let (dragged, ghost, onto) = (p.clone(), p.clone(), p.clone());
+                        d.on_drag(DragPin(dragged), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone()))).on_drag_move::<DragPin>(cx.listener(move |this, e: &DragMoveEvent<DragPin>, _, cx| {
+                            let project = e.drag(cx).0.clone();
+                            if project != onto && e.bounds.contains(&e.event.position) {
+                                this.drag_pin_to(&project, &onto, cx);
+                            } else if this.drag_pin.as_deref() != Some(project.as_str()) {
+                                this.drag_pin = Some(project);
+                                cx.notify();
+                            }
+                        }))
+                    })
+                    .when(self.drag_pin.as_deref() == Some(p.as_str()), |d| d.opacity(0.4))
                     .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(p.clone()))
                     .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
@@ -8701,13 +8890,41 @@ impl Workbench {
                     .child(
                         div()
                             .relative()
-                            .min_w(px(18.))
+                            .min_w(px(40.))
                             .h(px(18.))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
                             .justify_end()
                             .child(div().text_size(px(11.)).text_color(theme.muted_foreground).when(plus_cwd.is_some(), |d| d.group_hover(group.clone(), |s| s.opacity(0.))).child(list.len().to_string()))
+                            // The pin, left of the plus and shown with
+                            // it: the room for both is always kept.
+                            .child({
+                                let project = p.clone();
+                                div()
+                                    .id(SharedString::from(format!("folder-pin-{p}")))
+                                    .absolute()
+                                    .right(px(22.))
+                                    .top_0()
+                                    .size(px(18.))
+                                    .rounded(px(5.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    // A pinned project wears its pin
+                                    // always; the others show one under
+                                    // the pointer.
+                                    .when(!is_pinned, |d| d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)))
+                                    .text_color(theme.muted_foreground)
+                                    .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
+                                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if is_pinned { "Unpin project" } else { "Pin project" }).build(window, cx))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        swallow_click(window, cx);
+                                        cx.stop_propagation();
+                                        this.toggle_pin(&project, cx);
+                                    }))
+                                    .child(Icon::default().path(if is_pinned { "icons/pin-filled.svg" } else { "icons/pin.svg" }).with_size(px(13.)))
+                            })
                             .when_some(plus_cwd, |d, cwd| {
                                 d.child(
                                     div()
@@ -8723,8 +8940,11 @@ impl Workbench {
                                         .opacity(0.)
                                         .group_hover(group.clone(), |s| s.opacity(1.))
                                         .text_color(theme.muted_foreground)
-                                        .hover(|s| s.bg(theme.border).text_color(theme.foreground))
-                                        .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("New session here").build(window, cx))
+                                        // The row under it is already tinted by the
+                                        // pointer: in the light theme the border's
+                                        // colour was that tint again.
+                                        .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
+                                        .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("New session here (⌘T in its project)").build(window, cx))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             swallow_click(window, cx);
                                             cx.stop_propagation();
@@ -8742,11 +8962,17 @@ impl Workbench {
             }
             // The sessions, in a box whose height is the sum of its rows,
             // so opening and closing can run that height up and down.
-            let more = list.len().saturating_sub(FOLDER_ROWS);
+            // The newest few, and under them any older one with a tab:
+            // a session opened from further back is in the list while
+            // its tab is, and leaves with it.
+            let tabbed: Vec<SessionRef> = list.iter().skip(FOLDER_ROWS).filter(|r| self.tabs.contains(&key_of(r))).cloned().collect();
+            let total = list.len();
+            let list: Vec<SessionRef> = list.into_iter().take(FOLDER_ROWS).chain(tabbed).collect();
+            let more = total - list.len();
             let mut body = v_flex().overflow_hidden();
             let mut body_h = 0.;
             let mut last_bucket = "";
-            self.side_rows_changed(&p, list.iter().take(FOLDER_ROWS).map(|r| SideRow { key: key_of(r), title: r.title.clone(), agent: r.agent }).collect(), cx);
+            self.side_rows_changed(&p, list.iter().map(|r| SideRow { key: key_of(r), title: r.title.clone(), agent: r.agent }).collect(), cx);
             // A row that has just gone, shrinking away where it stood.
             let ghosts = |after: Option<&str>| -> Vec<AnyElement> {
                 self.side_gone
@@ -8772,9 +8998,11 @@ impl Workbench {
                     .collect()
             };
             body = body.children(ghosts(None));
-            for r in list.into_iter().take(FOLDER_ROWS) {
+            for (nth, r) in list.into_iter().enumerate() {
                 let b = bucket(r.mtime);
-                if b != last_bucket {
+                // An older one with a tab stands straight under the
+                // last row, with no heading of its own to come and go.
+                if b != last_bucket && nth < FOLDER_ROWS {
                     let h = if last_bucket.is_empty() { 18. } else { 24. };
                     body = body.child(h_flex().h(px(h)).flex_shrink_0().items_end().pl(px(42.)).pb(px(2.)).text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.7)).child(b));
                     body_h += h;
@@ -8788,9 +9016,27 @@ impl Workbench {
                 let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
                 let menu_key = key.clone();
                 let (born, after) = (self.side_born.borrow().contains_key(&key), key.clone());
+                // A session with a tab wears a bar at its row's left,
+                // in the accent for the one showing.
+                let tabbed = self.tabs.contains(&key);
+                let mark = (tabbed, self.presence(&format!("tab-{key}"), tabbed, cx));
+                let mark = (mark.0 || mark.1.is_some()).then(|| {
+                    let bar = div().absolute().left(px(-8.)).top(px((f32::from(SIDE_SESSION_H) - 14.) / 2.)).w(px(3.)).h(px(14.)).rounded_full().bg(if active { theme.primary } else { theme.muted_foreground.opacity(0.55) });
+                    match mark.1 {
+                        Some((coming, serial)) => bar
+                            .with_animation(ElementId::Name(format!("tab-mark-{key}-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                                let t = if coming { t } else { 1. - t };
+                                d.h(px(14. * t)).top(px((f32::from(SIDE_SESSION_H) - 14. * t) / 2.)).opacity(t)
+                            })
+                            .into_any_element(),
+                        None => bar.into_any_element(),
+                    }
+                });
                 let row =
                     h_flex()
                         .id(SharedString::from(format!("recent-{key}")))
+                        .relative()
+                        .children(mark)
                         .h(SIDE_SESSION_H)
                         .flex_shrink_0()
                         .ml(px(18.))
@@ -8981,6 +9227,72 @@ impl Workbench {
         self.save_ui(false);
     }
 
+    /// The projects the sidebar lists, of all there are in the order
+    /// the index has them (the newest first): the pinned ones in their
+    /// own order, then the rest as they stand. Also how many are pinned
+    /// and how many are left out. A pinned project is only moved, so
+    /// one let go is back where it stands by itself.
+    fn side_order(&self, natural: &[String]) -> (Vec<String>, usize, usize) {
+        let mut shown: Vec<String> = self.pinned.iter().filter(|p| natural.contains(p)).cloned().collect();
+        let pinned = shown.len();
+        let room = SIDE_FOLDERS.saturating_sub(pinned).max(SIDE_FOLDERS_LEAST);
+        let rest: Vec<String> = natural.iter().filter(|n| !self.pinned.contains(n)).take(room).cloned().collect();
+        let more = natural.len() - pinned - rest.len();
+        shown.extend(rest);
+        (shown, pinned, more)
+    }
+
+    /// Pin a project under the ones pinned before it, or let it go.
+    fn toggle_pin(&mut self, project: &str, cx: &mut Context<Self>) {
+        match self.pinned.iter().position(|p| p == project) {
+            Some(ix) => {
+                self.pinned.remove(ix);
+            }
+            None => self.pinned.push(project.to_string()),
+        }
+        self.save_ui(true);
+        cx.notify();
+    }
+
+    /// A pinned project dragged onto another takes its place, the
+    /// others closing up behind it.
+    fn drag_pin_to(&mut self, project: &str, onto: &str, cx: &mut Context<Self>) {
+        if self.drag_pin.as_deref() != Some(project) {
+            self.drag_pin = Some(project.to_string());
+            cx.notify();
+        }
+        let (Some(from), Some(to)) = (self.pinned.iter().position(|p| p == project), self.pinned.iter().position(|p| p == onto)) else { return };
+        if from != to {
+            let moved = self.pinned.remove(from);
+            self.pinned.insert(to, moved);
+            self.save_ui(true);
+            cx.notify();
+        }
+    }
+
+    /// How something small in the sidebar stands at this draw, asked at
+    /// every draw whether it is there or not, so a change is seen as
+    /// one: whether it is coming, and the number of the change, while
+    /// it moves; nothing at rest. What was never drawn before is not
+    /// played. One going is drawn until its time is up, and once more
+    /// then as nothing.
+    fn presence(&self, id: &str, on: bool, cx: &mut Context<Self>) -> Option<(bool, u32)> {
+        let mut all = self.presences.borrow_mut();
+        let now = Instant::now();
+        let p = all.entry(id.to_string()).or_insert_with(|| (on, now.checked_sub(FOLD_ANIM * 2).unwrap_or(now), 0));
+        if p.0 != on {
+            *p = (on, now, p.2 + 1);
+            if !on {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(FOLD_ANIM + Duration::from_millis(20)).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        }
+        (p.2 > 0 && p.1.elapsed() < FOLD_ANIM).then_some((on, p.2))
+    }
+
     fn toggle_folder(&mut self, project: &str, cx: &mut Context<Self>) {
         let open = self.folders_open.get_or_insert_with(HashSet::new);
         self.folders_auto.remove(project);
@@ -9111,6 +9423,7 @@ impl Workbench {
         match what {
             MenuDo::OpenFolder(Some(cwd)) => crate::sys::open_path(std::path::Path::new(&cwd)),
             MenuDo::OpenFolder(None) => self.notice = Some(Notice::error(FOLDER_GONE)),
+            MenuDo::Pin(project) => self.toggle_pin(&project, cx),
             MenuDo::Reveal(path) => crate::sys::reveal_path(&path),
             MenuDo::File(what, path) => self.file_do(what, path, window, cx),
             MenuDo::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
@@ -13293,6 +13606,7 @@ impl Render for Workbench {
                 this.hub.refresh();
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
+            .on_action(cx.listener(|this, _: &NewSessionHere, window, cx| this.new_session_here(window, cx)))
             .on_action(cx.listener(|this, _: &NewBranch, window, cx| this.branch_new_open(None, window, cx)))
             .on_action(cx.listener(|this, _: &GoAgents, _, cx| this.show_agents(None, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {

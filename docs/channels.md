@@ -253,6 +253,22 @@ no thirty-second repeat drop, and a slash command runs. A screen that is
 something else for five seconds is put in front of the person
 (`HubEvent::TerminalNeeded`).
 
+**Going on to another session.** Claude Code can leave a session
+without ending: `/clear` begins a new one in the same process, under a
+new id, and `/resume` takes up an old one. The process's registry record
+takes the new id about half a second after the command, with no moment
+without one (2.1.296). `Hub::follow_terminals` reads that at every look
+at the registry and moves the terminal to the session it is on now
+(`HubEvent::Moved`); the thread that reports the screen asks which
+session that is each time. `Workbench::follow` moves the tab with it. A
+session `/clear` began has nothing said in it, which the index lists
+nowhere, so it stands as a session begun here does until the index has
+it, under the name the old one was given if it was given one. The
+session left stays in the list with nothing behind it, and is resumed
+like any other. Kept under the id it was started on, the terminal had no
+record there, what was typed was answered in a transcript nobody was
+reading, and the conversation went dead after `/clear`.
+
 **Letting go.** `reap_terminals` drops one whose child is gone, or that
 is not showing and idle past `driver.idle_min`; all go at quit. One that
 dies by itself is said once under the composer with the last line of its

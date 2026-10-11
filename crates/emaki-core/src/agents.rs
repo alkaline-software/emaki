@@ -106,6 +106,17 @@ pub struct Agent {
     pub docs: &'static str,
     /// The adapter that reads its sessions, when there is one.
     pub reads: Option<AgentId>,
+    /// For an app with a window and no program on `PATH`: where it is
+    /// installed, a path a system. Looked for after `bins`.
+    pub apps: &'static [&'static str],
+    /// Where an installer is downloaded, for one got that way first.
+    pub download: &'static str,
+    /// What having it does for Emaki, for something that is not an
+    /// agent; empty for an agent, whose page says what is read of it.
+    pub with_emaki: &'static str,
+    /// The accent of `look::ACCENTS` it wears where it has no agent's
+    /// colour; empty for the window's own.
+    pub accent: &'static str,
 }
 
 impl Agent {
@@ -125,7 +136,14 @@ pub fn all() -> &'static [Agent] {
 }
 
 pub fn by_id(id: &str) -> Option<&'static Agent> {
-    ALL.iter().find(|a| a.id == id)
+    ALL.iter().chain(TOOLS).find(|a| a.id == id)
+}
+
+/// What is worth having beside the agents and is not one: it has a
+/// card and a page as an agent has, is looked for the same way, and is
+/// in no list of agents.
+pub fn tools() -> &'static [Agent] {
+    TOOLS
 }
 
 /// The catalogue's entry for an agent whose sessions are read.
@@ -158,6 +176,10 @@ const ALL: &[Agent] = &[
         site: "https://claude.com/product/claude-code",
         docs: "https://code.claude.com/docs",
         reads: Some(AgentId::ClaudeCode),
+        apps: &[],
+        download: "",
+        with_emaki: "",
+        accent: "",
     },
     Agent {
         id: "codex",
@@ -182,8 +204,36 @@ const ALL: &[Agent] = &[
         site: "https://developers.openai.com/codex",
         docs: "https://developers.openai.com/codex/cli",
         reads: Some(AgentId::Codex),
+        apps: &[],
+        download: "",
+        with_emaki: "",
+        accent: "",
     },
 ];
+
+const TOOLS: &[Agent] = &[Agent {
+    id: "github-desktop",
+    name: "GitHub Desktop",
+    maker: "GitHub",
+    about: "GitHub's app for git. Sign in once in a window, then clone, commit, push and pull a project without a command line.",
+    bins: &["github-desktop"],
+    install: &[Way { os: MAC, by: "Homebrew", command: "brew install --cask github" }, Way { os: WINDOWS, by: "winget", command: "winget install github-desktop" }],
+    sign_in: "",
+    sign_in_how: "Open GitHub Desktop and choose Settings, then Accounts, then Sign in to GitHub.com (Options under File on Windows). A browser opens to finish.",
+    plans: "Takes any GitHub account. A free one will do.",
+    key_env: &[],
+    home: "",
+    signed: &[],
+    keychain: "GitHub - https://api.github.com",
+    version_arg: "",
+    site: "https://desktop.github.com",
+    docs: "https://docs.github.com/desktop",
+    reads: None,
+    apps: &["/Applications/GitHub Desktop.app", "~/Applications/GitHub Desktop.app", "%LOCALAPPDATA%/GitHubDesktop/GitHubDesktop.exe"],
+    download: "https://desktop.github.com/download/",
+    with_emaki: "Emaki's branch list and its changes work on the same repository GitHub Desktop does, and each sees what the other did. Changes set aside at a branch switch are kept under GitHub Desktop's own name for them, so either app can bring them back. Its sign-in is its own: when Emaki's Fetch or Publish is refused, the sheet that comes up says how to give git one too.",
+    accent: "violet",
+}];
 
 /// What looking for one agent found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -230,7 +280,18 @@ pub fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// The agent's program in `dirs`, the first there is.
+/// A path of the catalogue's with what stands for a folder filled in:
+/// "~", and on Windows a variable between percent signs. None when the
+/// variable is not set, as on a system the path is not for.
+fn app_path(path: &str) -> Option<PathBuf> {
+    match path.strip_prefix('%').and_then(|rest| rest.split_once('%')) {
+        Some((var, rest)) => std::env::var_os(var).map(|v| PathBuf::from(v).join(rest.trim_start_matches('/'))),
+        None => Some(paths::expand_tilde(path)),
+    }
+}
+
+/// The agent's program in `dirs`, the first there is; for an app, where
+/// it is installed.
 pub fn find_in(agent: &Agent, dirs: &[PathBuf]) -> Option<PathBuf> {
     let suffixes: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ""] } else { &[""] };
     for dir in dirs {
@@ -243,7 +304,7 @@ pub fn find_in(agent: &Agent, dirs: &[PathBuf]) -> Option<PathBuf> {
             }
         }
     }
-    None
+    agent.apps.iter().filter_map(|a| app_path(a)).find(|p| p.exists())
 }
 
 /// The dotted number in what a `--version` printed: "2.1.3 (Claude
@@ -320,7 +381,8 @@ pub fn detect_in(agent: &Agent, dirs: &[PathBuf]) -> Found {
     let path = find_in(agent, dirs);
     let home = !agent.home.is_empty() && paths::expand_tilde(agent.home).is_dir();
     let (version, signed) = match &path {
-        Some(p) => (version_of(p, agent.version_arg, dirs), signed_in(agent)),
+        // An app is not asked its version: run, it would open its window.
+        Some(p) => (if agent.version_arg.is_empty() { String::new() } else { version_of(p, agent.version_arg, dirs) }, signed_in(agent)),
         None => (String::new(), false),
     };
     Found { path, version, home, signed }
@@ -332,7 +394,7 @@ pub fn detect_in(agent: &Agent, dirs: &[PathBuf]) -> Found {
 pub fn detect_all() -> Vec<(&'static str, Found)> {
     let dirs = search_dirs();
     std::thread::scope(|s| {
-        let jobs: Vec<_> = ALL.iter().map(|a| (a.id, s.spawn(|| detect_in(a, &dirs)))).collect();
+        let jobs: Vec<_> = ALL.iter().chain(TOOLS).map(|a| (a.id, s.spawn(|| detect_in(a, &dirs)))).collect();
         jobs.into_iter().map(|(id, j)| (id, j.join().unwrap_or_default())).collect()
     })
 }
@@ -376,7 +438,7 @@ fn published(url: &str) -> Option<bool> {
 /// it cannot say a maker now recommends another, which only a new
 /// release of the catalogue does.
 pub fn stale_commands() -> Vec<&'static str> {
-    let asked: Vec<(&'static str, String)> = ALL.iter().flat_map(|a| a.install.iter()).filter_map(|w| source_of(w).map(|u| (w.command, u))).collect();
+    let asked: Vec<(&'static str, String)> = ALL.iter().chain(TOOLS).flat_map(|a| a.install.iter()).filter_map(|w| source_of(w).map(|u| (w.command, u))).collect();
     std::thread::scope(|s| {
         let jobs: Vec<_> = asked.iter().map(|(command, url)| (*command, s.spawn(|| published(url)))).collect();
         jobs.into_iter().filter_map(|(command, j)| (j.join().ok().flatten() == Some(false)).then_some(command)).collect()
