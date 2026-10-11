@@ -605,6 +605,25 @@ const PLAN_BOX_H: Pixels = px(360.);
 /// one of its own.
 const NEW_TITLE: &str = "New Session";
 
+/// The round a message sent from here stands in until the transcript has
+/// it, by its `uuid`. No row has this one.
+pub const OUTGOING: &str = "outgoing";
+
+/// A message as it left the window, shown until the transcript shows it.
+/// An agent takes a moment to write a prompt down, and one that has to
+/// be started first takes a second or more: the conversation showed
+/// nothing for that long, and a new session a bare pane.
+pub struct Outgoing {
+    text: String,
+    attached: Vec<Attachment>,
+    /// When it was sent, and how many rounds the conversation had then:
+    /// a round after those is the message, written.
+    at: f64,
+    base: usize,
+    /// Why it did not go, when it did not.
+    pub error: String,
+}
+
 /// Why nothing that needs Claude Code is done on a session begun here
 /// and not yet sent to: there is none behind it until then.
 const DRAFT_WAITS: &str = "send a first message to start this session";
@@ -1130,6 +1149,10 @@ pub struct Workbench {
     /// The last message sent from here, with the tab it went to and what
     /// was attached, so a stopped turn can hand it back whole.
     last_sent: Option<(String, String, Vec<Attachment>)>,
+    /// Messages sent from here that their transcripts do not have yet,
+    /// by tab: each is drawn at the conversation's end from the moment
+    /// it is sent (`wear_outgoing`), and marked when it did not go.
+    pub(crate) outgoing: HashMap<String, Outgoing>,
     /// The session that was showing and working at the last index, to
     /// notice the moment it is stopped.
     was_working: Option<String>,
@@ -1190,6 +1213,22 @@ pub struct Workbench {
     pub(crate) conv_min: Rc<Cell<Pixels>>,
     /// How wide the composer's row was last drawn.
     composer_row_w: Rc<Cell<Pixels>>,
+    /// What the conversation needs, as last measured with room to
+    /// spare. `conv_min` is raised while the row is squeezed, which it
+    /// is for a moment whenever two panes are in motion at once; what
+    /// puts a pane away for good goes by this one, which that does not
+    /// move.
+    pub(crate) conv_need: Rc<Cell<Pixels>>,
+    /// The terminal was put away because the window was dragged too
+    /// narrow for it and the panel at the left. Its room still counts
+    /// against the sidebar, or the sidebar came back into the room the
+    /// terminal left and went again a few points on. Until the window
+    /// is wide enough for both again, or a panel's button is pressed.
+    pub(crate) term_folded: bool,
+    /// A probe's steps: say where the panes stand at the next draw, and
+    /// put the keyboard in the terminal as a click on it does.
+    pending_panes: bool,
+    pending_term_focus: bool,
     /// The pane the current scroll gesture began in, and when its last event
     /// came; see `route_scroll`.
     scroll_owner: Option<Pane>,
@@ -1212,6 +1251,16 @@ pub struct Workbench {
     pub(crate) sidebar_w: Pixels,
     /// The sidebar's edge is being dragged.
     side_drag: bool,
+    /// The sidebar beside the content, and over it on the scrim, as
+    /// each was at the last draw; and each one's coming or going: which,
+    /// since when, and whether it was floating there already, so it
+    /// stays where it is and only what is around it moves.
+    side_was: Option<bool>,
+    peek_was: bool,
+    side_anim: Option<(bool, Instant, bool)>,
+    peek_anim: Option<(bool, Instant, bool)>,
+    /// The press that kept a floating sidebar, until the next draw.
+    float_kept: bool,
     /// `EMAKI_GO=sidefit` asked for the fitted width at the next draw.
     fit_wanted: bool,
     /// The sidebar is folded away and showing over the content because the
@@ -1287,10 +1336,9 @@ pub struct Workbench {
     pub(crate) side_term_agent: bool,
     pub(crate) side_term_w: Pixels,
     pub(crate) side_term_drag: bool,
-    /// The window is too narrow for the files or the outline, or for the
-    /// terminal, beside a conversation at its least: not drawn for now.
-    pub(crate) fold_left: bool,
-    pub(crate) fold_term: bool,
+    /// The Explain button last pressed, and when: its change of state
+    /// is the one drawn in motion.
+    pub(crate) explain_flip: Option<(String, Instant)>,
     pub(crate) side_term_focus: FocusHandle,
     /// The side that showed before the last press and the one after,
     /// when, and which press that was.
@@ -1441,6 +1489,9 @@ pub struct Workbench {
     pub(crate) pending_save: bool,
     /// `EMAKI_GO=cell:<row>,<col>` and `cell:type:<words>`, likewise.
     pub(crate) pending_cell: Option<String>,
+    /// A probe's step (`winw:<w>`): the window is made that wide at the
+    /// next draw, as a drag of its edge would.
+    pending_win_w: Option<f32>,
     /// `EMAKI_GO=treefocus`: the keyboard to the files panel, at the next draw.
     pub(crate) pending_tree_focus: bool,
     /// `EMAKI_GO=newin:<folder>`: the plus on that folder, at the next draw.
@@ -1546,6 +1597,22 @@ pub fn key_of(r: &SessionRef) -> String {
     format!("{}:{}", r.agent.as_str(), r.session_id)
 }
 
+/// What was attached in the composer, as a round carries it.
+fn as_sent(attached: &[Attachment]) -> Vec<emaki_core::model::Attachment> {
+    attached
+        .iter()
+        .filter(|a| a.path.is_file())
+        .map(|a| emaki_core::model::Attachment {
+            kind: if a.image { "image".into() } else { "file".into() },
+            path: a.path.to_string_lossy().to_string(),
+            name: a.name.clone(),
+            media_type: a.mime.clone(),
+            size: std::fs::metadata(&a.path).map(|m| m.len()).unwrap_or(0),
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// Swallow a click without leaving the toolkit's text selection mid-drag.
 /// gpui-component's window selection layer begins a drag on every left
 /// mouse-down and ends it on the bubble-phase mouse-up; a click handler that
@@ -1639,6 +1706,9 @@ fn file_tail(path: &str, bytes: u64, lines: usize) -> Option<String> {
 
 /// Narrower than this, the sidebar no longer sits beside the content.
 const NARROW_W: Pixels = px(880.);
+/// How far past the width the terminal was put away at the window is
+/// dragged back before the sidebar may have its room (`term_folded`).
+const FOLD_SLACK: Pixels = px(40.);
 
 impl Workbench {
     /// Show the sidebar: beside the content when there is room, over it
@@ -1769,6 +1839,7 @@ impl Workbench {
         if self.sidebar_float {
             self.sidebar_float = false;
             self.float_anim = None;
+            self.float_kept = true;
             self.show_sidebar();
         } else if self.sidebar_pinned() {
             self.hide_sidebar();
@@ -2180,17 +2251,56 @@ impl Workbench {
     /// The sidebar over the content, for a narrow window: a scrim that any
     /// click closes, so choosing a session in it also puts it away.
     fn render_sidebar_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // The scrim comes up and the sidebar slides in from the edge,
+        // and they go the way they came. A sidebar that was floating
+        // there stays where it is.
+        let t = Self::shown_t(self.peek_anim, self.sidebar_peek);
+        let slid = if matches!(self.peek_anim, Some((true, _, true))) { 1. } else { t };
         div()
             .id("sidebar-scrim")
             .absolute()
             .inset_0()
             .occlude()
-            .bg(gpui::black().opacity(0.25))
+            .bg(gpui::black().opacity(0.25 * t))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.sidebar_peek = false;
                 cx.notify();
             }))
-            .child(div().absolute().left_0().top_0().h_full().w(self.sidebar_w).shadow_lg().child(self.render_sidebar(cx)))
+            .child(div().absolute().left(self.sidebar_w * (slid - 1.)).top_0().h_full().w(self.sidebar_w).shadow_lg().child(self.render_sidebar(cx)))
+    }
+
+    /// How far something is shown, from 0 to 1, by its coming or going
+    /// (`side_anim`, `peek_anim`) and where it rests. Drawn off the
+    /// clock: the sidebar's width is not one element's to animate, the
+    /// top strip, the panels and their edges all stand by it.
+    fn shown_t(anim: Option<(bool, Instant, bool)>, rest: bool) -> f32 {
+        match anim {
+            Some((coming, at, _)) if at.elapsed() < FLOAT_ANIM => {
+                let t = ease_out_quint()(at.elapsed().as_secs_f32() / FLOAT_ANIM.as_secs_f32());
+                if coming { t } else { 1. - t }
+            }
+            _ => if rest { 1. } else { 0. },
+        }
+    }
+
+    /// How much of the sidebar is beside the content, from 0 to 1.
+    pub(crate) fn side_t(&self) -> f32 {
+        Self::shown_t(self.side_anim, self.sidebar_open && !self.narrow)
+    }
+
+    /// The room the sidebar takes of the row as it is drawn now.
+    pub(crate) fn side_w_now(&self) -> Pixels {
+        self.sidebar_w * self.side_t()
+    }
+
+    /// A change in whether something shows starts its coming or going,
+    /// from as far as the one before had got.
+    fn turn(anim: &mut Option<(bool, Instant, bool)>, coming: bool, kept: bool) {
+        let done = match *anim {
+            Some((_, at, _)) if at.elapsed() < FLOAT_ANIM => FLOAT_ANIM - at.elapsed(),
+            _ => Duration::ZERO,
+        };
+        *anim = Some((coming, Instant::now().checked_sub(done).unwrap_or_else(Instant::now), kept));
     }
 }
 
@@ -2835,6 +2945,7 @@ impl Workbench {
             limits_read: now_secs(),
             ctx_watch_until: 0.0,
             last_sent: None,
+            outgoing: HashMap::new(),
             was_working: None,
             handed_back: None,
             issues: Vec::new(),
@@ -2860,6 +2971,10 @@ impl Workbench {
             pane_w: px(1180.),
             conv_min: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
             composer_row_w: Rc::new(Cell::new(px(0.))),
+            conv_need: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
+            term_folded: false,
+            pending_panes: false,
+            pending_term_focus: false,
             settings_scroll: ScrollHandle::new(),
             seg_bounds: Rc::new(std::cell::RefCell::new(HashMap::new())),
             seg_state: std::cell::RefCell::new(HashMap::new()),
@@ -2883,8 +2998,7 @@ impl Workbench {
             side_term_agent: ui.term_agent.unwrap_or(false),
             side_term_w: px(ui.term_w.unwrap_or(f32::from(crate::term_panel::TERM_W))),
             side_term_drag: false,
-            fold_left: false,
-            fold_term: false,
+            explain_flip: None,
             side_term_focus: cx.focus_handle(),
             side_term_anim: None,
             side_term_poll: None,
@@ -2953,6 +3067,7 @@ impl Workbench {
             pending_edit: None,
             pending_save: false,
             pending_cell: None,
+            pending_win_w: None,
             pending_tree_focus: false,
             pending_new_in: None,
             pending_answer: None,
@@ -3012,6 +3127,11 @@ impl Workbench {
             side_drag: false,
             fit_wanted: false,
             sidebar_float: false,
+            side_was: None,
+            peek_was: false,
+            side_anim: None,
+            peek_anim: None,
+            float_kept: false,
             float_block: false,
             float_anim: None,
             stashed: HashMap::new(),
@@ -3208,10 +3328,11 @@ impl Workbench {
             }
             HubEvent::Adopted { agent, from, to } => self.adopt(agent, &from, &to, cx),
             HubEvent::DriverFailed { session_id, error } => {
-                let view = self.drivers.entry(session_id).or_default();
+                let view = self.drivers.entry(session_id.clone()).or_default();
                 view.starting = false;
                 view.state = "exited".into();
                 view.error = error.clone();
+                self.fail_outgoing(&session_id, &error);
                 self.notice = Some(Notice::error(format!("could not start the agent: {error}")));
                 cx.notify();
             }
@@ -3220,6 +3341,7 @@ impl Workbench {
                 // which says it better than a "sent" would; only what did
                 // not go, or is waiting, is worth a line.
                 if !error.is_empty() {
+                    self.fail_outgoing(&session_id, &error);
                     self.notice = Some(Notice::error(format!("not sent: {error}")));
                 } else if queued {
                     self.notice = Some(Notice::said("queued behind the running turn"));
@@ -3382,6 +3504,7 @@ impl Workbench {
     pub fn toggle_explain(&mut self, call_id: &str, name: &str, input: &serde_json::Map<String, serde_json::Value>, has_text: bool, cx: &mut Context<Self>) {
         self.pin_scroll();
         let Some(d) = self.detail.as_mut() else { return };
+        self.explain_flip = Some((call_id.to_string(), Instant::now()));
         if d.open_explanations.remove(call_id) {
             cx.notify();
             return;
@@ -3674,6 +3797,13 @@ impl Workbench {
         }
         if let Some((key, _, _)) = self.last_sent.as_mut().filter(|(k, _, _)| *k == old) {
             *key = new.clone();
+        }
+        // The conversation showing, and the message waiting in it.
+        if let Some(d) = self.detail.as_mut().filter(|d| d.key == old) {
+            d.key = new.clone();
+        }
+        if let Some(out) = self.outgoing.remove(&old) {
+            self.outgoing.insert(new.clone(), out);
         }
         for (sid, _) in self.permissions.iter_mut().filter(|(s, _)| s == from) {
             *sid = to.to_string();
@@ -3984,6 +4114,18 @@ impl Workbench {
             }
             // A click on the head of the last tool call that is not in
             // a folded run: it opens, and is brought into view.
+            Some("panes") => {
+                self.pending_panes = true;
+                cx.notify();
+            }
+            Some("termfocus") => {
+                self.pending_term_focus = true;
+                cx.notify();
+            }
+            Some(t) if t.starts_with("winw:") => {
+                self.pending_win_w = t["winw:".len()..].parse().ok();
+                cx.notify();
+            }
             Some("toolopen") => {
                 self.pin_scroll();
                 if let Some(d) = self.detail.as_mut() {
@@ -4057,6 +4199,7 @@ impl Workbench {
     pub fn close_tab(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.tabs.iter().position(|t| t == key) else { return };
         self.tabs.remove(ix);
+        self.outgoing.remove(key);
         // A session begun here with nothing sent goes with its tab.
         if let Some(id) = self.begun.iter().find(|d| key_of(d) == key).map(|d| d.session_id.clone()).filter(|id| !self.begun_sent.contains(id)) {
             self.begun.retain(|d| d.session_id != id);
@@ -4216,21 +4359,66 @@ impl Workbench {
         if !rnd.attachments.is_empty() || rnd.prompt.trim() != text.trim() {
             return;
         }
-        rnd.attachments = attached
-            .iter()
-            .filter(|a| a.path.is_file())
-            .map(|a| emaki_core::model::Attachment {
-                kind: if a.image { "image".into() } else { "file".into() },
-                path: a.path.to_string_lossy().to_string(),
-                name: a.name.clone(),
-                media_type: a.mime.clone(),
-                size: std::fs::metadata(&a.path).map(|m| m.len()).unwrap_or(0),
-                ..Default::default()
-            })
-            .collect();
+        rnd.attachments = as_sent(attached);
+    }
+
+    /// A message sent from here stands at the conversation's end until
+    /// the transcript has it: a round written since, or the prompt
+    /// withdrawn by a stop. Then the transcript's own round is in its
+    /// place, at the same item of the list.
+    fn wear_outgoing(&mut self, key: &str, session: &mut Session) {
+        let Some(out) = self.outgoing.get(key) else { return };
+        let since = |r: &emaki_core::model::Round| chrono::DateTime::parse_from_rfc3339(&r.ts).map_or(true, |t| t.timestamp_millis() as f64 / 1000.0 >= out.at - 1.0);
+        let written = session.rounds.iter().skip(out.base).any(|r| r.source != emaki_core::model::Source::System && since(r)) || session.withdrawn.as_ref().is_some_and(since);
+        if written {
+            self.outgoing.remove(key);
+            return;
+        }
+        let ts = chrono::DateTime::from_timestamp_millis((out.at * 1000.0) as i64).map(|t| t.to_rfc3339()).unwrap_or_default();
+        session.rounds.push(emaki_core::model::Round {
+            index: session.rounds.len(),
+            uuid: OUTGOING.into(),
+            end_ts: ts.clone(),
+            ts,
+            prompt: out.text.clone(),
+            source: emaki_core::model::Source::Web,
+            attachments: as_sent(&out.attached),
+            ..Default::default()
+        });
+    }
+
+    /// Show the message just sent to the session showing, before any of
+    /// it is on disk. A session started from the home page has no
+    /// conversation read yet, and gets an empty one to stand in.
+    fn show_outgoing(&mut self, text: String, attached: Vec<Attachment>) {
+        let Some(key) = self.selected.clone() else { return };
+        let (path, session) = match self.detail.as_ref().filter(|d| d.key == key) {
+            Some(d) => (d.path.clone(), (*d.session).clone()),
+            None => {
+                let Some(r) = self.selected_ref() else { return };
+                (PathBuf::new(), Session { id: r.session_id.clone(), agent: r.agent, cwd: r.cwd.clone(), ..Default::default() })
+            }
+        };
+        let base = session.rounds.iter().filter(|r| r.uuid != OUTGOING).count();
+        // A command is not a message: it has no round to wait for.
+        if text.is_empty() && attached.is_empty() || slash_command(&text).is_some() {
+            self.outgoing.remove(&key);
+        } else {
+            self.outgoing.insert(key.clone(), Outgoing { text, attached, at: now_secs(), base, error: String::new() });
+        }
+        self.set_detail(key, path, session);
+    }
+
+    /// A message did not go: its bubble says so, and stays to be copied.
+    fn fail_outgoing(&mut self, session_id: &str, error: &str) {
+        let tail = format!(":{session_id}");
+        for (_, out) in self.outgoing.iter_mut().filter(|(key, _)| key.ends_with(&tail)) {
+            out.error = error.to_string();
+        }
     }
 
     fn set_detail(&mut self, key: String, path: PathBuf, mut session: Session) {
+        session.rounds.retain(|r| r.uuid != OUTGOING);
         self.dress_queued(&key, &mut session);
         // A prompt handed back to the composer is no round, as the
         // terminal takes it off its screen: until the transcript says so
@@ -4243,6 +4431,7 @@ impl Workbench {
                 _ => self.handed_back = None,
             }
         }
+        self.wear_outgoing(&key, &mut session);
         if self.limits.refresh_from_statusline() | self.limits.absorb_codex(&session.usage_windows, session.usage_windows_at) {
             let _ = self.limits.save();
         }
@@ -7197,11 +7386,7 @@ impl Workbench {
                 };
                 self.hub.send_to_terminal(&sid, words, pictures);
                 if !new_id.is_empty() {
-                    let key = format!("claude-code:{sid}");
-                    self.pending_select = Some(key.clone());
-                    self.selected = Some(key);
-                    self.new_id = String::new();
-                    self.page = Page::Session;
+                    self.show_begun(AgentId::ClaudeCode, &sid, cx);
                     self.notice = Some(Notice::said("starting claude…"));
                 }
                 let _ = text;
@@ -7240,22 +7425,7 @@ impl Workbench {
                 self.drivers.insert(sid.clone(), DriverView { starting: true, state: "starting".into(), mode: mode.clone(), model: model.clone(), effort: effort.clone(), ..Default::default() });
                 self.hub.spawn_driver_and_send(agent, sid.clone(), cwd, resume, mode, model, effort, Some((text.clone(), images)));
                 if self.page == Page::New {
-                    let key = format!("{}:{sid}", agent.as_str());
-                    self.pending_select = Some(key.clone());
-                    self.selected = Some(key);
-                    self.new_id = String::new();
-                    self.page = Page::Session;
-                    // An agent that names its own sessions has no file
-                    // under this id: the conversation shows as begun
-                    // until the agent says which it is (`adopt`).
-                    if agent == AgentId::Codex {
-                        let stamp = chrono::Utc::now().to_rfc3339();
-                        let draft = SessionRef { agent, session_id: sid.clone(), cwd: self.new_cwd.clone(), title: NEW_TITLE.into(), started: stamp.clone(), updated: stamp, mtime: now_secs(), blank: true, ..Default::default() };
-                        self.refs.insert(0, draft.clone());
-                        self.begun.push(draft);
-                        self.begun_sent.insert(sid.clone());
-                        self.tabs.push(format!("{}:{sid}", agent.as_str()));
-                    }
+                    self.show_begun(agent, &sid, cx);
                 }
                 self.notice = Some(Notice::said(format!("starting {}…", agent.speaker().to_lowercase())));
             }
@@ -7271,9 +7441,26 @@ impl Workbench {
             self.notice = Some(Notice::said(format!("starting {}…", self.agent_now().speaker().to_lowercase())));
         }
         self.last_sent = self.selected.clone().map(|key| (key, typed.trim().to_string(), self.attachments.clone()));
+        self.show_outgoing(typed.trim().to_string(), self.attachments.clone());
         self.composer.update(cx, |s, cx| s.set_value("", window, cx));
         self.attachments.clear();
         cx.notify();
+    }
+
+    /// A session started from the home page is on its tab at once, as a
+    /// record of our own until the index has one for it (`begun`): the
+    /// agent has still to start, and to write the session's file. An
+    /// agent that names its own sessions has no file under this id at
+    /// all, and the record stands until it says which it is (`adopt`).
+    fn show_begun(&mut self, agent: AgentId, sid: &str, cx: &mut Context<Self>) {
+        let stamp = chrono::Utc::now().to_rfc3339();
+        let draft = SessionRef { agent, session_id: sid.to_string(), cwd: self.new_cwd.clone(), title: NEW_TITLE.into(), started: stamp.clone(), updated: stamp, mtime: now_secs(), blank: true, ..Default::default() };
+        let key = key_of(&draft);
+        self.refs.insert(0, draft.clone());
+        self.begun.push(draft);
+        self.begun_sent.insert(sid.to_string());
+        self.new_id = String::new();
+        self.open_session(&key, cx);
     }
 
     /// Hand a stopped turn's prompt back: its words in the composer with
@@ -7299,7 +7486,7 @@ impl Workbench {
         // click), the last round while it is still only a prompt, by the
         // rule the withdrawal goes by (`build::handle_user`).
         let untouched = |r: &&emaki_core::model::Round| !r.items.iter().any(|it| !matches!(it, Item::Notice { .. }));
-        let Some(rnd) = self.shown_session().and_then(|s| s.withdrawn.as_ref().or_else(|| s.rounds.iter().rev().find(|r| !r.queued).filter(untouched))) else {
+        let Some(rnd) = self.shown_session().and_then(|s| s.withdrawn.as_ref().or_else(|| s.rounds.iter().rev().find(|r| !r.queued && r.uuid != OUTGOING).filter(untouched))) else {
             return;
         };
         // Still a round: the stop left no marker (Escape pressed at
@@ -9580,9 +9767,12 @@ impl Workbench {
         // centred; one with buttons is as wide as they are, so the tabs
         // stand the same way off both.
         let mut left_end = h_flex().when(left.is_empty(), |d| d.min_w(px(120.))).flex_shrink_0().items_center().gap(px(6.));
-        if !self.sidebar_open || self.narrow {
-            let room = Self::strip_right() - px(4.);
-            left_end = if left.is_empty() { left_end.w(room) } else { left_end.pl(room) };
+        // The room goes as the sidebar comes, so the strip does not
+        // jump at either end of it.
+        let away = 1. - self.side_t();
+        if away > 0. {
+            let room = (Self::strip_right() - px(4.)) * away;
+            left_end = if left.is_empty() { left_end.w(room.max(px(120.))) } else { left_end.pl(room) };
         }
         let left_end = left_end.children(left);
         Self::drag_region(h_flex(), cx)
@@ -12039,12 +12229,15 @@ impl Workbench {
                         // that. With none left the row has spilled, by
                         // how much is not known, and the least is raised
                         // a step at a time until there is some.
-                        let (row_w, conv_min) = (self.composer_row_w.clone(), self.conv_min.clone());
+                        let (row_w, conv_min, conv_need) = (self.composer_row_w.clone(), self.conv_min.clone(), self.conv_need.clone());
                         let slack = canvas(
                             move |bounds, window, _| {
                                 let (row, spare) = (row_w.get(), bounds.size.width);
                                 if row <= px(0.) {
                                     return;
+                                }
+                                if spare >= px(0.5) {
+                                    conv_need.set((row - spare + COMPOSER_AROUND).max(crate::panels::CONVERSATION_MIN));
                                 }
                                 let need = if spare < px(0.5) { row + px(24.) } else { row - spare };
                                 let least = (need + COMPOSER_AROUND).max(crate::panels::CONVERSATION_MIN);
@@ -12895,34 +13088,80 @@ impl Render for Workbench {
         // Sooner where the panels beside a conversation are asked for: the
         // conversation keeps its least width, and the sidebar is the first
         // to give its room up.
+        if let Some(w) = self.pending_win_w.take() {
+            window.resize(size(px(w), window.viewport_size().height));
+        }
         let on_session = self.page == Page::Session && self.detail.is_some();
+        let vw = window.viewport_size().width;
+        // The window narrowed past where the panel at the left and the
+        // terminal both fit: the terminal is put away, always the
+        // terminal, so it is known beforehand which goes. Through
+        // `term_go`, as its button does it, or the button stayed lit.
+        let both_fit = vw >= self.conv_need.get() + crate::panels::PANEL_MIN + crate::term_panel::TERM_MIN;
+        if on_session && (self.files_on || self.outline_on) && self.side_term && !both_fit {
+            let this = cx.entity();
+            window.defer(cx, move |_, cx| {
+                this.update(cx, |this, cx| {
+                    this.term_go(None, cx);
+                    this.term_folded = true;
+                })
+            });
+        }
+        // Well past where both fit, not at it: a hand that wavers at the
+        // width the terminal went at would bring the sidebar in and out.
+        if vw >= self.conv_need.get() + crate::panels::PANEL_MIN + crate::term_panel::TERM_MIN + FOLD_SLACK {
+            self.term_folded = false;
+        }
         let want_left = on_session && (self.files_on || self.outline_on);
         let want_term = (on_session && self.side_term) || (self.page == Page::Agents && self.agent_open.is_some() && self.agents_shell);
         let want_file = on_session && self.file_view.is_some();
         let (left_min, term_min, file_min) = (if want_left { crate::panels::PANEL_MIN } else { px(0.) }, if want_term { crate::term_panel::TERM_MIN } else { px(0.) }, if want_file { crate::panels::FILE_MIN } else { px(0.) });
         let conv_min = self.conv_min.get();
         let least = conv_min + left_min + term_min;
-        let vw = window.viewport_size().width;
-        self.narrow = vw < NARROW_W || ((want_left || want_term || want_file) && vw < self.sidebar_w + least + file_min);
-        // A window too narrow even so does not draw what will not fit, the
-        // files or the outline first and then the terminal, until it is
-        // wide enough again. What was asked for is kept.
+        // The room of a terminal put away for the window's width still
+        // counts against the sidebar (`term_folded`).
+        let held = if self.term_folded && want_left { crate::term_panel::TERM_MIN } else { px(0.) };
+        self.narrow = vw < NARROW_W || ((want_left || want_term || want_file) && vw < self.sidebar_w + least + file_min + held);
+        // A window too narrow even so does not draw the file shown,
+        // until it is wide enough again. The panel at the left or the
+        // terminal always has room: the window is never narrower than
+        // the conversation and one of them (`main::MIN_W`).
         let room = vw - if self.sidebar_open && !self.narrow { self.sidebar_w } else { px(0.) };
-        // The file shown is the first not drawn.
         self.fold_file = want_file && room < least + file_min;
-        self.fold_left = want_left && room < least;
-        self.fold_term = want_term && room < conv_min + term_min;
-        if self.fold_term && want_left {
-            self.fold_left = room < conv_min + left_min;
-        }
         if !self.narrow {
             self.sidebar_peek = false;
+        }
+        // The sidebar comes and goes in motion, whoever asked: its
+        // button, the key, a window dragged narrower or wider, a panel
+        // that needed its room. Not under a drag of its own edge, where
+        // it is the pointer's, and not at the first draw.
+        let kept = std::mem::take(&mut self.float_kept);
+        let beside = self.sidebar_open && !self.narrow;
+        if self.side_was != Some(beside) {
+            if self.side_was.is_some() && !self.side_drag {
+                Self::turn(&mut self.side_anim, beside, kept);
+            }
+            self.side_was = Some(beside);
+        }
+        let peek = self.narrow && self.sidebar_peek;
+        if self.peek_was != peek {
+            Self::turn(&mut self.peek_anim, peek, kept);
+            self.peek_was = peek;
+        }
+        let moving = |a: Option<(bool, Instant, bool)>| a.is_some_and(|(_, at, _)| at.elapsed() < FLOAT_ANIM);
+        let (side_moving, peek_moving) = (moving(self.side_anim), moving(self.peek_anim));
+        if side_moving || peek_moving {
+            window.request_animation_frame();
         }
         if std::mem::take(&mut self.fit_wanted) {
             self.sidebar_w = self.sidebar_fit(window, cx);
         }
-        let sidebar_open = self.sidebar_open && !self.narrow;
-        let sidebar_peek = self.narrow && self.sidebar_peek;
+        let sidebar_open = beside && !side_moving;
+        let sidebar_peek = peek || peek_moving;
+        let side_t = self.side_t();
+        // A sidebar that was floating when it was kept is drawn where it
+        // was, over the row, while the row makes room under it.
+        let side_kept = side_moving && matches!(self.side_anim, Some((true, _, true)));
         self.sync_tab_widths(cx);
         // `EMAKI_FOCUS_DEBUG=1` prints where the keyboard is at every draw.
         if std::env::var_os("EMAKI_FOCUS_DEBUG").is_some() {
@@ -12935,9 +13174,28 @@ impl Render for Workbench {
             window.focus(&self.tree_focus, cx);
         }
         // The files panel put away with the keyboard in it: the focus
-        // goes to the window, or no shortcut would be heard.
+        // goes to the window, or no shortcut would be heard. The same
+        // for the terminal, whoever put it away: its button moved the
+        // focus itself, and one put away for the window's width or for
+        // the other panel left the keyboard in a terminal not drawn.
         if self.tree_focus.is_focused(window) && !(self.page == Page::Session && self.files_on) {
             window.focus(&self.focus_handle, cx);
+        }
+        if std::mem::take(&mut self.pending_term_focus) {
+            window.focus(&self.side_term_focus, cx);
+        }
+        if self.side_term_focus.is_focused(window) && !self.term_panel_shown() {
+            window.focus(&self.focus_handle, cx);
+        }
+        if std::mem::take(&mut self.pending_panes) {
+            eprintln!(
+                "panes: w={} sidebar={} left={} term={} keys={}",
+                f32::from(vw),
+                self.sidebar_open && !self.narrow,
+                if self.files_on { "files" } else if self.outline_on { "outline" } else { "off" },
+                self.side_term,
+                if self.side_term_focus.is_focused(window) { "terminal" } else if self.focus_handle.contains_focused(window, cx) { "window" } else { "nowhere" },
+            );
         }
         // A slide after a drag is drawn off the clock, frame by frame.
         if self.tabs_sliding() {
@@ -12945,7 +13203,7 @@ impl Render for Workbench {
         }
         self.view_w = window.viewport_size().width;
         self.view_h = window.viewport_size().height;
-        self.pane_w = window.viewport_size().width - if sidebar_open { self.sidebar_w } else { px(0.) };
+        self.pane_w = window.viewport_size().width - self.side_w_now();
         if std::mem::take(&mut self.panel_fit_wanted) {
             self.panel_w = self.panel_fit(window, cx);
         }
@@ -13091,7 +13349,12 @@ impl Render for Workbench {
             .text_color(theme.foreground)
             .text_size(px(13.))
             .child(
-                h_flex().size_full().when(sidebar_open, |d| d.child(self.render_sidebar(cx))).map(|this| match self.page {
+                // The sidebar slides in from the window's edge as its
+                // room in the row opens, and out as it closes.
+                h_flex().size_full().when(side_t > 0., |d| {
+                    let w = self.sidebar_w;
+                    d.child(div().h_full().flex_shrink_0().overflow_hidden().w((w * side_t).round()).when(!side_kept, |d| d.child(div().h_full().w(w).ml(w * (side_t - 1.)).child(self.render_sidebar(cx)))))
+                }).map(|this| match self.page {
                     Page::New => this.child(self.render_new(cx)),
                     Page::Sessions => this.child(self.render_sessions(cx)),
                     Page::Session => this.child(self.render_detail(window, cx)),
@@ -13102,6 +13365,7 @@ impl Render for Workbench {
             .children(self.render_panel_grip(cx))
             .children(self.render_file_grip(cx))
             .children(self.render_term_grip(cx))
+            .when(side_kept, |d| d.child(div().absolute().top_0().left_0().h_full().w(self.sidebar_w).child(self.render_sidebar(cx))))
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
             .children(self.render_sidebar_float(cx))
             .child(self.render_strip(cx))

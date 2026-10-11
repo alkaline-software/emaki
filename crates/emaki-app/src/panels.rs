@@ -1113,7 +1113,7 @@ impl Workbench {
 
     /// Which of the two panels is drawn: (files, outline), one at most.
     pub(crate) fn panels_shown(&self) -> (bool, bool) {
-        if self.page != Page::Session || self.detail.is_none() || self.fold_left {
+        if self.page != Page::Session || self.detail.is_none() {
             return (false, false);
         }
         (self.files_on, self.outline_on && !self.files_on)
@@ -1134,8 +1134,29 @@ impl Workbench {
     /// A panel's button was pressed: the one showing goes, and any other
     /// takes the place of the one that was.
     pub(crate) fn toggle_panel(&mut self, files: bool, cx: &mut Context<Self>) {
+        let to = (self.panel_on() != Some(files)).then_some(files);
+        // With room for one of the two beside the conversation, the
+        // terminal gives its place up.
+        if to.is_some() && self.page == Page::Session && self.side_term && !self.room_for_both() {
+            self.term_go(None, cx);
+        }
+        self.panel_go(to, cx);
+    }
+
+    /// Whether the panel at the left and the terminal both fit beside
+    /// the conversation at its least.
+    pub(crate) fn room_for_both(&self) -> bool {
+        self.view_w >= self.conv_need.get() + PANEL_MIN + crate::term_panel::TERM_MIN
+    }
+
+    /// The panel goes to the files, to the outline, or away, and the
+    /// change is drawn.
+    pub(crate) fn panel_go(&mut self, to: Option<bool>, cx: &mut Context<Self>) {
         let from = self.panel_on();
-        let to = (from != Some(files)).then_some(files);
+        if from == to {
+            return;
+        }
+        self.term_folded = false;
         self.files_on = to == Some(true);
         self.outline_on = to == Some(false);
         self.outline_at = None;
@@ -1263,7 +1284,7 @@ impl Workbench {
     /// Where the panel begins: after the sidebar when that is beside the
     /// content.
     fn panel_left(&self) -> Pixels {
-        if self.sidebar_open && !self.narrow { self.sidebar_w } else { px(0.) }
+        self.side_w_now()
     }
 
     /// The widest the panel may be dragged: the conversation keeps

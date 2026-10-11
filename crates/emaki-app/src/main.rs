@@ -172,9 +172,14 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
 }
 
 /// Where the window was last time, if that spot is still on a screen.
+/// The least the window is dragged to: the conversation at its least
+/// with one pane beside it, the wider of the two there are, so a pane
+/// asked for always has room.
+const MIN_W: Pixels = px(780.);
+
 fn remembered_bounds(cx: &App) -> Option<Bounds<Pixels>> {
     let r = ui_state::UiState::load().window?;
-    let b = Bounds { origin: point(px(r.x), px(r.y)), size: size(px(r.w.max(560.)), px(r.h.max(480.))) };
+    let b = Bounds { origin: point(px(r.x), px(r.y)), size: size(px(r.w).max(MIN_W), px(r.h.max(480.))) };
     let centre = point(b.origin.x + b.size.width / 2., b.origin.y + b.size.height / 2.);
     cx.displays().iter().any(|d| d.bounds().contains(&centre)).then_some(b)
 }
@@ -192,7 +197,7 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             titlebar: Some(titlebar),
             // Narrow enough for the sidebar to fold away (see NARROW_W) and
             // the conversation to run edge to edge, like the Claude app.
-            window_min_size: Some(size(px(560.), px(480.))),
+            window_min_size: Some(size(MIN_W, px(480.))),
             app_id: Some("emaki".into()),
             // The top strip holds tabs, which are dragged along it, so the
             // app says which presses move the window (`drag_region`).
