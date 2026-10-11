@@ -110,10 +110,15 @@ A name, three entries and a card (`render_sidebar`).
 - The strip has no line under it: the sidebar ends against the content's
   card (Layout). Its foot is still level with the foot of the card's own
   strip.
-- The sidebar stands on the window's frame and takes its colours there
-  (`render_sidebar` sets them over the theme's): the frame's ground, and
-  the ink thinned for a lit row and a line. The theme's sidebar colours
-  are the panels' beside a conversation, a shade lighter.
+- The sidebar stands on the window's frame and draws with a theme of its
+  own (`shell_theme`), as do the two buttons at the window's corner while
+  they are over it. Beside a light page the frame is near black, so that
+  theme has the dark appearance's inks and says it is dark, and whatever
+  goes by the mode picks the shade that reads there. A row is lit and a
+  line ruled in the ink thinned. Everything the sidebar draws takes its
+  colours from that theme: a toolkit button, or a `cx.theme()` inside a
+  closure, brings the page's colours onto the frame, which is how the
+  open session's row came out near white under white words.
 - New session, All Projects, Agents. The All Projects entry is still ⌘L
   and `GoSessions`; its icon is a briefcase so it does not read as a
   folder row. Agents is ⌘E and goes to the agents page
@@ -322,7 +327,8 @@ died before this launch.
 Laid out like the Claude desktop app.
 
 - The window's ground is the frame (`title_bar.background` in the theme),
-  a shade darker than the page. The sidebar stands on it with no edge of
+  set against the page and not near it: near black beside the light
+  page, and lighter than the dark one (`docs/look.md`, The grounds). The sidebar stands on it with no edge of
   its own, and the content is a card on it with rounded corners: `FRAME`
   of the ground shows over, under and right of the card, and left of it
   when the sidebar is away.

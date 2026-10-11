@@ -29,6 +29,25 @@ About `vendor/`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/`,
 - A sweep for the old name must use word boundaries: "describe",
   "subscribe" and "transcribe" contain "scribe".
 
+## The window's edges
+
+- A light line under the window's foot, seen once the frame was dark, was
+  the window behind: ours stood a point short of the screen's usable
+  height, where whatever had filled the screen with it left it. Read off
+  a screenshot, the line was two pixels outside our own last row.
+  `main::filled` takes remembered bounds that are within two points of an
+  edge of the usable area to that edge. The window opened at the full
+  height covers it; nothing in the drawing is short.
+- gpui leaves the Mac window's own background the system's, near white in
+  the light appearance. `sys::set_window_ground` sets it to the frame's
+  colour whenever that changes (`Workbench::render`), so the window is
+  never light under a dark frame while it is being drawn or resized.
+- The system draws a rim one pixel wide inside the window's edge, a
+  little lighter than what is under it, on every side. It is not ours to
+  remove.
+- `EMAKI_SHOT_FRAME=1` with `EMAKI_SHOT` keeps the system's shadow and
+  rim in the picture, for reading the pixels at an edge.
+
 ## The vendored toolkit
 
 `vendor/gpui-component/` holds the four gpui-component crates Emaki uses

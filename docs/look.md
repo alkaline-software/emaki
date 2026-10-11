@@ -25,6 +25,25 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
   picture, the GPU samples a few of its pixels for each one drawn and a
   large picture comes out jagged on a small disc.
 
+## The grounds
+
+Three things are kept apart by more than a shade, because a window of
+creams a step from each other tired the eye and gave it nowhere to rest.
+
+- The frame and the sidebar on it (`title_bar.background`): a warm
+  graphite in the light appearance (the ink's own near black was tried
+  and was too heavy), and in the dark one a grey
+  lighter than the page, so the page is a well in a lighter shell.
+- The page and what lies on it: in the light appearance near white with
+  a trace of warmth, its greys (panels, tracks, bubbles, lines) the old
+  creams with most of their colour taken out. In the dark appearance the
+  page is the darkest ground there is.
+- The accent, the one warm colour left, which is why it now stands out.
+
+The terminal keeps Kaku's cream in the light appearance
+(`docs/channels.md`): it is a different thing from the page and may look
+it.
+
 ## Icons
 
 Every icon is Tabler's outline (tabler.io/icons), drawn with a stroke of

@@ -183,7 +183,31 @@ fn remembered_bounds(cx: &App) -> Option<Bounds<Pixels>> {
     let r = ui_state::UiState::load().window?;
     let b = Bounds { origin: point(px(r.x), px(r.y)), size: size(px(r.w).max(MIN_W), px(r.h.max(480.))) };
     let centre = point(b.origin.x + b.size.width / 2., b.origin.y + b.size.height / 2.);
-    cx.displays().iter().any(|d| d.bounds().contains(&centre)).then_some(b)
+    let display = cx.displays().into_iter().find(|d| d.bounds().contains(&centre))?;
+    Some(filled(b, display.visible_bounds()))
+}
+
+/// A window left a point or two short of an edge of the screen's usable
+/// area reaches that edge. Whatever fills the screen with a window (a
+/// tiling key, a window manager) can leave it that much short, and the
+/// window behind it then shows as a line along that side: a white line
+/// under a dark frame.
+fn filled(b: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
+    let near = |a: Pixels, to: Pixels| a != to && (a - to).abs() <= px(2.);
+    let (mut left, mut top, mut right, mut bottom) = (b.left(), b.top(), b.right(), b.bottom());
+    if near(left, area.left()) {
+        left = area.left();
+    }
+    if near(top, area.top()) {
+        top = area.top();
+    }
+    if near(right, area.right()) {
+        right = area.right();
+    }
+    if near(bottom, area.bottom()) {
+        bottom = area.bottom();
+    }
+    Bounds::from_corners(point(left, top), point(right, bottom))
 }
 
 fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {

@@ -223,6 +223,27 @@ pub fn install_dock_icon() {
 #[cfg(not(target_os = "macos"))]
 pub fn install_dock_icon() {}
 
+/// The native window's own ground, under everything the app draws. gpui
+/// leaves it the system's, near white in the light appearance, and the
+/// drawing can stop a fraction of a point short of the window's foot: a
+/// window as tall as the screen showed a light line under a dark frame.
+/// Set to the frame's colour, whatever shows there is the frame.
+#[cfg(target_os = "macos")]
+pub fn set_window_ground(window: &gpui::Window, ground: gpui::Rgba) {
+    use objc2_app_kit::{NSColor, NSView};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+    let Some(view) = (unsafe { (handle.ns_view.as_ptr() as *const NSView).as_ref() }) else { return };
+    if let Some(native) = view.window() {
+        let colour = NSColor::colorWithSRGBRed_green_blue_alpha(ground.r as f64, ground.g as f64, ground.b as f64, 1.);
+        native.setBackgroundColor(Some(&colour));
+    }
+}
+#[cfg(not(target_os = "macos"))]
+pub fn set_window_ground(_window: &gpui::Window, _ground: gpui::Rgba) {}
+
 /// A picture of the app's own window, written to `path` as a PNG, for
 /// looking at a state from a script (`EMAKI_SHOT`). A process may capture
 /// its own windows without Screen Recording access, which the terminal
@@ -272,7 +293,10 @@ pub fn shoot_window(window: &gpui::Window, path: &std::path::Path) -> Result<(),
         }
         let capture: Capture = std::mem::transmute(capture);
         let null = Rect { x: f64::INFINITY, y: f64::INFINITY, w: 0.0, h: 0.0 };
-        let image = capture(null, 1 << 3, number as u32, 1);
+        // `EMAKI_SHOT_FRAME=1` keeps what the system draws around the
+        // window, its shadow and its rim.
+        let framing = if std::env::var_os("EMAKI_SHOT_FRAME").is_some() { 0 } else { 1 };
+        let image = capture(null, 1 << 3, number as u32, framing);
         if image.is_null() {
             return Err("the window could not be captured".into());
         }
