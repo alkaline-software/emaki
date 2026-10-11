@@ -167,6 +167,20 @@ absolute path, so two sessions of one folder share it. The root and every
 open folder are read again every `TREE_SECS` while the panel shows, which
 is how a file the agent writes appears. Rows follow VS Code's explorer.
 
+**Choosing rows.** One row is the file showing (`Tree::picked`), or
+the one last right-clicked, which is lit while its menu is up and after.
+Several are chosen together (`Tree::marked`) by ⌘A, which takes every
+row showing, or by a rectangle dragged over them from a press anywhere
+in the panel (`tree_band_to`). Every row is one height and the list
+begins at the scroller's top, so the rows under the rectangle are found
+by number, with nothing measured. A press that has not moved a few
+points is still a click, and the click that ends a drag chooses nothing
+(`tree_band_live`). A right click on one of several is their menu
+(`files_menu`: Add to Message, the paths a line each, the trash); on any
+other row it chooses that row alone. A folder chosen with what is in it
+is asked of once. Rows lit one under another are drawn as one block,
+round at its two ends: a round plate a row read as stripes.
+
 **Icons** are Catppuccin's (`file_icons.rs`). `assets/catppuccin/` holds
 the VS Code icon theme's icons (`catppuccin.catppuccin-vsc-icons` 1.26.0,
 MIT, copied from the installed extension's `dist/`), Latte for a light
@@ -431,8 +445,12 @@ far from the tree.
   numbers, folding, the language's colours, and its own selection, copy
   and find (⌘F). The editor is made again when the file, or
   what it holds, is another, and scrolls by itself, so the pane's own
-  scroller is not drawn around it. Its right click is the pane's menu
-  (the vendored `on_secondary_click`). A folded line ends in dots, as
+  scroller is not drawn around it. Its right click is Copy and Select
+  All and no more (the vendored `on_secondary_click`): what is asked of
+  the file is on its row's menu in the tree, and stood here too until
+  it was one list said twice. With nothing selected, the right
+  click selects the word under it first (the vendored `select_word_at`),
+  as one in a conversation does, so the menu has Copy for it. A folded line ends in dots, as
   VS Code's does (the vendored element).
 - A file the pane holds whole can be changed in that editor and saved
   with ⌘S, File, Save File, or the Save button the head shows while
@@ -490,14 +508,29 @@ far from the tree.
     answers at a keystroke in a file that does not parse yet. One step
     is the file's own (`indent::unit`: the smallest indent its lines
     show, a tab if they use tabs), else the language's habit.
-  - Saving an R file formats it first (`emaki_core::format`), with Air,
-    Posit's formatter, built in at its defaults: the editor takes the
-    formatted text as one step of undo, then the file does. A file Air
-    cannot parse is saved as typed and the row says it was not
-    formatted. No other language has a formatter; do not write one by
-    hand, take the language's own as Air was taken. Settings, Files has
-    the switch (`app.format_on_save`, on to begin with); off, a file is
-    saved as typed. Air and the Biome crates under it are built without
+  - Saving a file formats it first (`emaki_core::format`) when Settings,
+    Files has the switch on (`app.format_saved_files`, off to begin with;
+    the older `format_on_save` in a file is not read, having been R's
+    alone and on)
+    and the file's language is ticked there (`app.format_langs`, all
+    ten to begin with): the editor takes the formatted text as one step
+    of undo, then the file does. A file its formatter cannot parse is
+    saved as typed and the row says it was not formatted.
+  - No formatter is written here: each is the language's own, at its
+    defaults. R is Air's, Posit's formatter, built in. TypeScript,
+    JavaScript, JSON, Markdown and TOML are dprint's plugins, built in
+    as the libraries they are. Python, Rust, Go and C and C++ have a
+    formatter that is a program and not a library (`ruff format`,
+    `rustfmt`, `gofmt`, `clang-format`): it is run with the text on its
+    standard input when the machine has it. Settings names each
+    language's formatter after it, and says so when one is not installed.
+  - Markdown is formatted in `.md` files only. Quarto's and R
+    Markdown's are markdown to the editor and more than it, and a
+    formatter that does not know their blocks would rewrite them.
+  - Settings lists the ten in two lists that are always there, dimmed
+    and not to be ticked while the switch is off (`format::LANGS`; a
+    language's icon is its file's in the tree).
+  - Air and the Biome crates under it are built without
     debug assertions in the dev profile too (`Cargo.toml`): with them a
     6,700-line file took half a second to format, without them 27 ms.
 - The editor's margin marks what differs from git's copy of the file,
@@ -606,8 +639,8 @@ far from the tree.
   for one in the catalog's `/Dests` or the name tree under `/Names`,
   which is how LaTeX writes them. hayro has no reader for this.
 - A right click anywhere in the pane opens the window's menu
-  (`file_pane_menu`): what the place offers first (Copy for selected
-  words, in markdown either way and in code; Copy Image on a picture;
+  (`file_pane_menu`), the editor's own apart: what the place offers first (Copy for selected
+  words in markdown as it reads; Copy Image on a picture;
   Copy Cell and Copy Row on a table's cell; Copy and Select All on a
   PDF's page), then what the file's row in the tree has: Add to
   Message, Open, Reveal, the two paths.

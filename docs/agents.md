@@ -102,7 +102,7 @@ last answer is a day old; never at launch.
 
 Two levels, as the sessions page has (`Workbench::agent_open`).
 
-- Under the agents' row, a second headed "Beside the agents": a
+- Under the agents' row, a second headed "GitHub": a
   tool's card (`tool_card`), low and as wide as the row over it, so the
   page has no empty half.
 - The cards: side by side in the catalogue's order, whatever is

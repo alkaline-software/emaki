@@ -130,7 +130,7 @@ handed work on one of these files is told to read the doc too.
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`; `emaki-core/src/outline.rs`, `git.rs`, `indent.rs`, `format.rs`, `office.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
-| `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/anthropic-mono.py` | `docs/look.md` |
+| `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
 | Bringing in a new agent: a variant of `AgentId`, an adapter, a driver | `docs/new-agent.md`, then the docs it names |
@@ -197,7 +197,7 @@ scripts/release-publish.sh after CI: the notarized Mac images onto the draft rel
 scripts/statusline.sh      Claude Code's status line, ours: prints the line, leaves the rate limits
 scripts/relaunch.sh        quit the running Emaki and start the new build, once the agent's turn is over
 scripts/dev-app.sh         start the build in target/debug as an app: on a Mac a bundle opened through the system, never a bare executable
-scripts/anthropic-mono.py  the Claude app's code font into ~/.emaki/fonts, plus its 0.9 copy for inline code
+scripts/home-scroll.py     the handscroll over the greeting, as three line drawings a colour each
 docs/                      how each part works and its traps; the index below says which to read
 WORKFLOW.md                how to cut a release, step by step
 CHANGELOG.md               one section per release; the release job reads it

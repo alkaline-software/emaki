@@ -42,7 +42,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, NewSessionHere, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -54,7 +54,7 @@ pub const TERMINAL_CONTEXT: &str = "Terminal";
 pub const SIDEBAR_W: Pixels = px(268.);
 /// The sidebar is dragged between these. The least still has room for
 /// the window's buttons and the name beside them.
-const SIDEBAR_MIN: Pixels = px(248.);
+const SIDEBAR_MIN: Pixels = px(264.);
 const SIDEBAR_MAX: Pixels = px(440.);
 /// The most a double click on the edge asks for; a drag may go on to
 /// `SIDEBAR_MAX`.
@@ -107,6 +107,8 @@ pub(crate) enum MenuDo {
     Reveal(PathBuf),
     /// Something asked of a file or folder in the files panel.
     File(crate::panels::FileDo, PathBuf),
+    /// The same asked of several chosen there at once.
+    Files(crate::panels::FileDo, Vec<PathBuf>),
     /// Put these words on the clipboard.
     Copy(String),
     /// Put this picture on the clipboard.
@@ -153,7 +155,9 @@ impl MenuDo {
             MenuDo::File(FileDo::Changes, _) => "icons/git-diff.svg",
             MenuDo::File(FileDo::Open, _) if label.contains(" in ") || label.ends_with("folder") => "icons/folder-open.svg",
             MenuDo::File(FileDo::Open, _) => "icons/external-link.svg",
-            MenuDo::File(FileDo::Mention, _) => "icons/at.svg",
+            MenuDo::File(FileDo::Mention, _) | MenuDo::Files(FileDo::Mention, _) => "icons/at.svg",
+            MenuDo::Files(FileDo::Trash, _) => "icons/trash.svg",
+            MenuDo::Files(..) => "icons/copy.svg",
             MenuDo::File(FileDo::NewFile, _) => "icons/file-plus.svg",
             MenuDo::File(FileDo::NewFolder, _) => "icons/folder-plus.svg",
             MenuDo::File(FileDo::Trash, _) => "icons/trash.svg",
@@ -421,26 +425,34 @@ const STRIP_BTN: Pixels = px(26.);
 const SIDE_ROW_H: Pixels = px(26.);
 const SIDE_SESSION_H: Pixels = px(24.);
 pub const TITLEBAR_H: Pixels = px(48.);
+/// How far short of a place the list is put to run the rest of the way
+/// to it, and how long the run takes (`glide_to`).
+const GLIDE: Pixels = px(220.);
+const GLIDE_TIME: Duration = Duration::from_millis(360);
 /// The frame's width: the window's own ground, the sidebar's, showing
 /// around the content's card at its top, right and foot, and at its left
 /// when the sidebar is away.
-pub const FRAME: Pixels = px(6.);
+pub const FRAME: Pixels = px(3.);
 /// The card's strip at its two ends: what its tracks of buttons, 30
-/// high in a strip of 42, have over and under them, so a track is as far
+/// high in a strip of 45, have over and under them, so a track is as far
 /// from the card's side as from its top.
-const STRIP_PAD: Pixels = px(6.);
-/// The card's corners.
-const CARD_R: Pixels = px(10.);
+const STRIP_PAD: Pixels = px(7.5);
+/// The card's corners: the window's own, less the frame between them, so
+/// the two curves run side by side and the frame is as wide round a
+/// corner as along an edge. A Mac's window turns its corner at about 16
+/// points (measured off a picture of one; the system sets it and an app
+/// cannot). Windows' is 8, and a Linux window's is its desktop's.
+const CARD_R: Pixels = px(if cfg!(target_os = "macos") { 13. } else { 5. });
 /// Room for the traffic lights on a transparent title bar.
 pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("explain", "Explanations", "icons/bot.svg"), ("updates", "Updates", "icons/redo-2.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("updates", "Updates", "icons/redo-2.svg")];
 /// The panel's size: wide enough for a rail beside the rows, and a fixed
 /// height so it reads as a sheet, not a second window (capped by the
 /// window when that is smaller).
-pub const SETTINGS_W: Pixels = px(720.);
+pub const SETTINGS_W: Pixels = px(820.);
 pub const SETTINGS_H: Pixels = px(580.);
 pub const SETTINGS_RAIL_W: Pixels = px(180.);
 /// What the composer says when empty: on the home page, and on a session.
@@ -1435,6 +1447,16 @@ pub struct Workbench {
     pub(crate) shell_reveal: Option<Instant>,
     /// The window's width at the last draw.
     pub(crate) view_w: Pixels,
+    /// The languages whose formatter is a program this machine lacks,
+    /// looked for once.
+    format_missing: std::cell::OnceCell<Vec<(&'static str, &'static str)>>,
+    /// A rectangle being dragged over the files tree, from and to, in
+    /// the window's points; and whether the press that began it moved
+    /// far enough to be one, so the click that ends it chooses nothing.
+    pub(crate) tree_band: Option<(Point<Pixels>, Point<Pixels>)>,
+    pub(crate) tree_band_live: bool,
+    /// `file:menu` asked for a right click in the editor at the next draw.
+    pub(crate) file_menu_probe: bool,
     /// The frame's colour as the native window last had it.
     window_ground: Cell<Option<Hsla>>,
     /// The window's height at the last draw.
@@ -1576,6 +1598,8 @@ pub struct Workbench {
     /// the item, until the place has been drawn and gone to; where that
     /// place is in the window; and whether the next draw of it should go.
     pub(crate) unread_go: Option<(usize, usize)>,
+    /// A glide under way: when it began, where it ends, how far it has come.
+    glide: Option<(Instant, ListOffset, Pixels)>,
     /// What was just opened in the conversation (a tool call, a run, a
     /// thought: its kind, round and item), until it has been drawn open
     /// and brought into view (`reveal_mark`).
@@ -1995,7 +2019,7 @@ impl Workbench {
         };
         h_flex()
             .absolute()
-            // The lights' centres are at 27.75, measured: the middle of
+            // The lights' centres are at 26.25: the middle of
             // the card's strip, which starts a frame down.
             .top(px(1.) + FRAME / 2.)
             .left(Self::strip_left())
@@ -2381,13 +2405,37 @@ pub(crate) fn mode_name(options: &Options, key: &str) -> String {
 
 /// What to call a model, however the session names it: the agent's name
 /// for that key or id, else the id read for a family and a version.
+/// A choice's name as the window says it: the agent's own, less the
+/// "(recommended)" Claude Code puts after its default.
+pub(crate) fn plain_default(label: &str) -> String {
+    label.replace(" (recommended)", "").replace(" (Recommended)", "")
+}
+
+/// The file editor's text for the window's one size.
+pub(crate) fn editor_px(size: &str) -> f32 {
+    match size {
+        "small" => 11.5,
+        "large" => 14.,
+        _ => 12.5,
+    }
+}
+
+/// The terminal's text for the window's one size.
+fn term_px(size: &str) -> f32 {
+    match size {
+        "small" => 12.,
+        "large" => 15.,
+        _ => 13.,
+    }
+}
+
 pub(crate) fn model_name(options: &Options, name: &str) -> String {
     if let Some(m) = options.model(name) {
-        return m.label.clone();
+        return plain_default(&m.label);
     }
     if name.is_empty() {
         if let Some(m) = options.model(&options.default_model) {
-            return m.label.clone();
+            return plain_default(&m.label);
         }
     }
     match name.strip_suffix("[1m]").and_then(|base| options.model(base)) {
@@ -2511,7 +2559,16 @@ fn effort_pill(options: &Options, model: &str, effort: &str, theme: &gpui_compon
 
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let cfg = Config::load();
+        let mut cfg = Config::load();
+        // What Settings no longer asks is what it used to begin at:
+        // explanations for the calls waiting on a card, the terminal's
+        // rows and margins at their middle step, and its text the size
+        // the window's one size says (`set_chat_size`).
+        cfg.explain.enabled = true;
+        cfg.explain.scope = "permission".into();
+        cfg.terminal.spacing = "normal".into();
+        cfg.terminal.padding = "medium".into();
+        cfg.terminal.size = term_px(&cfg.app.chat_size);
         let (hub, mut rx) = Hub::start(cfg.clone());
 
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
@@ -3087,6 +3144,10 @@ impl Workbench {
             shell_reveal: None,
             view_w: px(1280.),
             window_ground: Cell::new(None),
+            file_menu_probe: false,
+            tree_band: None,
+            tree_band_live: false,
+            format_missing: std::cell::OnceCell::new(),
             tree: Default::default(),
             files_scroll: ScrollHandle::new(),
             outline_scroll: ScrollHandle::new(),
@@ -3157,6 +3218,7 @@ impl Workbench {
             unread_was: false,
             unread_anim: None,
             unread_go: None,
+            glide: None,
             unread_y: Rc::new(std::cell::Cell::new(None)),
             reveal: None,
             folds: Default::default(),
@@ -4748,6 +4810,7 @@ impl Workbench {
     fn set_chat_font(&mut self, choice: &str, cx: &mut Context<Self>) {
         self.cfg.app.chat_font = choice.to_string();
         self.save_app_config();
+        crate::fonts::set_chat(choice, cx);
         cx.notify();
     }
 
@@ -4762,10 +4825,23 @@ impl Workbench {
         cx.notify();
     }
 
+    /// The monospace face, one for the whole window: code in a
+    /// conversation, the file's editor and the terminal. It is painted
+    /// into both palettes, as the accent is, and the appearance drawn
+    /// again with it.
+    fn set_mono_font(&mut self, choice: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_terminal(|t| t.font = choice.into(), cx);
+        crate::look::install(&self.cfg.app.accent, choice, cx);
+        crate::look::apply(&self.cfg.app.appearance, Some(window), cx);
+    }
+
+    /// The window's one text size: the conversation's, and with it the
+    /// terminal's.
     fn set_chat_size(&mut self, choice: &str, cx: &mut Context<Self>) {
         self.cfg.app.chat_size = choice.to_string();
         self.save_app_config();
-        cx.notify();
+        let size = term_px(choice);
+        self.set_terminal(|t| t.size = size, cx);
     }
 
     fn set_send_key(&mut self, choice: &str, cx: &mut Context<Self>) {
@@ -4787,7 +4863,7 @@ impl Workbench {
     fn set_accent(&mut self, choice: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.cfg.app.accent = choice.to_string();
         self.save_app_config();
-        crate::look::install(choice, cx);
+        crate::look::install(choice, &self.cfg.terminal.font, cx);
         crate::look::apply(&self.cfg.app.appearance, Some(window), cx);
         cx.notify();
     }
@@ -4856,22 +4932,12 @@ impl Workbench {
         cx.notify();
     }
 
-    fn set_explain_scope(&mut self, choice: &'static str, cx: &mut Context<Self>) {
-        self.cfg.explain.scope = choice.to_string();
-        self.hub.set_explain(self.cfg.explain.clone());
-        if let Err(e) = Config::edit(move |c| c.explain.scope = choice.to_string()) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
-        }
-        cx.notify();
-    }
-
     /// The settings panel (⌘,): how the window looks (appearance, accent,
     /// the conversation's face and size) and what a new session starts
     /// with (permission mode, model). Every choice is a row of pills, and
     /// every change is drawn at once and written to `config.json`.
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let fonts = cx.global::<crate::fonts::ChatFonts>().clone();
         let app = self.cfg.app.clone();
         let dark = theme.mode.is_dark();
 
@@ -4886,7 +4952,9 @@ impl Workbench {
             h_flex()
                 .items_center()
                 .gap(px(12.))
-                .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child(title)).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(detail)))
+                // A line under the title only where the title does not
+                // say it all.
+                .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child(title)).when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(detail))))
                 .child(control)
         };
 
@@ -4914,10 +4982,6 @@ impl Workbench {
                 .child(div().size(px(18.)).rounded_full().bg(color))
         }));
 
-        let serif_family = Some(fonts.serif.clone().unwrap_or_else(|| crate::fonts::SERIF_FALLBACK.into()));
-        let sans_family = fonts.sans.clone();
-        let font_key = if app.chat_font == "sans" { "sans" } else { "serif" };
-        let font = self.segmented("font", vec![("serif", "Anthropic Serif".into(), serif_family), ("sans", "Anthropic Sans".into(), sans_family)], font_key, Rc::new(|this, key, _, cx| this.set_chat_font(key, cx)), cx);
         let size_key = match app.chat_size.as_str() {
             "small" => "small",
             "large" => "large",
@@ -4929,10 +4993,6 @@ impl Workbench {
         let with = if cfg!(target_os = "macos") { "Cmd + Enter" } else { "Ctrl + Enter" };
         let send = self.segmented("send-key", vec![("cmd-enter", with.into(), None), ("enter", "Enter".into(), None)], if enter_sends { "enter" } else { "cmd-enter" }, Rc::new(|this, key, _, cx| this.set_send_key(key, cx)), cx);
         let send_note = if enter_sends { "Shift + Enter starts a new line." } else { "Enter or Shift + Enter starts a new line." };
-        let note = match &fonts.source {
-            Some(dir) => format!("Anthropic Serif and Anthropic Sans are loaded from the Claude app at {}.", emaki_core::paths::tilde(&dir.to_string_lossy())),
-            None => "Anthropic Serif and Anthropic Sans are the Claude desktop app's fonts and are loaded from it when it is installed. It was not found here, so Georgia stands in for the serif and the window's own face for the sans.".to_string(),
-        };
 
         let default_mode = if self.cfg.driver.default_mode.is_empty() { "default".to_string() } else { self.cfg.driver.default_mode.clone() };
         // The same lists the pills under the composer open, since both
@@ -4972,40 +5032,95 @@ impl Workbench {
         let term = self.cfg.terminal.clone();
         let pick = |list: &[&'static str], now: &str| list.iter().copied().find(|k| *k == now).unwrap_or(list[0]);
         let term_theme = self.segmented("term-theme", vec![("match", "Match window".into(), None), ("dark", "Dark".into(), None), ("light", "Light".into(), None)], pick(&["match", "dark", "light"], &term.theme), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.theme = key.into(), cx)), cx);
-        let code_name = fonts.code.clone().filter(|f| f.starts_with("Anthropic")).map(|_| "Anthropic Mono").unwrap_or("Code font");
-        let mut faces = vec![("jetbrains", "JetBrains Mono".to_string(), Some(crate::fonts::TERM_FAMILY.to_string())), ("code", code_name.to_string(), Some(crate::fonts::term_family("code", cx).to_string()))];
-        if cfg!(target_os = "macos") {
-            faces.push(("system", "SF Mono".to_string(), Some(crate::fonts::term_family("system", cx).to_string())));
-        }
-        let term_font = self.segmented("term-font", faces, pick(&["jetbrains", "code", "system"], &term.font), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.font = key.into(), cx)), cx);
-        // Three steps each, under the same three names.
-        let size_now = if term.size < 12.5 { "small" } else if term.size > 14. { "large" } else { "medium" };
-        let term_size = self.segmented("term-size", vec![("small", "Small".into(), None), ("medium", "Medium".into(), None), ("large", "Large".into(), None)], size_now, Rc::new(|this, key, _, cx| this.set_terminal(|t| t.size = match key { "small" => 12., "large" => 15., _ => 13. }, cx)), cx);
-        let term_spacing = self.segmented("term-spacing", vec![("tight", "Small".into(), None), ("normal", "Medium".into(), None), ("roomy", "Large".into(), None)], pick(&["normal", "tight", "roomy"], &term.spacing), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.spacing = key.into(), cx)), cx);
-        let term_padding = self.segmented("term-padding", vec![("compact", "Small".into(), None), ("medium", "Medium".into(), None), ("roomy", "Large".into(), None)], pick(&["medium", "compact", "roomy"], &term.padding), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.padding = key.into(), cx)), cx);
+        // The faces, a tile each, drawn in itself: the serifs and the
+        // sans serifs are one choice between them, the chat's; the
+        // monospace ones another.
+        let chat_now = crate::fonts::chat_face(&app.chat_font).key;
+        let mono_now = crate::fonts::mono_face(&term.font).key;
+        let tiles = |faces: &'static [crate::fonts::Face], now: &'static str, sample: &'static str, mono: bool, cx: &mut Context<Self>| {
+            h_flex().gap(px(8.)).children(faces.iter().map(|face| {
+                let (key, active) = (face.key, face.key == now);
+                v_flex()
+                    .id(SharedString::from(format!("face-{key}")))
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(70.))
+                    .px(px(12.))
+                    .justify_center()
+                    .gap(px(3.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .cursor_pointer()
+                    .border_color(if active { theme.primary } else { theme.input })
+                    .when(active, |d| d.bg(theme.primary.opacity(0.08)))
+                    .when(!active, |d| d.hover(|s| s.border_color(theme.muted_foreground)))
+                    .on_click(cx.listener(move |this, _, window, cx| if mono { this.set_mono_font(key, window, cx) } else { this.set_chat_font(key, cx) }))
+                    .child(div().text_size(px(if mono { 17. } else { 21. })).line_height(px(26.)).font_family(face.family).child(sample))
+                    .child(div().truncate().text_size(px(11.5)).text_color(if active { theme.foreground } else { theme.muted_foreground }).child(face.name))
+            }))
+        };
+        let group = |title: &'static str, body: AnyElement| v_flex().gap(px(7.)).child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(title)).child(body).into_any_element();
+        let serif_tiles = group("Serif", tiles(crate::fonts::SERIFS, chat_now, "Ag", false, cx).into_any_element());
+        let sans_tiles = group("Sans serif", tiles(crate::fonts::SANS, chat_now, "Ag", false, cx).into_any_element());
+        let mono_tiles = tiles(crate::fonts::monos(), mono_now, "fn(0) -> 1", true, cx).into_any_element();
         let term_cursor = self.segmented("term-cursor", vec![("bar", "Bar".into(), None), ("block", "Block".into(), None), ("underline", "Underline".into(), None)], pick(&["bar", "block", "underline"], &term.cursor), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.cursor = key.into(), cx)), cx);
         let term_blink = Checkbox::new("term-blink").checked(term.cursor_blink).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.cursor_blink = *on, cx)));
         let term_ligatures = Checkbox::new("term-ligatures").checked(term.ligatures).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.ligatures = *on, cx)));
         let term_copy = Checkbox::new("term-copy").checked(term.copy_on_select).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.copy_on_select = *on, cx)));
 
-        let format_on_save = Checkbox::new("format-on-save").checked(self.cfg.app.format_on_save).on_click(cx.listener(|this, on: &bool, _, cx| {
-            this.cfg.app.format_on_save = *on;
-            this.save_app_config();
-            cx.notify();
-        }));
+        // Formatting: one switch, and under it the languages in two
+        // lists, there whether it is on or not and dimmed while it is off.
+        let formatting = self.cfg.app.format_on_save;
+        let format_on_save = self.segmented(
+            "format-on-save",
+            vec![("off", "Off".into(), None), ("on", "On".into(), None)],
+            if formatting { "on" } else { "off" },
+            Rc::new(|this, key, _, cx| {
+                this.cfg.app.format_on_save = key == "on";
+                this.save_app_config();
+                cx.notify();
+            }),
+            cx,
+        );
+        let format_list = |title: &'static str, code: bool, cx: &mut Context<Self>| {
+            let rows = emaki_core::format::LANGS.iter().filter(|l| l.code == code).map(|l| {
+                let (key, on) = (l.key, self.cfg.app.format_langs.iter().any(|k| k == l.key));
+                // A language whose formatter is a program this machine
+                // lacks says which, since ticking it does nothing here.
+                let needs = self.format_missing.get_or_init(|| emaki_core::format::LANGS.iter().filter_map(|l| emaki_core::format::missing_program(l.key).map(|tool| (l.key, tool))).collect()).iter().find(|(k, _)| *k == key).map(|(_, tool)| *tool);
+                h_flex()
+                    .h(px(30.))
+                    .gap(px(9.))
+                    .items_center()
+                    .child(img(crate::file_icons::path(l.file, false, false, dark)).size(px(16.)).flex_shrink_0())
+                    // The names in a column of one width, so what
+                    // follows them starts at one place down the list.
+                    .child(div().w(px(72.)).flex_shrink_0().text_size(px(13.)).child(l.name))
+                    .child(div().min_w_0().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(match needs {
+                        Some(_) => format!("provided by {}, not installed", l.by),
+                        None => format!("provided by {}", l.by),
+                    }))
+                    .child(div().flex_1())
+                    .child(Checkbox::new(SharedString::from(format!("format-{key}"))).checked(on).disabled(!formatting).on_click(cx.listener(move |this, on: &bool, _, cx| {
+                        this.cfg.app.format_langs.retain(|k| k != key);
+                        if *on {
+                            this.cfg.app.format_langs.push(key.to_string());
+                        }
+                        this.save_app_config();
+                        cx.notify();
+                    })))
+            });
+            v_flex().flex_1().min_w_0().child(div().pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(title)).children(rows.collect::<Vec<_>>())
+        };
+        let format_lists = h_flex().items_start().gap(px(24.)).when(!formatting, |d| d.opacity(0.45)).child(format_list("Code", true, cx)).child(format_list("Documents and data", false, cx)).into_any_element();
         let auto_cap = Checkbox::new("auto-capitalize").checked(self.cfg.app.auto_capitalize).on_click(cx.listener(|this, on: &bool, _, cx| this.set_writing(|a| a.auto_capitalize = *on, cx)));
+        let spelling = self.cfg.app.check_writing;
         let check_writing = Checkbox::new("check-writing").checked(self.cfg.app.check_writing).on_click(cx.listener(|this, on: &bool, _, cx| this.set_writing(|a| a.check_writing = *on, cx)));
         let languages: Vec<&'static str> = emaki_core::check::LANGUAGES.iter().map(|l| l.0).collect();
         let writing_language = self.segmented("writing-language", emaki_core::check::LANGUAGES.iter().map(|(key, name)| (*key, name.to_string(), None)).collect(), pick(&languages, &self.cfg.app.writing_language), Rc::new(|this, key, _, cx| this.set_writing(|a| a.writing_language = key.into(), cx)), cx);
-        let language_note = if crate::sys::SYSTEM_SPELLING { "English gets spelling and grammar. Spanish, French and German get spelling." } else { "English gets spelling and grammar. Spanish, French and German are checked on a Mac only." };
+        // Said only where a choice does nothing: off a Mac.
+        let language_note = (!crate::sys::SYSTEM_SPELLING).then_some("Spanish, French and German are checked on a Mac only.");
 
-        let scope = if self.cfg.explain.enabled { self.cfg.explain.scope.as_str() } else { "off" };
-        let explain_key = match scope {
-            "off" => "off",
-            "all" => "all",
-            _ => "permission",
-        };
-        let explain = self.segmented("explain", vec![("off", "Off".into(), None), ("permission", "Permission cards".into(), None), ("all", "Every new call".into(), None)], explain_key, Rc::new(|this, key, _, cx| this.set_explain_scope(key, cx)), cx);
         // Updates, as little as possible: the version on the left, one
         // button on the right that is "Check for updates" until a check
         // finds something and "Update to x" after, in the same place, and
@@ -5063,54 +5178,78 @@ impl Workbench {
         let auto_check = Checkbox::new("update-auto").checked(self.cfg.app.check_updates).on_click(cx.listener(|this, on: &bool, _, cx| this.set_check_updates(*on, cx)));
         let version_detail: SharedString = if update_line.is_empty() { format!("Emaki {current}") } else { format!("Emaki {current} · {update_line}") }.into();
 
-        let explain_model = if self.cfg.explain.model.is_empty() { "claude-haiku-4-5".to_string() } else { self.cfg.explain.model.clone() };
-        let explain_note = format!(
-            "An opaque call (a heredoc, a piped chain, anything long) gets one or two plain sentences from {} through your own Claude Code login. Simple calls explain themselves for free, answers are kept by content so a command is explained once, and every tool card has an Explain button.",
-            model_label(&explain_model)
-        );
-
         // The rows of the section showing, and the rail beside them.
         let section = self.settings_section;
         let (section_title, section_anim): (&'static str, &'static str) = match section {
+            "fonts" => ("Fonts", "settings-fonts"),
             "composer" => ("Composer", "settings-composer"),
             "sessions" => ("New sessions", "settings-sessions"),
             "terminal" => ("Terminal", "settings-terminal"),
             "files" => ("Files", "settings-files"),
-            "explain" => ("Explanations", "settings-explain"),
             "updates" => ("Updates", "settings-updates"),
             _ => ("Appearance", "settings-appearance"),
         };
         let rows: Vec<AnyElement> = match section {
             "composer" => vec![
                 row("Send with", send_note, send, &theme).into_any_element(),
-                row("Auto-capitalization", "A sentence starts with a capital, and a lone \"i\" becomes \"I\". Delete the capital and type the letter again to keep it small.", auto_cap.into_any_element(), &theme).into_any_element(),
-                row("Spelling and grammar", "Marked under the words as you type, on this machine. Right-click a mark for corrections. Code, paths and commands are left alone.", check_writing.into_any_element(), &theme).into_any_element(),
-                // Five choices are wider than the room beside a note, so
-                // they stand under it.
+                row("Auto-capitalization", "", auto_cap.into_any_element(), &theme).into_any_element(),
+                // One entry: the tick turns the check on, and the languages
+                // under it are its choices, dimmed and out of the
+                // pointer's reach while it is off, as the formatters'
+                // lists are. Five choices are wider than the room beside
+                // the name, so they stand under it.
                 v_flex()
-                    .gap(px(8.))
-                    .child(v_flex().gap(px(2.)).child(div().text_size(px(13.5)).child("Language")).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(language_note)))
-                    .child(h_flex().child(writing_language))
+                    .gap(px(10.))
+                    .child(row("Spelling Check", language_note.unwrap_or(""), check_writing.into_any_element(), &theme))
+                    .child(div().relative().w_full().when(!spelling, |d| d.opacity(0.45)).child(writing_language).when(!spelling, |d| d.child(div().absolute().inset_0().occlude())))
                     .into_any_element(),
             ],
-            "files" => vec![row("Format on save", "A file saved from the file's pane is put in its language's standard form first. R is formatted by Air, with Air's defaults; no other language has a formatter yet.", format_on_save.into_any_element(), &theme).into_any_element()],
+            "fonts" => vec![
+                div().text_size(px(13.5)).child("Chat font").into_any_element(),
+                serif_tiles,
+                sans_tiles,
+                div().pt(px(4.)).text_size(px(13.5)).child("Monospace font").into_any_element(),
+                mono_tiles,
+                div().pt(px(4.)).child(row("Font size", "", size.into_any_element(), &theme)).into_any_element(),
+            ],
+            "files" => vec![row("Format on save", "", format_on_save, &theme).into_any_element(), format_lists],
             "sessions" => vec![
                 agent_head,
-                row("Permission mode", "What a session started here begins in.", if settings_agent == AgentId::Codex { codex_modes } else { modes }, &theme).into_any_element(),
-                row("Effort", if settings_agent == AgentId::Codex { "How hard it thinks. Default asks for none, and Codex uses its own." } else { "How hard it thinks. Default asks for none, and Claude Code uses its own." }, if settings_agent == AgentId::Codex { codex_efforts } else { efforts }, &theme).into_any_element(),
-                row("Model", "Which model a session started here uses.", if settings_agent == AgentId::Codex { codex_models } else { models }, &theme).into_any_element(),
-                div().text_size(px(12.)).text_color(theme.muted_foreground).child("A running session keeps its own choices: the pills under its composer change them for that session, and ⇧Tab in the composer steps through the modes.").into_any_element(),
+                row("Permission mode", "", if settings_agent == AgentId::Codex { codex_modes } else { modes }, &theme).into_any_element(),
+                row("Effort", "", if settings_agent == AgentId::Codex { codex_efforts } else { efforts }, &theme).into_any_element(),
+                row("Model", "", if settings_agent == AgentId::Codex { codex_models } else { models }, &theme).into_any_element(),
             ],
             "terminal" => vec![
-                row("Theme", "Follow the window, or keep one look.", term_theme, &theme).into_any_element(),
-                row("Font", "The face the terminal is set in.", term_font, &theme).into_any_element(),
-                row("Text size", "How large the terminal reads.", term_size, &theme).into_any_element(),
-                row("Line spacing", "The room between two rows.", term_spacing, &theme).into_any_element(),
-                row("Padding", "The room around the screen.", term_padding, &theme).into_any_element(),
-                row("Cursor", "Its shape.", term_cursor, &theme).into_any_element(),
-                row("Blinking cursor", "On and off by half seconds while the terminal has the keyboard.", term_blink.into_any_element(), &theme).into_any_element(),
-                row("Ligatures", "Join letters such as -> and != into one mark.", term_ligatures.into_any_element(), &theme).into_any_element(),
-                row("Copy on select", "A selection is copied when the button is let go.", term_copy.into_any_element(), &theme).into_any_element(),
+                row("Theme", "", term_theme, &theme).into_any_element(),
+                // The face and the size are the window's, set in Fonts.
+                row(
+                    "Font",
+                    "The window's monospace font and size.",
+                    pill_button("term-fonts", "Open Fonts", &theme, cx.listener(|this, _, _, cx| {
+                        this.settings_section = "fonts";
+                        this.settings_scroll.set_offset(point(px(0.), px(0.)));
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                    &theme,
+                )
+                .into_any_element(),
+                row("Cursor", "", term_cursor, &theme).into_any_element(),
+                row("Blinking cursor", "", term_blink.into_any_element(), &theme).into_any_element(),
+                // The marks it joins are in the face that joins them.
+                h_flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child("Ligatures")).child({
+                        let mono = |t: &'static str| div().font_family(theme.mono_font_family.clone()).child(t);
+                        h_flex().gap(px(5.)).text_size(px(12.)).text_color(theme.muted_foreground)// A zero-width mark between the two letters, or the
+                        // face would join them here and show the answer
+                        // in place of what is typed.
+                        .child("Joins").child(mono("-\u{200C}>")).child("and").child(mono("!\u{200C}=")).child("into one mark.")
+                    }))
+                    .child(term_ligatures)
+                    .into_any_element(),
+                row("Copy on select", "", term_copy.into_any_element(), &theme).into_any_element(),
                 // The credit, with the name a link to Kaku's own page.
                 h_flex()
                     .text_size(px(12.))
@@ -5144,10 +5283,6 @@ impl Workbench {
                     .child(".")
                     .into_any_element(),
             ],
-            "explain" => vec![
-                row("Explain tool calls", "Which calls are put into plain words without asking.", explain.into_any_element(), &theme).into_any_element(),
-                div().text_size(px(12.)).text_color(theme.muted_foreground).child(explain_note).into_any_element(),
-            ],
             "updates" => vec![
                 h_flex()
                     .items_start()
@@ -5159,8 +5294,8 @@ impl Workbench {
             ],
             _ => vec![
                 row(
-                    "Picture",
-                    "Shown beside your name.",
+                    "Avatar",
+                    "",
                     h_flex()
                         .gap(px(10.))
                         .items_center()
@@ -5181,7 +5316,10 @@ impl Workbench {
                                     .items_center()
                                     .rounded(theme.radius)
                                     .border_1()
-                                    .border_color(theme.border)
+                                    // The line the button beside it has:
+                                    // the panel's own border is the
+                                    // panel's shade in the dark appearance.
+                                    .border_color(theme.input)
                                     .text_size(px(14.))
                                     .text_color(theme.danger)
                                     .cursor_pointer()
@@ -5197,7 +5335,7 @@ impl Workbench {
                 .into_any_element(),
                 row(
                     "Name",
-                    "What Emaki calls you.",
+                    "",
                     div()
                         .id("name-field")
                         .track_focus(&self.name_input.read(cx).focus_handle(cx))
@@ -5210,18 +5348,17 @@ impl Workbench {
                         .flex()
                         .items_center()
                         .rounded(px(8.))
-                        .bg(theme.muted)
+                        // A well in the panel: the panel's own muted
+                        // ground is its shade in the dark appearance.
+                        .bg(if dark { theme.sidebar } else { theme.muted })
                         .text_size(px(13.5))
                         .child(Input::new(&self.name_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.name_input, false, cx)))
                         .into_any_element(),
                     &theme,
                 )
                 .into_any_element(),
-                row("Theme", "Follow the system, or keep one look.", appearance.into_any_element(), &theme).into_any_element(),
-                row("Accent", "The colour of the send button, links and the mark.", accents.into_any_element(), &theme).into_any_element(),
-                row("Chat font", "The face the conversation is set in.", font.into_any_element(), &theme).into_any_element(),
-                row("Text size", "How large the conversation reads.", size.into_any_element(), &theme).into_any_element(),
-                div().text_size(px(12.)).text_color(theme.muted_foreground).child(note).into_any_element(),
+                row("Theme", "", appearance.into_any_element(), &theme).into_any_element(),
+                row("Accent", "", accents.into_any_element(), &theme).into_any_element(),
             ],
         };
         let rail = self.settings_rail(cx);
@@ -5350,8 +5487,12 @@ impl Workbench {
         let (pad, seg_h, seg_px, seg_text, round) = if small { (px(2.), px(18.), px(7.), px(11.), px(5.)) } else { (px(3.), px(26.), px(11.), px(12.5), px(7.)) };
         let theme = cx.theme().clone();
         let dark = theme.mode.is_dark();
-        let track_bg = if dark { theme.sidebar } else { theme.muted };
+        let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
         let plate_bg = if dark { theme.secondary_active } else { theme.popover };
+        // The languages stand under their entry, not beside it, so their
+        // track is the entry's width with the choices in equal parts: its
+        // ends are then the name's left and the tick's right.
+        let fill = control == "writing-language";
         let (from, to) = {
             let mut st = self.seg_state.borrow_mut();
             let e = st.entry(control).or_insert((current, current, None));
@@ -5392,6 +5533,7 @@ impl Workbench {
         let entity = cx.entity().downgrade();
         let row = h_flex()
             .gap(px(2.))
+            .when(fill, |d| d.flex_1().min_w_0())
             // Where each segment landed, relative to the track: the row
             // sits inside the track's 3px padding. A change is noted and
             // the next draw places the plate from it.
@@ -5441,6 +5583,7 @@ impl Workbench {
                     .rounded(round)
                     .cursor_pointer()
                     .text_size(seg_text)
+                    .when(fill, |d| d.flex_1().justify_center())
                     .when(active && !measured, |d| d.bg(plate_bg).shadow_sm())
                     .when(active, |d| d.font_weight(FontWeight::MEDIUM).text_color(theme.foreground))
                     .when(!active, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
@@ -5449,9 +5592,12 @@ impl Workbench {
                     // A choice of the agents page's install step has an
                     // icon before its word, in the word's ink.
                     .when_some(crate::agents_page::choice_icon(control, key), |d, icon| d.gap(px(4.)).child(Icon::default().path(icon).with_size(seg_text + px(1.5))))
+                    // A language has its flag before its name, in its
+                    // own colours.
+                    .when_some(flag_of(control, key), |d, flag| d.gap(px(6.)).child(img(flag).w(px(17.)).h(px(12.)).flex_shrink_0()))
                     .child(label)
             }));
-        h_flex().relative().p(pad).rounded(round + px(2.)).bg(track_bg).flex_shrink_0().children(plate).child(row).into_any_element()
+        h_flex().relative().p(pad).rounded(round + px(2.)).bg(track_bg).map(|d| if fill { d.w_full() } else { d.flex_shrink_0() }).children(plate).child(row).into_any_element()
     }
 
     // -- find in the conversation ------------------------------------------
@@ -5892,7 +6038,7 @@ impl Workbench {
             .when(!settled, |d| d.child(Icon::new(IconName::ChevronDown).with_size(px(13.)).flex_shrink_0()))
             .child(self.pick_mark(PickFor::Folder, cx));
         let strip = h_flex().w_full().items_center().child(strip).child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(theme.border)).child(agent_control);
-        v_flex().w_full().max_w(CONTENT_W).rounded(px(20.)).bg(if theme.mode.is_dark() { theme.sidebar } else { theme.muted }).child(card).child(strip).into_any_element()
+        v_flex().w_full().max_w(CONTENT_W).rounded(px(20.)).bg(if theme.mode.is_dark() { theme.tab_bar_segmented } else { theme.muted }).child(card).child(strip).into_any_element()
     }
 
     /// The choices of a list as they stand now, and the one that is set.
@@ -5930,12 +6076,12 @@ impl Workbench {
             PickFor::CodexEffort => efforts(&codex_model(self), &self.codex_next[2], true),
             PickFor::CodexModel => {
                 let now = codex_model(self);
-                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), m.label.clone(), m.detail.clone())).collect(), now)
+                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), plain_default(&m.label), m.detail.clone())).collect(), now)
             }
             PickFor::CodexMode => (options.modes.iter().map(|m| PickRow::tinted(m.key.clone(), m.label.clone(), m.detail.clone(), mode_color(&options, &m.key, theme))).collect(), self.codex_next[0].clone()),
             PickFor::Model => {
                 let now = options.model(&self.current_model()).map(|m| m.key.clone()).unwrap_or_default();
-                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), m.label.clone(), m.detail.clone())).collect(), now)
+                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), plain_default(&m.label), m.detail.clone())).collect(), now)
             }
             // Each in the colour its pill wears. On a session whose mode
             // only ⇧Tab moves, the ones that key has been seen to reach.
@@ -5981,7 +6127,7 @@ impl Workbench {
             PickFor::DefaultModel => {
                 let model = if self.cfg.driver.default_model.is_empty() { options.default_model.clone() } else { self.cfg.driver.default_model.clone() };
                 let now = options.model(&model).map(|m| m.key.clone()).unwrap_or(model);
-                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), m.label.clone(), m.detail.clone())).collect(), now)
+                (options.models.iter().map(|m| PickRow::plain(m.key.clone(), plain_default(&m.label), m.detail.clone())).collect(), now)
             }
         }
     }
@@ -6116,6 +6262,7 @@ impl Workbench {
             if key.is_empty() && ix > 0 {
                 rows = rows.child(div().flex_shrink_0().h(px(1.)).mx(px(6.)).my(px(3.)).bg(theme.border));
             }
+            let key_none = key.is_empty();
             let key = key.clone();
             rows = rows.child(
                 v_flex()
@@ -6141,7 +6288,9 @@ impl Workbench {
                                 Tint::Plain => div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()),
                                 tint => tinted(name, tint).text_size(px(13.)),
                             })
-                            .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary))),
+                            .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary)))
+                            // "Choose a folder…" has a key (`ChooseFolder`).
+                            .when(what == PickFor::Folder && key_none, |d| d.child(div().flex_1()).child(kbd_hint("⌘O", &theme))),
                     )
                     // A choice's line is prose and wraps; a folder's is a
                     // path, kept to one line so the list stays short.
@@ -8762,9 +8911,9 @@ impl Workbench {
         // strip, right of the window's buttons, ending where the entries'
         // key hints end.
         let brand = h_flex()
-            .gap(px(4.))
+            .gap(px(5.))
             .items_center()
-            .child(img("icon/app.png").size(px(26.)).flex_shrink_0())
+            .child(img("icon/app.png").size(px(31.)).flex_shrink_0())
             // Optima has a regular and a bold and nothing between: the
             // regular read as thin in the accent's colour and the bold as
             // thick. The name is drawn twice, half a pixel apart, which
@@ -8772,7 +8921,7 @@ impl Workbench {
             .child(
                 div()
                     .relative()
-                    .text_size(px(20.))
+                    .text_size(px(23.5))
                     .text_color(theme.primary)
                     .when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f))
                     .child("Emaki")
@@ -8783,7 +8932,7 @@ impl Workbench {
         // this strip, and the name takes the room to their right, centred
         // on the traffic lights as they are. No line under it: the
         // content's card is what the sidebar ends against.
-        let header = Self::drag_region(h_flex().h(TITLEBAR_H).flex_shrink_0().pt(px(2.) + FRAME).pr(px(20.)).justify_end().items_center().child(brand), cx);
+        let header = Self::drag_region(h_flex().h(TITLEBAR_H).flex_shrink_0().pt(px(2.) + FRAME).pr(px(16.)).justify_end().items_center().child(brand), cx);
         let top = v_flex().px(px(10.)).pt(px(8.)).gap(px(2.));
 
         let new_row = h_flex()
@@ -9486,6 +9635,7 @@ impl Workbench {
             MenuDo::Pin(project) => self.toggle_pin(&project, cx),
             MenuDo::Reveal(path) => crate::sys::reveal_path(&path),
             MenuDo::File(what, path) => self.file_do(what, path, window, cx),
+            MenuDo::Files(what, paths) => self.files_do(what, paths, window, cx),
             MenuDo::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuDo::CopyImage(pic) => self.copy_image(pic, cx),
             MenuDo::OpenTerminal(key) => {
@@ -9798,7 +9948,10 @@ impl Workbench {
                     .cursor_pointer()
                     .text_size(px(13.))
                     .whitespace_nowrap()
-                    .hover(|s| s.bg(theme.sidebar_accent))
+                    // The dark palette's own hover is a shade off the
+                    // card and cannot be seen on it: a wash of the ink,
+                    // as a list's rows have.
+                    .hover(|s| s.bg(if theme.mode.is_dark() { theme.foreground.opacity(0.11) } else { theme.sidebar_accent }))
                     .when(!bare, |d| d.child(Icon::default().path(what.icon(label)).with_size(px(icon_w)).text_color(theme.foreground).flex_shrink_0()))
                     .on_click(cx.listener(move |this, _, window, cx| this.menu_pick(what.clone(), window, cx)))
                     .child(words),
@@ -9887,7 +10040,7 @@ impl Workbench {
     fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let dark = theme.mode.is_dark();
-        let track_bg = if dark { theme.sidebar } else { theme.muted };
+        let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
         let plate_bg = if dark { theme.secondary_active } else { theme.popover };
         let row_w = self.tabs_row_w.clone();
         let entity = cx.entity().downgrade();
@@ -10470,13 +10623,47 @@ impl Workbench {
         let Some((round, item)) = self.unread_from() else { return };
         let Some(d) = self.detail.as_mut() else { return };
         d.seen = shape_of(&d.session);
-        d.list.scroll_to(ListOffset { item_ix: round, offset_in_item: px(0.) });
+        let to = ListOffset { item_ix: round, offset_in_item: px(0.) };
+        d.list.scroll_to(to);
         if item > 0 {
             self.unread_go = Some((round, item));
             self.unread_y.set(None);
             self.unread_due.set(true);
+        } else {
+            self.glide_to(to);
         }
         cx.notify();
+    }
+
+    /// Arrive at `to` in motion: the list is put a little short of it and
+    /// runs the rest of the way (`glide_step`). The whole way cannot be
+    /// run, since what lies between has no height until it is drawn; the
+    /// last stretch is what the eye follows.
+    fn glide_to(&mut self, to: ListOffset) {
+        let Some(d) = self.detail.as_ref() else { return };
+        d.list.scroll_by(-GLIDE);
+        self.glide = Some((Instant::now(), to, px(0.)));
+    }
+
+    /// One frame of a glide: as far along as the clock says, and at its
+    /// end the list is put exactly where it was going, whatever the
+    /// heights learnt on the way did to the distance.
+    fn glide_step(&mut self, window: &mut Window) {
+        let Some((at, to, done)) = self.glide else { return };
+        let Some(d) = self.detail.as_ref() else {
+            self.glide = None;
+            return;
+        };
+        let t = at.elapsed().as_secs_f32() / GLIDE_TIME.as_secs_f32();
+        if t >= 1. {
+            d.list.scroll_to(to);
+            self.glide = None;
+            return;
+        }
+        let want = GLIDE * ease_out_quint()(t);
+        d.list.scroll_by(want - done);
+        self.glide = Some((at, to, want));
+        window.request_animation_frame();
     }
 
     /// The place gone to has been drawn: it is brought a little under
@@ -10485,6 +10672,8 @@ impl Workbench {
         self.unread_go = None;
         if let (Some(y), Some(d)) = (self.unread_y.take(), self.detail.as_ref()) {
             d.list.scroll_by(y - d.list.viewport_bounds().top() - px(70.));
+            let to = d.list.logical_scroll_top();
+            self.glide_to(to);
         }
         cx.notify();
     }
@@ -10499,6 +10688,7 @@ impl Workbench {
                 .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child("Pick a session, or press ⌘K to search everything."))
                 .into_any_element();
         };
+        self.glide_step(window);
         // At the end, what is there has been seen.
         if let Some(d) = self.detail.as_mut().filter(|d| d.list.is_following_tail()) {
             d.seen = shape_of(&d.session);
@@ -12675,6 +12865,45 @@ impl Workbench {
     /// session starts in is a pill on the composer (`PickFor::Folder`).
     /// It used to be a grid of six cards under it, and before that a cloud
     /// of full-path pills: both took the page for one choice.
+    /// Said over the composer when neither agent is on this machine: a
+    /// session cannot start, and the agents page says how to get one.
+    /// Nothing is said before the machine has been looked at
+    /// (`agents_found` empty), so it never shows for the moment a launch
+    /// takes to find them. `EMAKI_NO_AGENTS=1` shows it for a look.
+    fn no_agent_note(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let looked = !self.agents_found.is_empty();
+        let any = emaki_core::agents::all().iter().any(|a| self.agents_found.get(a.id).is_some_and(|f| f.path.is_some()));
+        if !(looked && !any) && std::env::var_os("EMAKI_NO_AGENTS").is_none() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let note = h_flex()
+            .w_full()
+            .max_w(CONTENT_W)
+            .px(px(16.))
+            .py(px(11.))
+            .gap(px(12.))
+            .items_center()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.primary.opacity(0.35))
+            .bg(theme.primary.opacity(0.07))
+            .child(Icon::default().path("icons/sparkles.svg").with_size(px(16.)).text_color(theme.primary).flex_shrink_0())
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(1.))
+                    .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child("No coding agent is installed"))
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("A session needs Claude Code or Codex. Install either one to begin.")),
+            )
+            .child(pill_button("home-agents", "Set up an agent", &theme, cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.show_agents(None, cx);
+            })));
+        Some(note.with_animation("home-no-agent", Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| d.opacity(t)).into_any_element())
+    }
+
     fn render_new(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let display = crate::fonts::display_family(cx);
@@ -12693,8 +12922,10 @@ impl Workbench {
                             v_flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .child(h_flex().gap(px(14.)).items_center().child(img("icon/app.png").size(px(44.)).flex_shrink_0()).child(div().text_size(px(36.)).font_family(display).child(greeting(&self.user_name))))
+                                .child(home_scroll(&theme))
+                                .child(div().text_size(px(36.)).font_family(display).child(greeting(&self.user_name)))
                         )
+                        .children(self.no_agent_note(cx))
                         .child(self.render_composer(cx)),
                 ),
             ),
@@ -12919,6 +13150,42 @@ fn card_corners(r: Pixels, ground: Hsla) -> impl IntoElement {
     .inset_0()
 }
 
+/// The drawing over the greeting: a handscroll, an emaki, seen from the
+/// front as the icon is, with a picture on its sheet. Lines only, in the
+/// manner of hairline's figures (github.com/lucasmarkes/hairline, MIT): a
+/// solid is its outline and one dim line inside it, nothing is filled,
+/// there are no words, and one mark, the sun, is bright, in the accent.
+/// Three layers, each one colour, so it follows the appearance and the
+/// accent. `scripts/home-scroll.py` writes the files.
+fn home_scroll(theme: &gpui_component::Theme) -> impl IntoElement {
+    let (w, h) = (px(240.), px(96.));
+    let layer = |path: &'static str, color: Hsla| svg().path(path).absolute().inset_0().size_full().text_color(color);
+    div()
+        .relative()
+        .w(w)
+        .h(h)
+        .flex_shrink_0()
+        .mb(px(14.))
+        .child(layer("icons/home/scroll-dim.svg", theme.foreground.opacity(0.3)))
+        .child(layer("icons/home/scroll-sil.svg", theme.foreground.opacity(0.72)))
+        .child(layer("icons/home/scroll-hi.svg", theme.primary))
+}
+
+/// The flag a language of the composer's wears in Settings.
+fn flag_of(control: &str, key: &str) -> Option<&'static str> {
+    if control != "writing-language" {
+        return None;
+    }
+    Some(match key {
+        "en-US" => "icons/flags/us.svg",
+        "en-GB" => "icons/flags/gb.svg",
+        "es" => "icons/flags/es.svg",
+        "fr" => "icons/flags/fr.svg",
+        "de" => "icons/flags/de.svg",
+        _ => return None,
+    })
+}
+
 pub fn page_in(id: &'static str, el: Div) -> AnyElement {
     el.with_animation(ElementId::Name(id.into()), Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()), |d, t| d.opacity(t).pt(px(8. * (1. - t)))).into_any_element()
 }
@@ -13064,7 +13331,9 @@ pub fn pill_button(id: impl Into<ElementId>, label: impl Into<SharedString>, the
         .justify_center()
         .rounded_full()
         .border_1()
-        .border_color(theme.border)
+        // The line an input has: a panel's own border is the panel's
+        // shade in the dark appearance, and the button had no edge.
+        .border_color(theme.input)
         .cursor_pointer()
         .text_size(px(12.))
         .text_color(theme.foreground)
@@ -13099,7 +13368,16 @@ pub fn pill_button_danger(id: impl Into<ElementId>, label: impl Into<SharedStrin
 }
 
 fn kbd_hint(text: &'static str, theme: &gpui_component::Theme) -> impl IntoElement {
-    div().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(text)
+    div().flex_shrink_0().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(shortcut(text))
+}
+
+/// A shortcut as this system's keyboard has it. It is written as the Mac
+/// has it ("⌘O"), and elsewhere ⌘ is Ctrl, the key `secondary` binds.
+fn shortcut(mac: &'static str) -> SharedString {
+    if cfg!(target_os = "macos") {
+        return mac.into();
+    }
+    mac.replace('⌘', "Ctrl+").replace('⇧', "Shift+").replace('⌥', "Alt+").into()
 }
 
 /// A round ghost button holding one icon.
@@ -13453,6 +13731,12 @@ impl Render for Workbench {
         if let Some(path) = self.file_probe.take() {
             self.file_preview(&path, window, cx);
         }
+        if std::mem::take(&mut self.file_menu_probe) {
+            if let Some(ed) = self.file_editor.as_ref() {
+                let at = self.file_view_scroll.bounds().origin + point(px(86.), px(23.));
+                ed.state.update(cx, |s, cx| s.secondary_click_at(at, window, cx));
+            }
+        }
         if self.branch_ask_probe.is_some() && self.panel_changes() > 0 {
             if let Some(name) = self.branch_ask_probe.take() {
                 self.branch_go(name, false, window, cx);
@@ -13701,6 +13985,14 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| this.show_new(None, window, cx)))
             .on_action(cx.listener(|this, _: &NewSessionHere, window, cx| this.new_session_here(window, cx)))
+            // ⌘O is the list's "Choose a folder…", on the new-session
+            // page and nowhere else.
+            .on_action(cx.listener(|this, _: &ChooseFolder, _, cx| {
+                if this.page == Page::New {
+                    this.close_pick(cx);
+                    this.choose_folder(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewBranch, window, cx| this.branch_new_open(None, window, cx)))
             .on_action(cx.listener(|this, _: &GoAgents, _, cx| this.show_agents(None, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {

@@ -395,7 +395,7 @@ impl Workbench {
     pub(crate) fn term_buttons(&self, agent: AgentId, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let dark = theme.mode.is_dark();
-        let track_bg = if dark { theme.sidebar } else { theme.muted };
+        let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
         let plate_bg = if dark { theme.secondary_active } else { theme.popover };
         let (seg_w, seg_h, pad, gap) = (30., 24., 3., 2.);
         let x_of = |agent: bool| pad + if agent { seg_w + gap } else { 0. };
@@ -472,7 +472,7 @@ impl Workbench {
             .flex_shrink_0()
             .p(px(pad))
             .rounded(px(9.))
-            .bg(if dark { theme.sidebar } else { theme.muted })
+            .bg(if dark { theme.tab_bar_segmented } else { theme.muted })
             .children(plate)
             .child(
                 h_flex()
@@ -1811,23 +1811,23 @@ struct Scheme {
 }
 
 static KAKU_DARK: Scheme = Scheme {
-    bg: 0x15141b,
+    bg: 0x2a2826,
     fg: 0xd5d4d6,
     cursor: 0x8e6ad9,
     sel: (0x8e6ad9, 0.55),
     sel_fg: 0xd5d4d6,
-    split: 0x29263c,
-    tab_on: 0x29263c,
-    tab_hover: 0x1f1d28,
+    split: 0x3f3c38,
+    tab_on: 0x3f3c38,
+    tab_hover: 0x33312e,
     tab_off: 0x6d6d6d,
     toast: (0x8e6ad9, 0xffffff),
     ansi: {
         let k = &crate::look::INKS_DARK;
         [0xc8c6cc, k.red, k.green, k.gold, k.blue, k.violet, k.teal, 0xd5d4d6, 0x6d6d6d, k.red, k.green, k.gold, k.blue, k.violet, k.teal, 0xd5d4d6]
     },
-    grounds: &[(0xc8c6cc, 0x15141b), (0x6d6d6d, 0x3a3942), (0x6e6e6e, 0x3a3942), (0x8ec3ff, 0x3a3942), (0xd5d4d6, 0x4a4954)],
+    grounds: &[(0xc8c6cc, 0x2a2826), (0x6d6d6d, 0x413f3b), (0x6e6e6e, 0x413f3b), (0x8ec3ff, 0x413f3b), (0xd5d4d6, 0x504d49)],
     inks: &[(0x000000, 0xd5d4d6), (0x110f18, 0xd5d4d6), (0x15141b, 0xd5d4d6), (0x1a1a1a, 0xd5d4d6), (0x1c1c1c, 0xd5d4d6)],
-    wash: 0x3a3942,
+    wash: 0x413f3b,
     plain: FontWeight::NORMAL,
     bold: FontWeight::MEDIUM,
 };

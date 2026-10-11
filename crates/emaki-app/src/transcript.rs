@@ -98,7 +98,7 @@ pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
                 // font's true Bold; inline code in the mono face. These and
                 // the plate are Emaki's additions to the vendored toolkit.
                 strong_font_weight: Some(FontWeight::SEMIBOLD),
-                inline_code_font_family: Some(crate::fonts::inline_code_family(cx).unwrap_or_else(|| theme.mono_font_family.clone())),
+                inline_code_font_family: Some(theme.mono_font_family.clone()),
                 // Inline code as the Claude app draws it, in the accent
                 // config asks for: the readable shade of it for the
                 // letters, a faint wash of it on a rounded plate behind.

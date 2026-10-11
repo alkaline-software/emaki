@@ -1046,13 +1046,6 @@ impl Hub {
         });
     }
 
-    /// A settings change for the explainer, applied to the running one.
-    pub fn set_explain(&self, cfg: emaki_core::config::Explain) {
-        if let Ok(mut c) = self.cfg.write() {
-            c.explain = cfg.clone();
-        }
-        self.explainer.set_cfg(cfg);
-    }
 
     pub fn stop_driver(&self, session_id: &str) {
         let d = self.drivers.lock().unwrap().remove(session_id);

@@ -2656,7 +2656,8 @@ fn a_new_line_starts_where_the_language_says() {
 
 #[test]
 fn an_r_file_is_formatted_as_air_formats_it() {
-    use emaki_core::format::format;
+    let all = emaki_core::format::all_keys();
+    let format = |lang: &str, text: &str| emaki_core::format::format(lang, std::path::Path::new("a.R"), text, &all);
     let messy = "f<-function(x,y){\nif(x>1){y=x+1}\n      else {y=2}\nreturn(y)}\n";
     let tidy = format("r", messy).unwrap().expect("a messy file changes");
     assert_eq!(tidy, "f <- function(x, y) {\n  if (x > 1) {\n    y <- x + 1\n  } else {\n    y <- 2\n  }\n  return(y)\n}\n");
@@ -2667,11 +2668,40 @@ fn an_r_file_is_formatted_as_air_formats_it() {
     let once = format("r", wide).unwrap().expect("it changes");
     assert!(once.contains("df %>%\n  filter(a > 1, b %in% c('x', \"y\")) %>%"), "{once}");
     assert_eq!(format("r", &once), Ok(None), "{once}");
-    // What is already in form is left alone, and so is what is not R.
+    // What is already in form is left alone, and so is a language
+    // nothing here formats.
     assert_eq!(format("r", &tidy), Ok(None));
-    assert_eq!(format("python", "x=1\n"), Ok(None));
+    assert_eq!(format("swift", "let x=1\n"), Ok(None));
     // A file that does not parse is not touched; the reason comes back.
     assert!(format("r", "f <- function( {\n").is_err());
+}
+
+#[test]
+fn a_file_is_formatted_by_its_language_s_own_formatter() {
+    use emaki_core::format::{all_keys, format, listed, LANGS};
+    use std::path::Path;
+    let all = all_keys();
+    // Ten languages in two lists of five, each with a file to take its
+    // icon from, and the editor's names find them.
+    assert_eq!((LANGS.iter().filter(|l| l.code).count(), LANGS.iter().filter(|l| !l.code).count()), (5, 5));
+    assert_eq!(listed("tsx").map(|l| l.key), Some("typescript"));
+    assert_eq!(listed("c").map(|l| l.key), Some("cpp"));
+    assert!(listed("swift").is_none());
+    // dprint's, built in.
+    assert_eq!(format("typescript", Path::new("a.ts"), "const  x:number=1\nfunction f(a,b){return a+b}\n", &all).unwrap().as_deref(), Some("const x: number = 1;\nfunction f(a, b) {\n  return a + b;\n}\n"));
+    assert_eq!(format("jsx", Path::new("a.jsx"), "const a=<div   className='x'>hi</div>\n", &all).unwrap().as_deref(), Some("const a = <div className=\"x\">hi</div>;\n"));
+    assert_eq!(format("json", Path::new("a.json"), "{\"a\":1,\"b\":[1,2]}", &all).unwrap().as_deref(), Some("{ \"a\": 1, \"b\": [1, 2] }\n"));
+    assert_eq!(format("toml", Path::new("a.toml"), "[a]\nb=1\nc   =  \"x\"\n", &all).unwrap().as_deref(), Some("[a]\nb = 1\nc = \"x\"\n"));
+    assert_eq!(format("markdown", Path::new("a.md"), "Title\n=====\n\n*  one\n*  two\n", &all).unwrap().as_deref(), Some("# Title\n\n- one\n- two\n"));
+    // A Quarto file is markdown to the editor and is left as it is.
+    assert_eq!(format("markdown", Path::new("a.qmd"), "Title\n=====\n", &all), Ok(None));
+    // What does not parse is not touched, and says why in a line.
+    let why = format("typescript", Path::new("a.ts"), "const = ;\n", &all).unwrap_err();
+    assert!(!why.is_empty() && !why.contains('\n'), "{why}");
+    assert!(format("json", Path::new("a.json"), "{\"a\": }", &all).is_err());
+    // A language not ticked is saved as typed.
+    let some = vec!["r".to_string()];
+    assert_eq!(format("json", Path::new("a.json"), "{\"a\":1}", &some), Ok(None));
 }
 
 #[test]
@@ -3397,4 +3427,29 @@ fn an_archive_of_the_old_shape_is_moved_into_the_new() {
     assert_eq!(read("claude/proj/later.jsonl"), "d\n");
     assert_eq!(read("claude/proj/a/subagents/agent-1.jsonl"), "sub\n");
     assert_eq!(read("claude/proj/a/subagents/agent-1.gen1.jsonl"), "sub, rewritten\n");
+}
+
+#[test]
+fn the_helper_asks_codex_with_nothing_kept_and_its_light_model() {
+    use emaki_core::explain::{codex_argv, light_of};
+    // The model Codex itself calls fast, whatever it is named this year.
+    let models = [("gpt-big", "Most capable for hard work."), ("gpt-small", "Fast and affordable model for easier tasks."), ("gpt-old", "Older fast and efficient model.")];
+    assert_eq!(light_of(models.iter().copied()).as_deref(), Some("gpt-small"));
+    assert_eq!(light_of([("gpt-big", "Most capable.")].iter().copied()), None);
+    // A Claude Code child's command line becomes one prompt, and the run
+    // leaves no session, reads no config and writes nowhere.
+    let claude: Vec<String> = ["-p", "--model", "claude-haiku-4-5", "--system-prompt", "Say what it does.", "Tool: Bash"].iter().map(|s| s.to_string()).collect();
+    let argv = codex_argv(&claude, Some("gpt-small"), std::path::Path::new("/tmp/out.txt"));
+    assert_eq!(argv[0], "exec");
+    for flag in ["--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"] {
+        assert!(argv.iter().any(|a| a == flag), "{flag} is missing");
+    }
+    let after = |flag: &str| argv.iter().position(|a| a == flag).and_then(|i| argv.get(i + 1)).cloned();
+    assert_eq!(after("--sandbox").as_deref(), Some("read-only"));
+    assert_eq!(after("--model").as_deref(), Some("gpt-small"));
+    assert_eq!(after("--output-last-message").as_deref(), Some("/tmp/out.txt"));
+    let prompt = argv.last().unwrap();
+    assert!(prompt.starts_with("Say what it does.") && prompt.ends_with("Tool: Bash"));
+    // With no light model known, the choice is Codex's.
+    assert!(!codex_argv(&claude, None, std::path::Path::new("/tmp/out.txt")).iter().any(|a| a == "--model"));
 }

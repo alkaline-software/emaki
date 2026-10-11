@@ -98,9 +98,11 @@ fn paint(cfg: &mut ThemeConfig, a: &Accent) {
     c.selection = Some(format!("{base}{}", if dark { "66" } else { "59" }).into());
 }
 
-/// Hand the toolkit both palettes with `accent_key` painted in. Called at
-/// start and again whenever the accent changes; `apply` then draws it.
-pub fn install(accent_key: &str, cx: &mut App) {
+/// Hand the toolkit both palettes with `accent_key` painted in and
+/// `mono` (the choice `fonts::term_family` reads) as every monospace
+/// face. Called at start and again whenever either changes; `apply` then
+/// draws it.
+pub fn install(accent_key: &str, mono: &str, cx: &mut App) {
     let set: ThemeSet = match serde_json::from_str(&inked(include_str!("../themes/emaki.json"))) {
         Ok(s) => s,
         Err(e) => {
@@ -109,15 +111,13 @@ pub fn install(accent_key: &str, cx: &mut App) {
         }
     };
     let a = accent(accent_key);
-    let code = crate::fonts::code_family(cx);
+    let code = crate::fonts::term_family(mono, cx);
     let theme = Theme::global_mut(cx);
     for mut cfg in set.themes {
         paint(&mut cfg, a);
         // The face for code goes into the config, so `Theme::change` keeps
         // it through every appearance switch, as it does the accent.
-        if code.is_some() {
-            cfg.mono_font_family = code.clone();
-        }
+        cfg.mono_font_family = Some(code.clone());
         let cfg = std::rc::Rc::new(cfg);
         if cfg.mode.is_dark() {
             theme.dark_theme = cfg;

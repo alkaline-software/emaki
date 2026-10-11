@@ -76,6 +76,13 @@ that past the last step. The picture is taken from inside
 Recording access, which the terminal running the probe often lacks. Crop a
 capture with PIL to read a detail.
 
+`EMAKI_GO` steps `treeall` (⌘A in the files tree) and `treeband:<y>:<y2>`
+(a rectangle dragged down it, in points from the tree's top); `file:menu`
+with the editor showing is a right click on its first line's word.
+
+`EMAKI_NO_AGENTS=1` shows the new-session page as a machine with no agent
+on it has it.
+
 Debug prints: `EMAKI_TIMING=1` (load and hand-over per open),
 `EMAKI_A11Y=1` (gpui's view of the accessibility tree at every draw),
 `EMAKI_SCROLL_DEBUG=1` (every wheel event with its phase and owner),

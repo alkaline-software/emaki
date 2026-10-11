@@ -7,11 +7,12 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
 
 - No call site names Tabler. A new icon is a file in `assets/icons/`
   under the toolkit's file name and a line in `OWN` (`assets.rs`).
-- Anthropic's fonts are not ours to ship. They are loaded from the machine,
-  each with a fallback.
-- On macOS register the Claude app's variable fonts with CoreText, not
-  `text_system().add_fonts`: handed the bytes, gpui holds one face per file
-  (Regular) and draws every bold as regular.
+- Every face the window carries is under a licence that lets an app
+  carry it (the SIL Open Font License), with that licence beside its
+  files in `assets/fonts`. Anthropic's faces are theirs: they are not
+  carried, not loaded from the Claude app and not fetched.
+- A face is a static file a weight. Handed a variable font's bytes,
+  gpui holds one face of it (Regular) and draws every bold as regular.
 - Call `look::apply`, never `sync_system_appearance`, the window's
   appearance observer included, or a pinned appearance flips with the
   system.
@@ -33,12 +34,20 @@ creams a step from each other tired the eye and gave it nowhere to rest.
 - The frame and the sidebar on it (`title_bar.background`): a warm
   graphite in the light appearance (the ink's own near black was tried
   and was too heavy), and in the dark one a grey
-  lighter than the page, so the page is a well in a lighter shell.
+  lighter than the page, near the light appearance's graphite, so the
+  page is a well in a lighter shell and the sidebar is the same thing in
+  both.
 - The page and what lies on it: in the light appearance near white with
   a trace of warmth, its greys (panels, tracks, bubbles, lines) the old
   creams with most of their colour taken out. In the dark appearance the
   page is the darkest ground there is.
 - The accent, the one warm colour left, which is why it now stands out.
+
+A track of buttons (a segmented control, the tabs' pill, the strip's two
+tracks, the tray under the composer) is `tab_bar.segmented.background`
+in the dark appearance, lighter than the page and than a card on it. It
+was the panels' ground, which on the darker page was the page's own
+shade, and a control had no edge.
 
 The terminal keeps Kaku's cream in the light appearance
 (`docs/channels.md`): it is a different thing from the page and may look
@@ -59,7 +68,8 @@ the `@tabler/icons` package (`icons/outline/<name>.svg`; `star-fill` from
 `icons/filled`), MIT, with `TABLER-LICENSE` beside them. Each is written
 on one line without Tabler's empty bounding path.
 
-Not Tabler: `bubble-tail.svg`, the tail of a prompt's bubble
+Not Tabler: the flags in `icons/flags` and the handscroll in `icons/home`
+(`docs/window.md`), drawn here, `bubble-tail.svg`, the tail of a prompt's bubble
 (`docs/conversation.md`), `claude.svg`, Claude's own mark, the other agents' marks in
 `icons/agents/` (`docs/agents.md`; Codex wears OpenAI's everywhere), `mark.svg`, and eleven toolkit icons
 that were never replaced (the window controls, the right and bottom
@@ -97,7 +107,7 @@ Everything that colours code or a terminal takes them from there.
 
 ## Inline code
 
-The accent on a wash of itself, as the Claude app draws it. `md_view` sets
+The accent on a wash of itself. `md_view` sets
 the letters to `theme.link` and `inline_code_chip` to a thinned
 `theme.primary` with a border, so both follow the accent.
 
@@ -112,72 +122,66 @@ the letters to `theme.link` and `inline_code_chip` to a thinned
   end; a breaking space left the next line starting with a gap.
 - The view's Copy action takes the pairs out again. The copy buttons read
   the model and never see them.
-- The Claude app sets inline code at 0.9em. A gpui text run carries a face
-  but no size, so the smaller size is a font of its own, `Inline Anthropic
-  Mono` (`fonts::inline_code_family`). Without it inline code is the size
-  of the paragraph.
-- Still different from the Claude app: the plate has a small margin where
-  theirs has none, and a span that wraps gets a plate per line with no
-  padding at the break. Their rule is `code:not(pre code)`: `.9em`,
-  `padding: .0625em .25em`, `border: .5px solid` at about 15%,
-  `border-radius: .4em`, danger red on a 5% wash of the text colour.
+- Inline code is the paragraph's size. A gpui text run carries a face
+  but no size, so a smaller size would be a font of its own.
 
-## The code font
+## The faces
 
-Anthropic Mono when the machine has it. The Claude app downloads it when it
-runs, and its bundle holds the serif and the sans and no mono, so it cannot
-be loaded the way those two are.
+Twelve, eleven of them built in (`fonts.rs`, `assets/fonts`), chosen in Settings,
+Fonts, where each is a tile drawn in itself:
 
-- `fonts::install` registers whatever is in `~/.emaki/fonts`.
-  `fonts::code_family` takes the first family that starts with "Anthropic
-  Mono" (the file calls itself "Anthropic Mono Web"), else on macOS
-  `.AppleSystemUIFontMonospaced`, else the toolkit's own.
-- `look::install` writes it into both theme configs as `mono_font_family`,
-  so it is every mono in the window but the terminal panel's, which is
-  JetBrains Mono (`docs/channels.md`, The terminal panel).
-- `scripts/anthropic-mono.py` fills `~/.emaki/fonts`: given the roman and
-  italic woff2, it unpacks each to TrueType and writes a second copy under
-  the family `Inline Anthropic Mono` with the em enlarged by 1/0.9.
-- The woff2 URLs are in the Claude app's live stylesheet, fetched from
-  `assets-proxy.anthropic.com` (`@font-face{font-family:anthropic-mono}`).
-  They carry a content hash and change, so read them again each time. The
-  stylesheet inside the app bundle shows only the fallbacks and led to SF
-  Mono, which was wrong.
-
-## The conversation's font
-
-Anthropic Serif or Anthropic Sans, loaded by `fonts.rs` at start from a
-Claude app on this machine (`Resources/fonts` on macOS, the Squirrel
-install under `LOCALAPPDATA` on Windows).
-
-- macOS: `CTFontManagerRegisterFontsForURL` for the process. CoreText lists
-  a variable font's named instances as faces of their own, and gpui's
-  family lookup falls through to the system source when it was not handed
-  the family, so bold finds a bold.
-- Elsewhere the bytes go in as they are, and bold stays regular until that
-  platform's text system learns variable fonts.
-- Without a Claude app the serif falls back to Georgia and the sans to the
-  window's face, and the settings panel says so.
-- The face is applied to the transcript container (`render_detail`),
+- **The chat font**, one of eight (`app.chat_font`): the serifs Source
+  Serif, Newsreader, Literata and Lora, and the sans serifs Inter, IBM
+  Plex Sans, Source Sans and Geist. The first serif to begin with. A
+  file that says `serif` or `sans`, from when there were two, gets the
+  first of each.
+- **The monospace font**, one of four (`terminal.font`, where it was
+  the terminal's alone): JetBrains Mono, the one to begin with, then
+  Monaco on a Mac and IBM Plex Mono elsewhere, Maple Mono and Geist
+  Mono. Monaco is Apple's: it is used from the system on a Mac, as
+  Optima is, and never carried, which is why Windows and Linux have
+  another in its place. IBM Plex Mono has no medium or semibold here:
+  its files name those as families of their own. The second place is
+  one choice whichever face a system has in it (`mono_face`), so a
+  settings file carried from one to the other keeps its meaning. The chosen face is
+  every mono in the window: code in a conversation,
+  the file's editor, the terminal. `look::install` writes it into both
+  theme configs as `mono_font_family`, so `Theme::change` keeps it, and
+  `Workbench::set_mono_font` installs and draws again when it changes.
+- Titles and the greeting are in the chat font (`display_family`), so a
+  page's title and the conversation agree.
+- The chat font is applied to the transcript container (`render_detail`),
   which the markdown view inherits, and to what the agent says on the
   cards under it: a plan, a question and its choices (`render_dialog`,
   `render_question`). Those are the conversation's words before the
-  transcript has them, and in the window's face a plan changed face the
-  moment it was answered. Code stays in the mono face; the cards' own
+  transcript has them. Code stays in the mono face; the cards' own
   words (their heads, badges, tabs and buttons), the chrome and the
-  composer in the UI face.
+  composer in the UI face, which is the system's.
+- The files are Google Fonts' static instances (regular, semibold, bold
+  and an italic; a medium too for a mono), Maple Mono its own release's.
+- Anthropic Serif, Sans and Mono were the faces until v0.2.1, loaded
+  from a Claude app on the machine and from `~/.emaki/fonts`. They are
+  Anthropic's own and were taken out whole, the script that fetched the
+  mono with them.
+- The system's faces are used and never carried: Optima for the app's
+  name in the sidebar and the person's in its footer (`WORDMARK_FACES`),
+  and Monaco. Optima is the Mac's alone, so the window carries Belleza,
+  a free face with the same flared strokes, for Windows and Linux.
 
 ## The look settings
 
-Four settings in `config.json` under `app`, changed in the settings panel:
+Four settings in `config.json` under `app`, changed in the settings panel
+(the first two in Appearance, the others in Fonts with the monospace
+face):
 
 - `appearance` (`system`, `light`, `dark`), drawn by `look::apply`.
 - `accent`, a name from `look::ACCENTS`. The palette stays in
   `themes/emaki.json`; an accent is a substitution over the keys that carry
   the terracotta there.
-- `chat_font` (`serif`, the default, or `sans`).
-- `chat_size` (`small`, `medium`, `large`), which `AppConfig::chat_px`
-  turns into the reply's pixel size, the prompt and thoughts a little
+- `chat_font`, one of the eight chat faces (The faces).
+- `chat_size` (`small`, `medium`, `large`), the window's one text size
+  ("Font size"): the terminal's goes with it. `AppConfig::chat_px`
+  turns it into the reply's pixel size, the prompt and thoughts a little
   under. Medium is the Claude desktop app's body size and line height, read
   from its stylesheet, which also sets bold to weight 600, matched through
   the vendored toolkit's `strong_font_weight`.
@@ -190,7 +194,7 @@ section (`docs/channels.md`, The terminal panel).
 ## The picture and the name
 
 `app.avatar` and `app.user_name`, the first two rows of Settings,
-Appearance.
+Appearance: Avatar and Name.
 
 - `Workbench::pick_avatar` opens the file picker. `avatar_keep` writes
   `~/.emaki/avatar/<time>.png` with the `image` crate gpui already builds:
