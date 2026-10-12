@@ -58,6 +58,10 @@ window remembers.
   where none does. That covers a file closed with the keyboard in it, a
   field put away, a panel folded, and whatever is added later. It waits
   a draw because a thing focused as it first appears is in no frame yet.
+- A file's pane closed with the files tree beside it gives the keys to
+  the tree (`tree_focus_back`): the file's row is still lit there, and
+  ⌘⌫, ⌘C and the arrows are the tree's only while it has the focus.
+  Not when the composer is being typed in.
 - Keep `on_reopen` in `main.rs`. The app stays running with no window, and
   without the handler a Dock click does nothing.
 - Every scroller in the window, now and later, has the same bar and keeps

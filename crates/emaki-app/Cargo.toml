@@ -53,6 +53,8 @@ wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6
 wordcraft-docx = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
 wordcraft-layout = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
 wordcraft-render = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
+wordcraft-engine = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
+wordcraft-geom = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 # A PowerPoint deck's slides as pictures, drawn by DeckCraft
 # (storytold/deckcraft, MIT OR Apache-2.0), on the same terms.

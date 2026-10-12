@@ -11,6 +11,7 @@ mod fonts;
 mod format;
 mod html_shot;
 mod html_web;
+mod word;
 mod hub;
 mod look;
 mod panels;
@@ -341,6 +342,7 @@ fn main() {
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
 
         cx.bind_keys(key_bindings());
+        word::bind_keys(cx);
         cx.set_menus(app_menus());
 
         if let Err(e) = open_main_window(cx) {
