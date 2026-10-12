@@ -9,6 +9,8 @@ mod branches;
 mod file_icons;
 mod fonts;
 mod format;
+mod html_shot;
+mod html_web;
 mod hub;
 mod look;
 mod panels;
@@ -65,6 +67,9 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-s", SaveFile, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-g", FindPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-enter", Send, Some(COMPOSER_CONTEXT)),
+        // Outside the composer too, for the new-session page with nothing
+        // typed (`send_pressed`). A field of its own keeps its own ⌘↩.
+        KeyBinding::new("secondary-enter", Send, Some(KEY_CONTEXT)),
         // On the terminal card Tab is Claude Code's, not the toolkit's
         // move to the next field.
         KeyBinding::new("tab", TermTab, Some(TERMINAL_CONTEXT)),
@@ -179,6 +184,25 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
     });
 }
 
+/// The window's workbench, for an action that reached no view.
+struct MainWorkbench(WeakEntity<Workbench>);
+
+impl Global for MainWorkbench {}
+
+/// Run `f` on the workbench of the active window, or with none there
+/// close that window, which is what the action asked of a window bare.
+fn with_workbench(cx: &mut App, f: impl FnOnce(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static) {
+    let Some(w) = cx.active_window() else { return };
+    let workbench = cx.try_global::<MainWorkbench>().and_then(|m| m.0.upgrade());
+    cx.defer(move |cx| {
+        w.update(cx, |_, window, cx| match workbench {
+            Some(workbench) => workbench.update(cx, |w, cx| f(w, window, cx)),
+            None => window.remove_window(),
+        })
+        .ok();
+    });
+}
+
 /// Where the window was last time, if that spot is still on a screen.
 /// The least the window is dragged to: the conversation at its least
 /// with one pane beside it, the wider of the two there are, so a pane
@@ -252,7 +276,18 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             // The window's own close button asks as Quit does when a file
             // has changes not saved.
             let asked = workbench.downgrade();
-            window.on_window_should_close(cx, move |_, cx| asked.update(cx, |w, cx| w.file_guard(crate::panels::FileThen::CloseWindow, cx)).unwrap_or(true));
+            window.on_window_should_close(cx, move |_, cx| {
+                asked
+                    .update(cx, |w, cx| {
+                        let go = w.file_guard(crate::panels::FileThen::CloseWindow, cx);
+                        if go {
+                            w.keep_composers(cx);
+                        }
+                        go
+                    })
+                    .unwrap_or(true)
+            });
+            cx.set_global(MainWorkbench(workbench.downgrade()));
             cx.new(|cx| Root::new(workbench, window, cx))
         },
     )
@@ -292,10 +327,12 @@ fn main() {
         look::apply(&app_cfg.appearance, None, cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |w| w.remove_window()));
-        // ⌘W that no view claimed (nothing focused, or nothing showing that
-        // ⌘W could close) closes the window, as it does in any app.
-        cx.on_action(|_: &CloseTab, cx| with_active_window(cx, |w| w.remove_window()));
+        // Close Window and ⌘W that no view heard: the focus is on nothing
+        // the page draws, so the key came from the window's root, above
+        // the workbench. They are handed to it all the same. Closing the
+        // window here closed it with tabs open, whatever was not saved.
+        cx.on_action(|_: &CloseWindow, cx| with_workbench(cx, |w, window, cx| w.close_window(window, cx)));
+        cx.on_action(|_: &CloseTab, cx| with_workbench(cx, |w, window, cx| w.close_nearest(window, cx)));
         cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w| w.minimize_window()));
         cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w| w.zoom_window()));
         cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |w| w.toggle_fullscreen()));

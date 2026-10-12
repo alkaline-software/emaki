@@ -17,6 +17,7 @@ pub mod explain;
 pub mod files;
 pub mod find;
 pub mod format;
+pub mod fsops;
 pub mod git;
 pub mod indent;
 pub mod json;

@@ -207,6 +207,53 @@ pub fn user_first_name() -> String {
     }
 }
 
+/// The keyboard given back to the window's own view, when something
+/// else in the window has it or nothing does. A web view set in the
+/// window (`html_web.rs`) takes it at a click, and AppKit leaves it on
+/// the window itself when that view is hidden or let go: letters then
+/// reach nothing, while Return and Delete, which AppKit offers to every
+/// view first, still worked. True when it had to be moved.
+#[cfg(target_os = "macos")]
+pub fn keys_to_window(window: &gpui::Window) -> bool {
+    // `EMAKI_KEYS_STAY=1` leaves them where they are, for a probe that
+    // looks at where that is.
+    if keys_at_window(window) || std::env::var_os("EMAKI_KEYS_STAY").is_some() {
+        return false;
+    }
+    let Some(view) = ns_view(window) else { return false };
+    let Some(native) = view.window() else { return false };
+    native.makeFirstResponder(Some(view));
+    true
+}
+#[cfg(not(target_os = "macos"))]
+pub fn keys_to_window(_: &gpui::Window) -> bool {
+    false
+}
+
+/// Whether the keyboard is the window's own view's. True where the
+/// question does not come up.
+#[cfg(target_os = "macos")]
+pub fn keys_at_window(window: &gpui::Window) -> bool {
+    use objc2_app_kit::{NSResponder, NSView};
+    let Some(view) = ns_view(window) else { return true };
+    let Some(native) = view.window() else { return true };
+    let ours = view as *const NSView as *const ();
+    native.firstResponder().is_some_and(|first| std::ptr::eq(&*first as *const NSResponder as *const (), ours))
+}
+#[cfg(not(target_os = "macos"))]
+pub fn keys_at_window(_: &gpui::Window) -> bool {
+    true
+}
+
+/// The window's own view, which gpui draws in and takes its keys by.
+#[cfg(target_os = "macos")]
+fn ns_view(window: &gpui::Window) -> Option<&objc2_app_kit::NSView> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return None };
+    unsafe { (handle.ns_view.as_ptr() as *const objc2_app_kit::NSView).as_ref() }
+}
+
 /// The Dock icon, for a bare binary run from `target/`. A bundle carries the
 /// same picture as `Emaki.icns`; this makes a `cargo run` look the same.
 #[cfg(target_os = "macos")]

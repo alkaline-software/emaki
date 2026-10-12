@@ -49,6 +49,14 @@ dprint-plugin-toml = "0.9"
 calamine = "0.36"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = "0.41"
+# A workbook's cells as the sheet shows them: 50% and not 0.5, a date
+# and not its serial. GridCraft's reader and number formats
+# (storytold/gridcraft, MIT OR Apache-2.0), pure Rust; not on crates.io,
+# so pinned to a commit. calamine still reads what this does not.
+gridcraft-core = { git = "https://github.com/storytold/gridcraft", rev = "b3acae6b7782ea236d0fb87a0121fd1ba2e14c2b" }
+gridcraft-model = { git = "https://github.com/storytold/gridcraft", rev = "b3acae6b7782ea236d0fb87a0121fd1ba2e14c2b" }
+gridcraft-numfmt = { git = "https://github.com/storytold/gridcraft", rev = "b3acae6b7782ea236d0fb87a0121fd1ba2e14c2b" }
+gridcraft-xlsx = { git = "https://github.com/storytold/gridcraft", rev = "b3acae6b7782ea236d0fb87a0121fd1ba2e14c2b" }
 
 # Probing a pid (the inbox registry) is a Unix signal; a file's identity on
 # Windows needs the NTFS file index, which std does not expose on stable.

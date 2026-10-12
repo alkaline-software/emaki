@@ -403,7 +403,9 @@ impl Tree {
 /// How many of a PDF's pages are drawn, how wide in pixels, and how
 /// large a PDF is read at all.
 const PDF_PAGES: usize = 40;
-const PDF_W: f32 = 1400.;
+/// A page is drawn as wide in pixels as the pane shows it, between these.
+const PDF_W_LEAST: f32 = 600.;
+const PDF_W_MOST: f32 = 2400.;
 const PDF_BYTES: u64 = 120_000_000;
 /// How much of a table is shown.
 const TABLE_ROWS: usize = 500;
@@ -413,6 +415,9 @@ const OFFICE_BYTES: usize = 40_000_000;
 const TABLE_CELL: usize = 48;
 /// How long the file's pane takes to come and to go.
 pub(crate) const FILE_ANIM: Duration = Duration::from_millis(200);
+/// How long files dragged in are held over a closed folder before it
+/// opens.
+const TREE_SPRING: Duration = Duration::from_millis(650);
 /// How wide the pane is to begin with, and the least it is dragged to.
 pub(crate) const FILE_W: Pixels = px(460.);
 pub(crate) const FILE_MIN: Pixels = px(280.);
@@ -449,6 +454,8 @@ pub(crate) struct PdfGlyph {
 /// A PDF as the pane shows it: the pages drawn, how many the file has,
 /// and the text in the order the file draws it.
 pub(crate) struct PdfDoc {
+    /// How wide in pixels its pages were asked for (`pdf_fit`).
+    drawn_w: f32,
     pages: Vec<PdfPage>,
     total: usize,
     glyphs: Vec<PdfGlyph>,
@@ -854,7 +861,11 @@ pub enum FileDo {
     /// The file or folder itself to the clipboard, and what the
     /// clipboard holds into this folder (or beside this file).
     Copy,
+    /// To the clipboard, and moved by the paste that follows.
+    Cut,
     Paste,
+    /// A copy beside it, under a free name.
+    Duplicate,
     Rename,
     NewFile,
     NewFolder,
@@ -900,7 +911,7 @@ fn read_file(path: &Path, root: &Path) -> FileView {
         let picture = text.as_ref().map(|t| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Svg, t.as_bytes().to_vec())));
         return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Picture(crate::workbench::file_image_dims(path), picture), source: text.map(Into::into) };
     }
-    if ext == "pdf" {
+    if ext == "pdf" || ext == "docx" || ext == "pptx" {
         return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Pages(None), source: None };
     }
     // Word, PowerPoint and Excel files are read by `emaki_core::office`,
@@ -1059,11 +1070,196 @@ impl<'a> hayro::hayro_interpret::Device<'a> for PdfText {
     fn pop_transparency_group(&mut self) {}
 }
 
+/// Rows of the tree, dragged: their paths, none under another.
+#[derive(Clone)]
+pub(crate) struct TreeDrag(Vec<PathBuf>);
+
+/// What follows the pointer while rows are dragged: a name, or how many.
+struct TreeDragged(String);
+
+impl Render for TreeDragged {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .h(px(24.))
+            .px(px(9.))
+            .gap(px(6.))
+            .items_center()
+            .rounded(px(7.))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.primary.opacity(0.55))
+            .shadow_md()
+            .text_size(px(12.))
+            .text_color(theme.foreground)
+            .child(Icon::default().path("icons/file.svg").with_size(px(13.)).text_color(theme.muted_foreground))
+            .child(div().max_w(px(200.)).truncate().child(self.0.clone()))
+    }
+}
+
+/// Where what is out of the tree is held until it can no longer be
+/// brought back (`emaki_core::fsops`).
+fn fs_hold() -> PathBuf {
+    emaki_core::paths::state_dir().join("held")
+}
+
+/// What is held and can no longer be reached goes to the system's
+/// trash, and the places it stood in are removed.
+fn fs_flush(held: Vec<PathBuf>) {
+    for path in &held {
+        let _ = crate::sys::trash_path(path);
+    }
+    if !held.is_empty() {
+        emaki_core::fsops::Journal::tidy(&fs_hold());
+    }
+}
+
+/// The journal a window starts with. What the window before it left
+/// held, a quit or a crash ago, goes to the trash first: nothing knows
+/// any more where it came from.
+pub(crate) fn open_journal() -> emaki_core::fsops::Journal {
+    let hold = fs_hold();
+    fs_flush(emaki_core::fsops::Journal::leftovers(&hold));
+    emaki_core::fsops::Journal::tidy(&hold);
+    emaki_core::fsops::Journal::new(hold)
+}
+
+/// The paths that are under none of the others: a folder chosen takes
+/// what is in it along.
+fn tops_of(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths.iter().filter(|p| !paths.iter().any(|other| other != *p && p.starts_with(other))).cloned().collect()
+}
+
+fn path_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+fn kind_word(kind: emaki_core::fsops::Kind) -> &'static str {
+    use emaki_core::fsops::Kind;
+    match kind {
+        Kind::Made => "making",
+        Kind::Renamed => "renaming",
+        Kind::Moved => "moving",
+        Kind::Copied => "copying",
+        Kind::Removed => "removing",
+    }
+}
+
+/// What an HTML file's pictures were drawn for: the file, its words (as
+/// a hash), the width in points, and the screen's pixels to a point,
+/// in hundredths.
+pub(crate) type HtmlKey = (PathBuf, u64, u32, u32);
+
+fn html_hash(text: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+/// A file shown as pages: a PDF's, or a Word document's.
+fn drawn_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("docx") => docx_pages(path, want_w),
+        Some("pptx") => pptx_pages(path, want_w),
+        _ => pdf_pages(path, want_w),
+    }
+}
+
+/// A PowerPoint deck's first slides as pictures, drawn by DeckCraft,
+/// which is all Rust: a slide a page. Their words are not kept beside
+/// them yet, so nothing on a slide is selected or found.
+fn pptx_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
+    use deckcraft_render::{render_slide, RenderOpts};
+    let want_w = want_w.clamp(PDF_W_LEAST, PDF_W_MOST).round();
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > PDF_BYTES {
+        return Err("This deck is too large to show here.".into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Could not read it: {e}"))?;
+    let drawn = std::panic::catch_unwind(move || {
+        let deck = deckcraft_pptx::import(&bytes).ok()?;
+        let (w, h) = (deck.slide_size.width as f32, deck.slide_size.height as f32);
+        let png = |shot: &deckcraft_render::Image| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, shot.to_png()));
+        let mut pages = Vec::new();
+        for ix in 0..deck.slides.len().min(PDF_PAGES) {
+            let shot = render_slide(&deck, ix, &RenderOpts { scale: (want_w / w.max(1.)) as f64, ..Default::default() });
+            let thumb = render_slide(&deck, ix, &RenderOpts { scale: (PDF_THUMB_W / w.max(1.)) as f64, ..Default::default() });
+            pages.push(PdfPage { image: png(&shot), thumb: png(&thumb), px: (shot.width, shot.height), unit: (w, h), glyphs: 0..0 });
+        }
+        Some(PdfDoc { drawn_w: want_w, pages, total: deck.slides.len(), glyphs: Vec::new(), contents: Vec::new() })
+    });
+    match drawn {
+        Ok(Some(doc)) if !doc.pages.is_empty() => Ok(doc),
+        _ => Err("This deck could not be drawn.".into()),
+    }
+}
+
+/// A Word document's first pages as pictures with their text, laid out
+/// and drawn by WordCraft, which is all Rust. The text is kept as a
+/// PDF's is, a letter where the page draws it, so it is selected, found
+/// and copied the same way. Slow enough to be kept off the main thread.
+fn docx_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
+    use wordcraft_doc::StoryRef;
+    use wordcraft_layout::{hit::page_lines, layout, LayoutCache, LayoutOptions, ViewMode};
+    use wordcraft_render::{render_page, RenderOptions};
+    let want_w = want_w.clamp(PDF_W_LEAST, PDF_W_MOST).round();
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > PDF_BYTES {
+        return Err("This document is too large to show here.".into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Could not read it: {e}"))?;
+    let drawn = std::panic::catch_unwind(move || {
+        let doc = wordcraft_docx::read(&bytes).ok()?;
+        let lay = layout(&doc, &mut LayoutCache::new(), &LayoutOptions { view: ViewMode::Print, ..Default::default() });
+        // Headers and footers as the page prints them: the default
+        // greys them, as an editor does while the body is written in.
+        let mut how = RenderOptions::default();
+        how.display.dim_header = false;
+        let png = |shot: wordcraft_render::Rendered| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, shot.to_png()));
+        let (mut pages, mut glyphs) = (Vec::new(), Vec::<PdfGlyph>::new());
+        for page in lay.pages.iter().take(PDF_PAGES) {
+            let shot = render_page(&doc, page, want_w / page.w.max(1.), &how);
+            let px = (shot.width, shot.height);
+            let thumb = render_page(&doc, page, PDF_THUMB_W / page.w.max(1.), &how);
+            let from = glyphs.len();
+            for hit in page_lines(page, StoryRef::Body) {
+                let Some(line) = hit.para.lines.get(hit.li) else { continue };
+                let Some(text) = doc.para(hit.story, hit.path).and_then(|p| p.text.get(line.start..line.stop)) else { continue };
+                let tall = hit.bottom - hit.top;
+                // The baseline is the line's own, or the paragraph's.
+                let down = if line.baseline >= line.top && line.baseline <= line.top + line.height { line.baseline - line.top } else { line.baseline };
+                let (base, em) = (hit.top + down.clamp(0., tall), (tall * 0.8).max(1.));
+                let letters: Vec<char> = text.chars().collect();
+                // A letter a cluster where they count the same; else
+                // the letters share the line's width evenly.
+                let exact = line.xs.len() == letters.len() + 1;
+                let (left, wide) = (hit.left, (hit.right - hit.left).max(0.) / letters.len().max(1) as f32);
+                let mut gap = 2;
+                for (i, ch) in letters.iter().enumerate() {
+                    if ch.is_whitespace() || ch.is_control() {
+                        gap = gap.max(1);
+                        continue;
+                    }
+                    let (x0, x1) = if exact { (hit.x + line.xs[i], hit.x + line.xs[i + 1]) } else { (left + wide * i as f32, left + wide * (i + 1) as f32) };
+                    glyphs.push(PdfGlyph { x0: x0.min(x1), x1: x0.max(x1), base, em, text: ch.to_string(), gap });
+                    gap = 0;
+                }
+            }
+            pages.push(PdfPage { image: png(shot), thumb: png(thumb), px, unit: (page.w, page.h), glyphs: from..glyphs.len() });
+        }
+        Some(PdfDoc { drawn_w: want_w, pages, total: lay.pages.len(), glyphs, contents: Vec::new() })
+    });
+    match drawn {
+        Ok(Some(doc)) if !doc.pages.is_empty() => Ok(doc),
+        _ => Err("This document could not be drawn.".into()),
+    }
+}
+
 /// A PDF's first pages as pictures with their text, and how many pages
 /// it has. Slow enough to be kept off the main thread. The renderer is
 /// hayro, which is all Rust; a file it cannot read, or stops on, is
 /// said so.
-fn pdf_pages(path: &Path) -> Result<PdfDoc, String> {
+fn pdf_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
+    let want_w = want_w.clamp(PDF_W_LEAST, PDF_W_MOST).round();
     use hayro::hayro_interpret::{interpret_page, Context, InterpreterCache, InterpreterSettings, TransformExt as _};
     use hayro::hayro_syntax::Pdf;
     use hayro::vello_cpu::color::palette::css::WHITE;
@@ -1079,7 +1275,7 @@ fn pdf_pages(path: &Path) -> Result<PdfDoc, String> {
         let (mut pages, mut glyphs) = (Vec::new(), Vec::<PdfGlyph>::new());
         for page in all.iter().take(PDF_PAGES) {
             let (w, h) = page.render_dimensions();
-            let scale = (PDF_W / w.max(1.)).min(4.);
+            let scale = (want_w / w.max(1.)).min(8.);
             let pixmap = hayro::render(page, &cache, &InterpreterSettings::default(), &hayro::RenderSettings::default(), &hayro::PixmapSettings { x_scale: scale, y_scale: scale, bg_color: WHITE });
             let px = (pixmap.width() as u32, pixmap.height() as u32);
             let png = pixmap.into_png().ok()?;
@@ -1103,7 +1299,7 @@ fn pdf_pages(path: &Path) -> Result<PdfDoc, String> {
             }
             pages.push(PdfPage { image: std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)), thumb: std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, thumb)), px, unit: (w, h), glyphs: from..glyphs.len() });
         }
-        Some(PdfDoc { pages, total: all.len(), glyphs, contents: pdf_contents::read(&pdf) })
+        Some(PdfDoc { drawn_w: want_w, pages, total: all.len(), glyphs, contents: pdf_contents::read(&pdf) })
     });
     match drawn {
         Ok(Some(doc)) if !doc.pages.is_empty() => Ok(doc),
@@ -1394,10 +1590,62 @@ impl Workbench {
 
     /// The pane's width as drawn: what it was dragged to, less when the
     /// conversation would be left with too little. It gives way before
-    /// the terminal and the panel at its left do.
+    /// the terminal and the panel at its left do. Enlarged, it is the
+    /// conversation's room as well, and on the way there or back it is
+    /// between the two.
     pub(crate) fn file_pane_w(&self) -> Pixels {
         let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
-        self.file_w.min(self.view_w - self.file_pane_left() - term - self.conv_min.get()).max(FILE_MIN)
+        let all = self.view_w - self.file_pane_left() - term;
+        let own = self.file_w.min(all - self.conv_min.get()).max(FILE_MIN);
+        let t = self.file_big_t();
+        (own + (all.max(own) - own) * t).round()
+    }
+
+    /// How far the pane is toward the conversation's room: none as it
+    /// usually stands, all of it enlarged.
+    fn file_big_t(&self) -> f32 {
+        let t = match self.file_big_at.map(|at| at.elapsed().as_secs_f32() / FILE_ANIM.as_secs_f32()) {
+            Some(t) if t < 1. => ease_out_quint()(t),
+            _ => 1.,
+        };
+        if self.file_big { t } else { 1. - t }
+    }
+
+    /// Whether the file has the conversation's room, all of it: the
+    /// conversation is not drawn then.
+    pub(crate) fn file_over(&self) -> bool {
+        self.file_big && self.file_pane_shown() && self.file_big_t() >= 1.
+    }
+
+    /// The pane's enlarge button: the file takes the conversation's room,
+    /// and gives it back at the next press or when it is closed.
+    pub(crate) fn file_enlarge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_big = !self.file_big;
+        self.file_big_at = Some(std::time::Instant::now());
+        // The caret goes back to the composer with its room.
+        if !self.file_big && self.file_focus.is_focused(window) {
+            let composer = self.composer.read(cx).focus_handle(cx);
+            window.focus(&composer, cx);
+        }
+        cx.notify();
+    }
+
+    /// The conversation beside the file's pane: as it is, or, while the
+    /// pane is on its way over it or back, at the width it has beside the
+    /// pane, cut by the pane's edge and fading, so nothing in it is laid
+    /// out again a frame at a time. None under a pane that has its room.
+    pub(crate) fn beside_file(&self, conversation: Div) -> Option<AnyElement> {
+        let t = if self.file_pane_shown() { self.file_big_t() } else { 0. };
+        if t <= 0. {
+            return Some(conversation.into_any_element());
+        }
+        if t >= 1. {
+            return None;
+        }
+        let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
+        let all = self.view_w - self.file_pane_left() - term;
+        let own = self.file_w.min(all - self.conv_min.get()).max(FILE_MIN);
+        Some(div().flex_1().min_w_0().h_full().overflow_hidden().opacity(1. - t).child(conversation.flex_none().w((all - own).max(px(0.)))).into_any_element())
     }
 
     /// The pane's edge follows the pointer while it is held.
@@ -1420,7 +1668,7 @@ impl Workbench {
     /// The strip over the pane's right edge, lit under the pointer; a
     /// double click puts the width back.
     pub(crate) fn render_file_grip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if !self.file_pane_shown() {
+        if !self.file_pane_shown() || self.file_big {
             return None;
         }
         let line = cx.theme().primary.opacity(0.55);
@@ -1718,9 +1966,10 @@ impl Workbench {
             return;
         }
         let path = path.to_path_buf();
+        let want = self.pdf_want_now();
         cx.spawn(async move |this, cx| {
             let from = path.clone();
-            let got = cx.background_executor().spawn(async move { pdf_pages(&from) }).await;
+            let got = cx.background_executor().spawn(async move { drawn_pages(&from, want) }).await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(v) = this.file_view.as_mut().filter(|v| v.path == path) {
                     v.body = match got {
@@ -1736,12 +1985,173 @@ impl Workbench {
         .detach();
     }
 
+    /// An HTML file as it reads is the system's web view, set over the
+    /// pane's room: made when one shows, told of another file or of this
+    /// one changed on the disk, moved with the pane, put out of sight
+    /// while the window draws over its pages, and let go with the file.
+    /// It shows the file as saved, not as its editor has it. Called at
+    /// every draw. Where the system has no web view to give, the page
+    /// is `html_fit`'s to draw.
+    pub(crate) fn html_web_sync(&mut self, window: &mut Window, _: &mut Context<Self>) {
+        let shows = self.file_pane_shown() && !self.file_raw;
+        let Some((path, mtime)) = self.file_view.as_ref().filter(|v| shows && matches!(v.body, FileBody::Html(_))).map(|v| (v.path.clone(), v.mtime)) else {
+            // Let go, and the keyboard with it back to the window: a
+            // click in the page had given it to the page.
+            if self.html_web.take().is_some() {
+                crate::sys::keys_to_window(window);
+            }
+            return;
+        };
+        if self.html_web.is_none() && !self.html_web_none {
+            let Some(root) = self.files_root() else { return };
+            self.html_web = crate::html_web::Web::open(window, &path, mtime, &root);
+            self.html_web_none = self.html_web.is_none();
+        }
+        let over = self.over_page();
+        // Its lower corners are the card's where nothing stands between.
+        let (files, outline) = self.panels_shown();
+        let (left, right) = (!files && !outline, self.file_over() && !self.term_panel_shown());
+        let Some(web) = self.html_web.as_mut() else { return };
+        if web.file != path || web.mtime != mtime {
+            web.load(&path, mtime);
+        }
+        web.round(left, right, f32::from(crate::workbench::CARD_R));
+        // Where it stands is the pane's to say as it is laid out
+        // (`Web::placer`, in `file_pane`). Out of sight, the keyboard is
+        // not left with it.
+        let shown = !over && web.is_placed();
+        web.show(shown);
+        if !shown {
+            crate::sys::keys_to_window(window);
+        }
+    }
+
+    /// An HTML file is drawn as a page off the main thread
+    /// (`html_shot::shoot`) and shown as pictures, so it is drawn again
+    /// when what it was drawn for is no longer so: the words (the file
+    /// changed, or its editor's text came back), the pane's width, the
+    /// screen's pixels. New words are drawn at once; a width waits until
+    /// it has stood still a moment. The last pictures show until the new
+    /// are in, and before the first the page reads as plain words.
+    /// Called at every draw.
+    pub(crate) fn html_fit(&mut self, cx: &mut Context<Self>) {
+        let Some((path, text)) = self.file_view.as_ref().filter(|_| !self.file_raw).and_then(|v| match &v.body {
+            FileBody::Html(text) => Some((v.path.clone(), text.clone())),
+            _ => None,
+        }) else {
+            self.html_fit_at = None;
+            return;
+        };
+        // The web view shows it, where there is one.
+        if self.html_web.is_some() || !self.html_web_none {
+            return;
+        }
+        let want = self.html_want.get().round();
+        if want <= 0. || self.html_busy {
+            return;
+        }
+        let key: HtmlKey = (path.clone(), html_hash(&text), want as u32, (self.ui_scale * 100.) as u32);
+        let have = self.html_shot.as_ref().map(|(k, _)| k);
+        if have == Some(&key) {
+            self.html_fit_at = None;
+            return;
+        }
+        const STILL: Duration = Duration::from_millis(280);
+        // Other words are drawn at once; a width, once it stands still.
+        let fresh = have.is_none_or(|k| (&k.0, k.1) != (&key.0, key.1));
+        let waited = matches!(&self.html_fit_at, Some((k, at)) if *k == key && at.elapsed() >= STILL);
+        if fresh || waited {
+            self.html_fit_at = None;
+            self.html_busy = true;
+            let scale = self.ui_scale;
+            cx.spawn(async move |this, cx| {
+                let from = path.clone();
+                let got = cx.background_executor().spawn(async move { crate::html_shot::shoot(&text, &from, want, scale) }).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.html_busy = false;
+                    if let Ok(shot) = got {
+                        this.html_shot = Some((key, std::sync::Arc::new(shot)));
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        } else if !matches!(&self.html_fit_at, Some((k, _)) if *k == key) {
+            self.html_fit_at = Some((key, std::time::Instant::now()));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(STILL + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+    }
+
+    /// How wide in pixels a PDF's page is on the screen: what the pane
+    /// last drew it at, or before it has, what its width leaves.
+    fn pdf_want_now(&self) -> f32 {
+        let want = self.pdf_want.get();
+        if want > 0. { want } else { (f32::from(self.file_pane_w()) - 37.) * self.ui_scale }
+    }
+
+    /// A PDF's pages are pictures, sharp at one size: the pixels the
+    /// pane shows them in. Drawn at a size of its own, a page was scaled
+    /// on the way to the screen and its letters were soft. So when the
+    /// page's width on the screen is no longer what the pictures were
+    /// drawn for, and has stood still a moment, they are drawn again,
+    /// the old ones showing until the new are in. Called at every draw.
+    pub(crate) fn pdf_fit(&mut self, cx: &mut Context<Self>) {
+        let Some((path, drawn)) = self.file_view.as_ref().and_then(|v| match &v.body {
+            FileBody::Pages(Some(doc)) => Some((v.path.clone(), doc.drawn_w)),
+            _ => None,
+        }) else {
+            self.pdf_fit_at = None;
+            return;
+        };
+        let want = self.pdf_want.get().clamp(PDF_W_LEAST, PDF_W_MOST).round();
+        if self.pdf_want.get() <= 0. || (want - drawn).abs() <= 2. || self.pdf_fitting {
+            self.pdf_fit_at = None;
+            return;
+        }
+        const STILL: Duration = Duration::from_millis(280);
+        match self.pdf_fit_at {
+            Some((w, at)) if w == want && at.elapsed() >= STILL => {
+                self.pdf_fit_at = None;
+                self.pdf_fitting = true;
+                cx.spawn(async move |this, cx| {
+                    let from = path.clone();
+                    let got = cx.background_executor().spawn(async move { drawn_pages(&from, want) }).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.pdf_fitting = false;
+                        if let (Ok(doc), Some(v)) = (got, this.file_view.as_mut().filter(|v| v.path == path && matches!(v.body, FileBody::Pages(Some(_))))) {
+                            v.body = FileBody::Pages(Some(std::sync::Arc::new(doc)));
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            Some((w, _)) if w == want => {}
+            _ => {
+                self.pdf_fit_at = Some((want, std::time::Instant::now()));
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(STILL + Duration::from_millis(20)).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        }
+    }
+
     /// The pane goes, in motion; drawn as it was for that moment.
     pub(crate) fn close_file_view(&mut self, cx: &mut Context<Self>) {
         if !self.file_guard(FileThen::Close, cx) {
             return;
         }
         if let Some(v) = self.file_view.take() {
+            // The conversation has its room back at once, and the pane
+            // goes from the width it has beside it.
+            self.file_big = false;
+            self.file_big_at = None;
             self.file_gone = Some(v);
             self.file_serial += 1;
             self.file_anim = Some((false, std::time::Instant::now(), self.file_serial));
@@ -2488,6 +2898,8 @@ impl Workbench {
     pub(crate) fn quit(&mut self, cx: &mut Context<Self>) {
         if self.file_guard(FileThen::Quit, cx) {
             self.keep_drafts(cx);
+            // What the tree removed and still held is the trash's now.
+            fs_flush(self.fs_journal.close());
             cx.quit();
         }
     }
@@ -2495,6 +2907,7 @@ impl Workbench {
     /// Close the window, once no file has changes not saved.
     pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_guard(FileThen::CloseWindow, cx) {
+            self.keep_composers(cx);
             window.remove_window();
         }
     }
@@ -3116,7 +3529,6 @@ impl Workbench {
             }
             self.file_raw = raw;
             self.file_mode_serial += 1;
-            self.save_ui(true);
             self.file_serial += 1;
             self.file_view_scroll.set_offset(point(px(0.), px(0.)));
             cx.notify();
@@ -3147,7 +3559,9 @@ impl Workbench {
                 item("Copy Path", FileDo::CopyPath, &n.path),
                 item("Copy Relative Path", FileDo::CopyRel, &n.path),
                 rule(),
+                item("Cut", FileDo::Cut, &n.path),
                 item("Copy", FileDo::Copy, &n.path),
+                item("Duplicate", FileDo::Duplicate, &n.path),
                 item("Rename", FileDo::Rename, &n.path),
                 item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
             ],
@@ -3164,7 +3578,9 @@ impl Workbench {
                     item("Copy Path", FileDo::CopyPath, &n.path),
                     item("Copy Relative Path", FileDo::CopyRel, &n.path),
                     rule(),
+                    item("Cut", FileDo::Cut, &n.path),
                     item("Copy", FileDo::Copy, &n.path),
+                    item("Duplicate", FileDo::Duplicate, &n.path),
                     item("Rename", FileDo::Rename, &n.path),
                     item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
                 ]);
@@ -3232,7 +3648,7 @@ impl Workbench {
     fn files_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let paths = self.tree.marked.clone();
         let item = |label: &'static str, what: FileDo| (label, MenuDo::Files(what, paths.clone()));
-        let items = vec![item("Add to Message", FileDo::Mention), item("Copy Paths", FileDo::CopyPath), item("Copy Relative Paths", FileDo::CopyRel), ("", MenuDo::Rule), item(crate::sys::TRASH_LABEL, FileDo::Trash)];
+        let items = vec![item("Add to Message", FileDo::Mention), item("Copy Paths", FileDo::CopyPath), item("Copy Relative Paths", FileDo::CopyRel), ("", MenuDo::Rule), item("Cut", FileDo::Cut), item("Duplicate", FileDo::Duplicate), item(crate::sys::TRASH_LABEL, FileDo::Trash)];
         self.open_menu(at, items, cx);
     }
 
@@ -3246,19 +3662,14 @@ impl Workbench {
                 cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
                 self.notice = Some(Notice::said("copied"));
             }
-            FileDo::Mention | FileDo::Trash => {
-                // A folder chosen takes what is in it along: what is
-                // under one of the others is not asked of twice.
-                let tops: Vec<PathBuf> = paths.iter().filter(|p| !paths.iter().any(|other| other != *p && p.starts_with(other))).cloned().collect();
-                let n = tops.len();
-                for path in tops {
+            FileDo::Mention => {
+                for path in tops_of(&paths) {
                     self.file_do(what, path, window, cx);
                 }
-                if what == FileDo::Trash {
-                    self.tree.marked.clear();
-                    self.notice = Some(Notice::said(format!("{} in the {}", plural(n, "item is", "items are"), crate::sys::TRASH_NAME)));
-                }
             }
+            FileDo::Trash => self.tree_trash(paths, cx),
+            FileDo::Cut => self.tree_cut(paths, cx),
+            FileDo::Duplicate => self.tree_duplicate(paths, cx),
             _ => {}
         }
         cx.notify();
@@ -3279,6 +3690,8 @@ impl Workbench {
             FileDo::CopyRel => copy(rel, self, cx),
             FileDo::Mention => self.file_mention(&path, window, cx),
             FileDo::Copy => self.tree_copy(&path, cx),
+            FileDo::Cut => self.tree_cut(vec![path], cx),
+            FileDo::Duplicate => self.tree_duplicate(vec![path], cx),
             FileDo::Paste => self.tree_paste(&path, cx),
             FileDo::Rename | FileDo::NewFile | FileDo::NewFolder => {
                 let (prompt, value) = match what {
@@ -3308,20 +3721,7 @@ impl Workbench {
                 });
             }
             FileDo::Collapse => self.tree_collapse(cx),
-            FileDo::Trash => match crate::sys::trash_path(&path) {
-                Ok(()) => {
-                    if self.file_view.as_ref().is_some_and(|v| v.path.starts_with(&path)) {
-                        self.file_view = None;
-                    }
-                    // What was typed in it and not saved goes with it.
-                    self.file_editor.take_if(|ed| ed.path.starts_with(&path));
-                    self.file_parked.retain(|ed| !ed.path.starts_with(&path));
-                    self.file_drafts.retain(|p, _| !p.starts_with(&path));
-                    self.tree.refresh(&root);
-                    self.notice = Some(Notice::said(format!("{} is in the {}", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), crate::sys::TRASH_NAME)));
-                }
-                Err(e) => self.notice = Some(Notice::error(format!("not moved: {e}"))),
-            },
+            FileDo::Trash => self.tree_trash(vec![path], cx),
         }
         cx.notify();
     }
@@ -3364,33 +3764,52 @@ impl Workbench {
     /// folder `at` is, or the folder the file `at` is in, under a name
     /// that is free there. Nothing is written over.
     pub(crate) fn tree_paste(&mut self, at: &Path, cx: &mut Context<Self>) {
-        let Some(root) = self.files_root() else { return };
+        // What was cut here is moved, while it is all still there.
+        let cut = std::mem::take(&mut self.file_cut);
+        if !cut.is_empty() && cut.iter().all(|p| p.exists()) {
+            let Some(root) = self.files_root() else { return };
+            let dir = if at.is_dir() { at.to_path_buf() } else { at.parent().map(Path::to_path_buf).unwrap_or(root) };
+            return self.tree_move(cut, &dir, cx);
+        }
         let files = self.clipboard_files(cx);
         if files.is_empty() {
             self.notice = Some(Notice::error("there is no file on the clipboard to paste".to_string()));
             cx.notify();
             return;
         }
+        self.tree_put(&files, at, "pasted", cx);
+    }
+
+    /// Files copied into the folder `at` is, or the folder the file `at`
+    /// is in, each under a name that is free there: what a paste and a
+    /// drop from the file manager both do. `said` is the word for it.
+    fn tree_put(&mut self, files: &[PathBuf], at: &Path, said: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
         let dir = if at.is_dir() { at.to_path_buf() } else { at.parent().map(Path::to_path_buf).unwrap_or(root.clone()) };
         if !dir.starts_with(&root) {
             return;
         }
         let mut last = None;
-        self.paste_last.clear();
-        for file in &files {
+        let mut made = Vec::new();
+        for file in files {
             match emaki_core::files::copy_into(file, &dir) {
                 Ok(to) => {
-                    self.paste_last.push(to.clone());
+                    made.push(to.clone());
                     last = Some(to)
                 }
                 Err(why) => {
-                    self.notice = Some(Notice::error(format!("{} was not pasted: {why}", file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
+                    self.notice = Some(Notice::error(format!("{} was not {said}: {why}", file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
                     last = None;
                     break;
                 }
             }
         }
-        // The folder pasted into is opened, and the copy is the row chosen.
+        // Taken back, the copies go; done again, they come back.
+        if !made.is_empty() {
+            let moves = made.iter().map(|to| (self.fs_journal.slot(to), to.clone())).collect();
+            self.fs_done(emaki_core::fsops::Kind::Copied, moves);
+        }
+        // The folder put into is opened, and the copy is the row chosen.
         self.tree.shut.remove(&root);
         if dir != root {
             self.tree.open.insert(dir.clone());
@@ -3398,10 +3817,128 @@ impl Workbench {
         self.tree.refresh(&root);
         self.tree.read_at = 0.;
         if let Some(to) = last {
-            self.notice = Some(Notice::said(format!("pasted as {}", to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
+            self.notice = Some(Notice::said(format!("{said} as {}", to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
             self.tree.picked = Some(to);
         }
         cx.notify();
+    }
+
+    /// Files dragged in from the file manager are over the tree at `at`:
+    /// over `row` (its path, and whether it is a folder), or over the
+    /// room around the rows. Where they would go is the folder under
+    /// them, the folder of the file under them, or the session's folder,
+    /// and is lit as it changes. A folder held over a moment opens, so
+    /// what is in it can be reached, as a spring-loaded folder does.
+    ///
+    /// Every row and the panel hear every move, in no promised order, so
+    /// the panel yields a move a row has already taken.
+    fn tree_drop_over(&mut self, at: Point<Pixels>, row: Option<(&Path, bool)>, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        if row.is_none() && self.tree_drop_probe == Some((at, true)) {
+            return;
+        }
+        self.tree_drop_probe = Some((at, row.is_some()));
+        let dir = match row {
+            Some((path, true)) => path.to_path_buf(),
+            Some((path, false)) => path.parent().map(Path::to_path_buf).unwrap_or(root.clone()),
+            None => root.clone(),
+        };
+        if self.tree_drop.as_ref().map(|(d, _)| d) == Some(&dir) {
+            return;
+        }
+        self.tree_drop = Some((dir.clone(), std::time::Instant::now()));
+        self.tree_drop_gone = None;
+        let closed = row.is_some_and(|(_, folder)| folder) && !self.tree.open.contains(&dir);
+        if closed {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TREE_SPRING).await;
+                let _ = this.update(cx, |this, cx| {
+                    // Still held over that folder, and still dragging.
+                    if (cx.has_active_drag() || this.tree_drop_hold) && this.tree_drop.as_ref().is_some_and(|(d, at)| *d == dir && at.elapsed() >= TREE_SPRING) && this.tree.open.insert(dir.clone()) {
+                        this.tree.kids.remove(&dir);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The files are over the tree no longer.
+    fn tree_drop_off(&mut self, cx: &mut Context<Self>) {
+        self.tree_drop_probe = None;
+        if let Some((dir, _)) = self.tree_drop.take() {
+            self.tree_drop_gone = Some((self.tree_drop_words(&dir), std::time::Instant::now()));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TREE_ANIM + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+            cx.notify();
+        }
+    }
+
+    /// They are let go over the tree: copied into the folder lit, or,
+    /// rows of the tree's own with no ⌥ held, moved there.
+    fn tree_drop_done(&mut self, files: &[PathBuf], copy: bool, cx: &mut Context<Self>) {
+        let Some(dir) = self.tree_drop.as_ref().map(|(dir, _)| dir.clone()).or_else(|| self.files_root()) else { return };
+        self.tree_drop_off(cx);
+        if copy {
+            self.tree_put(files, &dir, "copied in", cx);
+        } else {
+            self.tree_move(files.to_vec(), &dir, cx);
+        }
+    }
+
+    /// Whether what is dragged would be copied where it is let go: said
+    /// again when ⌥ goes down or comes up on the way.
+    fn tree_drop_kind(&mut self, copy: bool, cx: &mut Context<Self>) {
+        if self.tree_drop_copy != copy {
+            self.tree_drop_copy = copy;
+            cx.notify();
+        }
+    }
+
+    /// ⌘ and a click on a row, or ⇧ and one: the rows chosen together
+    /// grow or shrink by it, as a file manager's list does.
+    fn tree_click_more(&mut self, path: &Path, range: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        // The one row chosen so far is the first of the several.
+        if self.tree.marked.is_empty() {
+            self.tree.marked.extend(self.tree.picked.clone());
+        }
+        if range {
+            let rows: Vec<PathBuf> = self.tree.rows(&root).into_iter().filter_map(|row| match row {
+                Row::Node(node, _, _) => Some(node.path),
+                Row::More(..) | Row::Edit(..) => None,
+            }).collect();
+            let from = self.tree_anchor.clone().or(self.tree.marked.first().cloned()).and_then(|a| rows.iter().position(|r| *r == a)).unwrap_or(0);
+            if let Some(to) = rows.iter().position(|r| r == path) {
+                self.tree.marked = rows[from.min(to)..=from.max(to)].to_vec();
+            }
+        } else {
+            if let Some(ix) = self.tree.marked.iter().position(|p| p == path) {
+                self.tree.marked.remove(ix);
+            } else {
+                self.tree.marked.push(path.to_path_buf());
+            }
+            self.tree_anchor = Some(path.to_path_buf());
+        }
+        self.tree.picked = None;
+        cx.notify();
+    }
+
+    /// Where a drop would go, in words: the folder as it is named under
+    /// the session's.
+    fn tree_drop_words(&self, dir: &Path) -> String {
+        let root = self.files_root();
+        let named = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let verb = if self.tree_drop_copy { "Copy" } else { "Move" };
+        match root.as_ref().and_then(|r| dir.strip_prefix(r).ok()).filter(|rel| !rel.as_os_str().is_empty()) {
+            Some(rel) => format!("{verb} into {}", rel.to_string_lossy().replace('\\', "/")),
+            None => format!("{verb} into {}", root.as_deref().map(named).unwrap_or_default()),
+        }
     }
 
     /// The key that renames the row chosen, as the system's file manager
@@ -3460,16 +3997,36 @@ impl Workbench {
         }
     }
 
-    /// The files panel's keys: ⌘C copies the row chosen, ⌘V pastes
-    /// beside it, or into it when it is a folder, or into the session's
-    /// folder with no row chosen.
+    /// The files panel's keys, as a file manager and VS Code's explorer
+    /// have them. With ⌘: A every row, C copy, X cut, V paste (a cut is
+    /// moved), D a copy beside it, Z take the last thing back, ⇧Z (and Y
+    /// off a Mac) do it again, ⌫ remove. Alone: the arrows go from row to
+    /// row and open and close folders, and Delete removes off a Mac.
     fn tree_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
         // While a name is typed the keys are the field's.
-        if self.file_prompt.is_some() || !e.keystroke.modifiers.secondary() {
+        if self.file_prompt.is_some() {
             return;
         }
         let Some(root) = self.files_root() else { return };
-        match e.keystroke.key.as_str() {
+        let (key, m) = (e.keystroke.key.as_str(), e.keystroke.modifiers);
+        if !m.secondary() {
+            if m.modified() {
+                return;
+            }
+            match key {
+                "up" => self.tree_step(-1, cx),
+                "down" => self.tree_step(1, cx),
+                "left" => self.tree_side(false, cx),
+                "right" => self.tree_side(true, cx),
+                "delete" if !cfg!(target_os = "macos") => {
+                    let chosen = self.tree_chosen();
+                    self.tree_trash(chosen, cx)
+                }
+                _ => return,
+            }
+            return cx.stop_propagation();
+        }
+        match key {
             // Every row showing, as a file manager's ⌘A has it.
             "a" => {
                 self.tree.marked = self.tree.rows(&root).into_iter().filter_map(|row| match row {
@@ -3483,79 +4040,318 @@ impl Workbench {
                 let Some(path) = self.tree.picked.clone() else { return };
                 self.tree_copy(&path, cx);
             }
+            "x" => {
+                let chosen = self.tree_chosen();
+                self.tree_cut(chosen, cx)
+            }
             "v" => {
                 let at = self.tree.picked.clone().unwrap_or(root);
                 self.tree_paste(&at, cx);
             }
-            // The last paste is taken back, after a question.
-            "z" if !e.keystroke.modifiers.shift => self.ask_paste_undo(cx),
+            "d" => {
+                let chosen = self.tree_chosen();
+                self.tree_duplicate(chosen, cx)
+            }
+            "backspace" | "delete" => {
+                let chosen = self.tree_chosen();
+                self.tree_trash(chosen, cx)
+            }
+            "z" => self.tree_undo(m.shift, cx),
+            "y" if !cfg!(target_os = "macos") => self.tree_undo(true, cx),
             _ => return,
         }
         cx.stop_propagation();
     }
 
-    /// ⌘Z in the files panel: the question whether to take the last
-    /// paste back, when what it made is still there.
-    pub(crate) fn ask_paste_undo(&mut self, cx: &mut Context<Self>) {
-        self.paste_last.retain(|p| p.exists());
-        if self.paste_last.is_empty() {
-            return;
+    /// The rows a key is about: the several chosen, or the one.
+    fn tree_chosen(&self) -> Vec<PathBuf> {
+        if self.tree.marked.is_empty() { self.tree.picked.iter().cloned().collect() } else { self.tree.marked.clone() }
+    }
+
+    /// ↑ and ↓: the row before or after the one chosen is, brought into
+    /// view. With none chosen, the first or the last.
+    fn tree_step(&mut self, by: i32, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        let rows: Vec<PathBuf> = self.tree.rows(&root).into_iter().map(|row| match row {
+            Row::Node(node, _, _) => node.path,
+            Row::More(..) | Row::Edit(..) => PathBuf::new(),
+        }).collect();
+        let nodes: Vec<usize> = (0..rows.len()).filter(|ix| !rows[*ix].as_os_str().is_empty()).collect();
+        let Some(&last) = nodes.last() else { return };
+        let at = self.tree.picked.as_ref().or(self.tree.marked.last()).and_then(|p| rows.iter().position(|r| r == p));
+        let to = match at {
+            Some(at) if by < 0 => nodes.iter().rev().copied().find(|ix| *ix < at).unwrap_or(nodes[0]),
+            Some(at) => nodes.iter().copied().find(|ix| *ix > at).unwrap_or(last),
+            None if by < 0 => last,
+            None => nodes[0],
+        };
+        self.tree.marked.clear();
+        self.tree.picked = Some(rows[to].clone());
+        self.tree_anchor = self.tree.picked.clone();
+        // Into view, by its number: every row is one height.
+        let (room, top) = (self.files_scroll.bounds().size.height, TREE_ROW_H * to as f32);
+        let off = -self.files_scroll.offset().y;
+        if top < off {
+            self.files_scroll.set_offset(point(px(0.), -top));
+        } else if room > px(0.) && top + TREE_ROW_H > off + room {
+            self.files_scroll.set_offset(point(px(0.), -(top + TREE_ROW_H - room + px(6.))));
         }
-        self.paste_ask = Some(self.paste_ask.map(|n| n + 1).unwrap_or(0));
         cx.notify();
     }
 
-    /// Yes: every copy the paste made goes to the system's trash, where
-    /// it can be put back from, and whatever of it was open here goes
-    /// with it.
-    pub(crate) fn paste_undo_now(&mut self, cx: &mut Context<Self>) {
-        self.paste_ask = None;
-        let Some(root) = self.files_root() else { return };
-        let made = std::mem::take(&mut self.paste_last);
-        let mut failed = None;
-        for path in &made {
-            match crate::sys::trash_path(path) {
-                Ok(()) => {
-                    if self.file_view.as_ref().is_some_and(|v| v.path.starts_with(path)) {
-                        self.file_view = None;
-                    }
-                    self.file_editor.take_if(|ed| ed.path.starts_with(path));
-                    self.file_parked.retain(|ed| !ed.path.starts_with(path));
-                    self.file_drafts.retain(|p, _| !p.starts_with(path));
-                    if self.tree.picked.as_ref().is_some_and(|p| p.starts_with(path)) {
-                        self.tree.picked = None;
-                    }
+    /// → opens the folder chosen, or goes into one already open; ←
+    /// closes it, or goes up to the folder the row is in.
+    fn tree_side(&mut self, open: bool, cx: &mut Context<Self>) {
+        let (Some(root), Some(path)) = (self.files_root(), self.tree.picked.clone()) else { return };
+        let is_open = self.tree.open.contains(&path);
+        match (open, path.is_dir(), is_open) {
+            (true, true, false) | (false, true, true) => self.tree_toggle(&path, cx),
+            (true, true, true) => self.tree_step(1, cx),
+            (false, _, _) => {
+                if let Some(up) = path.parent().filter(|up| *up != root && up.starts_with(&root)) {
+                    self.tree.picked = Some(up.to_path_buf());
+                    cx.notify();
                 }
-                Err(e) => failed = Some(e),
             }
+            _ => {}
+        }
+    }
+
+    // ------------------------------------------------ done, and taken back
+
+    /// A thing done to the disk is written down, and what can no longer
+    /// be taken back or done again goes to the system's trash.
+    fn fs_done(&mut self, kind: emaki_core::fsops::Kind, moves: Vec<(PathBuf, PathBuf)>) {
+        let out = self.fs_journal.record(emaki_core::fsops::Op { kind, moves });
+        fs_flush(out);
+    }
+
+    /// What was open under a path that is gone goes with it.
+    fn tree_forget(&mut self, path: &Path) {
+        if self.file_view.as_ref().is_some_and(|v| v.path.starts_with(path)) {
+            self.file_view = None;
+        }
+        // What was typed in it and not saved goes with it.
+        self.file_editor.take_if(|ed| ed.path.starts_with(path));
+        self.file_parked.retain(|ed| !ed.path.starts_with(path));
+        self.file_drafts.retain(|p, _| !p.starts_with(path));
+        if self.tree.picked.as_ref().is_some_and(|p| p.starts_with(path)) {
+            self.tree.picked = None;
+        }
+        self.tree.marked.retain(|p| !p.starts_with(path));
+        self.file_cut.retain(|p| !p.starts_with(path));
+    }
+
+    /// What was at `from` is at `to`: the folders open under it, the
+    /// file showing, and what was typed in any file under it and not
+    /// saved, are under the new path.
+    fn tree_follow(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
+        let now = |p: &Path| p.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) });
+        let open: Vec<PathBuf> = self.tree.open.iter().filter(|p| p.starts_with(from)).cloned().collect();
+        for p in open {
+            self.tree.open.remove(&p);
+            if let Some(new) = now(&p) {
+                self.tree.open.insert(new);
+            }
+        }
+        let shown = self.file_view.as_ref().and_then(|v| now(&v.path));
+        for ed in self.file_editor.iter_mut().chain(self.file_parked.iter_mut()) {
+            if let Some(new) = now(&ed.path) {
+                ed.path = new;
+            }
+        }
+        let drafts: Vec<PathBuf> = self.file_drafts.keys().filter(|p| p.starts_with(from)).cloned().collect();
+        for old in drafts {
+            if let (Some(draft), Some(new)) = (self.file_drafts.remove(&old), now(&old)) {
+                self.file_drafts.insert(new, draft);
+            }
+        }
+        for p in self.tree.picked.iter_mut().chain(self.tree.marked.iter_mut()).chain(self.file_cut.iter_mut()) {
+            if let Some(new) = now(p) {
+                *p = new;
+            }
+        }
+        if let Some(new) = shown {
+            // Shown again under its name; its editor is kept and found
+            // by the path it now has.
+            if let Some(ed) = self.file_editor.take() {
+                self.file_parked.push(ed);
+            }
+            self.show_file(&new, cx);
+        }
+    }
+
+    /// Remove: the rows go out of the tree and are held, so ⌘Z puts
+    /// them back exactly. They reach the system's trash once that key
+    /// can no longer bring them back (`fsops`). One on another volume
+    /// than the holding folder cannot be held, and goes to the trash at
+    /// once, which is said.
+    pub(crate) fn tree_trash(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        let tops: Vec<PathBuf> = tops_of(&paths).into_iter().filter(|p| *p != root && p.starts_with(&root)).collect();
+        if tops.is_empty() {
+            return;
+        }
+        let (mut moves, mut straight, mut failed) = (Vec::new(), 0, None);
+        for path in &tops {
+            let slot = self.fs_journal.slot(path);
+            match emaki_core::fsops::move_path(path, &slot) {
+                Ok(()) => moves.push((path.clone(), slot)),
+                Err(_) => match crate::sys::trash_path(path) {
+                    Ok(()) => straight += 1,
+                    Err(e) => {
+                        failed = Some(e);
+                        continue;
+                    }
+                },
+            }
+            self.tree_forget(path);
+        }
+        let held = moves.len();
+        if !moves.is_empty() {
+            self.fs_done(emaki_core::fsops::Kind::Removed, moves);
+        }
+        self.tree.marked.clear();
+        self.tree.refresh(&root);
+        self.tree.read_at = 0.;
+        let what = match tops.as_slice() {
+            [one] => path_name(one),
+            many => format!("{} items", many.len()),
+        };
+        self.notice = Some(match failed {
+            Some(e) => Notice::error(format!("not removed: {e}")),
+            None if held == 0 && straight > 0 => Notice::said(format!("{what} moved to the {}", crate::sys::TRASH_NAME)),
+            None => Notice::said(format!("{what} removed. {} puts it back", if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" })),
+        });
+        cx.notify();
+    }
+
+    /// Move rows into a folder, as a drag or a cut and a paste does. One
+    /// already in that folder stays; a folder is not moved into itself;
+    /// a name taken there is not written over. What did move is one
+    /// thing to take back.
+    pub(crate) fn tree_move(&mut self, paths: Vec<PathBuf>, dir: &Path, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        if !dir.starts_with(&root) || !dir.is_dir() {
+            return;
+        }
+        let (mut moves, mut refused) = (Vec::new(), None);
+        for from in tops_of(&paths) {
+            let to = dir.join(from.file_name().unwrap_or_default());
+            if from.parent() == Some(dir) {
+                continue;
+            }
+            if dir.starts_with(&from) {
+                refused = Some(format!("{} cannot be moved into itself", path_name(&from)));
+                continue;
+            }
+            match emaki_core::fsops::move_path(&from, &to) {
+                Ok(()) => {
+                    self.tree_follow(&from, &to, cx);
+                    moves.push((from, to));
+                }
+                Err(why) => refused = Some(why),
+            }
+        }
+        let moved: Vec<PathBuf> = moves.iter().map(|(_, to)| to.clone()).collect();
+        if !moves.is_empty() {
+            self.fs_done(emaki_core::fsops::Kind::Moved, moves);
+            // The folder moved into is opened, and what moved is chosen.
+            self.tree.shut.remove(&root);
+            if dir != root {
+                self.tree.open.insert(dir.to_path_buf());
+                self.tree.kids.remove(dir);
+            }
+            self.tree.picked = moved.last().cloned();
+            self.tree.marked = if moved.len() > 1 { moved.clone() } else { Vec::new() };
         }
         self.tree.refresh(&root);
         self.tree.read_at = 0.;
-        self.notice = Some(match failed {
-            Some(e) => Notice::error(format!("the paste was not taken back: {e}")),
-            None => Notice::said("the paste is taken back".to_string()),
-        });
+        self.notice = match (refused, moved.as_slice()) {
+            (Some(why), _) => Some(Notice::error(why)),
+            (None, []) => None,
+            (None, [one]) => Some(Notice::said(format!("{} moved", path_name(one)))),
+            (None, many) => Some(Notice::said(format!("{} items moved", many.len()))),
+        };
         cx.notify();
     }
 
-    /// The question ⌘Z asks after a paste, on the card Discard's is on.
-    pub(crate) fn render_paste_ask(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(serial) = self.paste_ask else { return div().into_any_element() };
-        let name = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let what = match self.paste_last.as_slice() {
-            [one] => name(one),
-            many => format!("{} items", many.len()),
+    /// ⌘X: the rows are the ones the next paste moves, drawn faint
+    /// until then. Nothing on the disk changes yet.
+    pub(crate) fn tree_cut(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        self.file_cut = tops_of(&paths).into_iter().filter(|p| *p != root).collect();
+        if !self.file_cut.is_empty() {
+            self.notice = Some(Notice::said("cut. Paste moves it".to_string()));
+        }
+        cx.notify();
+    }
+
+    /// ⌘D: a copy of each beside it, under a free name.
+    pub(crate) fn tree_duplicate(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        for path in tops_of(&paths) {
+            if let Some(dir) = path.parent().map(Path::to_path_buf) {
+                self.tree_put(&[path], &dir, "copied", cx);
+            }
+        }
+    }
+
+    /// ⌘Z and ⌘⇧Z: the last thing done in the tree is taken back, or the
+    /// last taken back is done again, and the window follows the files.
+    pub(crate) fn tree_undo(&mut self, redo: bool, cx: &mut Context<Self>) {
+        use emaki_core::fsops::Kind;
+        let Some(root) = self.files_root() else { return };
+        let hold = fs_hold();
+        let ran = if redo { self.fs_journal.redo() } else { self.fs_journal.undo() };
+        let op = match ran {
+            None => {
+                self.notice = Some(Notice::said(if redo { "nothing to do again" } else { "nothing to take back" }.to_string()));
+                return cx.notify();
+            }
+            Some(Err((why, held))) => {
+                fs_flush(held);
+                self.notice = Some(Notice::error(format!("not {}: {why}", if redo { "done again" } else { "taken back" })));
+                return cx.notify();
+            }
+            Some(Ok(op)) => op,
         };
-        let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
-            swallow_click(window, cx);
-            this.paste_ask = None;
-            cx.notify();
-        });
-        let yes = cx.listener(|this, _: &ClickEvent, window, cx| {
-            swallow_click(window, cx);
-            this.paste_undo_now(cx);
-        });
-        self.ask_card("paste-ask", serial, format!("Undo pasting {what}?"), format!("It goes to the {}, and can be put back from there.", crate::sys::TRASH_NAME), Button::new("paste-ask-no").outline().small().label("No").on_click(cancel), Button::new("paste-ask-yes").primary().small().label("Yes").on_click(yes), cx)
+        // Each move as it just ran: from where the thing was to where it is.
+        let mut here = None;
+        for (before, after) in &op.moves {
+            let (from, to) = if redo { (before, after) } else { (after, before) };
+            match (from.starts_with(&hold), to.starts_with(&hold)) {
+                (false, true) => self.tree_forget(from),
+                (true, false) => here = Some(to.clone()),
+                _ => {
+                    self.tree_follow(from, to, cx);
+                    here = Some(to.clone());
+                }
+            }
+        }
+        // What came back, or moved, is seen and chosen.
+        if let Some(at) = &here {
+            self.tree.shut.remove(&root);
+            let mut up = at.parent();
+            while let Some(dir) = up.filter(|dir| *dir != root && dir.starts_with(&root)) {
+                if self.tree.open.insert(dir.to_path_buf()) {
+                    self.tree.kids.remove(dir);
+                }
+                up = dir.parent();
+            }
+            self.tree.marked.clear();
+            self.tree.picked = Some(at.clone());
+        }
+        self.tree.refresh(&root);
+        self.tree.read_at = 0.;
+        let n = op.moves.len();
+        let named = |ix: usize| op.moves.first().map(|(a, b)| path_name(if ix == 0 { a } else { b })).unwrap_or_default();
+        let what = match (op.kind, n) {
+            (Kind::Renamed, _) => format!("renaming {} to {}", named(0), named(1)),
+            (kind, 1) => format!("{} {}", kind_word(kind), named(1 - (kind == Kind::Removed) as usize)),
+            (kind, n) => format!("{} {n} items", kind_word(kind)),
+        };
+        self.notice = Some(Notice::said(format!("{}: {what}", if redo { "done again" } else { "taken back" })));
+        cx.notify();
     }
 
     /// A question on the window's own card over everything: a line, a
@@ -3721,38 +4517,11 @@ impl Workbench {
                     if to.exists() {
                         return Err(format!("{name} is already there"));
                     }
-                    std::fs::rename(from, &to).map_err(|e| e.to_string())?;
-                    // What was open under the old name is open under the new.
-                    let moved: Vec<PathBuf> = self.tree.open.iter().filter(|p| p.starts_with(from)).cloned().collect();
-                    for p in moved {
-                        self.tree.open.remove(&p);
-                        if let Ok(rest) = p.strip_prefix(from) {
-                            self.tree.open.insert(if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) });
-                        }
-                    }
-                    // The file showing, and what was typed in any file under
-                    // the old name and not saved, are under the new one.
-                    let renamed = |p: &Path| p.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) });
-                    let shown = self.file_view.as_ref().and_then(|v| renamed(&v.path));
-                    for ed in self.file_editor.iter_mut().chain(self.file_parked.iter_mut()) {
-                        if let Some(now) = renamed(&ed.path) {
-                            ed.path = now;
-                        }
-                    }
-                    let drafts: Vec<PathBuf> = self.file_drafts.keys().filter(|p| p.starts_with(from)).cloned().collect();
-                    for old in drafts {
-                        if let (Some(draft), Some(now)) = (self.file_drafts.remove(&old), renamed(&old)) {
-                            self.file_drafts.insert(now, draft);
-                        }
-                    }
-                    if let Some(now) = shown {
-                        // Shown again under its name; its editor is kept
-                        // and found by the path it now has.
-                        if let Some(ed) = self.file_editor.take() {
-                            self.file_parked.push(ed);
-                        }
-                        self.show_file(&now, cx);
-                    }
+                    emaki_core::fsops::move_path(from, &to)?;
+                    // What was open under the old name is open under the
+                    // new, and the rename is one thing to take back.
+                    self.tree_follow(from, &to, cx);
+                    self.fs_done(emaki_core::fsops::Kind::Renamed, vec![(from.clone(), to.clone())]);
                     Ok(Some(to))
                 }
                 FilePrompt::NewFile(dir) | FilePrompt::NewFolder(dir) => {
@@ -3762,10 +4531,15 @@ impl Workbench {
                     }
                     let file = matches!(prompt, FilePrompt::NewFile(_));
                     let folder = if file { to.parent().unwrap_or(dir).to_path_buf() } else { to.clone() };
+                    // What is made is everything from the first folder
+                    // that was not there: taken back, all of it goes.
+                    let top = to.ancestors().take_while(|p| p.starts_with(dir) && *p != dir.as_path()).filter(|p| !p.exists()).last().map(Path::to_path_buf).unwrap_or(to.clone());
                     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
                     if file {
                         std::fs::OpenOptions::new().write(true).create_new(true).open(&to).map_err(|e| e.to_string())?;
                     }
+                    let slot = self.fs_journal.slot(&top);
+                    self.fs_done(emaki_core::fsops::Kind::Made, vec![(slot, top)]);
                     // Every folder down to it is opened, so it is seen.
                     let mut up = to.parent();
                     while let Some(p) = up.filter(|p| p.starts_with(dir)) {
@@ -3861,6 +4635,14 @@ impl Workbench {
         }
         let picked = self.tree.picked.clone();
         let marked = self.tree.marked.clone();
+        // Where files dragged in from the file manager would go. A drag
+        // that left the window says nothing as it goes, so what it lit
+        // is put out here.
+        if self.tree_drop.is_some() && !cx.has_active_drag() && !self.tree_drop_hold {
+            self.tree_drop_off(cx);
+        }
+        let drop_dir = self.tree_drop.as_ref().map(|(dir, _)| dir.clone());
+        let drop_root = drop_dir.is_some() && drop_dir == root;
         // What came and what went since the last draw, each in motion.
         if let Some(r) = root.as_ref().filter(|_| exists) {
             if self.tree.seen_now(r, &rows) {
@@ -3950,8 +4732,17 @@ impl Workbench {
                         Some(letter) if !m.folder => div().w(px(12.)).flex_shrink_0().flex().justify_center().text_size(px(11.)).text_color(tint).child(letter).into_any_element(),
                         _ => div().w(px(12.)).flex_shrink_0().flex().justify_center().child(div().size(px(5.)).rounded_full().bg(tint.opacity(0.8))).into_any_element(),
                     });
-                    let (click, menu) = (node.clone(), node.clone());
+                    let (click, menu, over) = (node.clone(), node.clone(), node.clone());
                     let icon = img(crate::file_icons::path(&node.name, node.dir, open, dark)).size(px(16.)).flex_shrink_0();
+                    // Files dragged in: the folder they would go into is
+                    // lit, and what it holds under it more faintly, so
+                    // the whole of where they land reads as one place.
+                    // What a drag of this row takes: the rows chosen with
+                    // it, or itself.
+                    let dragged = TreeDrag(if marked.len() > 1 && marked.contains(&node.path) { tops_of(&marked) } else { vec![node.path.clone()] });
+                    let cut = self.file_cut.iter().any(|c| node.path.starts_with(c));
+                    let drop_here = !drop_root && node.dir && drop_dir.as_ref() == Some(&node.path);
+                    let drop_in = !drop_root && !drop_here && drop_dir.as_ref().is_some_and(|d| node.path.starts_with(d));
                     list = put(
                         list,
                         &mut ghosts,
@@ -3970,7 +4761,38 @@ impl Workbench {
                             .cursor_pointer()
                             .when(chosen, |d| d.bg(theme.primary.opacity(0.12)))
                             .when(!chosen, |d| d.hover(|s| s.bg(row_hover(&theme, dark))))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .when(drop_here, |d| d.bg(theme.primary.opacity(0.22)).rounded_b(px(0.)))
+                            .when(drop_in, |d| d.bg(theme.primary.opacity(0.08)).rounded(px(0.)))
+                            .when(cut, |d| d.opacity(0.45))
+                            // A press on a row is the row's: a click, or
+                            // the start of its drag, never a rectangle.
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.tree_press_row = true))
+                            // Dragged, the row (with the others chosen)
+                            // is moved where it is let go, or copied
+                            // there with ⌥ held.
+                            .on_drag(dragged, |drag, _, _, cx| {
+                                let label = match drag.0.as_slice() {
+                                    [one] => path_name(one),
+                                    many => format!("{} items", many.len()),
+                                };
+                                cx.new(|_| TreeDragged(label))
+                            })
+                            .on_drag_move::<ExternalPaths>(cx.listener({
+                                let over = over.clone();
+                                move |this, e: &DragMoveEvent<ExternalPaths>, _, cx| {
+                                    if e.bounds.contains(&e.event.position) {
+                                        this.tree_drop_copy = true;
+                                        this.tree_drop_over(e.event.position, Some((&over.path, over.dir)), cx);
+                                    }
+                                }
+                            }))
+                            .on_drag_move::<TreeDrag>(cx.listener(move |this, e: &DragMoveEvent<TreeDrag>, _, cx| {
+                                if e.bounds.contains(&e.event.position) {
+                                    this.tree_drop_kind(e.event.modifiers.alt, cx);
+                                    this.tree_drop_over(e.event.position, Some((&over.path, over.dir)), cx);
+                                }
+                            }))
+                            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                                 // The click is the row's: the room around
                                 // the rows takes one as "choose nothing".
                                 swallow_click(window, cx);
@@ -3982,6 +4804,15 @@ impl Workbench {
                                 if std::mem::take(&mut this.tree_band_live) {
                                     return;
                                 }
+                                // ⌘ and a click adds the row to those
+                                // chosen or takes it out; ⇧ and a click
+                                // chooses from the row last clicked to
+                                // this one. Neither opens anything.
+                                let keys = ev.modifiers();
+                                if keys.secondary() || keys.shift {
+                                    return this.tree_click_more(&click.path, keys.shift, cx);
+                                }
+                                this.tree_anchor = Some(click.path.clone());
                                 this.tree.marked.clear();
                                 if click.dir {
                                     this.tree.picked = Some(click.path.clone());
@@ -4015,11 +4846,71 @@ impl Workbench {
                 }
             }
         }
+        // Files dragged in, over the session's folder itself: a line
+        // round the whole panel. And at its foot, where they would go,
+        // in words, coming up as they arrive and fading as they leave.
+        let ring = drop_root.then(|| {
+            div()
+                .absolute()
+                .inset(px(3.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.primary.opacity(0.75))
+                .bg(theme.primary.opacity(0.06))
+                .with_animation("tree-drop-ring", Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
+        });
+        let words = |text: String| {
+            h_flex()
+                .h(px(26.))
+                .px(px(10.))
+                .gap(px(6.))
+                .items_center()
+                .rounded_full()
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.primary.opacity(0.6))
+                .shadow_md()
+                .text_size(px(12.))
+                .text_color(theme.foreground)
+                .child(Icon::default().path(if self.tree_drop_copy { "icons/copy.svg" } else { "icons/arrow-right.svg" }).with_size(px(13.)).text_color(theme.primary))
+                .child(div().max_w(px(220.)).truncate().child(text))
+        };
+        let drop_words = match (&drop_dir, &self.tree_drop_gone) {
+            (Some(dir), _) => Some(h_flex().absolute().left_0().right_0().bottom(px(12.)).justify_center().child(words(self.tree_drop_words(dir))).with_animation("tree-drop-words-in", Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).bottom(px(4. + 8. * t))).into_any_element()),
+            (None, Some((text, at))) if at.elapsed() < TREE_ANIM => {
+                Some(h_flex().absolute().left_0().right_0().bottom(px(12.)).justify_center().child(words(text.clone())).with_animation("tree-drop-words-out", Animation::new(TREE_ANIM), |d, t| d.opacity(1. - t)).into_any_element())
+            }
+            _ => None,
+        };
         let body = if exists {
             v_flex()
                 .relative()
                 .flex_1()
                 .min_h_0()
+                // Files from the file manager, anywhere over the panel:
+                // the rows say which folder, the room around them is
+                // the session's own.
+                .on_drag_move::<ExternalPaths>(cx.listener(|this, e: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    if e.bounds.contains(&e.event.position) {
+                        this.tree_drop_copy = true;
+                        this.tree_drop_over(e.event.position, None, cx);
+                    } else {
+                        this.tree_drop_off(cx);
+                    }
+                }))
+                .on_drop(cx.listener(|this, files: &ExternalPaths, _, cx| this.tree_drop_done(files.paths(), true, cx)))
+                // Rows of the tree itself, dragged: moved, or copied
+                // with ⌥ held as they are let go.
+                .on_drag_move::<TreeDrag>(cx.listener(|this, e: &DragMoveEvent<TreeDrag>, _, cx| {
+                    if e.bounds.contains(&e.event.position) {
+                        this.tree_drop_kind(e.event.modifiers.alt, cx);
+                        this.tree_drop_over(e.event.position, None, cx);
+                    } else {
+                        this.tree_drop_off(cx);
+                    }
+                }))
+                .on_drop(cx.listener(|this, rows: &TreeDrag, window, cx| this.tree_drop_done(&rows.0, window.modifiers().alt, cx)))
+                .children(ring)
                 .child(
                     v_flex()
                         .id("files-scroll")
@@ -4035,6 +4926,11 @@ impl Workbench {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, ev: &MouseDownEvent, _, _| {
+                                // A row took the press: it is its click
+                                // or its drag.
+                                if std::mem::take(&mut this.tree_press_row) {
+                                    return;
+                                }
                                 this.tree_band = Some((ev.position, ev.position));
                                 this.tree_band_live = false;
                             }),
@@ -4062,6 +4958,7 @@ impl Workbench {
                         }))
                         .child(list),
                 )
+                .children(drop_words)
                 // The rectangle, over the rows, cut to the panel.
                 .children(self.tree_band.filter(|_| self.tree_band_live).map(|(a, b)| {
                     let room = self.files_scroll.bounds();
@@ -5247,13 +6144,17 @@ impl Workbench {
         let theme = cx.theme().clone();
         let name = v.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let folder = v.rel.strip_suffix(&name).unwrap_or("").trim_end_matches(['/', '\\']).to_string();
-        let (open, open_too, reveal, mention) = (v.path.clone(), v.path.clone(), v.path.clone(), v.path.clone());
+        let (open, open_too, reveal) = (v.path.clone(), v.path.clone(), v.path.clone());
+        let big = self.file_big;
         // A table's grid runs to the pane's edges.
         let grid = (matches!(v.body, FileBody::Table(..)) && !self.file_raw) || matches!(v.body, FileBody::Sheets(_));
         let (pad_x, pad_y) = if grid { (0., 0.) } else { (18., 16.) };
         // A PDF's pages give the list beside them its room.
         let beside = if matches!(v.body, FileBody::Pages(Some(_))) && self.pdf_side.is_some() { PDF_SIDE_W } else { 0. };
         let room = (f32::from(w) - beside - 2. * pad_x - 1.).max(120.);
+        if matches!(v.body, FileBody::Pages(_)) && !leaving {
+            self.pdf_want.set(room * self.ui_scale);
+        }
         let quiet = |words: String| div().text_size(px(12.)).text_color(theme.muted_foreground).child(words);
         let mut wide = false;
         let mut heads: Option<(AnyElement, AnyElement)> = None;
@@ -5265,7 +6166,38 @@ impl Workbench {
             FileBody::Code(..) => div().into_any_element(),
             FileBody::Markdown(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
             FileBody::Notebook(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
-            FileBody::Html(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(gpui_component::text::TextView::html(SharedString::from(format!("file-html-{}-{}", v.rel, self.file_serial)), text.clone()).selectable(true)).into_any_element(),
+            // The web view stands over the pane's room; nothing of the
+            // page is drawn under it.
+            FileBody::Html(_) if self.html_web.is_some() => div().into_any_element(),
+            FileBody::Html(text) => {
+                if !leaving {
+                    self.html_want.set(room);
+                }
+                match self.html_shot.as_ref().filter(|(key, _)| key.0 == v.path) {
+                    // The page as drawn: its strips one under another
+                    // with nothing between, and over them a place a
+                    // link, which goes where a link out of the app goes.
+                    Some((_, shot)) => {
+                        let by = room / shot.css_w.max(1.);
+                        let strips = shot.strips.iter().map(|(image, rows)| img(ImageSource::Image(image.clone())).w(px(room)).h(px(room * *rows as f32 / shot.px_w.max(1) as f32)).flex_shrink_0());
+                        let links = shot.links.iter().enumerate().filter(|(_, (href, _))| ["http://", "https://", "mailto:"].iter().any(|s| href.starts_with(s))).map(|(ix, (href, at))| {
+                            let href = href.clone();
+                            div().id(("html-link", ix)).absolute().left(px(at[0] * by)).top(px(at[1] * by)).w(px(at[2] * by)).h(px(at[3] * by)).cursor_pointer().on_click(move |_, window, cx| {
+                                swallow_click(window, cx);
+                                cx.open_url(&href)
+                            })
+                        });
+                        v_flex()
+                            .gap(px(10.))
+                            .child(v_flex().relative().w(px(room)).bg(gpui::white()).border_1().border_color(theme.border).overflow_hidden().children(strips).children(links))
+                            .when(shot.more, |d| d.child(quiet("The page goes on past here.".into())))
+                            .into_any_element()
+                    }
+                    // Until it is drawn, its words as the toolkit reads
+                    // them.
+                    None => div().text_size(px(14.)).line_height(relative(1.6)).child(gpui_component::text::TextView::html(SharedString::from(format!("file-html-{}-{}", v.rel, self.file_serial)), text.clone()).selectable(true)).into_any_element(),
+                }
+            }
             FileBody::Picture(size, drawn) => {
                 // At its own size when that fits, never larger.
                 let (pw, ph) = match size {
@@ -5700,14 +6632,12 @@ impl Workbench {
                     })
                     .children(modes)
                     .when(!leaving, |d| {
-                        d.child(tool("file-mention", Icon::default().path("icons/at.svg"), "Add to message").on_click({
-                            let this = cx.entity().downgrade();
-                            move |_, window, cx| {
-                                let _ = this.update(cx, |this, cx| this.file_mention(&mention, window, cx));
-                            }
-                        }))
-                        .child(tool("file-open", Icon::default().path("icons/external-link.svg"), "Open with default app").on_click(move |_, _, _| crate::sys::open_path(&open)))
+                        d.child(tool("file-open", Icon::default().path("icons/external-link.svg"), "Open with default app").on_click(move |_, _, _| crate::sys::open_path(&open)))
                         .child(tool("file-reveal", Icon::default().path("icons/folder-open.svg"), crate::sys::REVEAL_LABEL).on_click(move |_, _, _| crate::sys::reveal_path(&reveal)))
+                        .child(tool("file-enlarge", Icon::default().path(if big { "icons/minimize.svg" } else { "icons/maximize.svg" }), if big { "Restore" } else { "Enlarge" }).on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.file_enlarge(window, cx)
+                        })))
                         // The close button, as an editor's tab has it: with
                         // changes not saved it is an orange dot, and the
                         // cross again under the pointer.
@@ -5748,6 +6678,12 @@ impl Workbench {
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
+                        // The web view is put over this room as the room
+                        // is laid out, so it moves in the frame the pane
+                        // does.
+                        .when_some(self.html_web.as_ref().filter(|_| !leaving && matches!(v.body, FileBody::Html(_)) && !self.file_raw).map(|web| web.placer()), |d, place| {
+                            d.child(canvas(move |bounds, _, _| place(bounds), |_, _, _, _| {}).absolute().inset_0())
+                        })
                         .map(|d| match editor {
                             // The editor scrolls itself; the wrapper only
                             // says where the pane's body is.
@@ -6158,6 +7094,32 @@ impl Workbench {
                 }
             }
             "file:off" => self.close_file_view(cx),
+            // Files dragged in from the file manager: held over a row or
+            // over the panel's room (`treedrag`, `treedrag:<path>`), and
+            // let go (`treedrop:<file>`).
+            t if t.starts_with("treedrag") => {
+                let row = t.strip_prefix("treedrag:").and_then(under);
+                self.tree_drop_probe = None;
+                self.tree_drop_hold = true;
+                self.tree_drop_copy = true;
+                self.tree_drop_over(point(px(0.), px(0.)), row.as_ref().map(|p| (p.as_path(), p.is_dir())), cx);
+            }
+            t if t.starts_with("treedrop:") => {
+                self.tree_drop_hold = false;
+                self.tree_drop_done(&[PathBuf::from(&t["treedrop:".len()..])], true, cx);
+            }
+            // A click in the page: the keyboard is the page's.
+            "web:keys" => {
+                if let Some(web) = &self.html_web {
+                    web.take_keys();
+                }
+            }
+            // The pane's enlarge button.
+            "file:big" => {
+                self.file_big = !self.file_big;
+                self.file_big_at = Some(std::time::Instant::now());
+                cx.notify();
+            }
             // In the tree: copy a file or folder, paste at one (or at
             // the folder itself with no path). In the comparison: ask
             // to discard a file's changes, and say yes.
@@ -6190,8 +7152,20 @@ impl Workbench {
                 }
             }
             "treenew" => self.pending_tree_do = None,
-            "pasteundo" => self.ask_paste_undo(cx),
-            "pasteundo:yes" => self.paste_undo_now(cx),
+            "treeundo" => self.tree_undo(false, cx),
+            "treeredo" => self.tree_undo(true, cx),
+            t if t.starts_with("treetrash:") => {
+                if let Some(p) = under(&t["treetrash:".len()..]) {
+                    self.tree_trash(vec![p], cx);
+                }
+            }
+            t if t.starts_with("treemove:") => {
+                if let Some((what, dir)) = t["treemove:".len()..].split_once(':') {
+                    if let (Some(what), Some(dir)) = (under(what), if dir.is_empty() { self.files_root() } else { under(dir) }) {
+                        self.tree_move(vec![what], &dir, cx);
+                    }
+                }
+            }
             t if t.starts_with("discard:") => {
                 if let Some(p) = under(&t["discard:".len()..]) {
                     self.open_changes(Some(p.clone()), cx);

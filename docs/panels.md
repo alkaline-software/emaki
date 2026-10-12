@@ -385,6 +385,79 @@ changed file's menu opens it on that file.
   so reading on does not move the reader. `DIFF_LINES` at most; a file
   that is not text says so.
 
+## What the tree does, taken back and done again
+
+⌘Z in the panel takes the last thing the tree did to the disk back, and
+⌘⇧Z (Ctrl+Y too, off a Mac) does it again (`tree_undo`,
+`emaki_core::fsops`). Everything the tree does is in it: a file or
+folder made, a rename, a move, a copy (pasted, duplicated, dropped in
+from the file manager), a removal.
+
+- Each is a list of moves, a path before and a path after, and one of
+  the two may be in the holding folder (`~/.emaki/state/held`). Taking
+  it back is the moves the other way, last first; doing it again is the
+  moves as they were. So nothing deletes anything: a file removed is
+  moved to the holding folder, and a file made or copied in has a place
+  there to go to when it is taken back.
+- A file removed is therefore not in the system's trash at once. It
+  goes there when ⌘Z can no longer bring it back: when something new is
+  done after a ⌘Z, when it is the hundred-and-first thing done, at
+  Quit, and at the next launch for what a crash left. The Trash is not
+  read back from: an app is not let into it, so a file put there could
+  not be put back by ⌘Z at all.
+- A move is a rename and nothing else, so a thing is never half
+  copied. What is on another volume than the holding folder cannot be
+  held: it goes to the trash at once, and the notice says so.
+- A thing is taken back whole or not at all. When one of its moves
+  cannot be made (a name since taken, a file since gone), those already
+  made are put back, the thing is forgotten, and the reason is said.
+- The window follows the files (`tree_follow`, `tree_forget`): the
+  folders open under a path, the file showing, what was typed in one
+  and not saved, the rows chosen and cut.
+- A file's own edits are not here: ⌘Z in the file's pane is the
+  editor's.
+
+## Moving, and the tree's keys
+
+- A row is dragged to move it, with the other rows chosen when it is
+  one of them (`TreeDrag`, `tree_move`); ⌥ held as it is let go copies
+  instead. Where it would go is lit and said as for files dragged in,
+  below, and a closed folder held over opens. A row already in that
+  folder stays, a folder is not moved into itself, and a name taken
+  there is not written over.
+- A press on a row is that row's click or drag (`tree_press_row`); the
+  rectangle that chooses rows starts from the room around them.
+- ⌘ and a click adds a row to those chosen or takes it out; ⇧ and a
+  click chooses from the row last clicked to this one
+  (`tree_click_more`, `tree_anchor`).
+- The keys (`tree_key`): ⌘X cuts, and the paste that follows moves
+  what was cut (drawn faint until then); ⌘D makes a copy beside the
+  row; ⌘⌫ removes on a Mac, and Delete elsewhere; ↑ and ↓ go from row
+  to row, → opens a folder or goes into it, ← closes it or goes up.
+  Cut and Duplicate are on a row's menu, and on the menu of several.
+
+## Files dragged in
+
+Files dragged from the file manager over the tree are copied in where
+they are let go (`tree_drop_over`, `tree_drop_done`, and `tree_put`,
+which a paste and a duplicate go through too): into the folder under them, the folder
+of the file under them, or the session's own over the room around the
+rows. Nothing is written over; a name taken gets a free one.
+
+- Where they would go is lit as it changes: the folder's row and, more
+  faintly, the rows it holds, so the place reads as one; a line round
+  the whole panel for the session's folder. At the panel's foot the
+  same is said in words, coming up as the files arrive and fading as
+  they leave.
+- A closed folder held over for `TREE_SPRING` opens, so what is in it
+  can be reached without letting go.
+- Every row and the panel hear every move of a drag, in no promised
+  order, so the panel yields a move a row has already taken
+  (`tree_drop_probe`).
+- A drag that leaves the window says nothing as it goes. What it lit is
+  put out at the next draw with no drag about.
+- It is a copy, never a move: the file manager's own file stays.
+
 ## The file's pane and the menu
 
 A click on a file shows it in a pane between the tree and the
@@ -408,6 +481,16 @@ far from the tree.
   lets go of what is selected there, as an editor's does
   (`file_unselect`): the editor's selection, words selected in a file
   as it reads, a block of a table's cells.
+- The head's enlarge button gives the pane the conversation's room too
+  (`file_enlarge`, `file_big`), and its next press or closing the file
+  gives it back. The width runs from one to the other
+  (`file_pane_w`), and on the way the conversation keeps the width it
+  has beside the pane, cut by the pane's edge and fading
+  (`beside_file`), so it is not laid out again a frame at a time. Under
+  an enlarged pane the conversation and its composer are not drawn, and
+  the focus is the pane's. The pane has no edge to drag then. It lasts
+  for the window, not between launches. "Add to message" was in the
+  head and was removed; it is on the tree's menu.
 - It is the first to give room up: narrower before the terminal and the
   tree are (`file_pane_w`, and `file_pane_least` in their own widths),
   and in a window with no room for its least it is not drawn
@@ -421,16 +504,28 @@ far from the tree.
   a Word, PowerPoint or Excel file as `emaki_core::office` reads it
   (below). Anything else, or a file that cannot be read, is a line
   saying so and "Open with default app".
-- An Office file is shown and nothing more (`office::read`, in
-  `read_file`): a `.docx` or a `.pptx` as markdown (`FileBody::Doc`: a
-  document's headings, paragraphs, lists and tables; a deck slide by
-  slide), an `.xlsx`, `.xlsm` or `.xls` as its sheets in the grid
-  (`FileBody::Sheets`), their names in a row over it when there are
-  several (`sheet_at`). It has no source, so no second way to show and
-  nothing to save. The old binary `.doc` and `.ppt` are not read: no
-  small reader for them was found, and nothing is asked of another
-  program. What is missed is in `office.rs`: a style's own formatting, a
-  cell's display format (0.5 for 50%), notes, pictures.
+- An Office file is shown and nothing more. It has no source, so no
+  second way to show and nothing to save. The old binary `.doc` and
+  `.ppt` are not read: no small reader for them was found, and nothing
+  is asked of another program.
+  - A `.docx` is its pages as pictures, laid out and drawn by WordCraft
+    (`docx_pages`), and a `.pptx` its slides, drawn by DeckCraft
+    (`pptx_pages`). Both are a PDF to the pane (`FileBody::Pages`,
+    `drawn_pages`): the same pages, the small ones beside them, the
+    same fit to the pane's pixels. A document's words are kept as a
+    PDF's are, a letter where the page draws it, so they are selected,
+    found and copied the same way; a line whose letters and clusters do
+    not count the same has its letters spread evenly along it. A
+    slide's words are not kept yet. A font the machine lacks is another
+    face, so lines can break where Word does not break them.
+  - An `.xlsx` or `.xlsm` is its sheets in the grid (`FileBody::Sheets`),
+    their names in a row over it when there are several (`sheet_at`),
+    each cell as the sheet shows it: its number format applied, by
+    GridCraft (`office::shown_sheets`). A formula's cell is the result
+    the file kept. calamine reads an `.xls`, and a zip GridCraft
+    refuses, as values. Not shown: bold, fills, widths, merged cells.
+  - `office::read` still reads a `.docx` and a `.pptx` as markdown; the
+    pane no longer asks it to.
 - The grid (`render_table`) has columns named by letter and rows by
   number, both staying in view (`render_table_heads`). The heads are
   not in the scroller: the letters are a strip over it and the numbers
@@ -617,10 +712,11 @@ far from the tree.
     its place among `FileEditor::hunks`, and a click while the marks
     are behind the text opens nothing.
 - What shows two ways has two segments in the head, as it reads and as
-  it is written (`two_ways`, `file_raw`, one choice for all of them):
-  markdown; HTML (`FileBody::Html`, the toolkit's HTML view: words,
-  headings, lists, tables, links, pictures, and no style sheet or
-  script, since a webview draws over every overlay); an SVG, which is
+  it is written (`two_ways`, `file_raw`, one choice for all of them).
+  Every launch begins with files as they read: the choice lasts for the
+  launch and is not in `ui.json`, where a source looked at once was what
+  every file opened as from then on. They are: markdown; HTML
+  (`FileBody::Html`, below); an SVG, which is
   a picture with a source; a table; a Jupyter notebook
   (`FileBody::Notebook`, its cells as markdown by
   `files::notebook_markdown`, its source the JSON). The written side is
@@ -697,7 +793,52 @@ far from the tree.
   its characters, which is drawn and cannot be selected.
 - A PDF is drawn by hayro, which is all Rust, so the same on every OS,
   off the main thread (`pdf_pages`), each page to a PNG the window
-  draws. The pane says "Drawing the pages…" until they are in, and a
+  draws. A page is drawn as wide in pixels as the pane shows it, and
+  drawn again when that width has changed and stood still a moment
+  (`pdf_fit`, `pdf_want`), the old pictures showing until the new are
+  in. At one fixed width a page was scaled on its way to the screen and
+  its letters were soft. PdfCraft was looked at for this and draws its
+  pages with hayro too.
+- HTML as it reads is the system's own web view (WKWebView, WebView2)
+  set over the pane's room as a child of the window (`html_web.rs`,
+  `html_web_sync`): the page as a browser has it, scripts run. A page
+  that lays itself out by script is nothing without one, and Blitz,
+  which drew it first, runs none.
+  - The view is not gpui's and is drawn over whatever gpui draws where
+    it stands, so it is put out of sight while the window draws over
+    its pages (`over_page`: a sheet, a menu, a list, the sidebar
+    floated). A new thing drawn over the pages goes in `over_page`, or
+    the page shows through it. A tooltip under the pane's head is behind
+    the page.
+  - The page's files come through a scheme of ours and not `file:`, so
+    it reads the session's folder and nothing else on the disk. What it
+    asks of the network it gets, as in a browser. A link out of its own
+    files opens in the system's browser, and the pane stays on the file.
+  - It shows the file as saved, not as the editor has it, and loads it
+    again when the file changes on the disk.
+  - A click in the page gives it the keyboard, and the window's
+    shortcuts that are not in the menu bar wait for a click outside it.
+    The keyboard has to be taken back, since AppKit does not give it
+    back: `sys::keys_to_window` makes the window's own view the first
+    responder again at a press on anything the window draws, when the
+    view is put out of sight, and when it is let go. Without it the
+    keyboard stayed on a view that was hidden or gone: no letter
+    reached the composer and an input method's candidates stood at the
+    screen's corner, while Return and Delete, which AppKit offers to
+    every view first, still worked.
+  - It is put where the pane's room is as that room is laid out
+    (`Web::placer`, a canvas over the room), in the same frame, so it
+    does not trail the pane. The page's own drawing at a new size is
+    the web view's, in another process, and comes a moment after.
+  - Its lower corners are cut round where they are the card's
+    (`Web::round`): it is drawn over the card's own round corners.
+  - It is let go with the file.
+  - On Linux no web view can be set in a gpui window (WebKitGTK wants a
+    GTK one), and the page is a picture drawn by Blitz
+    (`html_shot::shoot`, `html_fit`): its style sheets, no script,
+    nothing fetched, light on white, its links to the web places over
+    the picture, and before the first drawing the toolkit's text view.
+    Blitz is built there only. The pane says "Drawing the pages…" until they are in, and a
   file the renderer stops on is said to be one it could not draw.
 - The file is read again when it changes on disk (`tick_files`).
 - The pane's scroller is a pane of its own to `route_scroll`
@@ -747,11 +888,8 @@ here while the clipboard still names it) into the folder chosen, the
 folder the chosen file is in, or the session's folder with nothing chosen
 (`tree_paste`, `files::copy_into`). A name already there is not written
 over: the copy is "name copy.ext", then "name copy 2.ext", as the Finder
-has it. Paste is on the menu only while there is a file to paste. ⌘Z
-in the panel asks whether to take the last paste back (`paste_last`,
-`ask_paste_undo`, on the card Discard's question is on, `ask_card`), and
-on Yes the copies it made go to the system's trash. The
-panel has a focus of its own for the two keys (`tree_focus`), taken at a
+has it. Paste is on the menu only while there is a file to paste. The
+panel has a focus of its own for its keys (`tree_focus`), taken at a
 click on a row or on its empty room, and handed to the window when the
 panel is put away with the keyboard in it. Opening a file from the tree
 leaves the keyboard in the tree (`file_preview` hands it to the window only
@@ -861,6 +999,14 @@ this the mark fell back to the last entry when the move ended.
   or `:bring` answers it, and `branchrestore` is the strip's button. Put a
   dummy step first (`x;branchgo:…`): the first step can run before the
   session's folder is known, and then does nothing.
+- `EMAKI_GO=file:big` is the pane's enlarge button.
+- `EMAKI_GO=treedrag` holds files from the file manager over the
+  panel's room and `treedrag:<path>` over that row, with no drag there
+  is; `treedrop:<a file's full path>` lets that file go there.
+- `treetrash:<path>` removes a row, `treemove:<path>:<folder>` moves one
+  (an empty folder is the session's), and `treeundo` and `treeredo` are
+  ⌘Z and ⌘⇧Z. A probe that removes and does not take it back leaves the
+  file held, and the next launch puts it in the real trash.
 - `EMAKI_GO=outline:<n>` chooses that round's entry.
   `EMAKI_GLIDE_DEBUG=1` prints the list's place and what is left at every
   tick of a glide.
@@ -870,8 +1016,7 @@ this the mark fell back to the last entry when the move ended.
 - `EMAKI_GO=treecopy:<path>` copies that file or folder, `treepaste` or
   `treepaste:<path>` pastes into the folder or at that row;
   `discard:<path>` opens the comparison on a file with the question up,
-  and `discard:yes` answers it; `pasteundo` is ⌘Z after a paste and
-  `pasteundo:yes` its Yes. `treefocus` puts the keyboard in the files
+  and `discard:yes` answers it. `treefocus` puts the keyboard in the files
   panel, and `EMAKI_FOCUS_DEBUG=1` prints where it is at every draw.
 - `EMAKI_GO=treenew:file:<folder>:<words>` opens the field for a new
   file in that folder ("." is the session's) with those words typed;

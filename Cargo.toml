@@ -80,3 +80,9 @@ gpui-component = { path = "vendor/gpui-component/crates/ui" }
 gpui-base = { path = "vendor/gpui-component/crates/base" }
 gpui-component-macros = { path = "vendor/gpui-component/crates/macros" }
 gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
+
+# Stylo's derive, with one line changed so it builds beside gpui
+# (`vendor/stylo_derive/UPSTREAM.md`). Blitz, which draws an HTML file,
+# is built on Stylo.
+[patch.crates-io]
+stylo_derive = { path = "vendor/stylo_derive" }

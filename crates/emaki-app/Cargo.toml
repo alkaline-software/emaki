@@ -45,7 +45,19 @@ whoami = "1"
 # A PDF's pages as pictures, for the file shown beside a conversation:
 # pure Rust, so the same on every OS.
 hayro = "0.8"
+# A Word document's pages as pictures, laid out and drawn by WordCraft
+# (storytold/wordcraft, MIT OR Apache-2.0): pure Rust, with faces of its
+# own for a font the machine lacks. It is not on crates.io, so it is
+# pinned to a commit here.
+wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
+wordcraft-docx = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
+wordcraft-layout = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
+wordcraft-render = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+# A PowerPoint deck's slides as pictures, drawn by DeckCraft
+# (storytold/deckcraft, MIT OR Apache-2.0), on the same terms.
+deckcraft-pptx = { git = "https://github.com/storytold/deckcraft", rev = "0ec0cc5e815caea982a7deec51bc437f3ba187ad" }
+deckcraft-render = { git = "https://github.com/storytold/deckcraft", rev = "0ec0cc5e815caea982a7deec51bc437f3ba187ad" }
 
 # The .exe carries the icon as a resource; nothing to do elsewhere.
 [target.'cfg(windows)'.build-dependencies]
@@ -56,6 +68,23 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSResponder", "NSApplication", "NSImage", "NSRunningApplication", "NSWorkspace", "NSSpellChecker", "NSPasteboard", "NSColor"] }
 objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSURL", "NSArray", "NSRange"] }
 raw-window-handle = "0.6"
+
+# An HTML file as a browser shows it: the system's own web view set in
+# the file's pane (`html_web.rs`).
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+wry = "0.57"
+
+# Where no web view can be set in the window, an HTML file is drawn as a
+# picture with its style sheets, by Blitz (`html_shot.rs`): no script and
+# no network. A beta, so pinned exactly; anyrender_vello_cpu 0.18 wants
+# a newer anyrender than this Blitz builds on.
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+blitz-dom = { version = "=0.3.0-beta.2", features = ["floats"] }
+blitz-html = "=0.3.0-beta.2"
+blitz-paint = "=0.3.0-beta.2"
+blitz-traits = "=0.3.0-beta.2"
+anyrender = "=0.13.0"
+anyrender_vello_cpu = "=0.17.0"
 
 # Installers: `cargo packager --release` (cargo-packager) builds the app and
 # wraps it per platform. release.yml passes `--formats` per OS and renames
