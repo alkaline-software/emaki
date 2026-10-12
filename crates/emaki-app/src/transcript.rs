@@ -66,7 +66,18 @@ fn markdown_is_safe(text: &str) -> bool {
     safe
 }
 
+/// Markdown as a conversation draws it: `md_view` with the code among
+/// its words in the smaller cut of the monospace face
+/// (`fonts::inline_mono_family`), so it stands no taller than they do.
+pub(crate) fn chat_md_view(id: String, text: String, cx: &App) -> impl IntoElement {
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), cx)
+}
+
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), cx)
+}
+
+fn md_view_in(id: String, text: String, inline_mono: SharedString, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown as it is, in a code block,
     // rather than taking the window down.
@@ -98,7 +109,7 @@ pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
                 // font's true Bold; inline code in the mono face. These and
                 // the plate are Emaki's additions to the vendored toolkit.
                 strong_font_weight: Some(FontWeight::SEMIBOLD),
-                inline_code_font_family: Some(theme.mono_font_family.clone()),
+                inline_code_font_family: Some(inline_mono),
                 // Inline code as the Claude app draws it, in the accent
                 // config asks for: the readable shade of it for the
                 // letters, a faint wash of it on a rounded plate behind.
@@ -130,7 +141,7 @@ pub(crate) fn explain_card(id: String, text: String, pending: bool, size: Pixels
         .rounded(px(10.))
         .bg(theme.primary.opacity(if theme.mode.is_dark() { 0.10 } else { 0.07 }))
         .when(pending && text.is_empty(), |d| d.child(div().italic().text_size(size - px(1.)).text_color(theme.muted_foreground).child("Explaining…")))
-        .when(!(pending && text.is_empty()), |d| d.child(div().text_size(size).text_color(theme.foreground).line_height(relative(1.6)).child(md_view(id, text, cx))))
+        .when(!(pending && text.is_empty()), |d| d.child(div().text_size(size).text_color(theme.foreground).line_height(relative(1.6)).child(chat_md_view(id, text, cx))))
         .with_animation(ElementId::Name(anim), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-4. * (1. - t))))
 }
 
@@ -163,7 +174,7 @@ fn mono_block(id: String, text: &str, lang: &str, cx: &App) -> impl IntoElement 
     if dropped > 0 {
         md.push_str(&format!("\n\n*… {dropped} more lines*"));
     }
-    md_view(id, md, cx)
+    chat_md_view(id, md, cx)
 }
 
 /// The plan an `ExitPlanMode` call asks to go ahead with, as markdown.
@@ -316,7 +327,7 @@ impl Workbench {
                 let prompt = if rnd.prompt.contains('/') { emaki_core::driver::mark_commands(&rnd.prompt, |name| self.hub.knows_command(session.agent, cwd, name)) } else { rnd.prompt.clone() };
                 // And an "@" that names a file under the folder.
                 let prompt = if prompt.contains('@') { emaki_core::files::mark_mentions(&prompt, cwd) } else { prompt };
-                bubble = bubble.child(md_view(format!("p-{ix}"), prompt, cx));
+                bubble = bubble.child(chat_md_view(format!("p-{ix}"), prompt, cx));
             }
             // The time and the copy button show while the pointer is over
             // the prompt's row, as in the Claude app. Their line is always
@@ -547,7 +558,7 @@ impl Workbench {
     fn render_item(&mut self, ix: usize, jx: usize, item: &Item, open_tools: &HashSet<(usize, usize)>, open_thoughts: &HashSet<(usize, usize)>, open_subagents: &HashSet<(usize, usize)>, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let body_px = self.cfg.app.chat_px();
         match item {
-            Item::Text { md, .. } => div().w_full().text_size(px(body_px)).line_height(relative(1.5)).child(md_view(format!("t-{ix}-{jx}"), md.clone(), cx)).into_any_element(),
+            Item::Text { md, .. } => div().w_full().text_size(px(body_px)).line_height(relative(1.5)).child(chat_md_view(format!("t-{ix}-{jx}"), md.clone(), cx)).into_any_element(),
             Item::Thinking { md, seconds, .. } => self.render_thought(ix, jx, md, *seconds, open_thoughts.contains(&(ix, jx)), cx),
             Item::Notice { text, variant, .. } => self.render_notice(text, *variant, cx),
             Item::Tool(call) => self.render_tool(ix, jx, call, open_tools.contains(&(ix, jx)), open_subagents.contains(&(ix, jx)), &session.cwd, cx),
@@ -853,7 +864,7 @@ impl Workbench {
                     .text_size(px(body_px - 2.))
                     .text_color(theme.muted_foreground)
                     .line_height(relative(1.55))
-                    .child(md_view(format!("tk-{ix}-{jx}"), md.to_string(), cx));
+                    .child(chat_md_view(format!("tk-{ix}-{jx}"), md.to_string(), cx));
                 d.child(self.fold_wrap(fold, 4., body.into_any_element(), cx))
             })
             .into_any_element()
@@ -1135,7 +1146,7 @@ impl Workbench {
                     .child(badge_str("plan".into(), theme.primary.opacity(0.14), theme.primary))
                     .child(div().text_size(px(11.5)).text_color(if pending { theme.primary } else { theme.muted_foreground }).child(state)),
             )
-            .child(div().w_full().text_size(px(self.cfg.app.chat_px())).line_height(relative(1.5)).child(md_view(format!("plan-{ix}-{jx}"), plan.to_string(), cx)))
+            .child(div().w_full().text_size(px(self.cfg.app.chat_px())).line_height(relative(1.5)).child(chat_md_view(format!("plan-{ix}-{jx}"), plan.to_string(), cx)))
             .into_any_element()
     }
 
@@ -1232,7 +1243,7 @@ impl Workbench {
             ToolKind::Task => {
                 if let Some(p) = data.get("prompt").or(data.get("description")).and_then(|v| v.as_str()) {
                     let (snippet, _) = clip(p, 700);
-                    parts = parts.child(div().pl(px(10.)).border_l_2().border_color(theme.border).text_color(theme.muted_foreground).child(md_view(format!("tp-{ix}-{jx}"), snippet, cx)));
+                    parts = parts.child(div().pl(px(10.)).border_l_2().border_color(theme.border).text_color(theme.muted_foreground).child(chat_md_view(format!("tp-{ix}-{jx}"), snippet, cx)));
                 }
                 if !call.subagent.is_empty() {
                     let n = call.subagent.len();
@@ -1292,12 +1303,12 @@ impl Workbench {
         let mut v = v_flex().w_full().gap(px(6.));
         if !sub.prompt.is_empty() {
             let (snippet, _) = clip(&sub.prompt, 1200);
-            v = v.child(div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme.muted).text_size(px(12.)).child(md_view(format!("sp-{ix}-{jx}-{k}"), snippet, cx)));
+            v = v.child(div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme.muted).text_size(px(12.)).child(chat_md_view(format!("sp-{ix}-{jx}-{k}"), snippet, cx)));
         }
         for (m, item) in sub.items.iter().enumerate() {
             match item {
                 Item::Text { md, .. } => {
-                    v = v.child(div().text_size(px(12.5)).line_height(relative(1.55)).child(md_view(format!("st-{ix}-{jx}-{k}-{m}"), md.clone(), cx)));
+                    v = v.child(div().text_size(px(12.5)).line_height(relative(1.55)).child(chat_md_view(format!("st-{ix}-{jx}-{k}-{m}"), md.clone(), cx)));
                 }
                 Item::Tool(c) => {
                     v = v.child(

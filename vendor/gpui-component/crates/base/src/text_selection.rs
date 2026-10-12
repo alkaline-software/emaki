@@ -1019,6 +1019,12 @@ impl WindowSelectionState {
 
     /// Ends the current gesture and keeps its selection visible.
     pub fn end(&mut self, cx: &mut App) {
+        // (Emaki addition.) The press is over however it ends. A click
+        // handler that swallows the mouse-up calls this in its place
+        // (`TextSelection::end`); left prepared, every later press
+        // skipped `prepare_for_mouse_down`, and a selection a view keeps
+        // itself (a double click's word) was never cleared again.
+        self.mouse_down_prepared = false;
         self.pending_extension_anchor = None;
         if !self.is_selecting {
             return;

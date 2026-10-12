@@ -343,12 +343,25 @@ impl Hub {
     }
 
     /// A session the registry calls idle is not working, whatever its
-    /// transcript's tail reads as: see `TurnState::settle_idle`.
+    /// transcript's tail reads as: see `TurnState::settle_idle`. Nor is
+    /// one whose rows are older than the process behind it: a Claude Code
+    /// killed part way through a turn leaves a tail that reads as working,
+    /// and the hidden terminal started on it at the next launch is behind
+    /// the session some seconds before its record says idle.
     fn settle_stopped(&self, refs: &mut [SessionRef]) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let born: HashMap<String, f64> =
+            self.terminals.lock().unwrap().iter().filter(|(_, p)| p.alive()).map(|(sid, p)| (sid.clone(), now - p.age().as_secs_f64())).collect();
         let peers = self.peers.lock().unwrap();
         for r in refs.iter_mut() {
-            if let Some(p) = peers.get(&r.session_id).filter(|p| p.status == "idle" && p.status_at > 0.0) {
-                r.state.settle_idle(p.status_at);
+            let since = match peers.get(&r.session_id) {
+                // A turn of this process's, its rows perhaps not written yet.
+                Some(p) if p.status == "busy" => None,
+                Some(p) => Some(if p.status == "idle" { p.status_at.max(p.started_at) } else { p.started_at }),
+                None => born.get(&r.session_id).copied(),
+            };
+            if let Some(at) = since.filter(|at| *at > 0.0) {
+                r.state.settle_idle(at);
             }
         }
     }

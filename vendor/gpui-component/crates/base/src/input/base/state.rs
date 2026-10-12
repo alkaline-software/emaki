@@ -1308,8 +1308,11 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        // A field of one line is its own first row: to the start of the
+        // text, as Up alone goes there. (Emaki addition.)
         if self.is_single_line() {
-            return;
+            self.undo_manager.break_transaction_coalescing();
+            return self.select_to(0, cx);
         }
         self.undo_manager.break_transaction_coalescing();
         // One display row, in the cursor's column, as Up moves; from the
@@ -1328,8 +1331,10 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        // And its own last row: to the end. (Emaki addition.)
         if self.is_single_line() {
-            return;
+            self.undo_manager.break_transaction_coalescing();
+            return self.select_to(self.text.len(), cx);
         }
         self.undo_manager.break_transaction_coalescing();
         // One display row down, and from the last row to the end of the

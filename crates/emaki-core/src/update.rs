@@ -8,8 +8,9 @@
 //!
 //! - macOS: the disk image is mounted, `Emaki.app` copied out beside the
 //!   running bundle with `ditto` (which keeps the signature and the
-//!   attributes), swapped in with two renames, and opened. The old process
-//!   keeps running from its unlinked files until the window quits.
+//!   attributes), and swapped in with two renames. The old process keeps
+//!   running from its unlinked files until the window quits, and the new
+//!   app is opened once it has: never two at once.
 //! - Windows: the installer is started; it replaces the files itself once
 //!   the running app has quit.
 //! - Linux: an AppImage is replaced in place (`APPIMAGE` names the file the
@@ -178,8 +179,8 @@ pub fn download(version: &str, progress: &dyn Fn(u64, Option<u64>)) -> Result<Pa
 }
 
 /// Put the fetched installer in place and start the new app. On success
-/// the caller quits; the new one is already running (macOS, Linux) or the
-/// installer is up (Windows).
+/// the caller quits: the new one starts once it has (macOS), is already
+/// running (Linux), or the installer is up (Windows).
 pub fn install(installer: &Path) -> Result<(), String> {
     install_into(installer, None)
 }
@@ -248,7 +249,29 @@ fn install_macos(dmg: &Path, bundle: Option<&Path>) -> Result<(), String> {
         return Err(format!("could not put the new app in place: {e}"));
     }
     let _ = std::fs::remove_dir_all(&old);
-    Command::new("open").arg("-n").arg(&bundle).spawn().map(|_| ()).map_err(|e| format!("the new app is in place but did not start: {e}"))
+    open_once_gone(std::process::id(), &bundle).map_err(|e| format!("the new app is in place but did not start: {e}"))
+}
+
+/// Open `bundle` once the process `pid` has ended: a shell of its own
+/// that outlives this one and waits on the pid, not on a length of time.
+/// The new app must not start while the old one runs. Opened beside it
+/// (`open -n`), it was a second Emaki to the Dock, which gave it an icon
+/// of its own at the Dock's end and left the one the person keeps there
+/// without a running app.
+#[cfg(target_os = "macos")]
+fn open_once_gone(pid: u32, bundle: &Path) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    Command::new("/bin/sh")
+        .args(["-c", r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#, "sh"])
+        .arg(pid.to_string())
+        .arg(bundle)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(|_| ())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

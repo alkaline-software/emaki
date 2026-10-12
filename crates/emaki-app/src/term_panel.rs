@@ -272,7 +272,7 @@ impl Workbench {
         window.focus(if to.is_some() { &self.side_term_focus } else { &self.focus_handle }, cx);
     }
 
-    /// ⌘⇧T and ⌘⇧A, the buttons' keys: beside a conversation only.
+    /// ⌘⇧S and ⌘⇧A, the buttons' keys: beside a conversation only.
     pub(crate) fn toggle_term_key(&mut self, agent: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.term_stage() && !(agent && self.term_at_agents()) {
             self.toggle_term(agent, window, cx);
@@ -442,9 +442,9 @@ impl Workbench {
             .rounded(px(9.))
             .bg(track_bg)
             .children(plate)
-            .child(segment("term-shell", "icons/terminal.svg", "Shell (⌘⇧T)".to_string(), false, cx))
+            .child(segment("term-shell", "icons/terminal.svg", "Shell Terminal (⌘⇧S)".to_string(), false, cx))
             // The agent's side wears the agent's own mark.
-            .child(segment("term-agent", crate::workbench::agent_icon_path(agent), format!("{} in a terminal (⌘⇧A)", agent.display_name()), true, cx))
+            .child(segment("term-agent", crate::workbench::agent_icon_path(agent), "Agent Terminal (⌘⇧A)".to_string(), true, cx))
             .into_any_element()
     }
 
@@ -486,7 +486,7 @@ impl Workbench {
                     .cursor_pointer()
                     .text_color(if on { lit } else { theme.muted_foreground })
                     .hover(move |s| s.text_color(lit))
-                    .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Shell in your home folder (⌘⇧T)").build(window, cx))
+                    .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Shell Terminal in your home folder (⌘⇧S)").build(window, cx))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
                     .child(Icon::default().path("icons/terminal.svg").with_size(px(15.))),

@@ -42,7 +42,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ReopenTab, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -93,6 +93,15 @@ pub(crate) enum EditDo {
     SelectAll,
 }
 
+/// Where a session's name is written: in its row of the sidebar, on its
+/// tab, or on the sheet, for a place with neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenameAt {
+    Side,
+    Tab,
+    Sheet,
+}
+
 /// One choice on a right-click menu.
 #[derive(Clone)]
 pub(crate) enum MenuDo {
@@ -101,8 +110,9 @@ pub(crate) enum MenuDo {
     /// Pin the project to the head of the sidebar's list, or let it go
     /// back to where it stands by itself.
     Pin(String),
-    /// Give the session, by its key, a name of the person's own.
-    Rename(String),
+    /// Give the session, by its key, a name of the person's own,
+    /// written where the menu was asked for.
+    Rename(String, RenameAt),
     /// Show the session's transcript in the file manager.
     Reveal(PathBuf),
     /// Something asked of a file or folder in the files panel.
@@ -146,7 +156,7 @@ impl MenuDo {
     fn icon(&self, label: &str) -> &'static str {
         use crate::panels::FileDo;
         match self {
-            MenuDo::Rename(_) | MenuDo::File(FileDo::Rename, _) => "icons/pencil-simple.svg",
+            MenuDo::Rename(..) | MenuDo::File(FileDo::Rename, _) => "icons/pencil-simple.svg",
             MenuDo::OpenFolder(_) => "icons/folder-open.svg",
             MenuDo::Pin(_) if label.starts_with("Unpin") => "icons/pinned-off.svg",
             MenuDo::Pin(_) => "icons/pin.svg",
@@ -162,7 +172,8 @@ impl MenuDo {
             MenuDo::File(FileDo::NewFolder, _) => "icons/folder-plus.svg",
             MenuDo::File(FileDo::Trash, _) => "icons/trash.svg",
             MenuDo::File(FileDo::CopyPath | FileDo::CopyRel | FileDo::Copy, _) => "icons/copy.svg",
-            MenuDo::File(FileDo::Paste, _) => "icons/file-plus.svg",
+            MenuDo::File(FileDo::Paste, _) => "icons/clipboard.svg",
+            MenuDo::File(FileDo::Collapse, _) => "icons/copy-minus.svg",
             MenuDo::Copy(_) if label.contains("Session ID") => "icons/hash.svg",
             MenuDo::Copy(_) if label.contains("Command") => "icons/terminal.svg",
             MenuDo::Copy(_) if label.contains("Branch") => "icons/git-branch.svg",
@@ -172,8 +183,12 @@ impl MenuDo {
             MenuDo::CloseTab(_) => "icons/close.svg",
             MenuDo::CloseOthers(_) => "icons/circle-x.svg",
             MenuDo::Term(what) => what.icon(),
-            // A menu over text is words only, as the system's is.
-            MenuDo::Pdf(_) | MenuDo::Edit(..) | MenuDo::Fix(..) | MenuDo::Learn(_) | MenuDo::Ignore(..) | MenuDo::Note(_) | MenuDo::Rule => "",
+            MenuDo::Pdf(crate::panels::PdfDo::Copy) | MenuDo::Edit(EditDo::Copy, _) => "icons/copy.svg",
+            MenuDo::Pdf(crate::panels::PdfDo::SelectAll) | MenuDo::Edit(EditDo::SelectAll, _) => "icons/select-all.svg",
+            MenuDo::Edit(EditDo::Cut, _) => "icons/scissors.svg",
+            MenuDo::Edit(EditDo::Paste, _) => "icons/clipboard.svg",
+            // A spelling's corrections are words only, as the system's are.
+            MenuDo::Fix(..) | MenuDo::Learn(_) | MenuDo::Ignore(..) | MenuDo::Note(_) | MenuDo::Rule => "",
         }
     }
 
@@ -432,7 +447,7 @@ const GLIDE_TIME: Duration = Duration::from_millis(360);
 /// The frame's width: the window's own ground, the sidebar's, showing
 /// around the content's card at its top, right and foot, and at its left
 /// when the sidebar is away.
-pub const FRAME: Pixels = px(3.);
+pub const FRAME: Pixels = px(4.);
 /// The card's strip at its two ends: what its tracks of buttons, 30
 /// high in a strip of 45, have over and under them, so a track is as far
 /// from the card's side as from its top.
@@ -442,13 +457,13 @@ const STRIP_PAD: Pixels = px(7.5);
 /// corner as along an edge. A Mac's window turns its corner at about 16
 /// points (measured off a picture of one; the system sets it and an app
 /// cannot). Windows' is 8, and a Linux window's is its desktop's.
-const CARD_R: Pixels = px(if cfg!(target_os = "macos") { 13. } else { 5. });
+const CARD_R: Pixels = px(if cfg!(target_os = "macos") { 12. } else { 4. });
 /// Room for the traffic lights on a transparent title bar.
 pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("updates", "Updates", "icons/redo-2.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("updates", "Updates", "icons/redo-2.svg"), ("about", "About", "icons/info.svg")];
 /// The panel's size: wide enough for a rail beside the rows, and a fixed
 /// height so it reads as a sheet, not a second window (capped by the
 /// window when that is smaller).
@@ -1007,6 +1022,13 @@ pub struct Workbench {
     menu_serial: u32,
     /// The session being renamed, by its key, and the field for its name.
     renaming: Option<String>,
+    /// Where the name being given is written, and whether a row or a
+    /// tab drew its field at this draw: with neither, the sheet does.
+    /// The tabs closed, the last one last: ⌘⇧T takes them back off
+    /// the end, one a press.
+    closed_tabs: Vec<String>,
+    rename_at: RenameAt,
+    rename_drawn: std::cell::Cell<bool>,
     pub(crate) rename_input: Entity<InputState>,
     /// The name field in Settings.
     name_input: Entity<InputState>,
@@ -1285,6 +1307,8 @@ pub struct Workbench {
     side_scroll: ScrollHandle,
     sessions_scroll: ScrollHandle,
     home_scroll: ScrollHandle,
+    /// The handscroll over the greeting, as it answers the pointer.
+    home_fig: Rc<std::cell::RefCell<HomeFig>>,
     /// The settings body's scroll position, for its scrollbar.
     settings_scroll: ScrollHandle,
     pub(crate) sidebar_peek: bool,
@@ -1575,7 +1599,15 @@ pub struct Workbench {
     /// In a table: the cell chosen and whether it is being written in,
     /// and the field it is written in.
     pub(crate) table_at: Option<crate::panels::TableAt>,
+    /// A press on a table's cell is held: moving over other cells takes
+    /// the choice to them.
+    pub(crate) table_drag: bool,
     pub(crate) table_input: Entity<InputState>,
+    /// The field in the files tree a file or folder is named in.
+    pub(crate) tree_input: Entity<InputState>,
+    /// A probe's step for that field, done at the next draw, where
+    /// there is a window: what to ask, of which path, and words to type.
+    pub(crate) pending_tree_do: Option<(crate::panels::FileDo, PathBuf, Option<String>)>,
     /// Which sheet of a workbook shows, by its file.
     pub(crate) sheet_at: Option<(PathBuf, usize)>,
     /// In a PDF: the glyphs selected, from and to; where a drag began;
@@ -2341,7 +2373,7 @@ impl Workbench {
                 this.sidebar_peek = false;
                 cx.notify();
             }))
-            .child(div().absolute().left(self.sidebar_w * (slid - 1.)).top_0().h_full().w(self.sidebar_w).shadow_lg().child(self.render_sidebar(cx)))
+            .child(div().occlude().absolute().left(self.sidebar_w * (slid - 1.)).top_0().h_full().w(self.sidebar_w).shadow_lg().child(self.render_sidebar(cx)))
     }
 
     /// How far something is shown, from 0 to 1, by its coming or going
@@ -2672,10 +2704,12 @@ impl Workbench {
         }));
 
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("A name for this session"));
-        cx.subscribe_in(&rename_input, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { .. } = ev {
-                this.commit_rename(window, cx);
-            }
+        cx.subscribe_in(&rename_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => this.commit_rename(true, window, cx),
+            // A name written in a row or on a tab is kept when the
+            // field is left, as a file's is in the tree.
+            InputEvent::Blur if this.renaming.is_some() && this.rename_at != RenameAt::Sheet => this.commit_rename(false, window, cx),
+            _ => {}
         })
         .detach();
         let branch_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find or create a branch…"));
@@ -2759,6 +2793,16 @@ impl Workbench {
             }
         })
         .detach();
+        // A name in the files tree: ↩ makes it, and so does leaving the
+        // field. Each letter draws the row again, for its icon.
+        let tree_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe_in(&tree_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => this.commit_file_prompt(true, window, cx),
+            InputEvent::Blur => this.file_prompt_blur(window, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        })
+        .detach();
         let pdf_find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this file"));
         cx.subscribe_in(&pdf_find_input, window, |this, _, ev: &InputEvent, _window, cx| match ev {
             InputEvent::Change => this.pdf_find(cx),
@@ -2820,7 +2864,16 @@ impl Workbench {
                         "rename" => {
                             let _ = this.update(cx, |w, cx| {
                                 if let Some(key) = w.selected.clone() {
-                                    w.menu_pick(MenuDo::Rename(key), window, cx);
+                                    w.menu_pick(MenuDo::Rename(key, RenameAt::Sheet), window, cx);
+                                }
+                            });
+                        }
+                        // The same in the session's row of the sidebar,
+                        // or on its tab.
+                        "rename:side" | "rename:tab" => {
+                            let _ = this.update(cx, |w, cx| {
+                                if let Some(session) = w.selected.clone() {
+                                    w.menu_pick(MenuDo::Rename(session, if key == "rename:side" { RenameAt::Side } else { RenameAt::Tab }), window, cx);
                                 }
                             });
                         }
@@ -2975,6 +3028,9 @@ impl Workbench {
             term_demo: false,
             menu_serial: 0,
             renaming: None,
+            closed_tabs: Vec::new(),
+            rename_at: RenameAt::Sheet,
+            rename_drawn: Default::default(),
             rename_input,
             name_input,
             // A name still in our record is one its transcript does not
@@ -3103,6 +3159,7 @@ impl Workbench {
             side_scroll: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
             home_scroll: ScrollHandle::new(),
+            home_fig: Default::default(),
             sidebar_peek: false,
             sidebar_w: ui.sidebar_w.map(px).unwrap_or(SIDEBAR_W).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             files_on: ui.files_on.unwrap_or(false),
@@ -3210,8 +3267,11 @@ impl Workbench {
             pdf_find_open: false,
             pdf_find_input,
             table_at: None,
+            table_drag: false,
             sheet_at: None,
             table_input,
+            tree_input,
+            pending_tree_do: None,
             pdf_hits: Vec::new(),
             pdf_hit: 0,
             content_wheel_at: None,
@@ -3604,7 +3664,8 @@ impl Workbench {
             UpdateEvent::Downloading { done, total } => self.update.progress = Some((done, total)),
             UpdateEvent::Installing => self.update.progress = None,
             UpdateEvent::Relaunch => {
-                // The new app is already running; this one leaves.
+                // The new app is in place and starts once this one has
+                // left (on a Mac; elsewhere it is already up).
                 self.save_ui(true);
                 cx.quit();
             }
@@ -4195,15 +4256,28 @@ impl Workbench {
             // is renamed in, and a name given without the field.
             Some("menu") => {
                 if let Some(r) = self.selected_ref().cloned() {
-                    self.open_menu(point(px(150.), px(330.)), self.session_menu(&key_of(&r)), cx);
+                    self.open_menu(point(px(150.), px(330.)), self.session_menu(&key_of(&r), RenameAt::Sheet), cx);
                 }
             }
             // The terminal panel: `term` brings it, `term:agent` and
             // `term:shell` choose what it shows, `termtype:<words>` types
             // them there with Return.
             Some(t) if t == "term" || t.starts_with("term:") || t.starts_with("termtype:") => self.term_panel_probe(t, cx),
-            Some("renaming") => {
+            // The handscroll on the home page, wound as the pointer at
+            // that place across and down it (-1 to 1) would wind it.
+            Some(t) if t.starts_with("homewind:") => {
+                if let Some((across, down)) = t["homewind:".len()..].split_once(',').and_then(|(a, d)| Some((a.parse().ok()?, d.parse().ok()?))) {
+                    self.home_fig.borrow_mut().to = (across, down);
+                    cx.notify();
+                }
+            }
+            Some(t) if t == "renaming" || t.starts_with("renaming:") => {
                 self.renaming = self.selected.clone();
+                self.rename_at = match t {
+                    "renaming:side" => RenameAt::Side,
+                    "renaming:tab" => RenameAt::Tab,
+                    _ => RenameAt::Sheet,
+                };
                 cx.notify();
             }
             Some(t) if t.starts_with("name:") => {
@@ -4418,6 +4492,11 @@ impl Workbench {
             self.begun.retain(|d| d.session_id != id);
             self.refs.retain(|r| r.session_id != id);
             self.stashed.remove(key);
+        } else {
+            // It can be had back (`reopen_tab`), once: closed again it
+            // is the last closed again.
+            self.closed_tabs.retain(|closed| closed != key);
+            self.closed_tabs.push(key.to_string());
         }
         if self.selected.as_deref() == Some(key) {
             self.selected = None;
@@ -4431,6 +4510,18 @@ impl Workbench {
         }
         self.save_ui(true);
         cx.notify();
+    }
+
+    /// ⌘⇧T: the tab closed last is open again and showing, and at each
+    /// further press the one closed before it. One whose session is gone
+    /// since, or that has a tab again, is passed over.
+    fn reopen_tab(&mut self, cx: &mut Context<Self>) {
+        while let Some(key) = self.closed_tabs.pop() {
+            if !self.tabs.contains(&key) && self.refs.iter().any(|r| key_of(r) == key) {
+                self.open_session(&key, cx);
+                return;
+            }
+        }
     }
 
     /// Write the window's state to `state/ui.json`. `now` forces it; otherwise
@@ -5187,6 +5278,7 @@ impl Workbench {
             "terminal" => ("Terminal", "settings-terminal"),
             "files" => ("Files", "settings-files"),
             "updates" => ("Updates", "settings-updates"),
+            "about" => ("About", "settings-about"),
             _ => ("Appearance", "settings-appearance"),
         };
         let rows: Vec<AnyElement> = match section {
@@ -5283,6 +5375,54 @@ impl Workbench {
                     .child(".")
                     .into_any_element(),
             ],
+            // Who makes Emaki: the app, and a sentence naming the studio
+            // and its two owners, each name a link to where they are found.
+            "about" => {
+                let link = |id: &'static str, name: &'static str, url: &'static str| {
+                    div()
+                        .id(id)
+                        .cursor_pointer()
+                        .text_color(theme.foreground)
+                        .text_decoration_1()
+                        .text_decoration_color(theme.foreground.opacity(0.35))
+                        .hover(move |s| s.text_color(link_hover).text_decoration_color(link_hover))
+                        .on_click(move |_, _, cx| cx.open_url(url))
+                        .child(name)
+                };
+                let prose = || h_flex().flex_wrap().justify_center().text_size(px(13.5)).line_height(px(22.)).text_color(theme.muted_foreground);
+                vec![
+                    // A title card, set in the middle as a film's first
+                    // one is: who presents, the app as the sidebar
+                    // names it, and under a short rule, who they are.
+                    v_flex()
+                        .w_full()
+                        .items_center()
+                        .pt(px(36.))
+                        .pb(px(20.))
+                        .child(prose().child(link("about-studio", "Alkaline Software", "https://github.com/alkaline-software")).child(" presents"))
+                        // The icon and the name are each a link to the
+                        // app's own page: two things to press, and the
+                        // room between them is not one.
+                        .child(div().id("about-icon").mt(px(22.)).cursor_pointer().hover(|s| s.opacity(0.82)).on_click(|_, _, cx| cx.open_url("https://emaki.lol")).child(img("icon/app.png").size(px(84.)).flex_shrink_0()))
+                        .child(
+                            div()
+                                .id("about-name")
+                                .mt(px(8.))
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.82))
+                                .on_click(|_, _, cx| cx.open_url("https://emaki.lol"))
+                                .text_size(px(40.))
+                                .line_height(px(46.))
+                                .text_color(theme.primary)
+                                .when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f))
+                                .child("Emaki"),
+                        )
+                        .child(div().mt(px(2.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(format!("Version {current}")))
+                        .child(div().my(px(24.)).w(px(44.)).h(px(1.)).flex_shrink_0().bg(theme.foreground.opacity(0.18)))
+                        .child(prose().child("A studio by ").child(link("about-jp", "Dr. John Paul Helveston", "https://www.jhelvy.com")).child(" and ").child(link("about-pingfan", "Dr. Pingfan Hu", "https://pingfan.org")).child("."))
+                        .into_any_element(),
+                ]
+            }
             "updates" => vec![
                 h_flex()
                     .items_start()
@@ -5365,6 +5505,10 @@ impl Workbench {
 
         // The scrim is a flex box, so the panel sits in the middle of the
         // window both ways (an absolute panel with auto margins did not).
+        // The panel occludes, as every sheet on a scrim that closes at a
+        // click does: the scrim's bounds take the panel in, so a press in
+        // the panel let go outside it, or the other way, was a click on
+        // the scrim and closed it.
         div()
             .id("settings-overlay")
             .absolute()
@@ -5381,6 +5525,7 @@ impl Workbench {
             .child(
                 v_flex()
                     .id("settings-panel")
+                    .occlude()
                     .on_click(|_, window, cx| swallow_click(window, cx))
                     .w(SETTINGS_W)
                     .h(SETTINGS_H)
@@ -7919,7 +8064,9 @@ impl Workbench {
             self.branch_new_close(window, cx);
         } else if self.branch_menu.is_some() {
             self.close_branch_menu(window, cx);
-        } else if self.renaming.is_some() || self.file_prompt.is_some() {
+        } else if self.file_prompt.is_some() {
+            self.close_file_prompt(window, cx);
+        } else if self.renaming.is_some() {
             self.close_rename(window, cx);
         } else if self.settings_open {
             self.settings_open = false;
@@ -7934,8 +8081,7 @@ impl Workbench {
         } else if self.pdf_sel.is_some() {
             self.pdf_sel = None;
             cx.notify();
-        } else if self.file_view.is_some() {
-            self.close_file_view(cx);
+        } else if self.file_unselect(window, cx) {
         } else if self.search_open {
             self.close_search(window, cx);
         } else if self.find_open {
@@ -9163,7 +9309,6 @@ impl Workbench {
             let more = total - list.len();
             let mut body = v_flex().overflow_hidden();
             let mut body_h = 0.;
-            let mut last_bucket = "";
             self.side_rows_changed(&p, list.iter().map(|r| SideRow { key: key_of(r), title: r.title.clone(), agent: r.agent }).collect(), cx);
             // A row that has just gone, shrinking away where it stood.
             let ghosts = |after: Option<&str>| -> Vec<AnyElement> {
@@ -9190,16 +9335,7 @@ impl Workbench {
                     .collect()
             };
             body = body.children(ghosts(None));
-            for (nth, r) in list.into_iter().enumerate() {
-                let b = bucket(r.mtime);
-                // An older one with a tab stands straight under the
-                // last row, with no heading of its own to come and go.
-                if b != last_bucket && nth < FOLDER_ROWS {
-                    let h = if last_bucket.is_empty() { 18. } else { 24. };
-                    body = body.child(h_flex().h(px(h)).flex_shrink_0().items_end().pl(px(42.)).pb(px(2.)).text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.7)).child(b));
-                    body_h += h;
-                    last_bucket = b;
-                }
+            for r in list {
                 let key = key_of(&r);
                 let active = page == Page::Session && self.selected.as_deref() == Some(key.as_str());
                 let dot = self.live_color(&r, cx);
@@ -9208,6 +9344,7 @@ impl Workbench {
                 let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
                 let menu_key = key.clone();
                 let (born, after) = (self.side_born.borrow().contains_key(&key), key.clone());
+                let naming = self.rename_at == RenameAt::Side && self.renaming.as_deref() == Some(key.as_str());
                 // A session with a tab wears a bar at its row's left,
                 // in the accent for the one showing.
                 let tabbed = self.tabs.contains(&key);
@@ -9238,14 +9375,29 @@ impl Workbench {
                         .cursor_pointer()
                         .when(active, |d| d.bg(theme.sidebar_accent))
                         .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                        .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
+                        // A click opens the session with the caret in
+                        // the composer; a second writes its name here.
+                        .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                            if ev.click_count() >= 2 {
+                                this.menu_pick(MenuDo::Rename(key.clone(), RenameAt::Side), window, cx);
+                            } else {
+                                this.open_and_focus(&key, window, cx)
+                            }
+                        }))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key), cx)),
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key, RenameAt::Side), cx)),
                         )
                         .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
-                        .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).when(self.unnamed(&r), |d| d.italic()).child(r.title.clone()))
-                        .children(self.rename_mark(&r, "side", cx))
+                        .map(|d| {
+                            if naming {
+                                // The name is written here, in the row.
+                                self.rename_drawn.set(true);
+                                d.child(self.name_field("side-name", &self.rename_input, 13., "Session name", |this, window, cx| this.close_rename(window, cx), cx).on_click(|_, window, cx| swallow_click(window, cx)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+                            } else {
+                                d.child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).when(self.unnamed(&r), |d| d.italic()).child(r.title.clone())).children(self.rename_mark(&r, "side", cx))
+                            }
+                        })
                         .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
                         .when(r.archived && dot.is_none(), |d| d.child(Icon::new(IconName::HardDrive).with_size(px(12.)).text_color(theme.muted_foreground.opacity(0.7))));
                 // One that has just come grows in from nothing.
@@ -9401,7 +9553,16 @@ impl Workbench {
                 .vertical_scrollbar(&self.side_scroll),
         );
 
-        v_flex().w(self.sidebar_w).h_full().flex_shrink_0().bg(theme.sidebar).text_color(theme.sidebar_foreground).child(header).child(top).child(folders_card).child(footer)
+        v_flex()
+            .w(self.sidebar_w)
+            .h_full()
+            .flex_shrink_0()
+            .bg(theme.sidebar)
+            .text_color(theme.sidebar_foreground)
+            .child(header)
+            .child(top)
+            .child(folders_card)
+            .child(footer)
     }
 
     /// Whether a folder in the sidebar shows its sessions: the person's
@@ -9589,12 +9750,12 @@ impl Workbench {
     /// What a session offers at a right click, the same in the sidebar,
     /// on the sessions page and on its tab: its name, what can be copied
     /// of it, where it is on disk, and its tab when it has one.
-    pub(crate) fn session_menu(&self, key: &str) -> Vec<(&'static str, MenuDo)> {
+    pub(crate) fn session_menu(&self, key: &str, at: RenameAt) -> Vec<(&'static str, MenuDo)> {
         let Some(r) = self.refs.iter().find(|r| key_of(r) == key) else { return Vec::new() };
         let resume = emaki_core::terminal::resume_argv(r.agent, &r.session_id).iter().map(|a| emaki_core::terminal::shell_quote(a)).collect::<Vec<_>>().join(" ");
         let resume = if r.cwd.is_empty() { resume } else { format!("cd {} && {resume}", emaki_core::terminal::shell_quote(&r.cwd)) };
         let mut items = vec![
-            ("Rename", MenuDo::Rename(key.to_string())),
+            ("Rename", MenuDo::Rename(key.to_string(), at)),
             ("", MenuDo::Rule),
             ("Copy Session ID", MenuDo::Copy(r.session_id.clone())),
             ("Copy Resume Command", MenuDo::Copy(resume)),
@@ -9665,7 +9826,8 @@ impl Workbench {
             MenuDo::Learn(word) => self.learn_word(word, cx),
             MenuDo::Ignore(rule, words) => self.ignore_writing(rule, words, cx),
             MenuDo::Term(what) => self.term_do(what, window, cx),
-            MenuDo::Rename(key) => {
+            MenuDo::Rename(key, at) => {
+                self.rename_at = at;
                 // A name on its way is the one to change, not the one
                 // it replaces.
                 let now = match self.renames.get(&key) {
@@ -9687,14 +9849,68 @@ impl Workbench {
 
     /// The name in the field becomes the session's (`set_title`); an
     /// empty field changes nothing.
-    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file_prompt.is_some() {
-            return self.commit_file_prompt(window, cx);
-        }
+    ///
+    /// `refocus` is whether the keyboard goes back to where the name
+    /// was asked for: it does after ↩, and not when the field was left
+    /// for somewhere else.
+    fn commit_rename(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.renaming.clone() else { return };
         let name = self.rename_input.read(cx).value().trim().to_string();
         self.set_title(&key, &name, cx);
-        self.close_rename(window, cx);
+        if refocus {
+            self.close_rename(window, cx);
+        } else {
+            self.renaming = None;
+            cx.notify();
+        }
+    }
+
+    /// A name written in place: the toolkit's field in an outline, its
+    /// words standing where the name stood (`ml`: the outline and its
+    /// two points of room, and the eight the toolkit's input pads its
+    /// words by). A session's in its row or on its tab, a file's in the
+    /// tree. Escape is `cancel`; what ↩ and leaving the field do is the
+    /// input's own subscription.
+    pub(crate) fn name_field(&self, id: &'static str, input: &Entity<InputState>, size: f32, label: &'static str, cancel: fn(&mut Self, &mut Window, &mut Context<Self>), cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme().clone();
+        let focus = input.read(cx).focus_handle(cx);
+        div()
+            .id(id)
+            .key_context(FIND_CONTEXT)
+            .on_action(cx.listener(move |this, _: &Escape, window, cx| cancel(this, window, cx)))
+            .track_focus(&focus)
+            .role(Role::TextInput)
+            .aria_label(label)
+            .flex_1()
+            .min_w_0()
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .rounded(px(4.))
+            .bg(theme.background)
+            // The page's ink on the page's ground, wherever it stands:
+            // the sidebar has inks of its own.
+            .text_color(theme.foreground)
+            .font_weight(FontWeight::NORMAL)
+            .border_1()
+            .border_color(theme.primary)
+            .ml(px(-3.))
+            .child(div().ml(px(-6.)).flex_1().min_w_0().child(Input::new(input).with_size(gpui_component::Size::Size(px(size / 0.875))).appearance(false).bordered(false).on_secondary_click(self.input_menu(input, false, cx))))
+    }
+
+    /// F2 renames the session showing, on Windows, wherever the
+    /// keyboard is: on its tab, or in its row for one with no tab. The
+    /// files tree hears the key first and keeps it for the row chosen
+    /// there. A Mac has no key for this: ↩ is the composer's, and the
+    /// caret is in the composer whenever a session is opened.
+    fn rename_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !cfg!(target_os = "windows") || e.keystroke.key != "f2" || e.keystroke.modifiers.modified() || self.renaming.is_some() || self.page != Page::Session {
+            return;
+        }
+        let Some(session) = self.selected.clone() else { return };
+        cx.stop_propagation();
+        let at = if self.tabs.contains(&session) { RenameAt::Tab } else { RenameAt::Side };
+        self.menu_pick(MenuDo::Rename(session, at), window, cx);
     }
 
     /// The person gives the session a name. The session is asked to take
@@ -9863,7 +10079,6 @@ impl Workbench {
 
     pub(crate) fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming = None;
-        self.file_prompt = None;
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -9987,6 +10202,7 @@ impl Workbench {
             .child(
                 v_flex()
                     .id("rename-panel")
+                    .occlude()
                     .key_context(SEARCH_CONTEXT)
                     .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_rename(window, cx)))
                     .on_click(|_, window, cx| swallow_click(window, cx))
@@ -9999,7 +10215,7 @@ impl Workbench {
                     .border_1()
                     .border_color(theme.border)
                     .shadow(float_shadow(&theme))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(self.file_prompt.as_ref().map(|p| p.title()).unwrap_or("Rename session")))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Rename session"))
                     .child(
                         div()
                             .id("rename-field")
@@ -10156,7 +10372,8 @@ impl Workbench {
             let close_bg = theme.border;
             let ghost = title.clone();
             // The same menu the session has in the sidebar.
-            let menu = self.session_menu(&key);
+            let menu = self.session_menu(&key, RenameAt::Tab);
+            let naming = self.rename_at == RenameAt::Tab && self.renaming.as_deref() == Some(key.as_str());
             // A width that is over is drawn as it ended, so that a row
             // drawn afresh does not play it again.
             let fresh = width.from == 0. && width.at.elapsed() < TAB_ANIM;
@@ -10179,20 +10396,45 @@ impl Workbench {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .when(!menu.is_empty(), |d| d.on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, menu.clone(), cx))))
                 .on_drag(DragTab(key.clone()), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone())))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_session(&open_key, cx)))
+                // A click goes to the tab; a second writes its name on it.
+                .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                    if ev.click_count() >= 2 {
+                        this.menu_pick(MenuDo::Rename(open_key.clone(), RenameAt::Tab), window, cx);
+                    } else {
+                        this.open_session(&open_key, cx)
+                    }
+                }))
                 .child(agent_glyph(agent, px(14.), agent_color(agent, &theme), working, format!("tab-glyph-{ix}")))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .font_weight(if active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                        .text_color(if active { theme.foreground } else { theme.muted_foreground })
-                        .when(unnamed, |d| d.italic())
-                        .child(title),
-                )
-                .children(r.as_ref().and_then(|r| self.rename_mark(r, "tab", cx)))
+                .map(|d| {
+                    if naming {
+                        // The name is written here, on the tab. A press
+                        // in the field is the field's: not the start of
+                        // a drag of the tab, nor of the window.
+                        self.rename_drawn.set(true);
+                        d.child(
+                            self.name_field("tab-name", &self.rename_input, 12.5, "Session name", |this, window, cx| this.close_rename(window, cx), cx).on_click(|_, window, cx| swallow_click(window, cx)).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.press_taken = true;
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                        )
+                    } else {
+                        d.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.5))
+                                .font_weight(if active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                                .text_color(if active { theme.foreground } else { theme.muted_foreground })
+                                .when(unnamed, |d| d.italic())
+                                .child(title),
+                        )
+                        .children(r.as_ref().and_then(|r| self.rename_mark(r, "tab", cx)))
+                    }
+                })
                 .child(
                     div()
                         .id(("tab-close", ix))
@@ -10461,7 +10703,7 @@ impl Workbench {
                         .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key), cx)),
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key, RenameAt::Sheet), cx)),
                         )
                         .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working, glyph_id)))
                         .child(
@@ -11447,7 +11689,7 @@ impl Workbench {
         // stay in view however long it is.
         let plan_box = plan.map(|text| {
             let (scroll, _) = self.kept_scroll("dialog-plan".into(), Inner::Held);
-            div().id("dialog-plan").w_full().max_h(PLAN_BOX_H.min(self.view_h * 0.22).max(px(120.))).overflow_y_scroll().track_scroll(&scroll).rounded(px(8.)).border_1().border_color(theme.border).px(px(14.)).py(px(10.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).text_size(px(self.cfg.app.chat_px())).line_height(gpui::relative(1.5)).child(crate::transcript::md_view("dialog-plan-md".into(), text, cx))
+            div().id("dialog-plan").w_full().max_h(PLAN_BOX_H.min(self.view_h * 0.22).max(px(120.))).overflow_y_scroll().track_scroll(&scroll).rounded(px(8.)).border_1().border_color(theme.border).px(px(14.)).py(px(10.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).text_size(px(self.cfg.app.chat_px())).line_height(gpui::relative(1.5)).child(crate::transcript::chat_md_view("dialog-plan-md".into(), text, cx))
         });
         // With previews the terminal's pointer is the choice so far: a
         // digit moves it, and Return takes the one it is on.
@@ -12922,7 +13164,7 @@ impl Workbench {
                             v_flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .child(home_scroll(&theme))
+                                .child(self.home_scroll(&theme, cx))
                                 .child(div().text_size(px(36.)).font_family(display).child(greeting(&self.user_name)))
                         )
                         .children(self.no_agent_note(cx))
@@ -12955,13 +13197,14 @@ impl Workbench {
                 this.lightbox = None;
                 cx.notify();
             }))
-            .child(div().id("lightbox-img").on_click(|_, window, cx| swallow_click(window, cx)).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain)))
+            .child(div().id("lightbox-img").occlude().on_click(|_, window, cx| swallow_click(window, cx)).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain)))
             // The bar under the picture: the whole name or path, in the mono
             // face, selectable and wrapping rather than cut short, with Open
             // and Reveal when there is a file behind it.
             .child(
                 h_flex()
                     .id("lightbox-bar")
+                    .occlude()
                     .on_click(|_, window, cx| swallow_click(window, cx))
                     .gap(px(12.))
                     .items_center()
@@ -13022,6 +13265,7 @@ impl Workbench {
             .child(
                 v_flex()
                     .id("search-panel")
+                    .occlude()
                     .key_context(SEARCH_CONTEXT)
                     .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_search(window, cx)))
                     .on_click(|_, window, cx| swallow_click(window, cx))
@@ -13128,47 +13372,193 @@ fn kind_static(k: &str) -> &'static str {
 /// The four corners of a card, painted in the ground it stands on over
 /// whatever the card holds there: each the square corner less a quarter
 /// circle of `r`. It takes no click and no hover.
+///
+/// One quad's border, wide enough to fill a corner and kept to the
+/// card: a quad's edge is worked out a pixel at a time, where a path's
+/// is four samples a pixel, and the curve stepped.
 fn card_corners(r: Pixels, ground: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |b, _, window, _| {
-            // A circle's quarter as one cubic curve.
-            let k = r * (1. - 0.5523);
-            for (c, sx, sy) in [(b.origin, 1., 1.), (b.top_right(), -1., 1.), (b.bottom_right(), -1., -1.), (b.bottom_left(), 1., -1.)] {
-                let mut p = PathBuilder::fill();
-                p.move_to(c);
-                p.line_to(point(c.x + r * sx, c.y));
-                p.cubic_bezier_to(point(c.x, c.y + r * sy), point(c.x + k * sx, c.y), point(c.x, c.y + k * sy));
-                p.close();
-                if let Ok(path) = p.build() {
-                    window.paint_path(path, ground);
-                }
-            }
+            window.with_content_mask(Some(ContentMask { bounds: b }), |window| {
+                window.paint_quad(gpui::quad(b.dilate(r), r * 2., gpui::transparent_black(), r, ground, BorderStyle::default()));
+            });
         },
     )
     .absolute()
     .inset_0()
 }
 
-/// The drawing over the greeting: a handscroll, an emaki, seen from the
-/// front as the icon is, with a picture on its sheet. Lines only, in the
-/// manner of hairline's figures (github.com/lucasmarkes/hairline, MIT): a
-/// solid is its outline and one dim line inside it, nothing is filled,
-/// there are no words, and one mark, the sun, is bright, in the accent.
-/// Three layers, each one colour, so it follows the appearance and the
-/// accent. `scripts/home-scroll.py` writes the files.
-fn home_scroll(theme: &gpui_component::Theme) -> impl IntoElement {
-    let (w, h) = (px(240.), px(96.));
-    let layer = |path: &'static str, color: Hsla| svg().path(path).absolute().inset_0().size_full().text_color(color);
-    div()
-        .relative()
-        .w(w)
-        .h(h)
-        .flex_shrink_0()
-        .mb(px(14.))
-        .child(layer("icons/home/scroll-dim.svg", theme.foreground.opacity(0.3)))
-        .child(layer("icons/home/scroll-sil.svg", theme.foreground.opacity(0.72)))
-        .child(layer("icons/home/scroll-hi.svg", theme.primary))
+/// Where the handscroll over the greeting is in its answer to the
+/// pointer: how far it is wound to one side and how high its sun
+/// stands, each from -1 to 1 with rest at 0, how fast each is moving,
+/// and where the pointer asks them to be. Both follow on a spring
+/// (`step`), so the scroll runs a little past and settles.
+#[derive(Default)]
+pub(crate) struct HomeFig {
+    wind: f32,
+    wind_v: f32,
+    lift: f32,
+    lift_v: f32,
+    to: (f32, f32),
+    at: Option<Instant>,
+    /// Where the drawing was last laid out, for the pointer's place on it.
+    bounds: Bounds<Pixels>,
+}
+
+impl HomeFig {
+    /// The pointer's place across and down the drawing, or none when it
+    /// has left: the scroll is asked there, or back to rest.
+    fn ask(&mut self, at: Option<Point<Pixels>>) {
+        self.to = match at {
+            Some(at) if self.bounds.size.width > px(0.) => (((at.x - self.bounds.left()) / self.bounds.size.width * 2. - 1.).clamp(-1., 1.), ((at.y - self.bounds.top()) / self.bounds.size.height * 2. - 1.).clamp(-1., 1.)),
+            _ => (0., 0.),
+        };
+    }
+
+    /// A frame's worth of the spring. Whether it is still moving.
+    fn step(&mut self) -> bool {
+        let now = Instant::now();
+        let dt = self.at.map(|at| now.duration_since(at).as_secs_f32()).unwrap_or(0.).min(1. / 30.);
+        self.at = Some(now);
+        // Stiff enough to keep up with the pointer, loose enough to run
+        // a little past where it stops.
+        let (stiff, damp) = (90., 13.);
+        for _ in 0..2 {
+            let h = dt / 2.;
+            self.wind_v += (stiff * (self.to.0 - self.wind) - damp * self.wind_v) * h;
+            self.wind += self.wind_v * h;
+            self.lift_v += (stiff * (self.to.1 - self.lift) - damp * self.lift_v) * h;
+            self.lift += self.lift_v * h;
+        }
+        let still = |at: f32, to: f32, v: f32| (at - to).abs() < 0.002 && v.abs() < 0.01;
+        if still(self.wind, self.to.0, self.wind_v) && still(self.lift, self.to.1, self.lift_v) {
+            (self.wind, self.lift, self.wind_v, self.lift_v) = (self.to.0, self.to.1, 0., 0.);
+            self.at = None;
+            return false;
+        }
+        true
+    }
+}
+
+impl Workbench {
+    /// The drawing over the greeting: a handscroll, an emaki, seen from
+    /// the front as the icon is, with a landscape on its sheet. Lines
+    /// only, in the manner of hairline's figures
+    /// (github.com/lucasmarkes/hairline, MIT): nothing is filled, there
+    /// are no words, what is far is dimmer, and one mark, the sun, is
+    /// bright, in the accent. As its figures do, it answers the pointer,
+    /// and in what a handscroll does: the pointer moved across winds it.
+    ///
+    /// - The landscape is longer than the sheet shows and in four layers
+    ///   by how far off each is (`scripts/home-scroll.py`): they pass at
+    ///   four speeds, the water fastest and the mist hardly at all.
+    /// - The paper that leaves one roll goes onto the other, so one
+    ///   thickens as the other thins, each showing its turns.
+    /// - The sun rises and sinks a little with the pointer.
+    ///
+    /// The scroll's own lines are elements with borders, which can be
+    /// any width at any moment and are drawn exactly; the landscape is
+    /// one picture a layer, only moved. All of it follows on a spring
+    /// (`HomeFig`), a frame asked for while it moves and none at rest.
+    fn home_scroll(&self, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // The drawing's box, a roll's two ends, the sheet's two edges.
+        const W: f32 = 300.;
+        const H: f32 = 110.;
+        const TOP: f32 = 12.;
+        const FOOT: f32 = 98.;
+        const EDGE: f32 = 6.;
+        const KNOB: f32 = 8.;
+        const SW: f32 = 1.5;
+        // The landscape's strip, and how far its nearest layer is wound
+        // to either side.
+        const STRIP: f32 = 640.;
+        const RANGE: f32 = 150.;
+        let (wind, lift, moving) = {
+            let mut fig = self.home_fig.borrow_mut();
+            let moving = fig.step();
+            (fig.wind, fig.lift, moving)
+        };
+        let ink = |strength: f32| theme.foreground.opacity(strength);
+        let edge = ink(0.72);
+        // The pointer to the right winds the paper leftward: onto the
+        // left roll, off the right.
+        let (left_w, right_w) = (22. + 5. * wind, 12. - 5. * wind);
+        let (left_x, right_x) = (4., W - 4. - right_w);
+        let (sheet_x, sheet_w, sheet_y, sheet_h) = (left_x + left_w, right_x - left_x - left_w, TOP + EDGE, FOOT - TOP - 2. * EDGE);
+        let roll = |x: f32, w: f32, r: f32| div().absolute().left(px(x)).top(px(TOP)).w(px(w)).h(px(FOOT - TOP)).rounded(px(r.min(w / 2.))).border(px(SW)).border_color(edge);
+        // An axle's end past its roll: three sides, open where the roll is.
+        let knob = |x: f32, w: f32, up: bool| {
+            let d = div().absolute().left(px(x + w / 2. - 3.)).w(px(6.)).h(px(KNOB)).border_color(edge).border_l(px(SW)).border_r(px(SW));
+            if up { d.top(px(TOP - KNOB + SW)).border_t(px(SW)).rounded_t(px(2.)) } else { d.top(px(FOOT - SW)).border_b(px(SW)).rounded_b(px(2.)) }
+        };
+        // The paper wound on a roll, seen as its turns: a line a turn,
+        // counted in from the sheet, the last one fading as its room goes.
+        let turns = |from: f32, to: f32| {
+            let room = (to - from).abs();
+            let way = (to - from).signum();
+            (0..).map(|n| 6. + 5. * n as f32).take_while(move |at| *at < room - 4.).map(move |at| {
+                div().absolute().left(px(from + way * at - SW / 2.)).top(px(sheet_y + 3.)).w(px(SW)).h(px(sheet_h - 6.)).rounded_full().bg(ink(0.3 * ((room - 4. - at) / 5.).clamp(0., 1.)))
+            })
+        };
+        // A layer of the landscape: the strip, wound past by its depth.
+        let layer = |path: &'static str, depth: f32, strength: f32| svg().path(path).absolute().left(px((W - STRIP) / 2. - wind * RANGE * depth - sheet_x)).top_0().w(px(STRIP)).h(px(sheet_h)).text_color(ink(strength));
+        let sun = div().absolute().left(px(214. - wind * RANGE * 0.08 - sheet_x - 7.)).top(px(17. - lift * 5. - 7.)).size(px(14.)).rounded_full().border(px(SW)).border_color(theme.primary);
+        let fig = self.home_fig.clone();
+        div()
+            .id("home-scroll")
+            .relative()
+            .w(px(W))
+            .h(px(H))
+            .flex_shrink_0()
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                this.home_fig.borrow_mut().ask(Some(e.position));
+                cx.notify();
+            }))
+            .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                if !*over {
+                    this.home_fig.borrow_mut().ask(None);
+                    cx.notify();
+                }
+            }))
+            // Where it is, for the pointer's place on it; and the next
+            // frame, while the spring has not settled.
+            .child(
+                canvas(move |bounds, _, _| fig.borrow_mut().bounds = bounds, move |_, _, window, _| {
+                    if moving {
+                        window.request_animation_frame();
+                    }
+                })
+                .absolute()
+                .inset_0(),
+            )
+            // The sheet's picture, cut to the sheet.
+            .child(
+                div()
+                    .absolute()
+                    .left(px(sheet_x))
+                    .top(px(sheet_y))
+                    .w(px(sheet_w))
+                    .h(px(sheet_h))
+                    .overflow_hidden()
+                    .child(layer("icons/home/scroll-sky.svg", 0.15, 0.22))
+                    .child(sun)
+                    .child(layer("icons/home/scroll-far.svg", 0.35, 0.26))
+                    .child(layer("icons/home/scroll-mid.svg", 0.65, 0.5))
+                    .child(layer("icons/home/scroll-water.svg", 1., 0.3)),
+            )
+            // The sheet's two edges, from roll to roll.
+            .child(div().absolute().left(px(sheet_x)).top(px(sheet_y - SW / 2.)).w(px(sheet_w)).h(px(SW)).bg(edge))
+            .child(div().absolute().left(px(sheet_x)).top(px(sheet_y + sheet_h - SW / 2.)).w(px(sheet_w)).h(px(SW)).bg(edge))
+            .children(turns(sheet_x, left_x))
+            .children(turns(right_x, right_x + right_w))
+            .child(roll(left_x, left_w, 8.))
+            .child(roll(right_x, right_w, 5.))
+            .child(knob(left_x, left_w, true))
+            .child(knob(left_x, left_w, false))
+            .child(knob(right_x, right_w, true))
+            .child(knob(right_x, right_w, false))
+    }
 }
 
 /// The flag a language of the composer's wears in Settings.
@@ -13860,6 +14250,12 @@ impl Render for Workbench {
         if let Some(cwd) = self.pending_new_in.take() {
             self.new_session_in(&cwd, window, cx);
         }
+        if let Some((what, path, typed)) = self.pending_tree_do.take() {
+            self.file_do(what, path, window, cx);
+            if let Some(typed) = typed {
+                self.tree_input.update(cx, |s, cx| s.set_value(typed, window, cx));
+            }
+        }
         if std::mem::take(&mut self.pending_tree_focus) {
             window.focus(&self.tree_focus, cx);
         }
@@ -13877,6 +14273,7 @@ impl Render for Workbench {
         if self.side_term_focus.is_focused(window) && !self.term_panel_shown() {
             window.focus(&self.focus_handle, cx);
         }
+        self.rename_drawn.set(false);
         if std::mem::take(&mut self.pending_panes) {
             eprintln!(
                 "panes: w={} sidebar={} left={} term={} keys={}",
@@ -14013,6 +14410,8 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_panel(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleOutline, _, cx| this.toggle_panel(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleShell, window, cx| this.toggle_term_key(false, window, cx)))
+            .on_action(cx.listener(|this, _: &ReopenTab, _, cx| this.reopen_tab(cx)))
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| this.rename_key(e, window, cx)))
             .on_action(cx.listener(|this, _: &ToggleAgent, window, cx| this.toggle_term_key(true, window, cx)))
             .on_action(cx.listener(|this, _: &Tab1, window, cx| this.go_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &Tab2, window, cx| this.go_tab(2, window, cx)))
@@ -14088,7 +14487,9 @@ impl Render for Workbench {
             .when(self.settings_open, |d| d.child(self.render_settings(cx)))
             .when(self.changes.is_some(), |d| d.child(fade_in("changes-in", self.render_changes(cx))))
             .when_some(self.lightbox.clone(), |d, lb| d.child(fade_in("lightbox-in", self.render_lightbox(lb, cx))))
-            .when(self.renaming.is_some() || self.file_prompt.is_some(), |d| d.child(fade_in("rename-in", self.render_rename(cx))))
+            // The sheet, when the name was asked for where there is no
+            // row and no tab to write it in, or neither is drawn.
+            .when(self.renaming.is_some() && (self.rename_at == RenameAt::Sheet || !self.rename_drawn.get()), |d| d.child(fade_in("rename-in", self.render_rename(cx))))
             .when_some(self.branch_menu, |d, at| d.child(fade_in("branch-menu-in", self.render_branch_menu(at, window, cx))))
             .when(self.branch_new.is_some(), |d| d.child(fade_in("branch-new-in", self.render_branch_new(cx))))
             .when(self.branch_ask.is_some(), |d| d.child(fade_in("branch-ask-in", self.render_branch_ask(cx))))

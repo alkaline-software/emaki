@@ -11,6 +11,16 @@ window remembers.
   toolkit's selection layer begins a text drag on every left mouse-down and
   ends it on the bubble-phase mouse-up; a handler that stops propagation
   eats that mouse-up and every later mouse move extends a selection.
+- A sheet on a scrim that closes at a click occludes (`.occlude()` on
+  the sheet, not only on the scrim). gpui counts a click where the press
+  and the release are both in an element's bounds and the element is
+  under the pointer both times, and a scrim's bounds take its sheet in:
+  a press in the sheet let go outside it, or the other way, closed the
+  sheet, as a selection dragged past a field's end does. Occluding, the
+  sheet keeps the scrim from being under the pointer while the pointer
+  is over the sheet. Settings, rename, search, the comparison, the
+  branch sheets, the sign-in sheet, the lightbox and the floating
+  sidebar all do.
 - A hover style that changes the text's colour is set whatever state the
   element is in, never under a `when`. gpui works the text's colour out
   at layout from a flag it keeps per element, and that flag hears the
@@ -161,9 +171,10 @@ wears the most pressing of its sessions' (needs you, then working, then
 your turn).
 
 A folder lists its `FOLDER_ROWS` newest sessions, and under them any
-older one that has a tab, with no heading of its own: opened from
-further back it is in the list while its tab is, and goes with it,
-growing in and shrinking out as any row does (`side_rows_changed`).
+older one that has a tab: opened from further back it is in the list
+while its tab is, and goes with it, growing in and shrinking out as any
+row does (`side_rows_changed`). The rows have no headings by when
+("Today", "Yesterday"); those are the sessions page's.
 
 A session with a tab wears a short bar at its row's left: in the accent
 for the one showing, grey for the others. The dot at the right is the
@@ -175,7 +186,7 @@ is the sum of its fixed-height rows (`SIDE_ROW_H`, `SIDE_SESSION_H`), which
 drawn until the time is up.
 
 Narrower than `NARROW_W` the sidebar leaves the row and comes back only as
-an overlay over a scrim (the strip button, ⌘⇧S), which any click or Escape
+an overlay over a scrim (the strip button, ⌘B), which any click or Escape
 puts away. Each of these is in motion (Motion, below). `sidebar_open` keeps the preference for when the window is wide
 again.
 
@@ -341,7 +352,9 @@ Laid out like the Claude desktop app.
   corner is the system's and not ours to set.
 - A clip in gpui is a rectangle, so the card is square and its corners are
   painted over in the frame's colour after what it holds (`card_corners`).
-  A panel's ground stood square in a rounded corner otherwise.
+  A panel's ground stood square in a rounded corner otherwise. They are
+  one quad's border kept to the card, not paths: gpui gives a path four
+  samples a pixel, and the curve stepped beside the window's own.
 - Whatever is placed by the window's edges goes by the card's:
   `content_left`, `view_w` (its right edge) and `pane_w`. The card's strip
   is `FRAME` shorter than `TITLEBAR_H` and starts that much lower, so what
@@ -356,12 +369,33 @@ Laid out like the Claude desktop app.
 - The home page is a drawing of a handscroll, an emaki, over a greeting
   in `fonts::display_family` (the chat font, so titles and the
   conversation agree), over the composer. The drawing (`home_scroll`) is the scroll seen from the
-  front, as the icon is, in three line layers a colour each: the ink,
-  the ink dimmed and the accent, so it follows the appearance and the
-  accent with nothing drawn twice. It is in the manner of hairline's
-  figures (github.com/lucasmarkes/hairline): a solid as its outline and
-  one dim line inside, no fill, no words, one bright mark.
-  `scripts/home-scroll.py` writes the three files. Tried and dropped:
+  front, as the icon is, with a landscape on its sheet. It is in the
+  manner of hairline's figures (github.com/lucasmarkes/hairline): lines
+  only, no fill, no words, what is far dimmer, and one bright mark, the
+  sun, in the accent, so it follows the appearance and the accent.
+  - As hairline's figures do, it answers the pointer, in what a
+    handscroll does: the pointer moved across it winds it (`HomeFig`).
+    The landscape is longer than the sheet shows and in four layers by
+    how far off each is (`scripts/home-scroll.py` writes them): mist, a far range, near hills, water. They pass at four
+    speeds. The paper leaving one roll goes onto the other, so one
+    thickens as the other thins, each showing its turns; the sun rises
+    and sinks a little with the pointer. Tried and dropped: a cord
+    hanging from the right axle's foot and swinging with the winding. A
+    handscroll's cord is tied to the stave at its cover's edge, which is
+    wound inside the right roll while it is read, and nothing hangs from
+    an axle.
+  - It follows on a spring, a little past and back, and goes to rest
+    when the pointer leaves. A frame is asked for while it moves and
+    none at rest.
+  - The scroll's own lines (rolls, axles, the sheet's edges, the turns,
+    the sun) are elements with borders: they change width at any moment
+    and are drawn exactly. The landscape is a picture a layer, only
+    moved, inside a box that cuts it to the sheet. Not paths painted a
+    frame at a time: gpui gives a path four samples a pixel
+    (`card_corners`), and lines this thin would step.
+  - `EMAKI_GO=homewind:<across>,<down>` (each -1 to 1) winds it as the
+    pointer there would, for a picture.
+  Tried and dropped:
   hairline's own 2:1 view, which set the picture on the sheet at a
   slant. The app's icon stood beside the greeting until the drawing
   did its work; a dark drawing of the icon for the dark appearance was
@@ -423,6 +457,14 @@ over the composer and sends the person to the agents page
 A key is written as the Mac has it and drawn through `shortcut`
 (`kbd_hint`), which makes ⌘ "Ctrl+" off a Mac. The tooltips that name a
 key still say ⌘ everywhere.
+
+The last section, About, says who makes Emaki: the app's icon, name and
+version under "Alkaline Software presents", as a film's first card has
+it and set in the middle as one is (the studio at its GitHub
+organisation until it has a site; the name in the face and the accent
+the sidebar has it in; it and the icon are each a link to emaki.lol), then under a short rule a sentence naming its
+two owners in full, each name a link. It has nothing to set. Tried and dropped: a row a name with a line
+under it saying what each is, which read as a form.
 
 The three looks in Appearance have an icon each (`choice_icon`).
 
@@ -497,8 +539,9 @@ plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
   something on the clipboard, and Select All (`input_menu`, `EditDo`,
   dispatched to the input's own focus). The toolkit would show the
   system's menu there; the vendored `on_secondary_click` hands the click
-  over instead. A menu over text has no icons, none of its choices, so
-  its words still stand in one column. On a marked word of the composer
+  over instead. Each of the four has its icon, as a PDF's Copy and
+  Select All have; a spelling's corrections are words only, all of
+  them, so they still stand in one column. On a marked word of the composer
   the menu is that word's corrections and nothing else
   (`docs/composer.md`). The input calls the handler from inside its own
   update, so the menu is made a moment later (`window.defer`): reading
@@ -507,11 +550,37 @@ plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
   offers Copy Branch Name. The row stops the press, which would otherwise
   reach the list's sheet and put the list away.
 
-Rename opens a field over a scrim (`render_rename`, `rename_input`), the
-name there selected whole so a key replaces it: ↩ keeps
-the name, Escape or a click outside leaves it, an empty field changes
-nothing. A field opened on a session with a name on its way holds that
-name. Giving the name the transcript already says calls a waiting one off.
+A session's name is written where it was asked for (`RenameAt`,
+`rename_input`), in the field a file's name is written in in the tree
+(`name_field`): in its row of the sidebar from that row's menu, on its
+tab from the tab's. The name there is selected whole so a key replaces
+it. ↩ keeps the name and so does leaving the field, Escape leaves it as
+it was, an empty field changes nothing. A field opened on a session with
+a name on its way holds that name. Giving the name the transcript
+already says calls a waiting one off.
+
+- The two are one name. Both draw the session's title, so what is
+  written in one is what the other says, as soon as it is the title
+  (below: at once for a session that cannot be asked, when Claude Code
+  has taken it for one that can).
+- Where there is no row and no tab to write in (the sessions page, a
+  row in a folder that is closed, a sidebar put away) it is the sheet
+  over a scrim it was at first (`render_rename`): a row or a tab says
+  it drew the field (`rename_drawn`), and with neither the sheet does.
+  There a click outside leaves the name as it was.
+- A second click on the row or on the tab writes the name there, on
+  every system (the click's count, in the row's and the tab's own
+  click). The first has opened the session, as any click does.
+- F2 does the same on Windows, wherever the keyboard is (`rename_key`,
+  heard at the window's root, after the files tree, which keeps the
+  key for its own row): on the tab, or in the row for a session with no
+  tab. A Mac has no key for it. Tried and dropped: ↩ on a Mac with the
+  keyboard on the sidebar. A click on a session puts the caret in the
+  composer, where ↩ is the composer's, so the row had to be clicked a
+  second time to take the keyboard before ↩ meant rename, and a click
+  on the session showing no longer reached the composer.
+- A press in a tab's field says it is taken (`press_taken`) and stops
+  there, or it began a drag of the tab or of the window.
 
 A name is a request, kept in `renames` and in
 `~/.emaki/state/titles.json` by session key until it is settled, so a quit
@@ -729,6 +798,12 @@ while one runs (`tabs_sliding`). One moved again on its way starts from
 where it is. The plate adds its tab's offset, and the pill being moved is
 painted after the row (`deferred`, `pill_top`), so it passes over the pills
 it changes places with and not under them.
+
+⌘⇧T opens the tab closed last again and shows it, and at each further
+press the one closed before it (`closed_tabs`, `reopen_tab`). A session
+begun and closed with nothing sent is not kept, one gone since or open
+again is passed over, and the list is the window's while it runs, not
+`ui.json`'s.
 
 ⌘1 to ⌘9 (Ctrl elsewhere) go to that tab, or to the last one when there are
 fewer (`go_tab`). ⌘ held by itself for `TAB_HINT_HOLD` shows the digits:

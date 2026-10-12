@@ -66,9 +66,16 @@ is Tabler's `x`, `bot.svg` its `robot-face`, `tree-view.svg` its `subtask`), and
 icons the toolkit draws by itself change too. The files are from
 the `@tabler/icons` package (`icons/outline/<name>.svg`; `star-fill` from
 `icons/filled`), MIT, with `TABLER-LICENSE` beside them. Each is written
-on one line without Tabler's empty bounding path.
+on one line without Tabler's empty bounding path. A new file is also
+named in `OWN` in `assets.rs`: one that is not there draws nothing, and
+nothing says so.
 
-Not Tabler: the flags in `icons/flags` and the handscroll in `icons/home`
+`file-plus.svg` is two of Tabler's put together: the sheet of its
+`file-search`, which leaves the lower right corner free, and the plus of
+its `folder-plus`, so New File and New Folder carry the plus in one
+place. Tabler's own `file-plus` has it in the middle of the sheet.
+
+Not Tabler: the flags in `icons/flags` and the handscroll's landscape in `icons/home`
 (`docs/window.md`), drawn here, `bubble-tail.svg`, the tail of a prompt's bubble
 (`docs/conversation.md`), `claude.svg`, Claude's own mark, the other agents' marks in
 `icons/agents/` (`docs/agents.md`; Codex wears OpenAI's everywhere), `mark.svg`, and eleven toolkit icons
@@ -159,6 +166,19 @@ Fonts, where each is a tile drawn in itself:
   composer in the UI face, which is the system's.
 - The files are Google Fonts' static instances (regular, semibold, bold
   and an italic; a medium too for a mono), Maple Mono its own release's.
+- Code among a conversation's words is in a smaller cut of the
+  monospace face (`fonts::inline_cut`, `INLINE_SCALE`,
+  `transcript::chat_md_view`): the same face as a family of its own,
+  "<family> Inline", made at launch from the face's bytes with more
+  units to the em, which is what `size-adjust` does in a style sheet.
+  A monospace face is large on its body, and at the words' size its
+  code stood over them. gpui lays a paragraph out at one size (a
+  `TextRun` has a face and no size), so code among words can be smaller
+  only by being another face. One scale serves the three sizes, since
+  the cut is drawn at the words' own. Monaco's cut is made from the
+  system's file and not carried. Only the conversation uses it: a file
+  shown, a code block, the editor and the terminal keep the face as it
+  is.
 - Anthropic Serif, Sans and Mono were the faces until v0.2.1, loaded
   from a Claude app on the machine and from `~/.emaki/fonts`. They are
   Anthropic's own and were taken out whole, the script that fetched the
