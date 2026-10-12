@@ -70,6 +70,8 @@ upstream revision finds them.
    press took a whole paragraph. `move_vertical` is split so the step it
    computes (`vertical_offset`) serves both; `column_for_selecting` fixes
    the column when a selection starts.
+   In a field of one line ⇧↑ selects to the start of the text and ⇧↓ to
+   its end, as Up and Down alone go there (4); upstream does nothing.
 9. `crates/base/src/input/base/element.rs`, `state.rs`: the view follows
    the cursor as far as it went. `layout_cursor` stepped the scroll one
    line per change of selection, which keeps up with typing and leaves
@@ -196,6 +198,17 @@ upstream revision finds them.
    under a point selected as a double click selects it, for a right
    click in the file's editor to offer Copy for the word under it, as a
    conversation's does.
+26. `crates/base/src/text_selection.rs`: `WindowSelectionState::end`
+   ends the press too (`mouse_down_prepared`). A click handler that
+   swallows the mouse-up calls `TextSelection::end` in its place, and
+   the press stayed "prepared": every later press skipped the clearing,
+   and a word selected by a double click in such a pane stayed selected.
+   The test is in `crates/ui/src/text/window_selection.rs`
+   (`click_clears_double_click_selection_where_clicks_are_swallowed`).
+   The crates' tests are run from this folder with the app's
+   `Cargo.lock` copied beside its `Cargo.toml`, for the pinned gpui,
+   and a `themes/aurora.json` holding `{}`, which a test reads and the
+   copy does not have; neither is kept.
 
 ## Updating
 

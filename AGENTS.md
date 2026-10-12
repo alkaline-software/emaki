@@ -197,7 +197,7 @@ scripts/release-publish.sh after CI: the notarized Mac images onto the draft rel
 scripts/statusline.sh      Claude Code's status line, ours: prints the line, leaves the rate limits
 scripts/relaunch.sh        quit the running Emaki and start the new build, once the agent's turn is over
 scripts/dev-app.sh         start the build in target/debug as an app: on a Mac a bundle opened through the system, never a bare executable
-scripts/home-scroll.py     the handscroll over the greeting, as three line drawings a colour each
+scripts/home-scroll.py     the landscape on the handscroll over the greeting, as line drawings a depth each
 docs/                      how each part works and its traps; the index below says which to read
 WORKFLOW.md                how to cut a release, step by step
 CHANGELOG.md               one section per release; the release job reads it

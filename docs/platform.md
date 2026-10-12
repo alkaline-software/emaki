@@ -181,9 +181,13 @@ an SVG rasterised by Cocoa from one master.
   rate limit. The installer is `releases/download/v<version>/<asset>` under
   the stable names WORKFLOW.md fixes, fetched with `ureq` on rustls.
 - macOS: the disk image is mounted, `Emaki.app` copied beside the running
-  bundle with `ditto` (signature and attributes kept), swapped in with two
-  renames and opened with `open -n`; the old process quits. A bare
-  `target/debug/Emaki` refuses, having no bundle to replace.
+  bundle with `ditto` (signature and attributes kept) and swapped in with
+  two renames. The old process quits, and a shell of its own waiting on
+  that pid opens the new app once it is gone (`open_once_gone`). Opened
+  beside the old one with `open -n`, the new app was a second Emaki to
+  the Dock: an icon of its own at the Dock's end, and the one the person
+  keeps there left without a running app. A bare `target/debug/Emaki`
+  refuses, having no bundle to replace.
 - Windows starts the installer and quits. Linux replaces the running
   AppImage (`APPIMAGE`) and restarts it.
 - `Hub::check_updates` and `install_update` run on threads and report as

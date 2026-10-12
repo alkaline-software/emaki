@@ -360,6 +360,10 @@ mod tests {
         /// space (the proxy-anchored endpoint path).
         mid_gap: gpui::Pixels,
         first_style: crate::text::TextViewStyle,
+        /// (Emaki addition.) The view takes every click for itself, as a
+        /// pane of an app's does: it ends the selection and stops the
+        /// mouse-up there.
+        swallows_clicks: bool,
     }
 
     impl ChatTestView {
@@ -372,6 +376,7 @@ mod tests {
                 top_offset: px(10.),
                 mid_gap: px(0.),
                 first_style: crate::text::TextViewStyle::default(),
+                swallows_clicks: false,
             }
         }
     }
@@ -384,10 +389,21 @@ mod tests {
             // guard for `drag_from_blank_space_selects_views_below`), which the
             // `suppress_text_selection` mechanism guarantees because blank-space
             // presses never set that flag.
+            use gpui::StatefulInteractiveElement as _;
             div()
+                .id("chat")
                 .track_focus(&self.focus_handle)
                 .size_full()
                 .pt(self.top_offset)
+                .on_click({
+                    let swallows = self.swallows_clicks;
+                    move |_, window, cx| {
+                        if swallows {
+                            gpui_base::TextSelection::end(window, cx);
+                            cx.stop_propagation();
+                        }
+                    }
+                })
                 .child(
                     div().h(px(40.)).child(
                         TextView::new(&self.first)
@@ -1656,6 +1672,50 @@ mod tests {
         let text = window_selected_text(cx);
         assert_eq!(text.trim(), "Hello", "expected word selection: {text:?}");
         assert!(!text.contains("Second message"), "got: {text:?}");
+    }
+
+    /// (Emaki addition.) A click handler that swallows the mouse-up ends
+    /// the selection by hand (`TextSelection::end`). That must end the
+    /// press too: left "prepared", every later press skipped the clearing
+    /// and a word selected by a double click stayed selected for good.
+    #[gpui::test]
+    fn click_clears_double_click_selection_where_clicks_are_swallowed(cx: &mut TestAppContext) {
+        let (chat, cx) = setup(true, cx);
+        chat.update(cx, |chat, cx| {
+            chat.swallows_clicks = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let position = point(px(10.), px(15.));
+        cx.simulate_click(position, Modifiers::default());
+        for count in [1, 2] {
+            cx.simulate_event(MouseDownEvent {
+                position,
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count: count,
+                first_mouse: false,
+            });
+            cx.simulate_event(MouseUpEvent {
+                position,
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count: count,
+            });
+        }
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(window_selected_text(cx).trim(), "Hello");
+
+        cx.simulate_click(point(px(300.), px(100.)), Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(window_selected_text(cx), "");
     }
 
     #[gpui::test]

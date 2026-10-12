@@ -167,6 +167,28 @@ absolute path, so two sessions of one folder share it. The root and every
 open folder are read again every `TREE_SECS` while the panel shows, which
 is how a file the agent writes appears. Rows follow VS Code's explorer.
 
+**The head row.** The session's folder is the tree's first row, over the
+scroller so it stays in view, open to begin with, and a click closes
+or opens it (`Tree::shut`, by folder, not kept between launches); what
+is in it stands one step in. Something new made in a closed tree, or
+pasted into it, opens it. At its right are New File, New Folder
+and Collapse All Folders (`tree_new`, `tree_collapse`). The two new ones
+go in the folder chosen, the folder the chosen file is in, or the
+session's folder with nothing chosen. A click on the head row also
+lets go of what was chosen, and its right click is the empty room's
+menu. Collapse All Folders closes the folders under it and leaves it
+open.
+
+**Motion.** A row that comes or goes does so over `TREE_ANIM`
+(`Tree::seen_now`, as the sidebar's `side_rows_changed`): the rows about
+to be drawn are set against the rows last drawn, by path. One that was
+not there grows in; one that is no longer is drawn a moment more where
+it stood, shrinking (`TreeGhost`). That one rule is a folder opened or
+closed, the head row closed, Collapse All, a file made, renamed, put in
+the trash or written by the agent, and the row a name is typed in. A
+folder drawn for the first time plays nothing, and the name's row gives
+its place to what it named with neither moving.
+
 **Choosing rows.** One row is the file showing (`Tree::picked`), or
 the one last right-clicked, which is lit while its menu is up and after.
 Several are chosen together (`Tree::marked`) by ⌘A, which takes every
@@ -380,8 +402,12 @@ far from the tree.
   followed.
 - The pane widens in and narrows out as the panels at its sides do
   (`file_anim`, `file_gone`), and another file takes the place of the
-  one showing and fades in (`file_serial`). Its button and Escape close
-  it.
+  one showing and fades in (`file_serial`). Its button and ⌘W close it.
+  Escape does not: it closed the pane at first, and a press meant for
+  something else put the file away. With the keyboard in the pane it
+  lets go of what is selected there, as an editor's does
+  (`file_unselect`): the editor's selection, words selected in a file
+  as it reads, a block of a table's cells.
 - It is the first to give room up: narrower before the terminal and the
   tree are (`file_pane_w`, and `file_pane_least` in their own widths),
   and in a window with no room for its least it is not drawn
@@ -406,17 +432,37 @@ far from the tree.
   program. What is missed is in `office.rs`: a style's own formatting, a
   cell's display format (0.5 for 50%), notes, pictures.
 - The grid (`render_table`) has columns named by letter and rows by
-  number, both staying in view: they are laid over the cells and moved
-  against the scroll (`file_view_scroll.offset()`), the pane drawn again
-  at every wheel. Every other row is a shade darker and the chosen cell
-  is outlined (`table_at`). A click chooses a cell, the arrows and Tab
-  move, ⌘C copies it.
+  number, both staying in view (`render_table_heads`). The heads are
+  not in the scroller: the letters are a strip over it and the numbers
+  a strip at its left, each cutting what it holds, and what it holds is
+  moved along the strip by the scroll the cells have that way
+  (`file_view_scroll.offset()`, the pane drawn again at every wheel).
+  So the letters cannot move up or down and the numbers cannot move
+  sideways. Tried and dropped: both laid over the cells inside the
+  scroller and moved against both scrolls, where they shook and stood
+  off their place.
+- Every other row is a shade darker. One cell is chosen and outlined
+  (`table_at`); with `TableAt::to` the block from it to another is
+  chosen and washed, and its rows' and columns' heads are lit
+  (`table_range`). A press chooses a cell; a drag over the cells
+  (`table_drag`, ended at a release anywhere), a ⇧ press or ⇧ and an
+  arrow takes the choice to another (`table_extend`, `table_step`).
+  The arrows and Tab move. ⌘C copies what is chosen, a tab between
+  cells and a line a row (`table_range_text`), and Delete empties it
+  (`table_clear`, a step of undo a cell).
 - A cell of a table the pane holds whole is written in the grid: a
-  second click, ↩ or a letter opens a field in the cell's place
+  second press, ↩ or a letter opens a field in the cell's place
   (`table_edit`, `table_input`), ↩ keeps it and goes down a row, Escape
-  leaves it, Delete empties the cell. The field is the toolkit's input
-  at a size of its own, so its words stand where the cell's did, and its
-  outline is laid over it, not set around it as a border.
+  leaves it. A letter takes the place of what the cell held; a second
+  press keeps it and puts the caret where the press was
+  (`table_caret`, the words measured as the field sets them). The
+  field is the toolkit's input at a size of its own, so its words stand
+  where the cell's did, and its outline is laid over it, not set around
+  it as a border.
+  - The second press says the press is taken (`prevent_default`). The
+    pane takes the keyboard at every press in it that nobody claims,
+    and took it from the field as it opened: the field was up and a
+    third press was needed to write in it.
   - What is written goes into the file's text in that cell's place and
     nowhere else (`table_write`, `files::cell_at`, `cell_written`): the
     rest of the file keeps its quotes and its line ends. Do not write
@@ -446,7 +492,7 @@ far from the tree.
   and find (⌘F). The editor is made again when the file, or
   what it holds, is another, and scrolls by itself, so the pane's own
   scroller is not drawn around it. Its right click is Copy and Select
-  All and no more (the vendored `on_secondary_click`): what is asked of
+  All and no more, each with its icon (the vendored `on_secondary_click`): what is asked of
   the file is on its row's menu in the tree, and stood here too until
   it was one list said twice. With nothing selected, the right
   click selects the word under it first (the vendored `select_word_at`),
@@ -623,7 +669,7 @@ far from the tree.
 - ⌘F with the keyboard in a PDF opens that file's own find row
   (`pdf_find_open`, tried first in `open_find`): every place marked,
   the one it is on darker and brought into view, ↩ and ⇧↩ to step,
-  Escape to close. Escape then drops a selection, then closes the pane.
+  Escape to close. Escape then drops a selection.
 - A PDF's head has two segments for what stands beside its pages
   (`pdf_side`, `pdf_side_toggle`, kept in `ui.json`): the pages small,
   or the file's table of contents, and neither at a second press on the
@@ -638,12 +684,15 @@ far from the tree.
   names. A destination is an array beginning with the page, or a name
   for one in the catalog's `/Dests` or the name tree under `/Names`,
   which is how LaTeX writes them. hayro has no reader for this.
-- A right click anywhere in the pane opens the window's menu
-  (`file_pane_menu`), the editor's own apart: what the place offers first (Copy for selected
-  words in markdown as it reads; Copy Image on a picture;
-  Copy Cell and Copy Row on a table's cell; Copy and Select All on a
-  PDF's page), then what the file's row in the tree has: Add to
-  Message, Open, Reveal, the two paths.
+- A right click in the pane opens the window's menu (`file_pane_menu`),
+  the editor's own apart, with what the place offers and nothing else:
+  Copy for selected words in markdown, HTML, a notebook or a document as
+  it reads; Copy Image on a picture; Copy Cell and Copy Row on a table's
+  cell; Copy and Select All on a PDF's page. Where the place offers
+  nothing there is no menu. What is asked of the file itself (Add to
+  Message, Open, Reveal, its paths) is on its row in the tree and in the
+  pane's head; it stood under these too, and read as being about the
+  words.
 - Not done in a PDF: links, and text set in a font that says nothing of
   its characters, which is drawn and cannot be selected.
 - A PDF is drawn by hayro, which is all Rust, so the same on every OS,
@@ -664,11 +713,30 @@ muted grey is all but the sidebar's own ground.
 
 A right click is the window's own menu (`MenuDo::File`, `file_do`). Add
 to message puts the path as "@path" at the end of the composer. New file
-and New folder are on a folder or the panel's empty room. A name is asked
-for in the
-field a session is renamed in (`file_prompt`, `commit_file_prompt`): one
-name for a rename, a path under the folder for something new, never
-"..", and a name already taken is refused with the field left up.
+and New folder are on a folder or the panel's empty room, and the empty
+room's menu has Collapse All Folders.
+
+A name is typed in the tree, in the row it is for (`file_prompt`,
+`tree_input`, `commit_file_prompt`), as VS Code's explorer has it. Tried
+and dropped: the sheet a session is renamed in, far from the row.
+
+- A rename's field stands where the name did, with the name selected up
+  to its extension. A new folder's row is the first in its folder and a
+  new file's the first after the folders there, where the sorted list
+  will have them (`Row::Edit`); the folder is opened for it.
+- The row's icon is the one the name typed so far would get, at every
+  letter.
+- ↩ makes it and Escape leaves it. Leaving the field for somewhere else
+  keeps a name typed, and the keyboard stays where it went
+  (`file_prompt_blur`); an empty field makes nothing.
+- One name for a rename, a path under the folder for something new,
+  never "..". A name already taken is refused with the field left up
+  after ↩, and dropped with the reason said when the field was left.
+- What is made or renamed is the row chosen afterwards.
+- ↩ with a row chosen renames it on a Mac, F2 elsewhere, as each
+  system's file manager has it (`tree_rename_key`).
+- While the field is up the panel's own keys (⌘A, ⌘C, ⌘V, ⌘Z) are the
+  field's.
 
 Copy on a row's menu, or ⌘C with the row chosen, puts the file or folder
 itself on the clipboard (`tree_copy`, `sys::copy_file`: on a Mac as a file,
@@ -805,8 +873,17 @@ this the mark fell back to the last entry when the move ended.
   and `discard:yes` answers it; `pasteundo` is ⌘Z after a paste and
   `pasteundo:yes` its Yes. `treefocus` puts the keyboard in the files
   panel, and `EMAKI_FOCUS_DEBUG=1` prints where it is at every draw.
+- `EMAKI_GO=treenew:file:<folder>:<words>` opens the field for a new
+  file in that folder ("." is the session's) with those words typed;
+  `treenew:folder:…` and `treenew:rename:<path>` are the other two, and
+  `treecollapse` closes every folder. Nothing is made: the copy quits
+  with the field up. Use a scratch project all the same.
+- `EMAKI_GO=renaming:side` and `renaming:tab` show the field a
+  session's name is written in, in its row or on its tab, with nothing
+  in it; `EMAKI_KEYS=rename:side` and `rename:tab` are the menu's Rename
+  there, with the name and the keyboard in the field.
 - `EMAKI_GO=cell:<row>,<col>` chooses a cell of the table showing (from
-  0), `cell:type:<words>` writes in it and goes down a row, `cell:open`
+  0), `cell:to:<row>,<col>` takes the choice to another, `cell:type:<words>` writes in it and goes down a row, `cell:open`
   opens its field and leaves it up, `cell:undo` is ⌘Z.
 - Code on the file sheet came out in one colour, unhighlighted, in a
   probe; not looked into.

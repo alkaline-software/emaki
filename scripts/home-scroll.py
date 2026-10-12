@@ -1,34 +1,21 @@
 #!/usr/bin/env python3
-"""The handscroll over the greeting on the new-session page, as three
-line drawings a colour each: scripts/home-scroll.py <assets/icons/home>.
+"""The picture on the handscroll over the greeting on the new-session
+page, as line drawings a layer each: scripts/home-scroll.py <assets/icons/home>.
 
-Seen from the front, as the app's icon is: a sheet held between two
-rolls on their axles, the left one thick with what is still wound on it,
-and on the sheet a picture. Lines only, in the manner of hairline's
-figures (github.com/lucasmarkes/hairline): a solid is its outline and
-one dim line inside it, nothing is filled, there are no words, and one
-mark is bright. With no fill nothing hides what is behind it, so an
-axle is drawn only where it shows past its roll.
+The scroll itself (its two rolls, their axles, the sheet's two edges, the
+sun) is drawn by the window, which moves it (`workbench::home_scroll`).
+What is here is what is painted on the sheet: a landscape longer than the
+sheet shows, in four layers by how far off each is, so the window can
+wind it past at four speeds. Lines only, in the manner of hairline's
+figures (github.com/lucasmarkes/hairline): nothing is filled, there are
+no words, and what is far is dimmer, which the window does with each
+layer's colour. Every layer is the same strip, STRIP wide and SHEET
+high, drawn from its left.
 """
 import sys
 
 SW = 1.5
-TOP, FOOT = 10.0, 86.0       # a roll's two ends
-KNOB = 8.0                   # how far an axle shows past them
-EDGE = 6.0                   # the sheet's top and foot, inside a roll's ends
-
-
-def rrect(x, y, w, h, r):
-    return (f"M{x + r} {y} H{x + w - r} A{r} {r} 0 0 1 {x + w} {y + r} V{y + h - r} A{r} {r} 0 0 1 {x + w - r} {y + h} "
-            f"H{x + r} A{r} {r} 0 0 1 {x} {y + h - r} V{y + r} A{r} {r} 0 0 1 {x + r} {y} Z")
-
-
-def knob(cx, y, up, half=3.0, r=2.0):
-    """An axle's end past its roll: three sides, open where the roll is."""
-    tip = y - KNOB if up else y + KNOB
-    turn = tip + r if up else tip - r
-    sweep = 1 if up else 0
-    return f"M{cx - half} {y} V{turn} A{r} {r} 0 0 {sweep} {cx - half + r} {tip} H{cx + half - r} A{r} {r} 0 0 {sweep} {cx + half} {turn} V{y}"
+STRIP, SHEET = 640, 74
 
 
 def line(*pts):
@@ -48,33 +35,49 @@ def smooth(pts, n=10):
     return line(*out)
 
 
-# the two rolls: where each begins, how wide it is, its corners
-LEFT, RIGHT = (4.0, 22.0, 8.0), (224.0, 12.0, 5.0)
-sil, dim, hi = [], [], []
-for x, w, r in (LEFT, RIGHT):
-    sil.append(rrect(x, TOP, w, FOOT - TOP, r))
-    sil.append(knob(x + w / 2, TOP, True))
-    sil.append(knob(x + w / 2, FOOT, False))
-# the sheet: its top and its foot, from roll to roll
-x0, x1 = LEFT[0] + LEFT[1], RIGHT[0]
-sil.append(line((x0, TOP + EDGE), (x1, TOP + EDGE)))
-sil.append(line((x0, FOOT - EDGE), (x1, FOOT - EDGE)))
-# the paper wound on the left roll, seen as its last turn
-dim.append(line((LEFT[0] + LEFT[1] - 6, TOP + EDGE + 3), (LEFT[0] + LEFT[1] - 6, FOOT - EDGE - 3)))
-# the picture: a ridge, water under it, and a sun
-dim.append(smooth([(52, 62), (72, 44), (86, 54), (106, 34), (128, 58), (144, 50), (164, 62)]))
-dim.append(line((62, 70), (104, 70)))
-dim.append(line((114, 70), (140, 70)))
-hi.append("M185 38 m-7 0 a7 7 0 1 0 14 0 a7 7 0 1 0 -14 0")
+def pine(x, y, h=11):
+    """A pine on a ridge: its trunk and two boughs."""
+    return [line((x, y), (x, y - h)), line((x - 4, y - h + 7), (x, y - h + 2), (x + 4, y - h + 7)), line((x - 3, y - h + 3), (x, y - h - 1), (x + 3, y - h + 3))]
 
-W, H = 240, 96
+
+# The sky, furthest: bands of mist, as a picture scroll has them, and birds.
+sky = []
+for x, y, w in ((54, 12, 34), (70, 17, 22), (196, 9, 26), (300, 14, 40), (322, 19, 20), (452, 10, 30), (560, 15, 36), (578, 20, 18)):
+    sky.append(line((x, y), (x + w, y)))
+for x, y in ((150, 16), (160, 12), (410, 20), (421, 15), (512, 12)):
+    sky.append(line((x, y), (x + 3, y + 2), (x + 6, y)))
+
+# The far range, and a stroke of snow down its three peaks.
+far = [smooth([(0, 44), (40, 36), (70, 40), (110, 24), (150, 38), (185, 30), (230, 42), (270, 34), (300, 40), (350, 20), (395, 36), (430, 30), (470, 40), (520, 26), (560, 38), (600, 32), (640, 42)])]
+for x, y in ((110, 24), (350, 20), (520, 26)):
+    far.append(line((x + 1, y + 5), (x + 5, y + 10)))
+    far.append(line((x - 3, y + 6), (x - 6, y + 11)))
+
+# The near hills: pines on their ridges, a bridge over a gap, a pavilion.
+mid = [smooth([(0, 54), (50, 46), (90, 52), (140, 40), (175, 50), (215, 44), (260, 54)]), smooth([(282, 54), (310, 48), (360, 54), (410, 42), (450, 52), (500, 46), (545, 54), (600, 48), (640, 54)])]
+for x, y, h in ((132, 42, 9), (140, 40, 12), (149, 43, 9), (404, 43, 9), (412, 42, 12), (500, 46, 10), (56, 46, 9)):
+    mid += pine(x, y, h)
+mid.append("M258 54 Q270 45 284 54")
+mid.append(line((264, 50), (264, 55)))
+mid.append(line((278, 50), (278, 55)))
+# The pavilion: two posts, a roof with its eaves turned up, a smaller one over it.
+mid += [line((316, 48), (316, 41)), line((330, 48), (330, 41)), "M311 42 Q323 35 335 42", line((319, 37), (319, 33)), line((327, 37), (327, 33)), "M315 34 Q323 28 331 34", line((323, 29), (323, 26))]
+
+# The water, nearest: its lines, a boat under sail, reeds at the bank.
+water = []
+for y, runs in ((60, ((10, 30), (56, 18), (120, 44), (196, 14), (240, 36), (372, 26), (430, 40), (500, 16), (548, 50))), (65, ((30, 22), (88, 40), (160, 16), (216, 30), (300, 12), (356, 44), (452, 20), (520, 34), (590, 26))), (70, ((6, 18), (70, 12), (130, 30), (250, 20), (330, 34), (410, 14), (470, 40), (566, 22)))):
+    for x, w in runs:
+        water.append(line((x, y), (x + w, y)))
+water += ["M434 60 Q446 67 458 60", line((446, 61), (446, 49)), line((446, 50), (455, 59), (446, 59))]
+for x in (14, 20, 26, 604, 611, 618):
+    water.append(line((x, 58), (x + 2, 50)))
 
 
 def svg(paths):
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" fill="none" stroke="currentColor" '
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{STRIP}" height="{SHEET}" viewBox="0 0 {STRIP} {SHEET}" fill="none" stroke="currentColor" '
             f'stroke-width="{SW}" stroke-linecap="round" stroke-linejoin="round">' + "".join(f'<path d="{p}"/>' for p in paths) + "</svg>\n")
 
 
 out = sys.argv[1]
-for name, paths in (("sil", sil), ("dim", dim), ("hi", hi)):
+for name, paths in (("sky", sky), ("far", far), ("mid", mid), ("water", water)):
     open(f"{out}/scroll-{name}.svg", "w").write(svg(paths))

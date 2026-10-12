@@ -60,6 +60,10 @@ const PANEL_GRIP: Pixels = px(8.);
 /// read as one band across the pane.
 const HEAD_H: Pixels = px(31.);
 const TREE_ROW_H: Pixels = px(24.);
+/// How long a row of the tree takes to come or go.
+const TREE_ANIM: Duration = Duration::from_millis(200);
+/// What the row a new name is typed in goes by among the rows' paths.
+const TREE_EDIT_KEY: &str = "\0name";
 /// The list of branches shows this many rows of this height and scrolls
 /// for the rest.
 const BRANCH_ROWS: usize = 10;
@@ -190,6 +194,22 @@ type Listing = Rc<(Vec<Node>, usize)>;
 enum Row {
     Node(Node, usize, bool),
     More(usize, usize),
+    /// Where a new file or folder is being named: its depth, and
+    /// whether it is a folder.
+    Edit(usize, bool),
+}
+
+/// A row of the tree as it was last drawn: its path, what it showed
+/// (none for the row a name is typed in), its depth, and whether it
+/// was an open folder.
+type Seen = (PathBuf, Option<Node>, usize, bool);
+
+/// A row that has just gone, drawn a moment more where it stood: under
+/// the row `after`, or at the head.
+struct TreeGhost {
+    after: Option<PathBuf>,
+    row: Seen,
+    at: std::time::Instant,
 }
 
 /// The folders opened in the files panel and what each was last seen to
@@ -197,6 +217,15 @@ enum Row {
 #[derive(Default)]
 pub struct Tree {
     open: HashSet<PathBuf>,
+    /// The sessions' folders whose head row was closed. One is open
+    /// until it is, so the tree shows at first.
+    shut: HashSet<PathBuf>,
+    /// The rows as last drawn and the folder they were of, the rows
+    /// that have just come, and the ones that have just gone
+    /// (`Tree::seen_now`).
+    seen: Option<(PathBuf, Vec<Seen>)>,
+    born: HashMap<PathBuf, std::time::Instant>,
+    gone: Vec<TreeGhost>,
     kids: HashMap<PathBuf, Listing>,
     /// The file last shown, which its row marks.
     picked: Option<PathBuf>,
@@ -281,8 +310,63 @@ impl Tree {
     /// Every row under `root` that is showing, in order.
     fn rows(&mut self, root: &Path) -> Vec<Row> {
         let mut out = Vec::new();
-        self.walk(root, 0, &mut out);
+        if !self.shut.contains(root) {
+            self.walk(root, 0, &mut out);
+        }
         out
+    }
+
+    /// The rows about to be drawn against how they were last: one that
+    /// was not there has just come and grows in, one that is no longer
+    /// has just gone and is drawn a moment more, shrinking. That is a
+    /// folder opened or closed, a file made or removed, on disk or
+    /// here. A folder drawn for the first time plays nothing. Whether
+    /// anything came or went.
+    fn seen_now(&mut self, root: &Path, rows: &[Row]) -> bool {
+        let edit = PathBuf::from(TREE_EDIT_KEY);
+        let now: Vec<Seen> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Node(node, depth, open) => Some((node.path.clone(), Some(node.clone()), *depth, *open)),
+                Row::Edit(depth, dir) => Some((edit.clone(), None, *depth, *dir)),
+                Row::More(..) => None,
+            })
+            .collect();
+        let at = std::time::Instant::now();
+        let mut changed = false;
+        match self.seen.take() {
+            Some((of, was)) if of == root => {
+                let here: HashSet<&PathBuf> = now.iter().map(|row| &row.0).collect();
+                let there: HashSet<&PathBuf> = was.iter().map(|row| &row.0).collect();
+                let born: Vec<PathBuf> = now.iter().filter(|row| !there.contains(&row.0)).map(|row| row.0.clone()).collect();
+                // The name's row became the thing named: one takes the
+                // other's place and neither moves.
+                let named = there.contains(&edit) && !here.contains(&edit) && !born.is_empty();
+                let mut after = None;
+                for row in &was {
+                    if here.contains(&row.0) {
+                        after = Some(row.0.clone());
+                    } else if !(named && row.0 == edit) {
+                        self.born.remove(&row.0);
+                        self.gone.push(TreeGhost { after: after.clone(), row: row.clone(), at });
+                        changed = true;
+                    }
+                }
+                for path in born.into_iter().filter(|_| !named) {
+                    self.gone.retain(|ghost| ghost.row.0 != path);
+                    self.born.insert(path, at);
+                    changed = true;
+                }
+            }
+            _ => {
+                self.born.clear();
+                self.gone.clear();
+            }
+        }
+        self.seen = Some((root.to_path_buf(), now));
+        self.born.retain(|_, at| at.elapsed() < TREE_ANIM);
+        self.gone.retain(|ghost| ghost.at.elapsed() < TREE_ANIM);
+        changed
     }
 
     fn walk(&mut self, dir: &Path, depth: usize, out: &mut Vec<Row>) {
@@ -640,12 +724,15 @@ struct EditorWant {
 }
 
 /// A table's cell: whose table, which row and column of what the pane
-/// shows, and whether it is being written in.
+/// shows, and whether it is being written in. With `to`, the cells
+/// chosen are the block from this one to that: this is where a drag or
+/// a ⇧ click began, and stays the one that is written in.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TableAt {
     path: PathBuf,
     row: usize,
     col: usize,
+    to: Option<(usize, usize)>,
     editing: bool,
 }
 
@@ -772,25 +859,18 @@ pub enum FileDo {
     NewFile,
     NewFolder,
     Trash,
+    /// Every folder of the tree closed.
+    Collapse,
 }
 
-/// A name being asked for in the field a session is renamed in: a new
-/// name for that path, or a file or folder to make inside it.
+/// A name being asked for in a field in the tree, where the row is or
+/// will be: a new name for that path, or a file or folder to make
+/// inside it.
 #[derive(Clone)]
 pub enum FilePrompt {
     Rename(PathBuf),
     NewFile(PathBuf),
     NewFolder(PathBuf),
-}
-
-impl FilePrompt {
-    pub fn title(&self) -> &'static str {
-        match self {
-            FilePrompt::Rename(_) => "Rename",
-            FilePrompt::NewFile(_) => "New file",
-            FilePrompt::NewFolder(_) => "New folder",
-        }
-    }
 }
 
 fn is_picture(path: &Path) -> bool {
@@ -1442,8 +1522,8 @@ impl Workbench {
             .rows(&root)
             .iter()
             .filter_map(|row| match row {
-                Row::Node(node, depth, _) => Some(13. + 8. + 12. * *depth as f32 + 10. + 5. + 16. + 5. + measure(&node.name) + 5. + 12. + 8. + 10.),
-                Row::More(..) => None,
+                Row::Node(node, depth, _) => Some(13. + 8. + 12. * (*depth + 1) as f32 + 10. + 5. + 16. + 5. + measure(&node.name) + 5. + 12. + 8. + 10.),
+                Row::More(..) | Row::Edit(..) => None,
             })
             .fold(0f32, f32::max);
         px(widest.ceil()).clamp(PANEL_MIN, PANEL_FIT_MAX.min(self.panel_max()))
@@ -1776,26 +1856,47 @@ impl Workbench {
         self.file_pane_menu(items, at, cx);
     }
 
-    /// The pane's menu: what the place pressed offers first, then what
-    /// every file has, as its row in the tree does.
-    fn file_pane_menu(&mut self, mut items: Vec<(&'static str, MenuDo)>, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(path) = self.file_view.as_ref().map(|v| v.path.clone()) else { return };
-        if !items.is_empty() {
-            items.push(("", MenuDo::Rule));
+    /// Escape with the keyboard in the file's pane lets go of what is
+    /// selected there, as an editor does: the editor's selection, words
+    /// selected in a file as it reads, a block of a table's cells.
+    /// Whether there was anything to let go.
+    pub(crate) fn file_unselect(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.file_view.is_none() || !self.file_focus.contains_focused(window, cx) {
+            return false;
         }
-        items.extend([
-            ("Add to Message", MenuDo::File(FileDo::Mention, path.clone())),
-            ("Open", MenuDo::File(FileDo::Open, path.clone())),
-            (crate::sys::REVEAL_LABEL, MenuDo::File(FileDo::Reveal, path.clone())),
-            ("", MenuDo::Rule),
-            ("Copy Path", MenuDo::File(FileDo::CopyPath, path.clone())),
-            ("Copy Relative Path", MenuDo::File(FileDo::CopyRel, path)),
-        ]);
+        if let Some(state) = self.file_editor.as_ref().map(|ed| ed.state.clone()).filter(|state| !state.read(cx).selected_range().is_empty()) {
+            state.update(cx, |s, cx| {
+                let caret = s.cursor();
+                s.set_selected_range(caret..caret, cx);
+            });
+            return true;
+        }
+        if gpui_base::TextSelection::has_selection(window, cx) {
+            gpui_base::TextSelection::clear(window, cx);
+            cx.notify();
+            return true;
+        }
+        if let Some(at) = self.table_at.as_mut().filter(|at| at.to.is_some()) {
+            at.to = None;
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// The pane's menu: what the place pressed offers, and nothing of
+    /// the file's own. What is asked of the file (Add to Message, Open,
+    /// Reveal, its paths) is on its row in the tree and in the pane's
+    /// head; here it stood under a Copy that was about the words.
+    fn file_pane_menu(&mut self, items: Vec<(&'static str, MenuDo)>, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.file_view.is_none() || items.is_empty() {
+            return;
+        }
         self.open_menu(at, items, cx);
     }
 
     /// A right click on a file that is not a PDF: Copy for the words
-    /// selected, or the picture, and what every file has. The text
+    /// selected, or the picture. The text
     /// under the pointer selects its word at the same press, so what is
     /// selected is asked once the press has been handed round.
     fn file_body_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
@@ -2575,26 +2676,69 @@ impl Workbench {
         (at.row < rows.len() && at.col < widths.len()).then_some((at.row, at.col))
     }
 
+    /// The block of cells chosen, from its top left to its bottom right,
+    /// both inside what the table has: one cell, or the cells between
+    /// the chosen one and where the choice was taken to.
+    fn table_range(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (row, col) = self.table_cell()?;
+        let (rows, widths) = self.grid_rows()?;
+        let (to_row, to_col) = self.table_at.as_ref().and_then(|at| at.to).map(|(r, c)| (r.min(rows.len() - 1), c.min(widths.len() - 1))).unwrap_or((row, col));
+        Some(((row.min(to_row), col.min(to_col)), (row.max(to_row), col.max(to_col))))
+    }
+
+    /// The chosen cells as text: a tab between cells and a line a row,
+    /// as a spreadsheet copies them.
+    fn table_range_text(&self) -> Option<String> {
+        let ((r0, c0), (r1, c1)) = self.table_range()?;
+        let (rows, _) = self.grid_rows()?;
+        Some(rows[r0..=r1].iter().map(|row| row[c0..=c1.min(row.len().saturating_sub(1))].join("\t")).collect::<Vec<_>>().join("\n"))
+    }
+
     /// A cell is chosen: what was being written in another is kept first.
     pub(crate) fn table_select(&mut self, row: usize, col: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.table_commit(None, window, cx);
         let Some(path) = self.file_view.as_ref().map(|v| v.path.clone()) else { return };
-        self.table_at = Some(TableAt { path, row, col, editing: false });
+        self.table_at = Some(TableAt { path, row, col, to: None, editing: false });
         window.focus(&self.file_focus, cx);
         self.table_reveal();
         cx.notify();
     }
 
-    /// The chosen cell is brought into view, clear of the two heads.
+    /// The choice is taken from the chosen cell to this one: a drag over
+    /// the cells, or a ⇧ click.
+    fn table_extend(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        let Some(at) = self.table_at.as_mut().filter(|at| !at.editing) else { return };
+        let to = ((row, col) != (at.row, at.col)).then_some((row, col));
+        if at.to != to {
+            at.to = to;
+            cx.notify();
+        }
+    }
+
+    /// Where in a cell's words a point across the pane falls, as a count
+    /// of bytes: the words are measured as the cell's field sets them.
+    fn table_caret(&self, col: usize, words: &str, x: Pixels, window: &Window, cx: &App) -> usize {
+        let Some((_, widths)) = self.grid_rows() else { return words.len() };
+        let before: f32 = widths[..col.min(widths.len())].iter().map(|w| table_col_w(*w)).sum();
+        let left = self.file_view_scroll.bounds().left() + self.file_view_scroll.offset().x + px(before + 8.);
+        let run = TextRun { len: words.len(), font: font(cx.theme().font_family.clone()), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+        window.text_system().shape_line(words.to_string().into(), px(12.), &[run], None).closest_index_for_x(x - left)
+    }
+
+    /// The cell the choice was last taken to, else the chosen one, is
+    /// brought into view.
     fn table_reveal(&self) {
         let Some((row, col)) = self.table_cell() else { return };
-        let Some((_, widths)) = self.grid_rows() else { return };
+        let Some((rows, widths)) = self.grid_rows() else { return };
+        let (row, col) = self.table_at.as_ref().and_then(|at| at.to).map(|(r, c)| (r.min(rows.len() - 1), c.min(widths.len() - 1))).unwrap_or((row, col));
         let view = self.file_view_scroll.bounds().size;
         let mut off = self.file_view_scroll.offset();
         let x: f32 = widths[..col].iter().map(|w| table_col_w(*w)).sum();
         let (w, y) = (table_col_w(widths[col]), row as f32 * GRID_ROW);
         let (left, top) = (-f32::from(off.x), -f32::from(off.y));
-        let (room_w, room_h) = (f32::from(view.width) - GRID_NUM, f32::from(view.height) - GRID_HEAD);
+        // The two heads stand outside the scroller, so its room is the
+        // cells' own.
+        let (room_w, room_h) = (f32::from(view.width), f32::from(view.height));
         if x < left {
             off.x = px(-x);
         } else if x + w > left + room_w {
@@ -2630,6 +2774,7 @@ impl Workbench {
         });
         if let Some(at) = self.table_at.as_mut() {
             at.editing = true;
+            at.to = None;
         }
         cx.notify();
     }
@@ -2649,7 +2794,7 @@ impl Workbench {
             window.focus(&self.file_focus, cx);
         }
         if let Some((rows, cols)) = step {
-            self.table_step(rows, cols, cx);
+            self.table_step(rows, cols, false, cx);
         }
         cx.notify();
     }
@@ -2666,6 +2811,25 @@ impl Workbench {
     /// Put `value` in the chosen cell, as one step of the editor's undo.
     fn table_write(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some((row, col)) = self.table_cell() else { return };
+        self.table_put(row, col, value, window, cx);
+        self.table_refresh(cx);
+    }
+
+    /// Every chosen cell is emptied, the last first, so a cell's place
+    /// in the text is still where it was read. A step of undo a cell.
+    fn table_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(((r0, c0), (r1, c1))) = self.table_range() else { return };
+        for row in (r0..=r1).rev() {
+            for col in (c0..=c1).rev() {
+                self.table_put(row, col, "", window, cx);
+            }
+        }
+        self.table_refresh(cx);
+    }
+
+    /// `value` into the cell at `row` and `col` of the file's text. The
+    /// grid is not read again here (`table_refresh`).
+    fn table_put(&mut self, row: usize, col: usize, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ed) = self.table_editor() else { return };
         let (state, sep) = (ed.state.clone(), Self::table_sep(&ed.path));
         let text = state.read(cx).value().to_string();
@@ -2689,28 +2853,39 @@ impl Workbench {
         };
         let caret = span.start + written.len();
         state.update(cx, |s, cx| s.replace_bytes(span, &written, caret, window, cx));
-        self.table_refresh(cx);
     }
 
     /// The choice moves by rows and columns, and stops at the edges.
-    fn table_step(&mut self, rows: isize, cols: isize, cx: &mut Context<Self>) {
+    /// With `extend` (⇧ and an arrow) the chosen cell stays and the far
+    /// corner of the block moves.
+    fn table_step(&mut self, rows: isize, cols: isize, extend: bool, cx: &mut Context<Self>) {
         let Some((all, widths)) = self.grid_rows() else { return };
         let (n_rows, n_cols) = (all.len() as isize, widths.len() as isize);
+        let step = |(row, col): (usize, usize)| ((row as isize + rows).clamp(0, (n_rows - 1).max(0)) as usize, (col as isize + cols).clamp(0, (n_cols - 1).max(0)) as usize);
         if let Some(at) = self.table_at.as_mut() {
-            at.row = (at.row as isize + rows).clamp(0, (n_rows - 1).max(0)) as usize;
-            at.col = (at.col as isize + cols).clamp(0, (n_cols - 1).max(0)) as usize;
+            if extend {
+                let to = step(at.to.unwrap_or((at.row, at.col)));
+                at.to = (to != (at.row, at.col)).then_some(to);
+            } else {
+                (at.row, at.col) = step((at.row, at.col));
+                at.to = None;
+            }
         }
         self.table_reveal();
         cx.notify();
     }
 
     /// `EMAKI_GO=cell:<row>,<col>` chooses a cell (from 0),
+    /// `cell:to:<row>,<col>` takes the choice to another,
     /// `cell:type:<words>` writes in it and goes down a row,
     /// `cell:open` opens it and leaves the field up, `cell:undo` is ⌘Z.
     pub(crate) fn table_probe(&mut self, step: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(words) = step.strip_prefix("type:") {
             self.table_edit(Some(words), window, cx);
             self.table_commit(Some((1, 0)), window, cx);
+        } else if let Some((row, col)) = step.strip_prefix("to:").and_then(|to| to.split_once(',')).and_then(|(r, c)| Some((r.parse().ok()?, c.parse().ok()?))) {
+            self.table_extend(row, col, cx);
+            self.table_reveal();
         } else if step == "open" {
             self.table_edit(None, window, cx);
         } else if step == "undo" {
@@ -2724,32 +2899,31 @@ impl Workbench {
     }
 
     /// The table's keys, with a cell chosen and none being written in:
-    /// the arrows and Tab move, ↩ opens the cell, Delete empties it, a
-    /// letter opens it with that letter, and undo and redo are the
-    /// editor's.
+    /// the arrows and Tab move, ⇧ and an arrow takes the choice further,
+    /// ↩ opens the cell, Delete empties what is chosen, ⌘C copies it, a
+    /// letter opens the cell with that letter in place of what it held,
+    /// and undo and redo are the editor's.
     fn table_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_raw || !self.file_focus.is_focused(window) || self.table_cell().is_none() || self.table_at.as_ref().is_some_and(|at| at.editing) {
             return;
         }
         let m = e.keystroke.modifiers;
         match e.keystroke.key.as_str() {
-            "up" => self.table_step(-1, 0, cx),
-            "down" => self.table_step(1, 0, cx),
-            "left" => self.table_step(0, -1, cx),
-            "right" => self.table_step(0, 1, cx),
-            "tab" => self.table_step(0, if m.shift { -1 } else { 1 }, cx),
+            "up" => self.table_step(-1, 0, m.shift, cx),
+            "down" => self.table_step(1, 0, m.shift, cx),
+            "left" => self.table_step(0, -1, m.shift, cx),
+            "right" => self.table_step(0, 1, m.shift, cx),
+            "tab" => self.table_step(0, if m.shift { -1 } else { 1 }, false, cx),
             "enter" => self.table_edit(None, window, cx),
-            "backspace" | "delete" if self.table_editor().is_some() => self.table_write("", window, cx),
+            "backspace" | "delete" if self.table_editor().is_some() => self.table_clear(window, cx),
             "z" if m.secondary() => {
                 let Some(state) = self.table_editor().map(|ed| ed.state.clone()) else { return };
                 state.update(cx, |s, cx| if m.shift { s.redo_step(window, cx) } else { s.undo_step(window, cx) });
                 self.table_refresh(cx);
             }
             "c" if m.secondary() => {
-                let Some((row, col)) = self.table_cell() else { return };
-                if let Some((rows, _)) = self.grid_rows() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(rows[row][col].clone()));
-                }
+                let Some(text) = self.table_range_text() else { return };
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
             _ => match e.keystroke.key_char.as_deref().filter(|c| !m.secondary() && !m.control && !c.chars().any(char::is_control)) {
                 Some(typed) => {
@@ -2762,22 +2936,22 @@ impl Workbench {
         cx.stop_propagation();
     }
 
-    /// A table as a grid: columns named by letter and rows by number,
-    /// both staying in view; lines between the cells and every other row
-    /// a shade darker; the chosen cell outlined. A click chooses a cell
-    /// and a second opens it, in a field that stands in the cell's place.
+    /// A table's cells: lines between them and every other row a shade
+    /// darker; the chosen cell outlined, and the block chosen with it
+    /// washed. A press chooses a cell, a drag or a ⇧ press takes the
+    /// choice to another, and a second press opens the cell, in a field
+    /// that stands in the cell's place, with the caret where the press
+    /// was. The heads are `render_table_heads`.
     fn render_table(&self, v: &FileView, rows: &[Vec<String>], widths: &[usize], more: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let at = self.table_at.as_ref().filter(|at| at.path == v.path);
         let chosen = at.map(|at| (at.row, at.col));
         let editing = at.is_some_and(|at| at.editing);
-        let off = self.file_view_scroll.offset();
+        let block = at.and_then(|_| self.table_range());
         let total: f32 = widths.iter().map(|w| table_col_w(*w)).sum();
-        let (line, head_bg, stripe) = (theme.border, theme.sidebar, theme.foreground.opacity(if theme.mode.is_dark() { 0.035 } else { 0.03 }));
-        let lit = theme.primary.opacity(0.16);
+        let (line, stripe) = (theme.border, theme.foreground.opacity(if theme.mode.is_dark() { 0.035 } else { 0.03 }));
         let field_focus = self.table_input.read(cx).focus_handle(cx);
-        let body = v_flex().pt(px(GRID_HEAD)).pl(px(GRID_NUM)).text_size(px(12.)).children(rows.iter().enumerate().map(|(ix, row)| {
-            let whole: Rc<Vec<String>> = Rc::new(row.clone());
+        let body = v_flex().text_size(px(12.)).children(rows.iter().enumerate().map(|(ix, row)| {
             h_flex()
                 .h(px(GRID_ROW))
                 .flex_shrink_0()
@@ -2786,8 +2960,8 @@ impl Workbench {
                 .when(ix % 2 == 1, |d| d.bg(stripe))
                 .when(ix == 0, |d| d.font_weight(FontWeight::SEMIBOLD))
                 .children(row.iter().zip(widths).enumerate().map(|(col, (cell, chars))| {
-                    let whole = whole.clone();
                     let here = chosen == Some((ix, col));
+                    let within = block.is_some_and(|((r0, c0), (r1, c1))| (r0..=r1).contains(&ix) && (c0..=c1).contains(&col));
                     let base = div().relative().w(px(table_col_w(*chars))).h_full().flex_shrink_0().border_r_1().border_color(line).flex().items_center();
                     if here && editing {
                         return base
@@ -2822,50 +2996,109 @@ impl Workbench {
                             .into_any_element();
                     }
                     base.px(px(8.))
-                        .cursor_text()
+                        .cursor_default()
                         .child(div().min_w_0().truncate().child(cell.clone()))
-                        .when(here, |d| d.child(div().absolute().inset_0().border_2().border_color(theme.primary).bg(theme.primary.opacity(0.08))))
+                        .when(within, |d| d.child(div().absolute().inset_0().bg(theme.primary.opacity(0.08))))
+                        .when(here, |d| d.child(div().absolute().inset_0().border_2().border_color(theme.primary)))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                if e.modifiers.shift && this.table_cell().is_some() {
+                                    this.table_commit(None, window, cx);
+                                    this.table_extend(ix, col, cx);
+                                    return;
+                                }
                                 this.table_select(ix, col, window, cx);
+                                this.table_drag = e.click_count < 2;
                                 if e.click_count >= 2 {
                                     this.table_edit(None, window, cx);
+                                    if this.table_at.as_ref().is_some_and(|at| at.editing) {
+                                        // The caret goes where the press was.
+                                        let words = this.table_input.read(cx).value().to_string();
+                                        let caret = this.table_caret(col, &words, e.position.x, window, cx);
+                                        this.table_input.update(cx, |s, cx| s.set_selected_range(caret..caret, cx));
+                                        // The keyboard is the field's: the
+                                        // pane takes it at every press in
+                                        // it that is not said to be
+                                        // someone's, and took it from the
+                                        // field as it opened.
+                                        window.prevent_default();
+                                    }
                                 }
                             }),
                         )
+                        .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                            if this.table_drag && e.pressed_button == Some(MouseButton::Left) {
+                                this.table_extend(ix, col, cx);
+                            }
+                        }))
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
-                                this.table_select(ix, col, window, cx);
-                                let items = vec![("Copy Cell", MenuDo::Copy(whole[col].clone())), ("Copy Row", MenuDo::Copy(whole.join("\t")))];
+                                // A press on one of several chosen is
+                                // about them all; elsewhere it chooses.
+                                let several = this.table_at.as_ref().is_some_and(|at| at.to.is_some());
+                                let inside = this.table_range().is_some_and(|((r0, c0), (r1, c1))| (r0..=r1).contains(&ix) && (c0..=c1).contains(&col));
+                                if !(several && inside) {
+                                    this.table_select(ix, col, window, cx);
+                                }
+                                let Some((rows, _)) = this.grid_rows() else { return };
+                                let items = match this.table_range_text().filter(|_| several && inside) {
+                                    Some(cells) => vec![("Copy Cells", MenuDo::Copy(cells))],
+                                    None => vec![("Copy Cell", MenuDo::Copy(rows[ix][col].clone())), ("Copy Row", MenuDo::Copy(rows[ix].join("\t")))],
+                                };
                                 this.file_pane_menu(items, e.position, cx);
                             }),
                         )
                         .into_any_element()
                 }))
         }));
-        // The two heads are laid over the cells and moved against the
-        // scroll, so they stay at the pane's top and left: the numbers
-        // first, the letters over them, the corner over both.
-        let numbers = v_flex().absolute().top_0().left(-off.x).w(px(GRID_NUM)).pt(px(GRID_HEAD)).bg(head_bg).border_r_1().border_color(line).text_size(px(11.)).children((0..rows.len()).map(|ix| {
-            let here = chosen.is_some_and(|(row, _)| row == ix);
-            div().h(px(GRID_ROW)).flex_shrink_0().flex().items_center().justify_center().border_b_1().border_color(line).text_color(if here { theme.foreground } else { theme.muted_foreground }).when(here, |d| d.bg(lit)).child((ix + 1).to_string())
-        }));
-        let letters = h_flex().absolute().left_0().top(-off.y).h(px(GRID_HEAD)).pl(px(GRID_NUM)).bg(head_bg).border_b_1().border_color(line).text_size(px(11.)).children(widths.iter().enumerate().map(|(col, chars)| {
-            let here = chosen.is_some_and(|(_, c)| c == col);
-            div().w(px(table_col_w(*chars))).h_full().flex_shrink_0().flex().items_center().justify_center().border_r_1().border_color(line).text_color(if here { theme.foreground } else { theme.muted_foreground }).when(here, |d| d.bg(lit)).child(column_name(col))
-        }));
-        let corner = div().absolute().left(-off.x).top(-off.y).w(px(GRID_NUM)).h(px(GRID_HEAD)).bg(head_bg).border_r_1().border_b_1().border_color(line);
         // The width is said outright: stretched across the scroller, the
         // grid was as wide as the pane and nothing scrolled sideways.
         v_flex()
-            .w(px(total + GRID_NUM))
+            .w(px(total))
             .flex_shrink_0()
-            .child(div().relative().w_full().flex_shrink_0().child(body).child(numbers).child(letters).child(corner))
+            .child(body)
             .when(more, |d| d.child(div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(format!("Only the first {TABLE_ROWS} rows are shown. Open the file for the rest."))))
             .into_any_element()
+    }
+
+    /// A grid's two heads: the columns' letters in a row over the cells
+    /// and the rows' numbers in a column at their left, the corner
+    /// between them in the first. Neither is in the scroller. Each is a
+    /// strip of its own that cuts what it holds, and what it holds is
+    /// moved along the strip by the scroll the cells have that way, so
+    /// the letters cannot go up or down and the numbers cannot go
+    /// sideways. Laid over the cells in the scroller and moved against
+    /// both scrolls, they shook, and stood off their place by whatever
+    /// the scroller put around its content.
+    fn render_table_heads(&self, v: &FileView, rows: usize, widths: &[usize], cx: &App) -> (AnyElement, AnyElement) {
+        let theme = cx.theme().clone();
+        let off = self.file_view_scroll.offset();
+        let block = self.table_at.as_ref().filter(|at| at.path == v.path).and_then(|_| self.table_range());
+        let (line, head_bg, lit) = (theme.border, theme.sidebar, theme.primary.opacity(0.16));
+        let head = |here: bool, d: Div| d.flex_shrink_0().flex().items_center().justify_center().border_color(line).text_color(if here { theme.foreground } else { theme.muted_foreground }).when(here, |d| d.bg(lit));
+        let letters = h_flex().relative().left(off.x).h_full().children(widths.iter().enumerate().map(|(col, chars)| {
+            let here = block.is_some_and(|((_, c0), (_, c1))| (c0..=c1).contains(&col));
+            head(here, div().w(px(table_col_w(*chars))).h_full().border_r_1()).child(column_name(col))
+        }));
+        let numbers = v_flex().relative().top(off.y).children((0..rows).map(|ix| {
+            let here = block.is_some_and(|((r0, _), (r1, _))| (r0..=r1).contains(&ix));
+            head(here, div().w_full().h(px(GRID_ROW)).border_b_1()).child((ix + 1).to_string())
+        }));
+        let top = h_flex()
+            .h(px(GRID_HEAD))
+            .flex_shrink_0()
+            .bg(head_bg)
+            .border_b_1()
+            .border_color(line)
+            .text_size(px(11.))
+            .child(div().w(px(GRID_NUM)).h_full().flex_shrink_0().border_r_1().border_color(line))
+            .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(letters))
+            .into_any_element();
+        let side = div().w(px(GRID_NUM)).h_full().flex_shrink_0().overflow_hidden().bg(head_bg).border_r_1().border_color(line).text_size(px(11.)).child(numbers).into_any_element();
+        (top, side)
     }
 
     /// Markdown as it reads, or as it is written.
@@ -2937,7 +3170,16 @@ impl Workbench {
                 ]);
                 items
             }
-            None => vec![item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &root), rule(), item("New File", FileDo::NewFile, &root), item("New Folder", FileDo::NewFolder, &root), rule(), item("Copy Path", FileDo::CopyPath, &root)],
+            None => vec![
+                item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &root),
+                rule(),
+                item("New File", FileDo::NewFile, &root),
+                item("New Folder", FileDo::NewFolder, &root),
+                rule(),
+                item("Collapse All Folders", FileDo::Collapse, &root),
+                rule(),
+                item("Copy Path", FileDo::CopyPath, &root),
+            ],
         };
         if paste {
             let target = node.map(|n| n.path.clone()).unwrap_or(root);
@@ -2960,7 +3202,7 @@ impl Workbench {
         self.tree_band = Some((from, at));
         self.tree_band_live = true;
         let Some(root) = self.files_root() else { return };
-        let top = self.files_scroll.bounds().top() + self.files_scroll.offset().y + px(6.);
+        let top = self.files_scroll.bounds().top() + self.files_scroll.offset().y;
         let (first, last) = (from.y.min(at.y), from.y.max(at.y));
         self.tree.picked = None;
         self.tree.marked = self
@@ -3044,12 +3286,28 @@ impl Workbench {
                     FileDo::NewFile => (FilePrompt::NewFile(path), String::new()),
                     _ => (FilePrompt::NewFolder(path), String::new()),
                 };
+                // The folder a new one goes in is open, so its row is
+                // where the name is typed.
+                if let FilePrompt::NewFile(dir) | FilePrompt::NewFolder(dir) = &prompt {
+                    self.tree.shut.remove(&root);
+                    if *dir != root && self.tree.open.insert(dir.clone()) {
+                        self.tree.kids.remove(dir);
+                    }
+                }
+                // A rename begins with the name selected up to its
+                // extension, as a file manager's does.
+                let stem = match &prompt {
+                    FilePrompt::Rename(path) if !path.is_dir() => Path::new(&value).file_stem().map(|s| s.len()).filter(|n| *n > 0).unwrap_or(value.len()),
+                    _ => value.len(),
+                };
                 self.file_prompt = Some(prompt);
-                self.rename_input.update(cx, |s, cx| {
+                self.tree_input.update(cx, |s, cx| {
                     s.set_value(value, window, cx);
                     s.focus(window, cx);
+                    s.set_selected_range(0..stem, cx);
                 });
             }
+            FileDo::Collapse => self.tree_collapse(cx),
             FileDo::Trash => match crate::sys::trash_path(&path) {
                 Ok(()) => {
                     if self.file_view.as_ref().is_some_and(|v| v.path.starts_with(&path)) {
@@ -3133,6 +3391,7 @@ impl Workbench {
             }
         }
         // The folder pasted into is opened, and the copy is the row chosen.
+        self.tree.shut.remove(&root);
         if dir != root {
             self.tree.open.insert(dir.clone());
         }
@@ -3145,11 +3404,68 @@ impl Workbench {
         cx.notify();
     }
 
+    /// The key that renames the row chosen, as the system's file manager
+    /// has it: ↩ on a Mac, F2 elsewhere. Whether it was that key.
+    fn tree_rename_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let key = if cfg!(target_os = "macos") { "enter" } else { "f2" };
+        // With the keyboard on the tree itself: the ↩ that keeps a name
+        // comes by here too, from the field.
+        if !self.tree_focus.is_focused(window) || self.file_prompt.is_some() || e.keystroke.key != key || e.keystroke.modifiers.modified() || self.tree.marked.len() > 1 {
+            return false;
+        }
+        let Some(path) = self.tree.picked.clone().filter(|p| p.exists()) else { return false };
+        cx.stop_propagation();
+        self.file_do(FileDo::Rename, path, window, cx);
+        true
+    }
+
+    /// New File and New Folder at the tree's head: in the folder chosen,
+    /// the folder the chosen file is in, or the session's folder.
+    fn tree_new(&mut self, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        let dir = match self.tree.picked.clone() {
+            Some(p) if p.is_dir() => p,
+            Some(p) => p.parent().map(Path::to_path_buf).unwrap_or(root.clone()),
+            None => root.clone(),
+        };
+        let dir = if dir.starts_with(&root) { dir } else { root };
+        self.file_do(if folder { FileDo::NewFolder } else { FileDo::NewFile }, dir, window, cx);
+    }
+
+    /// Every folder of the tree is closed.
+    fn tree_collapse(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.files_root() else { return };
+        self.tree.open.retain(|p| !p.starts_with(&root));
+        cx.notify();
+    }
+
+    /// The name's field is put away and nothing is made.
+    pub(crate) fn close_file_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_prompt.take().is_some() {
+            window.focus(&self.tree_focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// The keyboard has left the name's field: a name typed is kept, as
+    /// an editor's explorer keeps it, and one that cannot be used is
+    /// dropped with the reason said.
+    pub(crate) fn file_prompt_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_prompt.is_none() {
+            return;
+        }
+        self.commit_file_prompt(false, window, cx);
+        if self.file_prompt.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// The files panel's keys: ⌘C copies the row chosen, ⌘V pastes
     /// beside it, or into it when it is a folder, or into the session's
     /// folder with no row chosen.
     fn tree_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
-        if !e.keystroke.modifiers.secondary() {
+        // While a name is typed the keys are the field's.
+        if self.file_prompt.is_some() || !e.keystroke.modifiers.secondary() {
             return;
         }
         let Some(root) = self.files_root() else { return };
@@ -3158,7 +3474,7 @@ impl Workbench {
             "a" => {
                 self.tree.marked = self.tree.rows(&root).into_iter().filter_map(|row| match row {
                     Row::Node(node, _, _) => Some(node.path),
-                    Row::More(..) => None,
+                    Row::More(..) | Row::Edit(..) => None,
                 }).collect();
                 self.tree.picked = None;
                 cx.notify();
@@ -3368,15 +3684,25 @@ impl Workbench {
         window.focus(&handle, cx);
     }
 
-    /// ↩ in the field while it asks for a file's name: the rename, or the
-    /// new file or folder, is made; a name that cannot be used says why
-    /// and leaves the field up.
-    pub(crate) fn commit_file_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// ↩ in the tree's field: the rename, or the new file or folder, is
+    /// made and its row chosen; a name that cannot be used says why and
+    /// leaves the field up.
+    ///
+    /// `refocus` is whether the keyboard goes back to the tree: it does
+    /// after ↩, and not when the field was left for somewhere else.
+    pub(crate) fn commit_file_prompt(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self.file_prompt.clone() else { return };
-        let name = self.rename_input.read(cx).value().trim().to_string();
+        let name = self.tree_input.read(cx).value().trim().to_string();
+        let done = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            if refocus {
+                this.close_file_prompt(window, cx);
+            } else {
+                this.file_prompt = None;
+                cx.notify();
+            }
+        };
         if name.is_empty() {
-            self.close_rename(window, cx);
-            return;
+            return done(self, window, cx);
         }
         let made = (|| -> Result<Option<PathBuf>, String> {
             // A name, or for something new a path under the folder; never
@@ -3390,7 +3716,7 @@ impl Workbench {
                 FilePrompt::Rename(from) => {
                     let to = from.with_file_name(&name);
                     if to == *from {
-                        return Ok(None);
+                        return Ok(Some(to));
                     }
                     if to.exists() {
                         return Err(format!("{name} is already there"));
@@ -3425,10 +3751,9 @@ impl Workbench {
                         if let Some(ed) = self.file_editor.take() {
                             self.file_parked.push(ed);
                         }
-                        self.tree.picked = Some(now.clone());
                         self.show_file(&now, cx);
                     }
-                    Ok(None)
+                    Ok(Some(to))
                 }
                 FilePrompt::NewFile(dir) | FilePrompt::NewFolder(dir) => {
                     let to = dir.join(&name);
@@ -3447,7 +3772,7 @@ impl Workbench {
                         self.tree.open.insert(p.to_path_buf());
                         up = p.parent();
                     }
-                    Ok(file.then_some(to))
+                    Ok(Some(to))
                 }
             }
         })();
@@ -3459,7 +3784,7 @@ impl Workbench {
                 if let Some(root) = self.files_root() {
                     self.tree.refresh(&root);
                 }
-                self.close_rename(window, cx);
+                done(self, window, cx);
             }
             Err(why) => {
                 self.notice = Some(Notice::error(why));
@@ -3472,11 +3797,60 @@ impl Workbench {
         let theme = cx.theme().clone();
         let root = self.files_root();
         let exists = root.as_ref().is_some_and(|r| r.is_dir());
-        let rows = match &root {
+        let mut rows = match &root {
             Some(r) if exists => self.tree.rows(r),
             _ => Vec::new(),
         };
         let dark = theme.mode.is_dark();
+        // A name being typed has a row of its own where the new file or
+        // folder will stand: a folder first in its folder, a file after
+        // the folders there, as the list is sorted.
+        let prompt = self.file_prompt.clone();
+        if let (Some(r), Some(FilePrompt::NewFile(dir) | FilePrompt::NewFolder(dir))) = (&root, &prompt) {
+            let folder = matches!(prompt, Some(FilePrompt::NewFolder(_)));
+            let at = if dir == r {
+                Some((0, 0))
+            } else {
+                rows.iter().enumerate().find_map(|(ix, row)| match row {
+                    Row::Node(n, depth, _) if n.path == *dir => Some((ix + 1, depth + 1)),
+                    _ => None,
+                })
+            };
+            if let Some((mut ix, depth)) = at {
+                while !folder {
+                    match rows.get(ix) {
+                        Some(Row::Node(n, d, _)) if *d > depth || (*d == depth && n.dir) => ix += 1,
+                        Some(Row::More(_, d)) if *d > depth => ix += 1,
+                        _ => break,
+                    }
+                }
+                rows.insert(ix, Row::Edit(depth, folder));
+            }
+        }
+        // The field itself, made once: one row has it. Its icon is the
+        // one the name typed so far would get.
+        let typed = self.tree_input.read(cx).value().to_string();
+        let mut field = prompt.is_some().then(|| self.name_field("tree-field", &self.tree_input, 12.5, "Name", |this, window, cx| this.close_file_prompt(window, cx), cx).into_any_element());
+        let pad = |depth: usize| px(8. + 12. * (depth + 1) as f32);
+        let chevron = |open: bool| Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(10.)).text_color(theme.muted_foreground);
+        // The row a name is typed in: the row's own shape, with the
+        // field where the name stands. Its clicks are its own.
+        let edit_row = |depth: usize, dir: bool, open: bool, field: AnyElement| {
+            h_flex()
+                .id("tree-edit")
+                .h(TREE_ROW_H)
+                .flex_shrink_0()
+                .pl(pad(depth))
+                .pr(px(8.))
+                .gap(px(5.))
+                .items_center()
+                .on_click(|_, window, cx| swallow_click(window, cx))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .child(div().w(px(10.)).flex_shrink_0().flex().justify_center().when(dir, |d| d.child(chevron(open))))
+                .child(img(crate::file_icons::path(typed.trim(), dir, open, dark)).size(px(16.)).flex_shrink_0())
+                .child(field)
+        };
         // Git's word on the folder; asked for at once when there is none
         // for it yet, so the colours do not wait for the clock.
         let status = self.tree.git.as_ref().filter(|(of, _)| Some(of) == root.as_ref()).map(|(_, st)| st.clone());
@@ -3487,13 +3861,79 @@ impl Workbench {
         }
         let picked = self.tree.picked.clone();
         let marked = self.tree.marked.clone();
-        let mut list = v_flex().w_full();
+        // What came and what went since the last draw, each in motion.
+        if let Some(r) = root.as_ref().filter(|_| exists) {
+            if self.tree.seen_now(r, &rows) {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(TREE_ANIM + Duration::from_millis(20)).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        }
+        let born: HashSet<PathBuf> = self.tree.born.keys().cloned().collect();
+        let mut ghosts: HashMap<Option<PathBuf>, Vec<Seen>> = HashMap::new();
+        for ghost in &self.tree.gone {
+            ghosts.entry(ghost.after.clone()).or_default().push(ghost.row.clone());
+        }
+        // The rows gone from under `key`, each as it was, shrinking.
+        let gone_under = |ghosts: &mut HashMap<Option<PathBuf>, Vec<Seen>>, key: Option<&PathBuf>| -> Vec<AnyElement> {
+            ghosts
+                .remove(&key.cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(path, node, depth, open)| {
+                    let row = h_flex().h(TREE_ROW_H).flex_shrink_0().pl(pad(depth)).pr(px(8.)).gap(px(5.)).items_center().children(node.map(|node| {
+                        let tint = status.as_ref().and_then(|st| st.mark(&node.path, node.dir)).map(|m| git_color(m.state, dark));
+                        [
+                            div().w(px(10.)).flex_shrink_0().flex().justify_center().when(node.dir, |d| d.child(chevron(open))).into_any_element(),
+                            img(crate::file_icons::path(&node.name, node.dir, open, dark)).size(px(16.)).flex_shrink_0().into_any_element(),
+                            div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(tint.unwrap_or(theme.foreground)).child(node.name.clone()).into_any_element(),
+                        ]
+                    }).into_iter().flatten());
+                    div()
+                        .overflow_hidden()
+                        .flex_shrink_0()
+                        .child(row)
+                        .with_animation(ElementId::Name(format!("tree-out-{}", path.display()).into()), Animation::new(TREE_ANIM).with_easing(ease_out_quint()), |d, t| d.h(TREE_ROW_H * (1. - t)).opacity(1. - t))
+                        .into_any_element()
+                })
+                .collect()
+        };
+        // A row goes in the list: growing when it has just come, and
+        // with what has just gone from under it after it.
+        let put = |list: Div, ghosts: &mut HashMap<Option<PathBuf>, Vec<Seen>>, key: Option<PathBuf>, row: AnyElement| -> Div {
+            let row = match &key {
+                Some(path) if born.contains(path) => div()
+                    .overflow_hidden()
+                    .flex_shrink_0()
+                    .child(row)
+                    .with_animation(ElementId::Name(format!("tree-in-{}", path.display()).into()), Animation::new(TREE_ANIM).with_easing(ease_out_quint()), |d, t| d.h(TREE_ROW_H * t).opacity(t))
+                    .into_any_element(),
+                _ => row,
+            };
+            let list = list.child(row);
+            match &key {
+                Some(path) => list.children(gone_under(ghosts, Some(path))),
+                None => list,
+            }
+        };
+        let mut list = v_flex().w_full().children(gone_under(&mut ghosts, None));
         // Which rows are lit, known before any is drawn: rows lit one
         // under another are one block, round at its two ends alone.
         let lit: Vec<bool> = rows.iter().map(|row| matches!(row, Row::Node(node, _, _) if picked.as_ref() == Some(&node.path) || marked.contains(&node.path))).collect();
         for (ix, row) in rows.into_iter().enumerate() {
-            let pad = |depth: usize| px(8. + 12. * depth as f32);
             match row {
+                Row::Edit(depth, dir) => {
+                    if let Some(field) = field.take() {
+                        list = put(list, &mut ghosts, Some(PathBuf::from(TREE_EDIT_KEY)), edit_row(depth, dir, false, field).into_any_element());
+                    }
+                }
+                Row::Node(node, depth, open) if matches!(&prompt, Some(FilePrompt::Rename(p)) if *p == node.path) => {
+                    if let Some(field) = field.take() {
+                        list = put(list, &mut ghosts, Some(node.path.clone()), edit_row(depth, node.dir, open, field).into_any_element());
+                    }
+                }
                 Row::More(n, depth) => {
                     list = list.child(h_flex().h(TREE_ROW_H).flex_shrink_0().pl(pad(depth) + px(15.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("{n} more")));
                 }
@@ -3512,7 +3952,10 @@ impl Workbench {
                     });
                     let (click, menu) = (node.clone(), node.clone());
                     let icon = img(crate::file_icons::path(&node.name, node.dir, open, dark)).size(px(16.)).flex_shrink_0();
-                    list = list.child(
+                    list = put(
+                        list,
+                        &mut ghosts,
+                        Some(node.path.clone()),
                         h_flex()
                             .id(("tree-row", ix))
                             .h(TREE_ROW_H)
@@ -3563,10 +4006,11 @@ impl Workbench {
                                     this.file_menu(Some(&menu), ev.position, cx)
                                 }),
                             )
-                            .child(div().w(px(10.)).flex_shrink_0().flex().justify_center().when(node.dir, |d| d.child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(10.)).text_color(theme.muted_foreground))))
+                            .child(div().w(px(10.)).flex_shrink_0().flex().justify_center().when(node.dir, |d| d.child(chevron(open))))
                             .child(icon)
                             .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(ink).child(node.name.clone()))
-                            .children(badge),
+                            .children(badge)
+                            .into_any_element(),
                     );
                 }
             }
@@ -3584,7 +4028,7 @@ impl Workbench {
                         .overflow_y_scroll()
                         .track_scroll(&self.files_scroll)
                         .px(px(6.))
-                        .py(px(6.))
+                        .pb(px(6.))
                         .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.file_menu(None, ev.position, cx)))
                         // A press anywhere in the panel may become a
                         // rectangle dragged over the rows (`tree_band_to`).
@@ -3630,7 +4074,63 @@ impl Workbench {
         } else {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("The session's folder is gone.").into_any_element()
         };
-        let el = v_flex().track_focus(&self.tree_focus).on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.tree_key(e, cx))).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).child(body);
+        // The session's folder heads the tree, open to begin with: a row
+        // that does not scroll away, with what is asked of the whole
+        // tree at its right. A click opens or closes it and chooses
+        // nothing, so New File goes in the folder itself.
+        let root_row = root.as_ref().filter(|_| exists).map(|r| {
+            let (open, toggled) = (!self.tree.shut.contains(r), r.clone());
+            let name = r.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| r.to_string_lossy().to_string());
+            let tool = |id: &'static str, icon: &'static str, tip: &'static str| Button::new(id).ghost().small().icon(Icon::default().path(icon)).tooltip(tip);
+            h_flex()
+                .id("tree-root")
+                .h(TREE_ROW_H)
+                .flex_shrink_0()
+                .mx(px(6.))
+                .mt(px(6.))
+                .pl(px(8.))
+                .pr(px(2.))
+                .gap(px(5.))
+                .items_center()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    window.focus(&this.tree_focus, cx);
+                    this.tree.marked.clear();
+                    this.tree.picked = None;
+                    if !this.tree.shut.remove(&toggled) {
+                        this.tree.shut.insert(toggled.clone());
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.file_menu(None, ev.position, cx)
+                    }),
+                )
+                .child(div().w(px(10.)).flex_shrink_0().flex().justify_center().child(chevron(open)))
+                .child(img(crate::file_icons::path(&name, true, open, dark)).size(px(16.)).flex_shrink_0())
+                .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(name))
+                .child(tool("tree-new-file", "icons/file-plus.svg", "New File").on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.tree_new(false, window, cx);
+                })))
+                .child(tool("tree-new-folder", "icons/folder-plus.svg", "New Folder").on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.tree_new(true, window, cx);
+                })))
+                .child(tool("tree-collapse", "icons/copy-minus.svg", "Collapse All Folders").on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.tree_collapse(cx);
+                })))
+        });
+        let el = v_flex().track_focus(&self.tree_focus).on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+            if !this.tree_rename_key(e, window, cx) {
+                this.tree_key(e, cx);
+            }
+        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(root_row).child(body);
         self.panel_in(true, el)
     }
 
@@ -4048,6 +4548,7 @@ impl Workbench {
                 .child(
                     v_flex()
                         .id("branch-ask")
+                        .occlude()
                         .on_click(|_, window, cx| swallow_click(window, cx))
                         .w(px(440.))
                         .max_w(gpui::relative(0.94))
@@ -4128,6 +4629,7 @@ impl Workbench {
             .child(
                 v_flex()
                     .id("branch-ask")
+                    .occlude()
                     .on_click(|_, window, cx| swallow_click(window, cx))
                     .w(px(440.))
                     .max_w(gpui::relative(0.94))
@@ -4637,6 +5139,7 @@ impl Workbench {
             .child(
                 v_flex()
                     .id("changes-sheet")
+                    .occlude()
                     .on_click(|_, window, cx| swallow_click(window, cx))
                     .w(gpui::relative(0.96))
                     .h(gpui::relative(0.92))
@@ -4753,6 +5256,7 @@ impl Workbench {
         let room = (f32::from(w) - beside - 2. * pad_x - 1.).max(120.);
         let quiet = |words: String| div().text_size(px(12.)).text_color(theme.muted_foreground).child(words);
         let mut wide = false;
+        let mut heads: Option<(AnyElement, AnyElement)> = None;
         let markdown = matches!(v.body, FileBody::Markdown(_));
         let pdf = matches!(v.body, FileBody::Pages(Some(_)));
         let body: AnyElement = match &v.body {
@@ -4869,12 +5373,14 @@ impl Workbench {
             }
             FileBody::Table(rows, widths, more) => {
                 wide = true;
+                heads = Some(self.render_table_heads(v, rows.len(), widths, cx));
                 self.render_table(v, rows, widths, *more, cx)
             }
             FileBody::Doc(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
             FileBody::Sheets(sheets) => match sheets.get(self.sheet_of(&v.path, sheets.len())) {
                 Some((_, rows, widths, more)) if !rows.is_empty() => {
                     wide = true;
+                    heads = Some(self.render_table_heads(v, rows.len(), widths, cx));
                     self.render_table(v, rows, widths, *more, cx)
                 }
                 _ => div().p(px(18.)).child(quiet("This sheet is empty.".into())).into_any_element(),
@@ -5146,6 +5652,9 @@ impl Workbench {
             // A table's heads stay put: they are drawn where the scroll is.
             .when(grid, |d| d.on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.pdf_mouse_move(e, cx)))
+            // A drag over a table's cells ends where the button is let go.
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.table_drag = false))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.table_drag = false))
             // The page in view is said in the head and marked in the list.
             .when(pdf, |d| d.on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())))
             .on_click(|_, window, cx| swallow_click(window, cx))
@@ -5216,7 +5725,7 @@ impl Workbench {
                                 .justify_center()
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(hover_bg))
-                                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if dirty { "Close (esc), not saved" } else { "Close (esc)" }).build(window, cx))
+                                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if dirty { "Close (⌘W), not saved" } else { "Close (⌘W)" }).build(window, cx))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     swallow_click(window, cx);
                                     this.close_file_view(cx)
@@ -5248,7 +5757,13 @@ impl Workbench {
                             // column's child is, it was as wide as the
                             // pane to the scroller and never scrolled
                             // sideways.
-                            None => d.child(if wide { scroller.items_start().overflow_scroll().child(body) } else { scroller.overflow_y_scroll().child(body) }).vertical_scrollbar(&self.file_view_scroll),
+                            None => match heads {
+                                // A grid: the letters over the cells'
+                                // scroller and the numbers at its left,
+                                // outside it (`render_table_heads`).
+                                Some((top, side)) => d.child(top).child(h_flex().flex_1().min_h_0().items_stretch().child(side).child(v_flex().relative().flex_1().min_w_0().min_h_0().child(scroller.items_start().overflow_scroll().child(body)).vertical_scrollbar(&self.file_view_scroll))),
+                                None => d.child(if wide { scroller.items_start().overflow_scroll().child(body) } else { scroller.overflow_y_scroll().child(body) }).vertical_scrollbar(&self.file_view_scroll),
+                            },
                         }),
                 ),
             )
@@ -5659,6 +6174,22 @@ impl Workbench {
             }
             "discard:yes" => self.discard_now(cx),
             "treefocus" => self.pending_tree_focus = true,
+            "treecollapse" => self.tree_collapse(cx),
+            // The name's field in the tree: treenew:file|folder|rename:<path>
+            // opens it, and :<words> after the path types them.
+            t if t.starts_with("treenew:") => {
+                let mut parts = t["treenew:".len()..].splitn(3, ':');
+                let what = match parts.next() {
+                    Some("folder") => FileDo::NewFolder,
+                    Some("rename") => FileDo::Rename,
+                    _ => FileDo::NewFile,
+                };
+                let path = parts.next().filter(|p| !p.is_empty() && *p != ".").and_then(under).or_else(|| self.files_root());
+                if let Some(path) = path {
+                    self.pending_tree_do = Some((what, path, parts.next().map(str::to_string)));
+                }
+            }
+            "treenew" => self.pending_tree_do = None,
             "pasteundo" => self.ask_paste_undo(cx),
             "pasteundo:yes" => self.paste_undo_now(cx),
             t if t.starts_with("discard:") => {
@@ -5691,7 +6222,7 @@ impl Workbench {
             }
             "file:menu" => {
                 let at = self.file_view_scroll.bounds().origin + point(px(40.), px(40.));
-                self.file_pane_menu(Vec::new(), at, cx);
+                self.file_pane_menu(vec![("Copy", MenuDo::Copy(String::new()))], at, cx);
             }
             // Fold the section that line (from 1) of the file's editor heads.
             t if t.starts_with("file:fold:") => {

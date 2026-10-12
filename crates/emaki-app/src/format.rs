@@ -78,8 +78,8 @@ pub fn stamp(ts: &str) -> String {
     dt.format(form).to_string()
 }
 
-/// Which group of a list by recency a time falls in: the sidebar and the
-/// sessions page head their rows with these.
+/// Which group of a list by recency a time falls in: the sessions page
+/// heads its rows with these.
 pub fn bucket(mtime: f64) -> &'static str {
     let today = Local::now().date_naive();
     let Some(dt) = DateTime::<Utc>::from_timestamp(mtime as i64, 0).map(|d| d.with_timezone(&Local)) else { return "Earlier" };

@@ -474,6 +474,7 @@ impl Workbench {
 
         let card = v_flex()
             .id("branch-new")
+            .occlude()
             .on_click(|_, window, cx| swallow_click(window, cx))
             .w(px(440.))
             .max_w(gpui::relative(0.94))
@@ -654,6 +655,7 @@ impl Workbench {
         let entity = cx.entity().downgrade();
         let card = v_flex()
             .id("git-gate")
+            .occlude()
             .on_click(|_, window, cx| swallow_click(window, cx))
             .w(px(480.))
             .max_w(gpui::relative(0.94))

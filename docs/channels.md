@@ -318,8 +318,9 @@ own terminal joined to its driver (`Hub::agent_screen`; Codex above).
 It shows one of two things, one at a time, each with a button at
 the strip's right end (`term_buttons`, the same two-segment control as
 the files and the outline at the left: the shell's first, then the
-agent's) and a key (⌘⇧T for the shell, ⌘⇧A for the agent; Ctrl off a
-Mac). A press on the other swaps the side and slides the plate, a
+agent's) and a key (⌘⇧S for the shell, ⌘⇧A for the agent; Ctrl off a
+Mac). The window calls them the Shell Terminal and the Agent Terminal, on
+the buttons and in the View menu. A press on the other swaps the side and slides the plate, a
 press on the one showing puts the panel away (`toggle_term`, `term_go`).
 `side_term_anim` keeps the side before the press and the one after, and
 the sides come, go and take each other's place as the two panels at the

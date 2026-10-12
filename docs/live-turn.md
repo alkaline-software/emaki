@@ -12,6 +12,14 @@ question, dialog, shells and permission cards), the screen readers in
   leaves no row, and the transcript read as working for ever.
 - Registry `idle` from before the rows the state was read from settles
   nothing: the registry has not caught up with a turn that just began.
+- Rows older than the process behind a session are not a turn of that
+  process. A Claude Code killed part way through a turn leaves a tail that
+  reads as working, and the hidden terminal started on the session at the
+  next launch is behind it some seconds before its record says idle: the
+  row said "Claude is working…" with a clock of hours. `settle_stopped`
+  settles on the process's start too (the record's `startedAt`, or the
+  terminal's own before there is a record). A record that says `busy` is
+  left alone: its turn's rows may not be written yet.
 - Hand a prompt back only when the agent wrote or ran nothing, and never
   over something already typed. Once the agent has started it has the
   message, and the stop only stops.
