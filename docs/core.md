@@ -213,10 +213,15 @@ second.
 - The call: `claude -p --model claude-haiku-4-5` with a fixed system
   prompt, no settings, no MCP servers, no tools.
 - Whose model answers (`explain::helper`), for the explanations and the
-  outline's labels alike: Claude Code's Haiku whenever Claude Code is
-  installed, with Codex or without, and Codex's light model for someone
-  who has Codex alone. `run_child` is the one place that chooses, so a
-  caller builds Claude Code's command line and nothing else.
+  outline's labels alike: the session's own agent's. Claude Code's
+  Haiku for a Claude Code session, Codex's light model for a Codex
+  one, and nobody when that agent is not installed. The two are never
+  crossed: with both installed Haiku once answered for Codex sessions
+  too, which spent one account on the other's work. So a caller says
+  which agent the session is (`Explainer::request`,
+  `outline::summarize`), and `run_child` is the one place that
+  chooses; the command line a caller builds is Claude Code's either
+  way.
 - The Codex call (`codex_argv`): `codex exec`, ephemeral so no session
   is kept, without the person's config or rules, in the read-only
   sandbox, at low effort, with the system prompt and the message as one
@@ -248,4 +253,5 @@ second.
   transcript (the five largest by default).
 - `EMAKI_TIMING=1` makes the app print load and hand-over time per open.
 - `emaki-core explain <command>` makes one real model call from a terminal.
-  `EMAKI_HELPER=codex` asks Codex whatever is installed.
+  It asks as a Claude Code session would; `EMAKI_HELPER=codex` asks as
+  a Codex one.

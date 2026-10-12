@@ -5,6 +5,20 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.2
+
+- Word documents open as pages and can be written in: type, select, style, format, undo and save with ⌘S, on WordCraft's engine. Try it on a copy first: a save rewrites the file.
+- PowerPoint slides are drawn as they look, Excel cells show their number formats, and PDF pages are sharp at any width.
+- HTML files show in the system's web view, scripts and all.
+- Parquet files open as a table, with each column's type and the file's row count.
+- The files tree works like a file manager: drag files in from Finder, drag rows to move them, cut, copy, duplicate, remove with ⌘⌫, and take it all back with ⌘Z and ⌘⇧Z.
+- Files, folders and sessions are renamed in place, and tables keep their heads in view and select blocks of cells.
+- A file can take over the conversation's room with the enlarge button, and files open as they read rather than as source.
+- Explanations and outline labels come from the session's own agent: Haiku for Claude Code, Codex's light model for Codex.
+- ⌘↩ or the send button with nothing typed starts a session on the home page, and each agent's page links to its sessions.
+- What is typed in the composer survives closing the window, and Settings has an About section.
+- Fixes: the keyboard is no longer lost after a file closes, ⌘W closes a file or a tab before the window, and pages no longer blink when the pane is resized.
+
 ## v0.2.1
 
 - A new look: the sidebar and a thin frame around the content in graphite, the page near white, and in the dark appearance a darker page in a lighter frame.

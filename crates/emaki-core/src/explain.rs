@@ -266,18 +266,16 @@ pub enum Helper {
     Codex,
 }
 
-/// Claude Code whenever it is installed, so its Haiku is what answers
-/// for anyone who has it, with Codex or without; Codex for someone who
-/// has Codex alone; nobody when neither is here. `EMAKI_HELPER=codex`
-/// asks Codex whatever is installed, for a look at that path.
-pub fn helper() -> Option<Helper> {
-    if std::env::var("EMAKI_HELPER").is_ok_and(|v| v == "codex") {
-        return crate::codex::codex_binary().map(|_| Helper::Codex);
+/// A session's own agent, when it is installed here: Claude Code's
+/// Haiku for a Claude Code session, Codex's light model for a Codex
+/// one. Never the other's: someone who works in one agent is not
+/// billed, or shown a sign-in, by the one they did not choose, and
+/// nobody answers when the session's own is not here.
+pub fn helper(agent: crate::model::AgentId) -> Option<Helper> {
+    match agent {
+        crate::model::AgentId::Codex => crate::codex::codex_binary().map(|_| Helper::Codex),
+        _ => driver::claude_binary().map(|_| Helper::Claude),
     }
-    if driver::claude_binary().is_some() {
-        return Some(Helper::Claude);
-    }
-    crate::codex::codex_binary().map(|_| Helper::Codex)
 }
 
 /// Codex's light model, by what Codex says of its own: the first it
@@ -350,10 +348,9 @@ fn run_codex(argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option
 /// child is isolated as every explainer child is: our scratch folder, no
 /// `CLAUDE*` variable of a parent session, `EMAKI_DISABLE` set, and
 /// whatever `env` adds.
-pub fn run_child(argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
-    // Claude Code's small model when Claude Code is here, and Codex's
-    // only for someone who has Codex alone (`helper`).
-    let claude = match helper()? {
+pub fn run_child(agent: crate::model::AgentId, argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
+    // The small model of the session's own agent (`helper`).
+    let claude = match helper(agent)? {
         Helper::Claude => driver::claude_binary()?,
         Helper::Codex => return run_codex(argv, env, timeout),
     };
@@ -468,7 +465,7 @@ impl Explainer {
     /// at once through `on_ready`; otherwise a thread asks the model, unless
     /// the call is cheap and `force` is off. One request per distinct
     /// arguments is in flight at a time.
-    pub fn request(self: &Arc<Self>, call_id: &str, tool_name: &str, input: &Map<String, Value>, force: bool) {
+    pub fn request(self: &Arc<Self>, agent: crate::model::AgentId, call_id: &str, tool_name: &str, input: &Map<String, Value>, force: bool) {
         if !force && !self.needs_model(tool_name, input) {
             return;
         }
@@ -496,7 +493,7 @@ impl Explainer {
         thread::Builder::new()
             .name("emaki-explain".into())
             .spawn(move || {
-                let text = me.ask_model(&tool_name, &input);
+                let text = me.ask_model(agent, &tool_name, &input);
                 me.inflight.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
                 if text.is_empty() {
                     (me.on_ready)(&call_id, "");
@@ -533,10 +530,10 @@ impl Explainer {
         prune_transcripts(Duration::from_secs(3600));
     }
 
-    fn ask_model(&self, tool_name: &str, input: &Map<String, Value>) -> String {
+    fn ask_model(&self, agent: crate::model::AgentId, tool_name: &str, input: &Map<String, Value>) -> String {
         let cfg = self.cfg();
         let argv = build_argv(&cfg, tool_name, input);
-        run_child(&argv, &[], Duration::from_secs(cfg.timeout_s.max(1))).map(|out| clean(&out)).unwrap_or_default()
+        run_child(agent, &argv, &[], Duration::from_secs(cfg.timeout_s.max(1))).map(|out| clean(&out)).unwrap_or_default()
     }
 
     /// Fill in every tool call in a session that has a cached explanation.

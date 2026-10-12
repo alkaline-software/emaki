@@ -139,19 +139,19 @@ pub fn parse_summaries(out: &str, n: usize) -> Vec<Option<String>> {
 /// Ask a small model for a line on each of those messages, `BATCH` to a
 /// child and the children side by side; what did not come back is asked
 /// for once more. Blocking; a message nothing came back for is `None`.
-pub fn summarize(cfg: &crate::config::Explain, prompts: &[String]) -> Vec<Option<String>> {
-    let mut out = ask(cfg, prompts);
+pub fn summarize(cfg: &crate::config::Explain, agent: crate::model::AgentId, prompts: &[String]) -> Vec<Option<String>> {
+    let mut out = ask(cfg, agent, prompts);
     let missing: Vec<usize> = (0..out.len()).filter(|i| out[*i].is_none()).collect();
     if !missing.is_empty() {
         let again: Vec<String> = missing.iter().map(|i| prompts[*i].clone()).collect();
-        for (i, line) in missing.into_iter().zip(ask(cfg, &again)) {
+        for (i, line) in missing.into_iter().zip(ask(cfg, agent, &again)) {
             out[i] = line;
         }
     }
     out
 }
 
-fn ask(cfg: &crate::config::Explain, prompts: &[String]) -> Vec<Option<String>> {
+fn ask(cfg: &crate::config::Explain, agent: crate::model::AgentId, prompts: &[String]) -> Vec<Option<String>> {
     let timeout = std::time::Duration::from_secs(cfg.timeout_s.max(30));
     let mut out = vec![None; prompts.len()];
     std::thread::scope(|scope| {
@@ -160,7 +160,7 @@ fn ask(cfg: &crate::config::Explain, prompts: &[String]) -> Vec<Option<String>> 
             .map(|chunk| {
                 scope.spawn(move || {
                     let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
-                    let said = crate::explain::run_child(&summary_argv(&cfg.model, &refs), SUMMARY_ENV, timeout).unwrap_or_default();
+                    let said = crate::explain::run_child(agent, &summary_argv(&cfg.model, &refs), SUMMARY_ENV, timeout).unwrap_or_default();
                     parse_summaries(&said, chunk.len())
                 })
             })

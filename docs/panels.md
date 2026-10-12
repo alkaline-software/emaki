@@ -504,20 +504,55 @@ far from the tree.
   a Word, PowerPoint or Excel file as `emaki_core::office` reads it
   (below). Anything else, or a file that cannot be read, is a line
   saying so and "Open with default app".
-- An Office file is shown and nothing more. It has no source, so no
-  second way to show and nothing to save. The old binary `.doc` and
-  `.ppt` are not read: no small reader for them was found, and nothing
-  is asked of another program.
-  - A `.docx` is its pages as pictures, laid out and drawn by WordCraft
-    (`docx_pages`), and a `.pptx` its slides, drawn by DeckCraft
-    (`pptx_pages`). Both are a PDF to the pane (`FileBody::Pages`,
+- A Word document is written in (`word.rs`, `FileBody::Word`,
+  `Workbench::word`). The pane is WordCraft's engine with a front of
+  ours: its `Session` holds the document, the selection and the undo
+  history, and every change is one of its commands run by id
+  (`WordPane::run`), the same commands WordCraft's own window runs.
+  Its layout says where the caret and the selection are, and its
+  renderer draws a page.
+  - It opens `.docx`, `.docm`, `.rtf` and `.odt` to write in, and the
+    binary `.doc` and the templates to read (`word::opens`): the engine
+    does not write those, so a change in one is refused and said.
+  - A page is a picture drawn on the main thread, only when it is in or
+    near view and the document or the width has changed
+    (`draw_pages`). It is given to the toolkit as pixels
+    (`RenderImage`), not as a PNG: a PNG is read over later frames, and
+    the page was blank until it was. The picture it replaces is let go
+    with `drop_image`, or the toolkit keeps it. While the pane's width
+    is moving the picture there is stretched, and drawn again when the
+    width has stood still.
+  - The caret and the selection are drawn over the picture and are not
+    in it, so moving the caret draws no page.
+  - Text comes through the toolkit's input handler
+    (`EntityInputHandler`), which is what an input method needs. What
+    it is still composing stands in the document; before each change
+    of it the document goes back to what it was (`EditSnapshot`), so
+    the composing letters leave no step to undo.
+  - A key is the engine's own key for a command (`KeyMap`), with two
+    exceptions. On a Mac ⌘ and ⌥ with an arrow move as a Mac moves,
+    since the engine's keys are Windows'. And ⌘B, ⌘L, ⌘E and ⌘R are
+    bound in the pane's own context (`WORD_CONTEXT`), since the window
+    binds them: a binding in a deeper context wins, and a key listener
+    never runs before a binding. ⌘S is the window's and saves it
+    (`save_word`).
+  - The strip over the pages is the Home tab's most used: undo, the
+    style, the size, bold to strikethrough, alignment, lists, indent.
+    The rest of the engine's commands have no button; those with a key
+    run by it. A command that opens one of WordCraft's dialogs is
+    passed over: there is no dialog here.
+  - Saving writes the document as WordCraft writes it. What it does not
+    model in a file made by Word may not come back out.
+  - With changes not saved it is in `unsaved`, so closing, quitting and
+    showing another file ask as they do for the editor. The file
+    changing on the disk reads it again only when nothing is unsaved.
+- A PowerPoint or Excel file is shown and nothing more. It has no
+  source, so no second way to show and nothing to save. The binary
+  `.ppt` is not read.
+  - A `.pptx` is its slides as pictures, drawn by DeckCraft
+    (`pptx_pages`). It is a PDF to the pane (`FileBody::Pages`,
     `drawn_pages`): the same pages, the small ones beside them, the
-    same fit to the pane's pixels. A document's words are kept as a
-    PDF's are, a letter where the page draws it, so they are selected,
-    found and copied the same way; a line whose letters and clusters do
-    not count the same has its letters spread evenly along it. A
-    slide's words are not kept yet. A font the machine lacks is another
-    face, so lines can break where Word does not break them.
+    same fit to the pane's pixels. A slide's words are not kept yet.
   - An `.xlsx` or `.xlsm` is its sheets in the grid (`FileBody::Sheets`),
     their names in a row over it when there are several (`sheet_at`),
     each cell as the sheet shows it: its number format applied, by
@@ -526,6 +561,12 @@ far from the tree.
     refuses, as values. Not shown: bold, fills, widths, merged cells.
   - `office::read` still reads a `.docx` and a `.pptx` as markdown; the
     pane no longer asks it to.
+- A Parquet file is a table (`emaki_core::parquet_file`, Apache's
+  reader by rows, without Arrow): its columns' names as the first row,
+  as a comma-separated file has them, and its first `TABLE_ROWS` rows.
+  What each column holds is over it, where the letters are for other
+  tables (`FileView::kinds`), and the row count under the grid is the
+  file's own, from its foot (`rows_all`). Read only.
 - The grid (`render_table`) has columns named by letter and rows by
   number, both staying in view (`render_table_heads`). The heads are
   not in the scroller: the letters are a strip over it and the numbers
@@ -796,7 +837,10 @@ far from the tree.
   draws. A page is drawn as wide in pixels as the pane shows it, and
   drawn again when that width has changed and stood still a moment
   (`pdf_fit`, `pdf_want`), the old pictures showing until the new are
-  in. At one fixed width a page was scaled on its way to the screen and
+  in. In is not when they are made: the toolkit reads a PNG over the
+  frames after, and a page is blank until its own is read. So the old
+  pictures stay under the new for a moment (`pdf_under`), and are then
+  let go with `remove_asset`, or the toolkit keeps them. At one fixed width a page was scaled on its way to the screen and
   its letters were soft. PdfCraft was looked at for this and draws its
   pages with hayro too.
 - HTML as it reads is the system's own web view (WKWebView, WebView2)

@@ -851,7 +851,7 @@ impl Hub {
                     // exists: reading it while you decide is the point.
                     if let driver::Event::Permission(p) = &ev {
                         let id = if p.tool_use_id.is_empty() { p.request_id.clone() } else { p.tool_use_id.clone() };
-                        hub2.explainer.request(&id, &p.tool_name, &p.input, false);
+                        hub2.explainer.request(agent, &id, &p.tool_name, &p.input, false);
                     }
                     hub2.send(HubEvent::Driver { session_id: sid.clone(), event: ev });
                     if exit {

@@ -1562,6 +1562,12 @@ pub struct Workbench {
     pub(crate) pdf_want: Cell<f32>,
     pub(crate) pdf_fit_at: Option<(f32, Instant)>,
     pub(crate) pdf_fitting: bool,
+    /// The Word document in the file's pane, written in there
+    /// (`word.rs`).
+    pub(crate) word: Option<Entity<crate::word::WordPane>>,
+    /// The pages a file showed before it was drawn again at a new
+    /// width, and since when: kept under the new for a moment.
+    pub(crate) pdf_under: Option<(std::sync::Arc<crate::panels::PdfDoc>, Instant)>,
     pub(crate) file_big: bool,
     pub(crate) file_big_at: Option<Instant>,
     pub(crate) file_gone: Option<crate::panels::FileView>,
@@ -1637,6 +1643,9 @@ pub struct Workbench {
     pending_win_w: Option<f32>,
     /// `EMAKI_GO=treefocus`: the keyboard to the files panel, at the next draw.
     pub(crate) pending_tree_focus: bool,
+    /// A file's pane has just been closed: the keys go to the files
+    /// tree, where its row is still the chosen one.
+    pub(crate) tree_focus_back: bool,
     /// `EMAKI_GO=newin:<folder>`: the plus on that folder, at the next draw.
     pending_new_in: Option<String>,
     /// `EMAKI_GO=file:ask:<answer>`, likewise.
@@ -3299,6 +3308,8 @@ impl Workbench {
             pdf_want: Cell::new(0.),
             pdf_fit_at: None,
             pdf_fitting: false,
+            word: None,
+            pdf_under: None,
             file_big: false,
             file_big_at: None,
             file_gone: None,
@@ -3331,6 +3342,7 @@ impl Workbench {
             pending_cell: None,
             pending_win_w: None,
             pending_tree_focus: false,
+            tree_focus_back: false,
             pending_new_in: None,
             pending_answer: None,
             pdf_side: match ui.pdf_side.as_deref() {
@@ -3788,7 +3800,7 @@ impl Workbench {
                 self.explanations.insert(call_id.to_string(), cached);
             } else {
                 self.explaining.insert(call_id.to_string());
-                self.hub.explainer.request(call_id, name, input, true);
+                self.hub.explainer.request(d.session.agent, call_id, name, input, true);
             }
         }
         cx.notify();
@@ -3985,7 +3997,7 @@ impl Workbench {
                     let known = !call.explanation.is_empty() || self.explanations.contains_key(&call.id) || self.explaining.contains(&call.id);
                     if !known && self.hub.explainer.needs_model(&call.name, &call.input) {
                         self.explaining.insert(call.id.clone());
-                        self.hub.explainer.request(&call.id, &call.name, &call.input, false);
+                        self.hub.explainer.request(session.agent, &call.id, &call.name, &call.input, false);
                     }
                 }
             }
@@ -14475,6 +14487,13 @@ impl Render for Workbench {
             }
         }
         if std::mem::take(&mut self.pending_tree_focus) {
+            window.focus(&self.tree_focus, cx);
+        }
+        // A file closed with the tree beside it: its row is still lit
+        // there, so the tree's keys (⌘⌫, ⌘C, the arrows) act on it. Not
+        // when the composer is being typed in: closing a file by its
+        // button does not take the keys from a message.
+        if std::mem::take(&mut self.tree_focus_back) && self.files_on && !self.composer.read(cx).focus_handle(cx).is_focused(window) {
             window.focus(&self.tree_focus, cx);
         }
         // The files panel put away with the keyboard in it: the focus

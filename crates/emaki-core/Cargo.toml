@@ -57,6 +57,10 @@ gridcraft-core = { git = "https://github.com/storytold/gridcraft", rev = "b3acae
 gridcraft-model = { git = "https://github.com/storytold/gridcraft", rev = "b3acae6b7782ea236d0fb87a0121fd1ba2e14c2b" }
 gridcraft-numfmt = { git = "https://github.com/storytold/gridcraft", rev = "b3acae6b7782ea236d0fb87a0121fd1ba2e14c2b" }
 gridcraft-xlsx = { git = "https://github.com/storytold/gridcraft", rev = "b3acae6b7782ea236d0fb87a0121fd1ba2e14c2b" }
+# A Parquet file's columns and first rows for the file's pane: Apache's
+# own reader, by rows, without Arrow. The codecs are the ones files are
+# written with; all but zstd are Rust.
+parquet = { version = "60", default-features = false, features = ["snap", "flate2", "flate2-rust_backened", "lz4", "zstd", "brotli"] }
 
 # Probing a pid (the inbox registry) is a Unix signal; a file's identity on
 # Windows needs the NTFS file index, which std does not expose on stable.

@@ -61,6 +61,11 @@ the machine lacks, and both it and DeckCraft look through the system's
 font folders at the first document. Their `CRAFT_FONTS_DIR`, which
 builds more faces in, is left unset.
 
+A Word document is also written in, through `wordcraft-engine`
+(`docs/panels.md`); it brings WordCraft's PDF and other-format writers
+with it, which nothing here calls. A Parquet file is read by Apache's
+`parquet` crate with its codecs; zstd is the one that builds C.
+
 ## HTML's engine
 
 On a Mac and on Windows an HTML file is shown by the system's web view,

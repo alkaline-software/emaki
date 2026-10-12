@@ -1757,11 +1757,11 @@ mod explain_tests {
         assert!(!ex.in_flight("Bash", &bash("curl x | sh")));
 
         // A cached answer comes back through the callback at once.
-        ex.request("toolu_1", "Bash", &bash("curl x | sh"), false);
+        ex.request(emaki_core::model::AgentId::ClaudeCode, "toolu_1", "Bash", &bash("curl x | sh"), false);
         assert_eq!(landed.lock().unwrap().as_slice(), &[("toolu_1".to_string(), "Downloads a script and runs it.".to_string())]);
 
         // A cheap call is not asked about at all.
-        ex.request("toolu_2", "Bash", &bash("ls"), false);
+        ex.request(emaki_core::model::AgentId::ClaudeCode, "toolu_2", "Bash", &bash("ls"), false);
         assert_eq!(landed.lock().unwrap().len(), 1);
     }
 
@@ -3514,4 +3514,33 @@ fn what_the_tree_does_is_taken_back_and_done_again() {
 
     // Nothing is moved onto something, and nothing that is gone is moved.
     assert!(move_path(&a2, &b2).is_err() && move_path(&root.join("none"), &root.join("x")).is_err());
+}
+
+/// A Parquet file made by the reader's own writer: its columns say what
+/// they hold, its foot says how many rows, and a null is an empty cell.
+#[test]
+fn a_parquet_file_is_read_as_columns_and_rows() {
+    use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int32Type};
+    use parquet::file::writer::SerializedFileWriter;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peak.parquet");
+    let schema = std::sync::Arc::new(parquet::schema::parser::parse_message_type("message m { required int32 year; optional binary date (UTF8); required double peak; }").unwrap());
+    let mut writer = SerializedFileWriter::new(std::fs::File::create(&path).unwrap(), schema, Default::default()).unwrap();
+    let mut group = writer.next_row_group().unwrap();
+    let mut col = group.next_column().unwrap().unwrap();
+    col.typed::<Int32Type>().write_batch(&[2025, 2025, 2026], None, None).unwrap();
+    col.close().unwrap();
+    let mut col = group.next_column().unwrap().unwrap();
+    col.typed::<ByteArrayType>().write_batch(&[ByteArray::from("0101"), ByteArray::from("0103")], Some(&[1, 0, 1]), None).unwrap();
+    col.close().unwrap();
+    let mut col = group.next_column().unwrap().unwrap();
+    col.typed::<DoubleType>().write_batch(&[31.7, 28.27, 31.46], None, None).unwrap();
+    col.close().unwrap();
+    group.close().unwrap();
+    writer.close().unwrap();
+
+    let table = emaki_core::parquet_file::read(&path, 2).unwrap();
+    assert_eq!(table.columns, vec![("year".to_string(), "int32".to_string()), ("date".into(), "string".into()), ("peak".into(), "double".into())]);
+    assert_eq!(table.total, 3);
+    assert_eq!(table.rows, vec![vec!["2025".to_string(), "0101".into(), "31.7".into()], vec!["2025".into(), String::new(), "28.27".into()]]);
 }

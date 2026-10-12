@@ -67,7 +67,7 @@ fn main() {
                 // What the window would ask a small model, and how long it takes.
                 let asked: Vec<String> = entries.iter().filter(|e| e.wants_summary()).map(|e| e.prompt.clone()).collect();
                 let began = std::time::Instant::now();
-                let lines = emaki_core::outline::summarize(&cfg.explain, &asked);
+                let lines = emaki_core::outline::summarize(&cfg.explain, session.agent, &asked);
                 let took = began.elapsed();
                 let mut lines = lines.into_iter();
                 for e in &entries {
@@ -281,7 +281,10 @@ fn main() {
                 let _ = tx.send(text.to_string());
             }));
             let cached = !ex.lookup("Bash", &input).is_empty();
-            ex.request("probe", "Bash", &input, true);
+            // As a Claude Code session would ask; `EMAKI_HELPER=codex`, as a
+            // Codex one.
+            let agent = if std::env::var("EMAKI_HELPER").is_ok_and(|v| v == "codex") { emaki_core::model::AgentId::Codex } else { emaki_core::model::AgentId::ClaudeCode };
+            ex.request(agent, "probe", "Bash", &input, true);
             match rx.recv_timeout(std::time::Duration::from_secs(cfg.explain.timeout_s + 5)) {
                 Ok(text) if !text.is_empty() => println!("{text}\n  ({})", if cached { "from the cache" } else { "from the model" }),
                 Ok(_) => println!("no explanation: the model gave nothing usable (is `claude` logged in?)"),

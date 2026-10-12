@@ -128,7 +128,7 @@ handed work on one of these files is told to read the doc too.
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
-| `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`; a table's cells in `files.rs` | `docs/panels.md` |
+| `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
@@ -164,6 +164,7 @@ crates/emaki-core/        everything without a window
   src/check.rs               the composer's writing: Harper's English, what counts as prose, the capital a sentence starts with
   src/git.rs                 what git says of a folder's files, as VS Code's explorer shows it
   src/files.rs               a folder's files for "@" in the composer: the list, the match, the tokens; a table's rows, and where a cell of one is written
+  src/parquet_file.rs        a Parquet file read for showing: its columns, its row count, its first rows
   src/office.rs              Word, PowerPoint and Excel files read for showing: a document or a deck as markdown, a workbook as sheets
   src/fsops.rs               what the files tree does to the disk, as moves to take back and do again; what is removed is held, not thrown away
   src/indent.rs              where a new line starts in the file's editor, by language, and what one step of indent is
@@ -183,6 +184,7 @@ crates/emaki-app/         the window
   src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions
   src/branches.rs            the list of branches and its remote: fetching, making a branch on its sheet, publishing one, the sign-in sheet
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets
+  src/word.rs                a Word document written in: WordCraft's engine with the pane's own pages, caret, keys and strip
   src/html_web.rs            an HTML file in the system's web view, set in the file's pane; hidden while the window draws over it
   src/html_shot.rs           the same file as a picture by Blitz, where no web view can be set: Linux
   src/term_panel.rs          the terminal at a conversation's right: a shell, and the agent's hidden terminal drawn whole

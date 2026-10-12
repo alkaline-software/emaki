@@ -404,6 +404,8 @@ impl Tree {
 /// large a PDF is read at all.
 const PDF_PAGES: usize = 40;
 /// A page is drawn as wide in pixels as the pane shows it, between these.
+/// How long the pages drawn before stay under the new ones.
+const PDF_UNDER: Duration = Duration::from_millis(1500);
 const PDF_W_LEAST: f32 = 600.;
 const PDF_W_MOST: f32 = 2400.;
 const PDF_BYTES: u64 = 120_000_000;
@@ -650,6 +652,12 @@ pub struct FileView {
     /// A file cut for the preview, or one with bytes that are no text,
     /// has none and is read only.
     source: Option<Rc<str>>,
+    /// What each column of a table holds, where the file says: a
+    /// Parquet file's. Shown over the columns in place of their letters.
+    kinds: Vec<String>,
+    /// How many rows the file has, where it says without being read
+    /// through.
+    rows_all: Option<usize>,
 }
 
 /// What was typed into a file's editor and not saved, and the time on
@@ -842,6 +850,8 @@ enum FileBody {
     /// (`emaki_core::office`). It is shown and nothing more: the file
     /// is not text, so there is no way it is written to show.
     Doc(String),
+    /// A Word document, written in by its own pane (`word.rs`).
+    Word,
     /// An Excel workbook: each sheet's name and what a table has.
     Sheets(Vec<(String, Vec<Vec<String>>, Vec<usize>, bool)>),
     /// Not something the window shows, or not readable: why.
@@ -909,10 +919,13 @@ fn read_file(path: &Path, root: &Path) -> FileView {
         // and to edit.
         let text = (ext == "svg" && size as usize <= PREVIEW_BYTES).then(|| std::fs::read_to_string(path).ok()).flatten();
         let picture = text.as_ref().map(|t| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Svg, t.as_bytes().to_vec())));
-        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Picture(crate::workbench::file_image_dims(path), picture), source: text.map(Into::into) };
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Picture(crate::workbench::file_image_dims(path), picture), source: text.map(Into::into), kinds: Vec::new(), rows_all: None };
     }
-    if ext == "pdf" || ext == "docx" || ext == "pptx" {
-        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Pages(None), source: None };
+    if crate::word::opens(&ext).is_some() {
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Word, source: None, kinds: Vec::new(), rows_all: None };
+    }
+    if ext == "pdf" || ext == "pptx" {
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Pages(None), source: None, kinds: Vec::new(), rows_all: None };
     }
     // Word, PowerPoint and Excel files are read by `emaki_core::office`,
     // to look at: a document or a deck as markdown, a workbook as its
@@ -936,7 +949,23 @@ fn read_file(path: &Path, root: &Path) -> FileView {
                 Err(why) => FileBody::None(format!("Emaki cannot show this file: {why}.")),
             }
         };
-        return FileView { path: path.to_path_buf(), rel, size, mtime, body, source: None };
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body, source: None, kinds: Vec::new(), rows_all: None };
+    }
+    // A Parquet file is a table with its columns' names as the first
+    // row, as a comma-separated file has them.
+    if ext == "parquet" {
+        return match emaki_core::parquet_file::read(path, TABLE_ROWS) {
+            Ok(table) => {
+                let (names, kinds): (Vec<String>, Vec<String>) = table.columns.into_iter().unzip();
+                let more = table.total > table.rows.len();
+                let (rows, mut widths) = table_shape(std::iter::once(names).chain(table.rows).collect());
+                for (w, kind) in widths.iter_mut().zip(&kinds) {
+                    *w = (*w).max(kind.chars().count());
+                }
+                FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Sheets(vec![(String::new(), rows, widths, more)]), source: None, kinds, rows_all: Some(table.total) }
+            }
+            Err(why) => FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::None(format!("Emaki cannot show this file: {why}.")), source: None, kinds: Vec::new(), rows_all: None },
+        };
     }
     let mut bytes = Vec::new();
     let read = std::fs::File::open(path).and_then(|f| f.take(PREVIEW_BYTES as u64 + 1).read_to_end(&mut bytes));
@@ -944,7 +973,7 @@ fn read_file(path: &Path, root: &Path) -> FileView {
         Err(e) => (FileBody::None(format!("Could not read it: {e}")), None),
         Ok(_) => body_of(path, bytes),
     };
-    FileView { path: path.to_path_buf(), rel, size, mtime, body, source }
+    FileView { path: path.to_path_buf(), rel, size, mtime, body, source, kinds: Vec::new(), rows_all: None }
 }
 
 /// Rows as the grid shows them: every row as long as the longest, up to
@@ -1160,7 +1189,6 @@ fn html_hash(text: &str) -> u64 {
 /// A file shown as pages: a PDF's, or a Word document's.
 fn drawn_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
     match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
-        Some("docx") => docx_pages(path, want_w),
         Some("pptx") => pptx_pages(path, want_w),
         _ => pdf_pages(path, want_w),
     }
@@ -1191,66 +1219,6 @@ fn pptx_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
     match drawn {
         Ok(Some(doc)) if !doc.pages.is_empty() => Ok(doc),
         _ => Err("This deck could not be drawn.".into()),
-    }
-}
-
-/// A Word document's first pages as pictures with their text, laid out
-/// and drawn by WordCraft, which is all Rust. The text is kept as a
-/// PDF's is, a letter where the page draws it, so it is selected, found
-/// and copied the same way. Slow enough to be kept off the main thread.
-fn docx_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
-    use wordcraft_doc::StoryRef;
-    use wordcraft_layout::{hit::page_lines, layout, LayoutCache, LayoutOptions, ViewMode};
-    use wordcraft_render::{render_page, RenderOptions};
-    let want_w = want_w.clamp(PDF_W_LEAST, PDF_W_MOST).round();
-    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > PDF_BYTES {
-        return Err("This document is too large to show here.".into());
-    }
-    let bytes = std::fs::read(path).map_err(|e| format!("Could not read it: {e}"))?;
-    let drawn = std::panic::catch_unwind(move || {
-        let doc = wordcraft_docx::read(&bytes).ok()?;
-        let lay = layout(&doc, &mut LayoutCache::new(), &LayoutOptions { view: ViewMode::Print, ..Default::default() });
-        // Headers and footers as the page prints them: the default
-        // greys them, as an editor does while the body is written in.
-        let mut how = RenderOptions::default();
-        how.display.dim_header = false;
-        let png = |shot: wordcraft_render::Rendered| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, shot.to_png()));
-        let (mut pages, mut glyphs) = (Vec::new(), Vec::<PdfGlyph>::new());
-        for page in lay.pages.iter().take(PDF_PAGES) {
-            let shot = render_page(&doc, page, want_w / page.w.max(1.), &how);
-            let px = (shot.width, shot.height);
-            let thumb = render_page(&doc, page, PDF_THUMB_W / page.w.max(1.), &how);
-            let from = glyphs.len();
-            for hit in page_lines(page, StoryRef::Body) {
-                let Some(line) = hit.para.lines.get(hit.li) else { continue };
-                let Some(text) = doc.para(hit.story, hit.path).and_then(|p| p.text.get(line.start..line.stop)) else { continue };
-                let tall = hit.bottom - hit.top;
-                // The baseline is the line's own, or the paragraph's.
-                let down = if line.baseline >= line.top && line.baseline <= line.top + line.height { line.baseline - line.top } else { line.baseline };
-                let (base, em) = (hit.top + down.clamp(0., tall), (tall * 0.8).max(1.));
-                let letters: Vec<char> = text.chars().collect();
-                // A letter a cluster where they count the same; else
-                // the letters share the line's width evenly.
-                let exact = line.xs.len() == letters.len() + 1;
-                let (left, wide) = (hit.left, (hit.right - hit.left).max(0.) / letters.len().max(1) as f32);
-                let mut gap = 2;
-                for (i, ch) in letters.iter().enumerate() {
-                    if ch.is_whitespace() || ch.is_control() {
-                        gap = gap.max(1);
-                        continue;
-                    }
-                    let (x0, x1) = if exact { (hit.x + line.xs[i], hit.x + line.xs[i + 1]) } else { (left + wide * i as f32, left + wide * (i + 1) as f32) };
-                    glyphs.push(PdfGlyph { x0: x0.min(x1), x1: x0.max(x1), base, em, text: ch.to_string(), gap });
-                    gap = 0;
-                }
-            }
-            pages.push(PdfPage { image: png(shot), thumb: png(thumb), px, unit: (page.w, page.h), glyphs: from..glyphs.len() });
-        }
-        Some(PdfDoc { drawn_w: want_w, pages, total: lay.pages.len(), glyphs, contents: Vec::new() })
-    });
-    match drawn {
-        Ok(Some(doc)) if !doc.pages.is_empty() => Ok(doc),
-        _ => Err("This document could not be drawn.".into()),
     }
 }
 
@@ -1952,6 +1920,52 @@ impl Workbench {
         cx.notify();
     }
 
+    /// A Word document is read off the main thread and given a pane of
+    /// its own to be written in. One showing already stays, with what
+    /// was written in it; when the file has changed on the disk and
+    /// nothing here is unsaved, it is read again.
+    fn show_word(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let on_disk = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        let have = self.word.as_ref().map(|w| w.read(cx)).filter(|w| w.path == path).map(|w| (w.dirty(), w.mtime));
+        match have {
+            Some((dirty, mtime)) if dirty || mtime == on_disk => return,
+            Some(_) => {}
+            None => self.word = None,
+        }
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let from = path.clone();
+            let got = cx.background_executor().spawn(async move { crate::word::read(&from) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.file_view.as_ref().is_some_and(|v| v.path == path) {
+                    return;
+                }
+                match (got, this.word.clone().filter(|w| w.read(cx).path == path)) {
+                    (Ok(doc), Some(pane)) => pane.update(cx, |pane, cx| pane.reload(doc, cx)),
+                    (Ok(doc), None) => {
+                        let pane = cx.new(|cx| crate::word::WordPane::new(&path, doc, cx));
+                        cx.subscribe(&pane, |this, _, said: &crate::word::WordEvent, cx| {
+                            if let crate::word::WordEvent::Said(words) = said {
+                                this.notice = Some(crate::workbench::Notice::error(words.clone()));
+                            }
+                            cx.notify();
+                        })
+                        .detach();
+                        this.word = Some(pane);
+                    }
+                    (Err(why), _) => {
+                        this.word = None;
+                        if let Some(v) = this.file_view.as_mut() {
+                            v.body = FileBody::None(format!("Emaki cannot show this file: {why}."));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Reads the file for the pane. A PDF's pages are drawn off the main
     /// thread and put in when they are done, if the file is still the
     /// one showing.
@@ -1961,7 +1975,13 @@ impl Workbench {
         let pdf = matches!(view.body, FileBody::Pages(None));
         // The pages drawn so far stay while a changed file is drawn again.
         let kept = self.file_view.take().filter(|was| pdf && was.path == path).map(|was| was.body);
+        let word = matches!(view.body, FileBody::Word);
         self.file_view = Some(FileView { body: kept.unwrap_or(view.body.clone()), ..view });
+        if word {
+            self.show_word(path, cx);
+        } else {
+            self.word = None;
+        }
         if !pdf {
             return;
         }
@@ -2086,6 +2106,17 @@ impl Workbench {
         }
     }
 
+    /// The pages drawn before the ones showing are let go, and the
+    /// toolkit's copies of their pictures with them: it keeps every
+    /// picture it has read until told.
+    fn pdf_under_drop(&mut self, cx: &mut Context<Self>) {
+        if let Some((old, _)) = self.pdf_under.take() {
+            for page in &old.pages {
+                page.image.clone().remove_asset(cx);
+            }
+        }
+    }
+
     /// How wide in pixels a PDF's page is on the screen: what the pane
     /// last drew it at, or before it has, what its width leaves.
     fn pdf_want_now(&self) -> f32 {
@@ -2100,6 +2131,9 @@ impl Workbench {
     /// drawn for, and has stood still a moment, they are drawn again,
     /// the old ones showing until the new are in. Called at every draw.
     pub(crate) fn pdf_fit(&mut self, cx: &mut Context<Self>) {
+        if self.pdf_under.as_ref().is_some_and(|(_, at)| at.elapsed() >= PDF_UNDER) {
+            self.pdf_under_drop(cx);
+        }
         let Some((path, drawn)) = self.file_view.as_ref().and_then(|v| match &v.body {
             FileBody::Pages(Some(doc)) => Some((v.path.clone(), doc.drawn_w)),
             _ => None,
@@ -2123,7 +2157,20 @@ impl Workbench {
                     let _ = this.update(cx, |this, cx| {
                         this.pdf_fitting = false;
                         if let (Ok(doc), Some(v)) = (got, this.file_view.as_mut().filter(|v| v.path == path && matches!(v.body, FileBody::Pages(Some(_))))) {
-                            v.body = FileBody::Pages(Some(std::sync::Arc::new(doc)));
+                            // The pictures just made are read by the
+                            // toolkit over the next frames, and a page
+                            // is blank until its own is. The ones they
+                            // take over from stay under them for that
+                            // while, so the page does not blink.
+                            if let FileBody::Pages(Some(old)) = std::mem::replace(&mut v.body, FileBody::Pages(Some(std::sync::Arc::new(doc)))) {
+                                this.pdf_under_drop(cx);
+                                this.pdf_under = Some((old, std::time::Instant::now()));
+                                cx.spawn(async move |this, cx| {
+                                    cx.background_executor().timer(PDF_UNDER + Duration::from_millis(20)).await;
+                                    let _ = this.update(cx, |_, cx| cx.notify());
+                                })
+                                .detach();
+                            }
                         }
                         cx.notify();
                     });
@@ -2152,6 +2199,7 @@ impl Workbench {
             // goes from the width it has beside it.
             self.file_big = false;
             self.file_big_at = None;
+            self.tree_focus_back = true;
             self.file_gone = Some(v);
             self.file_serial += 1;
             self.file_anim = Some((false, std::time::Instant::now(), self.file_serial));
@@ -2818,6 +2866,7 @@ impl Workbench {
     fn unsaved(&self, cx: &App) -> Vec<PathBuf> {
         let mut all: Vec<PathBuf> = self.file_editor.iter().chain(self.file_parked.iter()).filter(|ed| ed.dirty(cx)).map(|ed| ed.path.clone()).collect();
         all.extend(self.file_drafts.keys().filter(|p| !all.contains(p)).cloned().collect::<Vec<_>>());
+        all.extend(self.word.as_ref().map(|w| w.read(cx)).filter(|w| w.dirty()).map(|w| w.path.clone()));
         all
     }
 
@@ -2848,6 +2897,11 @@ impl Workbench {
         let showing = self.file_editor.as_ref().is_some_and(|ed| ed.path == ask.path);
         match answer {
             FileAnswer::Cancel => return,
+            FileAnswer::Save if self.word.as_ref().is_some_and(|w| w.read(cx).path == ask.path) => {
+                if !self.save_word(cx) {
+                    return;
+                }
+            }
             FileAnswer::Save if showing => {
                 self.save_file(window, cx);
                 // Not saved after all (the file changed on disk, or could
@@ -2871,6 +2925,7 @@ impl Workbench {
                 self.file_parked.retain(|p| p.path != ask.path);
                 self.file_drafts.remove(&ask.path);
             }
+            FileAnswer::Discard if self.word.as_ref().is_some_and(|w| w.read(cx).path == ask.path) => self.word = None,
             FileAnswer::Discard => {
                 // The editor goes back to what the file holds, as one
                 // step, so even this can be undone while it shows.
@@ -2992,7 +3047,33 @@ impl Workbench {
     /// (`emaki_core::format`: R, by Air), in the editor as one step of
     /// undo and then on disk. A file its formatter cannot read is saved
     /// as it is, and the row says why it was not formatted.
+    /// The Word document showing is written to its file. Whether it was.
+    fn save_word(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(pane) = self.word.clone() else { return false };
+        let (path, mtime) = (pane.read(cx).path.clone(), pane.read(cx).mtime);
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let on_disk = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        if on_disk != mtime && self.file_conflict != Some(on_disk) {
+            self.file_conflict = Some(on_disk);
+            self.notice = Some(Notice::error(format!("{name} changed on disk since it was opened. Save again to write over it.")));
+            cx.notify();
+            return false;
+        }
+        self.file_conflict = None;
+        let saved = pane.update(cx, |pane, cx| pane.save(cx));
+        if let Err(why) = &saved {
+            self.notice = Some(Notice::error(format!("could not save {name}: {why}")));
+        }
+        self.tree.read_at = 0.;
+        cx.notify();
+        saved.is_ok()
+    }
+
     pub(crate) fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.word.as_ref().is_some_and(|w| w.read(cx).dirty()) && self.file_view.as_ref().is_some_and(|v| matches!(v.body, FileBody::Word)) {
+            self.save_word(cx);
+            return;
+        }
         let Some(ed) = self.file_editor.as_ref().filter(|ed| ed.dirty(cx)) else { return };
         let (path, mut text) = (ed.path.clone(), ed.state.read(cx).value().to_string());
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -3473,7 +3554,13 @@ impl Workbench {
             .w(px(total))
             .flex_shrink_0()
             .child(body)
-            .when(more, |d| d.child(div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(format!("Only the first {TABLE_ROWS} rows are shown. Open the file for the rest."))))
+            .when(more && v.rows_all.is_none(), |d| d.child(div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(format!("Only the first {TABLE_ROWS} rows are shown. Open the file for the rest."))))
+            // A file that says how many rows it has: that, whether or
+            // not all of them are here. The first row is the names.
+            .children(v.rows_all.map(|all| {
+                let (rows, cols) = (plural(all, "row", "rows"), plural(widths.len(), "column", "columns"));
+                div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(if more { format!("{rows}, {cols}. The first {} are shown.", crate::format::thousands(TABLE_ROWS)) } else { format!("{rows}, {cols}.") })
+            }))
             .into_any_element()
     }
 
@@ -3494,7 +3581,7 @@ impl Workbench {
         let head = |here: bool, d: Div| d.flex_shrink_0().flex().items_center().justify_center().border_color(line).text_color(if here { theme.foreground } else { theme.muted_foreground }).when(here, |d| d.bg(lit));
         let letters = h_flex().relative().left(off.x).h_full().children(widths.iter().enumerate().map(|(col, chars)| {
             let here = block.is_some_and(|((_, c0), (_, c1))| (c0..=c1).contains(&col));
-            head(here, div().w(px(table_col_w(*chars))).h_full().border_r_1()).child(column_name(col))
+            head(here, div().w(px(table_col_w(*chars))).h_full().border_r_1()).child(v.kinds.get(col).cloned().unwrap_or_else(|| column_name(col)))
         }));
         let numbers = v_flex().relative().top(off.y).children((0..rows).map(|ix| {
             let here = block.is_some_and(|((r0, _), (r1, _))| (r0..=r1).contains(&ix));
@@ -6209,10 +6296,14 @@ impl Workbench {
                 };
                 v_flex().items_center().gap(px(8.)).child(match drawn { Some(picture) => img(picture.clone()), None => img(v.path.clone()) }.w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.))).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
             }
+            // The document's own pane stands in the body's place.
+            FileBody::Word if self.word.is_some() => div().into_any_element(),
+            FileBody::Word => v_flex().py(px(60.)).items_center().child(quiet("Opening the document…".into())).into_any_element(),
             FileBody::Pages(None) => v_flex().py(px(60.)).items_center().child(quiet("Drawing the pages…".into())).into_any_element(),
             FileBody::Pages(Some(doc)) => {
                 let (sel, hits, on) = (self.pdf_sel, std::rc::Rc::new(self.pdf_hits.clone()), self.pdf_hits.get(self.pdf_hit).copied());
                 let showing = self.pdf_find_open;
+                let under = self.pdf_under.as_ref().map(|(old, _)| old.clone());
                 let (ink_sel, ink_hit, ink_on) = (gpui::rgba(0x2f7cf655), gpui::rgba(0xffd43b66), gpui::rgba(0xff922bb0));
                 v_flex()
                     .gap(px(12.))
@@ -6230,7 +6321,8 @@ impl Workbench {
                             .border_color(theme.border)
                             .bg(gpui::white())
                             .cursor(CursorStyle::IBeam)
-                            .child(img(ImageSource::Image(page.image.clone())).size_full())
+                            .children(under.as_ref().and_then(|old| old.pages.get(ix)).map(|old| img(ImageSource::Image(old.image.clone())).absolute().top_0().left_0().size_full()))
+                            .child(img(ImageSource::Image(page.image.clone())).absolute().top_0().left_0().size_full())
                             // Over the picture: where the page is, kept for
                             // the mouse, and the marks of what is selected
                             // and found, a line at a time.
@@ -6365,6 +6457,7 @@ impl Workbench {
             };
             gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(crate::workbench::editor_px(&self.cfg.app.chat_size))).on_secondary_click(menu).into_any_element()
         });
+        let word = self.word.as_ref().filter(|w| matches!(v.body, FileBody::Word) && !leaving && w.read(cx).path == v.path).map(|w| w.clone().into_any_element());
         let cut = match &v.body {
             FileBody::Code(_, _, dropped) if *dropped > 0 => Some(div().flex_shrink_0().px(px(pad_x)).py(px(8.)).border_t_1().border_color(theme.border).child(quiet(format!("Only the first {PREVIEW_LINES} lines are shown. Open the file for the rest.")))),
             _ => None,
@@ -6684,16 +6777,18 @@ impl Workbench {
                         .when_some(self.html_web.as_ref().filter(|_| !leaving && matches!(v.body, FileBody::Html(_)) && !self.file_raw).map(|web| web.placer()), |d, place| {
                             d.child(canvas(move |bounds, _, _| place(bounds), |_, _, _, _| {}).absolute().inset_0())
                         })
-                        .map(|d| match editor {
+                        .map(|d| match (word, editor) {
+                            // The document's pane scrolls itself too.
+                            (Some(word), _) => d.child(div().flex_1().min_h_0().child(word)),
                             // The editor scrolls itself; the wrapper only
                             // says where the pane's body is.
-                            Some(editor) => d.child(div().id("file-body").flex_1().min_h_0().track_scroll(&self.file_view_scroll).pt(px(6.)).font_family(theme.mono_font_family.clone()).text_size(px(12.5)).child(editor)).children(cut),
+                            (None, Some(editor)) => d.child(div().id("file-body").flex_1().min_h_0().track_scroll(&self.file_view_scroll).pt(px(6.)).font_family(theme.mono_font_family.clone()).text_size(px(12.5)).child(editor)).children(cut),
                             // What is wider than the pane keeps its own
                             // width: stretched across the scroller, as a
                             // column's child is, it was as wide as the
                             // pane to the scroller and never scrolled
                             // sideways.
-                            None => match heads {
+                            (None, None) => match heads {
                                 // A grid: the letters over the cells'
                                 // scroller and the numbers at its left,
                                 // outside it (`render_table_heads`).
@@ -6773,9 +6868,11 @@ impl Workbench {
             self.outline_asking.insert(key.clone());
         }
         let cfg = self.hub.explainer.cfg();
+        // The labels are the session's own agent's to write.
+        let Some(agent) = self.detail.as_ref().map(|d| d.session.agent) else { return };
         cx.spawn(async move |this, cx| {
             let prompts: Vec<String> = asked.iter().map(|(_, p)| p.clone()).collect();
-            let lines = cx.background_executor().spawn(async move { outline::summarize(&cfg, &prompts) }).await;
+            let lines = cx.background_executor().spawn(async move { outline::summarize(&cfg, agent, &prompts) }).await;
             let saved = this
                 .update(cx, |this, cx| {
                     for ((key, _), line) in asked.into_iter().zip(lines) {
@@ -7115,6 +7212,14 @@ impl Workbench {
                 }
             }
             // The pane's enlarge button.
+            // In a Word document: word:type:<words> types, word:run:<id>
+            // runs one of the engine's commands, word:end and word:all
+            // move and select.
+            step if step.starts_with("word:") => {
+                if let Some(pane) = self.word.clone() {
+                    pane.update(cx, |pane, cx| pane.probe(&step[5..], cx));
+                }
+            }
             "file:big" => {
                 self.file_big = !self.file_big;
                 self.file_big_at = Some(std::time::Instant::now());
