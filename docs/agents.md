@@ -147,6 +147,9 @@ Two levels, as the sessions page has (`Workbench::agent_open`).
   reads its sessions. The sessions themselves are not listed here: All
   Projects has them, and narrows to an agent. A list of an agent's
   projects stood under the steps and was removed for saying it twice.
+  In its place is one row under the steps with the count of sessions,
+  which goes to All Projects narrowed to the agent. It is there when
+  there is a session to go to.
 
 ## The sidebar
 
@@ -183,4 +186,5 @@ sessions are not read has no colour and keeps the accent.
 - `EMAKI_PAGE=agents` lands on the page. `EMAKI_GO=page:agents`,
   `agent:<id>` (inside one), `agentos:mac|linux|windows`,
   `agentway:<name>` (a way as the catalogue names it, or `Download`)
-  and `agents:check` are the clicks.
+  and `agents:check` are the clicks; `agents:end` scrolls the page to
+  its foot.

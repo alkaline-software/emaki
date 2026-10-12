@@ -48,6 +48,35 @@ About `vendor/`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/`,
 - `EMAKI_SHOT_FRAME=1` with `EMAKI_SHOT` keeps the system's shadow and
   rim in the picture, for reading the pixels at an edge.
 
+## Office files' readers
+
+WordCraft, DeckCraft and GridCraft (storytold, MIT OR Apache-2.0) draw a
+Word document's pages and a deck's slides and read a workbook's cells.
+None is on crates.io, so each is a `git` dependency pinned to a commit
+in the crate's manifest; a newer one is taken by changing that `rev` and
+looking at the files again. They are all Rust, with no system library.
+WordCraft compiles in faces of its own (Source Sans 3, Source Serif 4,
+Inter, JetBrains Mono, all under the SIL Open Font License) for a font
+the machine lacks, and both it and DeckCraft look through the system's
+font folders at the first document. Their `CRAFT_FONTS_DIR`, which
+builds more faces in, is left unset.
+
+## HTML's engine
+
+On a Mac and on Windows an HTML file is shown by the system's web view,
+through `wry` (`html_web.rs`); WebView2 has to be on the Windows
+machine, as it is on any current one. On Linux no web view can be set
+in a gpui window, and Blitz draws the file (`html_shot.rs`), built for
+that target alone. It is a beta, pinned exactly in the app's manifest, with `anyrender` and `anyrender_vello_cpu` at the
+versions that Blitz builds on. Its style engine is Stylo, Servo's, under
+the MPL-2.0: a file of it that is changed has to be published as
+changed. One is: `vendor/stylo_derive/`, Stylo's derive crate with one
+line changed (`UPSTREAM.md` there), `[patch]`ed over crates.io in the
+root manifest. Without it Stylo does not compile beside gpui, which
+turns on a `log` feature that adds a second conversion into
+`std::fmt::Error`. On Linux Blitz's fonts need fontconfig, which the
+build already had.
+
 ## The vendored toolkit
 
 `vendor/gpui-component/` holds the four gpui-component crates Emaki uses

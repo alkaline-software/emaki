@@ -16,7 +16,7 @@ use emaki_core::agents::{self, Agent, Found, Os};
 use emaki_core::transcript::SessionRef;
 
 use crate::format::plural;
-use crate::workbench::{page_in, pill_button, Page, Workbench, CONTENT_W};
+use crate::workbench::{page_in, pill_button, Page, Scope, Workbench, CONTENT_W};
 
 /// How old what was found may be before a visit to the page looks again.
 const AGENTS_FRESH: Duration = Duration::from_secs(20);
@@ -694,9 +694,31 @@ impl Workbench {
             .child(self.agent_step(2, signed, false, "Sign in".into(), signed.then(|| "Done".to_string()), sign, ink, cx))
             .child(self.agent_step(3, (a.reads.is_some() || !a.with_emaki.is_empty()) && installed, true, "Use it with Emaki".into(), None, v_flex().child(emaki), ink, cx));
 
-        let page = v_flex().w_full().max_w(CONTENT_W).pt(px(20.)).pb(px(40.)).gap(px(16.)).child(crumb).child(head).child(prose(a.about.to_string(), cx)).child(links).child(steps);
+        // The way to the sessions themselves: All Projects, narrowed to
+        // this agent. One row and not a list, which said it twice.
+        let kept = a.reads.filter(|_| !sessions.is_empty()).map(|id| {
+            let count = sessions.len();
+            h_flex()
+                .id("agent-sessions")
+                .w_full()
+                .px(px(20.))
+                .py(px(14.))
+                .gap(px(12.))
+                .items_center()
+                .rounded(px(14.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(if theme.mode.is_dark() { theme.muted.opacity(0.35) } else { theme.popover })
+                .cursor_pointer()
+                .hover(move |s| s.border_color(ink.opacity(0.55)).bg(ink.opacity(0.05)))
+                .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(Scope::Agent(id), None, cx)))
+                .child(Icon::default().path("icons/briefcase.svg").with_size(px(16.)).text_color(ink))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(plural(count, "session", "sessions")))
+                .child(div().flex_shrink_0().text_size(px(12.5)).text_color(theme.muted_foreground).child("See in All Projects"))
+                .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(theme.muted_foreground.opacity(0.7)))
+        });
 
-        page
+        v_flex().w_full().max_w(CONTENT_W).pt(px(20.)).pb(px(40.)).gap(px(16.)).child(crumb).child(head).child(prose(a.about.to_string(), cx)).child(links).child(steps).children(kept)
     }
 }
 

@@ -44,7 +44,20 @@ window remembers.
 - ⌘W closes the nearest thing, in this order: with the keyboard in a
   shell, that shell's tab and nothing else, even with none left to
   close; otherwise a file shown beside the conversation, then the
-  session's tab, then the window.
+  session's tab, then the window (`close_nearest`).
+- A `CloseTab` or `CloseWindow` no view heard is handed to the workbench
+  by `main.rs` (`with_workbench`), never answered by closing the window.
+  The focus can be on nothing the page draws, and the key then comes
+  from the window's root: closing there closed the window with tabs
+  open and asked nothing about a file not saved.
+- Nothing has to give the focus back when it goes. `keep_focus`, at
+  every draw, asks whether the focus is inside what the workbench drew
+  (`contains_focused` on its own handle). When it is not at one draw and
+  still is not at the next, with the same thing holding it, the focus
+  goes to the composer where one shows and to the workbench's handle
+  where none does. That covers a file closed with the keyboard in it, a
+  field put away, a panel folded, and whatever is added later. It waits
+  a draw because a thing focused as it first appears is in no frame yet.
 - Keep `on_reopen` in `main.rs`. The app stays running with no window, and
   without the handler a Dock click does nothing.
 - Every scroller in the window, now and later, has the same bar and keeps
@@ -830,8 +843,9 @@ title bar does it.
 
 `CloseTab` closes the showing tab, then the last tab (which lands on the
 new-session page with the caret in its composer), then the window. `main.rs`
-answers a `CloseTab` no view claimed by closing the window. `on_reopen` (a
-Dock click, a second launch) opens the window again.
+hands a `CloseTab` no view claimed to the workbench, which does the same.
+`on_reopen` (a Dock click, a second launch) opens the window again, and
+what was typed in each composer is there (`docs/composer.md`).
 
 Clicking a session puts the caret in the composer. On the sessions page,
 which draws no composer, `Workbench::render` moves the focus

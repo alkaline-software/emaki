@@ -35,9 +35,7 @@ pub struct UiState {
     pub term_w: Option<f32>,
     /// How wide the file shown beside the conversation was dragged to.
     pub file_w: Option<f32>,
-    /// Markdown shown as it is written, and what stands beside a PDF's
-    /// pages: `pages`, `contents` or nothing.
-    pub file_raw: Option<bool>,
+    /// What stands beside a PDF's pages: `pages`, `contents` or nothing.
     pub pdf_side: Option<String>,
     pub term_agent: Option<bool>,
     /// The agent a new session is begun with, and what a new Codex

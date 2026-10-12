@@ -167,6 +167,8 @@ impl MenuDo {
             MenuDo::File(FileDo::Open, _) => "icons/external-link.svg",
             MenuDo::File(FileDo::Mention, _) | MenuDo::Files(FileDo::Mention, _) => "icons/at.svg",
             MenuDo::Files(FileDo::Trash, _) => "icons/trash.svg",
+            MenuDo::File(FileDo::Cut, _) | MenuDo::Files(FileDo::Cut, _) => "icons/scissors.svg",
+            MenuDo::File(FileDo::Duplicate, _) | MenuDo::Files(FileDo::Duplicate | FileDo::Copy, _) => "icons/copy.svg",
             MenuDo::Files(..) => "icons/copy.svg",
             MenuDo::File(FileDo::NewFile, _) => "icons/file-plus.svg",
             MenuDo::File(FileDo::NewFolder, _) => "icons/folder-plus.svg",
@@ -457,7 +459,7 @@ const STRIP_PAD: Pixels = px(7.5);
 /// corner as along an edge. A Mac's window turns its corner at about 16
 /// points (measured off a picture of one; the system sets it and an app
 /// cannot). Windows' is 8, and a Linux window's is its desktop's.
-const CARD_R: Pixels = px(if cfg!(target_os = "macos") { 12. } else { 4. });
+pub(crate) const CARD_R: Pixels = px(if cfg!(target_os = "macos") { 12. } else { 4. });
 /// Room for the traffic lights on a transparent title bar.
 pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
@@ -813,6 +815,13 @@ pub struct Attachment {
     /// shape. `None` when unknown.
     pub size: Option<(u32, u32)>,
 }
+
+/// What was left typed in each composer when the window closed, for the
+/// window opened next: the app runs on with no window, and a draft is
+/// lost at Quit and not before.
+pub(crate) struct KeptDrafts(HashMap<String, (String, Vec<Attachment>)>);
+
+impl Global for KeptDrafts {}
 
 /// A picture read back out of a transcript, with its size when the header
 /// gave one.
@@ -1479,6 +1488,15 @@ pub struct Workbench {
     /// far enough to be one, so the click that ends it chooses nothing.
     pub(crate) tree_band: Option<(Point<Pixels>, Point<Pixels>)>,
     pub(crate) tree_band_live: bool,
+    /// Files dragged in from the file manager, over the tree: the folder
+    /// they would go into and since when, the pointer's last place with
+    /// whether a row had it, and the words that said where, on their
+    /// way out (`tree_drop_over`).
+    pub(crate) tree_drop: Option<(PathBuf, Instant)>,
+    pub(crate) tree_drop_probe: Option<(Point<Pixels>, bool)>,
+    pub(crate) tree_drop_gone: Option<(String, Instant)>,
+    /// A probe holds files over the tree with no drag there is.
+    pub(crate) tree_drop_hold: bool,
     /// `file:menu` asked for a right click in the editor at the next draw.
     pub(crate) file_menu_probe: bool,
     /// The frame's colour as the native window last had it.
@@ -1520,6 +1538,32 @@ pub struct Workbench {
     /// The pane coming or going: which, since when, and a count that
     /// names the animation. `file_gone` is the file drawn as it goes.
     pub(crate) file_anim: Option<(bool, Instant, u64)>,
+    /// The file's pane has the conversation's room too (`file_enlarge`),
+    /// and when that last changed, for the motion.
+    /// The window's pixels to a point, and for a PDF showing: how wide
+    /// in pixels the pane draws a page, since when that has been so, and
+    /// whether its pages are being drawn again for it (`pdf_fit`).
+    /// An HTML file drawn as a page (`html_fit`): what it was drawn
+    /// for and the pictures, how wide the pane shows it, since when a
+    /// drawing has been wanted, and whether one is being made.
+    pub(crate) html_shot: Option<(crate::panels::HtmlKey, std::sync::Arc<crate::html_shot::Shot>)>,
+    pub(crate) html_want: Cell<f32>,
+    pub(crate) html_fit_at: Option<(crate::panels::HtmlKey, Instant)>,
+    pub(crate) html_busy: bool,
+    /// The system's web view with the HTML file showing in it, where
+    /// there is one (`html_web_sync`), and whether one was asked for
+    /// and not given.
+    pub(crate) html_web: Option<crate::html_web::Web>,
+    pub(crate) html_web_none: bool,
+    /// What had the focus at the last draw, when it was nothing drawn
+    /// (`keep_focus`).
+    focus_astray: Option<Option<FocusHandle>>,
+    pub(crate) ui_scale: f32,
+    pub(crate) pdf_want: Cell<f32>,
+    pub(crate) pdf_fit_at: Option<(f32, Instant)>,
+    pub(crate) pdf_fitting: bool,
+    pub(crate) file_big: bool,
+    pub(crate) file_big_at: Option<Instant>,
     pub(crate) file_gone: Option<crate::panels::FileView>,
     pub(crate) file_serial: u64,
     /// How wide the pane was dragged to, whether its edge is held, and
@@ -1556,8 +1600,17 @@ pub struct Workbench {
     pub(crate) discard_ask: Option<(PathBuf, u32)>,
     /// What the last paste in the files panel made, for ⌘Z to take
     /// back, and the question that asks first, by its number.
-    pub(crate) paste_last: Vec<PathBuf>,
-    pub(crate) paste_ask: Option<u32>,
+    /// What the files tree has done to the disk, to take back and do
+    /// again (⌘Z, ⌘⇧Z; `tree_undo`).
+    pub(crate) fs_journal: emaki_core::fsops::Journal,
+    /// The rows cut (⌘X), which the next paste moves.
+    pub(crate) file_cut: Vec<PathBuf>,
+    /// A press landed on a row, so it is not the start of a rectangle;
+    /// the row a ⇧ click reaches from; and whether what is dragged over
+    /// the tree would be copied there, not moved.
+    pub(crate) tree_press_row: bool,
+    pub(crate) tree_anchor: Option<PathBuf>,
+    pub(crate) tree_drop_copy: bool,
     /// The change a mark in the editor's margin opened, and a count for
     /// its animation.
     pub(crate) file_peek: Option<crate::panels::FilePeek>,
@@ -2932,6 +2985,16 @@ impl Workbench {
                         // puts it in the terminal panel first. `tabs`
                         // prints what is open.
                         "closetab" => window.dispatch_action(Box::new(CloseTab), cx),
+                        // ⌘↩, and the focus taken off everything, as it is
+                        // when what held it is no longer drawn.
+                        "send" => window.dispatch_action(Box::new(Send), cx),
+                        "blur" => window.blur(cx),
+                        // The focus put on an element no frame holds, as a
+                        // thing closed leaves it.
+                        "astray" => {
+                            let gone = cx.focus_handle();
+                            window.focus(&gone, cx);
+                        }
                         "focus:shell" => {
                             let _ = this.update(cx, |w, cx| window.focus(&w.side_term_focus, cx));
                         }
@@ -3013,7 +3076,7 @@ impl Workbench {
             load_task: None,
             composer,
             attachments: Vec::new(),
-            drafts: HashMap::new(),
+            drafts: cx.try_global::<KeptDrafts>().map(|kept| kept.0.clone()).unwrap_or_default(),
             folders_open: ui.folders_open.clone().map(|f| f.into_iter().collect()),
             folder_anim: None,
             folders_live: HashSet::new(),
@@ -3204,6 +3267,10 @@ impl Workbench {
             file_menu_probe: false,
             tree_band: None,
             tree_band_live: false,
+            tree_drop: None,
+            tree_drop_probe: None,
+            tree_drop_gone: None,
+            tree_drop_hold: false,
             format_missing: std::cell::OnceCell::new(),
             tree: Default::default(),
             files_scroll: ScrollHandle::new(),
@@ -3221,12 +3288,25 @@ impl Workbench {
             file_view: None,
             file_view_scroll: ScrollHandle::new(),
             file_anim: None,
+            html_shot: None,
+            html_want: Cell::new(0.),
+            html_fit_at: None,
+            html_busy: false,
+            html_web: None,
+            html_web_none: false,
+            focus_astray: None,
+            ui_scale: window.scale_factor(),
+            pdf_want: Cell::new(0.),
+            pdf_fit_at: None,
+            pdf_fitting: false,
+            file_big: false,
+            file_big_at: None,
             file_gone: None,
             file_serial: 0,
             file_w: px(ui.file_w.unwrap_or(f32::from(crate::panels::FILE_W))),
             file_drag: false,
             fold_file: false,
-            file_raw: ui.file_raw.unwrap_or(false),
+            file_raw: false,
             file_editor: None,
             file_parked: Vec::new(),
             file_ask: None,
@@ -3235,8 +3315,11 @@ impl Workbench {
             tree_focus: cx.focus_handle(),
             file_clip: None,
             discard_ask: None,
-            paste_last: Vec::new(),
-            paste_ask: None,
+            fs_journal: crate::panels::open_journal(),
+            file_cut: Vec::new(),
+            tree_press_row: false,
+            tree_anchor: None,
+            tree_drop_copy: true,
             file_peek: None,
             file_peek_serial: 0,
             pending_revert: false,
@@ -4134,6 +4217,11 @@ impl Workbench {
                 key
             }
         };
+        // Its folder shows its sessions, so the one begun is seen there.
+        let project = emaki_core::paths::project_slug(cwd);
+        if !self.folder_open(&project) {
+            self.toggle_folder(&project, cx);
+        }
         self.open_and_focus(&key, window, cx);
     }
 
@@ -4320,6 +4408,10 @@ impl Workbench {
             Some("page:sessions") => self.show_sessions(Scope::All, cx),
             // The agents page, and inside one agent of it by its id.
             Some("page:agents") => self.show_agents(None, cx),
+            Some("agents:end") => {
+                self.agents_page_scroll.scroll_to_bottom();
+                cx.notify();
+            }
             Some("agents:check") => self.check_agents(true, cx),
             Some(t) if t.starts_with("agent:") => self.show_agents(emaki_core::agents::by_id(&t["agent:".len()..]).map(|a| a.id), cx),
             Some(t) if t.starts_with("agentos:") => {
@@ -4483,6 +4575,77 @@ impl Workbench {
     /// keeps running until its idle timeout, and the transcript is on disk.
     /// Closing the showing tab moves to its neighbour, or to the new-session
     /// page when it was the last one, with the caret in its composer.
+    /// Whether the window is drawing something of its own over its
+    /// pages: a sheet, a menu, a list, the sidebar floated. The web
+    /// view is not gpui's and would be drawn over every one of them.
+    pub(crate) fn over_page(&self) -> bool {
+        self.search_open
+            || self.settings_open
+            || self.changes.is_some()
+            || self.lightbox.is_some()
+            || (self.renaming.is_some() && self.rename_at == RenameAt::Sheet)
+            || self.branch_menu.is_some()
+            || self.branch_new.is_some()
+            || self.branch_ask.is_some()
+            || self.git_gate.is_some()
+            || self.file_peek.is_some()
+            || self.file_ask.is_some()
+            || self.discard_ask.is_some()
+            || self.menu.is_some()
+            || self.menu_gone.as_ref().is_some_and(|(_, at)| at.elapsed() < MENU_OUT)
+            || self.pick.is_some()
+            || self.pick_gone.as_ref().is_some_and(|(_, at)| at.elapsed() < MENU_OUT)
+            || self.sidebar_peek
+    }
+
+    /// The focus is kept on something the window draws. A thing that had
+    /// it and is gone (a file closed, a field put away, a panel folded)
+    /// leaves it on an element in no frame, or on nothing, and a key
+    /// then comes from the window's root, above every handler here: no
+    /// shortcut did anything until a click somewhere. So whatever took
+    /// it away, when the focus is outside what was drawn at one draw and
+    /// still is at the next, it goes to the composer where one shows, or
+    /// to the workbench itself. Two draws, since what is focused as it
+    /// first appears is in no frame yet. Called at every draw.
+    fn keep_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.contains_focused(window, cx) {
+            self.focus_astray = None;
+            return;
+        }
+        let now = window.focused(cx);
+        if self.focus_astray.as_ref() != Some(&now) {
+            self.focus_astray = Some(now);
+            window.request_animation_frame();
+            return;
+        }
+        self.focus_astray = None;
+        let composer = self.composer.read(cx).focus_handle(cx);
+        let shows = match self.page {
+            Page::New => true,
+            Page::Session => self.detail.is_some() && !self.file_over(),
+            _ => false,
+        };
+        // Not the composer when it is the composer that was not drawn.
+        if shows && now.as_ref() != Some(&composer) {
+            window.focus(&composer, cx);
+        } else {
+            window.focus(&self.focus_handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// ⌘W closes the nearest thing: a file shown beside the conversation
+    /// first, then the session's tab, then the window. A shell with the
+    /// keyboard never gets here (`term_panel.rs`). `main.rs` calls it too,
+    /// for a ⌘W pressed with the focus on nothing the page draws.
+    pub fn close_nearest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected.clone() {
+            _ if self.file_pane_shown() => self.close_file_view(cx),
+            Some(key) if self.page == Page::Session && self.tabs.contains(&key) => self.close_tab(&key, window, cx),
+            _ => self.close_window(window, cx),
+        }
+    }
+
     pub fn close_tab(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.tabs.iter().position(|t| t == key) else { return };
         self.tabs.remove(ix);
@@ -4545,7 +4708,6 @@ impl Workbench {
             panel_w: Some(f32::from(self.panel_w)),
             term_w: Some(f32::from(self.side_term_w)),
             file_w: Some(f32::from(self.file_w)),
-            file_raw: Some(self.file_raw),
             pdf_side: Some(match self.pdf_side {
                 Some(true) => "pages",
                 Some(false) => "contents",
@@ -7732,6 +7894,25 @@ impl Workbench {
         ("spawn", String::new())
     }
 
+    /// ⌘↩. With nothing typed on the new-session page it is the plus on
+    /// the folder chosen there: a session begun with nothing said, which
+    /// starts no agent, so the folder's files and a shell are at hand
+    /// with no agent signed in and no network. Otherwise it sends.
+    fn send_pressed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let empty = self.attachments.is_empty() && self.composer.read(cx).value().trim().is_empty();
+        if empty && self.page == Page::New {
+            let cwd = self.new_cwd.clone();
+            if cwd.is_empty() {
+                self.notice = Some(Notice::said("pick a folder first"));
+                cx.notify();
+            } else {
+                self.new_session_in(&cwd, window, cx);
+            }
+            return;
+        }
+        self.send_message(window, cx);
+    }
+
     pub fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut typed = self.composer.read(cx).value().to_string();
         // An empty box with a suggested prompt in it sends the prompt,
@@ -8004,14 +8185,21 @@ impl Workbench {
         if self.draft_of.as_ref() == Some(&key) {
             return;
         }
-        // The first composer of the launch takes what is there (`EMAKI_TYPE`).
-        let Some(old) = self.draft_of.replace(key.clone()) else { return };
-        let text = self.composer.read(cx).value().to_string();
-        let attached = std::mem::take(&mut self.attachments);
-        if text.trim().is_empty() && attached.is_empty() {
-            self.drafts.remove(&old);
-        } else {
-            self.drafts.insert(old, (text, attached));
+        match self.draft_of.replace(key.clone()) {
+            Some(old) => {
+                let text = self.composer.read(cx).value().to_string();
+                let attached = std::mem::take(&mut self.attachments);
+                if text.trim().is_empty() && attached.is_empty() {
+                    self.drafts.remove(&old);
+                } else {
+                    self.drafts.insert(old, (text, attached));
+                }
+            }
+            // The first composer of the window takes what is there
+            // (`EMAKI_TYPE`). With nothing there, what a window closed
+            // before this one left typed here comes back (`KeptDrafts`).
+            None if self.composer.read(cx).value().is_empty() && self.attachments.is_empty() && self.drafts.contains_key(&key) => {}
+            None => return,
         }
         let (text, attached) = self.drafts.remove(&key).unwrap_or_default();
         self.attachments = attached.into_iter().filter(|a| a.path.is_file()).collect();
@@ -8022,6 +8210,21 @@ impl Workbench {
             s.set_cursor_position(gpui_component::input::Position::new(end, col), window, cx);
         });
         self.mark_slash(cx);
+    }
+
+    /// Every composer's words as they stand, the one showing among them,
+    /// put where the next window finds them. Called as the window goes.
+    pub(crate) fn keep_composers(&mut self, cx: &mut Context<Self>) {
+        let mut all = self.drafts.clone();
+        if let Some(key) = self.draft_of.clone() {
+            let text = self.composer.read(cx).value().to_string();
+            if text.trim().is_empty() && self.attachments.is_empty() {
+                all.remove(&key);
+            } else {
+                all.insert(key, (text, self.attachments.clone()));
+            }
+        }
+        cx.set_global(KeptDrafts(all));
     }
 
     /// Escape with nothing to close stops the turn running on the session
@@ -8038,9 +8241,8 @@ impl Workbench {
     /// What Escape closes, nearest first: the lightbox, then the search;
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.discard_ask.is_some() || self.paste_ask.is_some() {
+        if self.discard_ask.is_some() {
             self.discard_ask = None;
-            self.paste_ask = None;
             cx.notify();
         } else if self.file_ask.is_some() {
             self.file_answer(crate::panels::FileAnswer::Cancel, window, cx);
@@ -11198,7 +11400,7 @@ impl Workbench {
             .h_full()
             .bg(theme.background)
             .child(topbar)
-            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().children(files_panel).children(outline_panel).children(file_pane).child(conversation).children(term_panel))
+            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().children(files_panel).children(outline_panel).children(file_pane).children(self.beside_file(conversation)).children(term_panel))
             .into_any_element()
     }
 
@@ -12780,7 +12982,11 @@ impl Workbench {
                 if running {
                     d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))).child(Icon::new(IconName::Pause).with_size(px(15.)).text_color(theme.primary_foreground))
                 } else if can_send {
-                    d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx))).child(Icon::new(IconName::ArrowUp).with_size(px(16.)).text_color(theme.primary_foreground))
+                    d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, window, cx| this.send_pressed(window, cx))).child(Icon::new(IconName::ArrowUp).with_size(px(16.)).text_color(theme.primary_foreground))
+                } else if self.page == Page::New {
+                    // With nothing typed on the new-session page it is
+                    // ⌘↩ there: a session begun with nothing said.
+                    d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, window, cx| this.send_pressed(window, cx))).child(Icon::new(IconName::ArrowUp).with_size(px(16.)).text_color(theme.primary_foreground))
                 } else {
                     d.bg(theme.muted).child(Icon::new(IconName::ArrowUp).with_size(px(16.)).text_color(theme.muted_foreground))
                 }
@@ -12885,7 +13091,7 @@ impl Workbench {
                 div()
                     .id("composer")
                     .key_context(COMPOSER_CONTEXT)
-                    .on_action(cx.listener(|this, _: &Send, window, cx| this.send_message(window, cx)))
+                    .on_action(cx.listener(|this, _: &Send, window, cx| this.send_pressed(window, cx)))
                     .capture_action(cx.listener(|this, _: &gpui_component::input::Paste, _, cx| {
                         if this.paste_attachments(cx) {
                             cx.stop_propagation();
@@ -12907,7 +13113,7 @@ impl Workbench {
                     // a new line.
                     .capture_action(cx.listener(|this, a: &gpui_component::input::Enter, window, cx| {
                         if a.secondary {
-                            this.send_message(window, cx);
+                            this.send_pressed(window, cx);
                             cx.stop_propagation();
                         } else if this.slash_key(SlashKey::Run, window, cx) {
                             cx.stop_propagation();
@@ -14106,6 +14312,18 @@ impl Render for Workbench {
         if self.page == Page::Sessions && self.composer.read(cx).focus_handle(cx).is_focused(window) {
             window.focus(&self.focus_handle, cx);
         }
+        self.ui_scale = window.scale_factor();
+        self.pdf_fit(cx);
+        self.html_web_sync(window, cx);
+        self.html_fit(cx);
+        self.keep_focus(window, cx);
+        // The same under a file that has the conversation's room.
+        if self.file_over() && self.composer.read(cx).focus_handle(cx).is_focused(window) {
+            window.focus(&self.file_focus, cx);
+        }
+        if self.file_big_at.is_some_and(|at| at.elapsed() < crate::panels::FILE_ANIM) {
+            window.request_animation_frame();
+        }
         match self.term_focus_due.take() {
             Some(true) => window.focus(&self.term_focus, cx),
             Some(false) if self.page == Page::Session => {
@@ -14245,7 +14463,7 @@ impl Render for Workbench {
         self.sync_tab_widths(cx);
         // `EMAKI_FOCUS_DEBUG=1` prints where the keyboard is at every draw.
         if std::env::var_os("EMAKI_FOCUS_DEBUG").is_some() {
-            eprintln!("focus: tree={} file={} composer={} root={}", self.tree_focus.is_focused(window), self.file_focus.is_focused(window), self.composer.read(cx).focus_handle(cx).is_focused(window), self.focus_handle.is_focused(window));
+            eprintln!("focus: tree={} file={} composer={} root={} keys-at-window={} web={}", self.tree_focus.is_focused(window), self.file_focus.is_focused(window), self.composer.read(cx).focus_handle(cx).is_focused(window), self.focus_handle.is_focused(window), crate::sys::keys_at_window(window), self.html_web.is_some());
         }
         if let Some(cwd) = self.pending_new_in.take() {
             self.new_session_in(&cwd, window, cx);
@@ -14308,6 +14526,13 @@ impl Render for Workbench {
             .id("workbench")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            // A press on anything the window draws: the keyboard is the
+            // window's again, whatever a page in the web view had of it.
+            .capture_any_mouse_down(cx.listener(|this, _, window, _| {
+                if this.html_web.is_some() {
+                    crate::sys::keys_to_window(window);
+                }
+            }))
             .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, _, cx| this.modifiers_changed(&e.modifiers, cx)))
             // A raw wheel listener in the capture phase, registered at paint
             // (nothing is drawn): see `route_scroll`.
@@ -14392,14 +14617,14 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &NewBranch, window, cx| this.branch_new_open(None, window, cx)))
             .on_action(cx.listener(|this, _: &GoAgents, _, cx| this.show_agents(None, cx)))
-            .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.selected.clone() {
-                // ⌘W closes the nearest thing: a file shown beside the
-                // conversation first, then the session's tab, then the
-                // window. A shell with the keyboard never gets here
-                // (`term_panel.rs`).
-                _ if this.file_pane_shown() => this.close_file_view(cx),
-                Some(key) if this.page == Page::Session && this.tabs.contains(&key) => this.close_tab(&key, window, cx),
-                _ => this.close_window(window, cx),
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| this.close_nearest(window, cx)))
+            // ⌘↩ with the keyboard outside the composer: on the
+            // new-session page with nothing typed it begins a session
+            // all the same, and anywhere else it is nothing.
+            .on_action(cx.listener(|this, _: &Send, window, cx| {
+                if this.page == Page::New && this.attachments.is_empty() && this.composer.read(cx).value().trim().is_empty() {
+                    this.send_pressed(window, cx);
+                }
             }))
             // Quit and Close Window ask first when a file has changes
             // not saved (`file_guard`).
@@ -14497,7 +14722,6 @@ impl Render for Workbench {
             .when(self.file_peek.is_some(), |d| d.child(self.render_file_peek(window, cx)))
             .when(self.file_ask.is_some(), |d| d.child(self.render_file_ask(window, cx)))
             .when(self.discard_ask.is_some(), |d| d.child(fade_in("discard-ask-in", self.render_discard_ask(cx))))
-            .when(self.paste_ask.is_some(), |d| d.child(self.render_paste_ask(cx)))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
             .when_some(self.pick_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))

@@ -62,7 +62,20 @@ session, or the new-session page) the words and attachment chips are put
 away under where they were typed (`drafts`) and what was left here comes
 back with the caret at its end. It runs at every draw and before
 `restore_prompt`, which asks whether the box is empty on a session's
-behalf. The sessions page draws no composer and changes nothing. Drafts are in memory only. Tried and dropped: one box for the
+behalf. The sessions page draws no composer and changes nothing. Drafts are in
+memory only, and last until Quit: a window closed leaves them with the
+app (`keep_composers`, `KeptDrafts`), which runs on with no window, and
+the window opened next starts with them. Its first composer takes what
+was left there when it is empty.
+
+⌘↩ with nothing typed on the new-session page is the plus on the folder
+chosen there (`send_pressed`): a session begun with nothing said, which
+starts no agent, so the folder's files and a shell are at hand with no
+agent signed in and no network. A bare ↩ that sends does not do this.
+The key is bound on the window as well as in the composer, so on that
+page it does the same with the keyboard anywhere outside a field, and
+the send button there, which is lit with nothing typed, does it too. The
+folder a session is begun in opens in the sidebar (`new_session_in`). Tried and dropped: one box for the
 window, whose words followed the person into the next session.
 
 ## Spelling, grammar and capitals

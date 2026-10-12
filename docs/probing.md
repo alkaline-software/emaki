@@ -76,6 +76,14 @@ that past the last step. The picture is taken from inside
 Recording access, which the terminal running the probe often lacks. Crop a
 capture with PIL to read a detail.
 
+`EMAKI_KEYS=send` is ⌘↩, `blur` takes the focus off everything, and
+`astray` puts it on an element no frame holds, as a thing closed leaves
+it (`EMAKI_FOCUS_DEBUG=1` prints where it is at every draw, and whether
+the native keyboard is at the window's own view; `EMAKI_GO=web:keys`
+gives it to the page in the web view as a click there does, and
+`EMAKI_KEYS_STAY=1` stops the window taking it back): `EMAKI_KEYS=tabs,blur,closetab,tabs`
+shows what ⌘W does then.
+
 `EMAKI_GO` steps `treeall` (⌘A in the files tree) and `treeband:<y>:<y2>`
 (a rectangle dragged down it, in points from the tree's top); `file:menu`
 with the editor showing is a right click on its first line's word.

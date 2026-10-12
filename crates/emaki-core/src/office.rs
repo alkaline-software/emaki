@@ -770,12 +770,70 @@ fn book(bytes: Vec<u8>, most_rows: usize) -> Result<Vec<Sheet>, String> {
         let book = Xls::new(Cursor::new(bytes)).map_err(|e| if matches!(e, XlsError::Password) { locked() } else { not_excel() })?;
         Ok(sheets(book, most_rows))
     } else if bytes.starts_with(b"PK") {
+        // As the sheet shows its cells, where GridCraft reads the file.
+        if let Some(shown) = shown_sheets(&bytes, most_rows) {
+            return Ok(shown);
+        }
         let book = Xlsx::new(Cursor::new(bytes)).map_err(|e| if matches!(e, XlsxError::Password) { locked() } else { not_excel() })?;
         Ok(sheets(book, most_rows))
     } else {
         Err(not_excel())
     }
 }
+
+/// A zipped workbook's sheets with each cell as the sheet shows it, its
+/// number format applied: "50%", "2026-10-12", "1,234.50", "$12.00". A
+/// formula's cell has the result the file kept. None when GridCraft
+/// cannot read the file or finds nothing in it, and calamine is asked.
+fn shown_sheets(bytes: &[u8], most_rows: usize) -> Option<Vec<Sheet>> {
+    use gridcraft_core::CellRef;
+    use gridcraft_model::Visibility;
+    use gridcraft_numfmt::{format_value, NumberFormat};
+    let (book, _) = std::panic::catch_unwind(|| gridcraft_xlsx::read_xlsx(bytes)).ok()?.ok()?;
+    let mut shown: Vec<&gridcraft_model::Sheet> = book.sheets.iter().map(|s| &**s).filter(|s| s.visibility == Visibility::Visible).collect();
+    if shown.is_empty() {
+        shown = book.sheets.iter().map(|s| &**s).collect();
+    }
+    // A format is parsed once, however many cells wear it.
+    let mut formats: HashMap<String, NumberFormat> = HashMap::new();
+    let mut out = Vec::new();
+    for sheet in shown {
+        let Some(used) = sheet.used_range() else {
+            out.push(Sheet { name: sheet.name.clone(), rows: Vec::new(), more: false });
+            continue;
+        };
+        let (last_row, last_col) = (used.end.row as usize, (used.end.col as usize).min(MAX_COLS - 1));
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        for row in 0..=last_row.min(most_rows.saturating_sub(1)) {
+            let mut cells = Vec::with_capacity(last_col + 1);
+            for col in 0..=last_col {
+                let at = CellRef::new(row as u32, col as u32);
+                let value = sheet.value(at);
+                if value.is_empty() {
+                    cells.push(String::new());
+                    continue;
+                }
+                let style = book.styles.get(sheet.style_id(at));
+                let format = formats.entry(style.num_fmt.as_str().to_string()).or_insert_with(|| NumberFormat::parse(style.num_fmt.as_str()));
+                cells.push(format_value(&value, format, book.date_system).text);
+            }
+            rows.push(cells);
+        }
+        // Rows and columns left empty after the last value are not kept.
+        let filled = rows.iter().rposition(|r| r.iter().any(|c| !c.is_empty())).map(|i| i + 1).unwrap_or(0);
+        rows.truncate(filled);
+        let width = rows.iter().map(|r| r.iter().rposition(|c| !c.is_empty()).map(|i| i + 1).unwrap_or(0)).max().unwrap_or(0);
+        for row in &mut rows {
+            row.resize(width, String::new());
+        }
+        out.push(Sheet { name: sheet.name.clone(), rows, more: last_row + 1 > most_rows });
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The most columns of a sheet that are read: a format set on a whole
+/// row reaches Excel's last column.
+const MAX_COLS: usize = 512;
 
 /// The sheets Excel shows: worksheets that are not hidden, or every
 /// worksheet when all are. A sheet that cannot be read is left out.

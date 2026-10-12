@@ -3040,7 +3040,9 @@ fn a_workbook_reads_as_rows() {
     let Ok(Office::Sheets(sheets)) = read(&path, 100) else { panic!("a workbook is sheets") };
     assert!(!sheets[0].more);
     assert_eq!(sheets[0].rows.len(), 4, "the row that holds nothing is not one");
-    assert_eq!(sheets[0].rows[3], row(&["", "TRUE", "#DIV/0!", "2025-10-13", "2025-10-13 12:00:00"]));
+    // A date is as its format shows it: 14 is month, day, year, and
+    // shows no time of day, as in Excel.
+    assert_eq!(sheets[0].rows[3], row(&["", "TRUE", "#DIV/0!", "10/13/2025", "10/13/2025"]));
     assert_eq!(sheets[0].rows[1], row(&["", "Item", "Count", "Price", ""]), "every row is as wide as the widest");
 }
 
@@ -3452,4 +3454,64 @@ fn the_helper_asks_codex_with_nothing_kept_and_its_light_model() {
     assert!(prompt.starts_with("Say what it does.") && prompt.ends_with("Tool: Bash"));
     // With no light model known, the choice is Codex's.
     assert!(!codex_argv(&claude, None, std::path::Path::new("/tmp/out.txt")).iter().any(|a| a == "--model"));
+}
+
+/// What the files tree does is taken back and done again as moves: a
+/// file removed is held and comes back where it was, one made goes and
+/// comes back, a move is undone the other way, and a thing that cannot
+/// be taken back whole is not taken back at all.
+#[test]
+fn what_the_tree_does_is_taken_back_and_done_again() {
+    use emaki_core::fsops::{move_path, Journal, Kind, Op};
+    let dir = tempfile::tempdir().unwrap();
+    let (root, hold) = (dir.path().join("proj"), dir.path().join("held"));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let mut journal = Journal::new(hold.clone());
+    assert!(journal.undo().is_none() && journal.redo().is_none());
+
+    // Removed: held, back at ⌘Z, held again at ⌘⇧Z.
+    let a = root.join("a.txt");
+    std::fs::write(&a, "words").unwrap();
+    let slot = journal.slot(&a);
+    move_path(&a, &slot).unwrap();
+    assert!(journal.record(Op { kind: Kind::Removed, moves: vec![(a.clone(), slot.clone())] }).is_empty());
+    assert!(!a.exists() && slot.exists());
+    assert_eq!(journal.undo().unwrap().unwrap().kind, Kind::Removed);
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "words");
+    journal.redo().unwrap().unwrap();
+    assert!(!a.exists() && slot.exists());
+    journal.undo().unwrap().unwrap();
+
+    // Moved with another, and back: both or neither.
+    let b = root.join("b.txt");
+    std::fs::write(&b, "b").unwrap();
+    let (a2, b2) = (root.join("src/a.txt"), root.join("src/b.txt"));
+    move_path(&a, &a2).unwrap();
+    move_path(&b, &b2).unwrap();
+    journal.record(Op { kind: Kind::Moved, moves: vec![(a.clone(), a2.clone()), (b.clone(), b2.clone())] });
+    // A name taken where one of them stood: the move is not taken back,
+    // and nothing of it is.
+    std::fs::write(&a, "another").unwrap();
+    let (why, _) = journal.undo().unwrap().unwrap_err();
+    assert!(why.contains("already there"), "{why}");
+    assert!(a2.exists() && b2.exists() && !b.exists(), "neither went back");
+    assert!(journal.undo().is_none(), "what could not be taken back is forgotten");
+
+    // Made: gone at ⌘Z to a place of its own, back at ⌘⇧Z; a new thing
+    // done after a ⌘Z gives what that held up for the trash.
+    let made = root.join("new.txt");
+    std::fs::write(&made, "").unwrap();
+    let slot = journal.slot(&made);
+    journal.record(Op { kind: Kind::Made, moves: vec![(slot.clone(), made.clone())] });
+    journal.undo().unwrap().unwrap();
+    assert!(!made.exists() && slot.exists());
+    journal.redo().unwrap().unwrap();
+    assert!(made.exists() && !slot.exists());
+    journal.undo().unwrap().unwrap();
+    let dropped = journal.record(Op { kind: Kind::Renamed, moves: vec![(a2.clone(), a2.clone())] });
+    assert_eq!(dropped, vec![slot.clone()], "it cannot be done again, so it is the trash's");
+    assert_eq!(Journal::leftovers(&hold), vec![slot]);
+
+    // Nothing is moved onto something, and nothing that is gone is moved.
+    assert!(move_path(&a2, &b2).is_err() && move_path(&root.join("none"), &root.join("x")).is_err());
 }
