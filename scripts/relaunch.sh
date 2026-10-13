@@ -5,6 +5,11 @@
 # while the turn is still being written.
 #
 #   scripts/relaunch.sh [seconds]     default 15
+#   scripts/relaunch.sh --installed [seconds]
+#
+# With --installed what is started is /Applications/Emaki.app, not the
+# build: the end of a release, when target/ has been deleted
+# (scripts/release-clean.sh).
 #
 # The wait is the countdown and then a state, not a longer time: Claude
 # Code's registry record for this session (~/.claude/sessions/<pid>.json)
@@ -12,6 +17,8 @@
 # no longer does.
 
 cd "$(dirname "$0")/.." || exit 1
+installed=""
+[ "$1" = --installed ] && { installed=1; shift; }
 delay="${1:-15}"
 
 # The session this was run from: the nearest ancestor with a registry
@@ -26,7 +33,7 @@ while [ "${p:-1}" -gt 1 ]; do
     p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
 done
 
-REC="$rec" DELAY="$delay" nohup sh -c '
+REC="$rec" DELAY="$delay" INSTALLED="$installed" nohup sh -c '
     sleep "$DELAY"
     if [ -n "$REC" ]; then
         n=0
@@ -40,6 +47,18 @@ REC="$rec" DELAY="$delay" nohup sh -c '
     fi
     pkill -x Emaki
     sleep 2
-    exec scripts/dev-app.sh
+    [ -z "$INSTALLED" ] && exec scripts/dev-app.sh
+    # As dev-app.sh opens the build: the environment a Dock launch has,
+    # and none of the CLAUDE* variables of this session.
+    exec env -i \
+        HOME="$HOME" USER="$USER" LOGNAME="${LOGNAME:-$USER}" SHELL="${SHELL:-/bin/zsh}" \
+        PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+        TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)" \
+        SSH_AUTH_SOCK="$(launchctl getenv SSH_AUTH_SOCK)" \
+        /usr/bin/open -n /Applications/Emaki.app
 ' >/dev/null 2>&1 &
+if [ -n "$installed" ]; then
+    echo "The installed Emaki opens ${delay}s from now, or when this turn ends if that is later"
+    exit 0
+fi
 echo "Emaki relaunches ${delay}s from now, or when this turn ends if that is later"

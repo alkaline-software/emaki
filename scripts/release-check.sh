@@ -16,6 +16,18 @@ grep -q "^version = \"$v\"$" Cargo.toml || fail "Cargo.toml does not say version
 scripts/release-notes.sh "$v" > /dev/null || fail "CHANGELOG.md has no section for v$v"
 lines=$(scripts/release-notes.sh "$v" | grep -c '^- ' || true)
 (( lines <= 12 )) || fail "the v$v changelog section has $lines lines; a dozen at most"
+# The notary service is asked now, with what release-mac.sh will use: a
+# credential it cannot reach is found here, not after the tag is out.
+if [[ "$(uname)" == Darwin ]]; then
+  if [[ -n "${APPLE_ID:-}" ]]; then
+    notary=(--apple-id "$APPLE_ID" --password "${APPLE_APP_PASSWORD:-}" --team-id "${APPLE_TEAM_ID:-}")
+  else
+    notary=(--keychain-profile "${NOTARY_PROFILE:-notarytool-profile}")
+  fi
+  said=$(xcrun notarytool history $notary 2>&1) \
+    || fail "the notary service cannot be reached with the saved credential (WORKFLOW.md, When something fails):
+${said##*Error: }"
+fi
 # --locked is how CI builds: a lock that was not refreshed fails here.
 cargo check --locked -p emaki-app -p emaki-core 2>&1 | tail -1
 [[ -z "$(git status --porcelain)" ]] || fail "uncommitted changes; the tag would not hold them"

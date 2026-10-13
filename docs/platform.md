@@ -23,7 +23,8 @@ About `vendor/`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/`,
   same-named assets.
 - Leave no second `Emaki.app` where Spotlight indexes, or Launchpad
   lists two. The dev build's bundle is in a folder named `.noindex` for
-  this, and `cargo clean` after a release takes the rest (WORKFLOW.md).
+  this, and `scripts/release-clean.sh` after a release takes the rest
+  (WORKFLOW.md).
 - Only Finder writes a `.DS_Store` Finder honours, so the disk image's
   layout runs through AppleScript on a mounted image.
 - A sweep for the old name must use word boundaries: "describe",

@@ -81,9 +81,10 @@ scripts/release-check.sh X.Y.Z
 ```
 
 It holds the commit to everything the tag will be held to: the version in
-`Cargo.toml`, a lock that builds with `--locked`, a changelog section of a
-dozen lines at most, a clean tree, the core tests, the app build, and a
-Windows type check (MinGW; `brew install mingw-w64 && rustup target add
+`Cargo.toml`, a changelog section of a dozen lines at most, a notary
+service that answers to the saved credential (step 5 needs it, an hour
+later), a lock that builds with `--locked`, a clean tree, the core tests,
+the app build, and a Windows type check (MinGW; `brew install mingw-w64 && rustup target add
 x86_64-pc-windows-gnu` once). Do not tag until it says "ready to tag". A
 tag that fails in CI has to be redone, and every redo means building and
 notarizing the Mac images again; v0.1.5 was tagged three times, the first
@@ -141,6 +142,10 @@ Each run ends with `built dist/Emaki-mac-<arch>.dmg (X.Y.Z, <arch>, signed,
 notarized)` and leaves only the two images in `dist/`. Notarization takes a
 few minutes per image; the four commands together about ten.
 
+Check each run's own exit code and last line. Step 3 asked the notary
+service already, so a credential that cannot be reached here is new since
+then: see "When something fails".
+
 ### 6. Put them on the release and publish it
 
 Once the workflow is green and both images are built:
@@ -180,36 +185,42 @@ Every release ends with this step, and a release is not finished until it
 has run. Nothing compiled is kept between releases: disk space is worth
 more here than the minutes the next build takes. Do it without being
 asked, once the release is confirmed done: step 6 printed "published with
-notarized Mac images", the installed copy opens, and `spctl -a -vv
-/Applications/Emaki.app` says "Notarized Developer ID". Then:
+notarized Mac images" and the installed copy opens. Then:
 
 ```
-cargo clean
-rm -rf dist
-mdfind "kMDItemFSName == 'Emaki.app'"
+scripts/release-clean.sh
 ```
 
-- `cargo clean` deletes `target/`: every build made while developing and
-  for the release (debug, release, the Intel and Windows targets), and
-  with it the dev build's bundle. Months of incremental builds had grown
-  it past 80 GB by v0.1.9.
-- `dist/` holds the two disk images, which are on the release by now.
-- `mdfind` must list `/Applications/Emaki.app` and nothing else.
+- It runs `cargo clean`, which deletes `target/`: every build made while
+  developing and for the release (debug, release, the Intel and Windows
+  targets), and with it the dev build's bundle. Months of incremental
+  builds had grown it past 80 GB by v0.1.9.
+- It deletes `dist/`, the two disk images, which are on the release by
+  now.
+- It asks Spotlight for every `Emaki.app` and fails if there is one other
+  than `/Applications/Emaki.app`.
+
+It refuses in two cases: the installed copy is not a notarized release,
+or `dist/` holds images of a version that is not published (a redo of the
+release wants them and the release builds).
 
 Nothing here can be lost: all of it is rebuilt from the source. The cost
 is time. The next `cargo build -p emaki-app` starts from nothing and takes
-some minutes, and so does the next release build. Do not clean before
-step 6 has succeeded: a redo of the release wants the release builds.
+some minutes, and so does the next release build.
 
-If an Emaki started from this repository is running (the dev build,
-`scripts/dev-app.sh`), its bundle is in `target/`, and the agent cutting
-the release is a child of it. Do not clean under it: say that the release
-is published and installed and that this step is left, and ask the person
-to quit the dev build and open the installed one. Run the step from a
-session there. `ps -axo command | grep "Emaki.app/Contents/MacOS"` shows
-which one is running.
+The agent cutting the release is usually a child of the dev build
+(`scripts/dev-app.sh`), whose bundle is in `target/`. The script cleans
+under it all the same: a running program keeps the files it has open, so
+the app and the session go on, as they did when v0.2.3 was cleaned this
+way by mistake. The app has no bundle on disk from then on, so the script
+ends by handing over: `scripts/relaunch.sh --installed` quits the dev
+build once the turn is over and opens `/Applications/Emaki.app`. Make it
+the last command of the release, and tell the person the window they are
+looking at will close and the installed one will open, with the session
+there to be continued.
 
-Afterwards `du -sh .` on the repository should be well under a gigabyte.
+Afterwards `du -sh .` on the repository should be well under a gigabyte;
+the script prints it.
 
 ## Redoing a release under the same tag
 
@@ -307,6 +318,21 @@ so it is caught before the tag next time.
   Automation) and run the script again. Check the script's exit code and
   that both images are in `dist/`: piped into `tail`, a failed first
   image went unnoticed for v0.1.9 until the second was done.
+
+- **`release-mac.sh --notarize` stops with "No Keychain password item
+  found for profile: notarytool-profile"**, run by an agent in Emaki,
+  while the same two commands work in the person's own terminal: the
+  credential is in place and could not be reached from the session at
+  that moment. Why is not known; an hour later the same session reached
+  it. Run the two commands of step 5 in a terminal of your own, then go
+  on from step 6. `release-check.sh` now asks the notary service before
+  anything is built, so step 3 says so. In v0.2.3 it was found after the
+  tag was out.
+- **`release-clean.sh` must find the running dev build with `ps`**:
+  `pgrep` leaves out its own ancestors, and the app is the ancestor of
+  the session that runs the script. Written with `pgrep`, it sees
+  nothing, and the dev build is left running with no files and nothing
+  opened in its place.
 
 - **"Cargo.toml says X but the tag is vY"**: the version and the tag
   disagree. Fix `Cargo.toml`, commit, redo the tag.

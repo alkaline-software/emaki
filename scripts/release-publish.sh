@@ -20,7 +20,7 @@ sha=${state##* }
 
 for a in arm64 x64; do
   img="dist/Emaki-mac-$a.dmg"
-  [[ -f $img ]] || fail "$img is missing (WORKFLOW.md step 4)"
+  [[ -f $img ]] || fail "$img is missing (WORKFLOW.md step 5)"
   spctl -a -t open --context context:primary-signature -v $img 2>&1 | grep -q "Notarized Developer ID" || fail "$img is not notarized"
   xcrun stapler validate $img > /dev/null || fail "$img has no stapled ticket"
   # Built before the tag's commit was made: an image of other code.
