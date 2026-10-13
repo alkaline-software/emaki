@@ -37,7 +37,7 @@ use emaki_core::options::{humanize, Choice, Options};
 use emaki_core::search::Results;
 use emaki_core::transcript::{Naming, SessionRef};
 
-use crate::format::{bucket, elapsed_since, now_secs, plural, relative};
+use crate::format::{day, elapsed_since, now_secs, plural};
 use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
@@ -102,6 +102,20 @@ pub(crate) enum RenameAt {
     Sheet,
 }
 
+/// What a menu does to the sidebar's projects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectsDo {
+    /// Each one's folder in the file manager, a window each.
+    Open,
+    /// Out of the list, under "Hidden" at its foot.
+    Hide,
+    /// Back into the list.
+    Show,
+}
+
+/// More folders than this are not opened at once without asking.
+const OPEN_MANY: usize = 3;
+
 /// One choice on a right-click menu.
 #[derive(Clone)]
 pub(crate) enum MenuDo {
@@ -110,6 +124,9 @@ pub(crate) enum MenuDo {
     /// Pin the project to the head of the sidebar's list, or let it go
     /// back to where it stands by itself.
     Pin(String),
+    /// Something asked of the sidebar's projects, one or several chosen
+    /// together.
+    Projects(ProjectsDo, Vec<String>),
     /// Give the session, by its key, a name of the person's own,
     /// written where the menu was asked for.
     Rename(String, RenameAt),
@@ -160,6 +177,9 @@ impl MenuDo {
             MenuDo::OpenFolder(_) => "icons/folder-open.svg",
             MenuDo::Pin(_) if label.starts_with("Unpin") => "icons/pinned-off.svg",
             MenuDo::Pin(_) => "icons/pin.svg",
+            MenuDo::Projects(ProjectsDo::Open, _) => "icons/folder-open.svg",
+            MenuDo::Projects(ProjectsDo::Hide, _) => "icons/eye-off.svg",
+            MenuDo::Projects(ProjectsDo::Show, _) => "icons/eye.svg",
             MenuDo::Reveal(_) if label.contains("Transcript") => "icons/file-text.svg",
             MenuDo::Reveal(_) | MenuDo::File(FileDo::Reveal, _) => "icons/folder-open.svg",
             MenuDo::File(FileDo::Changes, _) => "icons/git-diff.svg",
@@ -281,9 +301,28 @@ fn shape_of(session: &Session) -> (usize, usize) {
 
 /// How many sessions an open folder shows in the sidebar before "N more".
 const FOLDER_ROWS: usize = 5;
-/// How many folders the sidebar lists before "N more".
-const SIDE_FOLDERS: usize = 10;
 /// How many agents the sidebar's card shows before it scrolls.
+/// What the sessions page's header does to the sessions chosen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManageDo {
+    /// The agent's own copy is let go; Emaki's is the session from then.
+    Archive,
+    /// Every copy goes to the system's trash.
+    Delete,
+}
+
+/// The header's height while sessions are being chosen.
+const MANAGE_BAR_H: f32 = 44.;
+
+/// A session's row under its project on the sessions page: one height
+/// for every row, which the unfolding needs.
+const PAGE_SESSION_H: Pixels = px(50.);
+/// About what a project's own row on the sessions page stands, for
+/// keeping it in view over its sessions (`follow_foot`).
+const PAGE_PROJECT_H: f32 = 60.;
+/// How long past its unfolding a folder's foot is still followed, so the
+/// frame it comes to rest in is one of them.
+const FOOT_STAY: Duration = Duration::from_millis(120);
 /// How long a folder takes to unfold or fold away.
 const FOLDER_ANIM: Duration = Duration::from_millis(200);
 /// How long the terminal card takes to come, and to go.
@@ -370,9 +409,6 @@ struct DragPill(String);
 #[derive(Clone)]
 struct DragPin(String);
 
-/// The fewest projects the sidebar lists under the pinned ones.
-const SIDE_FOLDERS_LEAST: usize = 3;
-
 /// The plate under the showing tab: the tab it left, the one it is under,
 /// and when that changed. Each change has a number, so its move is played
 /// once.
@@ -442,10 +478,37 @@ const STRIP_BTN: Pixels = px(26.);
 const SIDE_ROW_H: Pixels = px(26.);
 const SIDE_SESSION_H: Pixels = px(24.);
 pub const TITLEBAR_H: Pixels = px(48.);
-/// How far short of a place the list is put to run the rest of the way
-/// to it, and how long the run takes (`glide_to`).
-const GLIDE: Pixels = px(220.);
-const GLIDE_TIME: Duration = Duration::from_millis(360);
+/// The move to where the new part of a conversation begins
+/// (`UnreadGlide`): the most of the way that is run and not skipped, how
+/// fast what is left falls away, how far under the view's top the place
+/// comes to rest, the speed and length of a run toward a round not drawn
+/// yet, how far short of one the list is put when the run does not find
+/// it, and the longest a move takes.
+const UNREAD_CAP: f32 = 1400.;
+const UNREAD_EASE: f32 = 0.11;
+const UNREAD_UNDER: f32 = 70.;
+const UNREAD_RUN: f32 = 5200.;
+const UNREAD_RUN_TICKS: u32 = 14;
+const UNREAD_SHORT: f32 = 260.;
+const UNREAD_MOST: Duration = Duration::from_millis(1500);
+
+/// A move of the conversation to where its new part begins, a frame at
+/// a time. The place is an item of a round, known once that round is
+/// drawn (`unread_y`), or a round's top. What is left of the way falls
+/// away smoothly from where the reader is; a way longer than
+/// `UNREAD_CAP` is skipped down to that first. A round not drawn yet is
+/// run toward, which draws what is passed, and gone to directly if the
+/// run does not find it.
+struct UnreadGlide {
+    round: usize,
+    item: usize,
+    began: Instant,
+    last: Instant,
+    blind: u32,
+    jumped: bool,
+    still: u32,
+    was: Option<f32>,
+}
 /// The frame's width: the window's own ground, the sidebar's, showing
 /// around the content's card at its top, right and foot, and at its left
 /// when the sidebar is away.
@@ -940,9 +1003,25 @@ pub struct Workbench {
     pub cfg: Config,
     pub refs: Vec<SessionRef>,
     pub scope: Scope,
-    /// The folder the sessions page is inside; none is its top level,
-    /// the folders themselves.
-    sessions_folder: Option<String>,
+    /// The projects the sessions page shows the sessions of, the one
+    /// just opened or closed there (`sessions_toggle`, as `folder_anim`
+    /// is the sidebar's), and one the page is to be brought to once it
+    /// is drawn: "N more" under a project in the sidebar.
+    sessions_open: HashSet<String>,
+    sessions_anim: Option<(String, bool, Instant, u32)>,
+    sessions_goto: Option<String>,
+    /// The sessions page while its sessions are being chosen, to be
+    /// archived or deleted: whether it is, the keys chosen, the question
+    /// asked before either is done (with its number, for the card's
+    /// motion), whether one is being done now, and what came of the last.
+    manage: bool,
+    picked: HashSet<String>,
+    manage_ask: Option<(ManageDo, u32)>,
+    manage_busy: bool,
+    manage_said: Option<String>,
+    /// Where the header was last drawn, to know when it has been
+    /// scrolled out of view.
+    manage_y: Rc<std::cell::Cell<Option<Pixels>>>,
     /// What looking for each agent of the catalogue found, by its id;
     /// empty until the first look is in (`check_agents`).
     pub(crate) agents_found: HashMap<&'static str, emaki_core::agents::Found>,
@@ -1314,6 +1393,10 @@ pub struct Workbench {
     inner_kept: std::cell::RefCell<HashMap<SharedString, (ScrollHandle, bool)>>,
     /// The scroll positions momentum may be forwarded to.
     side_scroll: ScrollHandle,
+    /// The pinned projects' own scroller, over the rest, and whether the
+    /// wheel's gesture under way began on it.
+    pin_scroll: ScrollHandle,
+    scroll_pins: bool,
     sessions_scroll: ScrollHandle,
     home_scroll: ScrollHandle,
     /// The handscroll over the greeting, as it answers the pointer.
@@ -1375,6 +1458,40 @@ pub struct Workbench {
     /// The projects pinned to the head of the sidebar's list, in the
     /// order they were pinned or have been dragged to.
     pinned: Vec<String>,
+    /// The projects put out of the list, drawn under "Hidden" at its
+    /// foot, and whether that section shows them.
+    hidden: Vec<String>,
+    hidden_open: bool,
+    /// Whether "Temporary" shows its projects. Neither section is
+    /// remembered open: both are shut at every launch.
+    temp_open: bool,
+    /// The projects chosen together in the sidebar (⌘ and a click, ⇧
+    /// and one, as the files tree has it), the one a range is taken
+    /// from, and the projects as last drawn, in their order, which a
+    /// range is taken over.
+    side_marked: Vec<String>,
+    side_anchor: Option<String>,
+    side_drawn: std::cell::RefCell<Vec<String>>,
+    /// A rectangle dragged over the projects, from where it was pressed
+    /// to where the pointer is, as the files tree has one; whether it
+    /// has moved far enough to be one and not a click; whether the
+    /// press was on a pinned project, which is dragged to reorder
+    /// instead; where each project's row was last drawn, and whether
+    /// among the pinned; and the room the rectangle is drawn in.
+    /// The keyboard is the Projects card's while projects are chosen
+    /// there, so ⌘A is its own.
+    side_focus: FocusHandle,
+    side_band: Option<(Point<Pixels>, Point<Pixels>)>,
+    side_band_live: bool,
+    /// When a rectangle's drag last ended: the click that ends it comes
+    /// with the same release, before or after this is known.
+    side_band_at: Option<Instant>,
+    side_press_pin: bool,
+    side_rows_at: Rc<std::cell::RefCell<Vec<(String, Bounds<Pixels>, bool)>>>,
+    side_room: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    /// The folders about to be opened, more than `OPEN_MANY` of them,
+    /// while the question is up, with its number for the card's motion.
+    open_ask: Option<(Vec<String>, u32)>,
     /// The pinned project being dragged, drawn dimmed.
     drag_pin: Option<String>,
     /// Small things of the sidebar that are there or are not (the mark
@@ -1382,9 +1499,6 @@ pub struct Workbench {
     /// each was last drawn: whether it was there, when that changed and
     /// which change it was.
     presences: std::cell::RefCell<HashMap<String, (bool, Instant, u32)>>,
-    /// The project the line under the pinned ones was last drawn
-    /// after, so it closes where it stood when the last pin is let go.
-    pin_rule_after: std::cell::RefCell<Option<String>>,
     /// ⌘ (Ctrl elsewhere) is down by itself, as of this press (a count,
     /// so the wait begun at an earlier press does not answer for it).
     hint_press: Option<u32>,
@@ -1693,7 +1807,7 @@ pub struct Workbench {
     /// place is in the window; and whether the next draw of it should go.
     pub(crate) unread_go: Option<(usize, usize)>,
     /// A glide under way: when it began, where it ends, how far it has come.
-    glide: Option<(Instant, ListOffset, Pixels)>,
+    glide: Option<UnreadGlide>,
     /// What was just opened in the conversation (a tool call, a run, a
     /// thought: its kind, round and item), until it has been drawn open
     /// and brought into view (`reveal_mark`).
@@ -1708,7 +1822,6 @@ pub struct Workbench {
     side_born: std::cell::RefCell<HashMap<String, Instant>>,
     side_gone: std::cell::RefCell<Vec<SideGone>>,
     pub(crate) unread_y: Rc<std::cell::Cell<Option<Pixels>>>,
-    pub(crate) unread_due: Rc<std::cell::Cell<bool>>,
     /// The grammar marks the person has ignored (`check::ignore_key`).
     ignored: HashSet<String>,
     /// The rename field is asking for a file's name, not a session's.
@@ -1946,9 +2059,7 @@ impl Workbench {
         // always ask for the most.
         let mut widest = 0f32;
         let mut take = |need: f32| widest = widest.max(need);
-        let names: Vec<String> = folders.iter().map(|(p, _)| p.clone()).collect();
-        let (shown, _, _) = self.side_order(&names);
-        for (p, list) in folders.into_iter().filter(|(p, _)| shown.contains(p)) {
+        for (p, list) in folders {
             take(FOLDER_CHROME + measure(&p, 13.) + measure(&list.len().to_string(), 11.));
             if self.folder_open(&p) {
                 for r in list.into_iter().take(FOLDER_ROWS) {
@@ -3057,7 +3168,15 @@ impl Workbench {
             cfg,
             refs: Vec::new(),
             scope: Scope::All,
-            sessions_folder: None,
+            sessions_open: HashSet::new(),
+            sessions_anim: None,
+            sessions_goto: None,
+            manage: false,
+            picked: HashSet::new(),
+            manage_ask: None,
+            manage_busy: false,
+            manage_said: None,
+            manage_y: Rc::new(std::cell::Cell::new(None)),
             agents_found: HashMap::new(),
             agents_checking: false,
             agents_checked: None,
@@ -3229,6 +3348,8 @@ impl Workbench {
             scroll_inner: None,
             inner_kept: Default::default(),
             side_scroll: ScrollHandle::new(),
+            pin_scroll: ScrollHandle::new(),
+            scroll_pins: false,
             sessions_scroll: ScrollHandle::new(),
             home_scroll: ScrollHandle::new(),
             home_fig: Default::default(),
@@ -3380,7 +3501,6 @@ impl Workbench {
             side_prev: Default::default(),
             side_born: Default::default(),
             side_gone: Default::default(),
-            unread_due: Rc::new(std::cell::Cell::new(false)),
             ignored: emaki_core::check::ignored(),
             file_prompt: None,
             branch_menu: None,
@@ -3428,9 +3548,22 @@ impl Workbench {
             drag_tab: None,
             drag_pill: None,
             pinned: ui.pinned.clone(),
+            hidden: ui.hidden.clone(),
+            hidden_open: false,
+            temp_open: false,
+            side_marked: Vec::new(),
+            side_anchor: None,
+            side_drawn: std::cell::RefCell::new(Vec::new()),
+            side_focus: cx.focus_handle(),
+            side_band: None,
+            side_band_live: false,
+            side_band_at: None,
+            side_press_pin: false,
+            side_rows_at: Rc::new(std::cell::RefCell::new(Vec::new())),
+            side_room: Rc::new(std::cell::Cell::new(Bounds::default())),
+            open_ask: None,
             drag_pin: None,
             presences: std::cell::RefCell::new(HashMap::new()),
-            pin_rule_after: std::cell::RefCell::new(None),
             hint_press: None,
             hint_presses: 0,
             tab_hints: false,
@@ -3508,16 +3641,26 @@ impl Workbench {
                 if settled {
                     self.save_titles();
                 }
-                // A session begun here that the index now has is the
-                // index's from now on. One it does not have yet stands
-                // at the head of the list while its tab is open.
-                self.begun.retain(|d| !refs.iter().any(|r| r.session_id == d.session_id));
+                // A session begun here that the index now has, with
+                // something said in it, is the index's from now on. One
+                // it does not have yet stands at the head of the list
+                // while its tab is open, and one it has only the first
+                // rows of keeps our record's folder and name on the
+                // index's (`lend_begun`).
+                for r in refs.iter_mut() {
+                    if let Some(d) = self.begun.iter().find(|d| d.agent == r.agent && d.session_id == r.session_id) {
+                        lend_begun(r, d);
+                    }
+                }
+                self.begun.retain(|d| !refs.iter().any(|r| r.session_id == d.session_id && !r.blank));
                 let tabs = &self.tabs;
                 self.begun.retain(|d| tabs.contains(&key_of(d)));
                 let live: HashSet<&str> = self.begun.iter().map(|d| d.session_id.as_str()).collect();
                 self.begun_sent.retain(|id| live.contains(id.as_str()));
                 for d in self.begun.iter().rev() {
-                    refs.insert(0, d.clone());
+                    if !refs.iter().any(|r| r.session_id == d.session_id) {
+                        refs.insert(0, d.clone());
+                    }
                 }
                 self.refs = refs;
                 self.try_renames(cx);
@@ -4109,8 +4252,15 @@ impl Workbench {
     fn follow(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
         let agent = AgentId::ClaudeCode;
         let (old, new) = (format!("{}:{from}", agent.as_str()), format!("{}:{to}", agent.as_str()));
-        if !self.refs.iter().any(|r| key_of(r) == new) {
-            let Some(left) = self.refs.iter().find(|r| key_of(r) == old) else { return };
+        // The index can have the new session's first rows before this is
+        // heard: its record is then kept, and lent what it lacks.
+        let have = self.refs.iter().position(|r| key_of(r) == new);
+        let begun = self.begun.iter().any(|d| d.session_id == to);
+        let left = self.refs.iter().find(|r| key_of(r) == old).cloned();
+        if have.is_none() && left.is_none() {
+            return;
+        }
+        if let Some(left) = left.filter(|_| !begun && have.is_none_or(|i| self.refs[i].blank)) {
             let stamp = chrono::Utc::now().to_rfc3339();
             let title = if left.named.is_empty() { NEW_TITLE.to_string() } else { left.title.clone() };
             let draft = SessionRef {
@@ -4127,7 +4277,10 @@ impl Workbench {
                 blank: true,
                 ..Default::default()
             };
-            self.refs.insert(0, draft.clone());
+            match have {
+                Some(i) => lend_begun(&mut self.refs[i], &draft),
+                None => self.refs.insert(0, draft.clone()),
+            }
             self.begun.push(draft);
             self.begun_sent.insert(to.to_string());
         }
@@ -4344,9 +4497,42 @@ impl Workbench {
             Some("step:mode") => self.cycle_mode(cx),
             // A click on a folder in the sidebar, by its name.
             Some(t) if t.starts_with("folder:") => self.toggle_folder(&t["folder:".len()..], cx),
+            // A click on a project on the sessions page.
+            Some(t) if t.starts_with("project:") => self.sessions_toggle(&t["project:".len()..], cx),
+            // The sessions page's header: `manage` is its Select button,
+            // `pickall:<project>` chooses a project's sessions, and
+            // `manage:archive` and `manage:delete` ask. The question is
+            // never answered from a script: these remove files.
+            Some("manage") => self.manage_toggle(cx),
+            Some(t) if t.starts_with("pickall:") => {
+                let keys: Vec<String> = self.refs.iter().filter(|r| r.project() == t["pickall:".len()..]).map(key_of).collect();
+                self.pick(&keys, cx);
+            }
+            Some("manage:archive") => self.manage_asked(ManageDo::Archive, cx),
+            Some("manage:delete") => self.manage_asked(ManageDo::Delete, cx),
             // Pin or unpin a project, and drag one pinned project onto
             // another: `pindrag:<project>:<onto>`.
             Some(t) if t.starts_with("pin:") => self.toggle_pin(&t["pin:".len()..], cx),
+            // The sidebar's projects chosen together: `mark:<project>`
+            // is ⌘ and a click, `markto:<project>` ⇧ and one,
+            // `projects:open`, `projects:hide` and `projects:show` what
+            // their menu does, `hidden` a click on the Hidden heading.
+            Some(t) if t.starts_with("mark:") => self.side_click_more(&t["mark:".len()..], false, cx),
+            Some(t) if t.starts_with("markto:") => self.side_click_more(&t["markto:".len()..], true, cx),
+            Some("projects:open") => self.projects_do(ProjectsDo::Open, self.side_marked.clone(), cx),
+            Some("projects:hide") => self.projects_do(ProjectsDo::Hide, self.side_marked.clone(), cx),
+            Some("projects:show") => self.projects_do(ProjectsDo::Show, self.side_marked.clone(), cx),
+            Some("hidden") => self.toggle_section(1, cx),
+            Some("temporary") => self.toggle_section(0, cx),
+            // A rectangle dragged down the Projects card, in points from
+            // its top: `sideband:<y>:<y2>`.
+            Some(t) if t.starts_with("sideband:") => {
+                if let Some((a, b)) = t["sideband:".len()..].split_once(':').and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?))) {
+                    let room = self.side_room.get();
+                    self.side_band = Some((point(room.left() + px(40.), room.top() + px(a)), point(room.left() + px(40.), room.top() + px(a))));
+                    self.side_band_to(point(room.left() + px(180.), room.top() + px(b)), cx);
+                }
+            }
             Some(t) if t.starts_with("pindrag:") => {
                 if let Some((project, onto)) = t["pindrag:".len()..].split_once(':') {
                     self.drag_pin_to(project, onto, cx);
@@ -4603,6 +4789,8 @@ impl Workbench {
             || self.file_peek.is_some()
             || self.file_ask.is_some()
             || self.discard_ask.is_some()
+            || self.manage_ask.is_some()
+            || self.open_ask.is_some()
             || self.menu.is_some()
             || self.menu_gone.as_ref().is_some_and(|(_, at)| at.elapsed() < MENU_OUT)
             || self.pick.is_some()
@@ -4620,6 +4808,18 @@ impl Workbench {
     /// to the workbench itself. Two draws, since what is focused as it
     /// first appears is in no frame yet. Called at every draw.
     fn keep_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The Projects card has the keyboard only while projects are
+        // chosen in it. Whatever let them go, it goes back to the
+        // composer where one shows, as it was before the choosing.
+        if self.side_marked.is_empty() && self.side_band.is_none() && self.side_focus.is_focused(window) {
+            let shows = match self.page {
+                Page::New => true,
+                Page::Session => self.detail.is_some() && !self.file_over(),
+                _ => false,
+            };
+            let to = if shows { self.composer.read(cx).focus_handle(cx) } else { self.focus_handle.clone() };
+            window.focus(&to, cx);
+        }
         if self.focus_handle.contains_focused(window, cx) {
             self.focus_astray = None;
             return;
@@ -4743,6 +4943,7 @@ impl Workbench {
                 v
             }),
             pinned: self.pinned.clone(),
+            hidden: self.hidden.clone(),
         }
         .save();
         self.last_ui_save = std::time::Instant::now();
@@ -4763,14 +4964,17 @@ impl Workbench {
         self.show_sessions_in(scope, None, cx);
     }
 
-    /// The sessions page has two levels: the folders, and one folder's
-    /// sessions. `scope` narrows either.
+    /// The sessions page, narrowed to `scope`. With a project named, that
+    /// one is open onto its sessions and the page is brought to it.
     pub(crate) fn show_sessions_in(&mut self, scope: Scope, folder: Option<String>, cx: &mut Context<Self>) {
-        if self.sessions_folder != folder {
+        if self.page != Page::Sessions {
             self.sessions_scroll.set_offset(point(px(0.), px(0.)));
         }
         self.scope = scope;
-        self.sessions_folder = folder;
+        if let Some(p) = &folder {
+            self.sessions_open.insert(p.clone());
+        }
+        self.sessions_goto = folder;
         self.page = Page::Sessions;
         self.sidebar_peek = false;
         self.save_ui(true);
@@ -4848,7 +5052,7 @@ impl Workbench {
     fn wear_outgoing(&mut self, key: &str, session: &mut Session) {
         let Some(out) = self.outgoing.get(key) else { return };
         let since = |r: &emaki_core::model::Round| chrono::DateTime::parse_from_rfc3339(&r.ts).map_or(true, |t| t.timestamp_millis() as f64 / 1000.0 >= out.at - 1.0);
-        let written = session.rounds.iter().skip(out.base).any(|r| r.source != emaki_core::model::Source::System && since(r)) || session.withdrawn.as_ref().is_some_and(since);
+        let written = session.rounds.iter().skip(out.base).any(|r| !matches!(r.source, emaki_core::model::Source::System | emaki_core::model::Source::Command) && since(r)) || session.withdrawn.as_ref().is_some_and(since);
         if written {
             self.outgoing.remove(key);
             return;
@@ -5577,7 +5781,7 @@ impl Workbench {
                         // The icon and the name are each a link to the
                         // app's own page: two things to press, and the
                         // room between them is not one.
-                        .child(div().id("about-icon").mt(px(22.)).cursor_pointer().hover(|s| s.opacity(0.82)).on_click(|_, _, cx| cx.open_url("https://emaki.lol")).child(img("icon/app.png").size(px(84.)).flex_shrink_0()))
+                        .child(div().id("about-icon").mt(px(22.)).cursor_pointer().hover(|s| s.opacity(0.82)).on_click(|_, _, cx| cx.open_url("https://emaki.lol")).child(img("icon/app-large.png").size(px(84.)).flex_shrink_0()))
                         .child(
                             div()
                                 .id("about-name")
@@ -7753,6 +7957,8 @@ impl Workbench {
         };
         if begins {
             self.scroll_owner = Some(here);
+            // Over the pinned projects, when they have more than shows.
+            self.scroll_pins = here == Pane::Sidebar && self.pin_scroll.max_offset().y > px(0.) && self.pin_scroll.bounds().contains(&e.position);
             self.scroll_inner = inner.clone().map(|(h, kind)| {
                 let at = h.offset().y;
                 (h, kind, at)
@@ -7813,6 +8019,7 @@ impl Workbench {
                     Pane::Files => &self.files_scroll,
                     Pane::File => &self.file_view_scroll,
                     Pane::Outline => &self.outline_scroll,
+                    _ if self.scroll_pins => &self.pin_scroll,
                     _ => &self.side_scroll,
                 };
                 let at = handle.offset() + delta;
@@ -8253,7 +8460,17 @@ impl Workbench {
     /// What Escape closes, nearest first: the lightbox, then the search;
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.discard_ask.is_some() {
+        if self.open_ask.is_some() {
+            self.open_ask = None;
+            cx.notify();
+        } else if self.manage_ask.is_some() {
+            self.manage_ask = None;
+            cx.notify();
+        } else if !self.side_marked.is_empty() {
+            // The projects chosen together are let go.
+            self.side_marked.clear();
+            cx.notify();
+        } else if self.discard_ask.is_some() {
             self.discard_ask = None;
             cx.notify();
         } else if self.file_ask.is_some() {
@@ -9193,7 +9410,6 @@ impl Workbench {
     fn scoped_refs(&self) -> Vec<&SessionRef> {
         self.refs
             .iter()
-            .filter(|r| self.sessions_folder.as_ref().is_none_or(|p| r.project() == *p))
             .filter(|r| match &self.scope {
                 Scope::All => true,
                 Scope::Agent(a) => r.agent == *a,
@@ -9329,7 +9545,7 @@ impl Workbench {
         let sessions_active = page == Page::Sessions;
         let top = top
             .child(new_row)
-            .child(nav("nav-sessions", Icon::default().path("icons/briefcase.svg"), "All Projects", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
+            .child(nav("nav-sessions", Icon::default().path("icons/scroll.svg"), "All Sessions", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
             .child(nav("nav-agents", Icon::default().path("icons/sparkles.svg"), "Agents", "⌘E", page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
 
         // The rows sit in a column of their own inside the scroller. As
@@ -9358,20 +9574,47 @@ impl Workbench {
         // The pinned projects first, in their own order, with a line
         // under them; then the rest, as the index has them.
         let names: Vec<String> = folders.iter().map(|(p, _)| p.clone()).collect();
-        let (shown, pinned_n, more_folders) = self.side_order(&names);
+        // A project every session of which was run in a temporary
+        // folder: a scratch run, with a folder nobody can go back to.
+        let temp: HashSet<String> = folders.iter().filter(|(_, list)| list.iter().all(|r| emaki_core::paths::is_temp_dir(&r.cwd))).map(|(p, _)| p.clone()).collect();
+        let (shown, pinned_n, temp_n, hidden_n) = self.side_order(&names, &temp);
         let mut by_name: HashMap<String, Vec<SessionRef>> = folders.into_iter().collect();
         let folders: Vec<(String, Vec<SessionRef>)> = shown.into_iter().filter_map(|p| by_name.remove(&p).map(|list| (p, list))).collect();
-        let divided = pinned_n > 0 && folders.len() > pinned_n;
+        // The temporary projects and the hidden ones are blocks of their
+        // own at the list's foot, in that order, each under a heading
+        // that opens and closes it: sections 0 and 1 here.
+        let (temp_from, hidden_from) = (folders.len() - hidden_n - temp_n, folders.len() - hidden_n);
+        let section_of = |at: usize| if at >= hidden_from { Some(1) } else if at >= temp_from { Some(0) } else { None };
+        let divided = pinned_n > 0 && temp_from > pinned_n;
+        self.side_rows_at.borrow_mut().clear();
+        // Which projects are lit, known before any is drawn, as the
+        // files tree has it: rows lit one under another are one block,
+        // round at its two ends alone. Two rows are one under another
+        // when they are in the same list (the pinned, the rest, the
+        // hidden) and the upper one's sessions are not showing between.
+        let lit: Vec<(bool, u8, bool)> = folders
+            .iter()
+            .enumerate()
+            .map(|(at, (p, _))| {
+                let list = match section_of(at) {
+                    Some(section) => 2 + section as u8,
+                    None if at < pinned_n => 0,
+                    None => 1,
+                };
+                let unfolded = self.folder_open(p) || self.folder_anim.as_ref().is_some_and(|(name, _, at, _)| name == p && at.elapsed() < FOLDER_ANIM);
+                (self.side_marked.contains(p), list, unfolded)
+            })
+            .collect();
+        let section_open = [self.temp_open, self.hidden_open];
+        let section_moving = [self.presence("side-temp", self.temp_open, cx), self.presence("side-hidden", self.hidden_open, cx)];
+        let section_shown = [section_open[0] || section_moving[0].is_some(), section_open[1] || section_moving[1].is_some()];
+        let mut section_box = [v_flex().flex_shrink_0().overflow_hidden(), v_flex().flex_shrink_0().overflow_hidden()];
+        let mut section_h = [0f32; 2];
+        *self.side_drawn.borrow_mut() = folders.iter().enumerate().filter(|(at, _)| section_of(*at).is_none_or(|section| section_open[section])).map(|(_, (p, _))| p.clone()).collect();
         let rule = self.presence("pin-rule", divided, cx);
-        // The line stands after the last pinned project. Going, it
-        // closes where it stood: after the project it was last drawn
-        // after, wherever that one now is. Drawn at the head of the
-        // list instead, it pushed a project let go at the top down
-        // for a moment, and the row shook.
-        if divided {
-            *self.pin_rule_after.borrow_mut() = folders.get(pinned_n - 1).map(|(p, _)| p.clone());
-        }
-        let rule_after = self.pin_rule_after.borrow().clone().filter(|_| divided || rule.is_some());
+        // The pinned projects are a block of their own over the rest,
+        // which the rest scrolls under, and the line is its foot.
+        let mut pins = v_flex().flex_shrink_0();
         let rule_line = |theme: &gpui_component::Theme| {
             let line = div().flex_shrink_0().overflow_hidden().child(div().h(px(9.)).flex().items_center().px(px(10.)).child(div().h(px(1.)).w_full().bg(theme.sidebar_border)));
             match rule {
@@ -9384,14 +9627,25 @@ impl Workbench {
                 None => line.into_any_element(),
             }
         };
-        let mut before: Option<String> = None;
         for (at, (p, list)) in folders.into_iter().enumerate() {
             let theme = Self::shell_theme(cx);
-            if before.is_some() && before == rule_after {
-                scroll = scroll.child(rule_line(&theme));
-            }
-            before = Some(p.clone());
             let is_pinned = at < pinned_n;
+            let section = section_of(at);
+            if section.is_some_and(|section| !section_shown[section]) {
+                continue;
+            }
+            // A pinned project's rows go to the block over the rest,
+            // and a temporary or hidden one's to its block at the foot:
+            // `scroll` is that block until this project is drawn.
+            if is_pinned {
+                std::mem::swap(&mut scroll, &mut pins);
+            } else if let Some(section) = section {
+                std::mem::swap(&mut scroll, &mut section_box[section]);
+                section_h[section] += f32::from(SIDE_ROW_H);
+            }
+            let marked = lit[at].0;
+            let above = marked && at > 0 && lit[at - 1].0 && lit[at - 1].1 == lit[at].1 && !lit[at - 1].2;
+            let below = marked && at + 1 < lit.len() && lit[at + 1].0 && lit[at + 1].1 == lit[at].1 && !lit[at].2;
             let open = self.folder_open(&p);
             let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
             let dot = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| self.column_color(*c, cx));
@@ -9408,21 +9662,48 @@ impl Workbench {
                     .gap(px(10.))
                     .rounded(px(8.))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                    // One of the projects chosen together is lit, in the
+                    // accent as a chosen file is, and joined to the lit
+                    // row over it and under it.
+                    .when(!marked, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.6))))
+                    .when(marked, |d| d.bg(theme.primary.opacity(0.22)))
+                    .when(above, |d| d.rounded_t(px(0.)))
+                    .when(below, |d| d.rounded_b(px(0.)))
+                    .when(section == Some(1), |d| d.opacity(0.7))
                     .group(group.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_folder(&name, cx)))
+                    // ⌘ and a click adds the project to those chosen or
+                    // takes it out, ⇧ and a click chooses from the one
+                    // last clicked to this one; neither opens it. A
+                    // plain click opens it and lets the chosen go.
+                    .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                        // The end of a rectangle's drag is not a click
+                        // on the row it ended over.
+                        // The card's own click, which lets the chosen go,
+                        // does not hear this one.
+                        swallow_click(window, cx);
+                        if this.side_banded() {
+                            return;
+                        }
+                        let keys = ev.modifiers();
+                        if keys.secondary() || keys.shift {
+                            // The keyboard is the card's from here: ⌘A
+                            // is every project.
+                            window.focus(&this.side_focus, cx);
+                            return this.side_click_more(&name, keys.shift, cx);
+                        }
+                        this.side_marked.clear();
+                        this.side_anchor = Some(name.clone());
+                        this.toggle_folder(&name, cx);
+                    }))
                     .on_mouse_down(MouseButton::Right, {
                         let project = p.clone();
-                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                            let pin = if this.pinned.contains(&project) { "Unpin Project" } else { "Pin Project" };
-                            this.open_menu(ev.position, vec![(pin, MenuDo::Pin(project.clone())), (crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))], cx)
-                        })
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.project_menu(&project, ev.position, cx))
                     })
                     // A pinned project is dragged onto another pinned
                     // one to take its place.
                     .when(is_pinned, |d| {
                         let (dragged, ghost, onto) = (p.clone(), p.clone(), p.clone());
-                        d.on_drag(DragPin(dragged), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone()))).on_drag_move::<DragPin>(cx.listener(move |this, e: &DragMoveEvent<DragPin>, _, cx| {
+                        d.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.side_press_pin = true)).on_drag(DragPin(dragged), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone()))).on_drag_move::<DragPin>(cx.listener(move |this, e: &DragMoveEvent<DragPin>, _, cx| {
                             let project = e.drag(cx).0.clone();
                             if project != onto && e.bounds.contains(&e.event.position) {
                                 this.drag_pin_to(&project, &onto, cx);
@@ -9433,6 +9714,12 @@ impl Workbench {
                         }))
                     })
                     .when(self.drag_pin.as_deref() == Some(p.as_str()), |d| d.opacity(0.4))
+                    // Where the row is, for a rectangle dragged over it.
+                    .relative()
+                    .child({
+                        let (rows, name) = (self.side_rows_at.clone(), p.clone());
+                        canvas(move |bounds, _, _| rows.borrow_mut().push((name, bounds, is_pinned)), |_, _, _, _| {}).absolute().inset_0()
+                    })
                     .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(p.clone()))
                     .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
@@ -9510,6 +9797,11 @@ impl Workbench {
             let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
             if !open && anim.is_none() {
                 self.side_prev.borrow_mut().remove(&p);
+                if is_pinned {
+                    std::mem::swap(&mut scroll, &mut pins);
+                } else if let Some(section) = section {
+                    std::mem::swap(&mut scroll, &mut section_box[section]);
+                }
                 continue;
             }
             // The sessions, in a box whose height is the sum of its rows,
@@ -9592,6 +9884,9 @@ impl Workbench {
                         // A click opens the session with the caret in
                         // the composer; a second writes its name here.
                         .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                            if this.side_banded() {
+                                return;
+                            }
                             if ev.click_count() >= 2 {
                                 this.menu_pick(MenuDo::Rename(key.clone(), RenameAt::Side), window, cx);
                             } else {
@@ -9642,7 +9937,7 @@ impl Workbench {
                         .text_size(px(12.))
                         .text_color(theme.muted_foreground)
                         .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(Scope::All, Some(all.clone()), cx)))
+                        .on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.show_sessions_in(Scope::All, Some(all.clone()), cx) }))
                         .child(format!("{more} more")),
                 );
                 body_h += f32::from(SIDE_SESSION_H);
@@ -9659,23 +9954,57 @@ impl Workbench {
                     .into_any_element(),
                 None => body.into_any_element(),
             });
+            if self.folder_anim.as_ref().is_some_and(|(name, opening, at, _)| *name == p && *opening && at.elapsed() < FOLDER_ANIM + FOOT_STAY) {
+                scroll = scroll.child(follow_foot(if is_pinned { &self.pin_scroll } else { &self.side_scroll }, body_h + f32::from(SIDE_ROW_H)));
+            }
+            if is_pinned {
+                std::mem::swap(&mut scroll, &mut pins);
+            } else if let Some(section) = section {
+                section_h[section] += body_h;
+                std::mem::swap(&mut scroll, &mut section_box[section]);
+            }
         }
-
-        if more_folders > 0 {
+        let rule_el = (divided || rule.is_some()).then(|| rule_line(&Self::shell_theme(cx)));
+        // "Temporary" and then "Hidden", under the last project that
+        // shows: each a heading with how many there are, and under it
+        // its projects when it is open. Both are shut at every launch.
+        for (section, (label, id, count), block) in [("Temporary", "side-temp", temp_n), ("Hidden", "side-hidden", hidden_n)].into_iter().zip(section_box).enumerate().map(|(n, (said, block))| (n, said, block)) {
+            if count == 0 {
+                continue;
+            }
+            let theme = Self::shell_theme(cx);
             scroll = scroll.child(
                 h_flex()
-                    .id("folders-more")
+                    .id(id)
                     .h(SIDE_ROW_H)
+                    .when(section == 0 || temp_n == 0, |d| d.mt(px(6.)))
+                    .px(px(10.))
+                    .gap(px(6.))
                     .flex_shrink_0()
-                    .pl(px(42.))
+                    .items_center()
                     .rounded(px(8.))
                     .cursor_pointer()
-                    .text_size(px(12.))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-                    .on_click(cx.listener(|this, _, _, cx| this.show_sessions(Scope::All, cx)))
-                    .child(format!("{more_folders} more")),
+                    .on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.toggle_section(section, cx) }))
+                    .child(div().flex_1().child(label))
+                    .child(div().font_weight(FontWeight::NORMAL).child(count.to_string()))
+                    .child(Icon::new(if section_open[section] { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground)),
             );
+            if section_shown[section] {
+                let full = section_h[section];
+                scroll = scroll.child(match section_moving[section] {
+                    Some((coming, serial)) => block
+                        .with_animation(ElementId::Name(format!("{id}-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                            let t = if coming { t } else { 1. - t };
+                            d.h(px(full * t)).opacity(t)
+                        })
+                        .into_any_element(),
+                    None => block.into_any_element(),
+                });
+            }
         }
 
         let footer = h_flex()
@@ -9758,13 +10087,87 @@ impl Workbench {
                 .overflow_hidden()
                 .child(h_flex().h(px(28.)).flex_shrink_0().px(px(14.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(label))
         };
+        // The rectangle, over the rows, cut to the card's room.
+        let band = self.side_band.filter(|_| self.side_band_live).map(|(a, b)| {
+            let room = self.side_room.get();
+            let (left, top) = (a.x.min(b.x).max(room.left()), a.y.min(b.y).max(room.top()));
+            let (right, bottom) = (a.x.max(b.x).min(room.right()), a.y.max(b.y).min(room.bottom()));
+            div().absolute().left(left - room.left()).top(top - room.top()).w((right - left).max(px(0.))).h((bottom - top).max(px(0.))).rounded(px(3.)).border_1().border_color(theme.primary.opacity(0.7)).bg(theme.primary.opacity(0.12))
+        });
+        let room = self.side_room.clone();
         let folders_card = card("Projects").flex_1().min_h_0().mt(px(10.)).mb(px(8.)).child(
             v_flex()
+                .id("side-card")
                 .relative()
                 .flex_1()
                 .min_h_0()
-                .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(4.)).pb(px(4.)).child(scroll))
-                .vertical_scrollbar(&self.side_scroll),
+                .child(canvas(move |bounds, _, _| room.set(bounds), |_, _, _, _| {}).absolute().inset_0())
+                // A press anywhere in the card may become a rectangle
+                // dragged over the projects (`side_band_to`), but for
+                // one on a pinned project, which is dragged to another
+                // place among the pinned.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, _, _| {
+                        if std::mem::take(&mut this.side_press_pin) {
+                            return;
+                        }
+                        this.side_band = Some((ev.position, ev.position));
+                        this.side_band_live = false;
+                    }),
+                )
+                .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        this.side_band_to(ev.position, cx);
+                        if this.side_band_live {
+                            window.focus(&this.side_focus, cx);
+                        }
+                    }
+                }))
+                // ⌘A takes every project showing, while the card has
+                // the keyboard.
+                .track_focus(&self.side_focus)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    let keys = &e.keystroke;
+                    if keys.key == "a" && keys.modifiers.secondary() && !keys.modifiers.shift && !keys.modifiers.alt {
+                        this.side_marked = this.side_drawn.borrow().clone();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                // A click on the card's empty room lets what is chosen go.
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !this.side_banded() && !this.side_marked.is_empty() {
+                        this.side_marked.clear();
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.side_band_end(cx)))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.side_band_end(cx)))
+                // The pinned projects stay where they are while the rest
+                // scrolls. They take what they need up to half the card,
+                // and past that scroll by themselves, so the rest always
+                // has the other half.
+                .when(pinned_n > 0, |d| {
+                    d.child(
+                        v_flex()
+                            .relative()
+                            .flex_shrink_0()
+                            .max_h(gpui::relative(0.5))
+                            .child(v_flex().id("pin-scroll").min_h_0().overflow_y_scroll().track_scroll(&self.pin_scroll).px(px(4.)).child(pins))
+                            .vertical_scrollbar(&self.pin_scroll),
+                    )
+                })
+                .children(rule_el.map(|line| div().flex_shrink_0().px(px(4.)).child(line)))
+                .child(
+                    v_flex()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(4.)).pb(px(4.)).child(scroll))
+                        .vertical_scrollbar(&self.side_scroll),
+                )
+                .children(band),
         );
 
         v_flex()
@@ -9811,19 +10214,199 @@ impl Workbench {
         self.save_ui(false);
     }
 
-    /// The projects the sidebar lists, of all there are in the order
-    /// the index has them (the newest first): the pinned ones in their
-    /// own order, then the rest as they stand. Also how many are pinned
-    /// and how many are left out. A pinned project is only moved, so
-    /// one let go is back where it stands by itself.
-    fn side_order(&self, natural: &[String]) -> (Vec<String>, usize, usize) {
-        let mut shown: Vec<String> = self.pinned.iter().filter(|p| natural.contains(p)).cloned().collect();
+    /// The projects in the sidebar's order, every one of them, from
+    /// the order the index has them in (the newest first): the pinned
+    /// ones in their own order, then the rest as they stand. Also how
+    /// many are pinned. A pinned project is only moved, so one let go
+    /// is back where it stands by itself.
+    ///
+    /// Two kinds come after, each under a heading of its own: the
+    /// projects run in a temporary folder (`temp`), then the hidden
+    /// ones, as the index has them. How many of each there are is said
+    /// third and fourth. A pinned project is among the pinned though its
+    /// folder is temporary, and a hidden one is hidden whatever else it
+    /// is.
+    fn side_order(&self, natural: &[String], temp: &HashSet<String>) -> (Vec<String>, usize, usize, usize) {
+        let seen = |n: &&String| !self.hidden.contains(n);
+        let mut shown: Vec<String> = self.pinned.iter().filter(|p| natural.contains(p)).filter(seen).cloned().collect();
         let pinned = shown.len();
-        let room = SIDE_FOLDERS.saturating_sub(pinned).max(SIDE_FOLDERS_LEAST);
-        let rest: Vec<String> = natural.iter().filter(|n| !self.pinned.contains(n)).take(room).cloned().collect();
-        let more = natural.len() - pinned - rest.len();
-        shown.extend(rest);
-        (shown, pinned, more)
+        let rest = || natural.iter().filter(|n| !self.pinned.contains(n)).filter(seen);
+        shown.extend(rest().filter(|n| !temp.contains(*n)).cloned());
+        let before = shown.len();
+        shown.extend(rest().filter(|n| temp.contains(*n)).cloned());
+        let temps = shown.len() - before;
+        let before = shown.len();
+        shown.extend(natural.iter().filter(|n| self.hidden.contains(n)).cloned());
+        let hidden = shown.len() - before;
+        (shown, pinned, temps, hidden)
+    }
+
+    /// ⌘ and a click on a project, or ⇧ and one: the projects chosen
+    /// together grow or shrink by it, as the files tree's rows do.
+    fn side_click_more(&mut self, project: &str, range: bool, cx: &mut Context<Self>) {
+        if range {
+            let rows = self.side_drawn.borrow().clone();
+            let from = self.side_anchor.clone().or(self.side_marked.first().cloned()).and_then(|a| rows.iter().position(|r| *r == a)).unwrap_or(0);
+            if let Some(to) = rows.iter().position(|r| r == project) {
+                self.side_marked = rows[from.min(to)..=from.max(to)].to_vec();
+            }
+        } else {
+            match self.side_marked.iter().position(|p| p == project) {
+                Some(ix) => {
+                    self.side_marked.remove(ix);
+                }
+                None => self.side_marked.push(project.to_string()),
+            }
+            self.side_anchor = Some(project.to_string());
+        }
+        cx.notify();
+    }
+
+    /// The rectangle follows the pointer, and the projects whose rows it
+    /// lies over are the ones chosen. A press that has not moved a few
+    /// points is still a click. A row's place is where it was last
+    /// drawn, cut to its own list: one scrolled out of its list is under
+    /// nothing.
+    fn side_band_to(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((from, _)) = self.side_band else { return };
+        if !self.side_band_live && (at.x - from.x).abs() < px(4.) && (at.y - from.y).abs() < px(4.) {
+            return;
+        }
+        self.side_band = Some((from, at));
+        self.side_band_live = true;
+        let (first, last) = (from.y.min(at.y), from.y.max(at.y));
+        let (pins, rest) = (self.pin_scroll.bounds(), self.side_scroll.bounds());
+        self.side_marked = self
+            .side_rows_at
+            .borrow()
+            .iter()
+            .filter(|(_, row, pinned)| {
+                let list = if *pinned { pins } else { rest };
+                let (top, bottom) = (row.top().max(list.top()), row.bottom().min(list.bottom()));
+                top < bottom && top < last && bottom > first
+            })
+            .map(|(name, _, _)| name.clone())
+            .collect();
+        cx.notify();
+    }
+
+    /// Whether a rectangle is being dragged or has only just been let
+    /// go: the click that comes with that release is not a click.
+    fn side_banded(&self) -> bool {
+        self.side_band_live || self.side_band_at.is_some_and(|at| at.elapsed() < Duration::from_millis(300))
+    }
+
+    /// The press is over.
+    fn side_band_end(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.side_band_live) {
+            self.side_band_at = Some(Instant::now());
+        }
+        if self.side_band.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A right click on a project: the menu of the several chosen when
+    /// it is one of them, and else its own, which chooses it alone.
+    fn project_menu(&mut self, project: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let several = self.side_marked.len() > 1 && self.side_marked.iter().any(|p| p == project);
+        if !several {
+            self.side_marked.clear();
+            self.side_anchor = Some(project.to_string());
+        }
+        let of: Vec<String> = if several { self.side_marked.clone() } else { vec![project.to_string()] };
+        let hidden = of.iter().all(|p| self.hidden.contains(p));
+        let mut items = Vec::new();
+        if !several && !hidden {
+            items.push((if self.pinned.iter().any(|p| p == project) { "Unpin Project" } else { "Pin Project" }, MenuDo::Pin(project.to_string())));
+        }
+        items.push((crate::sys::OPEN_FOLDER_LABEL, MenuDo::Projects(ProjectsDo::Open, of.clone())));
+        items.push(match (hidden, several) {
+            (true, true) => ("Show Projects", MenuDo::Projects(ProjectsDo::Show, of)),
+            (true, false) => ("Show Project", MenuDo::Projects(ProjectsDo::Show, of)),
+            (false, true) => ("Hide Projects", MenuDo::Projects(ProjectsDo::Hide, of)),
+            (false, false) => ("Hide Project", MenuDo::Projects(ProjectsDo::Hide, of)),
+        });
+        self.open_menu(at, items, cx);
+    }
+
+    /// A project's folder: the newest session's that is still there.
+    fn project_folder(&self, project: &str) -> Option<String> {
+        self.refs.iter().filter(|r| r.project() == project).map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir())
+    }
+
+    /// What a project's menu asked, of one or of the several chosen.
+    fn projects_do(&mut self, what: ProjectsDo, projects: Vec<String>, cx: &mut Context<Self>) {
+        match what {
+            // Each folder in a window of its own. More than a few at
+            // once is asked about first: that many windows opening is
+            // not what a slip of the hand should do.
+            ProjectsDo::Open => {
+                let folders: Vec<String> = projects.iter().filter_map(|p| self.project_folder(p)).collect();
+                if folders.is_empty() {
+                    self.notice = Some(Notice::error(FOLDER_GONE));
+                } else if folders.len() > OPEN_MANY {
+                    let serial = self.open_ask.as_ref().map(|(_, n)| n + 1).unwrap_or(0);
+                    self.open_ask = Some((folders, serial));
+                } else {
+                    for f in &folders {
+                        crate::sys::open_path(std::path::Path::new(f));
+                    }
+                }
+            }
+            ProjectsDo::Hide => {
+                for p in projects {
+                    if !self.hidden.contains(&p) {
+                        self.hidden.push(p);
+                    }
+                }
+                self.side_marked.clear();
+                self.save_ui(true);
+            }
+            ProjectsDo::Show => {
+                self.hidden.retain(|h| !projects.contains(h));
+                self.side_marked.clear();
+                self.save_ui(true);
+            }
+        }
+        cx.notify();
+    }
+
+    fn render_open_ask(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some((folders, serial)) = self.open_ask.clone() else { return div().into_any_element() };
+        let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            this.open_ask = None;
+            cx.notify();
+        });
+        let go = cx.listener(|this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            if let Some((folders, _)) = this.open_ask.take() {
+                for f in &folders {
+                    crate::sys::open_path(std::path::Path::new(f));
+                }
+            }
+            cx.notify();
+        });
+        self.ask_card(
+            "open-ask",
+            serial,
+            format!("Open {} folders?", folders.len()),
+            format!("Each opens in a window of its own in {}.", crate::sys::FILE_MANAGER),
+            Button::new("open-ask-cancel").outline().small().label("Cancel").on_click(cancel),
+            Button::new("open-ask-yes").primary().small().label("Open").on_click(go),
+            cx,
+        )
+    }
+
+    /// Show the projects under "Temporary" (0) or "Hidden" (1), or put
+    /// them away.
+    fn toggle_section(&mut self, section: usize, cx: &mut Context<Self>) {
+        match section {
+            0 => self.temp_open = !self.temp_open,
+            _ => self.hidden_open = !self.hidden_open,
+        }
+        cx.notify();
     }
 
     /// Pin a project under the ones pinned before it, or let it go.
@@ -10008,6 +10591,7 @@ impl Workbench {
             MenuDo::OpenFolder(Some(cwd)) => crate::sys::open_path(std::path::Path::new(&cwd)),
             MenuDo::OpenFolder(None) => self.notice = Some(Notice::error(FOLDER_GONE)),
             MenuDo::Pin(project) => self.toggle_pin(&project, cx),
+            MenuDo::Projects(what, projects) => self.projects_do(what, projects, cx),
             MenuDo::Reveal(path) => crate::sys::reveal_path(&path),
             MenuDo::File(what, path) => self.file_do(what, path, window, cx),
             MenuDo::Files(what, paths) => self.files_do(what, paths, window, cx),
@@ -10771,18 +11355,204 @@ impl Workbench {
 
     // -- the sessions page ----------------------------------------------------
 
-    /// Two levels, as the sidebar has: the folders, newest first, and
-    /// inside one, its sessions headed by when. The pills narrow either
-    /// level to an agent, and stay as the level
-    /// changes.
+    /// Open a project onto its sessions on the sessions page, or close
+    /// it again, in motion.
+    fn sessions_toggle(&mut self, project: &str, cx: &mut Context<Self>) {
+        if !self.sessions_open.remove(project) {
+            self.sessions_open.insert(project.to_string());
+        }
+        let opening = self.sessions_open.contains(project);
+        let serial = self.sessions_anim.as_ref().map(|(_, _, _, n)| n + 1).unwrap_or(0);
+        self.sessions_anim = Some((project.to_string(), opening, Instant::now(), serial));
+        // One closing is drawn until its time is up, and once more then
+        // as nothing.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FOLDER_ANIM + Duration::from_millis(20)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Begin choosing sessions on the sessions page, or stop.
+    fn manage_toggle(&mut self, cx: &mut Context<Self>) {
+        self.manage = !self.manage;
+        self.picked.clear();
+        self.manage_said = None;
+        cx.notify();
+    }
+
+    /// Choose these sessions, or let them go when every one is chosen
+    /// already: one session's row, or a project's, which is all of its.
+    fn pick(&mut self, keys: &[String], cx: &mut Context<Self>) {
+        if keys.iter().all(|k| self.picked.contains(k)) {
+            for k in keys {
+                self.picked.remove(k);
+            }
+        } else {
+            self.picked.extend(keys.iter().cloned());
+        }
+        self.manage_said = None;
+        cx.notify();
+    }
+
+    /// Of the sessions chosen, the ones `what` is done to, and how many
+    /// are left as they are because something is running in them. One
+    /// begun here with nothing sent has no file, and an archived one is
+    /// not archived again: neither is counted.
+    fn manage_targets(&self, what: ManageDo) -> (Vec<SessionRef>, usize) {
+        let mut running = 0;
+        let mut go = Vec::new();
+        for r in self.refs.iter().filter(|r| self.picked.contains(&key_of(r))) {
+            if r.path.as_os_str().is_empty() || (what == ManageDo::Archive && r.archived) {
+                continue;
+            }
+            if self.driven(&r.session_id) || self.hub.is_live(r, self.now) {
+                running += 1;
+            } else {
+                go.push(r.clone());
+            }
+        }
+        (go, running)
+    }
+
+    /// Archive or Delete, pressed: the question first, or why there is
+    /// nothing to ask.
+    fn manage_asked(&mut self, what: ManageDo, cx: &mut Context<Self>) {
+        let (go, running) = self.manage_targets(what);
+        if go.is_empty() {
+            self.manage_said = Some(match (what, running) {
+                (_, n) if n > 0 => format!("{} still running; nothing was done.", plural(n, "session is", "sessions are")),
+                (ManageDo::Archive, _) => "Already archived.".to_string(),
+                (ManageDo::Delete, _) => "Nothing to delete.".to_string(),
+            });
+        } else {
+            let serial = self.manage_ask.map(|(_, n)| n + 1).unwrap_or(0);
+            self.manage_ask = Some((what, serial));
+        }
+        cx.notify();
+    }
+
+    fn render_manage_ask(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some((what, serial)) = self.manage_ask else { return div().into_any_element() };
+        let (go, running) = self.manage_targets(what);
+        let n = plural(go.len(), "session", "sessions");
+        let left = if running > 0 { format!(" {} still running and left as {}.", plural(running, "session is", "sessions are"), if running == 1 { "it is" } else { "they are" }) } else { String::new() };
+        let (title, detail, yes) = match what {
+            ManageDo::Archive => (
+                format!("Archive {n} now?"),
+                format!("Each one's own copy is removed from its agent, once Emaki's copy has been checked to be the same. It is then listed as archived, and its agent no longer lists it. Nothing in a project's folder is touched.{left}"),
+                "Archive",
+            ),
+            ManageDo::Delete => (
+                format!("Delete {n}?"),
+                format!("Every copy is moved to the {}: the agent's and Emaki's. They can be put back from there by hand. Nothing in a project's folder is touched.{left}", crate::sys::TRASH_NAME),
+                "Delete",
+            ),
+        };
+        let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            this.manage_ask = None;
+            cx.notify();
+        });
+        let go = cx.listener(move |this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            this.manage_now(what, window, cx);
+        });
+        let yes = Button::new("manage-ask-yes").small().label(yes).on_click(go);
+        let yes = if what == ManageDo::Delete { yes.danger() } else { yes.primary() };
+        self.ask_card("manage-ask", serial, title, detail, Button::new("manage-ask-cancel").outline().small().label("Cancel").on_click(cancel), yes, cx)
+    }
+
+    /// The question answered yes: it is done off the main thread, a
+    /// session at a time, and what came of it is said in the header.
+    /// Only the sessions' own files are touched, the agent's and
+    /// Emaki's: never anything in a project's folder.
+    fn manage_now(&mut self, what: ManageDo, window: &mut Window, cx: &mut Context<Self>) {
+        self.manage_ask = None;
+        let (go, running) = self.manage_targets(what);
+        if go.is_empty() || self.manage_busy {
+            cx.notify();
+            return;
+        }
+        self.manage_busy = true;
+        self.manage_said = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let work = go.clone();
+            let failed: Vec<(String, String)> = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut failed = Vec::new();
+                    for r in &work {
+                        let done = match what {
+                            ManageDo::Archive => emaki_core::archive::release(r),
+                            ManageDo::Delete => emaki_core::archive::everything_of(r).iter().try_for_each(|p| crate::sys::trash_path(p)),
+                        };
+                        if let Err(why) = done {
+                            failed.push((key_of(r), why));
+                        }
+                    }
+                    failed
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.manage_busy = false;
+                this.picked.clear();
+                let done: Vec<&SessionRef> = go.iter().filter(|r| !failed.iter().any(|(k, _)| *k == key_of(r))).collect();
+                let mut said = match what {
+                    ManageDo::Archive => format!("{} archived.", plural(done.len(), "session", "sessions")),
+                    ManageDo::Delete => format!("{} moved to the {}.", plural(done.len(), "session", "sessions"), crate::sys::TRASH_NAME),
+                };
+                if running > 0 {
+                    said.push_str(&format!(" {} still running, left.", running));
+                }
+                if let Some((_, why)) = failed.first() {
+                    said.push_str(&format!(" {} not done: {why}.", failed.len()));
+                }
+                this.manage_said = Some(said);
+                // A tab closed here goes to another tab or the new-session
+                // page; the person is on this page and stays on it.
+                let page = this.page;
+                for r in done {
+                    let key = key_of(r);
+                    match what {
+                        // Gone: its tab with it, and its row at once.
+                        ManageDo::Delete => {
+                            this.close_tab(&key, window, cx);
+                            this.closed_tabs.retain(|k| *k != key);
+                            this.refs.retain(|x| key_of(x) != key);
+                            this.begun.retain(|x| key_of(x) != key);
+                        }
+                        // Read from the archive's copy from now on: the
+                        // one showing at once, any other when its tab is
+                        // next gone to.
+                        ManageDo::Archive => {
+                            if this.page == Page::Session && this.selected.as_deref() == Some(key.as_str()) {
+                                this.pending_select = Some(key);
+                            }
+                        }
+                    }
+                }
+                if page == Page::Sessions {
+                    this.page = page;
+                }
+                this.hub.refresh();
+                this.save_ui(true);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The projects, newest first, each a row that opens onto its
+    /// sessions in place. The ones an agent still has anything of come
+    /// first; under "Archived" are those whose every session is kept
+    /// here alone, its agent having deleted it. The pills narrow the
+    /// page to an agent.
     fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let now = self.now;
         let scope = self.scope.clone();
-        let folder = self.sessions_folder.clone();
-        // What the pills count: everything at the top, the folder's own
-        // inside one.
-        let base: Vec<&SessionRef> = self.refs.iter().filter(|r| folder.as_ref().is_none_or(|p| r.project() == *p)).collect();
 
         let filter = |id: SharedString, label: String, to: Scope, cx: &mut Context<Self>| {
             let theme = cx.theme().clone();
@@ -10800,12 +11570,12 @@ impl Workbench {
                 .border_color(if active { theme.foreground } else { theme.border })
                 .when(active, |d| d.bg(theme.foreground).text_color(theme.background))
                 .when(!active, |d| d.hover(|s| s.bg(theme.muted)))
-                .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(to.clone(), this.sessions_folder.clone(), cx)))
+                .on_click(cx.listener(move |this, _, _, cx| this.show_sessions(to.clone(), cx)))
                 .child(label)
         };
-        let mut filters = h_flex().gap(px(6.)).flex_wrap().child(filter("f-all".into(), format!("All · {}", base.len()), Scope::All, cx));
+        let mut filters = h_flex().gap(px(6.)).flex_wrap().child(filter("f-all".into(), format!("All · {}", self.refs.len()), Scope::All, cx));
         for a in AgentId::ALL {
-            let n = base.iter().filter(|r| r.agent == a).count();
+            let n = self.refs.iter().filter(|r| r.agent == a).count();
             if n > 0 || scope == Scope::Agent(a) {
                 filters = filters.child(filter(format!("f-{}", a.as_str()).into(), format!("{} · {n}", a.display_name()), Scope::Agent(a), cx));
             }
@@ -10813,33 +11583,74 @@ impl Workbench {
 
         let refs: Vec<SessionRef> = self.scoped_refs().into_iter().cloned().collect();
         let count = refs.len();
-        let head = |b: &'static str, first: bool| div().pt(if first { px(4.) } else { px(18.) }).pb(px(6.)).px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(b).into_any_element();
-        let mut rows: Vec<AnyElement> = Vec::new();
-        let mut last_bucket = "";
-        let mut folders_n = 0;
-        if folder.is_none() {
-            // The top level: a row per folder, headed by when it was last
-            // worked in. A folder wears what the sidebar's does: its icon
-            // in the agent's colour while a session of its is live, and
-            // the most pressing of their states as a chip.
-            let mut folders: Vec<(String, Vec<SessionRef>)> = Vec::new();
-            for r in refs {
-                let p = r.project();
-                match folders.iter_mut().find(|(name, _)| *name == p) {
-                    Some((_, list)) => list.push(r),
-                    None => folders.push((p, vec![r])),
-                }
+        let mut folders: Vec<(String, Vec<SessionRef>)> = Vec::new();
+        for r in refs {
+            let p = r.project();
+            match folders.iter_mut().find(|(name, _)| *name == p) {
+                Some((_, list)) => list.push(r),
+                None => folders.push((p, vec![r])),
             }
-            folders_n = folders.len();
-            let home = std::env::var("HOME").unwrap_or_default();
-            for (p, list) in folders {
-                let newest = list.iter().map(|r| r.mtime).fold(0., f64::max);
-                let b = bucket(newest);
-                if b != last_bucket {
-                    rows.push(head(b, last_bucket.is_empty()));
-                    last_bucket = b;
-                }
+        }
+        // What the line over the list counts: the sessions an agent
+        // still has and the ones kept here alone, and the projects each
+        // kind is in. A project with both is counted for both.
+        let gone_n = folders.iter().flat_map(|(_, list)| list.iter()).filter(|r| r.archived).count();
+        let active_in = folders.iter().filter(|(_, list)| list.iter().any(|r| !r.archived)).count();
+        let gone_in = folders.iter().filter(|(_, list)| list.iter().any(|r| r.archived)).count();
+        // While sessions are being chosen each row has a box before it:
+        // ticked, or for a project with some of its sessions chosen, a
+        // dash. It comes in and goes out with the header.
+        let manage = self.manage;
+        let moving = self.presence("manage-bar", manage, cx);
+        let all_keys: Vec<String> = folders.iter().flat_map(|(_, list)| list.iter().map(key_of)).collect();
+        let state_of = |keys: &[String]| match keys.iter().filter(|k| self.picked.contains(*k)).count() {
+            0 => 0u8,
+            n if n == keys.len() => 1,
+            _ => 2,
+        };
+        let pick_box = |id: String, state: u8, theme: &gpui_component::Theme| -> Option<AnyElement> {
+            if !manage && moving.is_none() {
+                return None;
+            }
+            let on = state > 0;
+            let tick = div()
+                .size(px(16.))
+                .flex_shrink_0()
+                .rounded(px(4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_1()
+                .border_color(if on { theme.primary } else { theme.muted_foreground.opacity(0.6) })
+                .when(on, |d| d.bg(theme.primary).child(Icon::new(if state == 1 { IconName::Check } else { IconName::Minus }).with_size(px(11.)).text_color(theme.primary_foreground)));
+            let boxed = div().flex_shrink_0().overflow_hidden().child(tick);
+            Some(match moving {
+                // The row's gap comes and goes with it.
+                Some((coming, serial)) => boxed
+                    .with_animation(ElementId::Name(format!("pick-{id}-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                        let t = if coming { t } else { 1. - t };
+                        d.w(px(16. * t)).mr(px(-12. * (1. - t))).opacity(t)
+                    })
+                    .into_any_element(),
+                None => boxed.w(px(16.)).into_any_element(),
+            })
+        };
+        let (kept, archived): (Vec<_>, Vec<_>) = folders.into_iter().partition(|(_, list)| list.iter().any(|r| !r.archived));
+        let home = std::env::var("HOME").unwrap_or_default();
+        // The day at a row's right end, and the room a project's chevron
+        // takes, which a session's row keeps empty so the days line up.
+        let when = |mtime: f64, theme: &gpui_component::Theme| div().flex_shrink_0().text_size(px(12.)).text_color(theme.muted_foreground).child(day(mtime));
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (section, list) in [(false, kept), (true, archived)] {
+            if section && !list.is_empty() {
+                rows.push(div().pt(if rows.is_empty() { px(4.) } else { px(18.) }).pb(px(6.)).px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("Archived").into_any_element());
+            }
+            for (p, list) in list {
+                // A project wears what the sidebar's does: its icon in
+                // the accent while a session of its is live, and the
+                // most pressing of their states as a chip.
                 let theme = cx.theme().clone();
+                let newest = list.iter().map(|r| r.mtime).fold(0., f64::max);
                 let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
                 let chip = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| (*c, self.column_color(*c, cx)));
                 let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
@@ -10851,11 +11662,40 @@ impl Workbench {
                         _ => c.to_string(),
                     });
                 }
-                sub.push(relative(newest, now));
-                let (name, to) = (p.clone(), scope.clone());
+                let open = self.sessions_open.contains(&p);
+                let anim = self.sessions_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
+                let name = p.clone();
+                let keys: Vec<String> = list.iter().map(key_of).collect();
+                let project_box = pick_box(format!("p-{p}"), state_of(&keys), &theme);
+                let chevron_of = p.clone();
+                // Come to from the sidebar, the page is brought to this
+                // row once it is drawn and its place is known.
+                let goto = (self.sessions_goto.as_ref() == Some(&p)).then(|| {
+                    let (scroll, entity) = (self.sessions_scroll.clone(), cx.entity().downgrade());
+                    canvas(
+                        move |bounds, _, cx| {
+                            let by = bounds.top() - scroll.bounds().top() - px(12.);
+                            scroll.set_offset(point(px(0.), (scroll.offset().y - by).min(px(0.))));
+                            if let Some(entity) = entity.upgrade() {
+                                cx.defer(move |cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.sessions_goto = None;
+                                        cx.notify();
+                                    })
+                                });
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_0()
+                });
                 rows.push(
                     h_flex()
                         .id(SharedString::from(format!("srow-folder-{p}")))
+                        .relative()
                         .w_full()
                         .px(px(12.))
                         .py(px(9.))
@@ -10864,9 +11704,13 @@ impl Workbench {
                         .rounded(px(10.))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.muted))
-                        .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(to.clone(), Some(name.clone()), cx)))
+                        // Choosing, a click on the row chooses all of its
+                        // sessions, and the chevron is what opens it.
+                        .on_click(cx.listener(move |this, _, _, cx| if this.manage { this.pick(&keys, cx) } else { this.sessions_toggle(&name, cx) }))
                         .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))], cx)))
-                        .child(div().w(px(24.)).flex().justify_center().child(Icon::new(IconName::Folder).with_size(px(17.)).text_color(tint)))
+                        .children(goto)
+                        .children(project_box)
+                        .child(div().w(px(24.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(17.)).text_color(tint)))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -10876,120 +11720,257 @@ impl Workbench {
                                 .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
                         )
                         .when_some(chip, |d, (col, c)| d.child(state_chip(col, c, &theme)))
-                        .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(theme.muted_foreground.opacity(0.7)))
-                        .into_any_element(),
-                );
-            }
-        } else {
-            // Inside a folder: its sessions, newest first. A live row
-            // carries its state as a chip at the right (the column it is
-            // on, in that colour).
-            for r in refs {
-                let b = bucket(r.mtime);
-                if b != last_bucket {
-                    rows.push(head(b, last_bucket.is_empty()));
-                    last_bucket = b;
-                }
-                let key = key_of(&r);
-                let theme = cx.theme().clone();
-                let card = self.card_for(&r);
-                let dot = self.live_color(&r, cx);
-                let working = self.is_working(&r);
-                let glyph_id = SharedString::from(format!("row-glyph-{key}"));
-                let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
-                let mut sub = Vec::new();
-                if !r.git_branch.is_empty() {
-                    sub.push(format!("⎇ {}", r.git_branch));
-                }
-                sub.push(relative(r.mtime, now));
-                let menu_key = key.clone();
-                rows.push(
-                    h_flex()
-                        .id(SharedString::from(format!("row-{key}")))
-                        .w_full()
-                        .px(px(12.))
-                        .py(px(9.))
-                        .gap(px(12.))
-                        .items_center()
-                        .rounded(px(10.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.muted))
-                        .on_click(cx.listener(move |this, _, window, cx| this.open_and_focus(&key, window, cx)))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key, RenameAt::Sheet), cx)),
-                        )
-                        .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working, glyph_id)))
+                        .child(when(newest, &theme))
                         .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap(px(2.))
-                                .child(
-                                    h_flex()
-                                        .gap(px(8.))
-                                        .items_center()
-                                        .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).when(self.unnamed(&r), |d| d.italic()).child(r.title.clone()))
-                                        .children(self.rename_mark(&r, "page", cx))
-                                        .when(r.archived, |d| d.child(badge("archived", theme.muted, theme.muted_foreground)))
-                                        .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
-                                )
-                                .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
+                            div()
+                                .id(SharedString::from(format!("srow-chevron-{p}")))
+                                .flex_shrink_0()
+                                .when(manage, |d| {
+                                    d.p(px(6.)).m(px(-6.)).rounded(px(6.)).hover(|s| s.bg(theme.border)).on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.sessions_toggle(&chevron_of, cx);
+                                    }))
+                                })
+                                .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(14.)).text_color(theme.muted_foreground.opacity(0.7))),
                         )
-                        .when_some(dot, |d, c| d.child(state_chip(card.column, c, &theme)))
                         .into_any_element(),
                 );
+                if !open && anim.is_none() {
+                    continue;
+                }
+                // Its sessions, newest first, in a box of fixed-height
+                // rows so that the opening has a height to run to. A
+                // live row carries its state as a chip.
+                let body_h = f32::from(PAGE_SESSION_H) * list.len() as f32;
+                let mut body = v_flex().w_full().flex_shrink_0().overflow_hidden();
+                for r in list {
+                    let key = key_of(&r);
+                    let card = self.card_for(&r);
+                    let dot = self.live_color(&r, cx);
+                    let working = self.is_working(&r);
+                    let glyph_id = SharedString::from(format!("row-glyph-{key}"));
+                    let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
+                    let menu_key = key.clone();
+                    let session_box = pick_box(format!("s-{key}"), state_of(std::slice::from_ref(&key)), &theme);
+                    body = body.child(
+                        h_flex()
+                            .id(SharedString::from(format!("row-{key}")))
+                            .h(PAGE_SESSION_H)
+                            .flex_shrink_0()
+                            .pl(px(48.))
+                            .pr(px(12.))
+                            .gap(px(12.))
+                            .items_center()
+                            .rounded(px(10.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.muted))
+                            .on_click(cx.listener(move |this, _, window, cx| if this.manage { this.pick(std::slice::from_ref(&key), cx) } else { this.open_and_focus(&key, window, cx) }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key, RenameAt::Sheet), cx)),
+                            )
+                            .children(session_box)
+                            .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working, glyph_id)))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.))
+                                    .child(
+                                        h_flex()
+                                            .gap(px(8.))
+                                            .items_center()
+                                            .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).when(self.unnamed(&r), |d| d.italic()).child(r.title.clone()))
+                                            .children(self.rename_mark(&r, "page", cx))
+                                            // Under "Archived" every row is.
+                                            .when(r.archived && !section, |d| d.child(badge("archived", theme.muted, theme.muted_foreground)))
+                                            .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
+                                    )
+                                    .when(!r.git_branch.is_empty(), |d| d.child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(format!("⎇ {}", r.git_branch)))),
+                            )
+                            .when_some(dot, |d, c| d.child(state_chip(card.column, c, &theme)))
+                            .child(when(r.mtime, &theme))
+                            .child(div().w(px(14.)).flex_shrink_0()),
+                    );
+                }
+                let body = match anim {
+                    Some((opening, serial)) => body
+                        .with_animation(ElementId::Name(format!("sessions-body-{p}-{serial}").into()), Animation::new(FOLDER_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                            let t = if opening { t } else { 1. - t };
+                            d.h(px(body_h * t)).opacity(t)
+                        })
+                        .into_any_element(),
+                    None => body.into_any_element(),
+                };
+                // Opened by a click, its foot is kept in view as it grows.
+                let follow = self.sessions_anim.as_ref().is_some_and(|(name, opening, at, _)| *name == p && *opening && at.elapsed() < FOLDER_ANIM + FOOT_STAY);
+                rows.push(if follow { v_flex().w_full().flex_shrink_0().child(body).child(follow_foot(&self.sessions_scroll, body_h + PAGE_PROJECT_H)).into_any_element() } else { body });
             }
         }
         if rows.is_empty() {
             rows.push(div().px(px(12.)).py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child("Nothing here.").into_any_element());
         }
 
-        let title = match (&folder, &scope) {
-            (Some(p), _) => p.clone(),
-            (None, Scope::All) => "Your projects".to_string(),
-            (None, Scope::Agent(a)) => format!("{} projects", a.display_name()),
+        let title = match &scope {
+            Scope::All => "All Sessions".to_string(),
+            Scope::Agent(a) => format!("{} sessions", a.display_name()),
         };
-        let line = match &folder {
-            Some(_) => format!("{} in this project.", plural(count, "session", "sessions")),
-            None => format!("{} in {} on this machine, every one of them kept.", plural(count, "session", "sessions"), plural(folders_n, "project", "projects")),
-        };
+        // Two figures, a label each: the count of sessions is what is
+        // read first, in the page's ink, and its projects follow in
+        // the muted one. As one sentence in one grey the four numbers
+        // had nothing to tell them apart.
+        let figures = [("Active", count - gone_n, active_in), ("Archived", gone_n, gone_in)];
         let display = crate::fonts::display_family(cx);
-        // Inside a folder, the way back up sits over its name.
-        let crumb = folder.is_some().then(|| {
-            let hover = theme.foreground;
+        // The line over the first project: what is here, and "Select"
+        // at its right. Choosing, it is a plate with a box for every
+        // session the pills leave, how many are chosen, what came of
+        // the last thing done, and Archive, Delete and Done. Scrolled
+        // out of view it stands at the page's top instead (`floats`),
+        // so what is chosen far down can still be acted on.
+        let n = self.picked.len();
+        let none = n == 0 || self.manage_busy;
+        let said = if self.manage_busy { Some("Working…".to_string()) } else { self.manage_said.clone() };
+        // A pill as the page's filters are: quiet, the danger's, or solid.
+        let pill = |id: &'static str, icon: Option<&'static str>, label: &'static str, kind: u8, off: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>, on: fn(&mut Self, &mut Context<Self>)| {
+            let ink = match kind {
+                1 => theme.danger,
+                2 => theme.background,
+                _ => theme.foreground,
+            };
+            let hover = match kind {
+                1 => theme.danger.opacity(0.1),
+                2 => theme.foreground.opacity(0.85),
+                _ => theme.foreground.opacity(0.06),
+            };
             h_flex()
+                .id(id)
+                .h(px(28.))
+                .px(px(12.))
                 .gap(px(6.))
+                .flex_shrink_0()
                 .items_center()
+                .rounded_full()
                 .text_size(px(12.5))
-                .text_color(theme.muted_foreground)
+                .text_color(ink)
+                .border_1()
+                .border_color(match kind {
+                    1 => theme.danger.opacity(0.35),
+                    2 => theme.foreground,
+                    _ => theme.border,
+                })
+                .when(kind == 2, |d| d.bg(theme.foreground))
+                .children(icon.map(|path| Icon::default().path(path).with_size(px(14.)).text_color(ink)))
+                .child(label)
+                .map(|d| if off { d.opacity(0.4) } else { d.cursor_pointer().hover(move |s| s.bg(hover)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    swallow_click(window, cx);
+                    on(this, cx);
+                })) })
+        };
+        let tools = |suffix: &'static str, cx: &mut Context<Self>| -> Div {
+            let theme = cx.theme().clone();
+            if !manage {
+                return h_flex()
+                    .w_full()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(h_flex().flex_1().min_w_0().overflow_hidden().gap(px(14.)).items_center().text_size(px(12.5)).text_color(theme.muted_foreground).children(figures.iter().enumerate().map(|(at, (label, sessions, projects))| {
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap(px(14.))
+                            .items_center()
+                            .when(at > 0, |d| d.child(div().w(px(1.)).h(px(14.)).bg(theme.border)))
+                            .child(
+                                h_flex()
+                                    .gap(px(7.))
+                                    .items_baseline()
+                                    .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child(label.to_uppercase()))
+                                    .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(plural(*sessions, "session", "sessions")))
+                                    .child(div().child(format!("in {}", plural(*projects, "project", "projects")))),
+                            )
+                    })))
+                    .child(pill("sessions-select", Some("icons/select-all.svg"), "Select", 0, false, &theme, cx, |this, cx| this.manage_toggle(cx)));
+            }
+            let all = all_keys.clone();
+            let ids: [&'static str; 4] = if suffix.is_empty() { ["manage-all", "manage-archive", "manage-delete", "manage-done"] } else { ["manage-all-f", "manage-archive-f", "manage-delete-f", "manage-done-f"] };
+            h_flex()
+                .w_full()
+                .gap(px(8.))
+                .items_center()
                 .child(
-                    div()
-                        .id("sessions-up")
+                    h_flex()
+                        .id(ids[0])
+                        .gap(px(10.))
+                        .pr(px(4.))
+                        .items_center()
                         .cursor_pointer()
-                        .hover(move |s| s.text_color(hover))
-                        .on_click(cx.listener(|this, _, _, cx| this.show_sessions_in(this.scope.clone(), None, cx)))
-                        .child("All Projects"),
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .on_click(cx.listener(move |this, _, _, cx| this.pick(&all, cx)))
+                        .children(pick_box(format!("all{suffix}"), state_of(&all_keys), &theme))
+                        .child(if n == 0 { "Select all".to_string() } else { format!("{n} selected") }),
                 )
-                .child(Icon::new(IconName::ChevronRight).with_size(px(11.)))
-                .child(div().min_w_0().truncate().child(title.clone()))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).children(said.clone()))
+                .child(pill(ids[1], Some("icons/archive.svg"), "Archive", 0, none, &theme, cx, |this, cx| this.manage_asked(ManageDo::Archive, cx)))
+                .child(pill(ids[2], Some("icons/trash.svg"), "Delete", 1, none, &theme, cx, |this, cx| this.manage_asked(ManageDo::Delete, cx)))
+                .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(theme.border))
+                .child(pill(ids[3], None, "Done", 2, false, &theme, cx, |this, cx| this.manage_toggle(cx)))
+        };
+        // The plate comes and goes under the line's words: its ground,
+        // and the room at its sides.
+        let plate_y = self.manage_y.clone();
+        let ground = theme.muted;
+        let plate = move |d: Div, t: f32| d.h(px(MANAGE_BAR_H)).px(px(12. * t)).rounded(px(12.)).bg(ground.opacity(t));
+        let row = h_flex().w_full().flex_shrink_0().items_center().child(tools("", cx)).child(canvas(move |bounds, _, _| plate_y.set(Some(bounds.top())), |_, _, _, _| {}).absolute().top_0().left_0().size_0());
+        let row = match moving {
+            Some((coming, serial)) => row
+                .with_animation(ElementId::Name(format!("manage-row-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| plate(d, if coming { t } else { 1. - t }))
+                .into_any_element(),
+            None => plate(row, if manage { 1. } else { 0. }).into_any_element(),
+        };
+        // Whether the plate has gone up out of the list's view.
+        let away = manage && self.manage_y.get().is_some_and(|y| y + px(MANAGE_BAR_H) < self.sessions_scroll.bounds().top());
+        let floats = self.presence("manage-float", away, cx);
+        let float = (away || floats.is_some()).then(|| {
+            let card = h_flex()
+                .w_full()
+                .max_w(CONTENT_W)
+                .h(px(MANAGE_BAR_H))
+                .px(px(12.))
+                .items_center()
+                .rounded(px(12.))
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .shadow(float_shadow(&theme))
+                .occlude()
+                .child(tools("-f", cx));
+            let over = div().absolute().top(px(8.)).left_0().right_0().px(px(24.)).flex().justify_center();
+            match floats {
+                Some((coming, serial)) => over
+                    .child(card.with_animation(ElementId::Name(format!("manage-float-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                        let t = if coming { t } else { 1. - t };
+                        d.opacity(t).mt(px(-6. * (1. - t)))
+                    }))
+                    .into_any_element(),
+                None => over.child(card).into_any_element(),
+            }
         });
 
         v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(self.render_topbar(String::new(), Vec::new(), cx)).child(v_flex().relative().flex_1().min_h_0().vertical_scrollbar(&self.sessions_scroll).child(
             v_flex().id("sessions").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.sessions_scroll).px(px(24.)).items_center().child(page_in(
-                if folder.is_some() { "page-sessions-folder" } else { "page-sessions" },
+                "page-sessions",
                 v_flex()
                     .w_full()
                     .max_w(CONTENT_W)
                     .pt(px(20.))
                     .pb(px(40.))
                     .gap(px(14.))
-                    .child(v_flex().gap(px(6.)).children(crumb).child(div().text_size(px(30.)).font_family(display).child(title)))
+                    .child(div().text_size(px(30.)).font_family(display).child(title))
                     .child(filters)
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(line))
+                    .child(row)
                     .child(v_flex().w_full().gap(px(2.)).children(rows)),
             )),
-        ))
+        ).children(float))
     }
     // -- one conversation ----------------------------------------------------
 
@@ -11072,66 +12053,102 @@ impl Workbench {
     }
 
     /// Goes to where the new part of the conversation begins, which the
-    /// reader has now seen. A new round is a place the list knows; an
-    /// item part way down a round is gone to once that round is drawn
-    /// and the item's place in it is known (`unread_arrive`).
+    /// reader has now seen, in motion from where they are (`glide_step`).
     fn unread_show(&mut self, cx: &mut Context<Self>) {
         let Some((round, item)) = self.unread_from() else { return };
         let Some(d) = self.detail.as_mut() else { return };
         d.seen = shape_of(&d.session);
-        let to = ListOffset { item_ix: round, offset_in_item: px(0.) };
-        d.list.scroll_to(to);
-        if item > 0 {
-            self.unread_go = Some((round, item));
-            self.unread_y.set(None);
-            self.unread_due.set(true);
-        } else {
-            self.glide_to(to);
-        }
+        // An item part way down a round has a mark drawn before it,
+        // which says where it is.
+        self.unread_go = (item > 0).then_some((round, item));
+        self.unread_y.set(None);
+        let now = Instant::now();
+        self.glide = Some(UnreadGlide { round, item, began: now, last: now, blind: 0, jumped: false, still: 0, was: None });
         cx.notify();
     }
 
-    /// Arrive at `to` in motion: the list is put a little short of it and
-    /// runs the rest of the way (`glide_step`). The whole way cannot be
-    /// run, since what lies between has no height until it is drawn; the
-    /// last stretch is what the eye follows.
-    fn glide_to(&mut self, to: ListOffset) {
-        let Some(d) = self.detail.as_ref() else { return };
-        d.list.scroll_by(-GLIDE);
-        self.glide = Some((Instant::now(), to, px(0.)));
-    }
-
-    /// One frame of a glide: as far along as the clock says, and at its
-    /// end the list is put exactly where it was going, whatever the
-    /// heights learnt on the way did to the distance.
+    /// One frame of the move. It ends at the place, or as near it as
+    /// the list's end lets the view come, or when the reader takes the
+    /// wheel.
     fn glide_step(&mut self, window: &mut Window) {
-        let Some((at, to, done)) = self.glide else { return };
-        let Some(d) = self.detail.as_ref() else {
-            self.glide = None;
-            return;
-        };
-        let t = at.elapsed().as_secs_f32() / GLIDE_TIME.as_secs_f32();
-        if t >= 1. {
-            d.list.scroll_to(to);
-            self.glide = None;
+        let Some(mut g) = self.glide.take() else { return };
+        let over = self.glide_frame(&mut g) || g.began.elapsed() > UNREAD_MOST || self.content_wheel_at.is_some_and(|at| at > g.began);
+        if over {
+            self.unread_go = None;
             return;
         }
-        let want = GLIDE * ease_out_quint()(t);
-        d.list.scroll_by(want - done);
-        self.glide = Some((at, to, want));
+        self.glide = Some(g);
         window.request_animation_frame();
     }
 
-    /// The place gone to has been drawn: it is brought a little under
-    /// the top of the view.
-    pub(crate) fn unread_arrive(&mut self, cx: &mut Context<Self>) {
-        self.unread_go = None;
-        if let (Some(y), Some(d)) = (self.unread_y.take(), self.detail.as_ref()) {
-            d.list.scroll_by(y - d.list.viewport_bounds().top() - px(70.));
-            let to = d.list.logical_scroll_top();
-            self.glide_to(to);
+    /// Whether the move is over, having moved the list a frame's worth.
+    fn glide_frame(&self, g: &mut UnreadGlide) -> bool {
+        let Some(list) = self.detail.as_ref().map(|d| &d.list) else { return true };
+        let now = Instant::now();
+        let dt = (now - g.last).as_secs_f32().min(0.05);
+        g.last = now;
+        let top = list.logical_scroll_top();
+        // Come down onto the list's end, where its top is past the last
+        // round: the place is as near the view's top as it gets. Run on
+        // from there, the list was put back short of the round and came
+        // down again.
+        if top.item_ix >= list.item_count() {
+            return true;
         }
-        cx.notify();
+        let view = list.viewport_bounds().top();
+        let left = if g.item > 0 {
+            self.unread_y.get().map(|y| f32::from(y - view) - UNREAD_UNDER)
+        } else if top.item_ix == g.round {
+            Some(-f32::from(top.offset_in_item))
+        } else {
+            list.bounds_for_item(g.round).map(|b| f32::from(b.top() - view))
+        };
+        if std::env::var("EMAKI_GLIDE_DEBUG").is_ok() {
+            eprintln!("unread to {}.{}: at {}+{:.0} left {left:?}", g.round, g.item, top.item_ix, f32::from(top.offset_in_item));
+        }
+        let Some(mut left) = left else {
+            g.blind += 1;
+            // Nothing has been drawn since the click: the mark may be a
+            // frame away.
+            if g.blind == 1 {
+                return false;
+            }
+            if g.blind <= UNREAD_RUN_TICKS + 1 {
+                list.scroll_by(px(UNREAD_RUN * dt * if g.round < top.item_ix { -1. } else { 1. }));
+                return false;
+            }
+            if !std::mem::replace(&mut g.jumped, true) {
+                list.scroll_to(ListOffset { item_ix: g.round, offset_in_item: px(0.) });
+                list.scroll_by(px(-UNREAD_SHORT));
+                return false;
+            }
+            return g.blind > UNREAD_RUN_TICKS + 6;
+        };
+        if left.abs() < 1. {
+            return true;
+        }
+        // The list's end holds the view short of a place near it: no
+        // nearer after a few frames is as near as it gets.
+        if g.was.is_some_and(|was| (was - left).abs() < 0.5) {
+            g.still += 1;
+            if g.still >= 4 {
+                return true;
+            }
+        } else {
+            g.still = 0;
+        }
+        g.was = Some(left);
+        if left.abs() > UNREAD_CAP {
+            let skip = left - UNREAD_CAP * left.signum();
+            list.scroll_by(px(skip));
+            left -= skip;
+        }
+        let mut step = left * (1. - (-dt / UNREAD_EASE).exp());
+        if step.abs() < 1.5 {
+            step = left.abs().min(1.5) * left.signum();
+        }
+        list.scroll_by(px(step));
+        false
     }
 
     fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -14182,6 +15199,52 @@ impl ComeBack {
     }
 }
 
+/// What our record of a session begun here lends the index's while the
+/// transcript has only its first rows. Claude Code writes the name a
+/// session carries (`/clear`) a fifth of a second before any row that
+/// names a folder, and the index reads the file in between: the session
+/// was then listed under its project directory's name, a folder of its
+/// own in the sidebar, until the next read put it where it belongs. With
+/// nothing said and no name given, the index calls it untitled, and it
+/// keeps the name it was begun under.
+fn lend_begun(r: &mut SessionRef, draft: &SessionRef) {
+    if r.cwd.is_empty() {
+        r.cwd = draft.cwd.clone();
+        if r.git_branch.is_empty() {
+            r.git_branch = draft.git_branch.clone();
+        }
+    }
+    if r.blank && r.named.is_empty() {
+        r.title = draft.title.clone();
+    }
+}
+
+/// A mark of no height under a folder's sessions while they unfold. Where
+/// they run past the foot of the list they are in, the list is moved up
+/// by as much, frame by frame with the unfolding, so the person sees the
+/// end of what they opened. Never by more than leaves the folder's own
+/// row in view: `above` is how much stands over the mark once open.
+fn follow_foot(scroll: &ScrollHandle, above: f32) -> AnyElement {
+    let scroll = scroll.clone();
+    canvas(
+        move |bounds, window, _| {
+            let view = scroll.bounds();
+            let over = bounds.top() + px(10.) - view.bottom();
+            let room = bounds.top() - view.top() - px(above);
+            let by = over.min(room);
+            if by > px(0.5) {
+                let at = scroll.offset();
+                scroll.set_offset(point(at.x, at.y - by));
+            }
+            window.request_animation_frame();
+        },
+        |_, _, _, _| {},
+    )
+    .w_full()
+    .h(px(0.))
+    .into_any_element()
+}
+
 /// A folder's own name, and the folders it is in with the home folder as
 /// "~": the two lines of a folder on the home page's list.
 fn folder_name(cwd: &str) -> String {
@@ -14741,6 +15804,8 @@ impl Render for Workbench {
             .when(self.file_peek.is_some(), |d| d.child(self.render_file_peek(window, cx)))
             .when(self.file_ask.is_some(), |d| d.child(self.render_file_ask(window, cx)))
             .when(self.discard_ask.is_some(), |d| d.child(fade_in("discard-ask-in", self.render_discard_ask(cx))))
+            .when(self.manage_ask.is_some(), |d| d.child(fade_in("manage-ask-in", self.render_manage_ask(cx))))
+            .when(self.open_ask.is_some(), |d| d.child(fade_in("open-ask-in", self.render_open_ask(cx))))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
             .when_some(self.pick_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))

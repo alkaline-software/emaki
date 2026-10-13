@@ -145,15 +145,15 @@ Two levels, as the sessions page has (`Workbench::agent_open`).
   markdown view made a link of an address in a command and drew the
   escapes inside it. The third says whether Emaki
   reads its sessions. The sessions themselves are not listed here: All
-  Projects has them, and narrows to an agent. A list of an agent's
+  Sessions has them, and narrows to an agent. A list of an agent's
   projects stood under the steps and was removed for saying it twice.
   In its place is one row under the steps with the count of sessions,
-  which goes to All Projects narrowed to the agent. It is there when
+  which goes to All Sessions narrowed to the agent. It is there when
   there is a session to go to.
 
 ## The sidebar
 
-"Agents" is an entry under All Projects (⌘E, `GoAgents`), which goes to
+"Agents" is an entry under All Sessions (⌘E, `GoAgents`), which goes to
 the cards. There was a card of agents in the sidebar, a row an agent
 with its sessions' count; it was removed for the entry, since the page
 says the same and more.

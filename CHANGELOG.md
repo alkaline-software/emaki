@@ -5,6 +5,18 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.3
+
+- The sidebar lists every project and scrolls; pinned projects stay put above the rest, up to half the list.
+- Projects in the sidebar are selected together with ⌘-click, ⇧-click, a dragged rectangle or ⌘A, then opened in Finder or hidden. Hidden projects and ones run in temporary folders sit under their own headings at the foot.
+- All Projects is now All Sessions, with a scroll for its icon: projects unfold in place, each row shows its date, and archived projects have their own section.
+- Sessions can be selected there, by project or one by one, and archived now or deleted. Archive checks Emaki's copy first; Delete moves every copy to the Trash. Nothing in a project's folder is touched.
+- An agent's progress notes show as part of the reply, as in the terminal, and a running command says what it is for.
+- Code blocks no longer wrap: a wide one scrolls sideways.
+- A session begun by `/clear` opens with `/clear`, and no longer flashes under a stray folder in the sidebar.
+- "New messages" scrolls down to the new part, and a project opened near the foot of a list scrolls into view.
+- Fixes: stray lines around the logo in About.
+
 ## v0.2.2
 
 - Word documents open as pages and can be written in: type, select, style, format, undo and save with ⌘S, on WordCraft's engine. Try it on a copy first: a save rewrites the file.

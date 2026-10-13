@@ -44,6 +44,14 @@ depend on. The code honours each; keep it that way.
   `first_prompt_title` all skip them. See Compaction.
 - **A peer row is `isMeta: true` and still a prompt.** The builder and
   `turn_state` must treat it as one, or the log shows a reply to nothing.
+- **A `thinking` block with words in it may be a message.** Claude Code
+  (2.1.291 on) keeps the model's thinking to itself, an empty block, and
+  writes what the model says of its progress between tool calls as a
+  `thinking` block too, which its terminal shows as any message. The
+  block's signature names its kind near its start, `narration` or
+  `thinking` (`build::is_narration`). A narration is reply text. Taken
+  for a thought it was folded shut, and inside a run of tool calls it
+  was out of sight until the run was opened.
 - **Do not ignore `attachment` rows.** A message sent mid-turn exists only
   as one.
 - **A rule line on Claude Code's screen may carry text.** Test for one
@@ -65,6 +73,13 @@ In the conversation the command's own chip is left out when the prompt
 above already says it. `/compact`'s output line, "Compacted (ctrl+o to
 see full summary)", is the terminal's instruction and is dropped, so the
 round reads as the prompt and the boundary's notice.
+
+A command run before anything was said is the conversation's first
+message: a round of its own with the command as its prompt
+(`RoundBuilder::opens_with`, `Source::Command`), as the agent's screen
+has it. `/clear` heads the session it began. Kept as a chip until a
+round opened, it was drawn under the first prompt, after the words it
+came before. Such a round is nobody's message to hand back or wait on.
 
 Only that command's output goes. `RoundBuilder::command` is the command
 the next output belongs to: a `/model` run later, still in the `/compact`
@@ -90,6 +105,14 @@ transcript under a new id and carries the session's name into it
 otherwise shows as two sessions of one name, the second empty. The
 process stays the same and its registry record moves to the new id; the
 window follows it (`docs/channels.md`, Going on to another session).
+
+The name rows are written about a fifth of a second before any row
+that names a folder, and the registry has the new id by then, so the
+index can read the file in between and list the session with no `cwd`:
+under its project directory's name, a folder of its own in the sidebar.
+The window's own record of the session lends the index's its folder,
+and its name while nothing is said and none was given
+(`workbench::lend_begun`), and stands beside it until something is said.
 
 `peek` marks a transcript `blank` (`SessionRef::blank`,
 `transcript::says_something`) when the whole file fits in the head it

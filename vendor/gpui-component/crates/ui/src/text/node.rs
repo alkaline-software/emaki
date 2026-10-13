@@ -9,7 +9,8 @@ use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
     Hsla, InteractiveElement as _, IntoElement, Length, ObjectFit, Overflow, ParentElement,
     ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _,
-    WhiteSpace, Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
+    WhiteSpace, Window, div, img, linear_color_stop, linear_gradient,
+    prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
 use ropey::Rope;
@@ -18,7 +19,7 @@ use crate::{
     ActiveTheme as _, Icon, IconName, StyledExt, h_flex,
     highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter},
     input::{InputEdit, Point, RopeExt as _},
-    scroll::horizontal_scroll_area,
+    scroll::{ScrollableElement as _, horizontal_scroll_area},
     text::{
         CodeBlockActionsFn, LinkClickHandlerFn, MarkdownExtensions, MarkdownNode,
         document::NodeRenderOptions,
@@ -1229,6 +1230,11 @@ impl CodeBlock {
         cx: &mut App,
     ) -> AnyElement {
         let style = &node_cx.style;
+        // Where the block is scrolled sideways, kept by the block as
+        // parsed: the same block has the same place while its text
+        // stands. (Emaki addition.)
+        let key = SharedString::from(format!("codeblock-scroll-{:p}", Arc::as_ptr(&self.state)));
+        let scroll = window.use_keyed_state(key, cx, |_, _| ScrollHandle::default()).read(cx).clone();
 
         div()
             .w_full()
@@ -1249,13 +1255,57 @@ impl CodeBlock {
                     .text_size(cx.theme().mono_font_size)
                     .relative()
                     .refine_style(&style.code_block)
-                    .child(Inline::new(
-                        "code",
-                        self.state.clone(),
-                        vec![],
-                        self.styles(&cx.theme().highlight_theme),
-                        node_cx.link_click_handler.clone(),
-                    ))
+                    // A line of code is not wrapped: what is set out in
+                    // columns (a table, a drawing, a mock of a screen)
+                    // came apart where a line was broken. A block wider
+                    // than its room scrolls sideways, and only when the
+                    // gesture is sideways, so a wheel over it still moves
+                    // what it is in (`horizontal_scroll_area`, as a table
+                    // has). Where more lies past an edge the
+                    // text fades into the block's ground there, and the
+                    // scrollbar shows under the pointer: cut off clean,
+                    // a line read as all there was. (Emaki addition.)
+                    .whitespace_nowrap()
+                    .child({
+                        let scroll = scroll.clone();
+                        let (at, most) = (-scroll.offset().x, scroll.max_offset().x);
+                        let ground = cx.theme().muted;
+                        let fade = |left: bool| {
+                            let (from, to) = if left { (ground, ground.opacity(0.)) } else { (ground.opacity(0.), ground) };
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(36.))
+                                .map(|d| if left { d.left_0() } else { d.right_0() })
+                                .bg(linear_gradient(90., linear_color_stop(from, 0.), linear_color_stop(to, 1.)))
+                        };
+                        div()
+                            .relative()
+                            .w_full()
+                            .min_w_0()
+                            .child(horizontal_scroll_area(
+                                ("code-scroll", options.ix),
+                                &scroll,
+                                // A row, and the text an item of it that
+                                // does not shrink: as a block's child it
+                                // was as wide as the block, its lines ran
+                                // past it, and there was nothing to scroll.
+                                &gpui::StyleRefinement::default().flex(),
+                                div().flex_none().child(Inline::new(
+                                    "code",
+                                    self.state.clone(),
+                                    vec![],
+                                    self.styles(&cx.theme().highlight_theme),
+                                    node_cx.link_click_handler.clone(),
+                                )),
+                            ))
+                            .when(at > px(1.), |d| d.child(fade(true)))
+                            .when(most - at > px(1.), |d| d.child(fade(false)))
+                    })
+                    // On the block and not on the text's own box: there
+                    // it lay over the last line.
+                    .horizontal_scrollbar(&scroll)
                     .when_some(node_cx.code_block_actions.clone(), |this, actions| {
                         this.child(
                             div()

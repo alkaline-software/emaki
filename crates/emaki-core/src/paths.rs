@@ -128,6 +128,19 @@ pub fn uploads_dir(session_id: &str) -> PathBuf {
     }
 }
 
+/// Whether a folder is under one of the system's temporary places: a
+/// scratch folder an agent or a script was run in, which the system
+/// clears by itself and nobody goes back to.
+pub fn is_temp_dir(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let under = |root: &str| {
+        let root = root.trim_end_matches('/');
+        !root.is_empty() && (p == root || p.starts_with(&format!("{root}/")))
+    };
+    let system = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+    under(&system) || ["/tmp", "/private/tmp", "/var/tmp", "/var/folders", "/private/var/folders"].iter().any(|root| under(root))
+}
+
 /// Create the whole tree with private permissions. Idempotent.
 pub fn ensure_dirs() -> std::io::Result<()> {
     let r = root();

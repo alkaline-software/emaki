@@ -264,6 +264,8 @@ session that is each time. `Workbench::follow` moves the tab with it. A
 session `/clear` began has nothing said in it, which the index lists
 nowhere, so it stands as a session begun here does until the index has
 it, under the name the old one was given if it was given one. The
+index's first read of it can lack the folder, which our record lends
+it (`docs/transcript-format.md`, Blank sessions). The
 session left stays in the list with nothing behind it, and is resumed
 like any other. Kept under the id it was started on, the terminal had no
 record there, what was typed was answered in a transcript nobody was

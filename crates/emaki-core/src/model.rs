@@ -347,6 +347,20 @@ pub enum Item {
     Tool(ToolCall),
 }
 
+impl ToolCall {
+    /// What the agent says it is doing with this call, while it runs: the
+    /// line Claude Code's terminal sets over a running command (a Bash
+    /// call's `description`, a subagent's). It is said for as long as the
+    /// call runs and no longer, as there.
+    pub fn saying(&self) -> Option<String> {
+        if self.status != CallStatus::Pending {
+            return None;
+        }
+        let said = self.input.get("description").and_then(|v| v.as_str()).map(str::trim).filter(|d| !d.is_empty())?;
+        Some(said.lines().next().unwrap_or(said).to_string())
+    }
+}
+
 impl Item {
     pub fn ts(&self) -> &str {
         match self {

@@ -549,7 +549,16 @@ pub fn turn_state(rows: &[Value], cwd: &str) -> TurnState {
                 };
                 state.set(Phase::NeedsYou, activity, if name == "ExitPlanMode" { "plan" } else { "ask" });
             } else {
-                let activity = if subject.is_empty() { name.to_string() } else { subject };
+                // What the agent says it is doing, when it says: the
+                // line its terminal sets over the running call.
+                let said = one_line(input_str(input, "description"), 110);
+                let activity = if !said.is_empty() {
+                    said
+                } else if subject.is_empty() {
+                    name.to_string()
+                } else {
+                    subject
+                };
                 state.set(Phase::Working, activity, tool_kind(name).as_str());
                 state.tool = name.into();
             }
@@ -638,6 +647,19 @@ impl RoundBuilder {
         self.rounds.push(rnd);
         self.current = Some(self.rounds.len() - 1);
         self.rounds.last_mut().unwrap()
+    }
+
+    /// A command run before anything was said is the conversation's first
+    /// message, as it is on the agent's screen: `/clear` heads the session
+    /// it began. Kept as a chip until a round opened, it was drawn under
+    /// the first prompt, after the words it came before. Says whether it
+    /// opened one.
+    fn opens_with(&mut self, command: &str, ts: &str, uuid: &str) -> bool {
+        if self.current.is_some() {
+            return false;
+        }
+        self.open_round(ts, uuid, command.to_string(), Source::Command);
+        true
     }
 
     fn ensure_round(&mut self, ts: &str) -> &mut Round {
@@ -1224,8 +1246,11 @@ fn handle_system(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut Sess
             }
             let (text, commands, outputs) = strip_wrappers(content);
             for c in commands {
-                b.command = command_name(&format!("/{}", c.trim_start_matches('/')));
-                b.add_notice(format!("/{}", c.trim_start_matches('/')), ts, NoticeVariant::Command);
+                let name = format!("/{}", c.trim_start_matches('/'));
+                if !b.opens_with(&name, ts, str_of(row, "uuid")) {
+                    b.add_notice(name.clone(), ts, NoticeVariant::Command);
+                }
+                b.command = command_name(&name);
             }
             // The row names its command even when its content does not.
             if let Some(name) = run.map(|r| str_of(r, "command").trim_start_matches('/')).filter(|n| !n.is_empty()) {
@@ -1331,9 +1356,10 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
     // goes: a `/model` run later in the same round keeps its own.
     let said = b.current.map(|i| command_name(&b.rounds[i].prompt)).unwrap_or_default();
     for c in commands {
-        let name = command_name(&format!("/{}", c.trim_start_matches('/')));
-        if name != said {
-            b.add_notice(format!("/{}", c.trim_start_matches('/')), ts, NoticeVariant::Command);
+        let shown = format!("/{}", c.trim_start_matches('/'));
+        let name = command_name(&shown);
+        if !b.opens_with(&shown, ts, uuid) && name != said {
+            b.add_notice(shown, ts, NoticeVariant::Command);
         }
         b.command = name;
     }
@@ -1394,6 +1420,11 @@ fn handle_assistant(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut S
                 if text.is_empty() {
                     continue;
                 }
+                // Said to the person, not thought: it is part of the reply.
+                if is_narration(&block) {
+                    b.add(Item::Text { uuid: uuid.into(), ts: ts.into(), md: text.into() });
+                    continue;
+                }
                 let seconds = if b.last_ts.is_empty() { 0.0 } else { elapsed_ms(&b.last_seen_ts(), ts) as f64 / 1000.0 };
                 b.add(Item::Thinking { uuid: uuid.into(), ts: ts.into(), md: text.into(), seconds });
             }
@@ -1416,6 +1447,19 @@ fn handle_assistant(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut S
             _ => {}
         }
     }
+}
+
+/// Whether a `thinking` block is a note to the person and not a thought.
+/// Claude Code (2.1.291 on) keeps the model's thinking to itself, an
+/// empty block, and writes what the model says of its progress between
+/// tool calls as a `thinking` block with words in it. Its terminal shows
+/// those as it shows any message. The two are told apart by the kind the
+/// block's signature names near its start, `narration` or `thinking`; a
+/// signature that says nothing of it leaves the block a thought.
+fn is_narration(block: &Value) -> bool {
+    let signature = str_of(block, "signature");
+    let head = &signature.as_bytes()[..signature.len().min(96) / 4 * 4];
+    std::str::from_utf8(head).ok().and_then(crate::driver::base64_decode).is_some_and(|raw| raw.windows(9).any(|w| w == b"narration"))
 }
 
 fn apply_result(call: &mut ToolCall, block: &Value, sidecar: Option<&Value>, ts: &str) {

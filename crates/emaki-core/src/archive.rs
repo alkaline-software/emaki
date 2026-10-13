@@ -430,12 +430,7 @@ pub fn archive_ref(r: &SessionRef, state: &mut State, stats: &mut Stats) {
     if r.archived || is_inside_archive(&r.path) {
         return;
     }
-    let slug = if r.cwd.is_empty() { paths::safe_component(&r.project_dir) } else { paths::project_slug(&r.cwd) };
-    let file_name = match r.agent {
-        AgentId::ClaudeCode => format!("{}.jsonl", r.session_id),
-        _ => r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("{}.jsonl", r.session_id)),
-    };
-    let target = session_archive_path(r.agent, &slug, &file_name);
+    let target = archived_main(r);
     mirror_file(&r.path, &target, state, stats);
 
     if r.agent == AgentId::ClaudeCode {
@@ -470,6 +465,141 @@ pub fn sweep(refs: &[SessionRef]) -> Stats {
 
 pub fn archive_one(r: &SessionRef) -> Stats {
     sweep(std::slice::from_ref(r))
+}
+
+/// Where the archive keeps a session's main file.
+fn archived_main(r: &SessionRef) -> PathBuf {
+    if r.archived || is_inside_archive(&r.path) {
+        return r.path.clone();
+    }
+    let slug = if r.cwd.is_empty() { paths::safe_component(&r.project_dir) } else { paths::project_slug(&r.cwd) };
+    let file_name = match r.agent {
+        AgentId::ClaudeCode => format!("{}.jsonl", r.session_id),
+        _ => r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("{}.jsonl", r.session_id)),
+    };
+    session_archive_path(r.agent, &slug, &file_name)
+}
+
+/// Every file under `dir`, folders gone into.
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.filter_map(Result::ok).map(|e| e.path()) {
+        if entry.is_dir() {
+            files_under(&entry, out);
+        } else {
+            out.push(entry);
+        }
+    }
+}
+
+/// Archive a session now: the agent's own files are let go, as the agent
+/// lets them go itself when they are old enough, and the archive's copy
+/// is from then on the session. It is asked for by the person, of a
+/// session nothing is running in.
+///
+/// Nothing is removed until every file to be removed has been read
+/// against its copy and found the same, byte for byte. A file the archive
+/// does not keep (anything in the session's folder but its sidecars, or
+/// one too large to copy) stays where it is.
+pub fn release(r: &SessionRef) -> Result<(), String> {
+    if r.archived || is_inside_archive(&r.path) {
+        return Ok(());
+    }
+    if !r.path.is_file() {
+        return Err("its file is not there".into());
+    }
+    if archive_one(r).errors > 0 {
+        return Err("it could not be copied into the archive".into());
+    }
+    let target = archived_main(r);
+    let mut pairs = vec![(r.path.clone(), target.clone())];
+    let (side_src, side_dst) = (r.path.with_extension(""), target.with_extension(""));
+    if r.agent == AgentId::ClaudeCode && side_src.is_dir() {
+        for name in SIDECAR_DIRS {
+            let mut files = Vec::new();
+            files_under(&side_src.join(name), &mut files);
+            for f in files {
+                let Ok(rel) = f.strip_prefix(&side_src) else { continue };
+                pairs.push((f.clone(), side_dst.join(rel)));
+            }
+        }
+    }
+    if let Some((src, _)) = pairs.iter().find(|(src, dst)| !same_bytes(src, dst)) {
+        let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        return Err(format!("the archive's copy of {name} is not the same as the agent's"));
+    }
+    for (src, _) in &pairs {
+        fs::remove_file(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    }
+    // The folders left empty go too; one that still holds something stays.
+    if side_src.is_dir() {
+        for name in SIDECAR_DIRS {
+            let mut dirs = vec![side_src.join(name)];
+            let mut at = 0;
+            while at < dirs.len() {
+                if let Ok(entries) = fs::read_dir(&dirs[at]) {
+                    dirs.extend(entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()));
+                }
+                at += 1;
+            }
+            for d in dirs.iter().rev() {
+                let _ = fs::remove_dir(d);
+            }
+        }
+        let _ = fs::remove_dir(&side_src);
+    }
+    Ok(())
+}
+
+/// Everything a session is on disk, for deleting it: the agent's own
+/// files first, then the archive's with the generations set aside from
+/// it, then what Emaki made from them. The agent's come first so that a
+/// sweep running meanwhile has no source to copy into the archive again.
+/// A folder is named whole.
+pub fn everything_of(r: &SessionRef) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if !(r.archived || is_inside_archive(&r.path)) {
+        out.push(r.path.clone());
+        if r.agent == AgentId::ClaudeCode {
+            out.push(r.path.with_extension(""));
+        }
+    }
+    let target = archived_main(r);
+    out.push(target.clone());
+    out.push(target.with_extension(""));
+    // `<name>.genN.jsonl` beside it, and each one's sidecars.
+    let stem = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let gen_of = stem.split(".gen").next().unwrap_or(&stem).to_string();
+    if let Some(entries) = target.parent().and_then(|p| fs::read_dir(p).ok()) {
+        let mut gens: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                *p != target && name.strip_prefix(gen_of.as_str()).and_then(|rest| rest.strip_prefix(".gen")).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            })
+            .collect();
+        gens.sort();
+        if stem == gen_of {
+            out.extend(gens);
+        }
+    }
+    // The markdown rendered from it, under any title it has had.
+    let slug = if r.cwd.is_empty() { paths::safe_component(&r.project_dir) } else { paths::project_slug(&r.cwd) };
+    let sid8: String = paths::safe_component(&r.session_id).chars().take(8).collect();
+    if !sid8.is_empty() {
+        if let Ok(entries) = fs::read_dir(paths::logs_dir().join(slug)) {
+            let suffix = format!("-{sid8}.md");
+            out.extend(entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix))));
+        }
+    }
+    // With no id the uploads folder is everybody's.
+    if !r.session_id.is_empty() {
+        out.push(paths::uploads_dir(&r.session_id));
+    }
+    out.retain(|p| p.exists());
+    out.dedup();
+    out
 }
 
 /// How long a copy the agent no longer has is left as it is before it is

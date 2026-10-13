@@ -210,6 +210,19 @@ upstream revision finds them.
    and a `themes/aurora.json` holding `{}`, which a test reads and the
    copy does not have; neither is kept.
 
+27. `crates/ui/src/text/node.rs`: a code block's lines are not wrapped
+   (`whitespace_nowrap` on the block). The text is in the toolkit's own
+   `horizontal_scroll_area`, as a table is, so a block wider than its
+   room scrolls sideways and a wheel that is not sideways passes through
+   to what the block is in. The area is a row and the text an item of it
+   that does not shrink: as a block's child the text was as wide as the
+   block and there was nothing to scroll. Its handle is kept with `use_keyed_state`
+   under the parsed block's own address, since a node is made off the
+   main thread and cannot hold one. Where more lies past an edge the text
+   fades into the block's ground, and the block has a horizontal
+   scrollbar, on the block itself so it lies in the padding under the
+   text and not over the last line. Wrapped, anything set out in columns came apart.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

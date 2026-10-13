@@ -6,28 +6,6 @@ pub fn now_secs() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// "just now", "4m ago", "3h ago", "yesterday", "Sep 12".
-pub fn relative(mtime: f64, now: f64) -> String {
-    let delta = (now - mtime).max(0.0);
-    if delta < 45.0 {
-        return "just now".into();
-    }
-    if delta < 3600.0 {
-        return format!("{}m ago", (delta / 60.0).round() as u64);
-    }
-    if delta < 86_400.0 {
-        return format!("{}h ago", (delta / 3600.0).round() as u64);
-    }
-    if delta < 172_800.0 {
-        return "yesterday".into();
-    }
-    if delta < 7.0 * 86_400.0 {
-        return format!("{}d ago", (delta / 86_400.0).round() as u64);
-    }
-    let dt = DateTime::<Utc>::from_timestamp(mtime as i64, 0).map(|d| d.with_timezone(&Local));
-    dt.map(|d| d.format("%b %-d").to_string()).unwrap_or_default()
-}
-
 /// How long ago, in whole words: "just now", "15 hours ago", "3 days
 /// ago", "2 months ago".
 pub fn ago(then: f64, now: f64) -> String {
@@ -78,19 +56,19 @@ pub fn stamp(ts: &str) -> String {
     dt.format(form).to_string()
 }
 
-/// Which group of a list by recency a time falls in: the sessions page
-/// heads its rows with these.
-pub fn bucket(mtime: f64) -> &'static str {
+/// The day something was last touched, for a row's right end: the time
+/// today, "Oct 2" on another day, with the year once it is not this one.
+pub fn day(mtime: f64) -> String {
+    let Some(dt) = DateTime::<Utc>::from_timestamp(mtime as i64, 0).map(|d| d.with_timezone(&Local)) else { return String::new() };
     let today = Local::now().date_naive();
-    let Some(dt) = DateTime::<Utc>::from_timestamp(mtime as i64, 0).map(|d| d.with_timezone(&Local)) else { return "Earlier" };
-    let days = (today - dt.date_naive()).num_days();
-    match days {
-        i64::MIN..=0 => "Today",
-        1 => "Yesterday",
-        2..=6 => "This week",
-        7..=30 => "This month",
-        _ => "Earlier",
-    }
+    let form = if dt.date_naive() == today {
+        "%H:%M"
+    } else if dt.year() == today.year() {
+        "%b %-d"
+    } else {
+        "%b %-d, %Y"
+    };
+    dt.format(form).to_string()
 }
 
 pub fn plural(n: usize, one: &str, many: &str) -> String {

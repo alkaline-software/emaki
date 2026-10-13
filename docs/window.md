@@ -146,34 +146,73 @@ A name, three entries and a card (`render_sidebar`).
   colours from that theme: a toolkit button, or a `cx.theme()` inside a
   closure, brings the page's colours onto the frame, which is how the
   open session's row came out near white under white words.
-- New session, All Projects, Agents. The All Projects entry is still ⌘L
-  and `GoSessions`; its icon is a briefcase so it does not read as a
-  folder row. Agents is ⌘E and goes to the agents page
+- New session, All Sessions, Agents. The All Sessions entry is still ⌘L
+  and `GoSessions`; its icon is a scroll (Tabler's `script`), which is
+  what an emaki is, and does not read as a folder row. Agents is ⌘E and goes to the agents page
   (`docs/agents.md`).
 - One card (`card`), Projects, under a name that does not scroll, taking
   the height left (`side_scroll`, `Pane::Sidebar` to `route_scroll`).
 - The footer is the person's name and a settings gear, nothing else.
 
-The Projects card lists the `SIDE_FOLDERS` newest projects, then "N more". A
+The Projects card lists every project, the newest first, and scrolls. It
+listed ten and then "N more", which went to the sessions page: the card
+stood half empty and the click left the list for another page. A
 click opens a folder onto its sessions and closes it again (`folders_open`,
-kept in `ui.json`): `FOLDER_ROWS` of them, headed by when (`format::bucket`,
-as on the sessions page), then "N more".
+kept in `ui.json`): `FOLDER_ROWS` of them, then "N more".
 
 A project can be pinned (the pin beside the plus under the pointer, or a
 right click on its row; `toggle_pin`, `pinned` in `ui.json`). The row
 keeps room for the pin and the plus whether they show or not, and a
 pinned project wears its pin, filled, at all times: a click lets it go.
-The line under the pinned ones closes where it stood
-(`pin_rule_after`), after the project it was last drawn after. Drawn at
-the head of the list as it closed, it pushed a project let go at the
-top down for a moment and the row shook. The pinned ones head the list in the order they
-were pinned, with a line under them, and one dragged onto another takes
+The pinned ones are a block of their own over the rest, in the order
+they were pinned, with a line at its foot: the rest scrolls under it
+and the pinned stay where they are. The block takes what it needs up to
+half the card and past that scrolls by itself (`pin_scroll`), so the
+rest always has the other half, however many are pinned or open. The
+wheel moves the block when a gesture begins over it and it has more
+than shows (`scroll_pins`), and the rest otherwise. One dragged onto another takes
 its place (`DragPin`, `drag_pin_to`: each pinned row hears the drag and
 answers when the pointer is on it). `side_order` is the one place the
 order is made, for the list and for the fitted width. A pin only moves
-the row: let go, the project is where the index has it. The pinned ones
-are all listed, and the rest fill what is left of `SIDE_FOLDERS`, never
-fewer than `SIDE_FOLDERS_LEAST`.
+the row: let go, the project is where the index has it.
+
+Several projects are chosen together as the files tree's rows are: ⌘ and
+a click adds one or takes it out, ⇧ and a click chooses from the one last
+clicked to this one over the rows as drawn (`side_click_more`,
+`side_marked`, `side_drawn`), and a rectangle dragged over them from a
+press anywhere in the card chooses the ones it lies over
+(`side_band_to`). The card has no empty room to press in, so the press
+may be on a row: one that has not moved a few points is still that row's
+click, and the click that ends a drag does nothing (`side_band_live`). A
+press on a pinned project is its own drag, to another place among the
+pinned. The rows are not one height here, so each says where it was
+drawn (`side_rows_at`), cut to its own list. A plain click opens the
+project and lets the chosen go, as Escape and a click on the card's
+empty room do. The chosen are lit in the accent, and rows lit one under
+another in the same list are one block, round at its two ends, unless
+the upper one's sessions show between them. While projects are chosen
+the card has the keyboard (`side_focus`), so ⌘A takes every project
+showing; when none is chosen any more it goes back to the composer
+(`keep_focus`). A right click on one of several is their menu
+(`project_menu`), and on any other project its own:
+
+- **Open in Finder** opens each one's folder in a window of its own
+  (`projects_do`). More than `OPEN_MANY` at once is asked about first
+  (`render_open_ask`).
+- **Hide Project** puts a project out of the list (`hidden`, kept in
+  `ui.json`); **Show Project** on a hidden one brings it back. A hidden
+  project is not among the pinned while it is hidden, and takes its pin up
+  again when shown. The sessions page lists every project, hidden or not.
+
+Two sections stand under the last project that shows, each a heading with
+its count that opens onto its projects in motion (`toggle_section`):
+"Temporary", then "Hidden". Temporary is the projects every session of
+which was run in one of the system's temporary folders
+(`paths::is_temp_dir`): a scratch run of an agent's or a script's, whose
+folder the system clears and nobody goes back to. A pinned one stays
+among the pinned and a hidden one is under Hidden. Both sections are shut
+at every launch and neither is remembered open: they are where what is
+not wanted in the list goes.
 
 A folder with a live session is open without being asked (`sync_folders`):
 it opens when one of its sessions goes live and closes when the last stops,
@@ -226,21 +265,64 @@ asked for the maximum.
 
 ## The sessions page
 
-Two levels, as the sidebar has. A project is a folder; the window says
-"project" and keeps the folder icon. The top level (`sessions_folder` none)
-is a row per folder with a chip for the most pressing of its live sessions.
-A click goes inside (`show_sessions_in`), where sessions are headed by when
-under an "All Projects › folder" line that goes back up. The pills (All, one per
-agent) narrow either level and stay as the level changes; inside
-a folder they count that folder's own. An archived session, one its agent no
-longer has, is listed with that agent's and wears an "archived" tag. It
-has no category of its own: a row a kind of session beside a row an agent
-read as a second sort of agent.
+"All Sessions": a row a project, newest first, as the sidebar has them. A
+project is a folder; the window says "project" and keeps the folder icon.
+A click opens a row onto its sessions in place and closes it again
+(`sessions_toggle`, `sessions_open`, kept for the launch only), by the
+sidebar's motion: a box of fixed-height rows (`PAGE_SESSION_H`) run up or
+down with the opacity. It went inside the project, to a second level
+under an "All Projects › folder" line: a click left the list, and two
+projects could not be looked into at once.
 
-"N more" under a folder in the sidebar goes inside that folder; "N more" at
-the foot of the folders and the All Projects entry go to the top; a project
-on an agent's page goes inside that folder narrowed to the agent. A right click is Open in Finder
-on a folder and the session's menu on a session.
+Nothing is headed by when. Each row has the day it was last touched at
+its right end (`format::day`), a project's before its chevron and a
+session's in line with it. The one heading is "Archived", over the
+projects whose every session is kept here alone, its agent having
+deleted it: what Emaki is for. A project an agent still has something of
+is above it, and an archived session in one wears an "archived" tag. The
+pills (All, one per agent) narrow the page.
+
+A project opened by a click, here or in the sidebar, has its foot kept in
+view as it unfolds (`follow_foot`): where its sessions run past the foot
+of the list, the list moves up with them, never by more than leaves the
+project's own row showing. One that opens by itself (a session gone
+live) moves nothing.
+
+### Choosing sessions
+
+The line over the first project counts the sessions an agent still has
+and the archived ones, each with the projects it is in (a project with
+both is counted for both), as two labelled figures with the session
+counts in the page's ink, with
+"Select" at its right. Pressed, the line becomes a plate (`manage`,
+`picked`) and every row gets a box before it. A session's row chooses
+it; a project's row chooses all of its sessions, and its chevron is
+then what opens it. The plate has a box for everything the pills leave,
+the count, what came of the last thing done, and Archive, Delete and
+Done, drawn as the page's pills are: Archive quiet, Delete in the
+danger's ink, Done solid as the pill that is on. It is in the list's
+flow, over the first project; scrolled out of view, a copy of it stands
+at the page's top (`manage_y`, the "manage-float" presence), so
+sessions chosen far down can be acted on. It was a strip fixed over the
+page's title, which read as a toolbar of the window's and not of the
+list. Each of the two asks first (`render_manage_ask`), and is done off
+the main thread (`manage_now`).
+
+- **Archive** lets go of the agent's own copy now, without waiting for
+  the agent to delete it (`archive::release`, `docs/core.md`).
+- **Delete** moves every copy to the system's trash, the agent's and
+  the archive's (`archive::everything_of`).
+- Both are of sessions. Nothing in a project's folder is touched.
+- A session something is running in (`Hub::is_live`, a driver) is left
+  as it is and counted in what is said.
+- The question is not answered from a script: the probe's steps stop at
+  asking.
+
+"N more" under a folder in the sidebar opens that project here and
+brings the page to it (`sessions_goto`: the row says where it is once
+drawn); the All Sessions entry goes to the top; the row on an agent's
+page goes here narrowed to the agent. A right click is Open in Finder on
+a project and the session's menu on a session.
 
 ## Motion
 

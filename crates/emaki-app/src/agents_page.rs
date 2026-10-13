@@ -678,8 +678,8 @@ impl Workbench {
         let sessions = self.agent_sessions(a);
         let emaki = match a.reads {
             None if !a.with_emaki.is_empty() => prose(a.with_emaki.to_string(), cx),
-            Some(_) if sessions.is_empty() => prose(format!("{}'s sessions appear under All Projects. None yet.", a.name), cx),
-            Some(_) => prose(format!("Its sessions are under All Projects, including ones {} has deleted.", a.name), cx),
+            Some(_) if sessions.is_empty() => prose(format!("{}'s sessions appear under All Sessions. None yet.", a.name), cx),
+            Some(_) => prose(format!("Its sessions are under All Sessions, including ones {} has deleted.", a.name), cx),
             None => prose(format!("Emaki does not read {}'s sessions yet.", a.name), cx),
         };
 
@@ -694,7 +694,7 @@ impl Workbench {
             .child(self.agent_step(2, signed, false, "Sign in".into(), signed.then(|| "Done".to_string()), sign, ink, cx))
             .child(self.agent_step(3, (a.reads.is_some() || !a.with_emaki.is_empty()) && installed, true, "Use it with Emaki".into(), None, v_flex().child(emaki), ink, cx));
 
-        // The way to the sessions themselves: All Projects, narrowed to
+        // The way to the sessions themselves: All Sessions, narrowed to
         // this agent. One row and not a list, which said it twice.
         let kept = a.reads.filter(|_| !sessions.is_empty()).map(|id| {
             let count = sessions.len();
@@ -712,9 +712,9 @@ impl Workbench {
                 .cursor_pointer()
                 .hover(move |s| s.border_color(ink.opacity(0.55)).bg(ink.opacity(0.05)))
                 .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(Scope::Agent(id), None, cx)))
-                .child(Icon::default().path("icons/briefcase.svg").with_size(px(16.)).text_color(ink))
+                .child(Icon::default().path("icons/scroll.svg").with_size(px(16.)).text_color(ink))
                 .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(plural(count, "session", "sessions")))
-                .child(div().flex_shrink_0().text_size(px(12.5)).text_color(theme.muted_foreground).child("See in All Projects"))
+                .child(div().flex_shrink_0().text_size(px(12.5)).text_color(theme.muted_foreground).child("See in All Sessions"))
                 .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(theme.muted_foreground.opacity(0.7)))
         });
 

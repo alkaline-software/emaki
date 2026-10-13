@@ -2017,6 +2017,152 @@ fn a_cleared_session_is_blank_until_something_is_said() {
     assert!(!emaki_core::transcript::peek(&path).blank);
 }
 
+/// The session `/clear` began opens with `/clear`, as its terminal does:
+/// the command is the first message, and the first prompt comes after it.
+/// It was kept as a chip and drawn under that prompt, in the reply.
+#[test]
+fn a_command_before_the_first_prompt_comes_first() {
+    let clear = || {
+        vec![
+            json!({"type": "custom-title", "customTitle": "Named before", "sessionId": "s1"}),
+            json!({"type": "mode", "mode": "normal", "sessionId": "s1"}),
+            json!({"type": "user", "isMeta": true, "uuid": "u0", "timestamp": "2026-01-01T10:00:00Z", "sessionId": "s1", "message": {"role": "user", "content": "<local-command-caveat>x</local-command-caveat>"}}),
+            json!({"type": "user", "uuid": "u1", "timestamp": "2026-01-01T10:00:00Z", "sessionId": "s1", "message": {"role": "user", "content": "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"}}),
+            json!({"type": "system", "subtype": "local_command", "content": "<local-command-stdout></local-command-stdout>", "commandRun": {"command": "clear", "args": ""}, "timestamp": "2026-01-01T10:00:00Z", "sessionId": "s1"}),
+        ]
+    };
+    let built = |rows: &[Value]| build(BuildInput { rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let notices = |r: &emaki_core::model::Round| r.items.iter().filter_map(|i| if let Item::Notice { text, .. } = i { Some(text.clone()) } else { None }).collect::<Vec<_>>();
+
+    // Nothing said yet: the command alone, and nobody is waited on.
+    let mut rows = clear();
+    let s = built(&rows);
+    assert_eq!(s.rounds.iter().map(|r| (r.prompt.as_str(), r.source)).collect::<Vec<_>>(), vec![("/clear", Source::Command)]);
+    assert!(notices(&s.rounds[0]).is_empty(), "no chip repeating it");
+    assert_ne!(turn_state(&rows, "").phase, Phase::Working);
+
+    rows.push(user("hello", "2026-01-01T10:03:00Z"));
+    rows.push(assistant(vec![json!({"type": "text", "text": "Hi."})], "end_turn", "2026-01-01T10:03:01Z"));
+    let s = built(&rows);
+    assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["/clear", "hello"]);
+    assert!(notices(&s.rounds[1]).is_empty(), "the command is not said again under the prompt");
+    assert_eq!(first_prompt_title(&rows, 72), "hello", "the session is not named after the command");
+
+    // What a command before the first prompt set is said with it; one
+    // run after a prompt is a chip in that prompt's round, as before.
+    let mut rows = vec![
+        json!({"type": "system", "subtype": "local_command", "content": "<command-name>/effort</command-name>\n<command-args>high</command-args>", "commandRun": {"command": "effort", "args": "high"}, "timestamp": "2026-01-01T10:00:00Z", "uuid": "c1", "sessionId": "s1"}),
+        json!({"type": "system", "subtype": "local_command", "content": "<local-command-stdout>Set effort level to high: more thinking</local-command-stdout>", "timestamp": "2026-01-01T10:00:00Z", "sessionId": "s1"}),
+        user("go", "2026-01-01T10:01:00Z"),
+    ];
+    rows.push(user("<command-name>/rename</command-name>\n<command-args>x</command-args>", "2026-01-01T10:02:00Z"));
+    let s = built(&rows);
+    assert_eq!(s.rounds.iter().map(|r| r.prompt.as_str()).collect::<Vec<_>>(), vec!["/effort high", "go"]);
+    assert_eq!(notices(&s.rounds[0]), vec!["High"]);
+    assert_eq!(notices(&s.rounds[1]), vec!["/rename x"]);
+}
+
+/// Archived at the person's word, a session leaves its agent's folder
+/// only once the archive's copy is the same, and is then listed as
+/// archived. Deleted, it is named whole: the agent's files, the
+/// archive's, and what was made from them.
+#[test]
+fn a_session_is_archived_now_and_named_whole_for_deleting() {
+    let _guard = isolated();
+    let dir = emaki_core::paths::projects_dir().join("-tmp-kept");
+    let side = dir.join("keep-1").join("subagents");
+    std::fs::create_dir_all(&side).unwrap();
+    let path = dir.join("keep-1.jsonl");
+    let rows = [
+        json!({"type": "user", "uuid": "u1", "sessionId": "keep-1", "cwd": "/tmp/kept", "timestamp": "2026-01-01T10:00:00Z", "message": {"role": "user", "content": "hello"}}),
+        json!({"type": "assistant", "uuid": "a1", "sessionId": "keep-1", "cwd": "/tmp/kept", "timestamp": "2026-01-01T10:00:01Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi."}]}}),
+    ];
+    let text: String = rows.iter().map(|r| format!("{r}\n")).collect();
+    std::fs::write(&path, &text).unwrap();
+    std::fs::write(side.join("agent-x.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+    // Something of the session's the archive does not keep.
+    std::fs::write(dir.join("keep-1").join("note.txt"), "mine").unwrap();
+
+    let live = |id: &str| emaki_core::adapters::index_all(0, &[]).into_iter().find(|r| r.session_id == id);
+    let r = live("keep-1").unwrap();
+    assert!(!r.archived);
+
+    // Named whole before anything is done: both copies and the folder.
+    emaki_core::archive::archive_one(&r);
+    let all = emaki_core::archive::everything_of(&r);
+    assert!(all.contains(&path) && all.contains(&dir.join("keep-1")));
+    assert!(all.iter().any(|p| emaki_core::archive::is_inside_archive(p) && p.extension().is_some_and(|e| e == "jsonl")));
+    assert!(all.iter().all(|p| p.exists()));
+
+    emaki_core::archive::release(&r).unwrap();
+    assert!(!path.exists(), "the agent's copy is let go");
+    assert!(!side.exists(), "and its sidecars");
+    assert_eq!(std::fs::read_to_string(dir.join("keep-1").join("note.txt")).unwrap(), "mine", "what the archive does not keep stays");
+    let kept = live("keep-1").unwrap();
+    assert!(kept.archived);
+    assert_eq!(std::fs::read_to_string(&kept.path).unwrap(), text, "the archive's copy is the session, byte for byte");
+    assert!(kept.path.with_extension("").join("subagents").join("agent-x.jsonl").is_file());
+    emaki_core::archive::release(&kept).unwrap();
+    assert!(kept.path.is_file(), "archiving an archived session does nothing");
+
+    // Archived, it is named by the archive's files alone.
+    let all = emaki_core::archive::everything_of(&kept);
+    assert!(all.contains(&kept.path) && all.iter().all(|p| emaki_core::archive::is_inside_archive(p)));
+    // A session with no id names nobody's uploads.
+    std::fs::create_dir_all(emaki_core::paths::uploads_dir("")).unwrap();
+    let nobody = emaki_core::transcript::SessionRef::default();
+    assert!(emaki_core::archive::everything_of(&nobody).is_empty());
+}
+
+/// What the model says of its progress between tool calls is written as
+/// a `thinking` block whose signature names it a narration. It is part
+/// of the reply, as in the terminal, and not a thought to be unfolded.
+#[test]
+fn a_narration_is_part_of_the_reply() {
+    // The first bytes of the two kinds of signature, as Claude Code 2.1.296 writes them.
+    let narration = "CAQSuwYKEQgSGAI4AUIJbmFycmF0aW9uEgyuMP9glm1435/MykwaDEaTvGgMldpvRFYvMCIwTw8tOwPB";
+    let thinking = "CAQSsgYKEAgSGAI4AUIIdGhpbmtpbmcSDNJTn0VznoPLV9/rCBoMOR1U/4BeZFzTkC6IIjDLJNsaxdcm";
+    let rows = vec![
+        user("go", "2026-01-01T10:00:00Z"),
+        assistant(vec![json!({"type": "thinking", "thinking": "", "signature": thinking})], "", "2026-01-01T10:00:01Z"),
+        assistant(vec![json!({"type": "thinking", "thinking": "Found the cause; fixing it now.", "signature": narration})], "", "2026-01-01T10:00:02Z"),
+        assistant(vec![json!({"type": "thinking", "thinking": "A thought of the old kind.", "signature": thinking})], "", "2026-01-01T10:00:03Z"),
+        assistant(vec![json!({"type": "thinking", "thinking": "One with no signature.", "signature": ""})], "", "2026-01-01T10:00:04Z"),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let kinds: Vec<(&str, &str)> = s.rounds[0].items.iter().filter_map(|i| match i {
+        Item::Text { md, .. } => Some(("text", md.as_str())),
+        Item::Thinking { md, .. } => Some(("thought", md.as_str())),
+        _ => None,
+    }).collect();
+    assert_eq!(kinds, vec![("text", "Found the cause; fixing it now."), ("thought", "A thought of the old kind."), ("thought", "One with no signature.")]);
+}
+
+/// A running command is said in the agent's own words for it, as the
+/// terminal sets them over the command, and only while it runs.
+#[test]
+fn a_running_call_says_what_it_is_for() {
+    let call = json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "grep -n one two", "description": "Finding how the rows are drawn"}});
+    let mut rows = vec![user("go", "2026-01-01T10:00:00Z"), assistant(vec![call], "tool_use", "2026-01-01T10:00:01Z")];
+    assert_eq!(turn_state(&rows, "").activity, "Finding how the rows are drawn");
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    let said = |s: &emaki_core::model::Session| s.rounds[0].items.iter().find_map(|i| i.as_tool()).map(|c| (c.saying(), c.subject.clone())).unwrap();
+    assert_eq!(said(&s), (Some("Finding how the rows are drawn".to_string()), "grep -n one two".to_string()));
+
+    rows.push(row(json!({"type": "user", "uuid": "r1", "timestamp": "2026-01-01T10:00:02Z", "sessionId": "s1", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}})));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(said(&s).0, None, "once it has run the card is the command again");
+}
+
+#[test]
+fn a_scratch_folder_is_known_for_one() {
+    use emaki_core::paths::is_temp_dir;
+    assert!(is_temp_dir("/private/tmp/claude-501/-Users-x/scratchpad/spike-cwd"));
+    assert!(is_temp_dir("/tmp/x") && is_temp_dir("/var/folders/ab/T/x") && is_temp_dir("/tmp"));
+    assert!(is_temp_dir(&std::env::temp_dir().join("x").to_string_lossy()));
+    assert!(!is_temp_dir("/Users/x/Documents/tmp/project") && !is_temp_dir("/tmpfiles/x") && !is_temp_dir(""));
+}
+
 /// A command started in the background runs until Claude Code's
 /// notification for its id, which is in the queue the moment it exits.
 #[test]

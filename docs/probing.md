@@ -46,13 +46,13 @@ EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value withou
 EMAKI_GO="page:new;newfolder:<path>;newagent:codex;say:<words>" EMAKI_OPEN=<id> ./target/debug/Emaki  # a new Codex session: the folder, the agent, a message (a real model call); allow, deny and stop answer the oldest card and stop the turn; pick:mode and pick:agent open those lists
 EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to another session, or to the new-session page
 EMAKI_GO="page:new;pick:folder" EMAKI_OPEN=<id> ./target/debug/Emaki  # the new-session page's list of folders (steps wait for a session to be open, so name one)
-EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar
+EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar; mark:<name> is ⌘ and a click on it and markto:<name> ⇧ and one, projects:open, projects:hide and projects:show what the menu of those chosen does, hidden a click on the Hidden heading and temporary one on Temporary, and sideband:<y>:<y2> a rectangle dragged down the Projects card; project:<name> is a click on a project on the sessions page; manage is its Select button, pickall:<project> chooses a project's sessions, manage:archive and manage:delete ask (and nothing answers)
 EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it
 EMAKI_GO="pin:<project>;pin:<other>;pindrag:<other>:<project>" EMAKI_OPEN=<id> ./target/debug/Emaki  # pin two projects (pin: again unpins), then drag the second onto the first
 EMAKI_GO="open:<id2>;tabhints" EMAKI_OPEN=<id> ./target/debug/Emaki  # the tabs' numbers, as holding ⌘ shows them
 EMAKI_GO="x;tabdrag:<id2>:0;pilldrag:<folder>:500" EMAKI_OPEN=<id> ./target/debug/Emaki  # drag a tab along its pill, or a folder's pill along the row, to an x from the row's left edge
 EMAKI_GO="x;tree:crates;file:README.md" EMAKI_OPEN=<id> ./target/debug/Emaki  # the files panel: open a folder, show a file (file:off closes its pane, file:raw and file:read choose how markdown or a table shows; file:fold:<line> folds the section that line heads, file:type:<words> puts words at the start of the editor and file:save saves it; file:peek:<n> opens the nth change against git on its card and file:revert reverts it; with changes not saved, file:off or quit brings the question up and file:ask:save, file:ask:discard or file:ask:cancel answers it; in a PDF pdf:all selects everything, pdf:sel:<from>,<to> those glyphs, pdf:text prints the selection, pdf:find:<words> finds and pdf:next steps, pdf:pages and pdf:contents are the two buttons, pdf:page:<n> goes to a page; in a Word document word:type:<words> types, word:compose:<words> is an input method still composing, word:run:<id> runs one of the engine's commands, word:style:<name> gives the paragraph a style, word:all selects everything and word:style opens the list of styles; file:menu is a right click in the pane); filemenu:<path> is its right click; files and outline are the two buttons; outline:<n> goes to that round; panelw:<w> drags the panel's edge, panelfit is the double click on it; branches opens the list of branches, branchq:<words> types in its field, branchask:<name> shows the question a switch asks, branchgo:<name>:leave|bring answers it, branchrestore puts left changes back; changes opens the comparison, changes:<path> on that file
-EMAKI_GO="page:sessions;sessions:<folder>" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sessions page's folders, then inside one
+EMAKI_GO="page:sessions;sessions:<folder>" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sessions page, then a project opened on it and the page brought to it
 EMAKI_GO="side:320;sidefit" EMAKI_OPEN=<id> ./target/debug/Emaki  # drag the sidebar's edge to that x; then the double click on it
 EMAKI_GO="x;scroll:-3000;x;unread" EMAKI_OPEN=<id> ./target/debug/Emaki  # scroll the conversation by points (less than none is up), then click "New messages"; append rows to a scratch transcript meanwhile to have something new
 EMAKI_GO="x;term:shell;winw:800" EMAKI_OPEN=<id> ./target/debug/Emaki  # make the window that wide, as a drag of its edge would: here with the files and a terminal both showing, to see which is put away
@@ -94,7 +94,8 @@ on it has it.
 Debug prints: `EMAKI_TIMING=1` (load and hand-over per open),
 `EMAKI_A11Y=1` (gpui's view of the accessibility tree at every draw),
 `EMAKI_SCROLL_DEBUG=1` (every wheel event with its phase and owner),
-`EMAKI_GLIDE_DEBUG=1` (the outline's move, tick by tick),
+`EMAKI_GLIDE_DEBUG=1` (the outline's move and the move to the new
+messages, tick by tick),
 `EMAKI_OUTLINE_DEBUG=1`, `EMAKI_PTY_LOG=<file>` (the hidden terminal's raw
 output).
 
