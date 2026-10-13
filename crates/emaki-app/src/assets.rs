@@ -15,6 +15,7 @@ pub struct Assets;
 
 const OWN: &[(&str, &[u8])] = &[
     ("icon/app.png", include_bytes!("../assets/icon/icon-128.png")),
+    ("icon/app-large.png", include_bytes!("../assets/icon/icon-512.png")),
     ("icons/agents/codex.svg", include_bytes!("../assets/icons/agents/codex.svg")),
     ("icons/agents/github-desktop.svg", include_bytes!("../assets/icons/agents/github-desktop.svg")),
     ("icons/sparkles.svg", include_bytes!("../assets/icons/sparkles.svg")),
@@ -30,7 +31,8 @@ const OWN: &[(&str, &[u8])] = &[
     ("icons/flags/fr.svg", include_bytes!("../assets/icons/flags/fr.svg")),
     ("icons/flags/de.svg", include_bytes!("../assets/icons/flags/de.svg")),
     ("icons/refresh.svg", include_bytes!("../assets/icons/refresh.svg")),
-    ("icons/briefcase.svg", include_bytes!("../assets/icons/briefcase.svg")),
+    ("icons/scroll.svg", include_bytes!("../assets/icons/scroll.svg")),
+    ("icons/archive.svg", include_bytes!("../assets/icons/archive.svg")),
     ("icons/bubble-tail.svg", include_bytes!("../assets/icons/bubble-tail.svg")),
     ("icons/git-diff.svg", include_bytes!("../assets/icons/git-diff.svg")),
     ("icons/keyboard.svg", include_bytes!("../assets/icons/keyboard.svg")),

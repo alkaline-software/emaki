@@ -41,15 +41,18 @@ up. Two things are ours, for prompts and replies alike:
   conversation's foot (`unread_pill`, rising in and fading out). A click
   goes to where the new part begins (`unread_show`) and counts it seen.
   A new round is an item the list can go to. An item part way down a
-  round is not: the round is gone to, a mark of no height is drawn
-  before that item (`render_round`, `unread_go`), and when it has been
-  drawn the list is moved by how far it is from the top
-  (`unread_arrive`).
-- **The arrival is in motion** (`glide_to`, `glide_step`). The list is
-  put a stretch short of where it is going and runs the rest off the
-  clock, then is set exactly on the place. The whole way cannot be run:
-  the rounds between have no height until they are drawn, so a distance
-  to cover is not known. The click used to land in one frame.
+  round is not: a mark of no height is drawn before that item
+  (`render_round`, `unread_go`), which says at every frame where it is.
+- **The way there is run from where the reader is** (`UnreadGlide`,
+  `glide_step`): each frame the list moves a part of what is left, so
+  the conversation is seen going down and slows onto the place. A way
+  longer than `UNREAD_CAP` is skipped down to that first. A round not
+  drawn yet has no place: the list runs toward it a few frames, which
+  draws what it passes, and is put a little short of it if that does not
+  find it. The move ends at the place, at the list's end when the place
+  cannot come up to the top, or when the reader takes the wheel. Tried
+  and dropped: putting the list a stretch short of the place in one
+  frame and running only that stretch, which read as a jump.
 
 ## A message sent, before it is written
 
@@ -92,6 +95,16 @@ The bubble is the one item of a row, which shrinks it to the room there
 is (`min_w_0`). As an item of a column aligned to its end it took the
 width of its words up to its most, and in a pane narrower than that ran
 off the left edge, with its height still that of the narrow wrap.
+
+## Code blocks
+
+A block of code does not wrap its lines: one wider than its room scrolls
+sideways (the vendored `node.rs`, listed in `UPSTREAM.md`). Wrapped,
+anything set out in columns (a table, a mock of a screen) came apart, and
+the terminal was where it could be read. The scroller is the toolkit's
+own, the one a table has, and takes a sideways gesture only, so a wheel
+over a block still moves the conversation. Where more lies past an edge
+the text fades out there: cut off clean, a line read as all there was.
 
 ## Copy buttons and times
 
@@ -136,6 +149,12 @@ count and tokens.
   `result_index` name the result row and block;
   `transcript::image_block_bytes` takes the first image inside a
   `tool_result` block) and drawn as a tile that opens the lightbox.
+- A call that is running says what the agent says it is for, in the
+  page's own face (`ToolCall::saying`: a Bash call's `description`, a
+  subagent's), on its card, on a folded run and as the session's
+  activity (`build::turn_state`). Claude Code's terminal sets that line
+  over a running command and takes it away when the command is done, and
+  so does the card: it is then the command again.
 - Three or more consecutive tool calls, thoughts between them included,
   fold into one row (`render_run`): the count, a tally by `tool_label`, the
   last subject, the total time, and the turning mark with "running…" while

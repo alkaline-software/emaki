@@ -408,7 +408,7 @@ impl Workbench {
         let mut e = 0;
         // Where "New messages" is going to, when that is in this round:
         // a mark of no height before the item, which says where it is
-        // drawn and, the first time, has the conversation go there.
+        // drawn at every frame of the move there.
         let mut going = self.unread_go.filter(|(round, _)| *round == ix).map(|(_, item)| item);
         while jx < n {
             any = true;
@@ -420,19 +420,9 @@ impl Workbench {
                 }
                 if item < reach {
                     going = None;
-                    let (place, due, entity) = (self.unread_y.clone(), self.unread_due.clone(), cx.entity().downgrade());
+                    let place = self.unread_y.clone();
                     body = body.child(
-                        canvas(
-                            move |bounds, _, cx| {
-                                place.set(Some(bounds.top()));
-                                if due.replace(false) {
-                                    if let Some(entity) = entity.upgrade() {
-                                        cx.defer(move |cx| entity.update(cx, |this, cx| this.unread_arrive(cx)));
-                                    }
-                                }
-                            },
-                            |_, _, _, _| {},
-                        )
+                        canvas(move |bounds, _, _| place.set(Some(bounds.top())), |_, _, _, _| {})
                         .w_full()
                         .h(px(0.)),
                     );
@@ -575,6 +565,7 @@ impl Workbench {
         let mut kinds: Vec<(String, usize)> = Vec::new();
         let mut total_ms = 0u64;
         let mut last_subject = String::new();
+        let mut said: Option<String> = None;
         let mut running = false;
         let mut errors = 0;
         let mut count = 0;
@@ -589,6 +580,9 @@ impl Workbench {
                 }
                 if c.status == CallStatus::Pending {
                     running = true;
+                    // What the agent says of the call that is running,
+                    // as its terminal has it over the command.
+                    said = c.saying();
                     last_subject = format!("{} {}", c.name, c.subject);
                 } else if !running {
                     last_subject = format!("{} {}", c.name, c.subject);
@@ -634,7 +628,10 @@ impl Workbench {
             })
             .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).flex_shrink_0().child(format!("{count} tool calls")))
             .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).flex_shrink_0().child(tally))
-            .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(last_subject))
+            .child(match said {
+                Some(said) => div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.foreground).child(said),
+                None => div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(last_subject),
+            })
             .when(errors > 0, |d| d.child(div().text_size(px(11.5)).text_color(theme.danger).flex_shrink_0().child(format!("{errors} failed"))))
             .when(running, |d| d.child(div().text_size(px(11.5)).text_color(agent_color(session.agent, &theme)).flex_shrink_0().child("running…")))
             .when(!running && total_ms > 1500, |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).flex_shrink_0().child(human_duration(total_ms))));
@@ -961,7 +958,12 @@ impl Workbench {
                 }))
                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(if has_body { theme.muted_foreground } else { theme.border }))
                 .child(div().flex_shrink_0().child(tool_badge(call, &theme)))
-                .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(theme.muted_foreground).child(subject))
+                // While it runs, what the agent says it is doing, in
+                // the page's own face; then the call itself.
+                .child(match call.saying() {
+                    Some(said) => div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.foreground).child(said),
+                    None => div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(theme.muted_foreground).child(subject),
+                })
                 .when(!stat.is_empty(), |d| d.child(div().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(stat)))
                 .when(!status_text.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(status_color).child(status_text)))
                 .when(!duration.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(duration)))

@@ -155,7 +155,7 @@ fn app_menus() -> Vec<Menu> {
         name: "View".into(),
         disabled: false,
         items: vec![
-            MenuItem::action("All Projects", GoSessions),
+            MenuItem::action("All Sessions", GoSessions),
             MenuItem::action("Agents", GoAgents),
             MenuItem::action("Search", ToggleSearch),
             MenuItem::separator(),

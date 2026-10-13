@@ -4444,7 +4444,7 @@ impl Workbench {
     /// A question on the window's own card over everything: a line, a
     /// line under it, and its two buttons.
     #[allow(clippy::too_many_arguments)]
-    fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, no: Button, yes: Button, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, no: Button, yes: Button, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         div()
             .id(SharedString::from(format!("{id}-overlay")))

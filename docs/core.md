@@ -67,6 +67,17 @@ may not be running that week, and the thirty days is a setting.
   On a Mac the packed copy is made beside the file and compared byte for
   byte before it takes its place. A `.gz` beside the file was not used:
   a dozen readers go by a transcript's name and seek in it.
+- **Archived at the person's word** (`release`), a session leaves its
+  agent's folder now. Every file to be removed is first read against its
+  copy, all of it, and nothing goes unless all are the same; a file the
+  archive does not keep (anything in the session's folder but its
+  sidecars) stays. It is the one time Emaki removes a file of an
+  agent's, and only ever a whole session's, asked for on the sessions
+  page. **Deleted** (`everything_of`), a session is named whole for the
+  trash: the agent's files first, so a sweep under way has no source to
+  copy again, then the archive's with its generations, the markdown
+  rendered from it and its uploads. A session with no id names nothing:
+  its uploads folder would be everybody's.
 - **When** is the hub's (`spawn_scanner`): every session at launch and at
   quit; after that a session whose file changed, once its turn is over,
   and one still at work every five minutes. The scan every few seconds is

@@ -57,6 +57,9 @@ pub struct UiState {
     /// The projects pinned to the head of the sidebar's list, in the
     /// order they stand there.
     pub pinned: Vec<String>,
+    /// The projects put out of the sidebar's list, under "Hidden" at
+    /// its foot.
+    pub hidden: Vec<String>,
 }
 
 fn file() -> std::path::PathBuf {

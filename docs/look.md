@@ -55,6 +55,11 @@ it.
 
 ## Icons
 
+The app's own icon is drawn from two sizes of it (`assets.rs`): the 128
+for the sidebar's strip, and the 512 for the About page, where it stands
+larger. The 128 stretched to that size drew a hairline at the picture's
+right and foot.
+
 Every icon is Tabler's outline (tabler.io/icons), drawn with a stroke of
 1.75 where Tabler's own is 2: at the sizes the window uses, 2 reads heavy.
 They took the place of Phosphor's in v0.1.8, whose corners read as sharp.
