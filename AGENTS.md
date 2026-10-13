@@ -197,10 +197,11 @@ scripts/make-icon.sh       remakes assets/icon from scripts/icon/icon.html
 scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
 scripts/release-notes.sh   one version's section of CHANGELOG.md, the release notes
-scripts/release-check.sh   before a tag: version, lock, changelog, tests, build, Windows type check
+scripts/release-check.sh   before a tag: version, lock, changelog, the notary credential, tests, build, Windows type check
 scripts/release-publish.sh after CI: the notarized Mac images onto the draft release, then publish
+scripts/release-clean.sh   after a release: deletes target/ and dist/, then quits the dev build and opens the installed app
 scripts/statusline.sh      Claude Code's status line, ours: prints the line, leaves the rate limits
-scripts/relaunch.sh        quit the running Emaki and start the new build, once the agent's turn is over
+scripts/relaunch.sh        quit the running Emaki and start the new build, once the agent's turn is over; --installed starts /Applications/Emaki.app
 scripts/dev-app.sh         start the build in target/debug as an app: on a Mac a bundle opened through the system, never a bare executable
 scripts/home-scroll.py     the landscape on the handscroll over the greeting, as line drawings a depth each
 docs/                      how each part works and its traps; the index below says which to read
@@ -242,6 +243,13 @@ running Emaki and starts the new build (`scripts/dev-app.sh`). The agent's sessi
 child of the app, so quitting the app ends the session: the script waits
 while the session's registry record says `busy`. Never `pkill` by hand from
 inside the app, and look at a change before the relaunch with a probe copy.
+
+**"Clean up after the release" means `scripts/release-clean.sh`.** It is
+the last step of a release (WORKFLOW.md, step 8), run without being asked
+and as the last command, from whichever Emaki the session is in. Run that
+script and nothing by hand: it deletes `target/` and `dist/`, and when the
+dev build is the one running it quits it after the turn and opens the
+installed app.
 
 ## Writing things down
 
