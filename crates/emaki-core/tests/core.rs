@@ -1943,6 +1943,14 @@ fn hidden_terminal_clicks_become_keys() {
     assert_eq!(at(ask, "Banana"), Some(b"\x1b[B\r".to_vec()));
     assert_eq!(at(ask, "Type something"), Some(b"\x1b[B\x1b[B".to_vec()));
 
+    // Choices with no numbers, as the question about a folder to trust
+    // has them: arrows from the pointed one, and Return.
+    let trust = " Accessing workspace:\n\n /Users/a/b\n\n Security guide\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n";
+    assert_eq!(at(trust, "Yes, I trust"), Some(b"\x1b[B\r".to_vec()));
+    assert_eq!(at(trust, "No, exit"), Some(b"\r".to_vec()));
+    assert_eq!(at(trust, "Security guide"), None);
+    assert_eq!(at(trust, "Esc to cancel"), Some(b"\x1b".to_vec()));
+
     let model = "   Select model\n\n     1.  Default (recommended)  Opus 5.5 · Best for everyday tasks\n   ❯ 2.  Opus 5.5 ✔             For complex work\n     3.  Fable 5.1              For your toughest challenges\n   ↓ 4.  Sonnet 5.5             Most efficient\n\n   Enter to set as default · s to use this session only · Esc to cancel";
     assert_eq!(at(model, "Default"), Some(b"\x1b[A\r".to_vec()));
     assert_eq!(at(model, "Sonnet"), Some(b"\x1b[B\x1b[B\r".to_vec()));
@@ -3689,4 +3697,30 @@ fn a_parquet_file_is_read_as_columns_and_rows() {
     assert_eq!(table.columns, vec![("year".to_string(), "int32".to_string()), ("date".into(), "string".into()), ("peak".into(), "double".into())]);
     assert_eq!(table.total, 3);
     assert_eq!(table.rows, vec![vec!["2025".to_string(), "0101".into(), "31.7".into()], vec!["2025".into(), String::new(), "28.27".into()]]);
+}
+
+#[test]
+fn a_markdown_header_is_read_apart_from_the_text() {
+    use emaki_core::files::front_matter;
+    let text = "---\nname: ph-app\ndescription: \"A skill: for apps\"\ntags: [a, 'b']\nsteps:\n  - one\n  - two\nnote: >\n  folded\n  words\nformat:\n  html:\n    toc: true\n# a comment\nlong: runs\n  on\n---\n\n# Skill\n";
+    let (fields, rest) = front_matter(text).unwrap();
+    let get = |k: &str| fields.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str()).unwrap();
+    assert_eq!(fields.len(), 7);
+    assert_eq!(get("name"), "ph-app");
+    assert_eq!(get("description"), "A skill: for apps");
+    assert_eq!(get("tags"), "a, b");
+    assert_eq!(get("steps"), "one\ntwo");
+    assert_eq!(get("note"), "folded words");
+    assert_eq!(get("format"), "html:\n  toc: true");
+    assert_eq!(get("long"), "runs on");
+    assert_eq!(rest, "\n# Skill\n");
+    // A rule over a paragraph, a header never closed, and plain text.
+    assert!(front_matter("---\nSome words.\n---\nmore\n").is_none());
+    assert!(front_matter("---\nname: a\n\n# Title\n").is_none());
+    assert!(front_matter("# Title\n\n---\na: b\n---\n").is_none());
+    assert!(front_matter("---\n---\ntext\n").is_none());
+    assert_eq!(front_matter("---\r\ntitle: T\r\n---\r\nbody").unwrap(), (vec![("title".to_string(), "T".to_string())], "body"));
+    // As a table: the first field is the head, and no mark is markdown's.
+    let table = emaki_core::files::front_matter_table(&[("name".into(), "a|b *c*".into()), ("steps".into(), "one\n  two".into())]);
+    assert_eq!(table, "| name | a\\|b \\*c\\* |\n|---|---|\n| steps | one<br>\u{a0}\u{a0}two |\n");
 }

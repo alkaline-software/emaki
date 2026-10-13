@@ -5,6 +5,17 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.4
+
+- Whatever an agent asks is shown: a question Emaki has no card for, such as Claude Code asking whether a new folder is trusted, comes up on the terminal card in the conversation and no longer waits unseen.
+- Sessions in the sidebar are selected together with ⌘-click, ⇧-click or a dragged rectangle, across projects, and archived or deleted from their menu. A selection is projects or sessions, whichever was touched first.
+- A project's menu in the sidebar archives or deletes its sessions, for one project or several.
+- The Changes sheet selects files the same ways, has a right-click menu, discards several files at once, and closes with ⌘W.
+- A markdown file's YAML header shows as a table of its fields over the text.
+- ⇧↑ and ⇧↓ select to the start and the end in every one-line field.
+- The buttons on question cards are pills with an icon, as Select on All Sessions is.
+- Fixes: a table column no longer breaks a word in its middle.
+
 ## v0.2.3
 
 - The sidebar lists every project and scrolls; pinned projects stay put above the rest, up to half the list.

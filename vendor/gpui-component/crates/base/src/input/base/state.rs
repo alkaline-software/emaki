@@ -3283,10 +3283,14 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
             // (Emaki addition.)
             .on_action(window.listener_for(&entity, InputBaseState::up))
             .on_action(window.listener_for(&entity, InputBaseState::down))
+            // And so are their selecting forms: ⇧ and up selects to the
+            // start, ⇧ and down to the end (see `select_up`). Listened
+            // for on a textarea only, a field of one line had the code
+            // for it and never heard the key. (Emaki addition.)
+            .on_action(window.listener_for(&entity, InputBaseState::select_up))
+            .on_action(window.listener_for(&entity, InputBaseState::select_down))
             .when(self.is_multi_line(), |this| {
-                this.on_action(window.listener_for(&entity, InputBaseState::select_up))
-                    .on_action(window.listener_for(&entity, InputBaseState::select_down))
-                    .on_action(window.listener_for(&entity, InputBaseState::page_up))
+                this.on_action(window.listener_for(&entity, InputBaseState::page_up))
                     .on_action(window.listener_for(&entity, InputBaseState::page_down))
             })
             .on_action(window.listener_for(&entity, InputBaseState::on_action_select_all))

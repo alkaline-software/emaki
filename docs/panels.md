@@ -375,6 +375,23 @@ changed file's menu opens it on that file.
 
 - The file list is a `uniform_list`, since a commit of icons is a
   thousand rows.
+- Files are chosen in it as rows are in the tree (`Changes::marked`,
+  `change_click`, `changes_band_to`): a click is one, ⌘ and a click
+  adds or takes one, ⇧ and a click reaches from the last one clicked,
+  and a rectangle dragged over the list takes the rows under it. Rows
+  chosen one under another are one lit block. A click on the list's
+  empty room lets them all go (`changes_let_go`); the file whose lines
+  show (`picked`) stays shown with no row lit, and Discard, Open and
+  Reveal at the head are then asked of it.
+- A right click is the menu (`changes_menu`): of one file, Open, Reveal,
+  Add to Message, the two paths and Discard Changes; of several chosen
+  together, what can be asked of them all. A file taken out has nothing
+  to open. The choices are the tree's own (`MenuDo::File`, `Files`) but
+  for Discard (`MenuDo::Discard`).
+- Discard is asked of every file chosen (`ask_discard`, `discard_now`),
+  the pill at the head saying how many, and the question says which of
+  them go to the trash because the last commit has no such file.
+- ⌘W closes the sheet (`close_nearest`), the question over it first.
 - `git::diff` is `git diff HEAD` for the file, `--cached` before a first
   commit, and a file git does not track read as all new lines.
 - `git::parse_diff` sets a run of lines taken out beside the lines put in
@@ -496,7 +513,12 @@ far from the tree.
   and in a window with no room for its least it is not drawn
   (`fold_file`), with a line under the composer saying so.
 - What is shown (`FileBody`, `read_file`): markdown as the conversation
-  draws it; other text in the editor (below), the first `PREVIEW_BYTES`
+  draws it, and a YAML header it opens with as a table of its fields over
+  the text (`files::front_matter`, `front_matter_table`; markdown itself
+  reads a header as a rule and a heading of every field). The table is
+  part of the same markdown text, since a selection does not run from
+  one text view into another: a card of its own, drawn first, could not
+  be selected or copied; other text in the editor (below), the first `PREVIEW_BYTES`
   and `PREVIEW_LINES` of it; a picture at its own size
   or the pane's width; a PDF's first `PDF_PAGES` pages as pictures; a
   `.csv` or `.tsv` as a grid (`files::table`, `render_table`), its first

@@ -237,8 +237,8 @@ idle driver is stopped (one mid-reply is refused, `terminal_check`), the
 hidden terminal is started and the action waits in `pending_terminal`; a
 wish asked again during the wait replaces the older one. The wait is a
 state, not a time: `terminal_ready` wants the registry record `idle` (a
-login or trust screen says `waiting` and is never typed into) and the
-prompt on the screen. It never opens the person's terminal: with
+login screen says `waiting`, a folder to trust has no record at all, and
+neither is ever typed into) and the prompt on the screen. It never opens the person's terminal: with
 `driver.hidden_terminal` off, or for another agent, it says so and does
 nothing.
 
@@ -304,7 +304,23 @@ sits in the conversation.
   the registry says `waiting` (`/status`, `/config`), and by itself for
   a waiting screen `dialog_on_screen` cannot read (`term_auto`). It goes
   when `watch_terminal` sees the wait over, or by its close button
-  (Escape). ⇧Tab and Stop never show it; a click on the mode pill is one
+  (Escape).
+- **Anything the hidden terminal asks that no card knows is shown on
+  this card. This is the rule that keeps a question from waiting
+  unseen**, whatever Claude Code adds later. A wait is not only what the
+  registry calls `waiting`: 2.1.296 asks whether a folder is trusted
+  before it writes a registry record at all. So for our own terminal
+  with no record, or with one that says `idle`, `read_dialog` goes by
+  the screen: one that is not the prompt, not a turn at work, not empty,
+  and has stood still (`SCREEN_UNSAID`, longer under `idle`) is drawn on
+  the card, and the card goes when the prompt is back. Before this the
+  card was put up for the trust question (`TerminalNeeded`) and taken
+  down a second later by the same reader, which saw no `waiting`. With
+  the agent's side of the terminal panel showing, the person has that
+  screen already and no card comes up.
+- A choice with no number ("❯ No, exit" over "Yes, I trust this
+  folder") takes a click as a numbered one does (`pty::hits`), on a
+  screen with no numbered choice. ⇧Tab and Stop never show it; a click on the mode pill is one
   ⇧Tab.
 - Animation (`TERM_ANIM`, `TermShown`): held by its foot, opening up
   from the composer. While closing it is drawn from its last rows and

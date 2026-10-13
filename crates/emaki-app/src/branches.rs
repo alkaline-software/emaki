@@ -15,7 +15,7 @@ use emaki_core::git;
 
 use crate::format::plural;
 use crate::panels::BranchAsk;
-use crate::workbench::{float_shadow, pill_button, swallow_click, Notice, Workbench};
+use crate::workbench::{choice_pill, float_shadow, pill_button, Press, swallow_click, Notice, Workbench};
 
 /// How old the last word from the remote may be before the list of
 /// branches asks again when it is opened.
@@ -520,14 +520,16 @@ impl Workbench {
                     .w_full()
                     .justify_end()
                     .gap(px(8.))
-                    .child(Button::new("branch-new-cancel").outline().small().label("Cancel").on_click(cx.listener(|this, _, window, cx| {
+                    .child(choice_pill("branch-new-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.branch_new_close(window, cx);
                     })))
-                    .child(Button::new("branch-new-go").primary().small().label(label).disabled(name.is_empty() || taken).on_click(cx.listener(|this, _, window, cx| {
-                        swallow_click(window, cx);
-                        this.branch_new_go(window, cx);
-                    }))),
+                    .child(choice_pill("branch-new-go", "icons/git-branch.svg", label, Press::Primary, name.is_empty() || taken, &theme).when(!(name.is_empty() || taken), |d| {
+                        d.on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.branch_new_go(window, cx);
+                        }))
+                    })),
             );
         div()
             .id("branch-new-overlay")
@@ -684,14 +686,16 @@ impl Workbench {
                     .w_full()
                     .justify_end()
                     .gap(px(8.))
-                    .child(Button::new("gate-close").outline().small().label("Close").on_click(cx.listener(|this, _, window, cx| {
+                    .child(choice_pill("gate-close", "icons/close.svg", "Close", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.git_gate = None;
                         cx.notify();
                     })))
-                    .child(Button::new("gate-check").primary().small().label(if gate.checking { "Checking…" } else { "Check again" }).disabled(gate.checking).on_click(move |_, window, cx| {
-                        swallow_click(window, cx);
-                        let _ = entity.update(cx, |this, cx| this.gate_check(cx));
+                    .child(choice_pill("gate-check", "icons/refresh.svg", if gate.checking { "Checking…" } else { "Check again" }, Press::Primary, gate.checking, &theme).when(!gate.checking, |d| {
+                        d.on_click(move |_, window, cx| {
+                            swallow_click(window, cx);
+                            let _ = entity.update(cx, |this, cx| this.gate_check(cx));
+                        })
                     })),
             );
         div()

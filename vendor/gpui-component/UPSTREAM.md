@@ -222,6 +222,16 @@ upstream revision finds them.
    fades into the block's ground, and the block has a horizontal
    scrollbar, on the block itself so it lies in the padding under the
    text and not over the last line. Wrapped, anything set out in columns came apart.
+28. `crates/ui/src/text/node.rs` (`render_wrap_table`): a column is never
+   narrower than its longest word, up to a number of letters that is
+   less with more columns. Columns are sized by the length of their text
+   alone, so a column of short words beside one of long text was given
+   so little that a word broke in its middle.
+29. `crates/base/src/input/base/state.rs` (the input's `on_action` list):
+   `select_up` and `select_down` are listened for in a field of one line
+   too, not a textarea only. Both had a branch for one line (change to
+   `select_up`, above) that no key reached, so ⇧ with up or down did
+   nothing in any name, search or find field.
 
 ## Updating
 

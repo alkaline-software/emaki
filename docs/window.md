@@ -32,6 +32,13 @@ window remembers.
   `InputState`'s handle and carries the text role. The toolkit's input
   frame tracks a handle of its own, so focusing a state from code lands on a
   handle with no dispatch node: no key bindings, nothing for assistive apps.
+- What a caret key does in a field is the toolkit's, in
+  `vendor/gpui-component/crates/base/src/input/base`, and so the same in
+  every field there is and will be: in one line, up goes to the start
+  and down to the end, and ⇧ with either selects to there. A key that
+  does nothing in a field is looked for there, in the bindings and the
+  `on_action` list (which was missing the selecting pair for one line),
+  not answered in the field's own handler.
 - The focused element must be one the page draws. gpui dispatches a key
   from the focused node, or from the window root when that node is not in
   the frame, and the root is above every handler in the workbench, so every
@@ -43,8 +50,9 @@ window remembers.
   context is never reached.
 - ⌘W closes the nearest thing, in this order: with the keyboard in a
   shell, that shell's tab and nothing else, even with none left to
-  close; otherwise a file shown beside the conversation, then the
-  session's tab, then the window (`close_nearest`).
+  close; otherwise the comparison of changes when it is up (and the
+  question over it before that), a file shown beside the conversation,
+  then the session's tab, then the window (`close_nearest`).
 - A `CloseTab` or `CloseWindow` no view heard is handed to the workbench
   by `main.rs` (`with_workbench`), never answered by closing the window.
   The focus can be on nothing the page draws, and the key then comes
@@ -196,6 +204,12 @@ showing; when none is chosen any more it goes back to the composer
 (`keep_focus`). A right click on one of several is their menu
 (`project_menu`), and on any other project its own:
 
+- **Archive Sessions** and **Delete Sessions** ask it of every session
+  of the projects, those the sidebar does not list too
+  (`MenuDo::Sessions`, `manage_ask_of`): the question and the work are
+  the sessions page's (`render_manage_ask`, `manage_now`), and what came
+  of it is said on the notice line. Sessions only: nothing in a
+  project's folder is touched.
 - **Open in Finder** opens each one's folder in a window of its own
   (`projects_do`). More than `OPEN_MANY` at once is asked about first
   (`render_open_ask`).
@@ -203,6 +217,19 @@ showing; when none is chosen any more it goes back to the composer
   `ui.json`); **Show Project** on a hidden one brings it back. A hidden
   project is not among the pinned while it is hidden, and takes its pin up
   again when shown. The sessions page lists every project, hidden or not.
+
+Sessions are chosen together in the same ways (`side_sessions`,
+`side_session_more`, `side_sess_drawn`, `side_sess_at`), across every
+project that is open: ⇧ and a click reaches over the sessions as drawn,
+whichever projects they are in. **Projects are chosen or sessions are,
+never both, and what is touched first says which.** With projects chosen,
+⌘ or ⇧ and a click on a session does nothing, and the other way round; a
+rectangle takes the kind of the row nearest to where it was pressed,
+once it reaches one, and keeps to it however far it is dragged
+(`side_band_kind`). A right click on one of several sessions is Archive
+Sessions and Delete Sessions (`side_session_menu`); on any other session
+it is that session's own menu, with Archive Session and Delete Session
+at its foot.
 
 Two sections stand under the last project that shows, each a heading with
 its count that opens onto its projects in motion (`toggle_section`):

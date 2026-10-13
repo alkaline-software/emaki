@@ -2233,6 +2233,23 @@ impl BlockNode {
 
         let style = &node_cx.style;
         let row_count = table.children.len();
+        // A column is never narrower than its longest word, up to a
+        // point: sized by the length of its text alone, a column of short
+        // words beside one of long text was given so little that a word
+        // broke in its middle. The most a word may ask for is less with
+        // more columns, so the floors together stay inside a narrow pane.
+        // (Emaki addition.)
+        let font_size = f32::from(window.text_style().font_size.to_pixels(window.rem_size()));
+        let word_cap = (60 / col_lens.len().max(1)).clamp(6, 20);
+        let mut col_word: Vec<usize> = vec![0; col_lens.len()];
+        for row in table.children.iter() {
+            for (ix, cell) in row.children.iter().enumerate() {
+                let longest = cell.children.text().split_whitespace().map(|w| w.chars().count()).max().unwrap_or(0);
+                if let Some(slot) = col_word.get_mut(ix) {
+                    *slot = (*slot).max(longest.min(word_cap));
+                }
+            }
+        }
         let mut rows = Vec::with_capacity(row_count);
         for (row_ix, row) in table.children.iter().enumerate() {
             let mut cells = Vec::with_capacity(row.children.len());
@@ -2244,6 +2261,7 @@ impl BlockNode {
                     .copied()
                     .unwrap_or(MAX_LENGTH)
                     .min(MAX_LENGTH);
+                let word_w = col_word.get(ix).copied().unwrap_or(0) as f32 * font_size * 0.62 + 18.;
 
                 cells.push(
                     div()
@@ -2251,7 +2269,7 @@ impl BlockNode {
                         .overflow_hidden()
                         .when(align == ColumnumnAlign::Center, |this| this.text_center())
                         .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .min_w_16()
+                        .min_w(px(word_w.max(64.)))
                         .w(Length::Definite(relative(len as f32)))
                         .px_2()
                         .py_1()
