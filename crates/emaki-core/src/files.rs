@@ -483,6 +483,132 @@ pub fn table(text: &str, sep: char, most: usize) -> (Vec<Vec<String>>, bool) {
     (rows, false)
 }
 
+/// The YAML header a markdown file opens with, as a field a line, and
+/// the text under it. A field is a key at the left edge and what it
+/// holds as it reads: a folded or quoted value as its words, a list as an
+/// item a line, anything nested as it is written. `None` when the file
+/// does not open with one: no closing line, or a line at the left edge
+/// that is no key, which is a rule over a paragraph and not a header.
+pub fn front_matter(text: &str) -> Option<(Vec<(String, String)>, &str)> {
+    let body = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let first = body.split_inclusive('\n').next()?;
+    if first.trim_end() != "---" || !first.ends_with('\n') {
+        return None;
+    }
+    let mut at = first.len();
+    let mut lines: Vec<&str> = Vec::new();
+    let rest = loop {
+        let line = body[at..].split_inclusive('\n').next()?;
+        at += line.len();
+        let bare = line.trim_end();
+        if bare == "---" || bare == "..." {
+            break &body[at..];
+        }
+        lines.push(line.trim_end_matches(['\n', '\r']));
+    };
+    let mut fields: Vec<(String, Vec<&str>)> = Vec::new();
+    for line in lines {
+        let nested = line.starts_with([' ', '\t']) || line.starts_with("- ") || line == "-";
+        if line.trim().is_empty() || nested {
+            if let Some((_, more)) = fields.last_mut() {
+                more.push(line);
+            }
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line.split_once(':')?;
+        if key.is_empty() || !(value.is_empty() || value.starts_with(' ')) {
+            return None;
+        }
+        fields.push((key.trim().trim_matches(['"', '\'']).to_string(), vec![value.trim()]));
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    let unquote = |v: &str| -> String {
+        let v = v.trim();
+        for q in ['"', '\''] {
+            if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) {
+                return v[1..v.len() - 1].to_string();
+            }
+        }
+        v.to_string()
+    };
+    let fields = fields
+        .into_iter()
+        .map(|(key, lines)| {
+            let head = lines[0];
+            let mut more: Vec<&str> = lines[1..].to_vec();
+            while more.last().is_some_and(|l| l.trim().is_empty()) {
+                more.pop();
+            }
+            let indent = more.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
+            let dedent = |l: &str| l.get(indent..).unwrap_or("").to_string();
+            let value = if head.starts_with('>') || head.starts_with('|') {
+                // A block: folded into one line of words, or kept as its lines.
+                let lines: Vec<String> = more.iter().map(|l| dedent(l)).collect();
+                if head.starts_with('>') {
+                    lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+                } else {
+                    lines.join("\n")
+                }
+            } else if head.is_empty() {
+                // A list of plain things reads as an item a line.
+                let plain = more.iter().all(|l| {
+                    let l = dedent(l);
+                    l.trim().is_empty() || (l.starts_with("- ") && !l[2..].contains(": "))
+                });
+                more.iter().map(|l| dedent(l)).filter(|l| !plain || !l.trim().is_empty()).map(|l| if plain { unquote(&l[2..]) } else { l }).collect::<Vec<_>>().join("\n")
+            } else if more.is_empty() && head.starts_with('[') && head.ends_with(']') {
+                head[1..head.len() - 1].split(',').map(|v| unquote(v)).filter(|v| !v.is_empty()).collect::<Vec<_>>().join(", ")
+            } else {
+                // A plain value may run on over indented lines.
+                let mut words = vec![head.to_string()];
+                words.extend(more.iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()));
+                unquote(&words.join(" "))
+            };
+            (key, value)
+        })
+        .collect();
+    Some((fields, rest))
+}
+
+/// A header's fields as a markdown table, a field a row, for the view
+/// that draws the text under it: one text, so one selection runs through
+/// both. A table's first row is its head, and here that is the first
+/// field. What a value holds is written so that markdown reads none of
+/// it as its own marks.
+pub fn front_matter_table(fields: &[(String, String)]) -> String {
+    let cell = |text: &str| -> String {
+        let mut out = String::new();
+        for (ix, line) in text.lines().enumerate() {
+            if ix > 0 {
+                out.push_str("<br>");
+            }
+            // An indent is kept by spaces markdown does not fold away.
+            let lead = line.len() - line.trim_start_matches(' ').len();
+            out.push_str(&"\u{a0}".repeat(lead));
+            for c in line[lead..].chars() {
+                if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '~' | '&' | '#' | '$') {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+        }
+        out
+    };
+    let mut out = String::new();
+    for (ix, (key, value)) in fields.iter().enumerate() {
+        out.push_str(&format!("| {} | {} |\n", cell(key), cell(value)));
+        if ix == 0 {
+            out.push_str("|---|---|\n");
+        }
+    }
+    out
+}
+
 /// A Jupyter notebook as markdown, to read: each markdown cell as it
 /// is, each code cell fenced in the notebook's language with `In [n]`
 /// over it, and what it printed fenced under it. A picture among the

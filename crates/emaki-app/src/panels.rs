@@ -27,7 +27,7 @@ use emaki_core::git;
 use emaki_core::outline::{self, Kind};
 
 use crate::format::{clock, plural};
-use crate::workbench::{float_shadow, pill_button, pill_button_danger, swallow_click, MenuDo, Notice, Page, Workbench};
+use crate::workbench::{choice_pill, float_shadow, pill_button, Press, pill_button_danger, swallow_click, MenuDo, Notice, Page, Workbench};
 
 /// How wide a panel is; both are, so one takes the other's place without
 /// moving the conversation.
@@ -255,6 +255,16 @@ pub struct Changes {
     pub(crate) list: ListState,
     pub(crate) files: UniformListScrollHandle,
     reading: bool,
+    /// The files chosen together, `picked` among them: what a menu or
+    /// Discard is asked of. Chosen as the tree's rows are.
+    marked: Vec<PathBuf>,
+    /// Where ⇧ and a click reaches from.
+    anchor: Option<PathBuf>,
+    /// A rectangle being dragged over the files: where the press was
+    /// and where the pointer is, and whether it has moved yet.
+    band: Option<(Point<Pixels>, Point<Pixels>)>,
+    band_live: bool,
+    band_at: Option<std::time::Instant>,
 }
 
 /// VS Code's colour for a git state, light then dark: the GitHub
@@ -3028,10 +3038,10 @@ impl Workbench {
                             .pt(px(2.))
                             .gap(px(8.))
                             .flex_wrap()
-                            .child(Button::new("file-ask-discard").outline().small().label("Don't Save").on_click(answer(FileAnswer::Discard)))
+                            .child(choice_pill("file-ask-discard", "icons/trash.svg", "Don't Save", Press::Danger, false, &theme).on_click(answer(FileAnswer::Discard)))
                             .child(div().flex_1())
-                            .child(Button::new("file-ask-cancel").outline().small().label("Cancel").on_click(answer(FileAnswer::Cancel)))
-                            .child(Button::new("file-ask-save").primary().small().label("Save").on_click(answer(FileAnswer::Save))),
+                            .child(choice_pill("file-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(answer(FileAnswer::Cancel)))
+                            .child(choice_pill("file-ask-save", "icons/check.svg", "Save", Press::Primary, false, &theme).on_click(answer(FileAnswer::Save))),
                     )
                     .with_animation(ElementId::Name(format!("file-ask-in-{}", self.file_ask_serial).into()), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-6. * (1. - t)))),
             )
@@ -4444,7 +4454,7 @@ impl Workbench {
     /// A question on the window's own card over everything: a line, a
     /// line under it, and its two buttons.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, no: Button, yes: Button, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, no: impl IntoElement, yes: impl IntoElement, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         div()
             .id(SharedString::from(format!("{id}-overlay")))
@@ -4479,9 +4489,12 @@ impl Workbench {
     }
 
     /// Discard, pressed in the comparison: the question first.
-    fn ask_discard(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn ask_discard(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
         let serial = self.discard_ask.as_ref().map(|(_, n)| n + 1).unwrap_or(0);
-        self.discard_ask = Some((path, serial));
+        self.discard_ask = Some((paths, serial));
         cx.notify();
     }
 
@@ -4490,47 +4503,67 @@ impl Workbench {
     /// trash. What was typed in it here and not saved goes too. The
     /// comparison moves to the next changed file, or closes with none.
     fn discard_now(&mut self, cx: &mut Context<Self>) {
-        let Some((path, _)) = self.discard_ask.take() else { return };
+        let Some((paths, _)) = self.discard_ask.take() else { return };
         let Some(root) = self.changes.as_ref().map(|c| c.root.clone()) else { return };
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let done = git::discard(&root, &path).and_then(|did| match did {
-            git::Discarded::New if path.exists() => crate::sys::trash_path(&path).map(|_| format!("{name} is in the {}", crate::sys::TRASH_NAME)),
-            _ => Ok(format!("the changes to {name} are discarded")),
-        });
-        match done {
-            Ok(said) => {
-                self.file_editor.take_if(|ed| ed.path == path);
-                self.file_parked.retain(|ed| ed.path != path);
-                self.file_drafts.remove(&path);
-                if self.file_view.as_ref().is_some_and(|v| v.path == path) {
-                    if path.exists() { self.show_file(&path, cx) } else { self.file_view = None }
+        let named = |path: &Path| path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let (mut said, mut failed, mut done) = (Vec::new(), Vec::new(), 0);
+        for path in &paths {
+            let name = named(path);
+            let did = git::discard(&root, path).and_then(|did| match did {
+                git::Discarded::New if path.exists() => crate::sys::trash_path(path).map(|_| format!("{name} is in the {}", crate::sys::TRASH_NAME)),
+                _ => Ok(format!("the changes to {name} are discarded")),
+            });
+            match did {
+                Ok(words) => {
+                    done += 1;
+                    said.push(words);
+                    self.file_editor.take_if(|ed| ed.path == *path);
+                    self.file_parked.retain(|ed| ed.path != *path);
+                    self.file_drafts.remove(path);
+                    if self.file_view.as_ref().is_some_and(|v| v.path == *path) {
+                        if path.exists() { self.show_file(path, cx) } else { self.file_view = None }
+                    }
                 }
-                // Git is asked again here and now, so the list is right
-                // at the next draw.
-                let status = git::status(&root).unwrap_or_default();
-                self.tree.changed = Rc::new(status.changed());
-                self.tree.git = Some((root.clone(), Rc::new(status)));
-                self.tree.refresh(&root);
-                self.tree.read_at = 0.;
-                if self.tree.changed.is_empty() {
-                    self.changes = None;
-                } else {
-                    self.open_changes(None, cx);
-                }
-                self.notice = Some(Notice::said(said));
+                Err(why) => failed.push(format!("{name} was not discarded: {why}")),
             }
-            Err(why) => self.notice = Some(Notice::error(format!("{name} was not discarded: {why}"))),
         }
+        if done > 0 {
+            // Git is asked again here and now, so the list is right
+            // at the next draw.
+            let status = git::status(&root).unwrap_or_default();
+            self.tree.changed = Rc::new(status.changed());
+            self.tree.git = Some((root.clone(), Rc::new(status)));
+            self.tree.refresh(&root);
+            self.tree.read_at = 0.;
+            if self.tree.changed.is_empty() {
+                self.changes = None;
+            } else {
+                self.open_changes(None, cx);
+            }
+        }
+        self.notice = Some(match (failed.first(), done) {
+            (Some(why), _) if failed.len() == 1 => Notice::error(why.clone()),
+            (Some(_), _) => Notice::error(format!("{} were not discarded", plural(failed.len(), "file", "files"))),
+            (None, 1) => Notice::said(said.remove(0)),
+            (None, n) => Notice::said(format!("the changes to {} are discarded", plural(n, "file", "files"))),
+        });
         cx.notify();
     }
 
     /// The question Discard asks, on the window's own card over the
     /// comparison. Nothing answers it but its two buttons and Escape.
     pub(crate) fn render_discard_ask(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some((path, serial)) = self.discard_ask.clone() else { return div().into_any_element() };
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let new = self.tree.changed.iter().any(|(p, s)| *p == path && matches!(s, git::State::Untracked | git::State::Added));
-        let (title, detail, yes) = if new {
+        let Some((paths, serial)) = self.discard_ask.clone() else { return div().into_any_element() };
+        let name = paths.first().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let new = paths.iter().filter(|path| self.tree.changed.iter().any(|(p, s)| p == *path && matches!(s, git::State::Untracked | git::State::Added))).count();
+        let (title, detail, yes) = if paths.len() > 1 {
+            let detail = match new {
+                0 => "Each file goes back to what the last commit has. This cannot be undone from here.".to_string(),
+                n if n == paths.len() => format!("The last commit has none of them, so discarding them moves them to the {}. They can be put back from there.", crate::sys::TRASH_NAME),
+                n => format!("Each goes back to what the last commit has, which cannot be undone from here. {} the last commit does not have {} to the {}.", plural(n, "file", "files"), if n == 1 { "goes" } else { "go" }, crate::sys::TRASH_NAME),
+            };
+            (format!("Discard the changes to {} files?", paths.len()), detail, "Discard Changes")
+        } else if new == 1 {
             (format!("Move {name} to the {}?", crate::sys::TRASH_NAME), "The last commit has no such file, so discarding it removes it. It can be put back from there.".to_string(), crate::sys::TRASH_LABEL)
         } else {
             (format!("Discard the changes to {name}?"), "The file goes back to what the last commit has. This cannot be undone from here.".to_string(), "Discard Changes")
@@ -4544,7 +4577,9 @@ impl Workbench {
             swallow_click(window, cx);
             this.discard_now(cx);
         });
-        self.ask_card("discard-ask", serial, title, detail, Button::new("discard-ask-cancel").outline().small().label("Cancel").on_click(cancel), Button::new("discard-ask-yes").danger().small().label(yes).on_click(go), cx)
+        let no = choice_pill("discard-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
+        let yes = choice_pill("discard-ask-yes", if new > 0 && new == paths.len() { "icons/trash.svg" } else { "icons/undo-2.svg" }, yes, Press::Danger, false, cx.theme()).on_click(go);
+        self.ask_card("discard-ask", serial, title, detail, no, yes, cx)
     }
 
     /// "@path" at the end of what is typed, as the composer's own "@"
@@ -5545,7 +5580,7 @@ impl Workbench {
                         .shadow(float_shadow(&theme))
                         .child(h_flex().gap(px(8.)).items_center().child(Icon::new(IconName::TriangleAlert).with_size(px(15.)).text_color(theme.danger)).child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title)))
                         .child(div().text_size(px(12.5)).line_height(px(19.)).text_color(theme.foreground).child(words))
-                        .child(h_flex().w_full().justify_end().child(Button::new("ask-close").primary().small().label("Close").on_click(cx.listener(|this, _, window, cx| {
+                        .child(h_flex().w_full().justify_end().child(choice_pill("ask-close", "icons/close.svg", "Close", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.branch_ask = None;
                             cx.notify();
@@ -5642,15 +5677,17 @@ impl Workbench {
                             .w_full()
                             .justify_end()
                             .gap(px(8.))
-                            .child(Button::new("ask-cancel").outline().small().label("Cancel").on_click(cx.listener(|this, _, window, cx| {
+                            .child(choice_pill("ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                                 swallow_click(window, cx);
                                 this.branch_ask = None;
                                 cx.notify();
                             })))
-                            .child(Button::new("ask-go").primary().small().label(if create { "Create branch" } else { "Switch branch" }).disabled(!ready).on_click(cx.listener(move |this, _, window, cx| {
-                                swallow_click(window, cx);
-                                this.branch_run(name.clone(), create, if leave { git::Carry::Leave } else { git::Carry::Bring }, cx);
-                            }))),
+                            .child(choice_pill("ask-go", "icons/git-branch.svg", if create { "Create branch" } else { "Switch branch" }, Press::Primary, !ready, &theme).when(ready, |d| {
+                                d.on_click(cx.listener(move |this, _, window, cx| {
+                                    swallow_click(window, cx);
+                                    this.branch_run(name.clone(), create, if leave { git::Carry::Leave } else { git::Carry::Bring }, cx);
+                                }))
+                            })),
                     ),
             )
             .into_any_element()
@@ -5948,7 +5985,8 @@ impl Workbench {
         if let Some(at) = picked.as_ref().and_then(|p| self.tree.changed.iter().position(|(c, _)| c == p)) {
             files.scroll_to_item(at, ScrollStrategy::Center);
         }
-        self.changes = Some(Changes { root, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false });
+        let marked: Vec<PathBuf> = picked.iter().cloned().collect();
+        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None });
         self.load_diff(cx);
         cx.notify();
     }
@@ -5966,6 +6004,131 @@ impl Workbench {
             self.load_diff(cx);
             cx.notify();
         }
+    }
+
+    /// A click on a changed file. Alone it is the one chosen and shown;
+    /// with ⌘ it joins or leaves the ones chosen; with ⇧ every file from
+    /// the last one clicked to it is chosen. The file shown is one of
+    /// them while any is chosen.
+    fn change_click(&mut self, path: PathBuf, m: Modifiers, cx: &mut Context<Self>) {
+        let order: Vec<PathBuf> = self.tree.changed.iter().map(|(p, _)| p.clone()).collect();
+        let Some(c) = &mut self.changes else { return };
+        // The click that comes with letting a rectangle go is no click.
+        if c.band_live || c.band_at.is_some_and(|at| at.elapsed() < Duration::from_millis(300)) {
+            return;
+        }
+        let mut show = path.clone();
+        if m.shift {
+            let from = c.anchor.as_ref().or(c.picked.as_ref()).and_then(|a| order.iter().position(|p| p == a)).unwrap_or(0);
+            if let Some(to) = order.iter().position(|p| *p == path) {
+                c.marked = order[from.min(to)..=from.max(to)].to_vec();
+            }
+        } else if m.secondary() {
+            match c.marked.iter().position(|p| *p == path) {
+                Some(ix) => {
+                    c.marked.remove(ix);
+                    if c.picked.as_ref() == Some(&path) {
+                        show = c.marked.last().cloned().unwrap_or(path.clone());
+                    } else {
+                        show = c.picked.clone().unwrap_or(path.clone());
+                    }
+                }
+                None => c.marked.push(path.clone()),
+            }
+            c.anchor = Some(path);
+        } else {
+            c.marked = vec![path.clone()];
+            c.anchor = Some(path);
+        }
+        self.pick_change(show, cx);
+        cx.notify();
+    }
+
+    /// The rectangle follows the pointer, and the files its rows lie
+    /// under are the ones chosen. A press that has not moved a few
+    /// points is still a click. Every row is one height, so a row's
+    /// place is its number.
+    fn changes_band_to(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let changed = self.tree.changed.clone();
+        let Some(c) = &mut self.changes else { return };
+        let Some((from, _)) = c.band else { return };
+        if !c.band_live && (at.x - from.x).abs() < px(4.) && (at.y - from.y).abs() < px(4.) {
+            return;
+        }
+        c.band = Some((from, at));
+        c.band_live = true;
+        let top = {
+            let handle = &c.files.0.borrow().base_handle;
+            handle.bounds().top() + handle.offset().y
+        };
+        let (first, last) = (from.y.min(at.y), from.y.max(at.y));
+        c.marked = changed
+            .iter()
+            .enumerate()
+            .filter(|(ix, _)| {
+                let y = top + CHANGE_ROW_H * *ix as f32;
+                y < last && y + CHANGE_ROW_H > first
+            })
+            .map(|(_, (p, _))| p.clone())
+            .collect();
+        cx.notify();
+    }
+
+    /// A click on the list's empty room lets what is chosen go. The
+    /// file shown stays shown.
+    fn changes_let_go(&mut self, cx: &mut Context<Self>) {
+        let Some(c) = &mut self.changes else { return };
+        if c.band_live || c.band_at.is_some_and(|at| at.elapsed() < Duration::from_millis(300)) || c.marked.is_empty() {
+            return;
+        }
+        c.marked.clear();
+        c.anchor = None;
+        cx.notify();
+    }
+
+    /// The press is over. The file shown is one of those chosen, when
+    /// any is.
+    fn changes_band_end(&mut self, cx: &mut Context<Self>) {
+        let Some(c) = &mut self.changes else { return };
+        let was = c.band.take().is_some();
+        if std::mem::take(&mut c.band_live) {
+            c.band_at = Some(std::time::Instant::now());
+            match c.marked.first().cloned() {
+                Some(first) if c.picked.as_ref().is_none_or(|p| !c.marked.contains(p)) => {
+                    c.anchor = Some(first.clone());
+                    self.pick_change(first, cx);
+                }
+                _ => {}
+            }
+        }
+        if was {
+            cx.notify();
+        }
+    }
+
+    /// A right click on a changed file: the menu of the several chosen
+    /// when it is one of them, and else its own, which chooses it alone.
+    fn changes_menu(&mut self, path: PathBuf, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(c) = &mut self.changes else { return };
+        let several = c.marked.len() > 1 && c.marked.contains(&path);
+        let items = if several {
+            let paths = c.marked.clone();
+            let item = |label: &'static str, what: FileDo| (label, MenuDo::Files(what, paths.clone()));
+            vec![item("Add to Message", FileDo::Mention), item("Copy Paths", FileDo::CopyPath), item("Copy Relative Paths", FileDo::CopyRel), ("", MenuDo::Rule), ("Discard Changes", MenuDo::Discard(paths.clone()))]
+        } else {
+            c.marked = vec![path.clone()];
+            c.anchor = Some(path.clone());
+            self.pick_change(path.clone(), cx);
+            let item = |label: &'static str, what: FileDo| (label, MenuDo::File(what, path.clone()));
+            let mut items = Vec::new();
+            // A file taken out has nothing to open or to show.
+            if path.exists() {
+                items.extend([item("Open", FileDo::Open), item(crate::sys::REVEAL_LABEL, FileDo::Reveal), ("", MenuDo::Rule), item("Add to Message", FileDo::Mention)]);
+            }
+            items.extend([item("Copy Path", FileDo::CopyPath), item("Copy Relative Path", FileDo::CopyRel), ("", MenuDo::Rule), ("Discard Changes", MenuDo::Discard(vec![path.clone()]))]);
+            items
+        };
+        self.open_menu(at, items, cx);
     }
 
     /// Read the picked file's lines against the last commit, off the
@@ -6013,8 +6176,9 @@ impl Workbench {
         let picked = c.picked.clone();
         let entity = cx.weak_entity();
         let (hover, chosen_bg, ink, quiet, mono) = (row_hover(&theme, dark), theme.primary.opacity(if dark { 0.18 } else { 0.12 }), theme.foreground, theme.muted_foreground, theme.mono_font_family.clone());
+        let marked: Rc<HashSet<PathBuf>> = Rc::new(c.marked.iter().cloned().collect());
         let files = uniform_list("changes-files", changed.len(), {
-            let (changed, root, picked) = (changed.clone(), root.clone(), picked.clone());
+            let (changed, root, marked) = (changed.clone(), root.clone(), marked.clone());
             move |range: std::ops::Range<usize>, _: &mut Window, _: &mut App| {
                 range
                     .map(|ix| {
@@ -6025,8 +6189,10 @@ impl Workbench {
                             None => (String::new(), rel.clone()),
                         };
                         let tint = git_color(state, dark);
-                        let chosen = picked.as_ref() == Some(&path);
-                        let entity = entity.clone();
+                        // Chosen rows one under another are one lit block.
+                        let is = |at: Option<usize>| at.and_then(|at| changed.get(at)).is_some_and(|(p, _)| marked.contains(p));
+                        let (chosen, above, below) = (marked.contains(&path), is(ix.checked_sub(1)), is(Some(ix + 1)));
+                        let (entity, menu_entity, menu_path) = (entity.clone(), entity.clone(), path.clone());
                         let row = h_flex()
                             .id(("change-row", ix))
                             .w_full()
@@ -6038,9 +6204,17 @@ impl Workbench {
                             .cursor_pointer()
                             .text_size(px(12.5))
                             .when(chosen, |d| d.bg(chosen_bg))
+                            .when(chosen && above, |d| d.rounded_t(px(0.)))
+                            .when(chosen && below, |d| d.rounded_b(px(0.)))
                             .when(!chosen, |d| d.hover(move |s| s.bg(hover)))
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |this, cx| this.pick_change(path.clone(), cx)).ok();
+                            .on_click(move |e: &ClickEvent, _, cx| {
+                                // Not the list's too, which lets go.
+                                cx.stop_propagation();
+                                entity.update(cx, |this, cx| this.change_click(path.clone(), e.modifiers(), cx)).ok();
+                            })
+                            .on_mouse_down(MouseButton::Right, move |e: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                menu_entity.update(cx, |this, cx| this.changes_menu(menu_path.clone(), e.position, cx)).ok();
                             })
                             .child(img(crate::file_icons::path(&name, false, false, dark)).size(px(16.)).flex_shrink_0())
                             // The folders give way first, so the name stays whole.
@@ -6107,7 +6281,17 @@ impl Workbench {
                     .into_any_element()
             }
         };
-        let (open, reveal, discard) = (picked.clone(), picked.clone(), picked.clone());
+        // Discard is asked of every file chosen; Open and Reveal of the one shown.
+        // With none chosen, all three are asked of the file shown.
+        let (open, reveal, discard) = (picked.clone().filter(|_| c.marked.len() <= 1), picked.clone().filter(|_| c.marked.len() <= 1), if c.marked.is_empty() { picked.clone().map(|p| vec![p]) } else { Some(c.marked.clone()) });
+        let discard_label: SharedString = if c.marked.len() > 1 { format!("Discard {}", c.marked.len()).into() } else { "Discard".into() };
+        // The rectangle, over the rows, cut to the list's room.
+        let band = c.band.filter(|_| c.band_live).map(|(a, b)| {
+            let room = c.files.0.borrow().base_handle.bounds();
+            let (left, top) = (a.x.min(b.x).max(room.left()), a.y.min(b.y).max(room.top()));
+            let (right, bottom) = (a.x.max(b.x).min(room.right()), a.y.max(b.y).min(room.bottom()));
+            div().absolute().left(left - room.left()).top(top - room.top()).w((right - left).max(px(0.))).h((bottom - top).max(px(0.))).rounded(px(3.)).border_1().border_color(theme.primary.opacity(0.7)).bg(theme.primary.opacity(0.12))
+        });
         let counts = shown.as_ref().filter(|d| !d.binary).map(|d| (d.added, d.removed));
         let branch = self.branches().map(|b| b.label());
         div()
@@ -6155,7 +6339,38 @@ impl Workbench {
                             .flex_1()
                             .min_h_0()
                             .items_stretch()
-                            .child(div().relative().w(CHANGES_LIST_W).flex_shrink_0().py(px(6.)).border_r_1().border_color(theme.border).bg(theme.sidebar).child(files).vertical_scrollbar(&c.files))
+                            .child(
+                                div()
+                                    .id("changes-list")
+                                    .relative()
+                                    .w(CHANGES_LIST_W)
+                                    .flex_shrink_0()
+                                    .py(px(6.))
+                                    .border_r_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.sidebar)
+                                    // A press anywhere in the list may become a
+                                    // rectangle dragged over the files.
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, e: &MouseDownEvent, _, _| {
+                                            if let Some(c) = &mut this.changes {
+                                                c.band = Some((e.position, e.position));
+                                                c.band_live = false;
+                                            }
+                                        }),
+                                    )
+                                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                                        if e.pressed_button == Some(MouseButton::Left) {
+                                            this.changes_band_to(e.position, cx);
+                                        }
+                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| this.changes_let_go(cx)))
+                                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.changes_band_end(cx)))
+                                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.changes_band_end(cx)))
+                                    .child(div().relative().size_full().child(files).children(band))
+                                    .vertical_scrollbar(&c.files),
+                            )
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -6176,7 +6391,7 @@ impl Workbench {
                                             })
                                             .when_some(discard, |el, p| {
                                                 let this = cx.entity().downgrade();
-                                                el.child(pill_button_danger("changes-discard", "Discard", &theme, move |_, _, cx| {
+                                                el.child(pill_button_danger("changes-discard", discard_label.clone(), &theme, move |_, _, cx| {
                                                     let _ = this.update(cx, |this, cx| this.ask_discard(p.clone(), cx));
                                                 }))
                                             })
@@ -6251,7 +6466,17 @@ impl Workbench {
             // Code, and markdown as it is written, are the editor's.
             FileBody::Markdown(_) if self.file_raw => div().into_any_element(),
             FileBody::Code(..) => div().into_any_element(),
-            FileBody::Markdown(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
+            FileBody::Markdown(text) => {
+                // A YAML header is the file's fields, not its first
+                // words: markdown reads it as a rule and a heading. It
+                // is drawn as a table in the same text, so a selection
+                // runs through it as through the rest.
+                let words = match emaki_core::files::front_matter(text) {
+                    Some((fields, rest)) => format!("{}\n{rest}", emaki_core::files::front_matter_table(&fields)),
+                    None => text.clone(),
+                };
+                div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), words, cx)).into_any_element()
+            }
             FileBody::Notebook(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
             // The web view stands over the pane's room; nothing of the
             // page is drawn under it.
@@ -7139,6 +7364,46 @@ impl Workbench {
             "branches" => self.branch_probe = Some(String::new()),
             // The comparison, on the first changed file or on that one.
             "changes" => self.open_changes(None, cx),
+            // In the comparison: changeclick:<path> is a click on a file,
+            // changeclick:cmd:<path> and changeclick:shift:<path> with
+            // that key held, changeband:<y>:<y2> a rectangle dragged
+            // down the list, changemenu:<path> a right click, and
+            // changesel prints the files chosen and the one shown.
+            t if t.starts_with("changeclick:") => {
+                let rest = &t["changeclick:".len()..];
+                let (m, path) = match rest.split_once(':') {
+                    Some(("cmd", path)) => (Modifiers::secondary_key(), path),
+                    Some(("shift", path)) => (Modifiers::shift(), path),
+                    _ => (Modifiers::default(), rest),
+                };
+                if let Some(path) = under(path) {
+                    self.change_click(path, m, cx);
+                }
+            }
+            t if t.starts_with("changeband:") => {
+                let mut ys = t["changeband:".len()..].split(':').filter_map(|y| y.parse::<f32>().ok());
+                if let (Some(a), Some(b), Some(room)) = (ys.next(), ys.next(), self.changes.as_ref().map(|c| c.files.0.borrow().base_handle.bounds())) {
+                    if let Some(c) = &mut self.changes {
+                        c.band = Some((point(room.left() + px(30.), room.top() + px(a)), point(room.left() + px(30.), room.top() + px(a))));
+                    }
+                    self.changes_band_to(point(room.left() + px(170.), room.top() + px(b)), cx);
+                }
+            }
+            "changeband" => self.changes_band_end(cx),
+            // A click on the list's empty room.
+            "changeoff" => self.changes_let_go(cx),
+            t if t.starts_with("changemenu:") => {
+                if let (Some(path), Some(room)) = (under(&t["changemenu:".len()..]), self.changes.as_ref().map(|c| c.files.0.borrow().base_handle.bounds())) {
+                    self.changes_menu(path, room.origin + point(px(120.), px(60.)), cx);
+                }
+            }
+            "changesel" => {
+                let named = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                match &self.changes {
+                    Some(c) => eprintln!("emaki: changes chosen {:?} shown {:?}", c.marked.iter().map(named).collect::<Vec<_>>(), c.picked.as_ref().map(named)),
+                    None => eprintln!("emaki: changes closed"),
+                }
+            }
             t if t.starts_with("changes:") => self.open_changes(under(&t["changes:".len()..]), cx),
             // The question a switch asks with changes not committed.
             t if t.starts_with("branchask:") => {
@@ -7241,6 +7506,13 @@ impl Workbench {
             }
             "discard:yes" => self.discard_now(cx),
             "treefocus" => self.pending_tree_focus = true,
+            // A key pressed as the keyboard presses it, through every
+            // listener and binding on the way: press:shift-up.
+            t if t.starts_with("press:") => self.pending_press.push(t["press:".len()..].to_string()),
+            "treecaret" => {
+                let s = self.tree_input.read(cx);
+                eprintln!("emaki: tree field {:?} of {}", s.selected_range(), s.value().len());
+            }
             "treecollapse" => self.tree_collapse(cx),
             // The name's field in the tree: treenew:file|folder|rename:<path>
             // opens it, and :<words> after the path types them.
@@ -7274,7 +7546,7 @@ impl Workbench {
             t if t.starts_with("discard:") => {
                 if let Some(p) = under(&t["discard:".len()..]) {
                     self.open_changes(Some(p.clone()), cx);
-                    self.ask_discard(p, cx);
+                    self.ask_discard(vec![p], cx);
                 }
             }
             "pdf:pages" => self.pdf_side_toggle(true, cx),

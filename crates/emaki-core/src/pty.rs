@@ -635,7 +635,36 @@ pub fn hits(rows: &[Vec<Span>]) -> Vec<Hit> {
     let arrows = |steps: i64, back: &str, on: &str| -> Vec<u8> { format!("{}\r", (if steps < 0 { back } else { on }).repeat(steps.unsigned_abs() as usize)).into_bytes() };
     let pointed = lines.iter().find_map(|l| choice(l).filter(|c| c.0).map(|c| c.1));
     let mut out = Vec::new();
+    // Choices with no numbers ("❯ No, exit" over "Yes, I trust this
+    // folder"): the rows above and below the pointed one that start in
+    // its column, up to a blank row or another indent. Only on a screen
+    // with no numbered choice, where "❯" is nothing else.
+    let mut bare: Vec<usize> = Vec::new();
+    if pointed.is_none() && !lines.iter().any(|l| choice(l).is_some()) {
+        let at = |line: &[char]| -> Option<(bool, usize)> {
+            let start = line.iter().position(|c| !c.is_whitespace())?;
+            if line[start] != '❯' {
+                return Some((false, start));
+            }
+            let text = (start + 1..line.len()).find(|ix| !line[*ix].is_whitespace())?;
+            Some((true, text))
+        };
+        if let Some((on, col)) = lines.iter().enumerate().find_map(|(row, l)| at(l).filter(|a| a.0).map(|a| (row, a.1))) {
+            let same = |row: usize| at(&lines[row]) == Some((false, col));
+            let first = (0..on).rev().take_while(|row| same(*row)).last().unwrap_or(on);
+            let last = (on + 1..lines.len()).take_while(|row| same(*row)).last().unwrap_or(on);
+            if first != last {
+                for row in first..=last {
+                    out.push(Hit { row, start: col, end: lines[row].len(), keys: arrows(row as i64 - on as i64, "\x1b[A", "\x1b[B") });
+                    bare.push(row);
+                }
+            }
+        }
+    }
     for (row, line) in lines.iter().enumerate() {
+        if bare.contains(&row) {
+            continue;
+        }
         if let Some((_, n, start)) = choice(line) {
             if let Some(from) = pointed {
                 let mut keys = arrows(n - from, "\x1b[A", "\x1b[B");

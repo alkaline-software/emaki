@@ -144,6 +144,10 @@ pub(crate) enum MenuDo {
     OpenTerminal(String),
     /// Close the session's tab.
     CloseTab(String),
+    /// Ask whether these changed files go back to the last commit.
+    Discard(Vec<PathBuf>),
+    /// Ask whether these sessions are archived now, or deleted.
+    Sessions(ManageDo, Vec<String>),
     /// Close every tab but the session's.
     CloseOthers(String),
     /// Something asked of the terminal at the conversation's right.
@@ -203,6 +207,9 @@ impl MenuDo {
             MenuDo::CopyImage(_) => "icons/image.svg",
             MenuDo::OpenTerminal(_) => "icons/square-terminal.svg",
             MenuDo::CloseTab(_) => "icons/close.svg",
+            MenuDo::Discard(_) => "icons/undo-2.svg",
+            MenuDo::Sessions(ManageDo::Archive, _) => "icons/archive.svg",
+            MenuDo::Sessions(ManageDo::Delete, _) => "icons/trash.svg",
             MenuDo::CloseOthers(_) => "icons/circle-x.svg",
             MenuDo::Term(what) => what.icon(),
             MenuDo::Pdf(crate::panels::PdfDo::Copy) | MenuDo::Edit(EditDo::Copy, _) => "icons/copy.svg",
@@ -330,6 +337,12 @@ const TERM_ANIM: Duration = Duration::from_millis(200);
 /// How long a hidden terminal's screen has to have stood still to be
 /// taken for drawn: Claude Code paints a question in a few writes.
 const SCREEN_SETTLED: Duration = Duration::from_millis(250);
+/// And how long before a screen is taken for asking something when the
+/// registry does not say it waits: with no record yet, where Claude Code
+/// is starting and draws in steps, and with a record that says `idle`,
+/// where a screen without the prompt is nearly always one on its way.
+const SCREEN_UNSAID: Duration = Duration::from_millis(700);
+const SCREEN_UNSAID_IDLE: Duration = Duration::from_millis(2000);
 /// How long a panel beside the conversation takes to come.
 pub(crate) const PANEL_ANIM: Duration = Duration::from_millis(200);
 
@@ -1472,6 +1485,23 @@ pub struct Workbench {
     side_marked: Vec<String>,
     side_anchor: Option<String>,
     side_drawn: std::cell::RefCell<Vec<String>>,
+    /// The sessions chosen together there, by their keys, of any
+    /// projects that are open; the one a range is taken from; the
+    /// sessions as last drawn, in their order; and where each one's row
+    /// was, and whether in a pinned project. Projects are chosen or
+    /// sessions are, never both: what was touched first says which, and
+    /// the other kind is left alone until the choosing is let go.
+    side_sessions: Vec<String>,
+    side_sess_anchor: Option<String>,
+    side_sess_drawn: std::cell::RefCell<Vec<String>>,
+    side_sess_at: Rc<std::cell::RefCell<Vec<(String, Bounds<Pixels>, bool)>>>,
+    /// Which kind the rectangle being dragged takes: sessions when
+    /// true, projects when false, not yet known before it reaches a row.
+    side_band_kind: Option<bool>,
+    /// What Archive or Delete was asked of, and whether from the
+    /// sidebar, which says how it went on the notice line.
+    manage_keys: Vec<String>,
+    manage_side: bool,
     /// A rectangle dragged over the projects, from where it was pressed
     /// to where the pointer is, as the files tree has one; whether it
     /// has moved far enough to be one and not a click; whether the
@@ -1717,7 +1747,7 @@ pub struct Workbench {
     /// comparison is asking to discard, with the question's number.
     pub(crate) tree_focus: FocusHandle,
     pub(crate) file_clip: Option<PathBuf>,
-    pub(crate) discard_ask: Option<(PathBuf, u32)>,
+    pub(crate) discard_ask: Option<(Vec<PathBuf>, u32)>,
     /// What the last paste in the files panel made, for ⌘Z to take
     /// back, and the question that asks first, by its number.
     /// What the files tree has done to the disk, to take back and do
@@ -1757,6 +1787,7 @@ pub struct Workbench {
     pending_win_w: Option<f32>,
     /// `EMAKI_GO=treefocus`: the keyboard to the files panel, at the next draw.
     pub(crate) pending_tree_focus: bool,
+    pub(crate) pending_press: Vec<String>,
     /// A file's pane has just been closed: the keys go to the files
     /// tree, where its row is still the chosen one.
     pub(crate) tree_focus_back: bool,
@@ -3463,6 +3494,7 @@ impl Workbench {
             pending_cell: None,
             pending_win_w: None,
             pending_tree_focus: false,
+            pending_press: Vec::new(),
             tree_focus_back: false,
             pending_new_in: None,
             pending_answer: None,
@@ -3552,6 +3584,13 @@ impl Workbench {
             hidden_open: false,
             temp_open: false,
             side_marked: Vec::new(),
+            side_sessions: Vec::new(),
+            side_sess_anchor: None,
+            side_sess_drawn: std::cell::RefCell::new(Vec::new()),
+            side_sess_at: Rc::new(std::cell::RefCell::new(Vec::new())),
+            side_band_kind: None,
+            manage_keys: Vec::new(),
+            manage_side: false,
             side_anchor: None,
             side_drawn: std::cell::RefCell::new(Vec::new()),
             side_focus: cx.focus_handle(),
@@ -4519,6 +4558,43 @@ impl Workbench {
             // their menu does, `hidden` a click on the Hidden heading.
             Some(t) if t.starts_with("mark:") => self.side_click_more(&t["mark:".len()..], false, cx),
             Some(t) if t.starts_with("markto:") => self.side_click_more(&t["markto:".len()..], true, cx),
+            // Sessions chosen in the sidebar, by the start of an id:
+            // `smark:<id>` is ⌘ and a click, `smarkto:<id>` ⇧ and one.
+            // `sidemenu:<project>` is a right click on a project and
+            // `sidemenu:session:<id>` on a session; `sideask:archive`
+            // and `sideask:delete` ask it of what is chosen (nothing
+            // answers); `sidesel` prints what is chosen.
+            Some(t) if t.starts_with("smark:") || t.starts_with("smarkto:") => {
+                let (range, id) = match t.strip_prefix("smarkto:") {
+                    Some(id) => (true, id),
+                    None => (false, &t["smark:".len()..]),
+                };
+                if let Some(key) = self.refs.iter().find(|r| r.session_id.starts_with(id)).map(key_of) {
+                    if self.side_marked.is_empty() {
+                        self.side_session_more(&key, range, cx);
+                    }
+                }
+            }
+            Some(t) if t.starts_with("sidemenu:") => {
+                let at = self.side_room.get().origin + point(px(120.), px(80.));
+                match t["sidemenu:".len()..].strip_prefix("session:") {
+                    Some(id) => {
+                        if let Some(key) = self.refs.iter().find(|r| r.session_id.starts_with(id)).map(key_of) {
+                            self.side_session_menu(&key, at, cx);
+                        }
+                    }
+                    None => self.project_menu(&t["sidemenu:".len()..], at, cx),
+                }
+            }
+            Some("sideask:archive") | Some("sideask:delete") => {
+                let what = if step == "sideask:archive" { ManageDo::Archive } else { ManageDo::Delete };
+                let keys = if self.side_sessions.is_empty() { self.refs.iter().filter(|r| self.side_marked.iter().any(|p| *p == r.project())).map(key_of).collect() } else { self.side_sessions.clone() };
+                self.manage_ask_of(what, keys, true, cx);
+            }
+            Some("sidesel") => {
+                let titles: Vec<String> = self.side_sessions.iter().filter_map(|k| self.refs.iter().find(|r| key_of(r) == *k).map(|r| r.title.chars().take(18).collect())).collect();
+                eprintln!("emaki: side projects {:?} sessions {:?}", self.side_marked, titles);
+            }
             Some("projects:open") => self.projects_do(ProjectsDo::Open, self.side_marked.clone(), cx),
             Some("projects:hide") => self.projects_do(ProjectsDo::Hide, self.side_marked.clone(), cx),
             Some("projects:show") => self.projects_do(ProjectsDo::Show, self.side_marked.clone(), cx),
@@ -4529,6 +4605,7 @@ impl Workbench {
             Some(t) if t.starts_with("sideband:") => {
                 if let Some((a, b)) = t["sideband:".len()..].split_once(':').and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?))) {
                     let room = self.side_room.get();
+                    self.side_band_kind = None;
                     self.side_band = Some((point(room.left() + px(40.), room.top() + px(a)), point(room.left() + px(40.), room.top() + px(a))));
                     self.side_band_to(point(room.left() + px(180.), room.top() + px(b)), cx);
                 }
@@ -4626,6 +4703,12 @@ impl Workbench {
                 self.agent_choose(None, Some(way), cx);
             }
             Some(t) if t.starts_with("sessions:") => self.show_sessions_in(Scope::All, Some(t["sessions:".len()..].to_string()), cx),
+            // Whether the terminal card is up, and whether by itself.
+            Some("termstate") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let screen = self.hub.terminal_for(&sid).map(|p| p.text().lines().filter(|l| !l.trim().is_empty()).take(3).collect::<Vec<_>>().join(" / "));
+                eprintln!("emaki: term card {:?} auto {} dialog {} page {:?} registry {:?} screen {:?}", self.term_open.as_deref().map(|s| &s[..8.min(s.len())]), self.term_auto, self.dialog_seen.is_some(), self.page == Page::Session, self.hub.peer_for(&sid).map(|p| p.status), screen);
+            }
             Some("page:new") => {
                 self.page = Page::New;
                 self.selected = None;
@@ -4811,7 +4894,7 @@ impl Workbench {
         // The Projects card has the keyboard only while projects are
         // chosen in it. Whatever let them go, it goes back to the
         // composer where one shows, as it was before the choosing.
-        if self.side_marked.is_empty() && self.side_band.is_none() && self.side_focus.is_focused(window) {
+        if self.side_marked.is_empty() && self.side_sessions.is_empty() && self.side_band.is_none() && self.side_focus.is_focused(window) {
             let shows = match self.page {
                 Page::New => true,
                 Page::Session => self.detail.is_some() && !self.file_over(),
@@ -4852,6 +4935,13 @@ impl Workbench {
     /// for a ⌘W pressed with the focus on nothing the page draws.
     pub fn close_nearest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected.clone() {
+            // What stands over the window goes first: the question over
+            // the comparison, then the comparison.
+            _ if self.discard_ask.is_some() => {
+                self.discard_ask = None;
+                cx.notify();
+            }
+            _ if self.changes.is_some() => self.close_changes(cx),
             _ if self.file_pane_shown() => self.close_file_view(cx),
             Some(key) if self.page == Page::Session && self.tabs.contains(&key) => self.close_tab(&key, window, cx),
             _ => self.close_window(window, cx),
@@ -6948,8 +7038,8 @@ impl Workbench {
     /// there and ready, however long that takes, then do what it was
     /// opened for. Nothing here is a length of time. Two things have to be
     /// so: Claude Code has registered in that terminal and its record
-    /// says `idle` (a login or trust screen says `waiting`, and is never
-    /// typed into), and its prompt is on the screen, which is the mode's
+    /// says `idle` (a login screen says `waiting`, a folder to trust has
+    /// no record yet, and neither is ever typed into), and its prompt is on the screen, which is the mode's
     /// footer under it (`terminal_up`, read off the terminal where it can
     /// be read; where it cannot, the registry's word stands). Looked at
     /// on the clock and whenever the terminal's status line runs. The
@@ -7289,11 +7379,26 @@ impl Workbench {
         // What a typed command opens (a picker, or the question
         // `/model fable` asks) is the terminal's to draw, on its card.
         let picking = self.come_back.as_ref().is_some_and(|cb| cb.typed.is_some());
+        // A wait the registry says, or one it does not: our own
+        // terminal with no record yet (a folder to trust is asked
+        // before Claude Code writes one, 2.1.296) or with one that says
+        // `idle`. There the screen alone says whether anything waits:
+        // one that is not the prompt, not a turn at work and stands
+        // still is something asked that no card of ours knows, and it
+        // is the terminal itself that is shown (`unsaid`, below).
+        let agent_side = self.term_on() == Some(true);
         let target = self.selected_ref().filter(|r| self.page == Page::Session && self.in_terminal(r) && !picking).map(|r| r.session_id.clone()).and_then(|sid| {
             self.hub.refresh_peers();
-            self.hub.peer_for(&sid).filter(|p| p.status == "waiting").map(|p| (sid, p.pid))
+            match (self.hub.peer_for(&sid), self.hub.terminal_for(&sid)) {
+                (Some(p), _) if p.status == "waiting" => Some((sid, p.pid, None)),
+                // The person is looking at that screen already.
+                _ if agent_side => None,
+                (None, Some(pty)) => Some((sid, pty.pid, Some(SCREEN_UNSAID))),
+                (Some(p), Some(_)) if p.status == "idle" => Some((sid, p.pid, Some(SCREEN_UNSAID_IDLE))),
+                _ => None,
+            }
         });
-        let Some((sid, pid)) = target else {
+        let Some((sid, pid, unsaid)) = target else {
             if self.dialog_seen.take().is_some() {
                 cx.notify();
             }
@@ -7314,16 +7419,44 @@ impl Workbench {
             // Also read: whether the screen still shows Claude Code's
             // prompt and nothing over it, which is a screen the question
             // has not been drawn on yet.
-            let (seen, at_prompt) = cx
+            let (seen, at_prompt, nothing) = cx
                 .background_spawn(async move {
                     let text = crate::sys::terminal_styled(pid);
                     let picker = text.as_deref().is_some_and(|t| t.lines().any(|l| l.chars().filter(|c| *c == '▔').count() >= 20));
                     let at_prompt = !picker && text.as_deref().is_some_and(|t| emaki_core::driver::prompt_on_screen(t).is_some());
-                    (text.and_then(|t| emaki_core::driver::dialog_on_screen(&t)), at_prompt)
+                    // Nothing asked: no screen, an empty one, or a turn at work.
+                    let blank = emaki_core::pty::for_pid(pid).is_none_or(|p| p.text().trim().is_empty());
+                    let nothing = blank || text.as_deref().is_none_or(|t| emaki_core::driver::working_on_screen(t).is_some());
+                    (text.and_then(|t| emaki_core::driver::dialog_on_screen(&t)), at_prompt, nothing)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.dialog_reading = false;
+                // With no wait said, the screen says there is none: the
+                // prompt, a turn at work, nothing drawn yet. And one
+                // that has not stood still for long enough is not yet
+                // known to be asking; it is read again at the next tick.
+                if let Some(still) = unsaid {
+                    let quiet = this.hub.terminal_for(&sid).is_some_and(|p| p.quiet_for() >= still);
+                    if seen.is_none() && (at_prompt || nothing) {
+                        if this.dialog_seen.take().is_some() {
+                            cx.notify();
+                        }
+                        this.term_dismissed = None;
+                        if this.term_auto {
+                            this.hide_terminal(cx);
+                        }
+                        return;
+                    }
+                    if !quiet {
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_millis(200)).await;
+                            let _ = this.update(cx, |this, cx| this.read_dialog(cx));
+                        })
+                        .detach();
+                        return;
+                    }
+                }
                 // Our own terminal waiting on a screen that is no
                 // dialog the card knows (a folder to trust, a login):
                 // the screen itself is drawn. A dialog the card does
@@ -8466,9 +8599,10 @@ impl Workbench {
         } else if self.manage_ask.is_some() {
             self.manage_ask = None;
             cx.notify();
-        } else if !self.side_marked.is_empty() {
-            // The projects chosen together are let go.
+        } else if !self.side_marked.is_empty() || !self.side_sessions.is_empty() {
+            // The projects or sessions chosen together are let go.
             self.side_marked.clear();
+            self.side_sessions.clear();
             cx.notify();
         } else if self.discard_ask.is_some() {
             self.discard_ask = None;
@@ -9587,6 +9721,8 @@ impl Workbench {
         let section_of = |at: usize| if at >= hidden_from { Some(1) } else if at >= temp_from { Some(0) } else { None };
         let divided = pinned_n > 0 && temp_from > pinned_n;
         self.side_rows_at.borrow_mut().clear();
+        self.side_sess_at.borrow_mut().clear();
+        self.side_sess_drawn.borrow_mut().clear();
         // Which projects are lit, known before any is drawn, as the
         // files tree has it: rows lit one under another are one block,
         // round at its two ends alone. Two rows are one under another
@@ -9686,12 +9822,17 @@ impl Workbench {
                         }
                         let keys = ev.modifiers();
                         if keys.secondary() || keys.shift {
+                            // With sessions chosen, a project is not one more.
+                            if !this.side_sessions.is_empty() {
+                                return;
+                            }
                             // The keyboard is the card's from here: ⌘A
                             // is every project.
                             window.focus(&this.side_focus, cx);
                             return this.side_click_more(&name, keys.shift, cx);
                         }
                         this.side_marked.clear();
+                        this.side_sessions.clear();
                         this.side_anchor = Some(name.clone());
                         this.toggle_folder(&name, cx);
                     }))
@@ -9841,8 +9982,15 @@ impl Workbench {
                     .collect()
             };
             body = body.children(ghosts(None));
-            for r in list {
+            // Sessions chosen together and one under another are one
+            // lit block, as projects are.
+            let lit: Vec<bool> = list.iter().map(|r| self.side_sessions.contains(&key_of(r))).collect();
+            for (row_ix, r) in list.into_iter().enumerate() {
                 let key = key_of(&r);
+                self.side_sess_drawn.borrow_mut().push(key.clone());
+                let chosen = lit[row_ix];
+                let (joined_up, joined_down) = (chosen && row_ix > 0 && lit[row_ix - 1], chosen && lit.get(row_ix + 1).copied().unwrap_or(false));
+                let (at_rows, at_key, more_key) = (self.side_sess_at.clone(), key.clone(), key.clone());
                 let active = page == Page::Session && self.selected.as_deref() == Some(key.as_str());
                 let dot = self.live_color(&r, cx);
                 let working = self.is_working(&r);
@@ -9879,13 +10027,37 @@ impl Workbench {
                         .gap(px(8.))
                         .rounded(px(7.))
                         .cursor_pointer()
-                        .when(active, |d| d.bg(theme.sidebar_accent))
-                        .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                        .when(active && !chosen, |d| d.bg(theme.sidebar_accent))
+                        .when(!chosen, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.6))))
+                        .when(chosen, |d| d.bg(theme.primary.opacity(0.22)))
+                        .when(joined_up, |d| d.rounded_t(px(0.)))
+                        .when(joined_down, |d| d.rounded_b(px(0.)))
+                        // Where the row is, for a rectangle dragged over it.
+                        .child(canvas(move |bounds, _, _| at_rows.borrow_mut().push((at_key, bounds, is_pinned)), |_, _, _, _| {}).absolute().inset_0())
                         // A click opens the session with the caret in
                         // the composer; a second writes its name here.
+                        // ⌘ and a click, or ⇧ and one, chooses it with
+                        // others and opens nothing.
                         .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                            // The card's own click, which lets the chosen
+                            // go, does not hear this one.
+                            cx.stop_propagation();
                             if this.side_banded() {
                                 return;
+                            }
+                            let keys = ev.modifiers();
+                            if keys.secondary() || keys.shift {
+                                // With projects chosen, a session is not one more.
+                                if this.side_marked.is_empty() {
+                                    window.focus(&this.side_focus, cx);
+                                    this.side_session_more(&more_key, keys.shift, cx);
+                                }
+                                return;
+                            }
+                            if !this.side_sessions.is_empty() || !this.side_marked.is_empty() {
+                                this.side_sessions.clear();
+                                this.side_marked.clear();
+                                cx.notify();
                             }
                             if ev.click_count() >= 2 {
                                 this.menu_pick(MenuDo::Rename(key.clone(), RenameAt::Side), window, cx);
@@ -9895,7 +10067,7 @@ impl Workbench {
                         }))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key, RenameAt::Side), cx)),
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.side_session_menu(&menu_key, ev.position, cx)),
                         )
                         .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
                         .map(|d| {
@@ -10130,15 +10302,20 @@ impl Workbench {
                 .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                     let keys = &e.keystroke;
                     if keys.key == "a" && keys.modifiers.secondary() && !keys.modifiers.shift && !keys.modifiers.alt {
-                        this.side_marked = this.side_drawn.borrow().clone();
+                        if this.side_sessions.is_empty() {
+                            this.side_marked = this.side_drawn.borrow().clone();
+                        } else {
+                            this.side_sessions = this.side_sess_drawn.borrow().clone();
+                        }
                         cx.stop_propagation();
                         cx.notify();
                     }
                 }))
                 // A click on the card's empty room lets what is chosen go.
                 .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.side_banded() && !this.side_marked.is_empty() {
+                    if !this.side_banded() && (!this.side_marked.is_empty() || !this.side_sessions.is_empty()) {
                         this.side_marked.clear();
+                        this.side_sessions.clear();
                         cx.notify();
                     }
                 }))
@@ -10276,17 +10453,43 @@ impl Workbench {
         self.side_band_live = true;
         let (first, last) = (from.y.min(at.y), from.y.max(at.y));
         let (pins, rest) = (self.pin_scroll.bounds(), self.side_scroll.bounds());
-        self.side_marked = self
-            .side_rows_at
-            .borrow()
-            .iter()
-            .filter(|(_, row, pinned)| {
-                let list = if *pinned { pins } else { rest };
-                let (top, bottom) = (row.top().max(list.top()), row.bottom().min(list.bottom()));
-                top < bottom && top < last && bottom > first
-            })
-            .map(|(name, _, _)| name.clone())
-            .collect();
+        // The rows of one kind under the rectangle, and how far the
+        // nearest of them is from where the press was.
+        let under = |rows: &[(String, Bounds<Pixels>, bool)]| -> (Vec<String>, Option<Pixels>) {
+            let hit: Vec<&(String, Bounds<Pixels>, bool)> = rows
+                .iter()
+                .filter(|(_, row, pinned)| {
+                    let list = if *pinned { pins } else { rest };
+                    let (top, bottom) = (row.top().max(list.top()), row.bottom().min(list.bottom()));
+                    top < bottom && top < last && bottom > first
+                })
+                .collect();
+            let near = hit.iter().map(|(_, row, _)| if from.y < row.top() { row.top() - from.y } else if from.y > row.bottom() { from.y - row.bottom() } else { px(0.) }).min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            (hit.into_iter().map(|(name, _, _)| name.clone()).collect(), near)
+        };
+        let (projects, project_near) = under(&self.side_rows_at.borrow());
+        let (sessions, session_near) = under(&self.side_sess_at.borrow());
+        // The row the rectangle reached first says which kind it takes,
+        // for as long as it is dragged.
+        if self.side_band_kind.is_none() {
+            self.side_band_kind = match (project_near, session_near) {
+                (Some(p), Some(s)) => Some(s < p),
+                (Some(_), None) => Some(false),
+                (None, Some(_)) => Some(true),
+                (None, None) => None,
+            };
+        }
+        match self.side_band_kind {
+            Some(true) => {
+                self.side_sessions = sessions;
+                self.side_marked.clear();
+            }
+            Some(false) => {
+                self.side_marked = projects;
+                self.side_sessions.clear();
+            }
+            None => {}
+        }
         cx.notify();
     }
 
@@ -10297,7 +10500,53 @@ impl Workbench {
     }
 
     /// The press is over.
+    /// ⌘ and a click on a session, or ⇧ and one: the sessions chosen
+    /// together grow or shrink by it, across the projects that are open.
+    fn side_session_more(&mut self, key: &str, range: bool, cx: &mut Context<Self>) {
+        if range {
+            let rows = self.side_sess_drawn.borrow().clone();
+            let from = self.side_sess_anchor.clone().or(self.side_sessions.first().cloned()).or(self.selected.clone()).and_then(|a| rows.iter().position(|r| *r == a)).unwrap_or(0);
+            if let Some(to) = rows.iter().position(|r| r == key) {
+                self.side_sessions = rows[from.min(to)..=from.max(to)].to_vec();
+            }
+        } else {
+            match self.side_sessions.iter().position(|k| k == key) {
+                Some(ix) => {
+                    self.side_sessions.remove(ix);
+                }
+                None => self.side_sessions.push(key.to_string()),
+            }
+            self.side_sess_anchor = Some(key.to_string());
+        }
+        cx.notify();
+    }
+
+    /// A right click on a session in the sidebar: what can be asked of
+    /// the several chosen when it is one of them, and else its own
+    /// menu, with archiving and deleting it at the foot.
+    fn side_session_menu(&mut self, key: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let several = self.side_sessions.len() > 1 && self.side_sessions.iter().any(|k| k == key);
+        let items = if several {
+            let keys = self.side_sessions.clone();
+            vec![("Archive Sessions", MenuDo::Sessions(ManageDo::Archive, keys.clone())), ("Delete Sessions", MenuDo::Sessions(ManageDo::Delete, keys))]
+        } else {
+            self.side_sessions.clear();
+            self.side_marked.clear();
+            let mut items = self.session_menu(key, RenameAt::Side);
+            if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).filter(|r| !r.path.as_os_str().is_empty()) {
+                items.push(("", MenuDo::Rule));
+                if !r.archived {
+                    items.push(("Archive Session", MenuDo::Sessions(ManageDo::Archive, vec![key.to_string()])));
+                }
+                items.push(("Delete Session", MenuDo::Sessions(ManageDo::Delete, vec![key.to_string()])));
+            }
+            items
+        };
+        self.open_menu(at, items, cx);
+    }
+
     fn side_band_end(&mut self, cx: &mut Context<Self>) {
+        self.side_band_kind = None;
         if std::mem::take(&mut self.side_band_live) {
             self.side_band_at = Some(Instant::now());
         }
@@ -10310,6 +10559,7 @@ impl Workbench {
     /// it is one of them, and else its own, which chooses it alone.
     fn project_menu(&mut self, project: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
         let several = self.side_marked.len() > 1 && self.side_marked.iter().any(|p| p == project);
+        self.side_sessions.clear();
         if !several {
             self.side_marked.clear();
             self.side_anchor = Some(project.to_string());
@@ -10321,12 +10571,20 @@ impl Workbench {
             items.push((if self.pinned.iter().any(|p| p == project) { "Unpin Project" } else { "Pin Project" }, MenuDo::Pin(project.to_string())));
         }
         items.push((crate::sys::OPEN_FOLDER_LABEL, MenuDo::Projects(ProjectsDo::Open, of.clone())));
+        let keys: Vec<String> = self.refs.iter().filter(|r| of.iter().any(|p| *p == r.project())).map(key_of).collect();
         items.push(match (hidden, several) {
             (true, true) => ("Show Projects", MenuDo::Projects(ProjectsDo::Show, of)),
             (true, false) => ("Show Project", MenuDo::Projects(ProjectsDo::Show, of)),
             (false, true) => ("Hide Projects", MenuDo::Projects(ProjectsDo::Hide, of)),
-            (false, false) => ("Hide Project", MenuDo::Projects(ProjectsDo::Hide, of)),
+            (false, false) => ("Hide Project", MenuDo::Projects(ProjectsDo::Hide, of.clone())),
         });
+        // Its sessions, archived now or deleted: the sessions, and
+        // nothing in the project's folder.
+        if !keys.is_empty() {
+            items.push(("", MenuDo::Rule));
+            items.push(("Archive Sessions", MenuDo::Sessions(ManageDo::Archive, keys.clone())));
+            items.push(("Delete Sessions", MenuDo::Sessions(ManageDo::Delete, keys)));
+        }
         self.open_menu(at, items, cx);
     }
 
@@ -10393,8 +10651,8 @@ impl Workbench {
             serial,
             format!("Open {} folders?", folders.len()),
             format!("Each opens in a window of its own in {}.", crate::sys::FILE_MANAGER),
-            Button::new("open-ask-cancel").outline().small().label("Cancel").on_click(cancel),
-            Button::new("open-ask-yes").primary().small().label("Open").on_click(go),
+            choice_pill("open-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel),
+            choice_pill("open-ask-yes", "icons/folder-open.svg", "Open", Press::Primary, false, cx.theme()).on_click(go),
             cx,
         )
     }
@@ -10604,6 +10862,8 @@ impl Workbench {
                 self.open_term_panel_agent(window, cx);
             }
             MenuDo::CloseTab(key) => self.close_tab(&key, window, cx),
+            MenuDo::Discard(paths) => self.ask_discard(paths, cx),
+            MenuDo::Sessions(what, keys) => self.manage_ask_of(what, keys, true, cx),
             MenuDo::CloseOthers(key) => {
                 for other in self.tabs.clone().into_iter().filter(|t| *t != key) {
                     self.close_tab(&other, window, cx);
@@ -11403,7 +11663,7 @@ impl Workbench {
     fn manage_targets(&self, what: ManageDo) -> (Vec<SessionRef>, usize) {
         let mut running = 0;
         let mut go = Vec::new();
-        for r in self.refs.iter().filter(|r| self.picked.contains(&key_of(r))) {
+        for r in self.refs.iter().filter(|r| self.manage_keys.contains(&key_of(r))) {
             if r.path.as_os_str().is_empty() || (what == ManageDo::Archive && r.archived) {
                 continue;
             }
@@ -11419,13 +11679,27 @@ impl Workbench {
     /// Archive or Delete, pressed: the question first, or why there is
     /// nothing to ask.
     fn manage_asked(&mut self, what: ManageDo, cx: &mut Context<Self>) {
+        self.manage_ask_of(what, self.picked.iter().cloned().collect(), false, cx);
+    }
+
+    /// The same asked of these sessions: the ones chosen on the sessions
+    /// page, or in the sidebar (`side`), where what came of it is said
+    /// on the notice line.
+    fn manage_ask_of(&mut self, what: ManageDo, keys: Vec<String>, side: bool, cx: &mut Context<Self>) {
+        self.manage_keys = keys;
+        self.manage_side = side;
         let (go, running) = self.manage_targets(what);
         if go.is_empty() {
-            self.manage_said = Some(match (what, running) {
+            let said = match (what, running) {
                 (_, n) if n > 0 => format!("{} still running; nothing was done.", plural(n, "session is", "sessions are")),
                 (ManageDo::Archive, _) => "Already archived.".to_string(),
                 (ManageDo::Delete, _) => "Nothing to delete.".to_string(),
-            });
+            };
+            if side {
+                self.notice = Some(Notice::said(said));
+            } else {
+                self.manage_said = Some(said);
+            }
         } else {
             let serial = self.manage_ask.map(|(_, n)| n + 1).unwrap_or(0);
             self.manage_ask = Some((what, serial));
@@ -11459,9 +11733,13 @@ impl Workbench {
             swallow_click(window, cx);
             this.manage_now(what, window, cx);
         });
-        let yes = Button::new("manage-ask-yes").small().label(yes).on_click(go);
-        let yes = if what == ManageDo::Delete { yes.danger() } else { yes.primary() };
-        self.ask_card("manage-ask", serial, title, detail, Button::new("manage-ask-cancel").outline().small().label("Cancel").on_click(cancel), yes, cx)
+        let yes = match what {
+            ManageDo::Delete => choice_pill("manage-ask-yes", "icons/trash.svg", yes, Press::Danger, false, cx.theme()),
+            ManageDo::Archive => choice_pill("manage-ask-yes", "icons/archive.svg", yes, Press::Primary, false, cx.theme()),
+        }
+        .on_click(go);
+        let no = choice_pill("manage-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
+        self.ask_card("manage-ask", serial, title, detail, no, yes, cx)
     }
 
     /// The question answered yes: it is done off the main thread, a
@@ -11499,6 +11777,8 @@ impl Workbench {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.manage_busy = false;
                 this.picked.clear();
+                this.side_sessions.clear();
+                this.side_marked.clear();
                 let done: Vec<&SessionRef> = go.iter().filter(|r| !failed.iter().any(|(k, _)| *k == key_of(r))).collect();
                 let mut said = match what {
                     ManageDo::Archive => format!("{} archived.", plural(done.len(), "session", "sessions")),
@@ -11510,7 +11790,11 @@ impl Workbench {
                 if let Some((_, why)) = failed.first() {
                     said.push_str(&format!(" {} not done: {why}.", failed.len()));
                 }
-                this.manage_said = Some(said);
+                if this.manage_side {
+                    this.notice = Some(if failed.is_empty() { Notice::said(said) } else { Notice::error(said) });
+                } else {
+                    this.manage_said = Some(said);
+                }
                 // A tab closed here goes to another tab or the new-session
                 // page; the person is on this page and stays on it.
                 let page = this.page;
@@ -11832,39 +12116,17 @@ impl Workbench {
         let said = if self.manage_busy { Some("Working…".to_string()) } else { self.manage_said.clone() };
         // A pill as the page's filters are: quiet, the danger's, or solid.
         let pill = |id: &'static str, icon: Option<&'static str>, label: &'static str, kind: u8, off: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>, on: fn(&mut Self, &mut Context<Self>)| {
-            let ink = match kind {
-                1 => theme.danger,
-                2 => theme.background,
-                _ => theme.foreground,
+            let kind = match kind {
+                1 => Press::Danger,
+                2 => Press::Solid,
+                _ => Press::Quiet,
             };
-            let hover = match kind {
-                1 => theme.danger.opacity(0.1),
-                2 => theme.foreground.opacity(0.85),
-                _ => theme.foreground.opacity(0.06),
-            };
-            h_flex()
-                .id(id)
-                .h(px(28.))
-                .px(px(12.))
-                .gap(px(6.))
-                .flex_shrink_0()
-                .items_center()
-                .rounded_full()
-                .text_size(px(12.5))
-                .text_color(ink)
-                .border_1()
-                .border_color(match kind {
-                    1 => theme.danger.opacity(0.35),
-                    2 => theme.foreground,
-                    _ => theme.border,
-                })
-                .when(kind == 2, |d| d.bg(theme.foreground))
-                .children(icon.map(|path| Icon::default().path(path).with_size(px(14.)).text_color(ink)))
-                .child(label)
-                .map(|d| if off { d.opacity(0.4) } else { d.cursor_pointer().hover(move |s| s.bg(hover)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            choice_pill(id, icon.unwrap_or(""), label, kind, off, theme).when(!off, |d| {
+                d.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     swallow_click(window, cx);
                     on(this, cx);
-                })) })
+                }))
+            })
         };
         let tools = |suffix: &'static str, cx: &mut Context<Self>| -> Div {
             let theme = cx.theme().clone();
@@ -14970,6 +15232,56 @@ pub fn pill_button(id: impl Into<ElementId>, label: impl Into<SharedString>, the
 
 /// `pill_button` for something that cannot be taken back: in the
 /// theme's red, at rest too.
+/// What a choice on a card is, which is how its pill is drawn.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Press {
+    /// One of several, or the way out: an outline.
+    Quiet,
+    /// What cannot be taken back: the danger's ink and outline.
+    Danger,
+    /// The answer the card is for: filled with the accent.
+    Primary,
+    /// Filled with the page's ink, where the accent would be too much.
+    Solid,
+}
+
+/// The window's button: a pill with an icon before its word. Every
+/// choice on a card that asks something is one, and so is anything new
+/// that is pressed. `off` is one that cannot be pressed now: paler, and
+/// the caller gives it no click (`.when(!off, ..)`).
+pub(crate) fn choice_pill(id: impl Into<ElementId>, icon: &'static str, label: impl Into<SharedString>, kind: Press, off: bool, theme: &gpui_component::Theme) -> Stateful<Div> {
+    let ink = match kind {
+        Press::Danger => theme.danger,
+        Press::Primary => theme.primary_foreground,
+        Press::Solid => theme.background,
+        Press::Quiet => theme.foreground,
+    };
+    let (ground, edge, hover) = match kind {
+        Press::Danger => (None, theme.danger.opacity(0.35), theme.danger.opacity(0.1)),
+        Press::Primary => (Some(theme.primary), theme.primary, theme.primary.opacity(0.85)),
+        Press::Solid => (Some(theme.foreground), theme.foreground, theme.foreground.opacity(0.85)),
+        // An edge of the ink, not the border's colour: on a card the
+        // border is the card's own shade and the pill had no outline.
+        Press::Quiet => (None, theme.foreground.opacity(0.16), theme.foreground.opacity(0.06)),
+    };
+    h_flex()
+        .id(id)
+        .h(px(28.))
+        .px(px(12.))
+        .gap(px(6.))
+        .flex_shrink_0()
+        .items_center()
+        .rounded_full()
+        .text_size(px(12.5))
+        .text_color(ink)
+        .border_1()
+        .border_color(edge)
+        .when_some(ground, |d, bg| d.bg(bg))
+        .when(!icon.is_empty(), |d| d.child(Icon::default().path(icon).with_size(px(14.)).text_color(ink)))
+        .child(label.into())
+        .map(|d| if off { d.opacity(0.4) } else { d.cursor_pointer().hover(move |s| s.bg(hover)) })
+}
+
 pub fn pill_button_danger(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: &gpui_component::Theme, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
     let red = theme.danger;
     h_flex()
@@ -15548,6 +15860,13 @@ impl Render for Workbench {
             if let Some(typed) = typed {
                 self.tree_input.update(cx, |s, cx| s.set_value(typed, window, cx));
             }
+        }
+        for key in std::mem::take(&mut self.pending_press) {
+            window.defer(cx, move |window, cx| {
+                if let Ok(key) = gpui::Keystroke::parse(&key) {
+                    window.dispatch_keystroke(key, cx);
+                }
+            });
         }
         if std::mem::take(&mut self.pending_tree_focus) {
             window.focus(&self.tree_focus, cx);

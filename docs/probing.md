@@ -26,6 +26,40 @@ hands. Read this before checking a change to the app by eye.
   otherwise point the status line at the scratch tree).
 - What the window remembers is `<home>/state/ui.json`. Edit it before the
   launch to choose a panel (`outline_on`, `files_on`), tabs or the sidebar.
+- `EMAKI_GO` step `press:<keystroke>` (`press:shift-up`) presses a key as
+  the keyboard does, through every listener and binding on the way. The
+  `EMAKI_KEYS` names send an action to the focus instead, which finds
+  nothing wrong when a key never becomes its action. `treecaret` prints
+  the selection in the tree's name field.
+- A new home copies the whole archive (over a gigabyte here) and reads
+  every session before the ones after the newest can be opened. Keep one
+  scratch home for a run of probes and write its `ui.json` again before
+  each, and remove it when done.
+- A probe variable whose value holds a space is not handed to the copy
+  (`scripts/dev-app.sh` passes only those without one), so every step
+  after it is lost without a word: `say:hello`, not `say:hello there`.
+- `EMAKI_GO` step `termstate` prints whether the terminal card is up,
+  whether by itself, what the registry says and the top of the hidden
+  terminal's screen. In the comparison of changes, `changeclick:<path>`
+  is a click on a file (`changeclick:cmd:<path>`, `changeclick:shift:<path>`
+  with that key), `changeband:<y>:<y2>` a rectangle dragged down the list
+  and `changeband` its release, `changeoff` a click on the list's empty
+  room, `changemenu:<path>` a right click, and
+  `changesel` prints the files chosen and the one shown.
+- In the sidebar, `smark:<id>` is ⌘ and a click on a session and
+  `smarkto:<id>` ⇧ and one (the id's start; a session the sidebar does
+  not draw is no end of a range), `sidemenu:<project>` and
+  `sidemenu:session:<id>` are right clicks, `sideask:archive` and
+  `sideask:delete` ask it of what is chosen (nothing answers), and
+  `sidesel` prints what is chosen. `sideband:<y>` counts from the first
+  project's row, not from the card's heading.
+- A folder Claude Code asks about trusting is a new git repository
+  beside others (not one under `/tmp`, nor an empty folder). Nothing
+  answers the question from a script.
+- A new home has the outline on, and an outline over a real session asks
+  a model for its labels, on the person's account. Before a copy opens a
+  real session, write `{"outline_on": false}` to `<home>/state/ui.json`,
+  unless the outline is what is being looked at.
 
 ## Launches
 

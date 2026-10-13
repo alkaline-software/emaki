@@ -83,6 +83,11 @@ already fixed once. The doc named after a rule has the full story.
 - **Waiting on the terminal is waiting on a state, never a length of
   time.** The registry's status and what is on the screen say when.
   (`docs/channels.md`, `docs/modes.md`)
+- **Whatever an agent asks is shown.** A question with a card of its own
+  gets the card; anything else the hidden terminal stops on is drawn as
+  it is, on the terminal card. A new kind of question is never a reason
+  for the window to wait in silence. (`docs/channels.md`, The terminal
+  card)
 - **Never splice a list item the reader may be inside.** gpui moves the
   scroll anchor to the start of the spliced range. (`docs/conversation.md`)
 - **A click the window swallows goes through `swallow_click`,** or the
@@ -93,6 +98,12 @@ already fixed once. The doc named after a rule has the full story.
 - **Every text passes `markdown_is_safe` before the markdown view gets
   it.** The parser panics on some inputs, and a panic in layout aborts the
   app. (`docs/conversation.md`)
+- **A field's keys are the toolkit's, never a field's own.** Every place
+  words are typed is the toolkit's `Input`, and what a key does in one
+  (up to the start and down to the end of one line, ⇧ with either to
+  select there) is fixed in `vendor/gpui-component`, where every field
+  now and later has it. Do not handle a caret key in one field.
+  (`docs/window.md`)
 - **The composer is plain text.** Live markdown in it was tried three ways
   and dropped. (`docs/composer.md`)
 - **One copy of gpui.** The pin is in `Cargo.lock`, not a `rev` of our own.
@@ -105,6 +116,9 @@ already fixed once. The doc named after a rule has the full story.
   from one frame to the next, and what is around it moves with it. Use
   the pattern its neighbours use; the person does not ask for this each
   time. (`docs/window.md`, Motion)
+- **A button is `choice_pill`,** a pill with an icon before its word, and
+  a menu's choice has an icon. A new button is not the toolkit's
+  `Button`. (`docs/look.md`)
 - **A shortcut is named as the Mac has it.** When the person says ⌘ and a
   key, bind `secondary-<key>`, which is ⌘ on a Mac and Ctrl on Windows and
   Linux, and write ⌘ in the docs. They do not say this each time.

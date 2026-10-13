@@ -5,6 +5,13 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
 
 ## Rules
 
+- A button is `choice_pill` (`workbench.rs`): a pill with an icon before
+  its word, as Select on the sessions page is. Its kind (`Press`) is how
+  it is drawn: quiet for one of several and for the way out, the
+  danger's for what cannot be taken back, filled with the accent for the
+  answer a card is for. Every choice on a card that asks something is
+  one, and so is any new button; the toolkit's `Button` is not used for
+  a new one. A choice in a menu has an icon too (`MenuDo::icon`).
 - No call site names Tabler. A new icon is a file in `assets/icons/`
   under the toolkit's file name and a line in `OWN` (`assets.rs`).
 - Every face the window carries is under a licence that lets an app
