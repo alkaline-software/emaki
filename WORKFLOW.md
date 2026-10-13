@@ -174,9 +174,12 @@ Keep no other `Emaki.app` on the disk (`dist/`, a scratch folder,
 `scripts/make-app.sh`'s output): Launchpad and Spotlight list each one.
 Step 8 removes the ones a release leaves.
 
-### 8. Clean up
+### 8. Delete the compiled files
 
-Only once the release is confirmed done: step 6 printed "published with
+Every release ends with this step, and a release is not finished until it
+has run. Nothing compiled is kept between releases: disk space is worth
+more here than the minutes the next build takes. Do it without being
+asked, once the release is confirmed done: step 6 printed "published with
 notarized Mac images", the installed copy opens, and `spctl -a -vv
 /Applications/Emaki.app` says "Notarized Developer ID". Then:
 
@@ -199,8 +202,14 @@ some minutes, and so does the next release build. Do not clean before
 step 6 has succeeded: a redo of the release wants the release builds.
 
 If an Emaki started from this repository is running (the dev build,
-`scripts/dev-app.sh`), quit it first and work from the installed one, or
-build again straight after: its bundle is in `target/`.
+`scripts/dev-app.sh`), its bundle is in `target/`, and the agent cutting
+the release is a child of it. Do not clean under it: say that the release
+is published and installed and that this step is left, and ask the person
+to quit the dev build and open the installed one. Run the step from a
+session there. `ps -axo command | grep "Emaki.app/Contents/MacOS"` shows
+which one is running.
+
+Afterwards `du -sh .` on the repository should be well under a gigabyte.
 
 ## Redoing a release under the same tag
 
