@@ -21,6 +21,15 @@ use crate::workbench::{choice_pill, float_shadow, pill_button, Press, swallow_cl
 /// branches asks again when it is opened.
 const FETCH_FRESH: Duration = Duration::from_secs(60);
 
+/// A strip under the files' head: one line and a button.
+pub(crate) const STRIP_H: f32 = 38.;
+
+/// The window's button (`choice_pill`) in the size a strip or a foot
+/// line takes.
+pub(crate) fn small_pill(id: impl Into<ElementId>, icon: &'static str, label: impl Into<SharedString>, kind: Press, off: bool, theme: &gpui_component::Theme) -> Stateful<Div> {
+    choice_pill(id, icon, label, kind, off, theme).h(px(24.)).px(px(10.)).gap(px(5.)).text_size(px(12.))
+}
+
 /// How the default branch here stands against the remote's, for a
 /// branch about to be made from it.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,25 +103,30 @@ impl Workbench {
     }
 
     /// The line at the foot of the list of branches: what the remote
-    /// last said, or why it said nothing.
+    /// last said, or why it said nothing, then the buttons: Pull when
+    /// the branch checked out is behind the remote's, and Fetch. The
+    /// buttons keep their place while the remote is being asked, so
+    /// nothing in the line moves.
     pub(crate) fn branch_fetch_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
         let b = self.branches()?;
         let origin = b.origin.clone()?;
         let root = self.files_root()?;
         let last = self.branch_fetched.as_ref().filter(|(of, _)| *of == root).map(|(_, r)| r.clone());
-        let row = h_flex().flex_shrink_0().min_h(px(30.)).px(px(12.)).py(px(6.)).gap(px(7.)).items_center().border_t_1().border_color(theme.border).text_size(px(11.5)).text_color(theme.muted_foreground);
-        let again = |label: &'static str, cx: &mut Context<Self>| {
-            let entity = cx.entity().downgrade();
-            pill_button("branch-fetch-again", label, &theme, move |_, window, cx| {
+        let row = h_flex().flex_shrink_0().min_h(px(44.)).px(px(12.)).py(px(8.)).gap(px(8.)).items_center().border_t_1().border_color(theme.border).text_size(px(11.5)).text_color(theme.muted_foreground);
+        let fetch = small_pill("branch-fetch-again", "icons/refresh.svg", if matches!(last, Some(Err(_))) { "Try Again" } else { "Fetch" }, Press::Quiet, self.branch_fetching, &theme).when(!self.branch_fetching, |d| {
+            d.on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
-                let _ = entity.update(cx, |this, cx| this.branch_fetch(true, cx));
-            })
-        };
+                this.branch_fetch(true, cx);
+            }))
+        });
+        let pull = self.sync_pill(true, cx);
         if self.branch_fetching {
             return Some(
-                row.child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).with_animation("branch-fetching", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
-                    .child(format!("Asking {origin} what it has…"))
+                row.child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0().with_animation("branch-fetching", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
+                    .child(div().flex_1().min_w_0().truncate().child(format!("Asking {origin}…")))
+                    .children(pull)
+                    .child(fetch)
                     .into_any_element(),
             );
         }
@@ -124,23 +138,274 @@ impl Workbench {
                     git::NetTrouble::SignIn => format!("{origin} did not take your sign-in. The list is as it was last fetched."),
                     git::NetTrouble::Other => format!("Could not fetch from {origin}: {why}"),
                 };
-                let entity = cx.entity().downgrade();
                 let reason = why.clone();
                 row.items_start()
                     .child(Icon::new(IconName::TriangleAlert).with_size(px(12.)).mt(px(3.)).text_color(theme.danger).flex_shrink_0())
                     .child(div().flex_1().min_w_0().line_height(px(17.)).text_color(theme.foreground).child(words))
                     .when(sign_in, |d| {
-                        d.child(pill_button("branch-sign-in", "Sign in…", &theme, move |_, window, cx| {
+                        d.child(small_pill("branch-sign-in", "icons/circle-user.svg", "Sign In…", Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
-                            let _ = entity.update(cx, |this, cx| this.open_gate("fetch".into(), reason.clone(), cx));
-                        }))
+                            this.open_gate("fetch".into(), reason.clone(), cx);
+                        })))
                     })
-                    .when(!sign_in, |d| d.child(again("Try again", cx)))
+                    .when(!sign_in, |d| d.child(fetch))
                     .into_any_element()
             }
-            Some(Ok(at)) => row.child(div().flex_1().min_w_0().truncate().child(format!("Fetched from {origin} {}", crate::format::ago(crate::format::now_secs() - at.elapsed().as_secs_f64(), crate::format::now_secs())))).child(again("Fetch", cx)).into_any_element(),
-            None => row.child(div().flex_1().min_w_0().truncate().child(format!("Not fetched from {origin} yet"))).child(again("Fetch", cx)).into_any_element(),
+            Some(Ok(at)) => {
+                let when = crate::format::ago(crate::format::now_secs() - at.elapsed().as_secs_f64(), crate::format::now_secs());
+                let words = match self.sync_words() {
+                    Some((said, _)) => format!("{said}. Fetched {when}"),
+                    None => format!("Fetched from {origin} {when}"),
+                };
+                row.child(div().flex_1().min_w_0().truncate().child(words)).children(pull).child(fetch).into_any_element()
+            }
+            None => row.child(div().flex_1().min_w_0().truncate().child(format!("Not fetched from {origin} yet"))).children(pull).child(fetch).into_any_element(),
         })
+    }
+
+    // -- pushing and pulling --------------------------------------------------
+
+    /// How the branch checked out stands against the remote's as last
+    /// fetched, in words, and what there is to do about it: pull (true),
+    /// push (false), or neither when the two have gone separate ways,
+    /// which takes a merge and is not done here. Nothing when they are
+    /// level or the remote has no such branch.
+    pub(crate) fn sync_words(&self) -> Option<(String, Option<bool>)> {
+        let b = self.branches()?;
+        b.origin.as_ref()?;
+        let commits = |n: usize| plural(n, "commit", "commits");
+        match (b.ahead, b.behind) {
+            (0, 0) => None,
+            (ahead, 0) => Some((format!("{} to push", commits(ahead)), Some(false))),
+            (0, behind) => Some((format!("{} to pull", commits(behind)), Some(true))),
+            (ahead, behind) => Some((format!("{} to push and {} to pull: merge in a terminal", commits(ahead), behind), None)),
+        }
+    }
+
+    /// The button that pulls, or the one that pushes, when there is
+    /// that to do; nothing otherwise.
+    pub(crate) fn sync_pill(&self, pull: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        self.sync_words().filter(|(_, what)| *what == Some(pull))?;
+        let busy = self.syncing == Some(pull);
+        let label = match (pull, busy) {
+            (true, true) => "Pulling…",
+            (true, false) => "Pull",
+            (false, true) => "Pushing…",
+            (false, false) => "Push",
+        };
+        let off = self.syncing.is_some() || self.branch_busy;
+        Some(
+            small_pill(if pull { "sync-pull" } else { "sync-push" }, if pull { "icons/arrow-down.svg" } else { "icons/arrow-up.svg" }, label, Press::Primary, off, &theme)
+                .when(!off, |d| {
+                    d.on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.sync_go(pull, cx);
+                    }))
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Pull: bring the branch checked out up to the remote's as last
+    /// fetched, which only adds commits (`git::fast_forward`). Push:
+    /// send its commits to the remote. Neither is done unasked. A pull
+    /// writes files, so not under a running turn, as a switch is not.
+    pub(crate) fn sync_go(&mut self, pull: bool, cx: &mut Context<Self>) {
+        let (Some(root), Some(b)) = (self.files_root(), self.branches()) else { return };
+        let Some(name) = b.current.clone() else { return };
+        if self.syncing.is_some() {
+            return;
+        }
+        if pull && self.selected_ref().is_some_and(|r| self.is_working(r)) {
+            self.notice = Some(Notice::error("a turn is running here; pull when it is over"));
+            cx.notify();
+            return;
+        }
+        let origin = b.origin.clone().unwrap_or_else(|| "origin".into());
+        self.syncing = Some(pull);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (dir, branch) = (root.clone(), name.clone());
+            let done = cx.background_executor().spawn(async move { if pull { git::fast_forward(&dir, &branch) } else { git::publish(&dir, &branch) } }).await;
+            this.update(cx, |this, cx| {
+                this.syncing = None;
+                match (done, pull) {
+                    (Ok(()), true) => this.notice = Some(Notice::said(format!("pulled {name} from {origin}"))),
+                    (Ok(()), false) => this.notice = Some(Notice::said(format!("pushed {name} to {origin}"))),
+                    (Err(why), true) => this.branch_ask = Some(BranchAsk::stop("Not pulled", format!("Nothing was changed. Git said: {why}."))),
+                    (Err(why), false) => this.net_failed("Not pushed", format!("push {name}"), why, cx),
+                }
+                this.read_git(root, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Under the files' head, with commits to push or to pull: one line
+    /// saying how many, and the button. It opens and closes in motion,
+    /// drawn as it goes from what it last said.
+    pub(crate) fn sync_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let now = self.sync_words();
+        let on = now.is_some();
+        if on {
+            *self.sync_kept.borrow_mut() = now;
+        }
+        let moving = self.presence("strip-sync", on, cx);
+        let (said, what) = self.sync_kept.borrow().clone().filter(|_| on || moving.is_some())?;
+        let row = h_flex()
+            .w_full()
+            .h(px(STRIP_H))
+            .flex_shrink_0()
+            .px(px(12.))
+            .gap(px(8.))
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.primary.opacity(0.07))
+            .text_size(px(11.5))
+            .child(Icon::default().path(if what == Some(true) { "icons/arrow-down.svg" } else { "icons/arrow-up.svg" }).with_size(px(12.)).text_color(theme.link).flex_shrink_0())
+            .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child(said))
+            .children(what.filter(|_| on).and_then(|pull| self.sync_pill(pull, cx)));
+        let wrap = v_flex().w_full().flex_shrink_0().justify_end().overflow_hidden().child(row);
+        Some(match moving {
+            Some((coming, n)) => wrap
+                .with_animation(ElementId::Name(format!("strip-sync-{n}").into()), Animation::new(crate::workbench::FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    let t = if coming { t } else { 1. - t };
+                    d.h(px((STRIP_H * t).round())).opacity(t)
+                })
+                .into_any_element(),
+            None => wrap.into_any_element(),
+        })
+    }
+
+    // -- committing -----------------------------------------------------------
+
+    /// The files a commit takes: every changed one not left out, and
+    /// whether that is all of them.
+    pub(crate) fn commit_files(&self) -> (Vec<std::path::PathBuf>, bool) {
+        let changed = self.changed_files();
+        let out = self.changes.as_ref().map(|c| &c.left_out);
+        let taken: Vec<std::path::PathBuf> = changed.iter().map(|(p, _)| p.clone()).filter(|p| out.is_none_or(|o| !o.contains(p))).collect();
+        let all = taken.len() == changed.len();
+        (taken, all)
+    }
+
+    /// A click on a file's box in the comparison: in or out of the
+    /// commit, and with it every file chosen together with it.
+    pub(crate) fn commit_tick(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let Some(c) = &mut self.changes else { return };
+        let out = !c.left_out.contains(&path);
+        let together: Vec<std::path::PathBuf> = if c.marked.len() > 1 && c.marked.contains(&path) { c.marked.clone() } else { vec![path] };
+        for p in together {
+            if out {
+                c.left_out.insert(p);
+            } else {
+                c.left_out.remove(&p);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Commit, from the button or ↩ in the summary: the files ticked,
+    /// under the words typed. Git does it and may refuse (no name to
+    /// commit under, a hook, a merge half done); its words are shown
+    /// and nothing is forced.
+    pub(crate) fn commit_go(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.changes.as_ref().map(|c| c.root.clone()) else { return };
+        let (files, all) = self.commit_files();
+        let summary = self.commit_summary.read(cx).value().trim().to_string();
+        let body = self.commit_body.read(cx).value().trim().to_string();
+        if self.committing || files.is_empty() || summary.is_empty() {
+            return;
+        }
+        let branch = self.branches().map(|b| b.label()).unwrap_or_default();
+        self.committing = true;
+        cx.notify();
+        let n = files.len();
+        cx.spawn_in(window, async move |this, cx| {
+            let dir = root.clone();
+            let done = cx.background_executor().spawn(async move { git::commit(&dir, &summary, &body, (!all).then_some(&files[..])) }).await;
+            this.update_in(cx, |this, window, cx| {
+                this.committing = false;
+                match done {
+                    Ok(()) => {
+                        this.commit_summary.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.commit_body.update(cx, |s, cx| s.set_value("", window, cx));
+                        if let Some(c) = &mut this.changes {
+                            c.left_out.clear();
+                        }
+                        this.notice = Some(Notice::said(format!("committed {} to {branch}", plural(n, "file", "files"))));
+                    }
+                    Err(why) => this.branch_ask = Some(BranchAsk::stop("Not committed", format!("Nothing was committed. Git said: {why}."))),
+                }
+                this.read_git(root, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// At the foot of the comparison's files: the commit's summary and
+    /// description, the button that commits the files ticked, and under
+    /// it how the branch stands against the remote's, with Push or Pull.
+    pub(crate) fn render_commit_box(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (files, _) = self.commit_files();
+        let summary = self.commit_summary.read(cx).value().trim().is_empty();
+        let off = self.committing || files.is_empty() || summary;
+        let label = if self.committing { "Committing…".to_string() } else if files.is_empty() { "No files to commit".to_string() } else { format!("Commit {}", plural(files.len(), "file", "files")) };
+        // A field is a hollow in the panel, as the list of branches' is.
+        // In the light appearance the hollow's grey is the panel's own,
+        // so there it is the page's ground inside a line.
+        let dark = theme.mode.is_dark();
+        let field = |id: &'static str, focus: FocusHandle| h_flex().id(id).track_focus(&focus).w_full().px(px(8.)).rounded(px(8.)).text_size(px(13.)).border_1().map(|d| if dark { d.bg(theme.muted).border_color(theme.transparent) } else { d.bg(theme.background).border_color(theme.input) });
+        // The comment is the one thing a commit needs: a star at the
+        // field's end says so until there is one, drawn
+        // as an icon in the accent, five solid petals: the letter sat
+        // high on its line, and a star of thin lines read as a scribble.
+        let need = self.presence("commit-need", summary, cx);
+        let star = div().flex_shrink_0().size(px(16.)).mr(px(2.)).flex().items_center().justify_center().child(Icon::default().path("icons/required.svg").with_size(px(12.)).text_color(theme.primary));
+        let star = match need {
+            Some((coming, n)) => star.with_animation(ElementId::Name(format!("commit-need-{n}").into()), Animation::new(crate::workbench::FOLD_ANIM), move |d, t| d.opacity(if coming { t } else { 1. - t })).into_any_element(),
+            None => star.opacity(if summary { 1. } else { 0. }).into_any_element(),
+        };
+        let (summary_focus, body_focus) = (self.commit_summary.read(cx).focus_handle(cx), self.commit_body.read(cx).focus_handle(cx));
+        let sync = self.sync_words().map(|(said, what)| {
+            h_flex()
+                .w_full()
+                .gap(px(8.))
+                .items_center()
+                .text_size(px(11.5))
+                .text_color(theme.muted_foreground)
+                .child(div().flex_1().min_w_0().line_height(px(16.)).child(said))
+                .children(what.and_then(|pull| self.sync_pill(pull, cx)))
+        });
+        v_flex()
+            .id("commit-box")
+            .flex_shrink_0()
+            .w_full()
+            .p(px(10.))
+            .gap(px(8.))
+            .border_t_1()
+            .border_color(theme.border)
+            // A press here is not one on the list of files over it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(field("commit-summary", summary_focus).h(px(32.)).items_center().child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.commit_summary).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_summary, false, cx)))).child(star))
+            .child(field("commit-body", body_focus).py(px(4.)).items_start().child(gpui_component::input::Textarea::new(&self.commit_body).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_body, false, cx))))
+            .child(choice_pill("commit-go", "icons/check.svg", label, Press::Primary, off, &theme).w_full().justify_center().when(!off, |d| {
+                d.on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.commit_go(window, cx);
+                }))
+            }))
+            .children(sync)
+            .into_any_element()
     }
 
     /// A call to the remote failed while `what` was being done: the
@@ -207,10 +472,12 @@ impl Workbench {
                 .text_size(px(11.5))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.link).flex_shrink_0())
                 .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child("Not published yet"))
-                .child(Button::new("branch-publish").primary().xsmall().label(if busy { "Publishing…" } else { "Publish" }).disabled(self.branch_publishing.is_some()).on_click(cx.listener(move |this, _, window, cx| {
-                    swallow_click(window, cx);
-                    this.branch_publish(cur.clone(), cx)
-                })))
+                .child(small_pill("branch-publish", "icons/arrow-up.svg", if busy { "Publishing…" } else { "Publish" }, Press::Primary, self.branch_publishing.is_some(), &theme).when(self.branch_publishing.is_none(), |d| {
+                    d.on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.branch_publish(cur.clone(), cx)
+                    }))
+                }))
                 .into_any_element(),
         )
     }

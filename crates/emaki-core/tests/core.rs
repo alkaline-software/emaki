@@ -2602,6 +2602,86 @@ fn git_lists_branches_and_switches_between_them() {
 }
 
 #[test]
+fn git_commits_and_asks_the_remote_about_two_branches() {
+    use emaki_core::git;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let run = |at: &std::path::Path, args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]).args(args).output().unwrap();
+        assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+    };
+    let said = |at: &std::path::Path, args: &[&str]| String::from_utf8_lossy(&std::process::Command::new("git").arg("-C").arg(at).args(args).output().unwrap().stdout).trim().to_string();
+    // `git::commit` runs git as the person has it: a name to commit
+    // under and no signing, whatever this machine is set to.
+    for (k, v) in [("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"), ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t"), ("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "commit.gpgsign"), ("GIT_CONFIG_VALUE_0", "false")] {
+        std::env::set_var(k, v);
+    }
+    let origin = root.join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    run(&origin, &["init", "-q"]);
+    std::fs::write(origin.join("a.txt"), "one").unwrap();
+    run(&origin, &["add", "."]);
+    run(&origin, &["commit", "-q", "-m", "first"]);
+    run(&origin, &["branch", "other"]);
+    // A push to the branch it has checked out is taken, for the test.
+    run(&origin, &["config", "receive.denyCurrentBranch", "updateInstead"]);
+    run(&root, &["clone", "-q", "origin", "work"]);
+    let work = root.join("work");
+
+    // Everything changed, new and gone files with it; then one file of two.
+    std::fs::write(work.join("a.txt"), "two").unwrap();
+    std::fs::write(work.join("new.txt"), "n").unwrap();
+    assert!(git::commit(&work, "  ", "", None).is_err(), "no summary, no commit");
+    git::commit(&work, "second", "why it was done", None).unwrap();
+    assert_eq!(said(&work, &["log", "-1", "--format=%s|%b"]), "second|why it was done");
+    assert!(!git::dirty(&work));
+    std::fs::write(work.join("a.txt"), "three").unwrap();
+    std::fs::remove_file(work.join("new.txt")).unwrap();
+    git::commit(&work, "only the one", "", Some(&[work.join("new.txt")])).unwrap();
+    assert_eq!(said(&work, &["show", "--name-status", "--format=", "HEAD"]), "D\tnew.txt");
+    assert_eq!(said(&work, &["status", "--porcelain"]), "M a.txt", "the file not named is still changed and not staged");
+    run(&work, &["checkout", "-q", "--", "a.txt"]);
+
+    // Two commits here the remote lacks; then it gets one this has not.
+    assert_eq!((git::branches(&work).unwrap().ahead, git::branches(&work).unwrap().behind), (2, 0));
+    git::publish(&work, "main").unwrap();
+    assert_eq!(git::branches(&work).unwrap().ahead, 0);
+    std::fs::write(origin.join("b.txt"), "b").unwrap();
+    run(&origin, &["add", "."]);
+    run(&origin, &["commit", "-q", "-m", "theirs"]);
+    run(&origin, &["checkout", "-q", "other"]);
+    std::fs::write(origin.join("c.txt"), "c").unwrap();
+    run(&origin, &["add", "."]);
+    run(&origin, &["commit", "-q", "-m", "on other"]);
+    run(&origin, &["branch", "later"]);
+    run(&origin, &["checkout", "-q", "main"]);
+
+    // A fetch asks about the branch checked out and the default one: main
+    // is both here. The other branch is as it was, and one made on the
+    // remote since is not heard of.
+    let other_was = said(&work, &["rev-parse", "origin/other"]);
+    assert_eq!(git::fetch_names(&work), vec!["main".to_string()]);
+    git::fetch(&work).unwrap();
+    assert_eq!((git::branches(&work).unwrap().ahead, git::branches(&work).unwrap().behind), (0, 1));
+    assert_eq!(said(&work, &["rev-parse", "origin/other"]), other_was);
+    assert!(!git::branches(&work).unwrap().has("later"));
+    // One branch asked for by name is brought up.
+    git::fetch_branch(&work, "other").unwrap();
+    assert_ne!(said(&work, &["rev-parse", "origin/other"]), other_was);
+    // On another branch the fetch is of both; one the remote has not is left out.
+    git::switch(&work, "other").unwrap();
+    assert_eq!(git::fetch_names(&work), vec!["other".to_string(), "main".to_string()]);
+    git::create(&work, "mine").unwrap();
+    assert_eq!(git::fetch_names(&work), vec!["main".to_string()]);
+    git::fetch(&work).unwrap();
+    // Pulling is a fast-forward of the branch checked out.
+    git::switch(&work, "main").unwrap();
+    git::fast_forward(&work, "main").unwrap();
+    assert_eq!(git::branches(&work).unwrap().behind, 0);
+    assert!(work.join("b.txt").exists());
+}
+
+#[test]
 fn mouse_reports_as_a_terminal_sends_them() {
     use emaki_core::pty::{mouse_bytes, MouseForm};
     assert_eq!(mouse_bytes(0, 4, 2, true, MouseForm::Sgr), b"\x1b[<0;5;3M");

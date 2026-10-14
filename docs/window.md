@@ -198,10 +198,13 @@ drawn (`side_rows_at`), cut to its own list. A plain click opens the
 project and lets the chosen go, as Escape and a click on the card's
 empty room do. The chosen are lit in the accent, and rows lit one under
 another in the same list are one block, round at its two ends, unless
-the upper one's sessions show between them. While projects are chosen
-the card has the keyboard (`side_focus`), so ⌘A takes every project
-showing; when none is chosen any more it goes back to the composer
-(`keep_focus`). A right click on one of several is their menu
+the upper one's sessions show between them. A press anywhere in the
+card gives it the keyboard (`side_focus`), and there ⌘A takes every
+project showing, whatever was chosen: projects, never sessions. Nothing
+has to be chosen first. A session opened by a click gives the keyboard
+to its composer, and a letter typed with the card focused goes there
+too, the keyboard with it, so typing after a click in the sidebar is
+not lost. A right click on one of several is their menu
 (`project_menu`), and on any other project its own:
 
 - **Archive Sessions** and **Delete Sessions** ask it of every session
@@ -419,6 +422,8 @@ The patterns, each in use and to be used again:
   of a session with a tab, the line under the pinned projects):
   `presence`, asked at every draw, which plays a change over
   `FOLD_ANIM` and not the first sight.
+- The settings are drawn over every sheet and card, the comparison
+  included; only a menu or a pill's list, which they open, is over them.
 - **Something that lies over the window and has no way out of its own**
   (the rename sheet, the lightbox, the comparison, the branch list and
   its question, the discard question): `fade_in`, on a static id, which
