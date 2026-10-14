@@ -746,6 +746,117 @@ pub fn commit(dir: &Path, summary: &str, description: &str, paths: Option<&[Path
     act(dir, &args)
 }
 
+/// A commit as the history lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Commit {
+    pub sha: String,
+    /// The first characters of `sha`, as git shortens it.
+    pub short: String,
+    pub author: String,
+    /// When it was committed, in seconds since 1970.
+    pub when: i64,
+    pub summary: String,
+    /// The rest of its message.
+    pub body: String,
+    pub tags: Vec<String>,
+    /// The remote's copy of the branch does not have it: it is still to
+    /// push, and can be undone without rewriting what others have.
+    pub local: bool,
+}
+
+/// The last `most` commits of what is checked out, the newest first.
+/// Empty before the first commit.
+pub fn log(dir: &Path, most: usize) -> Vec<Commit> {
+    let Some(out) = git(dir, &["log", "-n", &most.to_string(), "--format=%H%x1f%h%x1f%an%x1f%ct%x1f%s%x1f%b%x1f%D%x1e"]) else { return Vec::new() };
+    // Without a copy on a remote to set them against, nothing is called
+    // local: there is nowhere to push to, or the branch is not published.
+    let unpushed: Option<Vec<String>> = remote(dir).zip(line(dir, &["symbolic-ref", "--short", "-q", "HEAD"])).and_then(|(r, cur)| git(dir, &["rev-list", &format!("refs/remotes/{r}/{cur}..HEAD")])).map(|o| String::from_utf8_lossy(&o).lines().map(str::to_string).collect());
+    String::from_utf8_lossy(&out)
+        .split('\u{1e}')
+        .filter_map(|row| {
+            let mut f = row.trim_start_matches(['\n', '\r']).split('\u{1f}');
+            let sha = f.next().filter(|s| !s.is_empty())?.to_string();
+            let (short, author, when, summary, body, refs) = (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?, f.next().unwrap_or(""));
+            Some(Commit {
+                local: unpushed.as_ref().is_some_and(|u| u.contains(&sha)),
+                sha,
+                short: short.to_string(),
+                author: author.to_string(),
+                when: when.parse().unwrap_or(0),
+                summary: summary.to_string(),
+                body: body.trim().to_string(),
+                tags: refs.split(',').filter_map(|r| r.trim().strip_prefix("tag: ")).map(str::to_string).collect(),
+            })
+        })
+        .collect()
+}
+
+/// The files a commit changed, by their paths from the repository's
+/// top, against its first parent (so a merge shows what it brought in).
+pub fn commit_files(dir: &Path, sha: &str) -> Vec<(String, State)> {
+    let Some(out) = git(dir, &["diff-tree", "-r", "--root", "--no-commit-id", "--name-status", "-m", "--first-parent", sha]) else { return Vec::new() };
+    String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let state = match f.next()?.chars().next()? {
+                'A' => State::Added,
+                'D' => State::Deleted,
+                'R' | 'C' => State::Renamed,
+                'T' => State::TypeChanged,
+                _ => State::Modified,
+            };
+            // A rename names the old path and then the new one.
+            Some((f.last()?.to_string(), state))
+        })
+        .collect()
+}
+
+/// One file's lines as a commit changed them.
+pub fn commit_diff(dir: &Path, sha: &str, path: &str) -> Diff {
+    let out = command().arg("-C").arg(dir).args(["show", "--no-color", "--no-ext-diff", "--first-parent", "--format=", sha, "--", &format!(":/{path}")]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success());
+    out.map(|o| parse_diff(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
+}
+
+/// A new commit that takes back what `sha` changed. Git refuses when
+/// that does not fit what is here now, or with changes of the person's
+/// in its way; a revert left half done is given up, so either the
+/// commit is made or nothing has moved.
+pub fn revert(dir: &Path, sha: &str) -> Result<(), String> {
+    act(dir, &["revert", "--no-edit", sha]).inspect_err(|_| {
+        let _ = act(dir, &["revert", "--abort"]);
+    })
+}
+
+/// Take the last commit back, keeping everything it changed as changes
+/// not yet committed, staged: what was committed can be committed
+/// again, differently. Only a commit the remote does not have: one that
+/// was pushed is others' too, and taking it back here would rewrite
+/// what they have. Its message comes back for the fields it was typed in.
+pub fn undo_last(dir: &Path) -> Result<(String, String), String> {
+    let last = log(dir, 1).into_iter().next().ok_or("there is no commit to take back")?;
+    if !last.local {
+        return Err("the last commit is on the remote already; revert it instead".to_string());
+    }
+    if line(dir, &["rev-parse", "--verify", "-q", "HEAD~1"]).is_none() {
+        return Err("the first commit cannot be taken back".to_string());
+    }
+    act(dir, &["reset", "--soft", "HEAD~1"])?;
+    Ok((last.summary, last.body))
+}
+
+/// A commit's page on the host, where the remote is one of the hosts
+/// that have such pages at `/commit/<sha>` (GitHub, GitLab, Gitea).
+pub fn commit_url(dir: &Path, sha: &str) -> Option<String> {
+    let url = remote(dir).and_then(|r| line(dir, &["remote", "get-url", &r]))?;
+    let (host, _) = host_of(&url);
+    if host.is_empty() {
+        return None;
+    }
+    let path = url.split_once(&host)?.1.trim_start_matches([':', '/']).trim_end_matches('/').trim_end_matches(".git");
+    (!path.is_empty()).then(|| format!("https://{host}/{path}/commit/{sha}"))
+}
+
 /// Where the remote is, and how the machine would sign in to it: what
 /// the window goes by to say how.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

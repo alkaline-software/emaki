@@ -119,6 +119,8 @@ const OPEN_MANY: usize = 3;
 /// One choice on a right-click menu.
 #[derive(Clone)]
 pub(crate) enum MenuDo {
+    /// Something asked of a commit in the history, by its hash.
+    Commit(crate::branches::CommitDo, String),
     /// Open this folder in the file manager; none when it is gone.
     OpenFolder(Option<String>),
     /// Pin the project to the head of the sidebar's list, or let it go
@@ -194,6 +196,9 @@ impl MenuDo {
             MenuDo::File(FileDo::Cut, _) | MenuDo::Files(FileDo::Cut, _) => "icons/scissors.svg",
             MenuDo::File(FileDo::Duplicate, _) | MenuDo::Files(FileDo::Duplicate | FileDo::Copy, _) => "icons/copy.svg",
             MenuDo::Files(..) => "icons/copy.svg",
+            MenuDo::Commit(crate::branches::CommitDo::Undo | crate::branches::CommitDo::Revert, _) => "icons/undo-2.svg",
+            MenuDo::Commit(crate::branches::CommitDo::CopySha, _) => "icons/hash.svg",
+            MenuDo::Commit(crate::branches::CommitDo::View, _) => "icons/external-link.svg",
             MenuDo::File(FileDo::NewFile, _) => "icons/file-plus.svg",
             MenuDo::File(FileDo::NewFolder, _) => "icons/folder-plus.svg",
             MenuDo::File(FileDo::Trash, _) => "icons/trash.svg",
@@ -636,6 +641,9 @@ pub enum Pane {
     Branches,
     ChangeFiles,
     ChangeLines,
+    /// In the comparison's history: the commits, and one's files.
+    HistoryCommits,
+    HistoryFiles,
     /// Over such a card or sheet, on nothing that scrolls.
     Nowhere,
     /// The file shown at the conversation's right.
@@ -8259,7 +8267,11 @@ impl Workbench {
             self.scroll_inner = None;
             let here = match &self.changes {
                 _ if self.branch_menu.is_some() && self.branch_scroll.bounds().contains(&e.position) => Pane::Branches,
-                Some(c) if self.branch_menu.is_none() && c.files.0.borrow().base_handle.bounds().contains(&e.position) => Pane::ChangeFiles,
+                // The history draws its own two lists where the files
+                // are; the files' handle still has the place it had.
+                Some(c) if self.branch_menu.is_none() && c.history && c.commits_scroll.bounds().contains(&e.position) => Pane::HistoryCommits,
+                Some(c) if self.branch_menu.is_none() && c.history && c.cfiles_scroll.bounds().contains(&e.position) => Pane::HistoryFiles,
+                Some(c) if self.branch_menu.is_none() && !c.history && c.files.0.borrow().base_handle.bounds().contains(&e.position) => Pane::ChangeFiles,
                 Some(c) if self.branch_menu.is_none() && c.list.viewport_bounds().contains(&e.position) => Pane::ChangeLines,
                 _ => Pane::Nowhere,
             };
@@ -8280,6 +8292,8 @@ impl Workbench {
             match (owner, &self.changes) {
                 (Pane::Branches, _) if self.branch_menu.is_some() => held(&self.branch_scroll),
                 (Pane::ChangeFiles, Some(c)) => held(&c.files.0.borrow().base_handle),
+                (Pane::HistoryCommits, Some(c)) => held(&c.commits_scroll),
+                (Pane::HistoryFiles, Some(c)) => held(&c.cfiles_scroll),
                 (Pane::ChangeLines, Some(c)) => c.list.scroll_by(-delta.y),
                 _ => {}
             }
@@ -8392,7 +8406,7 @@ impl Workbench {
                 Page::Agents => self.agents_page_scroll.set_offset(self.agents_page_scroll.offset() + delta),
             },
             // Momentum left over from a card or sheet that has gone.
-            Pane::Branches | Pane::ChangeFiles | Pane::ChangeLines | Pane::Nowhere | Pane::Terminal => {}
+            Pane::Branches | Pane::ChangeFiles | Pane::ChangeLines | Pane::HistoryCommits | Pane::HistoryFiles | Pane::Nowhere | Pane::Terminal => {}
         }
         cx.stop_propagation();
         cx.notify();
@@ -11175,6 +11189,7 @@ impl Workbench {
             }
             MenuDo::CloseTab(key) => self.close_tab(&key, window, cx),
             MenuDo::Discard(paths) => self.ask_discard(paths, cx),
+            MenuDo::Commit(what, sha) => self.commit_do(what, sha, window, cx),
             MenuDo::Sessions(what, keys) => self.manage_ask_of(what, keys, true, cx),
             MenuDo::CloseOthers(key) => {
                 for other in self.tabs.clone().into_iter().filter(|t| *t != key) {
