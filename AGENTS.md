@@ -52,6 +52,20 @@ conversations from Claude Code hook stdin instead, and its README conceded
 the result was "not a full audit trail". Do not reintroduce that. If you need
 something the model lacks, get it from the transcript.
 
+## The standard
+
+Emaki is an elegant app, held to that everywhere: a considered layout,
+and motion wherever anything changes. Every change to the window meets
+this unasked. The person has asked many times.
+
+- **Nothing changes from one frame to the next.** What appears, goes,
+  opens, closes, grows or moves does so over a moment, with what is
+  around it: a card, a line, an arrow, a scroll a click starts. A jump is
+  a bug. Use the pattern its neighbours use. (`docs/window.md`, Motion)
+- **What is cut says so:** it fades out at that edge and can be reached.
+- **Look before saying it is done:** at all the change shows, hides or
+  moves, and at the layout in a narrow window.
+
 ## Rules that hold everywhere
 
 Each is here because breaking it loses data or reintroduces a bug that was
@@ -111,11 +125,10 @@ already fixed once. The doc named after a rule has the full story.
   in its `UPSTREAM.md`. (`docs/platform.md`)
 - **Everything Unix-only is gated with a stated fallback.** Windows and
   Linux are build targets. (`docs/platform.md`)
-- **Whatever appears or disappears does so in motion.** A menu, a card,
-  a panel, a list: it comes in over a moment and goes out over one, never
-  from one frame to the next, and what is around it moves with it. Use
-  the pattern its neighbours use; the person does not ask for this each
-  time. (`docs/window.md`, Motion)
+- **A card that comes up while a session runs stands at the
+  conversation's end and scrolls with it,** never over the composer. It
+  goes in `render_cards`, its body through `card_scroll`, which caps its
+  height and scrolls both ways. (`docs/live-turn.md`, The cards)
 - **A button is `choice_pill`,** a pill with an icon before its word, and
   a menu's choice has an icon. A new button is not the toolkit's
   `Button`. (`docs/look.md`)
@@ -225,11 +238,6 @@ STAGES.md                  the high-level plan: three stages, a page
 PLAN.md                    the detailed plan: tasks, decisions, what has landed
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
 .github/workflows/release.yml  installers on a v* tag, via cargo-packager
-```
-
-```
-cargo build -p emaki-app && scripts/dev-app.sh
-cargo test -p emaki-core
 ```
 
 **Each document has one job.** This file is what Emaki is, the rules that

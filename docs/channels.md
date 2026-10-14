@@ -279,10 +279,13 @@ screen.
 ## The terminal card
 
 `Workbench::render_terminal` draws the pty's screen where the dialog
-cards sit: `pty::panel_rows` (what is under the "▔" line a picker opens
+cards sit, at the conversation's end (`docs/live-turn.md`, The cards): `pty::panel_rows` (what is under the "▔" line a picker opens
 beneath, else the screen without blank edges), drawn as the terminal
 panel draws a screen (`term_card_look`: the same face, rows, shapes and
-colour rules, in letters small enough for every column to fit). Its
+colour rules, in letters small enough for every column to fit the
+conversation's column at its widest). In a narrower column the rows
+scroll sideways, and a screen with more rows than a card shows scrolls
+from its foot, where a picker's choices are (`card_scroll`). Its
 scheme is the window's own appearance, light or dark, whatever theme
 Claude Code is set to and whatever the panel's scheme is set to: the card
 sits in the conversation.
@@ -323,7 +326,7 @@ sits in the conversation.
   screen with no numbered choice. ⇧Tab and Stop never show it; a click on the mode pill is one
   ⇧Tab.
 - Animation (`TERM_ANIM`, `TermShown`): held by its foot, opening up
-  from the composer. While closing it is drawn from its last rows and
+  from the conversation's end. While closing it is drawn from its last rows and
   takes no click. The gap under the card is an element inside the height
   that runs, in a column with no gap. Tried and dropped: the column's
   gap (a stop at the end) and a negative margin with padding (a shake).

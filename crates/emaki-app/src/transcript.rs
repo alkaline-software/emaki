@@ -984,51 +984,15 @@ impl Workbench {
             let scroll = self.detail.as_mut().map(|d| d.body_scrolls.entry((ix, jx)).or_default().clone()).unwrap_or_default();
             let handle = scroll.handle.clone();
             self.inner_scroller(&handle, crate::workbench::Inner::Chained);
-            // The wheel over a body that scrolls belongs to the body: the
-            // list would otherwise take the same event (gpui hands a scroll
-            // to every scrollable under the mouse) and both would move.
-            // Whose a stroke is gets decided as it starts (see `Stroke`):
-            // the body's own handler has run by the time this one does, so
-            // the offset before it is `at - dy`, and an edge there in the
-            // wheel's direction means the body had nothing to give and the
-            // conversation takes the stroke. A body that fits passes
-            // everything on.
-            let wheel_handle = handle.clone();
-            let stroke = scroll.stroke.clone();
+            // The wheel over a body that scrolls belongs to the body,
+            // but for a stroke begun at its edge (`chain_wheel`).
             let body =
                 div()
                     .relative()
                     .w_full()
                     .border_t_1()
                     .border_color(theme.border)
-                    .on_scroll_wheel(move |event, window, cx| {
-                        let max = wheel_handle.max_offset().y;
-                        if max <= px(0.) {
-                            return;
-                        }
-                        let now = std::time::Instant::now();
-                        let mut s = stroke.borrow_mut();
-                        let touched = matches!(event.touch_phase, gpui::TouchPhase::Started);
-                        let paused = s.last.map(|t| now.duration_since(t) > crate::workbench::STROKE_GAP).unwrap_or(true);
-                        s.last = Some(now);
-                        if touched || paused {
-                            s.decided = false;
-                            s.handed_over = false;
-                        }
-                        if !s.decided {
-                            let dy = event.delta.pixel_delta(window.line_height()).y;
-                            if dy != px(0.) {
-                                let before = wheel_handle.offset().y - dy;
-                                let at_bottom = before <= -max;
-                                let at_top = before >= px(0.);
-                                s.handed_over = (dy < px(0.) && at_bottom) || (dy > px(0.) && at_top);
-                                s.decided = true;
-                            }
-                        }
-                        if !s.handed_over {
-                            cx.stop_propagation();
-                        }
-                    })
+                    .on_scroll_wheel(crate::workbench::chain_wheel(handle.clone(), scroll.stroke.clone()))
                     .child(
                         div()
                             .id(SharedString::from(format!("tool-body-{ix}-{jx}")))
