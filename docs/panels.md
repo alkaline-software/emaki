@@ -402,8 +402,10 @@ showing.
 
 ## Changes
 
-`changes_pill` at the head's right counts the files with a change
-(`Status::changed`, kept as `Tree::changed`) and opens the comparison
+`changes_pill` at the head's right is there in any repository, with
+the count of files with a change when there is one (`Status::changed`,
+kept as `Tree::changed`): with nothing changed the sheet still has the
+history and Push. It opens the comparison
 (`render_changes`, `Changes`), laid out as GitHub Desktop's Changes tab:
 a sheet with the changed files at its left and the picked file's lines at
 its right, the last commit beside what is there now. ⌘⇧G shows it and
@@ -439,8 +441,12 @@ changed file's menu opens it on that file.
   files. In a field of the commit's, ⌘A is the field's.
 - Under the files, the commit (`render_commit_box`): a comment, a
   description, and the button, which says how many files and is greyed
-  until there is a comment and a file. A star at the comment's end says
-  it is needed, until there is one. In the light appearance a field is
+  until there is a comment and a file. ⌘↩ commits from anywhere in the
+  sheet (the window's `Send`, taken by the sheet) and ⌘P pushes, as in
+  GitHub Desktop. The button reads "Commit 7 files to" and the branch,
+  whose name gives way when the two do not fit. A star at the comment's end says
+  it is needed, until there is one; then its place is the key that
+  commits, the two fading across each other in one slot. In the light appearance a field is
   the page's ground inside a line: the hollow's grey is the panel's own
   there. ↩ in the comment commits
   (`commit_go`). Done, the fields are emptied and the sheet stays, with
@@ -471,7 +477,10 @@ place, and the history said "Reading…" until a file was clicked. ↑ and ↓ g
 keyboard. A right click on a commit is its menu (`history_menu`,
 `commit_do`): Undo Commit and Revert Changes in Commit (Rules), Copy
 Commit Hash, and View on the Web where the remote's host has such a
-page (`git::commit_url`). The two lists are panes of their own to
+page (`git::commit_url`). A right click on one of its files
+(`history_file_menu`) is the file as it is on disk now, where it still
+is (Open, Reveal), its two paths, and its page on the host as that
+commit has it (`git::file_url`). The two lists are panes of their own to
 `route_scroll` (`Pane::HistoryCommits`, `HistoryFiles`). The clock's
 reading of the picked change is off while the history shows
 (`load_diff`): it took the commit's lines' place.
@@ -1138,7 +1147,8 @@ this the mark fell back to the last entry when the move ended.
   `panelfit` is the double click on it.
 - `EMAKI_GO=branches` opens the branch list, `branchq:<words>` types in
   its field; `changes` opens the comparison, `changes:<path>` on a file.
-  `history` is the sheet's other side and `history:down` is ↓ in it.
+  `history` is the sheet's other side and `history:down` is ↓ in it;
+  `commitsay:<words>` puts words in the commit's comment.
   As the first step `changes` opens nothing, git not having answered
   yet: put a step before it (`x;changes`). `branches` does not ask the
   remote as a click on the pill does; `branchfetch` does.

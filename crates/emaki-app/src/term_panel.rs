@@ -429,7 +429,7 @@ impl Workbench {
                 .text_color(if active { lit } else { theme.muted_foreground })
                 // On the active one too (`panels.rs`, the same control).
                 .hover(move |s| s.text_color(lit))
-                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .on_click(cx.listener(move |this, _, window, cx| this.toggle_term(which, window, cx)))
                 .child(Icon::default().path(icon).with_size(px(15.)))
@@ -486,7 +486,7 @@ impl Workbench {
                     .cursor_pointer()
                     .text_color(if on { lit } else { theme.muted_foreground })
                     .hover(move |s| s.text_color(lit))
-                    .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Shell Terminal in your home folder (⌘⇧S)").build(window, cx))
+                    .managed_tooltip(|window, cx| crate::workbench::tip("Shell Terminal in your home folder (⌘⇧S)", window, cx))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
                     .child(Icon::default().path("icons/terminal.svg").with_size(px(15.))),
@@ -779,7 +779,7 @@ impl Workbench {
             .text_color(hsla(k.tab_off))
             .hover(move |s| s.bg(hover_bg).text_color(lit))
             .active(move |s| s.bg(press_bg))
-            .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("New shell (⌘T)").build(window, cx))
+            .managed_tooltip(|window, cx| crate::workbench::tip("New shell (⌘T)", window, cx))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
             .on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);

@@ -13,8 +13,29 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
   one, and so is any new button; the toolkit's `Button` is not used for
   a new one. A choice in a menu has an icon too (`MenuDo::icon`).
   On a strip or a foot line it is the smaller `branches::small_pill`.
-  One that is off keeps its place and is dimmed, so nothing beside it
-  moves while the work it stands for is done.
+- A hover's label names the key that does the same, in brackets after
+  the words, as the Mac writes it: "Changes and History (⌘⇧G)". A
+  button with a key and no label gets one for that.
+- **Every key the window shows is drawn by `key_text`** (`workbench.rs`),
+  now and for anything added. A shortcut is its keys on caps
+  (`key_cap`): small plates of one height, none narrower than that,
+  each key in its plate's middle, a sign (⌘ ⇧ ⌥ ↩ ⇥ ↑ ↓) as an icon
+  (`icons/key-*.svg`, Tabler's, and the two arrows) and a letter as a
+  letter, both of one size. Tried and dropped, twice: the signs as
+  characters, each from whichever face has it, so ⌘ and ↩ stood at two
+  heights; then the signs as icons on the words' line, which were level
+  with each other and still neither the size nor the height of the
+  letter beside them. On equal plates they are. Brackets that hold only
+  shortcuts go ("Search (⌘K)" is the words and then the caps). Three
+  ways in: `kbd_hint` for a shortcut beside what it does (the sidebar's
+  rows, the commit's comment), `tip` for a hover's label (every
+  `managed_tooltip` builds with it, key or no key), and `key_text`
+  itself for a line of words, a button's hint or a notice. A place with
+  caps of its own takes the sign alone (`key_glyph`: the slash list's
+  foot). A new sign is a line in `key_sign` and `KEY_SIGNS` and an
+  icon; a string with a sign in it is never handed to the window as it
+  is. Off a Mac ⌘ and ⌥ are the words Ctrl and Alt on their caps. Not
+  covered: the system's own menus, and what an agent's terminal prints.
 - No call site names Tabler. A new icon is a file in `assets/icons/`
   under the toolkit's file name and a line in `OWN` (`assets.rs`).
 - Every face the window carries is under a licence that lets an app

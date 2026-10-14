@@ -362,7 +362,7 @@ impl Workbench {
                                     .text_color(theme.danger)
                                     .child(Icon::default().path("icons/circle-x.svg").with_size(px(14.)).text_color(theme.danger))
                                     .child("Not delivered")
-                                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(why.clone()).build(window, cx)),
+                                    .managed_tooltip(move |window, cx| crate::workbench::tip(why.clone(), window, cx)),
                             )
                         })
                         .when(rnd.queued, |d| d.child(div().child(format!("Queued, {} will read it at its next step", session.agent.speaker()))))
@@ -526,7 +526,7 @@ impl Workbench {
             .justify_center()
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
-            .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
+            .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let text = this.detail.as_ref().and_then(|d| d.session.rounds.get(ix)).map(|r| if reply { r.reply_markdown() } else { r.prompt.clone() }).unwrap_or_default();
                 this.copy_text(key.clone(), text, cx);

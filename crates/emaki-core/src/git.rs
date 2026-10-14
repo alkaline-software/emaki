@@ -845,6 +845,17 @@ pub fn undo_last(dir: &Path) -> Result<(String, String), String> {
     Ok((last.summary, last.body))
 }
 
+/// The top folder of the repository `dir` is in.
+pub fn top(dir: &Path) -> Option<PathBuf> {
+    line(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+}
+
+/// A file as a commit has it, on the host's pages: `/blob/<sha>/<path>`
+/// where a commit's page is at `/commit/<sha>`.
+pub fn file_url(dir: &Path, sha: &str, path: &str) -> Option<String> {
+    commit_url(dir, sha).map(|url| format!("{}/{path}", url.replacen("/commit/", "/blob/", 1)))
+}
+
 /// A commit's page on the host, where the remote is one of the hosts
 /// that have such pages at `/commit/<sha>` (GitHub, GitLab, Gitea).
 pub fn commit_url(dir: &Path, sha: &str) -> Option<String> {

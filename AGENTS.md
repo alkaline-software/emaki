@@ -132,10 +132,10 @@ already fixed once. The doc named after a rule has the full story.
 - **A button is `choice_pill`,** a pill with an icon before its word, and
   a menu's choice has an icon. A new button is not the toolkit's
   `Button`. (`docs/look.md`)
-- **A shortcut is named as the Mac has it.** When the person says ⌘ and a
-  key, bind `secondary-<key>`, which is ⌘ on a Mac and Ctrl on Windows and
-  Linux, and write ⌘ in the docs. They do not say this each time.
-  (`main.rs`)
+- **A shortcut is named as the Mac has it,** and its signs are drawn.
+  For ⌘ and a key bind `secondary-<key>` (Ctrl off a Mac) and write ⌘ in
+  the docs. Wherever the window shows a key, it goes through `key_text`
+  (`kbd_hint`, `tip`), never as characters. (`main.rs`, `docs/look.md`)
 - **The explainer's and the outline's model calls are real Claude Code
   calls on the person's account.** Cache the answer, ask for no more than
   is looked at, and never call one from a test. (`docs/core.md`,

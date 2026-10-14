@@ -18,6 +18,7 @@ use crate::panels::BranchAsk;
 use std::rc::Rc;
 
 use gpui_component::scroll::ScrollableElement as _;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use crate::workbench::{choice_pill, float_shadow, pill_button, MenuDo, Press, swallow_click, Notice, Workbench};
 
@@ -226,6 +227,8 @@ impl Workbench {
         let off = self.syncing.is_some() || self.branch_busy;
         Some(
             small_pill(if pull { "sync-pull" } else { "sync-push" }, if pull { "icons/arrow-down.svg" } else { "icons/arrow-up.svg" }, label, Press::Primary, off, &theme)
+                // ⌘P is the comparison's key for it.
+                .when(!pull, |d| d.managed_tooltip(|window, cx| crate::workbench::tip("Push (⌘P in Changes)", window, cx)))
                 .when(!off, |d| {
                     d.on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
@@ -371,9 +374,10 @@ impl Workbench {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (dir, of) = (root, sha.clone());
-            let files = cx.background_executor().spawn(async move { git::commit_files(&dir, &of) }).await;
+            let (files, top) = cx.background_executor().spawn(async move { (git::commit_files(&dir, &of), git::top(&dir)) }).await;
             this.update(cx, |this, cx| {
                 let Some(c) = this.changes.as_mut().filter(|c| c.commit.as_ref() == Some(&sha)) else { return };
+                c.top = top;
                 let first = files.first().map(|(p, _)| p.clone());
                 c.commit_files = Some((sha, Rc::new(files)));
                 match first {
@@ -440,6 +444,32 @@ impl Workbench {
         }
         if self.changes.as_ref().is_some_and(|c| c.commit.as_ref() != Some(&sha)) {
             self.history_pick(sha.clone(), cx);
+        }
+        self.open_menu(at, items, cx);
+    }
+
+    /// A right click on one of a commit's files: the file as it is on
+    /// disk now, when it is still there, its paths, and its page on the
+    /// remote's host as that commit has it.
+    pub(crate) fn history_file_menu(&mut self, path: String, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(c) = &self.changes else { return };
+        let Some(sha) = c.commit.clone() else { return };
+        let here = c.top.as_ref().map(|top| top.join(&path));
+        let page = git::file_url(&c.root, &sha, &path);
+        let mut items = Vec::new();
+        if let Some(file) = &here {
+            let item = |label: &'static str, what: crate::panels::FileDo| (label, MenuDo::File(what, file.clone()));
+            // A file since removed has nothing to open or to show.
+            if file.exists() {
+                items.extend([item("Open", crate::panels::FileDo::Open), item(crate::sys::REVEAL_LABEL, crate::panels::FileDo::Reveal), ("", MenuDo::Rule)]);
+            }
+            items.extend([item("Copy Path", crate::panels::FileDo::CopyPath), item("Copy Relative Path", crate::panels::FileDo::CopyRel)]);
+        }
+        if let Some(url) = page {
+            items.extend([("", MenuDo::Rule), ("View on the Web", MenuDo::Web(url))]);
+        }
+        if self.changes.as_ref().is_some_and(|c| c.commit_file.as_ref() != Some(&path)) {
+            self.history_file(path, cx);
         }
         self.open_menu(at, items, cx);
     }
@@ -550,7 +580,7 @@ impl Workbench {
                 None => (String::new(), path.clone()),
             };
             let chosen = c.commit_file.as_ref() == Some(path);
-            let to = path.clone();
+            let (to, menu_path) = (path.clone(), path.clone());
             h_flex()
                 .id(("commit-file", ix))
                 .w_full()
@@ -567,6 +597,13 @@ impl Workbench {
                     swallow_click(window, cx);
                     this.history_file(to.clone(), cx);
                 }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.history_file_menu(menu_path.clone(), e.position, cx);
+                    }),
+                )
                 .child(img(crate::file_icons::path(&name, false, false, dark)).size(px(16.)).flex_shrink_0())
                 .child(h_flex().flex_1().min_w_0().child(div().min_w_0().truncate().text_color(quiet).child(folder)).child(div().flex_shrink_0().text_color(theme.foreground).child(name)))
                 .child(div().w(px(12.)).flex_shrink_0().flex().justify_center().text_size(px(11.)).text_color(crate::panels::git_color(*state, dark)).children(state.letter()))
@@ -721,7 +758,11 @@ impl Workbench {
         let (files, _) = self.commit_files();
         let summary = self.commit_summary.read(cx).value().trim().is_empty();
         let off = self.committing || files.is_empty() || summary;
-        let label = if self.committing { "Committing…".to_string() } else if files.is_empty() { "No files to commit".to_string() } else { format!("Commit {}", plural(files.len(), "file", "files")) };
+        // "Commit 7 files to" and the branch's name, as GitHub Desktop
+        // words it: the name in a heavier face, and the part that gives
+        // way when the two do not fit.
+        let branch = self.branches().map(|b| b.label()).filter(|_| !self.committing && !files.is_empty());
+        let label = if self.committing { "Committing…".to_string() } else if files.is_empty() { "No files to commit".to_string() } else if branch.is_some() { format!("Commit {} to", plural(files.len(), "file", "files")) } else { format!("Commit {}", plural(files.len(), "file", "files")) };
         // A field is a hollow in the panel, as the list of branches' is.
         // In the light appearance the hollow's grey is the panel's own,
         // so there it is the page's ground inside a line.
@@ -733,10 +774,18 @@ impl Workbench {
         // high on its line, and a star of thin lines read as a scribble.
         let need = self.presence("commit-need", summary, cx);
         let star = div().flex_shrink_0().size(px(16.)).mr(px(2.)).flex().items_center().justify_center().child(Icon::default().path("icons/required.svg").with_size(px(12.)).text_color(theme.primary));
-        let star = match need {
-            Some((coming, n)) => star.with_animation(ElementId::Name(format!("commit-need-{n}").into()), Animation::new(crate::workbench::FOLD_ANIM), move |d, t| d.opacity(if coming { t } else { 1. - t })).into_any_element(),
-            None => star.opacity(if summary { 1. } else { 0. }).into_any_element(),
+        // With a comment the star's place is the key that commits. The
+        // two fade across each other in one slot, as wide as the key,
+        // so the field's words keep their room.
+        let key = crate::workbench::kbd_hint("⌘↩", &theme);
+        let (star, key) = match need {
+            Some((coming, n)) => (
+                star.with_animation(ElementId::Name(format!("commit-need-{n}").into()), Animation::new(crate::workbench::FOLD_ANIM), move |d, t| d.opacity(if coming { t } else { 1. - t })).into_any_element(),
+                div().child(key).with_animation(ElementId::Name(format!("commit-key-{n}").into()), Animation::new(crate::workbench::FOLD_ANIM), move |d, t| d.opacity(if coming { 1. - t } else { t })).into_any_element(),
+            ),
+            None => (star.opacity(if summary { 1. } else { 0. }).into_any_element(), div().child(key).opacity(if summary { 0. } else { 1. }).into_any_element()),
         };
+        let star = h_flex().relative().flex_shrink_0().pr(px(4.)).items_center().child(key).child(div().absolute().top_0().bottom_0().right(px(2.)).flex().items_center().child(star)).into_any_element();
         let (summary_focus, body_focus) = (self.commit_summary.read(cx).focus_handle(cx), self.commit_body.read(cx).focus_handle(cx));
         let sync = self.sync_words().map(|(said, what)| {
             h_flex()
@@ -761,7 +810,7 @@ impl Workbench {
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(field("commit-summary", summary_focus).h(px(32.)).items_center().child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.commit_summary).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_summary, false, cx)))).child(star))
             .child(field("commit-body", body_focus).py(px(4.)).items_start().child(gpui_component::input::Textarea::new(&self.commit_body).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_body, false, cx))))
-            .child(choice_pill("commit-go", "icons/check.svg", label, Press::Primary, off, &theme).w_full().justify_center().when(!off, |d| {
+            .child(choice_pill("commit-go", "icons/check.svg", label, Press::Primary, off, &theme).w_full().min_w_0().justify_center().children(branch.map(|b| div().min_w_0().truncate().ml(px(-2.)).font_weight(FontWeight::SEMIBOLD).child(b))).managed_tooltip(|window, cx| crate::workbench::tip("Commit (⌘↩)", window, cx)).when(!off, |d| {
                 d.on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.commit_go(window, cx);
