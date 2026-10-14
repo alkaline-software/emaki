@@ -49,6 +49,15 @@ About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
   `commit --only`, which leaves alone what else is staged. Git's own
   refusal is shown on a dialog (no name to commit under, a hook, a
   merge half done) and nothing is forced or amended.
+- A commit is taken back two ways, each on the commit's own menu in
+  the history and neither rewriting what the remote has. Undo
+  (`git::undo_last`, a soft reset) is offered for the newest commit
+  only, and only while the remote does not have it: its changes are
+  here again, staged, and its words are back in the fields. Revert
+  (`git::revert`) is a new commit that takes one's changes back; one
+  that does not fit is given up whole (`revert --abort`), so nothing is
+  left half reverted. No reset --hard, no amend, no checkout of a
+  commit.
 - Nothing here signs in. The sign-in sheet gives commands to paste, as
   the agents page does, and "Check again" asks the remote.
 - A branch switch is refused while a turn runs in the session showing: the
@@ -436,7 +445,36 @@ changed file's menu opens it on that file.
   there. ↩ in the comment commits
   (`commit_go`). Done, the fields are emptied and the sheet stays, with
   Push under the button.
+- A file that is no longer changed (committed, or discarded) lets go of
+  the right side at the next reading of git (`read_git`): the first
+  file left is shown, or with none the sheet says nothing has changed.
+  Its lines stood there after a commit, beside an empty list.
+- After a push from the sheet with nothing left to commit, the sheet
+  closes: it has done what it was opened for, and the notice line says
+  the push went. It closes in motion (`Changes::closing`,
+  `CHANGES_OUT`), as it does by ⌘W, Escape and its button.
 - ⌘W closes the sheet (`close_nearest`), the question over it first.
+
+**History** is the sheet's other side, chosen at its head
+(`history_show`, `render_history`). At the left the branch's last
+commits (`git::log`), the newest first: each its first line, who and
+when, a release's tag, and an arrow on one still to push. Then, as
+GitHub Desktop sets them, the commit's words over two more columns:
+the files it changed (`git::commit_files`, against its first parent)
+and the picked file's lines as that commit changed them
+(`git::commit_diff`), drawn by the same list as a change's. In a
+window narrower than `HISTORY_WIDE` the files go under the commits
+instead, in their column: three columns left the lines a strip there.
+A reading of a change's lines asked for before the history was turned
+to is dropped when it lands (`load_diff`): it took the commit's lines'
+place, and the history said "Reading…" until a file was clicked. ↑ and ↓ go from commit to commit while the sheet has the
+keyboard. A right click on a commit is its menu (`history_menu`,
+`commit_do`): Undo Commit and Revert Changes in Commit (Rules), Copy
+Commit Hash, and View on the Web where the remote's host has such a
+page (`git::commit_url`). The two lists are panes of their own to
+`route_scroll` (`Pane::HistoryCommits`, `HistoryFiles`). The clock's
+reading of the picked change is off while the history shows
+(`load_diff`): it took the commit's lines' place.
 - `git::diff` is `git diff HEAD` for the file, `--cached` before a first
   commit, and a file git does not track read as all new lines.
 - `git::parse_diff` sets a run of lines taken out beside the lines put in
@@ -1100,6 +1138,7 @@ this the mark fell back to the last entry when the move ended.
   `panelfit` is the double click on it.
 - `EMAKI_GO=branches` opens the branch list, `branchq:<words>` types in
   its field; `changes` opens the comparison, `changes:<path>` on a file.
+  `history` is the sheet's other side and `history:down` is ↓ in it.
   As the first step `changes` opens nothing, git not having answered
   yet: put a step before it (`x;changes`). `branches` does not ask the
   remote as a click on the pill does; `branchfetch` does.

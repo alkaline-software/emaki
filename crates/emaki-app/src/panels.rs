@@ -73,8 +73,10 @@ const BRANCH_TAG_W: Pixels = px(72.);
 const BRANCH_WHEN_W: Pixels = px(100.);
 /// The comparison: how wide its list of files is, and how tall a row of
 /// that list.
-const CHANGES_LIST_W: Pixels = px(300.);
+pub(crate) const CHANGES_LIST_W: Pixels = px(300.);
 const CHANGE_ROW_H: Pixels = px(26.);
+/// How long the comparison takes to go.
+const CHANGES_OUT: Duration = Duration::from_millis(140);
 /// The most entries one folder lists before "N more".
 const DIR_MAX: usize = 400;
 /// How often an open tree is read from disk again, in seconds.
@@ -249,12 +251,13 @@ pub struct Tree {
 /// ones, and its lines against the last commit.
 pub struct Changes {
     pub(crate) root: PathBuf,
-    picked: Option<PathBuf>,
-    /// The lines of `picked`, once read.
-    diff: Option<(PathBuf, Rc<git::Diff>)>,
+    pub(crate) picked: Option<PathBuf>,
+    /// The lines of `picked`, once read; in the history, of the commit's
+    /// file, under the name `history_key` gives the two.
+    pub(crate) diff: Option<(PathBuf, Rc<git::Diff>)>,
     pub(crate) list: ListState,
     pub(crate) files: UniformListScrollHandle,
-    reading: bool,
+    pub(crate) reading: bool,
     /// The files chosen together, `picked` among them: what a menu or
     /// Discard is asked of. Chosen as the tree's rows are.
     pub(crate) marked: Vec<PathBuf>,
@@ -267,6 +270,19 @@ pub struct Changes {
     band_at: Option<std::time::Instant>,
     /// The files a commit leaves out: every other one changed goes in.
     pub(crate) left_out: HashSet<PathBuf>,
+    /// The history shows, not the changes: the branch's commits, the
+    /// one picked by its hash, the files it changed (kept with the hash
+    /// they are of), and the one of those whose lines show.
+    pub(crate) history: bool,
+    pub(crate) commits: Option<Rc<Vec<git::Commit>>>,
+    pub(crate) commit: Option<String>,
+    pub(crate) commit_files: Option<(String, Rc<Vec<(String, git::State)>>)>,
+    pub(crate) commit_file: Option<String>,
+    pub(crate) commits_scroll: ScrollHandle,
+    pub(crate) cfiles_scroll: ScrollHandle,
+    /// Since when the sheet has been going: it is drawn that moment
+    /// more, fading, and takes no click.
+    pub(crate) closing: Option<std::time::Instant>,
 }
 
 /// VS Code's colour for a git state, light then dark: the GitHub
@@ -285,7 +301,7 @@ fn git_rgb(state: git::State) -> (u32, u32) {
     }
 }
 
-fn git_color(state: git::State, dark: bool) -> Hsla {
+pub(crate) fn git_color(state: git::State, dark: bool) -> Hsla {
     let (light, night) = git_rgb(state);
     rgb(if dark { night } else { light }).into()
 }
@@ -1335,7 +1351,7 @@ impl BranchAsk {
 /// The ground of a panel's row under the pointer. A panel is on the
 /// sidebar's ground, and in a light window the theme's muted grey is all
 /// but that same colour, so the row takes a wash of the ink there.
-fn row_hover(theme: &gpui_component::Theme, dark: bool) -> Hsla {
+pub(crate) fn row_hover(theme: &gpui_component::Theme, dark: bool) -> Hsla {
     if dark {
         theme.foreground.opacity(0.08)
     } else {
@@ -1859,12 +1875,25 @@ impl Workbench {
                     // The comparison opened before git had answered
                     // (⌘⇧G with the files panel never shown) shows its
                     // first file now.
+                    // And one whose file is no longer changed (it was
+                    // committed, or discarded) lets it go: its lines
+                    // stood there after a commit, beside an empty list.
                     let first = this.tree.changed.first().map(|(p, _)| p.clone());
-                    if let Some(c) = this.changes.as_mut().filter(|c| c.picked.is_none() && c.root == root) {
+                    let still: HashSet<PathBuf> = this.tree.changed.iter().map(|(p, _)| p.clone()).collect();
+                    if let Some(c) = this.changes.as_mut().filter(|c| c.root == root && c.picked.as_ref().is_none_or(|p| !still.contains(p))) {
+                        c.marked.retain(|p| still.contains(p));
+                        c.left_out.retain(|p| still.contains(p));
                         c.picked = first.clone();
                         c.anchor = first.clone();
-                        c.marked = first.into_iter().collect();
-                        this.load_diff(cx);
+                        if c.marked.is_empty() {
+                            c.marked = first.into_iter().collect();
+                        }
+                        if !c.history {
+                            c.diff = None;
+                            c.reading = false;
+                            c.list.reset(0);
+                            this.load_diff(cx);
+                        }
                     }
                 }
                 let trouble = trouble.map(|t| (root.clone(), t));
@@ -5984,7 +6013,7 @@ impl Workbench {
             files.scroll_to_item(at, ScrollStrategy::Center);
         }
         let marked: Vec<PathBuf> = picked.iter().cloned().collect();
-        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new() });
+        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None });
         self.changes_focus_due = true;
         // How the branch stands against the remote's, for the buttons
         // that push and pull.
@@ -5997,7 +6026,7 @@ impl Workbench {
     /// the files panel never was, so the sheet does not open empty on a
     /// folder with changes.
     pub(crate) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
-        if self.changes.is_some() {
+        if self.changes.as_ref().is_some_and(|c| c.closing.is_none()) {
             return self.close_changes(cx);
         }
         let Some(root) = self.files_root().filter(|r| git::inside(r)) else {
@@ -6009,8 +6038,22 @@ impl Workbench {
         self.open_changes(None, cx);
     }
 
+    /// Put the comparison away: it fades where it is for a moment, then
+    /// is gone.
     pub(crate) fn close_changes(&mut self, cx: &mut Context<Self>) {
-        self.changes = None;
+        let Some(c) = self.changes.as_mut().filter(|c| c.closing.is_none()) else { return };
+        c.closing = Some(std::time::Instant::now());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHANGES_OUT).await;
+            this.update(cx, |this, cx| {
+                if this.changes.as_ref().is_some_and(|c| c.closing.is_some()) {
+                    this.changes = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -6153,10 +6196,12 @@ impl Workbench {
     /// main thread. Run again on the clock while the comparison shows;
     /// the lines are replaced only when they differ, so reading on does
     /// not move the reader.
-    fn load_diff(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_diff(&mut self, cx: &mut Context<Self>) {
         let Some(c) = &mut self.changes else { return };
         let Some(path) = c.picked.clone() else { return };
-        if c.reading {
+        // The history's lines are a commit's, read once: the clock's
+        // reading of the picked file would take their place.
+        if c.reading || c.history {
             return;
         }
         c.reading = true;
@@ -6171,6 +6216,12 @@ impl Workbench {
                     return;
                 }
                 c.reading = false;
+                // Asked for before the history was turned to: the lines
+                // showing are a commit's now, and these took their place,
+                // so the history said "Reading…" until a file was clicked.
+                if c.history {
+                    return;
+                }
                 if c.diff.as_ref().is_none_or(|(was, d)| *was != path || **d != diff) {
                     c.list.reset(diff.rows.len());
                     c.diff = Some((path, Rc::new(diff)));
@@ -6272,14 +6323,17 @@ impl Workbench {
         .track_scroll(&c.files)
         .size_full();
 
-        let shown = c.diff.as_ref().filter(|(of, _)| Some(of) == picked.as_ref()).map(|(_, d)| d.clone());
+        // Whose lines show: the picked file's, or in the history the
+        // picked commit's file's.
+        let showing = if c.history { crate::branches::history_key(c) } else { picked.clone() };
+        let shown = c.diff.as_ref().filter(|(of, _)| Some(of) == showing.as_ref()).map(|(_, d)| d.clone());
         let rel = picked.as_ref().map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\', "/")).unwrap_or_default();
         // GitHub's own colours for a line put in and a line taken out:
         // the line's ground, and a stronger one behind its number.
         let rgba_of = |hex: u32, a: f32| Hsla::from(rgb(hex)).opacity(a);
         let (add, add_no, del, del_no) = if dark { (rgba_of(0x2ea043, 0.16), rgba_of(0x3fb950, 0.30), rgba_of(0xf85149, 0.14), rgba_of(0xf85149, 0.30)) } else { (Hsla::from(rgb(0xe6ffec)), Hsla::from(rgb(0xccffd8)), Hsla::from(rgb(0xffebe9)), Hsla::from(rgb(0xffd7d5))) };
         let body = match &shown {
-            None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if picked.is_some() { "Reading…" } else { "Nothing has changed since the last commit." }).into_any_element(),
+            None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { "Reading…" } else if c.history { "" } else { "Nothing has changed since the last commit." }).into_any_element(),
             Some(d) if d.binary => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child("This file is not text, so there are no lines to compare.").into_any_element(),
             Some(d) if d.rows.is_empty() => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child("No lines differ (the file is empty, or only its mode changed).").into_any_element(),
             Some(d) => {
@@ -6369,6 +6423,9 @@ impl Workbench {
                             }
                             cx.stop_propagation();
                             cx.notify();
+                        } else if matches!(keys.key.as_str(), "up" | "down") && !keys.modifiers.modified() && this.changes_focus.is_focused(window) && this.changes.as_ref().is_some_and(|c| c.history) {
+                            this.history_step(keys.key == "down", cx);
+                            cx.stop_propagation();
                         }
                     }))
                     .on_click(|_, window, cx| swallow_click(window, cx))
@@ -6391,13 +6448,27 @@ impl Workbench {
                             .border_b_1()
                             .border_color(theme.border)
                             .child(Icon::default().path("icons/git-diff.svg").with_size(px(15.)).text_color(quiet).flex_shrink_0())
-                            .child(div().flex_shrink_0().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child("Changes"))
-                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(quiet).child(format!("{} {}", crate::format::thousands(changed.len()), if changed.len() == 1 { "file" } else { "files" })))
+                            // The two things the sheet shows: what is not
+                            // committed yet, and what has been.
+                            .child(div().flex_shrink_0().child(self.segmented_sized(
+                                "changes-tab",
+                                vec![("changes", "Changes".to_string(), None), ("history", "History".to_string(), None)],
+                                if c.history { "history" } else { "changes" },
+                                Rc::new(|this: &mut Self, key, window, cx| {
+                                    swallow_click(window, cx);
+                                    this.history_show(key == "history", cx);
+                                }),
+                                true,
+                                cx,
+                            )))
+                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(quiet).child(if c.history { c.commits.as_ref().map(|l| plural(l.len(), "commit", "commits")).unwrap_or_default() } else { plural(changed.len(), "file", "files") }))
                             .when_some(branch, |el, b| el.child(h_flex().min_w_0().gap(px(4.)).items_center().text_size(px(12.)).text_color(quiet).child("on").child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).flex_shrink_0()).child(div().min_w_0().truncate().text_color(ink).child(b))))
                             .child(div().flex_1())
                             .child(Button::new("changes-close").ghost().small().icon(IconName::Close).on_click(cx.listener(|this, _, _, cx| this.close_changes(cx)))),
                     )
-                    .child(
+                    .child(if c.history {
+                        self.render_history(body, counts, cx)
+                    } else {
                         h_flex()
                             .flex_1()
                             .min_h_0()
@@ -6466,10 +6537,15 @@ impl Workbench {
                                             .when_some(reveal, |el, p| el.child(pill_button("changes-reveal", crate::sys::REVEAL_LABEL, &theme, move |_, _, _| crate::sys::reveal_path(&p)))),
                                     )
                                     .child(div().flex_1().min_h_0().child(body)),
-                            ),
-                    ),
+                            )
+                            .into_any_element()
+                    }),
             )
-            .into_any_element()
+            // Going, it fades where it is.
+            .map(|d| match c.closing {
+                Some(_) => d.with_animation("changes-out", Animation::new(CHANGES_OUT), |d, t| d.opacity(1. - t)).into_any_element(),
+                None => d.into_any_element(),
+            })
     }
 
     // -- the file shown -------------------------------------------------------
@@ -7431,6 +7507,9 @@ impl Workbench {
             "branches" => self.branch_probe = Some(String::new()),
             // The comparison, on the first changed file or on that one.
             "changes" => self.open_changes(None, cx),
+            // The comparison's other side, and ↓ in it.
+            "history" => self.history_show(true, cx),
+            "history:down" => self.history_step(true, cx),
             // In the comparison: changeclick:<path> is a click on a file,
             // changeclick:cmd:<path> and changeclick:shift:<path> with
             // that key held, changeband:<y>:<y2> a rectangle dragged

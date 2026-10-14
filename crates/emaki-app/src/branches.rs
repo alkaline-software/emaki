@@ -15,11 +15,40 @@ use emaki_core::git;
 
 use crate::format::plural;
 use crate::panels::BranchAsk;
-use crate::workbench::{choice_pill, float_shadow, pill_button, Press, swallow_click, Notice, Workbench};
+use std::rc::Rc;
+
+use gpui_component::scroll::ScrollableElement as _;
+
+use crate::workbench::{choice_pill, float_shadow, pill_button, MenuDo, Press, swallow_click, Notice, Workbench};
 
 /// How old the last word from the remote may be before the list of
 /// branches asks again when it is opened.
 const FETCH_FRESH: Duration = Duration::from_secs(60);
+
+/// What a commit's menu in the history asks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitDo {
+    /// Take the last commit back, its changes kept.
+    Undo,
+    /// A new commit that takes this one's changes back.
+    Revert,
+    CopySha,
+    /// Its page on the remote's host.
+    View,
+}
+
+/// How many commits the history lists.
+const HISTORY_MOST: usize = 300;
+/// The most a commit's files take under the commits before they scroll.
+const HISTORY_FILES_H: f32 = 190.;
+/// The files' own column, and the window's width from which they have one.
+const HISTORY_FILES_W: f32 = 270.;
+const HISTORY_WIDE: f32 = 980.;
+
+/// The name the history keeps a commit's file's lines under.
+pub(crate) fn history_key(c: &crate::panels::Changes) -> Option<std::path::PathBuf> {
+    c.commit.as_ref().zip(c.commit_file.as_ref()).map(|(sha, path)| std::path::PathBuf::from(format!("{sha}:{path}")))
+}
 
 /// A strip under the files' head: one line and a button.
 pub(crate) const STRIP_H: f32 = 38.;
@@ -232,7 +261,14 @@ impl Workbench {
                 this.syncing = None;
                 match (done, pull) {
                     (Ok(()), true) => this.notice = Some(Notice::said(format!("pulled {name} from {origin}"))),
-                    (Ok(()), false) => this.notice = Some(Notice::said(format!("pushed {name} to {origin}"))),
+                    (Ok(()), false) => {
+                        this.notice = Some(Notice::said(format!("pushed {name} to {origin}")));
+                        // With nothing left to commit, the comparison has
+                        // done what it was opened for.
+                        if this.changed_files().is_empty() && this.changes.as_ref().is_some_and(|c| !c.history) {
+                            this.close_changes(cx);
+                        }
+                    }
                     (Err(why), true) => this.branch_ask = Some(BranchAsk::stop("Not pulled", format!("Nothing was changed. Git said: {why}."))),
                     (Err(why), false) => this.net_failed("Not pushed", format!("push {name}"), why, cx),
                 }
@@ -280,6 +316,333 @@ impl Workbench {
                 .into_any_element(),
             None => wrap.into_any_element(),
         })
+    }
+
+    // -- the history ----------------------------------------------------------
+
+    /// The sheet's other side: the branch's commits, or back to what is
+    /// not committed yet.
+    pub(crate) fn history_show(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(c) = &mut self.changes else { return };
+        if c.history == on {
+            return;
+        }
+        c.history = on;
+        c.diff = None;
+        c.reading = false;
+        c.list.reset(0);
+        if on {
+            self.history_load(cx);
+        } else {
+            self.load_diff(cx);
+        }
+        cx.notify();
+    }
+
+    /// Read the commits, off the main thread, and show the newest when
+    /// the one picked is not among them any more.
+    pub(crate) fn history_load(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.changes.as_ref().map(|c| c.root.clone()) else { return };
+        cx.spawn(async move |this, cx| {
+            let dir = root.clone();
+            let log = cx.background_executor().spawn(async move { git::log(&dir, HISTORY_MOST) }).await;
+            this.update(cx, |this, cx| {
+                let Some(c) = this.changes.as_mut().filter(|c| c.root == root) else { return };
+                let pick = c.commit.clone().filter(|sha| log.iter().any(|m| m.sha == *sha)).or_else(|| log.first().map(|m| m.sha.clone()));
+                let moved = pick != c.commit || c.commit_files.is_none();
+                c.commits = Some(Rc::new(log));
+                if let (Some(sha), true) = (pick, moved) {
+                    this.history_pick(sha, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show a commit: its files, and the first one's lines.
+    pub(crate) fn history_pick(&mut self, sha: String, cx: &mut Context<Self>) {
+        let Some(c) = &mut self.changes else { return };
+        c.commit = Some(sha.clone());
+        c.commit_file = None;
+        c.cfiles_scroll.set_offset(point(px(0.), px(0.)));
+        let root = c.root.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (dir, of) = (root, sha.clone());
+            let files = cx.background_executor().spawn(async move { git::commit_files(&dir, &of) }).await;
+            this.update(cx, |this, cx| {
+                let Some(c) = this.changes.as_mut().filter(|c| c.commit.as_ref() == Some(&sha)) else { return };
+                let first = files.first().map(|(p, _)| p.clone());
+                c.commit_files = Some((sha, Rc::new(files)));
+                match first {
+                    Some(path) => this.history_file(path, cx),
+                    None => cx.notify(),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show one of the picked commit's files.
+    pub(crate) fn history_file(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(c) = &mut self.changes else { return };
+        let Some(sha) = c.commit.clone() else { return };
+        c.commit_file = Some(path.clone());
+        let (root, key) = (c.root.clone(), history_key(c));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let diff = cx.background_executor().spawn(async move { git::commit_diff(&root, &sha, &path) }).await;
+            this.update(cx, |this, cx| {
+                let Some(c) = this.changes.as_mut().filter(|c| c.history && history_key(c) == key) else { return };
+                c.list.reset(diff.rows.len());
+                c.diff = key.map(|k| (k, Rc::new(diff)));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// ↑ and ↓ in the history: the commit over or under the one picked.
+    pub(crate) fn history_step(&mut self, down: bool, cx: &mut Context<Self>) {
+        let Some(c) = &self.changes else { return };
+        let Some(list) = c.commits.clone() else { return };
+        let at = c.commit.as_ref().and_then(|sha| list.iter().position(|m| m.sha == *sha));
+        let to = match (at, down) {
+            (None, _) => 0,
+            (Some(at), true) => (at + 1).min(list.len().saturating_sub(1)),
+            (Some(at), false) => at.saturating_sub(1),
+        };
+        if let Some(m) = list.get(to).filter(|_| at != Some(to)) {
+            c.commits_scroll.scroll_to_item(to);
+            self.history_pick(m.sha.clone(), cx);
+        }
+    }
+
+    /// A right click on a commit: what can be asked of it. The newest
+    /// one can be taken back while the remote does not have it; any can
+    /// be reverted by a commit of its own.
+    pub(crate) fn history_menu(&mut self, sha: String, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(c) = &self.changes else { return };
+        let newest = c.commits.as_ref().and_then(|l| l.first()).filter(|m| m.sha == sha && m.local).is_some();
+        let page = git::commit_url(&c.root, &sha).is_some();
+        let item = |label: &'static str, what: CommitDo| (label, MenuDo::Commit(what, sha.clone()));
+        let mut items = Vec::new();
+        if newest {
+            items.push(item("Undo Commit", CommitDo::Undo));
+        }
+        items.extend([item("Revert Changes in Commit", CommitDo::Revert), ("", MenuDo::Rule), item("Copy Commit Hash", CommitDo::CopySha)]);
+        if page {
+            items.push(item("View on the Web", CommitDo::View));
+        }
+        if self.changes.as_ref().is_some_and(|c| c.commit.as_ref() != Some(&sha)) {
+            self.history_pick(sha.clone(), cx);
+        }
+        self.open_menu(at, items, cx);
+    }
+
+    /// Do what the commit's menu was asked. Undo and Revert are git's
+    /// own and may be refused; nothing is forced. A revert writes files,
+    /// so not under a running turn.
+    pub(crate) fn commit_do(&mut self, what: CommitDo, sha: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.changes.as_ref().map(|c| c.root.clone()) else { return };
+        match what {
+            CommitDo::CopySha => return cx.write_to_clipboard(ClipboardItem::new_string(sha)),
+            CommitDo::View => {
+                if let Some(url) = git::commit_url(&root, &sha) {
+                    cx.open_url(&url);
+                }
+                return;
+            }
+            CommitDo::Revert if self.selected_ref().is_some_and(|r| self.is_working(r)) => {
+                self.notice = Some(Notice::error("a turn is running here; revert when it is over"));
+                return cx.notify();
+            }
+            _ => {}
+        }
+        if std::mem::replace(&mut self.committing, true) {
+            return;
+        }
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let dir = root.clone();
+            let done = cx.background_executor().spawn(async move { if what == CommitDo::Undo { git::undo_last(&dir).map(Some) } else { git::revert(&dir, &sha).map(|_| None) } }).await;
+            this.update_in(cx, |this, window, cx| {
+                this.committing = false;
+                match done {
+                    // The commit's words are back in the fields it was
+                    // typed in, over what it changed, to commit again.
+                    Ok(Some((summary, body))) => {
+                        this.commit_summary.update(cx, |s, cx| s.set_value(summary, window, cx));
+                        this.commit_body.update(cx, |s, cx| s.set_value(body, window, cx));
+                        this.notice = Some(Notice::said("took the last commit back; its changes are here to commit again"));
+                        this.history_show(false, cx);
+                    }
+                    Ok(None) => {
+                        this.notice = Some(Notice::said("reverted the commit with a new one"));
+                        this.history_load(cx);
+                    }
+                    Err(why) => this.branch_ask = Some(BranchAsk::stop(if what == CommitDo::Undo { "Not undone" } else { "Not reverted" }, format!("Nothing was changed. Git said: {why}."))),
+                }
+                this.read_git(root, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The history's side of the sheet: the commits at the left with the
+    /// picked one's files under them, and at the right that commit's
+    /// words over the lines of the file picked.
+    pub(crate) fn render_history(&self, body: AnyElement, counts: Option<(usize, usize)>, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(c) = &self.changes else { return div().into_any_element() };
+        let dark = theme.mode.is_dark();
+        let (hover, chosen_bg, quiet) = (crate::panels::row_hover(&theme, dark), theme.primary.opacity(if dark { 0.18 } else { 0.12 }), theme.muted_foreground);
+        let now = crate::format::now_secs();
+        let commits = c.commits.clone();
+        let rows = commits.iter().flat_map(|l| l.iter()).enumerate().map(|(ix, m)| {
+            let chosen = c.commit.as_ref() == Some(&m.sha);
+            let (sha, menu_sha) = (m.sha.clone(), m.sha.clone());
+            h_flex()
+                .id(("commit-row", ix))
+                .w_full()
+                .flex_shrink_0()
+                .h(px(46.))
+                .px(px(10.))
+                .gap(px(8.))
+                .items_center()
+                .rounded(px(7.))
+                .cursor_pointer()
+                .map(|d| if chosen { d.bg(chosen_bg) } else { d.hover(move |s| s.bg(hover)) })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.history_pick(sha.clone(), cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.history_menu(menu_sha.clone(), e.position, cx);
+                    }),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(div().w_full().truncate().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(m.summary.clone()))
+                        .child(div().w_full().truncate().text_size(px(11.)).text_color(quiet).child(format!("{} \u{b7} {}", m.author, crate::format::ago(m.when as f64, now)))),
+                )
+                // A release's tag, and a mark on a commit still to push.
+                .children(m.tags.first().map(|t| div().flex_shrink_0().px(px(6.)).py(px(1.)).rounded(px(5.)).bg(theme.muted).text_size(px(10.5)).text_color(quiet).child(t.clone())))
+                .when(m.local, |d| d.child(Icon::default().path("icons/arrow-up.svg").with_size(px(12.)).text_color(theme.primary).flex_shrink_0()))
+        });
+        let rows: Vec<_> = rows.collect();
+        let files = c.commit_files.as_ref().filter(|(of, _)| Some(of) == c.commit.as_ref()).map(|(_, f)| f.clone());
+        let file_rows = files.iter().flat_map(|f| f.iter()).enumerate().map(|(ix, (path, state))| {
+            let (folder, name) = match path.rfind('/') {
+                Some(cut) => (path[..=cut].to_string(), path[cut + 1..].to_string()),
+                None => (String::new(), path.clone()),
+            };
+            let chosen = c.commit_file.as_ref() == Some(path);
+            let to = path.clone();
+            h_flex()
+                .id(("commit-file", ix))
+                .w_full()
+                .flex_shrink_0()
+                .h(px(26.))
+                .px(px(8.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .map(|d| if chosen { d.bg(chosen_bg) } else { d.hover(move |s| s.bg(hover)) })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.history_file(to.clone(), cx);
+                }))
+                .child(img(crate::file_icons::path(&name, false, false, dark)).size(px(16.)).flex_shrink_0())
+                .child(h_flex().flex_1().min_w_0().child(div().min_w_0().truncate().text_color(quiet).child(folder)).child(div().flex_shrink_0().text_color(theme.foreground).child(name)))
+                .child(div().w(px(12.)).flex_shrink_0().flex().justify_center().text_size(px(11.)).text_color(crate::panels::git_color(*state, dark)).children(state.letter()))
+        });
+        let file_rows: Vec<_> = file_rows.collect();
+        let n_files = file_rows.len();
+        let picked = commits.as_ref().and_then(|l| l.iter().find(|m| Some(&m.sha) == c.commit.as_ref())).cloned();
+        let empty = commits.as_ref().is_some_and(|l| l.is_empty());
+        // Three columns, as GitHub Desktop sets them: the commits, the
+        // picked one's files, the picked file's lines, with the commit's
+        // words over the last two. In a window too narrow to leave the
+        // lines their room the files go under the commits instead.
+        let wide = self.view_w >= px(HISTORY_WIDE);
+        let files_head = div().flex_shrink_0().px(px(14.)).pt(px(9.)).pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(quiet).child(if wide { plural(n_files, "changed file", "changed files") } else { format!("{} in this commit", plural(n_files, "file", "files")) });
+        let files_list = div()
+            .relative()
+            .when(wide, |d| d.flex_1().min_h_0())
+            .child(v_flex().id("history-files").map(|d| if wide { d.size_full() } else { d.max_h(px(HISTORY_FILES_H)) }).overflow_y_scroll().track_scroll(&c.cfiles_scroll).px(px(6.)).pb(px(6.)).children(file_rows))
+            .vertical_scrollbar(&c.cfiles_scroll);
+        let commits_list = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(v_flex().id("history-commits").size_full().overflow_y_scroll().track_scroll(&c.commits_scroll).p(px(6.)).gap(px(1.)).children(rows).when(empty, |d| d.child(div().p(px(12.)).text_size(px(12.5)).text_color(quiet).child("No commits yet."))))
+            .vertical_scrollbar(&c.commits_scroll);
+        let head = picked.map(|m| {
+            v_flex()
+                .flex_shrink_0()
+                .px(px(16.))
+                .py(px(11.))
+                .gap(px(4.))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).line_height(px(20.)).child(m.summary.clone()))
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .items_center()
+                        .text_size(px(11.5))
+                        .text_color(quiet)
+                        .child(div().flex_shrink_0().child(m.author.clone()))
+                        .child(div().flex_shrink_0().font_family(theme.mono_font_family.clone()).child(m.short.clone()))
+                        .child(div().min_w_0().truncate().child(crate::format::ago(m.when as f64, now)))
+                        .when(m.local, |d| d.child(div().flex_shrink_0().text_color(theme.primary).child("not pushed yet"))),
+                )
+                .when(!m.body.is_empty(), |d| d.child(div().id("history-body").mt(px(4.)).max_h(px(72.)).overflow_y_scroll().text_size(px(12.5)).line_height(px(18.)).text_color(theme.foreground.opacity(0.85)).child(m.body.clone())))
+        });
+        let file_head = c.commit_file.clone().map(|rel| {
+            h_flex()
+                .h(px(38.))
+                .flex_shrink_0()
+                .px(px(14.))
+                .gap(px(10.))
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(12.)).child(rel))
+                .when_some(counts, |el, (a, r)| {
+                    el.child(div().flex_shrink_0().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(crate::panels::git_color(git::State::Added, dark)).child(format!("+{a}")))
+                        .child(div().flex_shrink_0().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(crate::panels::git_color(git::State::Deleted, dark)).child(format!("\u{2212}{r}")))
+                })
+        });
+        let lines = v_flex().flex_1().min_w_0().children(file_head).child(div().flex_1().min_h_0().child(body));
+        let left = v_flex().w(crate::panels::CHANGES_LIST_W).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).rounded_bl(px(15.)).child(commits_list);
+        if wide {
+            let files = v_flex().w(px(HISTORY_FILES_W)).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar.opacity(0.5)).child(files_head).child(files_list);
+            return h_flex()
+                .flex_1()
+                .min_h_0()
+                .items_stretch()
+                .child(left)
+                .child(v_flex().flex_1().min_w_0().children(head).child(h_flex().flex_1().min_h_0().items_stretch().when(n_files > 0, |d| d.child(files)).child(lines)))
+                .into_any_element();
+        }
+        let left = left.when(n_files > 0, |d| d.child(v_flex().flex_shrink_0().border_t_1().border_color(theme.border).child(files_head).child(files_list)));
+        h_flex().flex_1().min_h_0().items_stretch().child(left).child(v_flex().flex_1().min_w_0().children(head).child(lines)).into_any_element()
     }
 
     // -- committing -----------------------------------------------------------

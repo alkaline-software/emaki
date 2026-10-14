@@ -2603,7 +2603,7 @@ fn git_lists_branches_and_switches_between_them() {
 
 #[test]
 fn git_commits_and_asks_the_remote_about_two_branches() {
-    use emaki_core::git;
+    use emaki_core::git::{self, State};
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let run = |at: &std::path::Path, args: &[&str]| {
@@ -2679,6 +2679,42 @@ fn git_commits_and_asks_the_remote_about_two_branches() {
     git::fast_forward(&work, "main").unwrap();
     assert_eq!(git::branches(&work).unwrap().behind, 0);
     assert!(work.join("b.txt").exists());
+
+    // The history: the newest first, what each changed, and which are
+    // still to push.
+    std::fs::write(work.join("a.txt"), "four\n").unwrap();
+    std::fs::write(work.join("d.txt"), "d\n").unwrap();
+    git::commit(&work, "fourth", "with a body", None).unwrap();
+    run(&work, &["tag", "v9"]);
+    let log = git::log(&work, 10);
+    assert_eq!(log.iter().map(|c| c.summary.as_str()).collect::<Vec<_>>(), ["fourth", "theirs", "only the one", "second", "first"]);
+    assert_eq!((log[0].body.as_str(), log[0].tags.as_slice(), log[0].local, log[1].local), ("with a body", &["v9".to_string()][..], true, false));
+    assert_eq!(git::commit_files(&work, &log[0].sha), vec![("a.txt".to_string(), State::Modified), ("d.txt".to_string(), State::Added)]);
+    assert_eq!(git::commit_files(&work, &log[4].sha), vec![("a.txt".to_string(), State::Added)], "the first commit's files are all new");
+    let d = git::commit_diff(&work, &log[0].sha, "a.txt");
+    assert_eq!((d.added, d.removed), (1, 1));
+    assert_eq!(git::commit_url(&work, "abc"), None, "a folder is no host");
+    run(&work, &["remote", "set-url", "origin", "git@github.com:someone/thing.git"]);
+    assert_eq!(git::commit_url(&work, "abc").as_deref(), Some("https://github.com/someone/thing/commit/abc"));
+    run(&work, &["remote", "set-url", "origin", origin.to_str().unwrap()]);
+
+    // The last commit taken back: its changes are here again, staged,
+    // and its words come back. One the remote has is not taken back.
+    assert_eq!(git::undo_last(&work), Ok(("fourth".to_string(), "with a body".to_string())));
+    assert_eq!(git::log(&work, 1)[0].summary, "theirs");
+    assert_eq!(said(&work, &["status", "--porcelain"]), "M  a.txt\nA  d.txt");
+    assert!(git::undo_last(&work).is_err());
+    git::commit(&work, "fourth again", "", None).unwrap();
+    // A revert is a commit of its own that takes one back.
+    let fourth = git::log(&work, 1)[0].sha.clone();
+    git::revert(&work, &fourth).unwrap();
+    assert!(!work.join("d.txt").exists());
+    assert!(git::log(&work, 1)[0].summary.starts_with("Revert"));
+    // One that does not fit is given up whole.
+    std::fs::write(work.join("a.txt"), "five\n").unwrap();
+    git::commit(&work, "fifth", "", None).unwrap();
+    assert!(git::revert(&work, &git::log(&work, 3)[2].sha).is_err());
+    assert!(!git::dirty(&work), "nothing is left half reverted");
 }
 
 #[test]
