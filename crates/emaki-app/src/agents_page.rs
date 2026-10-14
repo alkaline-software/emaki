@@ -245,7 +245,7 @@ impl Workbench {
             .items_center()
             .justify_center()
             .when(!busy, |d| d.cursor_pointer().hover(move |s| s.bg(hover_bg)))
-            .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if busy { "Refreshing…" } else { "Refresh status" }).build(window, cx))
+            .managed_tooltip(move |window, cx| crate::workbench::tip(if busy { "Refreshing…" } else { "Refresh status" }, window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.check_agents(true, cx)))
             .child(if busy { icon.with_animation("agents-checking", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))).into_any_element() } else { icon.into_any_element() })
             .into_any_element()
@@ -472,7 +472,7 @@ impl Workbench {
             .justify_center()
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
-            .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
+            .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
             .on_click(cx.listener(move |this, _, _, cx| this.copy_text(key.clone(), command.to_string(), cx)))
             .child(Icon::new(if done { IconName::Check } else { IconName::Copy }).with_size(px(14.)).text_color(if done { tick } else { theme.muted_foreground }));
         h_flex()

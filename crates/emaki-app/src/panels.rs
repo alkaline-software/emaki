@@ -278,6 +278,8 @@ pub struct Changes {
     pub(crate) commit: Option<String>,
     pub(crate) commit_files: Option<(String, Rc<Vec<(String, git::State)>>)>,
     pub(crate) commit_file: Option<String>,
+    /// The repository's top folder, which a commit's paths are from.
+    pub(crate) top: Option<PathBuf>,
     pub(crate) commits_scroll: ScrollHandle,
     pub(crate) cfiles_scroll: ScrollHandle,
     /// Since when the sheet has been going: it is drawn that moment
@@ -1488,7 +1490,7 @@ impl Workbench {
                 // set. Without one the mark stayed lit when its segment
                 // went back to rest with the pointer elsewhere.
                 .hover(|s| s.text_color(theme.foreground))
-                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(which, cx)))
                 .child(Icon::default().path(icon).with_size(px(15.)))
@@ -5527,7 +5529,7 @@ impl Workbench {
                         .justify_center()
                         .cursor_pointer()
                         .hover(move |s| s.bg(hover_bg))
-                        .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
+                        .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
                             this.copy_text(key.clone(), command.to_string(), cx);
@@ -5816,7 +5818,7 @@ impl Workbench {
                                     .justify_center()
                                     .bg(theme.primary.opacity(0.12))
                                     .when(!busy, |d| d.cursor_pointer().hover(|s| s.bg(theme.primary.opacity(0.28))))
-                                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                                    .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         // Not the row's own click, which switches.
@@ -5855,7 +5857,7 @@ impl Workbench {
                         swallow_click(window, cx);
                         this.branch_new_open(Some(typed.clone()).filter(|t| !t.is_empty()), window, cx);
                     }))))
-                    .child(div().pt(px(6.)).text_size(px(11.5)).text_color(theme.muted_foreground).child("Press ⌘⇧N to create a branch from anywhere in the app")),
+                    .child(div().pt(px(6.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(crate::workbench::key_text("Press ⌘⇧N to create a branch from anywhere in the app"))),
             );
         }
         let fresh = fresh.filter(|_| !rows.is_empty());
@@ -5942,6 +5944,7 @@ impl Workbench {
             ).child(choice_pill("branch-new-button", "icons/plus.svg", "New Branch", Press::Quiet, false, &theme)
                 .role(Role::Button)
                 .aria_label("New Branch")
+                .managed_tooltip(|window, cx| crate::workbench::tip("New Branch (⌘⇧N)", window, cx))
                 // As tall as the field it stands beside.
                 .h(px(32.))
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -5975,10 +5978,13 @@ impl Workbench {
     fn changes_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
         let root = self.files_root()?;
-        let n = self.tree.git.as_ref().filter(|(of, _)| *of == root).map(|_| self.tree.changed.len()).filter(|n| *n > 0)?;
+        // There in any repository, with nothing changed too: the sheet
+        // it opens has the history as well, and Push.
+        self.branches()?;
+        let n = self.tree.git.as_ref().filter(|(of, _)| *of == root).map_or(0, |_| self.tree.changed.len());
         // A button as the branch's is, lit while its sheet is up.
         let open = self.changes.is_some();
-        let tip = format!("Show {}", plural(n, "changed file", "changed files"));
+        let tip = if n > 0 { format!("{} \u{b7} Changes and History (⌘⇧G)", plural(n, "changed file", "changed files")) } else { "Changes and History (⌘⇧G)".to_string() };
         Some(
             h_flex()
                 .id("changes-pill")
@@ -5995,11 +6001,11 @@ impl Workbench {
                 .cursor_pointer()
                 .text_size(px(11.5))
                 .text_color(theme.foreground)
-                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| this.open_changes(None, cx)))
                 .child(Icon::default().path("icons/git-diff.svg").with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
-                .child(div().font_weight(FontWeight::MEDIUM).child(crate::format::thousands(n)))
+                .when(n > 0, |d| d.child(div().font_weight(FontWeight::MEDIUM).child(crate::format::thousands(n))))
                 .into_any_element(),
         )
     }
@@ -6013,7 +6019,7 @@ impl Workbench {
             files.scroll_to_item(at, ScrollStrategy::Center);
         }
         let marked: Vec<PathBuf> = picked.iter().cloned().collect();
-        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None });
+        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, top: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None });
         self.changes_focus_due = true;
         // How the branch stands against the remote's, for the buttons
         // that push and pull.
@@ -6413,8 +6419,23 @@ impl Workbench {
                     // the keyboard: in a field of the commit's it is
                     // the field's.
                     .track_focus(&self.changes_focus)
+                    // ⌘↩ commits and ⌘P pushes, as in GitHub Desktop,
+                    // wherever in the sheet the keyboard is. ⌘↩ is the
+                    // window's Send, taken here before the composer's.
+                    .on_action(cx.listener(|this, _: &crate::workbench::Send, window, cx| {
+                        if this.changes.as_ref().is_some_and(|c| !c.history) {
+                            this.commit_go(window, cx);
+                        }
+                    }))
                     .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                         let keys = &e.keystroke;
+                        if keys.key == "p" && keys.modifiers.secondary() && !keys.modifiers.shift && !keys.modifiers.alt {
+                            if this.sync_words().is_some_and(|(_, what)| what == Some(false)) {
+                                this.sync_go(false, cx);
+                            }
+                            cx.stop_propagation();
+                            return;
+                        }
                         if keys.key == "a" && keys.modifiers.secondary() && !keys.modifiers.shift && !keys.modifiers.alt && this.changes_focus.is_focused(window) {
                             let all: Vec<PathBuf> = this.tree.changed.iter().map(|(p, _)| p.clone()).collect();
                             if let Some(c) = &mut this.changes {
@@ -6865,7 +6886,7 @@ impl Workbench {
                         .cursor_pointer()
                         .text_color(if on == Some(which) { theme.foreground } else { theme.muted_foreground })
                         .hover(|s| s.text_color(theme.foreground))
-                        .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+                        .managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx))
                         .on_click(cx.listener(move |this, _, _, cx| press(this, which, cx)))
                         .child(Icon::default().path(icon).with_size(px(13.))),
                 );
@@ -7084,7 +7105,7 @@ impl Workbench {
                     )
                     .when(dirty, |d| {
                         d.child(
-                            div().flex_shrink_0().child(Button::new("file-save").outline().xsmall().label("Save").tooltip("Save (⌘S)").on_click(cx.listener(|this, _, window, cx| {
+                            div().id("file-save-tip").flex_shrink_0().managed_tooltip(|window, cx| crate::workbench::tip("Save (⌘S)", window, cx)).child(Button::new("file-save").outline().xsmall().label("Save").on_click(cx.listener(|this, _, window, cx| {
                                 swallow_click(window, cx);
                                 this.save_file(window, cx)
                             })))
@@ -7116,7 +7137,7 @@ impl Workbench {
                                 .justify_center()
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(hover_bg))
-                                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if dirty { "Close (⌘W), not saved" } else { "Close (⌘W)" }).build(window, cx))
+                                .managed_tooltip(move |window, cx| crate::workbench::tip(if dirty { "Close (⌘W), not saved" } else { "Close (⌘W)" }, window, cx))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     swallow_click(window, cx);
                                     this.close_file_view(cx)
@@ -7584,6 +7605,10 @@ impl Workbench {
                 }
             }
             t if t.starts_with("branchq:") => self.branch_probe = Some(t["branchq:".len()..].to_string()),
+            t if t.starts_with("commitsay:") => {
+                self.commit_probe = Some(t["commitsay:".len()..].to_string());
+                cx.notify();
+            }
             "outline" => self.toggle_panel(false, cx),
             // The panel's edge dragged to that width and let go, and the
             // double click on it.

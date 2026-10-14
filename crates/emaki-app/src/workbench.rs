@@ -121,6 +121,8 @@ const OPEN_MANY: usize = 3;
 pub(crate) enum MenuDo {
     /// Something asked of a commit in the history, by its hash.
     Commit(crate::branches::CommitDo, String),
+    /// Open this address in the browser.
+    Web(String),
     /// Open this folder in the file manager; none when it is gone.
     OpenFolder(Option<String>),
     /// Pin the project to the head of the sidebar's list, or let it go
@@ -198,7 +200,7 @@ impl MenuDo {
             MenuDo::Files(..) => "icons/copy.svg",
             MenuDo::Commit(crate::branches::CommitDo::Undo | crate::branches::CommitDo::Revert, _) => "icons/undo-2.svg",
             MenuDo::Commit(crate::branches::CommitDo::CopySha, _) => "icons/hash.svg",
-            MenuDo::Commit(crate::branches::CommitDo::View, _) => "icons/external-link.svg",
+            MenuDo::Commit(crate::branches::CommitDo::View, _) | MenuDo::Web(_) => "icons/globe.svg",
             MenuDo::File(FileDo::NewFile, _) => "icons/file-plus.svg",
             MenuDo::File(FileDo::NewFolder, _) => "icons/folder-plus.svg",
             MenuDo::File(FileDo::Trash, _) => "icons/trash.svg",
@@ -2003,6 +2005,8 @@ pub struct Workbench {
     /// whether it is to be given it at the next draw.
     pub(crate) changes_focus: FocusHandle,
     pub(crate) changes_focus_due: bool,
+    /// `EMAKI_GO=commitsay:<words>`: words for the commit's comment.
+    pub(crate) commit_probe: Option<String>,
     /// A pull (true) or a push under way.
     pub(crate) syncing: Option<bool>,
     /// What the strip under the files' head last said of commits to
@@ -2375,7 +2379,7 @@ impl Workbench {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .when(lit, |d| d.bg(hover))
                 .hover(move |s| s.bg(hover))
-                .when(!tip.is_empty(), |d| d.managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx)))
+                .when(!tip.is_empty(), |d| d.managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx)))
                 .child(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground))
         };
         h_flex()
@@ -3696,6 +3700,7 @@ impl Workbench {
             committing: false,
             changes_focus: cx.focus_handle(),
             changes_focus_due: false,
+            commit_probe: None,
             syncing: None,
             sync_kept: Default::default(),
             git_gate: None,
@@ -5718,7 +5723,7 @@ impl Workbench {
                 .hover(|s| s.border_color(theme.muted_foreground))
                 .managed_tooltip({
                     let name = a.name;
-                    move |window, cx| gpui_component::tooltip::Tooltip::new(name).build(window, cx)
+                    move |window, cx| crate::workbench::tip(name, window, cx)
                 })
                 .on_click(cx.listener(move |this, _, window, cx| this.set_accent(key, window, cx)))
                 .child(div().size(px(18.)).rounded_full().bg(color))
@@ -6367,7 +6372,7 @@ impl Workbench {
                         .when(active && !measured, |d| d.bg(plate_bg).shadow_sm())
                         .text_color(if active { own } else { theme.muted_foreground })
                         .hover(move |s| s.text_color(own))
-                        .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(agent.display_name()).build(window, cx))
+                        .managed_tooltip(move |window, cx| crate::workbench::tip(agent.display_name(), window, cx))
                         .on_click(cx.listener(move |this, _, window, cx| on(this, key, window, cx)))
                         .child(Icon::default().path(agent_icon_path(agent)).with_size(px(14.)));
                 }
@@ -10134,7 +10139,7 @@ impl Workbench {
                                     .when(!is_pinned, |d| d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)))
                                     .text_color(theme.muted_foreground)
                                     .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
-                                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if is_pinned { "Unpin project" } else { "Pin project" }).build(window, cx))
+                                    .managed_tooltip(move |window, cx| crate::workbench::tip(if is_pinned { "Unpin project" } else { "Pin project" }, window, cx))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         swallow_click(window, cx);
                                         cx.stop_propagation();
@@ -10161,7 +10166,7 @@ impl Workbench {
                                         // pointer: in the light theme the border's
                                         // colour was that tint again.
                                         .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
-                                        .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("New session here (⌘T in its project)").build(window, cx))
+                                        .managed_tooltip(|window, cx| crate::workbench::tip("New session here (⌘T in its project)", window, cx))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             swallow_click(window, cx);
                                             cx.stop_propagation();
@@ -10436,7 +10441,7 @@ impl Workbench {
                     .id("side-avatar")
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.85))
-                    .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Your picture and name").build(window, cx))
+                    .managed_tooltip(|window, cx| crate::workbench::tip("Your picture and name", window, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.settings_section = "appearance";
@@ -10477,7 +10482,7 @@ impl Workbench {
                     .justify_center()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.sidebar_accent))
-                    .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Settings (⌘,)").build(window, cx))
+                    .managed_tooltip(|window, cx| crate::workbench::tip("Settings (⌘,)", window, cx))
                     .child(Icon::new(IconName::Settings).with_size(px(16.)).text_color(theme.muted_foreground))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
@@ -11190,6 +11195,7 @@ impl Workbench {
             MenuDo::CloseTab(key) => self.close_tab(&key, window, cx),
             MenuDo::Discard(paths) => self.ask_discard(paths, cx),
             MenuDo::Commit(what, sha) => self.commit_do(what, sha, window, cx),
+            MenuDo::Web(url) => cx.open_url(&url),
             MenuDo::Sessions(what, keys) => self.manage_ask_of(what, keys, true, cx),
             MenuDo::CloseOthers(key) => {
                 for other in self.tabs.clone().into_iter().filter(|t| *t != key) {
@@ -11446,7 +11452,7 @@ impl Workbench {
                     .id(SharedString::from(format!("rename-mark-{site}-{key}")))
                     .flex_shrink_0()
                     .child(pencil())
-                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                    .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                     .with_animation(SharedString::from(format!("rename-mark-in-{site}-{key}")), Animation::new(RENAME_MARK_FADE).with_easing(ease_out_quint()), |d, t| d.opacity(t))
                     .into_any_element(),
             );
@@ -11617,7 +11623,7 @@ impl Workbench {
                             .text_size(px(14.))
                             .child(Input::new(&self.rename_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.rename_input, false, cx))),
                     )
-                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child("↩ to save · Esc to cancel")),
+                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(key_text("↩ to save · Esc to cancel"))),
             )
     }
 
@@ -11730,7 +11736,7 @@ impl Workbench {
                 .hover(|s| s.text_color(theme.foreground))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .on_drag(DragPill(project.clone()), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone())))
-                .when(!name.starts_with('\u{0}'), |d| d.managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(name.clone()).build(window, cx)))
+                .when(!name.starts_with('\u{0}'), |d| d.managed_tooltip(move |window, cx| crate::workbench::tip(name.clone(), window, cx)))
                 .child(Icon::new(IconName::Folder).with_size(px(13.)));
             let mut pill = h_flex()
                 .relative()
@@ -11831,6 +11837,7 @@ impl Workbench {
                         .justify_center()
                         .cursor_pointer()
                         .hover(move |s| s.bg(close_bg))
+                        .managed_tooltip(|window, cx| crate::workbench::tip("Close Tab (⌘W)", window, cx))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
                             this.close_tab(&close_key, window, cx);
@@ -12747,7 +12754,7 @@ impl Workbench {
                 .flex_1()
                 .h_full()
                 .child(self.render_topbar(String::new(), Vec::new(), cx))
-                .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child("Pick a session, or press ⌘K to search everything."))
+                .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child(key_text("Pick a session, or press ⌘K to search everything.")))
                 .into_any_element();
         };
         self.glide_step(window);
@@ -12805,7 +12812,7 @@ impl Workbench {
                     .hover(move |s| s.bg(hover_bg))
                     .font_family(theme.mono_font_family.clone())
                     .text_size(px(11.))
-                    .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(folder_tip).build(window, cx))
+                    .managed_tooltip(move |window, cx| crate::workbench::tip(folder_tip, window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.open_project_folder(cx)))
                     .child(Icon::new(IconName::Folder).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
                     .child(
@@ -12913,7 +12920,7 @@ impl Workbench {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)).text_color(theme.danger))
                         .active(|s| s.bg(theme.danger.opacity(0.18)))
-                        .managed_tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Stop this turn (Esc)").build(window, cx))
+                        .managed_tooltip(|window, cx| crate::workbench::tip("Stop this turn (Esc)", window, cx))
                         .on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.interrupt(cx);
@@ -13401,7 +13408,7 @@ impl Workbench {
                 .opacity(0.)
                 .group_hover(key.clone(), |s| s.opacity(1.))
                 .hover(move |s| s.bg(hover_bg))
-                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if done { "Copied" } else { "Copy" }).build(window, cx))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
                     this.copy_text(key.clone(), text.clone(), cx);
@@ -14082,8 +14089,14 @@ impl Workbench {
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(Button::new(SharedString::from(format!("allow-{}", p.request_id))).primary().small().label(if first { "Allow  ↩" } else { "Allow" }).on_click(cx.listener(move |this, _, _, cx| this.answer_permission(id_allow.clone(), true, cx))))
-                        .child(Button::new(SharedString::from(format!("deny-{}", p.request_id))).outline().small().label(if first { "Deny  ⇧↩" } else { "Deny" }).on_click(cx.listener(move |this, _, _, cx| this.answer_permission(id_deny.clone(), false, cx))))
+                        .child(choice_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", "Allow", Press::Primary, false, &theme).when(first, |d| d.child(key_text("↩"))).on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.answer_permission(id_allow.clone(), true, cx)
+                        })))
+                        .child(choice_pill(SharedString::from(format!("deny-{}", p.request_id)), "icons/close.svg", "Deny", Press::Quiet, false, &theme).when(first, |d| d.child(key_text("⇧↩"))).on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.answer_permission(id_deny.clone(), false, cx)
+                        })))
                         .when(first && several, |d| d.child(div().flex_1()).child(Button::new("allow-all").ghost().small().label("Allow all").on_click(cx.listener(|this, _, _, cx| this.allow_all_pending(cx))))),
                 )
                 .into_any_element()
@@ -14139,8 +14152,14 @@ impl Workbench {
                 h_flex()
                     .gap(px(8.))
                     .items_center()
-                    .child(Button::new(SharedString::from(format!("allow-{}", p.request_id))).primary().small().label(if first { "Yes, implement  ↩" } else { "Yes, implement" }).on_click(cx.listener(move |this, _, _, cx| this.answer_permission(yes.clone(), true, cx))))
-                    .child(Button::new(SharedString::from(format!("deny-{}", p.request_id))).outline().small().label(if first { "No, keep planning  ⇧↩" } else { "No, keep planning" }).on_click(cx.listener(move |this, _, _, cx| this.answer_permission(no.clone(), false, cx)))),
+                    .child(choice_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", "Yes, implement", Press::Primary, false, &theme).when(first, |d| d.child(key_text("↩"))).on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.answer_permission(yes.clone(), true, cx)
+                    })))
+                    .child(choice_pill(SharedString::from(format!("deny-{}", p.request_id)), "icons/close.svg", "No, keep planning", Press::Quiet, false, &theme).when(first, |d| d.child(key_text("⇧↩"))).on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.answer_permission(no.clone(), false, cx)
+                    }))),
             )
             .into_any_element()
     }
@@ -14765,7 +14784,7 @@ impl Workbench {
                 .bg(theme.background)
                 .text_size(px(10.))
                 .text_color(theme.muted_foreground)
-                .child(label)
+                .child(key_glyph(label, 10.))
         };
         let key = |cap: &'static str, does: &'static str| h_flex().flex_shrink_0().gap(px(5.)).items_center().child(keycap(cap)).child(does);
         let wash = theme.primary.opacity(if theme.is_dark() { 0.16 } else { 0.10 });
@@ -14903,6 +14922,8 @@ impl Workbench {
             }
             (w, theme.muted_foreground)
         };
+        // What the button does now, with its key.
+        let send_tip = if running { "Stop (Esc)" } else if self.cfg.app.send_key == "enter" { "Send (↩)" } else { "Send (⌘↩)" };
         let send = div()
             .id("send")
             .size(px(32.))
@@ -14911,6 +14932,7 @@ impl Workbench {
             .items_center()
             .justify_center()
             .flex_shrink_0()
+            .managed_tooltip(move |window, cx| crate::workbench::tip(send_tip, window, cx))
             .map(|d| {
                 if running {
                     d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))).child(Icon::new(IconName::Pause).with_size(px(15.)).text_color(theme.primary_foreground))
@@ -15215,7 +15237,9 @@ impl Workbench {
             .text_size(px(11.5))
             .children(self.render_limits(cx))
             .child(div().flex_1())
-            .child(div().min_w_0().truncate().text_color(hint_color).child(hint));
+            // A notice that names a key has the key drawn (`key_text`),
+            // and is cut at the row's end where one without is trailed off.
+            .child(if hint.chars().any(|c| key_sign(c).is_some()) { div().min_w_0().overflow_hidden().text_color(hint_color).child(key_text(&hint)) } else { div().min_w_0().truncate().text_color(hint_color).child(hint) });
         // A message that is a slash command being typed opens the list of
         // commands over the card; it closes as soon as a space or a line
         // follows the name.
@@ -15946,17 +15970,165 @@ pub fn pill_button_danger(id: impl Into<ElementId>, label: impl Into<SharedStrin
         .child(label.into())
 }
 
-fn kbd_hint(text: &'static str, theme: &gpui_component::Theme) -> impl IntoElement {
-    div().flex_shrink_0().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(shortcut(text))
+/// The icon a key's sign is drawn with: none for a character that is
+/// not one. Off a Mac ⌘ and ⌥ are the words Ctrl and Alt on their caps.
+fn key_sign(c: char) -> Option<&'static str> {
+    Some(match c {
+        '⌘' if cfg!(target_os = "macos") => "icons/key-command.svg",
+        '⌥' if cfg!(target_os = "macos") => "icons/key-option.svg",
+        '⇧' => "icons/key-shift.svg",
+        '↩' => "icons/key-return.svg",
+        '⇥' => "icons/key-tab.svg",
+        '↑' => "icons/arrow-up.svg",
+        '↓' => "icons/arrow-down.svg",
+        _ => return None,
+    })
 }
 
-/// A shortcut as this system's keyboard has it. It is written as the Mac
-/// has it ("⌘O"), and elsewhere ⌘ is Ctrl, the key `secondary` binds.
-fn shortcut(mac: &'static str) -> SharedString {
-    if cfg!(target_os = "macos") {
-        return mac.into();
+/// A piece of a line that names keys: words, or one shortcut's keys.
+enum KeyPiece {
+    Words(String),
+    Keys(Vec<String>),
+}
+
+/// A word a sign can stand before as one key: "⇧Tab".
+const KEY_WORDS: [&str; 5] = ["Tab", "Esc", "Enter", "Space", "Return"];
+
+/// A line cut into its words and its shortcuts. A shortcut is a run of
+/// signs with the one key after them (a letter, a digit, a mark, or one
+/// of `KEY_WORDS`), or signs alone ("⇧↩"). Brackets that hold nothing
+/// but shortcuts are dropped: the caps set them apart already.
+fn key_pieces(text: &str) -> Vec<KeyPiece> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<KeyPiece> = Vec::new();
+    let mut words = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !KEY_SIGNS.contains(&chars[i]) {
+            words.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let mut keys: Vec<String> = Vec::new();
+        while i < chars.len() && KEY_SIGNS.contains(&chars[i]) {
+            keys.push(chars[i].to_string());
+            i += 1;
+        }
+        // The key the signs go with, when the next thing is one.
+        let rest: String = chars[i..].iter().collect();
+        if let Some(w) = KEY_WORDS.iter().find(|w| rest.starts_with(**w)) {
+            keys.push(w.to_string());
+            i += w.chars().count();
+        } else if let Some(c) = chars.get(i).filter(|c| !c.is_whitespace() && !matches!(c, ')' | '(')) {
+            let alone = chars.get(i + 1).is_none_or(|n| !n.is_alphanumeric());
+            if alone && (c.is_alphanumeric() || matches!(c, ',' | '.' | '/' | '[' | ']' | '-' | '=')) && keys.iter().any(|k| k == "⌘" || k == "⌥") {
+                keys.push(c.to_uppercase().to_string());
+                i += 1;
+            }
+        }
+        if !words.is_empty() {
+            out.push(KeyPiece::Words(std::mem::take(&mut words)));
+        }
+        out.push(KeyPiece::Keys(keys));
     }
-    mac.replace('⌘', "Ctrl+").replace('⇧', "Shift+").replace('⌥', "Alt+").into()
+    if !words.is_empty() {
+        out.push(KeyPiece::Words(words));
+    }
+    // "(⌘K)" and "(⇧↩, ⌘⇧G)": the brackets go.
+    let mut at = 0;
+    while at < out.len() {
+        let opens = matches!(&out[at], KeyPiece::Words(w) if w.ends_with('('));
+        if opens {
+            let mut end = at + 1;
+            while matches!(out.get(end), Some(KeyPiece::Keys(_))) && matches!(out.get(end + 1), Some(KeyPiece::Words(w)) if w == ", ") {
+                end += 2;
+            }
+            if matches!(out.get(end), Some(KeyPiece::Keys(_))) && matches!(out.get(end + 1), Some(KeyPiece::Words(w)) if w.starts_with(')')) {
+                if let KeyPiece::Words(w) = &mut out[at] {
+                    w.pop();
+                }
+                if let KeyPiece::Words(w) = &mut out[end + 1] {
+                    w.remove(0);
+                }
+            }
+        }
+        at += 1;
+    }
+    out.retain(|p| !matches!(p, KeyPiece::Words(w) if w.is_empty()));
+    out
+}
+
+/// The signs a key is written with.
+const KEY_SIGNS: [char; 7] = ['⌘', '⌥', '⇧', '↩', '⇥', '↑', '↓'];
+
+/// One key on its cap: a small plate, every one the same height and no
+/// narrower than that, with the key in its middle. A sign is an icon and
+/// a letter is a letter, both of one size; set in the middle of equal
+/// plates they are level and read as one size, which side by side on a
+/// line of words they never did, each sign coming from another face.
+fn key_cap(key: &str) -> Div {
+    let sign = key.chars().next().filter(|_| key.chars().count() == 1).and_then(key_sign);
+    let word = match key {
+        "⌘" => "Ctrl",
+        "⌥" => "Alt",
+        other => other,
+    };
+    div()
+        .flex_shrink_0()
+        .h(px(KEY_CAP))
+        .min_w(px(KEY_CAP))
+        .px(px(3.5))
+        .rounded(px(4.5))
+        .bg(gpui::hsla(0., 0., 0.5, 0.17))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(10.5))
+        .line_height(px(KEY_CAP))
+        .font_weight(FontWeight::MEDIUM)
+        .map(|d| match sign {
+            Some(path) => d.child(Icon::default().path(path).with_size(px(10.5))),
+            None => d.child(word.to_string()),
+        })
+}
+
+const KEY_CAP: f32 = 17.;
+
+/// Words that name keys, written as the Mac has them ("Search (⌘K)"),
+/// with each shortcut drawn as its keys on caps (`key_cap`) after the
+/// words. **Every place the window shows a key goes through this**
+/// (`kbd_hint`, `tip`, or this itself for a line of words). The words
+/// take the size and colour of where they stand. It does not wrap.
+pub(crate) fn key_text(text: &str) -> Div {
+    let mut row = h_flex().flex_shrink_0().items_center();
+    for piece in key_pieces(text) {
+        row = match piece {
+            KeyPiece::Words(w) => row.child(div().flex_shrink_0().child(w.replace(' ', "\u{a0}"))),
+            KeyPiece::Keys(keys) => row.child(h_flex().flex_shrink_0().gap(px(2.)).mx(px(1.)).children(keys.iter().map(|k| key_cap(k)))),
+        };
+    }
+    row
+}
+
+/// A key's sign alone, with no cap of its own: for a place that draws
+/// its own (the slash list's foot).
+pub(crate) fn key_glyph(key: &str, size: f32) -> AnyElement {
+    match key.chars().next().filter(|_| key.chars().count() == 1).and_then(key_sign) {
+        Some(path) => Icon::default().path(path).with_size(px(size)).into_any_element(),
+        None => div().child(key.to_string()).into_any_element(),
+    }
+}
+
+/// A shortcut beside what it does, in the quiet ink: "⌘↩".
+pub(crate) fn kbd_hint(text: &str, theme: &gpui_component::Theme) -> impl IntoElement {
+    key_text(text).text_color(theme.muted_foreground)
+}
+
+/// A hover's label, with the keys it names drawn (`key_text`): what
+/// every `managed_tooltip` in the window builds.
+pub(crate) fn tip(text: impl Into<SharedString>, window: &mut Window, cx: &mut App) -> AnyView {
+    let text: SharedString = text.into();
+    gpui_component::tooltip::Tooltip::element(move |_, _| key_text(&text)).build(window, cx)
 }
 
 /// A round ghost button holding one icon.
@@ -16352,6 +16524,9 @@ impl Render for Workbench {
         }
         if self.file_big_at.is_some_and(|at| at.elapsed() < crate::panels::FILE_ANIM) {
             window.request_animation_frame();
+        }
+        if let Some(words) = self.commit_probe.take() {
+            self.commit_summary.update(cx, |s, cx| s.set_value(words, window, cx));
         }
         if std::mem::take(&mut self.changes_focus_due) && self.changes.is_some() {
             window.focus(&self.changes_focus, cx);

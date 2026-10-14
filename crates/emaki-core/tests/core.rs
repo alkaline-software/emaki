@@ -2696,6 +2696,8 @@ fn git_commits_and_asks_the_remote_about_two_branches() {
     assert_eq!(git::commit_url(&work, "abc"), None, "a folder is no host");
     run(&work, &["remote", "set-url", "origin", "git@github.com:someone/thing.git"]);
     assert_eq!(git::commit_url(&work, "abc").as_deref(), Some("https://github.com/someone/thing/commit/abc"));
+    assert_eq!(git::file_url(&work, "abc", "src/a.rs").as_deref(), Some("https://github.com/someone/thing/blob/abc/src/a.rs"));
+    assert_eq!(git::top(&work).and_then(|t| t.canonicalize().ok()), work.canonicalize().ok());
     run(&work, &["remote", "set-url", "origin", origin.to_str().unwrap()]);
 
     // The last commit taken back: its changes are here again, staged,

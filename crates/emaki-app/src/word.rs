@@ -555,7 +555,7 @@ impl WordPane {
                 .hover(|d| d.bg(theme.muted))
                 .cursor_pointer()
                 .child(inner)
-                .managed_tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx))
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     crate::workbench::swallow_click(window, cx);
