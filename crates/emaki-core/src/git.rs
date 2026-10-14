@@ -893,15 +893,17 @@ impl Account {
 }
 
 /// The host of a remote's address: `https://host/x`, `ssh://git@host/x`
-/// and `git@host:x` all name one.
+/// and `git@host:x` all name one. A folder names none, `C:/x` on Windows
+/// too: one letter before the colon is a drive, as git has it.
 pub fn host_of(url: &str) -> (String, bool) {
     if let Some(rest) = url.split_once("://").map(|(_, r)| r) {
         let host = rest.split('/').next().unwrap_or("");
         let host = host.rsplit('@').next().unwrap_or(host).split(':').next().unwrap_or("");
         return (host.to_string(), url.starts_with("ssh://"));
     }
+    let drive = |before: &str| before.len() == 1 && before.chars().all(|c| c.is_ascii_alphabetic());
     match url.split_once(':') {
-        Some((before, _)) if !before.contains('/') && !before.is_empty() => (before.rsplit('@').next().unwrap_or(before).to_string(), true),
+        Some((before, _)) if !before.contains(['/', '\\']) && !before.is_empty() && !drive(before) => (before.rsplit('@').next().unwrap_or(before).to_string(), true),
         _ => (String::new(), false),
     }
 }

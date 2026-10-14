@@ -305,6 +305,12 @@ so it is caught before the tag next time.
   test that passed `-c` only ("local changes would be overwritten by
   checkout").
 
+- **A git test fails on Windows only, on a remote that is a folder**: a
+  test's remote is a temp folder, `C:/Users/...` there, and a parser
+  of remotes that takes `x:y` for `host:path` reads it as a host "C".
+  One letter before the colon is a drive (`git::host_of`), as git has
+  it. v0.2.5's first push to `main` went red on it before the tag.
+
 - **One Mac package job in `release.yml` fails right after "satisfies
   its Designated Requirement", with no message, while the other
   passes**: `hdiutil create` on the runner ("Resource busy").

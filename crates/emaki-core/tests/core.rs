@@ -3687,6 +3687,9 @@ fn git_publishes_fetches_and_branches_from_another_branch() {
     assert_eq!(git::host_of("git@github.com:a/b.git"), ("github.com".to_string(), true));
     assert_eq!(git::host_of("ssh://git@example.org:22/a/b.git"), ("example.org".to_string(), true));
     assert_eq!(git::host_of("/a/local/folder.git"), (String::new(), false));
+    assert_eq!(git::host_of("C:/Users/me/origin"), (String::new(), false), "a drive is no host");
+    assert_eq!(git::host_of("D:\\repos\\origin.git"), (String::new(), false));
+    assert_eq!(git::host_of("me@host:a/b.git"), ("host".to_string(), true));
 }
 
 /// An archive from before each agent had a folder: Claude Code's projects
