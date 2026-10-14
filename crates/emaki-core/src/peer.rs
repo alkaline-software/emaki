@@ -130,6 +130,40 @@ pub fn registry() -> HashMap<String, Peer> {
     registry_all().into_iter().map(|p| (p.session_id.clone(), p)).collect()
 }
 
+/// Whether a process has been left with no parent: the terminal or the
+/// app that started it is gone and it runs on. An interactive Claude Code
+/// like that has no terminal anyone can reach, which is what a hidden
+/// terminal's becomes when Emaki ends without ending it.
+#[cfg(unix)]
+pub fn adrift(pid: i32) -> bool {
+    std::process::Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().ok().is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+}
+
+#[cfg(not(unix))]
+pub fn adrift(_pid: i32) -> bool {
+    false
+}
+
+/// End a process left adrift, and wait until it is gone: asked first,
+/// and made to after a moment, so nothing else is started on its session
+/// while it can still write.
+#[cfg(unix)]
+pub fn end(pid: i32) {
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    for n in 0..60 {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return;
+        }
+        if n == 40 {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(unix))]
+pub fn end(_pid: i32) {}
+
 /// The same records one by one: a session resumed in a second process
 /// while the first still runs has two, and `registry` keeps one of them.
 pub fn registry_all() -> Vec<Peer> {

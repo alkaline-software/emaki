@@ -263,6 +263,43 @@ fn ns_view(window: &gpui::Window) -> Option<&objc2_app_kit::NSView> {
     unsafe { (handle.ns_view.as_ptr() as *const objc2_app_kit::NSView).as_ref() }
 }
 
+/// Start the system's dictation in the field the keyboard is in, as
+/// Edit, Start Dictation does: the words are typed there as they are
+/// heard. Whether anything took the action.
+#[cfg(target_os = "macos")]
+pub fn start_dictation() -> bool {
+    use objc2::{sel, MainThreadMarker};
+    use objc2_app_kit::NSApplication;
+    let Some(mtm) = MainThreadMarker::new() else { return false };
+    unsafe { NSApplication::sharedApplication(mtm).sendAction_to_from(sel!(startDictation:), None, None) }
+}
+#[cfg(not(target_os = "macos"))]
+pub fn start_dictation() -> bool {
+    false
+}
+
+/// A sound of the app's own (a WAV file's bytes) played once, quietly:
+/// dictation's start and stop. The last one played is held until the
+/// next, or the system would let it go before it had sounded.
+#[cfg(target_os = "macos")]
+pub fn play_sound(wav: &'static [u8]) {
+    use objc2::AllocAnyThread as _;
+    use objc2_app_kit::NSSound;
+    use objc2_foundation::NSData;
+    thread_local! {
+        static PLAYING: std::cell::RefCell<Option<objc2::rc::Retained<NSSound>>> = const { std::cell::RefCell::new(None) };
+    }
+    let data = NSData::with_bytes(wav);
+    if let Some(sound) = NSSound::initWithData(NSSound::alloc(), &data) {
+        sound.setVolume(0.5);
+        sound.play();
+        PLAYING.with(|p| *p.borrow_mut() = Some(sound));
+    }
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+pub fn play_sound(_wav: &'static [u8]) {}
+
 /// The Dock icon, for a bare binary run from `target/`. A bundle carries the
 /// same picture as `Emaki.icns`; this makes a `cargo run` look the same.
 #[cfg(target_os = "macos")]

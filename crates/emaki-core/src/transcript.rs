@@ -234,9 +234,13 @@ pub struct SessionRef {
     pub git_branch: String,
     pub version: String,
     pub slug: String,
-    /// True when the agent has already deleted the original and this session
-    /// exists only because emaki archived it.
+    /// True when the session is archived: its agent does not continue it
+    /// until it is unarchived. Claude Code's are kept by Emaki alone
+    /// (`kept`); Codex's are in Codex's own `archived_sessions`.
     pub archived: bool,
+    /// True when this file is Emaki's copy and its agent has none.
+    #[serde(default)]
+    pub kept: bool,
     /// True when nothing has been said in it: no prompt, no reply, nothing
     /// queued. `/clear` leaves one behind, named after the session it
     /// cleared. It is archived like any other and listed nowhere.

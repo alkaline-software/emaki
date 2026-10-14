@@ -2,7 +2,8 @@
 
 About the composer parts of `crates/emaki-app/src/workbench.rs`,
 `crates/emaki-app/src/a11y.rs`, `crates/emaki-core/src/files.rs`,
-`crates/emaki-core/src/limits.rs` and `crates/emaki-core/src/statusline.rs`.
+`crates/emaki-core/src/dictate.rs`, `crates/emaki-core/src/limits.rs` and
+`crates/emaki-core/src/statusline.rs`.
 
 ## Rules
 
@@ -31,10 +32,29 @@ About the composer parts of `crates/emaki-app/src/workbench.rs`,
   not jump as a notice comes and goes.
 - Do nothing to "@path" in a message. Claude Code reads it out of a prompt
   itself, typed or pasted.
+- "@" lists the composer's folder and nothing outside it: no link is
+  followed out of it, and in a folder inside a repository git lists that
+  folder alone. Every read is charged to Emaki by macOS, so a walk that
+  wandered would ask for Desktop, Photos and every drive by name.
+  (`at_lists_nothing_outside_the_folder`)
 - `escape_at` is the one place that says how long an escape sequence is,
   for all four screen readers.
 - Setting the textarea's value is not a change event, so bringing a draft
   back starts no hidden terminal. Keep it that way.
+- No dictation model ships with the app, in the bundle or the
+  repository: each is downloaded by the person from Settings, Dictate,
+  into `~/.emaki/models`. With none there, the button and the key open
+  that section (`start_dictation`) and nothing listens.
+- A dictation model is let go before the process exits
+  (`dictate::unload`, at quit in `main.rs`, and in the CLI). Metal's
+  device is torn down at exit, and ggml aborts the process if a
+  model still holds its memory then: every quit would end in a crash.
+- Every bundle carries `NSMicrophoneUsageDescription` (`dev-app.sh`,
+  `make-app.sh`, and `crates/emaki-app/macos/Info.plist` merged by
+  cargo-packager), and the notarized one is signed with the audio-input
+  entitlement (`macos/Emaki.entitlements`). Without the line the system
+  ends an app that opens the microphone; without the entitlement, under
+  the hardened runtime, it hands the app silence.
 
 ## Accessibility
 
@@ -77,6 +97,79 @@ page it does the same with the keyboard anywhere outside a field, and
 the send button there, which is lit with nothing typed, does it too. The
 folder a session is begun in opens in the sidebar (`new_session_in`). Tried and dropped: one box for the
 window, whose words followed the person into the next session.
+
+## Dictation
+
+Four models, each downloaded once into `~/.emaki/models` from
+Settings, Dictate, and run here on the GPU by transcribe.cpp
+(`transcribe-cpp`, ggml's runtime), which runs every one of them from
+its file. **Every model offered hears many languages, tells by itself
+which is spoken, and writes two mixed in one sentence** (Chinese with
+English words in it, as the person talks about code). One that must be
+told the language is not offered, so there is no language to set:
+Cohere Transcribe was, and went for that; Nemotron 3.5 garbles a mixed
+sentence; Parakeet hears no Chinese. They are listed heaviest first:
+Qwen3-ASR 1.7B (the most accurate), Qwen3-ASR 0.6B (quick and nearly
+as good), Whisper Large v3 Turbo (99 languages; the default,
+`DEFAULT_MODEL`) and Whisper Small (the lightest, weaker at Chinese).
+Whisper Large v3 Turbo is whisper.cpp's own build, which transcribe.cpp
+reads as it is; the rest are the GGUF builds transcribe.cpp's makers
+publish, each at the smallest quantization that writes as well as the
+full one. Nothing said leaves the machine. A download goes on
+from where it was cut off (a `.part` beside, asked for by a Range), at a
+fixed commit, and the file takes its name only once its SHA-256 is the
+published one. One model is used at a time (`app.dictate_model`).
+A model that takes no more than so long a recording at once is handed
+the speech in pieces, cut at the quietest moment before the limit
+(`pieces`). whisper-rs ran Whisper before; it and transcribe.cpp each
+build a copy of ggml, so the two cannot be in one binary.
+
+The microphone stands right of the "+" (`render_mic`) and does what the
+key does (`app.dictate_key`, ⌘⇧D unless Settings says another;
+`toggle_dictation`): pressed, it listens; pressed again, the model
+writes down what was heard and it goes in at the caret as if typed
+(`insert_dictated`), with a space between it and a word it would run
+into, none beside Chinese, Japanese or Korean. While it listens the
+button is the danger's colour with a ring the voice swells, and the row
+under the composer says so: a red dot breathing, bars that follow the
+voice (the loudness eased frame to frame, `mic_levels`), "Listening" and
+the time (`render_dictation_line`). While the model works the button
+turns and the row says it is writing. A chime of two notes rising marks
+the start, the microphone opened as it rings down so it is not heard,
+and the same two falling marks the stop: Emaki's own, made by
+`scripts/dictate-sounds.py`, and always on. A short system sound was
+tried first and read as the Mac's alert.
+
+**Whisper is never handed a recording with no voice in it.** It was
+taught on videos' subtitles, and silence or a room's hum it writes down
+as the line such a video ends on: "Thank you.", "ご視聴ありがとうございました".
+So the model sees only the stretch where someone spoke
+(`dictate::speech_span`: loud well above the room's own level for a
+quarter of a second in all, a key or a cough being shorter), and none
+at all when there is none; and a stretch the model itself rates as
+likely not speech (`no_speech_probability`) is left out of what it
+writes. A recording of exact zeros is the system refusing the
+microphone, which it does with silence and not an error: the notice
+says where to allow it.
+
+The words come back in one piece when the person stops, not as they
+speak: Whisper reads thirty seconds at a time, and a minute of speech
+takes a second or two on Apple silicon. The model is loaded on first use
+and let go after ten minutes unused (`release_idle`, from the hub's
+scan): it holds about a gigabyte.
+
+The key is bound like any other (`main.rs`), globally as ⌘W is. A new
+one is recorded in Settings: ⌘ or ⌥ with a key, nothing the window
+already has (`key_taken`). The field takes the keys through a keystroke
+interceptor, since gpui runs the bindings before an element's own key
+listener and ⌘N pressed there would open a session. The old key is put
+out by a later binding to `NoAction`, which gpui ranks above it, so the
+change needs no restart and nothing else bound is touched.
+
+A Mac's alone for now (`dictate::AVAILABLE`): transcribe.cpp is C++ built
+by CMake, which the MinGW check from a Mac cannot build, and none of it
+has been tried on Windows or Linux. There the button is not drawn and
+Settings says so.
 
 ## Spelling, grammar and capitals
 
@@ -219,9 +312,18 @@ The context is the last request's input against `model_context_window`;
 a session that has not named a window yet shows no context rather than
 a share of a guess. The windows are the account's, a primary and a
 secondary of whatever length its plan has, and the row names each by its
-length: `5h:` and `7d:` on a paid plan, `30d:` alone on a free one. The
-newest any session's rollout recorded stands for all
-(`Limits::absorb_codex`), taken in when a session is loaded.
+length: `5h:` and `7d:` on a paid plan, `30d:` alone on a free one,
+and no `5h:` on Pro, which has no five-hour limit.
+
+Codex keeps a limit a family of models: `codex` for the plan's shared
+allowance, and another for a model with an allowance of its own (Spark
+had one), whose `limit_name` is that model's slug. A rollout's row
+carries whichever limit Codex heard of last, so taking the last row as
+the account's showed another model's numbers. Each is kept by its
+`limit_id` (`model::UsageBucket`), the newest of each from any session's
+rollout standing for all (`Limits::absorb_codex`), and the row shows the
+one the session's model draws on (`bucket_for`): its own where it has
+one, else the shared one, as Codex's own status line does.
 
 What was learned is kept in `state/limits.json` with its time; the row
 says "limits as of …" once stale and `--` until a source has reported.
@@ -350,4 +452,14 @@ own).
   handler (`rightclick:<x>` that many points along the line) and `all` selects everything. All the letters of
   one `keys:` handled in one update would arrive as one change, a paste.
 - `emaki-core files <folder> [typed]` prints what "@" would offer.
+- `emaki-core dictate download` fetches the model as Settings does, and
+  `emaki-core dictate file <wav>` prints the words in a 16-bit WAV file
+  (`say -o x.aiff` and `afconvert -f WAVE -d LEI16@16000 x.aiff x.wav`
+  make one). The microphone is the window's alone: a process the
+  terminal started is the terminal's in the system's eyes.
+- `EMAKI_GO=dictate:file:<wav>` hands a recording to the same path the
+  microphone's takes, and puts the words in the composer;
+  `dictate:key` is the key pressed, `dictate:get` the model's Download,
+and `dictate:pretend` listening to a made-up voice with no microphone,
+to see the button and the row while it listens.
 - `emaki-core statusline restore` puts back the previous `statusLine`.

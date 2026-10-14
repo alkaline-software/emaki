@@ -1365,6 +1365,18 @@ pub fn catalogue(cwd: &str) -> Result<Catalogue, DriverError> {
     got
 }
 
+/// Ask Codex to do one thing to a saved session (`thread/archive`,
+/// `thread/unarchive`, `thread/delete`), of a child started for it and
+/// let go after: Codex moves its own files and keeps its own records of
+/// them. No model is called.
+pub fn thread_call(method: &str, thread_id: &str) -> Result<(), DriverError> {
+    let (tx, _rx) = mpsc::channel();
+    let driver = CodexDriver::spawn("", tx, false)?;
+    let got = driver.handshake().and_then(|_| driver.request(method, json!({"threadId": thread_id}), REQUEST_TIMEOUT)).map(|_| ());
+    Drive::stop(&*driver);
+    got
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

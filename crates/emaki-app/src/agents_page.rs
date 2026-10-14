@@ -16,7 +16,7 @@ use emaki_core::agents::{self, Agent, Found, Os};
 use emaki_core::transcript::SessionRef;
 
 use crate::format::plural;
-use crate::workbench::{page_in, pill_button, Page, Scope, Workbench, CONTENT_W};
+use crate::workbench::{key_text, page_in, pill_button, swallow_click, Page, Scope, Workbench, CONTENT_W};
 
 /// How old what was found may be before a visit to the page looks again.
 const AGENTS_FRESH: Duration = Duration::from_secs(20);
@@ -33,6 +33,8 @@ const SWAP_ANIM: Duration = Duration::from_millis(240);
 pub(crate) struct AgentSwap {
     at: Instant,
     h: f32,
+    /// How tall the git step's words were.
+    git_h: f32,
     os: Os,
     way: &'static str,
 }
@@ -137,11 +139,12 @@ impl Workbench {
             })
             .detach();
         }
-        let task = cx.background_spawn(async move { agents::detect_all() });
+        let task = cx.background_spawn(async move { (agents::detect_all(), agents::git_here()) });
         cx.spawn(async move |this, cx| {
-            let found = task.await;
+            let (found, git) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.agents_found = found.into_iter().collect();
+                this.agents_git = Some(git);
                 this.agents_checking = false;
                 this.agents_checked = Some(Instant::now());
                 cx.notify();
@@ -153,7 +156,7 @@ impl Workbench {
     /// Choose a system or a way on the install step. What it showed is
     /// kept by its choices, to be drawn going as the new comes.
     pub(crate) fn agent_choose(&mut self, os: Option<Os>, way: Option<&'static str>, cx: &mut Context<Self>) {
-        self.agent_swap = Some(AgentSwap { at: Instant::now(), h: self.agent_way_h.get(), os: self.agent_os, way: self.agent_way });
+        self.agent_swap = Some(AgentSwap { at: Instant::now(), h: self.agent_way_h.get(), git_h: self.agent_git_h.get(), os: self.agent_os, way: self.agent_way });
         self.agent_os = os.unwrap_or(self.agent_os);
         self.agent_way = way.unwrap_or(self.agent_way);
         cx.notify();
@@ -452,7 +455,7 @@ impl Workbench {
 
     /// A command on a plate, in the code face, with a button that copies
     /// it.
-    pub(crate) fn command_box(&self, key: String, command: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn command_box(&self, key: String, command: SharedString, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         // The command's words are known by its box, not by their
         // number on the page.
@@ -473,7 +476,10 @@ impl Workbench {
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
             .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
-            .on_click(cx.listener(move |this, _, _, cx| this.copy_text(key.clone(), command.to_string(), cx)))
+            .on_click({
+                let command = command.clone();
+                cx.listener(move |this, _, _, cx| this.copy_text(key.clone(), command.to_string(), cx))
+            })
             .child(Icon::new(if done { IconName::Check } else { IconName::Copy }).with_size(px(14.)).text_color(if done { tick } else { theme.muted_foreground }));
         h_flex()
             .w_full()
@@ -487,7 +493,7 @@ impl Workbench {
             .border_1()
             .border_color(theme.border)
             .bg(if theme.mode.is_dark() { theme.background } else { theme.muted.opacity(0.6) })
-            .child(div().flex_1().min_w_0().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).line_height(px(19.)).child(self.selectable_as(text_id, command, cx)))
+            .child(div().flex_1().min_w_0().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).line_height(px(19.)).child(self.selectable_as(text_id, &command, cx)))
             .child(copy)
             .into_any_element()
     }
@@ -553,7 +559,44 @@ impl Workbench {
                     .child(h_flex().gap(px(12.)).items_center().child(div().min_w_0().truncate().text_size(px(30.)).font_family(display).child(a.name)).child(self.agent_chip(a, cx)))
                     .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(a.maker)),
             );
-        let links = h_flex().gap(px(8.)).items_center().child(link("agent-site", "Website", a.site, &tinted)).child(link("agent-docs", "Documentation", a.docs, &tinted)).child(div().flex_1()).child(self.check_button(cx));
+        // Which computer the steps are for: this one to begin with. Every
+        // step under it follows.
+        let os = self.agent_os;
+        let os_pick = {
+            let on: Rc<dyn Fn(&mut Self, &'static str, &mut Window, &mut Context<Self>)> = Rc::new(|this, key, _, cx| this.agent_choose(Os::parse(key), None, cx));
+            let options = Os::ALL.iter().map(|o| (o.as_str(), o.label().to_string(), None)).collect();
+            self.segmented_sized("agent-os", options, os.as_str(), on, true, cx)
+        };
+        let links = h_flex()
+            .gap(px(8.))
+            .items_center()
+            .child(link("agent-site", "Website", a.site, &tinted))
+            .child(link("agent-docs", "Documentation", a.docs, &tinted))
+            .child(div().flex_1())
+            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("Steps for"))
+            .child(os_pick)
+            .child(self.check_button(cx));
+        // A step's words, a line a thing to do, each with its number.
+        // A line that leads with a button is the button's height, and its
+        // number stands level with its words.
+        let numbered_at = |i: usize, tall: bool, line: AnyElement| h_flex().w_full().items_start().gap(px(8.)).child(div().w(px(16.)).flex_shrink_0().text_size(px(13.)).line_height(px(if tall { 24. } else { 20. })).text_color(theme.muted_foreground).child(format!("{i}."))).child(v_flex().flex_1().min_w_0().gap(px(8.)).child(line));
+        let numbered = |i: usize, line: AnyElement| numbered_at(i, false, line);
+        // A line with a key in it, its keys drawn.
+        let keys = |words: &str| key_text(words).text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.85)).into_any_element();
+        // The terminal, opened from the step that needs it: the shell at
+        // the page's right, where the button at the top right opens it.
+        let open_term = |id: &'static str, cx: &mut Context<Self>| {
+            crate::branches::small_pill(id, "icons/terminal.svg", "Open the Terminal", crate::workbench::Press::Quiet, false, &tinted)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    if this.term_on().is_none() {
+                        this.toggle_term(false, window, cx);
+                    } else {
+                        window.focus(&this.side_term_focus, cx);
+                    }
+                }))
+                .into_any_element()
+        };
 
         // Installing: where it is once it is there, and the ways to get
         // it for the system chosen, which stay: for another machine, or
@@ -565,11 +608,7 @@ impl Workbench {
                 .child(div().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(theme.muted_foreground).child(self.selectable(&tilde(&path.to_string_lossy()), cx)))
         });
         let install = {
-            let os = self.agent_os;
-            let on: Rc<dyn Fn(&mut Self, &'static str, &mut Window, &mut Context<Self>)> = Rc::new(|this, key, _, cx| this.agent_choose(Os::parse(key), None, cx));
-            let options = Os::ALL.iter().map(|o| (o.as_str(), o.label().to_string(), None)).collect();
-            // Two choices on one row, read as a path: the system, then
-            // the way on it. An app is downloaded first, where its
+            // The way on the system chosen above. An app is downloaded first, where its
             // maker has one for the system; each command is another
             // way. One way shows at a time, the maker's first choice to
             // begin with.
@@ -584,7 +623,7 @@ impl Workbench {
             };
             let hows = hows_on(os);
             let how = how_on(os, self.agent_way);
-            let mut pick = h_flex().gap(px(6.)).items_center().child(self.segmented_sized("agent-os", options, os.as_str(), on, true, cx));
+            let mut pick = h_flex().gap(px(8.)).items_center();
             if let (Some(how), true) = (how, hows.len() > 1) {
                 let on: Rc<dyn Fn(&mut Self, &'static str, &mut Window, &mut Context<Self>)> = Rc::new(|this, key, _, cx| this.agent_choose(None, Some(key), cx));
                 // A control a system, so the plate does not slide from
@@ -596,7 +635,7 @@ impl Workbench {
                 };
                 let short = |by: &'static str| by.split(" (").next().unwrap_or(by).to_string();
                 let options = hows.iter().map(|by| (*by, short(by), None)).collect();
-                pick = pick.child(Icon::new(IconName::ChevronRight).with_size(px(12.)).text_color(theme.muted_foreground.opacity(0.7))).child(self.segmented_sized(control, options, how, on, true, cx));
+                pick = pick.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("Install with")).child(self.segmented_sized(control, options, how, on, true, cx));
             }
             // What a way on a system says to do. Its words are known by
             // the system and the way, never by their place on the page:
@@ -612,12 +651,14 @@ impl Workbench {
                     None => col.child(quiet("none", format!("No installer for {} is listed here. See {}'s documentation.", os.label(), a.name), cx)),
                     Some(DOWNLOAD) => {
                         let url = a.download;
-                        col.child(
-                            v_flex()
-                                .gap(px(8.))
-                                .child(prose("download", format!("Download the installer from {} and open it, then press refresh above.", a.maker), cx))
-                                .child(h_flex().child(pill_button("agent-download", "Download", &tinted, move |_, _, cx| cx.open_url(url)))),
-                        )
+                        let open = match os {
+                            Os::Mac => format!("Open the file you downloaded. If it is a zip, open it, then drag {} into your Applications folder.", a.name),
+                            Os::Windows => "Open the file you downloaded and follow what it says.".to_string(),
+                            Os::Linux => "Open the file you downloaded with your system's software installer.".to_string(),
+                        };
+                        col.child(numbered_at(1, true, h_flex().gap(px(10.)).items_center().child(prose("download", format!("Download {} from {}:", a.name, a.maker), cx)).child(crate::branches::small_pill("agent-download", "icons/ways/download.svg", "Download", crate::workbench::Press::Quiet, false, &tinted).on_click(move |_, _, cx| cx.open_url(url))).into_any_element()))
+                            .child(numbered(2, prose("download-open", open, cx).into_any_element()))
+                            .child(numbered(3, prose("download-done", format!("Come back and press refresh above. This step gets a tick when Emaki finds {}.", a.name), cx).into_any_element()))
                     }
                     Some(by) => {
                         let ways = a.ways(os);
@@ -628,10 +669,37 @@ impl Workbench {
                             v_flex()
                                 .gap(px(5.))
                                 .child(div().text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(label))
-                                .child(self.command_box(format!("agent-way-{}-{}-{i}", a.id, os.as_str()), w.command, cx))
+                                .child(self.command_box(format!("agent-way-{}-{}-{i}", a.id, os.as_str()), w.command.into(), cx))
                                 .when(gone, |d| d.child(div().text_size(px(12.)).line_height(px(18.)).text_color(theme.danger).child(format!("This command's source is no longer published. See {}'s documentation.", a.name)))),
                         )
-                        .child(quiet("shell", "Run it in the shell (top right), then press refresh above.".into(), cx))
+                        .child(numbered(1, prose("copy", "Copy the command with the button at its right.".into(), cx).into_any_element()))
+                        .child(numbered_at(
+                            2,
+                            os == Os::here(),
+                            if os == Os::here() { h_flex().gap(px(10.)).items_center().child(prose("open", "Open the terminal:".into(), cx)).child(open_term("agent-term-install", cx)).into_any_element() } else { prose("open", format!("Open a terminal on that computer ({}).", if os == Os::Windows { "PowerShell" } else { "Terminal" }), cx).into_any_element() },
+                        ))
+                        .child(numbered(
+                            3,
+                            v_flex()
+                                .gap(px(4.))
+                                .child(keys(if os == Os::Mac { "Paste it there with ⌘V and press ↩." } else { "Paste it there with Ctrl+V and press Enter." }))
+                                .child(quiet("password", "If it asks for a password, type the one you log in to the computer with. Nothing shows as you type: that is normal.".into(), cx))
+                                .into_any_element(),
+                        ))
+                        .child(numbered(
+                            4,
+                            if os == Os::Windows {
+                                prose("again", format!("When it has finished, close the terminal and open a new one, so it can find {}.", a.name), cx).into_any_element()
+                            } else {
+                                v_flex()
+                                    .gap(px(8.))
+                                    .child(prose("again", format!("When it has finished, start the terminal afresh, so it can find {}:", a.name), cx))
+                                    .child(self.command_box(format!("agent-again-{}-{}", a.id, os.as_str()), agents::SHELL_AGAIN.into(), cx))
+                                    .child(quiet("path", "If the installer printed a line for you to run, such as one that adds a folder to your PATH, run that line first.".into(), cx))
+                                    .into_any_element()
+                            },
+                        ))
+                        .child(numbered(5, prose("done", format!("Press refresh above. This step gets a tick when Emaki finds {}.", a.name), cx).into_any_element()))
                     }
                 }
             };
@@ -654,7 +722,45 @@ impl Workbench {
                 }
                 None => div().relative().w_full().child(now),
             };
-            v_flex().gap(px(10.)).children(here).child(pick).child(shown)
+            v_flex().gap(px(12.)).children(here).child(pick).child(shown)
+        };
+
+        // Git, which the agents and Emaki's own panel work with: on a Mac
+        // it comes with Apple's command line tools, which a new Mac does
+        // not have. Its words follow the system as the install step's do.
+        let git = self.agents_git.clone();
+        let git_ready = git.as_ref().is_some_and(|g| g.ready);
+        let git_step = {
+            let git_body = |os: Os, cx: &mut Context<Self>| -> Div {
+                let id = |part: &str| format!("agent-git-text-{}-{}-{part}", a.id, os.as_str());
+                let prose = |part: &str, words: String, cx: &App| div().text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.85)).child(self.selectable_as(id(part), &words, cx));
+                let quiet = |part: &str, words: String, cx: &App| div().text_size(px(12.)).line_height(px(18.)).text_color(theme.muted_foreground).child(self.selectable_as(id(part), &words, cx));
+                let col = v_flex().w_full().gap(px(10.));
+                let col = if git_ready && os == Os::here() { col.child(prose("here", if os == Os::Mac { "Apple's command line tools, with git, are on this machine.".into() } else { "Git is on this machine.".into() }, cx)) } else { col };
+                match os {
+                    Os::Mac => col
+                        .child(prose("what", "Git keeps track of the changes to your files, and the agents use it. On a Mac it comes with Apple's command line tools.".into(), cx))
+                        .child(self.command_box(format!("agent-git-{}-mac", a.id), agents::GIT_MAC.into(), cx))
+                        .child(quiet("how", "Run it in the terminal as the next step shows. A window opens: click Install and wait until it says the software was installed, which can take several minutes. If it says the tools are already installed, there is nothing to do.".into(), cx)),
+                    Os::Linux => col
+                        .child(prose("what", "Git keeps track of the changes to your files, and the agents use it. Most Linux systems have it. If yours does not, install it with your system's package manager; on Ubuntu or Debian:".into(), cx))
+                        .child(self.command_box(format!("agent-git-{}-linux", a.id), agents::GIT_LINUX.into(), cx)),
+                    Os::Windows => col
+                        .child(prose("what", "Git keeps track of the changes to your files, and the agents use it. Download Git for Windows and open the installer; the choices it offers can be left as they are.".into(), cx))
+                        .child(h_flex().child(crate::branches::small_pill("agent-git-download", "icons/ways/download.svg", "Download Git", crate::workbench::Press::Quiet, false, &tinted).on_click(|_, _, cx| cx.open_url(agents::GIT_WINDOWS)))),
+                }
+            };
+            let tall = self.agent_git_h.clone();
+            let now = git_body(os, cx).relative().child(canvas(move |bounds, _, _| tall.set(f32::from(bounds.size.height)), |_, _, _, _| {}).absolute().inset_0());
+            match self.agent_swap.filter(|swap| swap.at.elapsed() < SWAP_ANIM && swap.os != os) {
+                Some(swap) => {
+                    let t = gpui::ease_out_quint()(swap.at.elapsed().as_secs_f32() / SWAP_ANIM.as_secs_f32());
+                    let to = self.agent_git_h.get();
+                    let was = git_body(swap.os, cx);
+                    div().relative().w_full().overflow_hidden().h(px(swap.git_h + (to - swap.git_h) * t)).child(now.opacity(t)).child(was.absolute().top_0().left_0().opacity(1. - t))
+                }
+                None => div().relative().w_full().child(now),
+            }
         };
 
         let signed = found.as_ref().is_some_and(|f| f.signed);
@@ -668,12 +774,58 @@ impl Workbench {
             // Signed in to in its own window, with nothing to type.
             sign = sign.child(prose(a.sign_in_how.to_string(), cx));
         } else {
-            sign = sign.child(self.command_box("agent-sign-in".into(), a.sign_in, cx)).child(prose(format!("Run it in the shell (top right). {}", a.sign_in_how), cx));
+            sign = sign
+                .child(self.command_box("agent-sign-in".into(), a.sign_in.into(), cx))
+                .child(numbered_at(1, os == Os::here(), if os == Os::here() { h_flex().gap(px(10.)).items_center().child(prose("Run it in the terminal, as you did to install:".into(), cx)).child(open_term("agent-term-sign-in", cx)).into_any_element() } else { prose("Run it in the terminal, as you did to install.".into(), cx).into_any_element() }))
+                .child(numbered(2, prose(a.sign_in_how.to_string(), cx).into_any_element()));
         }
         sign = sign.child(quiet(a.plans.to_string(), cx));
         if !signed && !a.key_env.is_empty() {
             sign = sign.child(quiet(format!("Or set {} in your shell's profile.", a.key_env.join(" or ")), cx));
         }
+
+        // Who commits are by: git asks before the first one, and a commit
+        // from Emaki's panel is refused until it knows. On GitHub's page,
+        // where git is the point. The line is written from the two fields.
+        let identity = (!a.with_emaki.is_empty()).then(|| {
+            let (known_name, known_email) = git.as_ref().map(|g| (g.name.clone(), g.email.clone())).unwrap_or_default();
+            let typed = |input: &Entity<gpui_component::input::InputState>, known: &str| {
+                let v = input.read(cx).value().trim().to_string();
+                if v.is_empty() { known.to_string() } else { v }
+            };
+            let name = typed(&self.git_name_input, &known_name);
+            let email = typed(&self.git_email_input, &known_email);
+            let well = if theme.mode.is_dark() { theme.sidebar } else { theme.muted };
+            let field = |id: &'static str, label: &'static str, input: &Entity<gpui_component::input::InputState>, cx: &mut Context<Self>| {
+                v_flex().flex_1().min_w_0().gap(px(4.)).child(div().text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(label)).child(
+                    div()
+                        .id(id)
+                        .track_focus(&input.read(cx).focus_handle(cx))
+                        .h(px(32.))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(8.))
+                        .bg(well)
+                        .text_size(px(13.))
+                        .child(gpui_component::input::Input::new(input).appearance(false).bordered(false).on_secondary_click(self.input_menu(input, false, cx))),
+                )
+            };
+            let mut body = v_flex().gap(px(10.));
+            if !known_name.is_empty() && !known_email.is_empty() {
+                body = body.child(prose(format!("Your commits are signed as {known_name} <{known_email}>. To change that, type a new name or address and run the line again."), cx));
+            } else {
+                body = body.child(prose("Git puts a name and an email address on every change you save, so others can see who made it. Use the address of your GitHub account.".into(), cx));
+            }
+            body = body.child(h_flex().gap(px(10.)).child(field("git-name-field", "Name", &self.git_name_input, cx)).child(field("git-email-field", "Email", &self.git_email_input, cx)));
+            if !name.is_empty() && !email.is_empty() {
+                let line = agents::git_identity_command(&name, &email, os);
+                body = body.child(self.command_box(format!("agent-identity-{}", os.as_str()), line.into(), cx)).child(numbered_at(1, os == Os::here(), if os == Os::here() { h_flex().gap(px(10.)).items_center().child(prose("Copy it and run it in the terminal:".into(), cx)).child(open_term("agent-term-identity", cx)).into_any_element() } else { prose("Copy it and run it in the terminal.".into(), cx).into_any_element() })).child(numbered(2, prose("Press refresh above. This step gets a tick when git knows your name and address.".into(), cx).into_any_element()));
+            } else {
+                body = body.child(quiet("Type both, and the line to run shows here.".into(), cx));
+            }
+            (!known_name.is_empty() && !known_email.is_empty(), body)
+        });
 
         let sessions = self.agent_sessions(a);
         let emaki = match a.reads {
@@ -690,9 +842,13 @@ impl Workbench {
             .border_1()
             .border_color(theme.border)
             .bg(if theme.mode.is_dark() { theme.muted.opacity(0.35) } else { theme.popover })
-            .child(self.agent_step(1, installed, false, format!("Install {}", a.name), installed.then(|| "Done".to_string()), install, ink, cx))
-            .child(self.agent_step(2, signed, false, "Sign in".into(), signed.then(|| "Done".to_string()), sign, ink, cx))
-            .child(self.agent_step(3, (a.reads.is_some() || !a.with_emaki.is_empty()) && installed, true, "Use it with Emaki".into(), None, v_flex().child(emaki), ink, cx));
+            .child(self.agent_step(1, git_ready, false, "Get git".into(), git_ready.then(|| "Done".to_string()), git_step, ink, cx))
+            .child(self.agent_step(2, installed, false, format!("Install {}", a.name), installed.then(|| "Done".to_string()), install, ink, cx))
+            .child(self.agent_step(3, signed, false, "Sign in".into(), signed.then(|| "Done".to_string()), sign, ink, cx))
+            .map(|d| match identity {
+                Some((known, body)) => d.child(self.agent_step(4, known, false, "Tell git who you are".into(), known.then(|| "Done".to_string()), body, ink, cx)).child(self.agent_step(5, installed, true, "Use it with Emaki".into(), None, v_flex().child(emaki), ink, cx)),
+                None => d.child(self.agent_step(4, (a.reads.is_some() || !a.with_emaki.is_empty()) && installed, true, "Use it with Emaki".into(), None, v_flex().child(emaki), ink, cx)),
+            });
 
         // The way to the sessions themselves: All Sessions, narrowed to
         // this agent. One row and not a list, which said it twice.

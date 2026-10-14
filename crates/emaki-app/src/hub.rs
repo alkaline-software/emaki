@@ -132,6 +132,9 @@ pub struct Hub {
     /// Sessions whose driver exited; a fresh mtime alone must not count as a
     /// process for them.
     ended: Mutex<HashMap<String, Instant>>,
+    /// Whether a registered process that is not ours has no parent, by
+    /// its pid, and when that was asked (`peer::adrift`).
+    adrift: Mutex<HashMap<i32, (bool, Instant)>>,
     /// Claude Code's own session registry: every terminal session with an
     /// inbox, refreshed on each scan.
     peers: Mutex<HashMap<String, Peer>>,
@@ -179,6 +182,7 @@ impl Hub {
             lost: Mutex::new(HashMap::new()),
             typing: Mutex::new(HashSet::new()),
             ended: Mutex::new(HashMap::new()),
+            adrift: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             inbox_last: Mutex::new(HashMap::new()),
             cfg: RwLock::new(cfg),
@@ -243,7 +247,7 @@ impl Hub {
                     // person looks.
                     let due: Vec<SessionRef> = refs
                         .iter()
-                        .filter(|r| !r.archived)
+                        .filter(|r| !r.kept)
                         .filter(|r| match taken.get(&format!("{}:{}", r.agent.as_str(), r.session_id)) {
                             None => true,
                             Some((size, mtime, _)) if *size == r.size && *mtime == r.mtime => false,
@@ -262,7 +266,7 @@ impl Hub {
                     // a day.
                     if packed_at.is_none_or(|at| at.elapsed() >= PACK_EVERY) {
                         packed_at = Some(Instant::now());
-                        let stale: Vec<SessionRef> = refs.iter().filter(|r| r.archived).cloned().collect();
+                        let stale: Vec<SessionRef> = refs.iter().filter(|r| r.kept).cloned().collect();
                         let _ = thread::Builder::new().name("emaki-pack".into()).spawn(move || {
                             let _ = archive::pack_stale(&stale);
                         });
@@ -275,6 +279,9 @@ impl Hub {
                     }
                     hub.reap_drivers();
                     hub.reap_terminals();
+                    // A dictation model holds about a gigabyte while
+                    // loaded; ten minutes unused and it goes.
+                    emaki_core::dictate::release_idle(Duration::from_secs(600));
                     match wake_rx.recv_timeout(Duration::from_millis(interval.max(500))) {
                         Ok(()) | Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -338,6 +345,13 @@ impl Hub {
         self.drivers.lock().unwrap().get(session_id).cloned()
     }
 
+    /// Nothing is behind this session, whatever its file's time says:
+    /// one unarchived is dated now, and a turn it was cut off in would
+    /// read as one at work.
+    pub fn mark_ended(&self, session_id: &str) {
+        self.ended.lock().unwrap().insert(session_id.to_string(), Instant::now());
+    }
+
     pub fn has_ended(&self, session_id: &str) -> bool {
         self.ended.lock().unwrap().contains_key(session_id)
     }
@@ -373,6 +387,17 @@ impl Hub {
         let all = peer::registry_all();
         let moved = self.follow_terminals(&all);
         let ours: Vec<i32> = self.terminals.lock().unwrap().values().map(|p| p.pid).collect();
+        // Which of the others has no parent: asked of the system, so
+        // once a while for each and not on every look.
+        {
+            let mut adrift = self.adrift.lock().unwrap();
+            adrift.retain(|pid, _| all.iter().any(|p| p.pid == *pid));
+            for p in all.iter().filter(|p| p.kind == "interactive" && !ours.contains(&p.pid)) {
+                if adrift.get(&p.pid).is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(10)) {
+                    adrift.insert(p.pid, (peer::adrift(p.pid), Instant::now()));
+                }
+            }
+        }
         let mut fresh: HashMap<String, Peer> = HashMap::new();
         for p in all {
             if ours.contains(&p.pid) || !fresh.contains_key(&p.session_id) {
@@ -516,6 +541,18 @@ impl Hub {
         }
     }
 
+    /// The Claude Code left behind on this session with no terminal: a
+    /// hidden terminal's, from an Emaki that ended without ending it. It
+    /// runs on and writes its transcript, and nothing can show its screen
+    /// or answer what it asks.
+    pub fn adrift_for(&self, session_id: &str) -> Option<i32> {
+        if self.terminal_for(session_id).is_some() {
+            return None;
+        }
+        let pid = self.peers.lock().unwrap().get(session_id)?.pid;
+        self.adrift.lock().unwrap().get(&pid).is_some_and(|(is, _)| *is).then_some(pid)
+    }
+
     /// Whether something is behind this session: our driver, a registered
     /// inbox, or a transcript written recently enough that a process is the
     /// likely explanation.
@@ -620,6 +657,13 @@ impl Hub {
     pub fn start_terminal(self: &Arc<Self>, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str, effort: &str) -> Result<(), String> {
         if self.terminal_for(session_id).is_some() {
             return Ok(());
+        }
+        // One writer: a Claude Code left on this session with no
+        // terminal is ended before another is started on it.
+        if let Some(pid) = self.adrift_for(session_id) {
+            peer::end(pid);
+            self.adrift.lock().unwrap().remove(&pid);
+            self.peers.lock().unwrap().remove(session_id);
         }
         let (tx, rx) = mpsc::channel::<()>();
         let tx = Mutex::new(tx);

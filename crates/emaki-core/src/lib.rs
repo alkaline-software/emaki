@@ -12,6 +12,7 @@ pub mod build;
 pub mod check;
 pub mod codex;
 pub mod config;
+pub mod dictate;
 pub mod driver;
 pub mod explain;
 pub mod files;

@@ -76,6 +76,20 @@ channel, its driver: see Codex below):
 4. `spawn`: none of those, the session is not archived, the driver is
    enabled and the folder is there.
 
+A hidden terminal's Claude Code can outlive the Emaki that started it:
+an Emaki ended by a signal (`scripts/relaunch.sh` uses `pkill`) never
+runs its quit, and a Claude Code with commands still running in the
+background does not end when its terminal goes. It runs on with no
+parent and no terminal, writing its transcript and taking inbox
+messages, and the next Emaki sees its record as `inbox`. Its screen
+cannot be shown again (the terminal went with the old Emaki) and what it
+asks cannot be answered. `peer::adrift` knows one: an interactive record
+whose process's parent is 1 (`Hub::adrift_for`, asked at most every
+ten seconds a pid). The terminal panel says so, not "a terminal of
+yours", and offers to stop it and start here. `Hub::start_terminal`
+ends one first (`peer::end`: asked, then made to) on any start, so a
+session never has the old one and a new one writing at once.
+
 `in_terminal` is `inbox` or `pty`. `Hub::is_live` trusts the driver, the
 hidden terminal and the registry before the mtime grace. `Hub::peer_for`
 answers with the hidden terminal's own record once there is one, never

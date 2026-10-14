@@ -239,6 +239,27 @@ impl Workbench {
         )
     }
 
+    /// Undo, beside Push: the last commit taken back while the remote
+    /// does not have it (`CommitDo::Undo`), its changes kept and its
+    /// words put back in the fields. There while there is a commit to
+    /// push, which is when the last one is still only here.
+    pub(crate) fn undo_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        self.branches().filter(|b| b.ahead > 0)?;
+        let off = self.committing || self.syncing.is_some() || self.branch_busy;
+        Some(
+            small_pill("sync-undo", "icons/undo-2.svg", "Undo", Press::Quiet, off, &theme)
+                .managed_tooltip(|window, cx| crate::workbench::tip("Take the last commit back, keeping its changes", window, cx))
+                .when(!off, |d| {
+                    d.on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.commit_do(CommitDo::Undo, String::new(), window, cx);
+                    }))
+                })
+                .into_any_element(),
+        )
+    }
+
     /// Pull: bring the branch checked out up to the remote's as last
     /// fetched, which only adds commits (`git::fast_forward`). Push:
     /// send its commits to the remote. Neither is done unasked. A pull
@@ -308,6 +329,7 @@ impl Workbench {
             .text_size(px(11.5))
             .child(Icon::default().path(if what == Some(true) { "icons/arrow-down.svg" } else { "icons/arrow-up.svg" }).with_size(px(12.)).text_color(theme.link).flex_shrink_0())
             .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child(said))
+            .children(self.undo_pill(cx).filter(|_| on))
             .children(what.filter(|_| on).and_then(|pull| self.sync_pill(pull, cx)));
         let wrap = v_flex().w_full().flex_shrink_0().justify_end().overflow_hidden().child(row);
         Some(match moving {
@@ -478,7 +500,9 @@ impl Workbench {
     /// own and may be refused; nothing is forced. A revert writes files,
     /// so not under a running turn.
     pub(crate) fn commit_do(&mut self, what: CommitDo, sha: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.changes.as_ref().map(|c| c.root.clone()) else { return };
+        // From the history's menu, or for Undo from the strip under the
+        // files' head, where no sheet is up.
+        let Some(root) = self.changes.as_ref().map(|c| c.root.clone()).or_else(|| self.files_root()) else { return };
         match what {
             CommitDo::CopySha => return cx.write_to_clipboard(ClipboardItem::new_string(sha)),
             CommitDo::View => {
@@ -618,13 +642,17 @@ impl Workbench {
         // lines their room the files go under the commits instead.
         let wide = self.view_w >= px(HISTORY_WIDE);
         let files_head = div().flex_shrink_0().px(px(14.)).pt(px(9.)).pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(quiet).child(if wide { plural(n_files, "changed file", "changed files") } else { format!("{} in this commit", plural(n_files, "file", "files")) });
+        // Both lists keep a little room under what scrolls, so a row cut
+        // at the foot stays inside the sheet's corner.
         let files_list = div()
             .relative()
+            .pb(px(4.))
             .when(wide, |d| d.flex_1().min_h_0())
             .child(v_flex().id("history-files").map(|d| if wide { d.size_full() } else { d.max_h(px(HISTORY_FILES_H)) }).overflow_y_scroll().track_scroll(&c.cfiles_scroll).px(px(6.)).pb(px(6.)).children(file_rows))
             .vertical_scrollbar(&c.cfiles_scroll);
         let commits_list = div()
             .relative()
+            .pb(px(4.))
             .flex_1()
             .min_h_0()
             .child(v_flex().id("history-commits").size_full().overflow_y_scroll().track_scroll(&c.commits_scroll).p(px(6.)).gap(px(1.)).children(rows).when(empty, |d| d.child(div().p(px(12.)).text_size(px(12.5)).text_color(quiet).child("No commits yet."))))
@@ -795,6 +823,7 @@ impl Workbench {
                 .text_size(px(11.5))
                 .text_color(theme.muted_foreground)
                 .child(div().flex_1().min_w_0().line_height(px(16.)).child(said))
+                .children(self.undo_pill(cx))
                 .children(what.and_then(|pull| self.sync_pill(pull, cx)))
         });
         v_flex()
@@ -1041,6 +1070,9 @@ impl Workbench {
                 .items_start()
                 .when(on, |d| d.bg(theme.primary.opacity(0.07)))
                 .when(!on, |d| d.cursor_pointer().hover(|s| s.bg(theme.muted.opacity(0.6))))
+                // Rounded where the box is, the first at its top and the
+                // second at its foot: a clip is a rectangle.
+                .map(|d| if from_default { d.rounded_t(px(9.)) } else { d.rounded_b(px(9.)) })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
                     if let Some(n) = this.branch_new.as_mut() {
@@ -1306,7 +1338,7 @@ impl Workbench {
                 steps.push(prose(format!("This repository is on {host}. Sign git in to it the way {host} documents, then check again.")).into_any_element());
             }
             Some(a) if a.ssh => {
-                steps.push(step(1, "Check your key", vec![self.command_box("gate-ssh".into(), "ssh -T git@github.com", cx), quiet("This repository is reached over ssh, with a key and no password. GitHub answers with your name when it knows the key.".into()).into_any_element()]).into_any_element());
+                steps.push(step(1, "Check your key", vec![self.command_box("gate-ssh".into(), "ssh -T git@github.com".into(), cx), quiet("This repository is reached over ssh, with a key and no password. GitHub answers with your name when it knows the key.".into()).into_any_element()]).into_any_element());
                 let link = pill_button("gate-ssh-docs", "How to add a key", &theme, |_, _, cx| cx.open_url("https://docs.github.com/en/authentication/connecting-to-github-with-ssh"));
                 steps.push(step(2, "Add a key if it does not", vec![h_flex().child(link).into_any_element()]).into_any_element());
             }
@@ -1315,9 +1347,9 @@ impl Workbench {
                 if a.gh.is_none() {
                     n += 1;
                     let install: AnyElement = if cfg!(target_os = "macos") {
-                        self.command_box("gate-gh-install".into(), "brew install gh", cx)
+                        self.command_box("gate-gh-install".into(), "brew install gh".into(), cx)
                     } else if cfg!(windows) {
-                        self.command_box("gate-gh-install".into(), "winget install --id GitHub.cli", cx)
+                        self.command_box("gate-gh-install".into(), "winget install --id GitHub.cli".into(), cx)
                     } else {
                         h_flex().child(pill_button("gate-gh-linux", "How to install it on Linux", &theme, |_, _, cx| cx.open_url("https://github.com/cli/cli/blob/trunk/docs/install_linux.md"))).into_any_element()
                     };
@@ -1325,10 +1357,10 @@ impl Workbench {
                 }
                 if !a.gh_signed {
                     n += 1;
-                    steps.push(step(n, "Sign in", vec![self.command_box("gate-gh-login".into(), "gh auth login", cx), quiet("Choose GitHub.com and HTTPS, answer yes to signing git in with your GitHub credentials, and sign in with a web browser.".into()).into_any_element()]).into_any_element());
+                    steps.push(step(n, "Sign in", vec![self.command_box("gate-gh-login".into(), "gh auth login".into(), cx), quiet("Choose GitHub.com and HTTPS, answer yes to signing git in with your GitHub credentials, and sign in with a web browser.".into()).into_any_element()]).into_any_element());
                 } else {
                     n += 1;
-                    steps.push(step(n, "Hand git the sign-in", vec![self.command_box("gate-gh-setup".into(), "gh auth setup-git", cx), quiet("GitHub's tool is signed in on this machine, and git was refused all the same. This has git use that sign-in. If it was refused again after it, the account signed in has no right to this repository.".into()).into_any_element()]).into_any_element());
+                    steps.push(step(n, "Hand git the sign-in", vec![self.command_box("gate-gh-setup".into(), "gh auth setup-git".into(), cx), quiet("GitHub's tool is signed in on this machine, and git was refused all the same. This has git use that sign-in. If it was refused again after it, the account signed in has no right to this repository.".into()).into_any_element()]).into_any_element());
                 }
             }
         }

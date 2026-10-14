@@ -2775,6 +2775,9 @@ impl Workbench {
                     .border_b_1()
                     .border_color(theme.border)
                     .bg(theme.muted.opacity(0.4))
+                    // A clip is a rectangle: the head's ground is rounded
+                    // as the card is, the card's less its border.
+                    .rounded_t(px(9.))
                     .child(div().flex_1().min_w_0().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(format!("{title}, against git's copy")))
                     .when(peek.can_revert, |d| {
                         d.child(Button::new("file-peek-revert").outline().xsmall().label("Revert").on_click(cx.listener(|this, _, window, cx| {
@@ -2788,8 +2791,10 @@ impl Workbench {
                         cx.notify();
                     }))),
             )
+            // Room under the lines, as deep as the card's corner, so a
+            // line's ground never stands square past its curve.
             .child(
-                v_flex().relative().w_full().child(
+                v_flex().relative().w_full().pb(px(9.)).child(
                     v_flex()
                         .id(("file-peek-lines", self.file_peek_serial as usize))
                         .w_full()
@@ -5655,6 +5660,9 @@ impl Workbench {
                 .items_start()
                 .when(on, |d| d.bg(theme.primary.opacity(0.07)))
                 .when(enabled && !on, |d| d.cursor_pointer().hover(|s| s.bg(theme.muted.opacity(0.6))))
+                // Rounded where the box is, the first at its top and the
+                // second at its foot: a clip is a rectangle.
+                .map(|d| if id == "ask-leave" { d.rounded_t(px(9.)) } else { d.rounded_b(px(9.)) })
                 .when(!enabled, |d| d.opacity(0.45))
                 .child(
                     div().mt(px(2.)).size(px(14.)).flex_shrink_0().rounded_full().border_1().border_color(if on { theme.primary } else { theme.muted_foreground.opacity(0.6) }).flex().items_center().justify_center().when(on, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.primary))),
@@ -5861,6 +5869,10 @@ impl Workbench {
             );
         }
         let fresh = fresh.filter(|_| !rows.is_empty());
+        let fetch_line = self.branch_fetch_line(cx);
+        // What is last in the card is rounded at its foot as the card is.
+        let make_last = fetch_line.is_none();
+        let list_last = fresh.is_none() && fetch_line.is_none();
         let make = fresh.map(|name| {
             let to = name.clone();
             h_flex()
@@ -5874,6 +5886,7 @@ impl Workbench {
                 .border_color(theme.border)
                 .cursor_pointer()
                 .text_size(px(12.5))
+                .when(make_last, |d| d.rounded_b(px(11.)))
                 .hover(|s| s.bg(theme.sidebar_accent))
                 .on_click(cx.listener(move |this, _, window, cx| this.branch_new_open(Some(to.clone()), window, cx)))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
@@ -5961,12 +5974,13 @@ impl Workbench {
                         .min_h_0()
                         .border_t_1()
                         .border_color(theme.border)
+                        .when(list_last, |d| d.pb(px(2.)))
                         .child(v_flex().id("branch-scroll").max_h(BRANCH_ROW_H * BRANCH_ROWS as f32 + px(10.)).overflow_y_scroll().track_scroll(&self.branch_scroll).p(px(5.)).child(list))
                         .vertical_scrollbar(&self.branch_scroll),
                 )
             })
             .children(make)
-            .children(self.branch_fetch_line(cx));
+            .children(fetch_line);
         let shut = |this: &mut Self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>| this.close_branch_menu(window, cx);
         div().id("branch-sheet").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(shut)).on_mouse_down(MouseButton::Right, cx.listener(shut)).child(card).into_any_element()
     }
@@ -6377,8 +6391,12 @@ impl Workbench {
                     }
                 })
                 .size_full();
+                // Room under the lines as deep as the sheet's corner, so
+                // a line's ground never stands square past its curve. The
+                // note of a cut stands there instead when there is one.
                 v_flex()
                     .size_full()
+                    .when(!d.cut, |el| el.pb(px(15.)))
                     .child(div().relative().flex_1().min_h_0().child(lines).vertical_scrollbar(&c.list))
                     .when(d.cut, |el| el.child(div().flex_shrink_0().px(px(14.)).py(px(8.)).border_t_1().border_color(theme.border).text_size(px(12.)).text_color(quiet).child("Only the beginning of this comparison is shown.")))
                     .into_any_element()

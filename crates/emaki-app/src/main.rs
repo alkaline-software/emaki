@@ -27,7 +27,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, ChooseFolder, OpenSettings, Refresh, ReopenTab, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Dictate, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, ChooseFolder, OpenSettings, Refresh, ReopenTab, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -90,6 +90,9 @@ fn key_bindings() -> Vec<KeyBinding> {
         // One global binding: a context-bound one loses to a global one
         // whenever the focus sits deeper than the workbench, in the composer.
         KeyBinding::new("secondary-w", CloseTab, None),
+        // Dictation starts and stops on the key Settings gives it, one
+        // global binding for the same reason as ⌘W's.
+        KeyBinding::new(&dictate_key(&emaki_core::config::Config::load().app.dictate_key), Dictate, None),
     ];
     if !cfg!(target_os = "macos") {
         keys.push(KeyBinding::new("win-,", OpenSettings, None));
@@ -103,6 +106,30 @@ fn key_bindings() -> Vec<KeyBinding> {
         ]);
     }
     keys
+}
+
+/// The dictation's key as a binding gpui takes: the one asked for when
+/// it is one, else the default.
+fn dictate_key(asked: &str) -> String {
+    if Keystroke::parse(asked).is_ok() { asked.to_string() } else { emaki_core::config::AppConfig::default().dictate_key }
+}
+
+/// Dictation moved from the key `old` to `new`, at once: the old key's
+/// binding is put out by a later one to nothing, which gpui ranks above
+/// it, and the new key is bound after that.
+pub fn move_dictate_key(old: &str, new: &str, cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(&dictate_key(old), NoAction, None), KeyBinding::new(&dictate_key(new), Dictate, None)]);
+}
+
+/// The action a key already has in the window, by its name, when it has
+/// one: a key for dictation must be one nothing else has.
+pub fn key_taken(binding: &str) -> Option<&'static str> {
+    let asked = Keystroke::parse(binding).ok()?.unparse();
+    key_bindings()
+        .into_iter()
+        .filter(|b| b.action().name() != Dictate.name())
+        .find(|b| b.keystrokes().len() == 1 && b.keystrokes()[0].unparse() == asked)
+        .map(|b| b.action().name())
 }
 
 fn app_menus() -> Vec<Menu> {
@@ -334,6 +361,20 @@ fn main() {
         // window here closed it with tabs open, whatever was not saved.
         cx.on_action(|_: &CloseWindow, cx| with_workbench(cx, |w, window, cx| w.close_window(window, cx)));
         cx.on_action(|_: &CloseTab, cx| with_workbench(cx, |w, window, cx| w.close_nearest(window, cx)));
+        cx.on_action(|_: &Dictate, cx| {
+            let Some(w) = cx.active_window() else { return };
+            let Some(workbench) = cx.try_global::<MainWorkbench>().and_then(|m| m.0.upgrade()) else { return };
+            cx.defer(move |cx| {
+                w.update(cx, |_, window, cx| workbench.update(cx, |w, cx| w.toggle_dictation(window, cx))).ok();
+            });
+        });
+        // ggml aborts the process at exit while a model holds the
+        // GPU's memory, so it is let go first.
+        cx.on_app_quit(|_| {
+            emaki_core::dictate::unload();
+            async {}
+        })
+        .detach();
         cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w| w.minimize_window()));
         cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w| w.zoom_window()));
         cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |w| w.toggle_fullscreen()));

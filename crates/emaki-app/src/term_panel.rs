@@ -1655,7 +1655,12 @@ impl Workbench {
         let theme = cx.theme().clone();
         let k = self.term_scheme(cx);
         let name = r.agent.display_name();
-        let (line, can): (String, bool) = if r.agent == AgentId::Codex {
+        let adrift = r.agent == AgentId::ClaudeCode && self.hub.hidden_terminals() && self.in_own_terminal(r) && self.hub.adrift_for(&r.session_id).is_some();
+        let (line, can): (String, bool) = if adrift {
+            // Its terminal went with the Emaki that started it, and a
+            // terminal cannot be joined again: the turn runs on unseen.
+            (format!("This turn began before Emaki was last quit. {name} is still running it, with no terminal left to show, and its work appears in the conversation. When the turn is over, {name} can be started here. Stopping it now ends the turn."), true)
+        } else if r.agent == AgentId::Codex {
             // Codex's own terminal, joined to the app server its driver
             // runs: one session, one writer.
             if self.hub.attaching(&r.session_id) {
@@ -1686,7 +1691,8 @@ impl Workbench {
             .px(px(28.))
             .child(div().text_size(px(12.5)).text_center().text_color(hsla(k.tab_off)).child(line))
             .when(can, |d| {
-                d.child(pill_button("term-agent-start", SharedString::from(format!("Start {name}")), &theme, cx.listener(|this, _, window, cx| {
+                let start = if adrift { crate::branches::small_pill("term-agent-start", "icons/circle-x.svg", "Stop and Start Here", crate::workbench::Press::Danger, false, &theme) } else { crate::branches::small_pill("term-agent-start", "icons/play.svg", format!("Start {name}"), crate::workbench::Press::Quiet, false, &theme) };
+                d.child(start.on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.start_hidden_terminal(cx);
                     window.focus(&this.side_term_focus, cx);

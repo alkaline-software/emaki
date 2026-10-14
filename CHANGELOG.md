@@ -5,6 +5,17 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.5
+
+- Dictation: talk into the composer with the microphone button or ⌘⇧D. A model you download in Settings, Dictate (Qwen3-ASR or Whisper) writes it down on this Mac, Chinese and English mixed. Mac only for now.
+- The Changes sheet commits the files you tick and has a History tab: browse commits, undo the last one or revert one. Push, Pull and Fetch sit where the counts are.
+- Settings has a page a section, Off and On for every switch, a field for dictation's key with Reset, and an About page.
+- Codex sessions are archived, unarchived and deleted through Codex itself, and an archived session is unarchived from its menu in the sidebar.
+- The Agents page walks through installing git and each agent and signing in, a numbered step at a time, for the system you choose.
+- Cards that come up while a session runs stand at the conversation's end and scroll with it; a dialog's tabs sit in a strip with arrows.
+- A Claude Code left running after its terminal closed is named as such, with a button to stop it and continue here.
+- Fixes: square corners that showed past rounded panels, sheets, menus and cards; Codex's usage limits.
+
 ## v0.2.4
 
 - Whatever an agent asks is shown: a question Emaki has no card for, such as Claude Code asking whether a new folder is trusted, comes up on the terminal card in the conversation and no longer waits unseen.

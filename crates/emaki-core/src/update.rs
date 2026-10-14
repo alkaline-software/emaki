@@ -51,6 +51,11 @@ pub fn asset_name() -> Option<&'static str> {
     }
 }
 
+/// The project's own page.
+pub fn repo_page() -> String {
+    format!("https://github.com/{REPO}")
+}
+
 pub fn release_page(version: &str) -> String {
     format!("https://github.com/{REPO}/releases/tag/v{version}")
 }

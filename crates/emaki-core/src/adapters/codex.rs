@@ -95,17 +95,56 @@ impl Adapter for CodexAdapter {
         crate::codex::catalogue(cwd).unwrap_or_default()
     }
 
+    /// A session in Codex's `archived_sessions` is archived: Codex does
+    /// not resume it until it is unarchived.
     fn list(&self, min_size: u64) -> Vec<SessionRef> {
         let mut files = Vec::new();
         for root in &self.roots {
             walk(root, &mut files);
         }
+        let archived_root = &self.roots[1];
         files
             .into_iter()
             .filter(|p| fs::metadata(p).map(|m| m.len() >= min_size).unwrap_or(false))
-            .map(|p| self.peek(&p))
+            .map(|p| {
+                let mut r = self.peek(&p);
+                r.archived = p.starts_with(archived_root);
+                r
+            })
             .filter(|r| !r.session_id.is_empty() && !r.title.is_empty())
             .collect()
+    }
+
+    /// Codex archives sessions itself (`/archive`, `codex archive`) and
+    /// deletes none by age, and Emaki asks it to: Codex moves its own
+    /// file and keeps its own record of it.
+    fn archives_itself(&self) -> bool {
+        true
+    }
+
+    fn present(&self) -> bool {
+        crate::codex::codex_binary().is_some()
+    }
+
+    fn archive(&self, r: &SessionRef) -> Result<(), String> {
+        if r.archived {
+            return Ok(());
+        }
+        crate::codex::thread_call("thread/archive", &r.session_id).map_err(|e| e.0)
+    }
+
+    /// Codex's own unarchive, which dates the session now.
+    fn unarchive(&self, r: &SessionRef) -> Result<(), String> {
+        crate::codex::thread_call("thread/unarchive", &r.session_id).map_err(|e| e.0)
+    }
+
+    /// Codex deletes its own; with no Codex here to ask, its file goes to
+    /// the trash.
+    fn delete_own(&self, r: &SessionRef) -> Result<bool, String> {
+        if !self.present() {
+            return Ok(false);
+        }
+        crate::codex::thread_call("thread/delete", &r.session_id).map(|_| true).map_err(|e| e.0)
     }
 
     fn peek(&self, path: &Path) -> SessionRef {
@@ -995,7 +1034,9 @@ impl Builder {
             "token_count" => {
                 // The account's windows ride on the same row, with or
                 // without the tokens: a primary and a secondary, each of
-                // whatever length the plan has.
+                // whatever length the plan has, for the limit the row
+                // names. Codex writes whichever limit it heard of last,
+                // so each is kept by its id, and none stands for another.
                 if let Some(limits) = payload.get("rate_limits").filter(|l| !l.is_null()) {
                     let windows: Vec<UsageWindow> = ["primary", "secondary"]
                         .iter()
@@ -1006,8 +1047,14 @@ impl Builder {
                         })
                         .collect();
                     if !windows.is_empty() {
-                        self.s.usage_windows = windows;
-                        self.s.usage_windows_at = crate::build::parse_ts(ts).map(|t| t.timestamp() as f64).unwrap_or(0.0);
+                        let text = |k: &str| limits.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                        let id = Some(text("limit_id")).filter(|i| !i.is_empty()).unwrap_or_else(|| crate::model::SHARED_LIMIT.to_string());
+                        let at = crate::build::parse_ts(ts).map(|t| t.timestamp() as f64).unwrap_or(0.0);
+                        let bucket = crate::model::UsageBucket { id, name: text("limit_name"), windows, at };
+                        match self.s.usage_buckets.iter_mut().find(|b| b.id == bucket.id) {
+                            Some(b) => *b = bucket,
+                            None => self.s.usage_buckets.push(bucket),
+                        }
                     }
                 }
                 let Some(info) = payload.get("info").filter(|i| !i.is_null()) else { return };

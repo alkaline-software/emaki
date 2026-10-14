@@ -13,6 +13,16 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
   one, and so is any new button; the toolkit's `Button` is not used for
   a new one. A choice in a menu has an icon too (`MenuDo::icon`).
   On a strip or a foot line it is the smaller `branches::small_pill`.
+- **A clip in gpui is a rectangle,** `overflow_hidden` too: a ground
+  (a fill, a hover, a chosen row, a header strip, a rail, a picture)
+  that reaches a rounded card's corner stands square past its curve.
+  Round it there itself, by the card's radius less its border
+  (`rounded_bl(px(17.))` in a card of 18). What scrolls cannot be
+  rounded, since its edge moves: keep room between the scroller and the
+  corner outside the scroller (a margin, or padding on the wrapper,
+  never padding inside it, which scrolls away). Over a solid ground
+  the corner can be painted over instead (`card_corners`); a sheet or a
+  menu floats over a page, so it cannot.
 - A hover's label names the key that does the same, in brackets after
   the words, as the Mac writes it: "Changes and History (⌘⇧G)". A
   button with a key and no label gets one for that.
@@ -114,7 +124,8 @@ place. Tabler's own `file-plus` has it in the middle of the sheet.
 Not Tabler: the flags in `icons/flags` and the handscroll's landscape in `icons/home`
 (`docs/window.md`), drawn here, `bubble-tail.svg`, the tail of a prompt's bubble
 (`docs/conversation.md`), `claude.svg`, Claude's own mark, the other agents' marks in
-`icons/agents/` (`docs/agents.md`; Codex wears OpenAI's everywhere), `mark.svg`, and eleven toolkit icons
+`icons/agents/` (`docs/agents.md`; Codex wears OpenAI's everywhere), the dictation models' makers' (Qwen's) in
+`icons/makers/` (LobeHub's icons, MIT, `LOBEHUB-LICENSE` beside them), `mark.svg`, and eleven toolkit icons
 that were never replaced (the window controls, the right and bottom
 panels, `inspector`, `resize-corner`, `star-off`), none of which the
 window draws.
