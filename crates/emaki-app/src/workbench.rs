@@ -679,7 +679,7 @@ const FIND_BAR_MOST: f32 = 64.;
 
 /// How long a fold in the conversation takes to open or shut, and a
 /// session's row in the sidebar to come or go.
-const FOLD_ANIM: Duration = Duration::from_millis(200);
+pub(crate) const FOLD_ANIM: Duration = Duration::from_millis(200);
 
 /// One thing that folds in the conversation, as it last stood.
 struct Fold {
@@ -1986,6 +1986,21 @@ pub struct Workbench {
     pub(crate) branch_fetched: Option<(PathBuf, Result<Instant, String>)>,
     /// The branch being sent to the remote.
     pub(crate) branch_publishing: Option<String>,
+    /// The commit's first line and the rest of its message, on the
+    /// comparison's sheet.
+    pub(crate) commit_summary: Entity<InputState>,
+    pub(crate) commit_body: Entity<TextareaState>,
+    pub(crate) committing: bool,
+    /// The comparison's own keyboard, for ⌘A over its files, and
+    /// whether it is to be given it at the next draw.
+    pub(crate) changes_focus: FocusHandle,
+    pub(crate) changes_focus_due: bool,
+    /// A pull (true) or a push under way.
+    pub(crate) syncing: Option<bool>,
+    /// What the strip under the files' head last said of commits to
+    /// push or pull, for drawing it as it goes: the words, and whether
+    /// its button pulls.
+    pub(crate) sync_kept: std::cell::RefCell<Option<(String, Option<bool>)>>,
     /// The sheet that says how to sign in to the remote.
     pub(crate) git_gate: Option<crate::branches::GitGate>,
     pub(crate) branch_probe: Option<String>,
@@ -3032,6 +3047,14 @@ impl Workbench {
             _ => {}
         })
         .detach();
+        let commit_summary = cx.new(|cx| InputState::new(window, cx).placeholder("Comment"));
+        cx.subscribe_in(&commit_summary, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => this.commit_go(window, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        })
+        .detach();
+        let commit_body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 8).placeholder("Description"));
         let machine_name = crate::sys::user_first_name();
         let name_input = cx.new(|cx| {
             let mut s = InputState::new(window, cx).placeholder(if machine_name.is_empty() { "Your name".to_string() } else { machine_name.clone() });
@@ -3660,6 +3683,13 @@ impl Workbench {
             branch_fetching: false,
             branch_fetched: None,
             branch_publishing: None,
+            commit_summary,
+            commit_body,
+            committing: false,
+            changes_focus: cx.focus_handle(),
+            changes_focus_due: false,
+            syncing: None,
+            sync_kept: Default::default(),
             git_gate: None,
             branch_probe: None,
             branch_ask_probe: None,
@@ -5048,18 +5078,6 @@ impl Workbench {
     /// to the workbench itself. Two draws, since what is focused as it
     /// first appears is in no frame yet. Called at every draw.
     fn keep_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The Projects card has the keyboard only while projects are
-        // chosen in it. Whatever let them go, it goes back to the
-        // composer where one shows, as it was before the choosing.
-        if self.side_marked.is_empty() && self.side_sessions.is_empty() && self.side_band.is_none() && self.side_focus.is_focused(window) {
-            let shows = match self.page {
-                Page::New => true,
-                Page::Session => self.detail.is_some() && !self.file_over(),
-                _ => false,
-            };
-            let to = if shows { self.composer.read(cx).focus_handle(cx) } else { self.focus_handle.clone() };
-            window.focus(&to, cx);
-        }
         if self.focus_handle.contains_focused(window, cx) {
             self.focus_astray = None;
             return;
@@ -10259,6 +10277,11 @@ impl Workbench {
                                 }
                                 return;
                             }
+                            // A session opened is read and written to: the
+                            // keyboard goes to its composer, not the card
+                            // the press was in.
+                            let to = this.composer.read(cx).focus_handle(cx);
+                            window.focus(&to, cx);
                             if !this.side_sessions.is_empty() || !this.side_marked.is_empty() {
                                 this.side_sessions.clear();
                                 this.side_marked.clear();
@@ -10493,6 +10516,9 @@ impl Workbench {
                         this.side_band_live = false;
                     }),
                 )
+                // A press anywhere in the card gives it the keyboard,
+                // heard before the rows, which stop their own presses.
+                .capture_any_mouse_down(cx.listener(|this, _, window, cx| window.focus(&this.side_focus, cx)))
                 .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
                     if ev.pressed_button == Some(MouseButton::Left) {
                         this.side_band_to(ev.position, cx);
@@ -10502,18 +10528,24 @@ impl Workbench {
                     }
                 }))
                 // ⌘A takes every project showing, while the card has
-                // the keyboard.
+                // the keyboard, whatever is chosen in it: projects, and
+                // never the sessions. Words typed there are the
+                // composer's: it gets the keyboard and the key again.
                 .track_focus(&self.side_focus)
-                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                     let keys = &e.keystroke;
                     if keys.key == "a" && keys.modifiers.secondary() && !keys.modifiers.shift && !keys.modifiers.alt {
-                        if this.side_sessions.is_empty() {
-                            this.side_marked = this.side_drawn.borrow().clone();
-                        } else {
-                            this.side_sessions = this.side_sess_drawn.borrow().clone();
-                        }
+                        this.side_sessions.clear();
+                        this.side_marked = this.side_drawn.borrow().clone();
                         cx.stop_propagation();
                         cx.notify();
+                    } else if keys.key_char.is_some() && !keys.modifiers.secondary() && !keys.modifiers.control && matches!(this.page, Page::New | Page::Session) {
+                        let (to, key) = (this.composer.read(cx).focus_handle(cx), keys.clone());
+                        window.focus(&to, cx);
+                        cx.stop_propagation();
+                        window.defer(cx, move |window, cx| {
+                            window.dispatch_keystroke(key, cx);
+                        });
                     }
                 }))
                 // A click on the card's empty room lets what is chosen go.
@@ -10906,7 +10938,7 @@ impl Workbench {
     /// it moves; nothing at rest. What was never drawn before is not
     /// played. One going is drawn until its time is up, and once more
     /// then as nothing.
-    fn presence(&self, id: &str, on: bool, cx: &mut Context<Self>) -> Option<(bool, u32)> {
+    pub(crate) fn presence(&self, id: &str, on: bool, cx: &mut Context<Self>) -> Option<(bool, u32)> {
         let mut all = self.presences.borrow_mut();
         let now = Instant::now();
         let p = all.entry(id.to_string()).or_insert_with(|| (on, now.checked_sub(FOLD_ANIM * 2).unwrap_or(now), 0));
@@ -16306,6 +16338,9 @@ impl Render for Workbench {
         if self.file_big_at.is_some_and(|at| at.elapsed() < crate::panels::FILE_ANIM) {
             window.request_animation_frame();
         }
+        if std::mem::take(&mut self.changes_focus_due) && self.changes.is_some() {
+            window.focus(&self.changes_focus, cx);
+        }
         match self.term_focus_due.take() {
             Some(true) => window.focus(&self.term_focus, cx),
             Some(false) if self.page == Page::Session => {
@@ -16654,7 +16689,9 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &FindInPage, window, cx| if this.find_open && this.find_input.read(cx).focus_handle(cx).is_focused(window) { this.close_find(window, cx) } else { this.open_find(window, cx) }))
             .on_action(cx.listener(|this, _: &SaveFile, window, cx| this.save_file(window, cx)))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_step(1, cx)))
-            .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.find_step(-1, cx)))
+            // ⌘⇧G steps the find bar back while it is open, and is
+            // the comparison's key otherwise.
+            .on_action(cx.listener(|this, _: &FindPrev, _, cx| if this.find_open { this.find_step(-1, cx) } else { this.toggle_changes(cx) }))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 if this.narrow && this.sidebar_peek {
                     this.sidebar_peek = false;
@@ -16705,7 +16742,6 @@ impl Render for Workbench {
             .children(self.render_sidebar_float(cx))
             .child(self.render_strip(cx))
             .when(search_open, |d| d.child(self.render_search(cx)))
-            .when(self.settings_open, |d| d.child(self.render_settings(cx)))
             .when(self.changes.is_some(), |d| d.child(fade_in("changes-in", self.render_changes(cx))))
             .when_some(self.lightbox.clone(), |d, lb| d.child(fade_in("lightbox-in", self.render_lightbox(lb, cx))))
             // The sheet, when the name was asked for where there is no
@@ -16720,6 +16756,10 @@ impl Render for Workbench {
             .when(self.discard_ask.is_some(), |d| d.child(fade_in("discard-ask-in", self.render_discard_ask(cx))))
             .when(self.manage_ask.is_some(), |d| d.child(fade_in("manage-ask-in", self.render_manage_ask(cx))))
             .when(self.open_ask.is_some(), |d| d.child(fade_in("open-ask-in", self.render_open_ask(cx))))
+            // The settings are over every sheet and card there is: under
+            // one, they opened behind it. Only a menu or a list, which
+            // the settings open themselves, is over them.
+            .when(self.settings_open, |d| d.child(self.render_settings(cx)))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
             .when_some(self.pick_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))

@@ -29,17 +29,32 @@ About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
   limit. Nobody is at one, and the list of branches would hang. A
   remote that refuses comes back as words, and `git::why_net` says
   whether to check the network or to sign in.
-- Nothing is pushed, published or merged without a click on a button
-  that says so. A fetch is the one call to the remote made unasked: it
-  changes what is known of the remote and nothing checked out. The
-  default branch is brought up to the remote's only by a fast-forward
-  (`git::fast_forward`); where that takes a merge it is left alone.
+- Nothing is committed, pushed, pulled, published or merged without a
+  click on a button that says so. A fetch is the one call to the remote
+  made unasked: it changes what is known of the remote and nothing
+  checked out. A branch is brought up to the remote's only by a
+  fast-forward (`git::fast_forward`), the default one before a branch
+  is made from it and the one checked out by Pull; where that takes a
+  merge it is left alone, and the line says to merge in a terminal.
+- A fetch asks the remote about two branches at most, the one checked
+  out and the default one (`git::fetch`, `fetch_names`), never all of
+  them: a repository may have a hundred. A branch only the remote has
+  is asked for by name when it is switched to (`git::fetch_branch`).
+  So a branch made on the remote since the clone is not in the list
+  until something else fetches it, and one deleted there stays listed.
+  A branch the remote is not known to have is left out of the fetch:
+  asked for one it lacks, git fails the whole call.
+- A commit takes the files ticked in the comparison and nothing else
+  (`git::commit`): all of them by `add -A` under the folder, some by
+  `commit --only`, which leaves alone what else is staged. Git's own
+  refusal is shown on a dialog (no name to commit under, a hook, a
+  merge half done) and nothing is forced or amended.
 - Nothing here signs in. The sign-in sheet gives commands to paste, as
   the agents page does, and "Check again" asks the remote.
 - A branch switch is refused while a turn runs in the session showing: the
   agent is writing the files a switch would change.
-- Nothing is staged or committed from the comparison. The one thing it
-  changes is Discard, on the file showing (`ask_discard`, `discard_now`,
+- The comparison changes two things, each on its own button: a commit
+  of the files ticked, and Discard, on the file showing (`ask_discard`, `discard_now`,
   `git::discard`): a file the last commit has goes back to what that
   commit has, staged or not, after what it held is written into git's
   object store, where it stays until git prunes; a file the commit does
@@ -284,13 +299,25 @@ branch to the remote and has it follow its copy there (`branch_publish`,
 which named an action in a column of states. The branch checked out says the same on a strip under
 the head (`publish_strip`).
 
-**The remote.** "remote" means the remote had the branch at the last
-fetch; nothing of it is checked out here. Opening the list fetches when
-the last word is more than a minute old (`branch_fetch`), and the line at
-the list's foot says when the remote last answered or why it did not. A
-switch to a remote's branch fetches first, so what is checked out is what
-the remote has now; when the remote cannot be asked the branch is checked
-out as last fetched and the row under the composer says so.
+**The remote.** "remote" means the remote had the branch when it was
+last heard of; nothing of it is checked out here. Opening the list, or
+the comparison, fetches when the last word is more than a minute old
+(`branch_fetch`): the branch checked out and the default one, no others
+(Rules). The line at the list's foot says when the remote last answered
+or why it did not, and how the branch checked out stands against the
+remote's (`sync_words`, from `Branches::ahead` and `behind`). Its
+buttons are Fetch and, with commits to pull, Pull; they keep their
+place while the remote is asked. A switch to a remote's branch fetches
+that branch first, so what is checked out is what the remote has now;
+when the remote cannot be asked the branch is checked out as last
+fetched and the row under the composer says so.
+
+**Push and Pull** (`sync_go`, `sync_pill`) are offered wherever the
+count is said: the list's foot (Pull), a strip under the files' head
+when there are commits either way (`sync_strip`, there while the
+comparison has nothing to open for), and under the commit's button.
+Pull is refused while a turn runs in the session showing, as a switch
+is. Gone separate ways, neither is offered.
 
 **Making a branch** is one sheet (`render_branch_new`, `BranchNew`),
 reached three ways: the New Branch button beside the field, words that
@@ -370,7 +397,11 @@ showing.
 (`Status::changed`, kept as `Tree::changed`) and opens the comparison
 (`render_changes`, `Changes`), laid out as GitHub Desktop's Changes tab:
 a sheet with the changed files at its left and the picked file's lines at
-its right, the last commit beside what is there now. "Show changes" in a
+its right, the last commit beside what is there now. ⌘⇧G shows it and
+puts it away (`toggle_changes`); with the find bar open that key is the
+bar's step back, as it was (`FindPrev`). The sheet keeps the strip's
+height clear over and under it, so it is in the window's middle and its
+head is never under the window's three buttons. "Show changes" in a
 changed file's menu opens it on that file.
 
 - The file list is a `uniform_list`, since a commit of icons is a
@@ -391,6 +422,20 @@ changed file's menu opens it on that file.
 - Discard is asked of every file chosen (`ask_discard`, `discard_now`),
   the pill at the head saying how many, and the question says which of
   them go to the trash because the last commit has no such file.
+- Each file has a box, ticked to begin with: the files ticked are the
+  commit (`Changes::left_out`, `commit_tick`). A click on the box of
+  one of several chosen together ticks or clears them all.
+- ⌘A chooses every file while the sheet itself has the keyboard
+  (`changes_focus`): it has it when it opens and after a press on the
+  files. In a field of the commit's, ⌘A is the field's.
+- Under the files, the commit (`render_commit_box`): a comment, a
+  description, and the button, which says how many files and is greyed
+  until there is a comment and a file. A star at the comment's end says
+  it is needed, until there is one. In the light appearance a field is
+  the page's ground inside a line: the hollow's grey is the panel's own
+  there. ↩ in the comment commits
+  (`commit_go`). Done, the fields are emptied and the sheet stays, with
+  Push under the button.
 - ⌘W closes the sheet (`close_nearest`), the question over it first.
 - `git::diff` is `git diff HEAD` for the file, `--cached` before a first
   commit, and a file git does not track read as all new lines.
@@ -1055,6 +1100,9 @@ this the mark fell back to the last entry when the move ended.
   `panelfit` is the double click on it.
 - `EMAKI_GO=branches` opens the branch list, `branchq:<words>` types in
   its field; `changes` opens the comparison, `changes:<path>` on a file.
+  As the first step `changes` opens nothing, git not having answered
+  yet: put a step before it (`x;changes`). `branches` does not ask the
+  remote as a click on the pill does; `branchfetch` does.
 - `branchnew` opens the sheet a branch is made on, `branchnew:<name>`
   with that name, and `branchnewgo` presses Create Branch. `branchpublish`
   publishes the branch checked out, `branchfetch` fetches, and `gitgate`

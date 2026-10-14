@@ -12,6 +12,9 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
   answer a card is for. Every choice on a card that asks something is
   one, and so is any new button; the toolkit's `Button` is not used for
   a new one. A choice in a menu has an icon too (`MenuDo::icon`).
+  On a strip or a foot line it is the smaller `branches::small_pill`.
+  One that is off keeps its place and is dimmed, so nothing beside it
+  moves while the work it stands for is done.
 - No call site names Tabler. A new icon is a file in `assets/icons/`
   under the toolkit's file name and a line in `OWN` (`assets.rs`).
 - Every face the window carries is under a licence that lets an app

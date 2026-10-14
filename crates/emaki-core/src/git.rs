@@ -404,6 +404,12 @@ pub struct Branches {
     /// Local branches no remote has: made here and not yet published.
     /// Empty with no remote, where there is nowhere to publish to.
     pub unpublished: Vec<String>,
+    /// How far the branch checked out and the remote's copy of it are
+    /// apart, as last fetched: commits here the remote lacks (to push),
+    /// and commits there that are not here (to pull). Both none where
+    /// the remote has no such branch.
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 /// A name in pieces that order as a person reads it: a run of digits
@@ -516,6 +522,7 @@ pub fn branches(dir: &Path) -> Option<Branches> {
     let default = b.default.clone();
     b.local.sort_by_key(|name| (Some(name) != default.as_ref(), name.clone()));
     b.stashed = b.current.as_ref().map_or(0, |cur| left_on(dir, cur).len());
+    (b.ahead, b.behind) = b.current.as_ref().and_then(|cur| ahead_behind(dir, cur)).unwrap_or_default();
     Some(b)
 }
 
@@ -626,13 +633,48 @@ pub fn why_net(words: &str) -> NetTrouble {
     }
 }
 
-/// Ask the remote what it has now, and forget the branches it no longer
-/// has. Nothing to do, and no failure, in a repository with no remote.
-pub fn fetch(dir: &Path) -> Result<(), String> {
-    match remote(dir) {
-        Some(r) => net(dir, &["fetch", "--prune", "--quiet", &r]),
-        None => Ok(()),
+/// The branches a fetch asks the remote about: the one checked out and
+/// the default one, each where the remote is known to have it. Asked
+/// for one it has not, git fails the whole fetch.
+pub fn fetch_names(dir: &Path) -> Vec<String> {
+    let Some(r) = remote(dir) else { return Vec::new() };
+    let default = line(dir, &["symbolic-ref", "--short", "-q", &format!("refs/remotes/{r}/HEAD")]).and_then(|h| h.split_once('/').map(|(_, n)| n.to_string())).or_else(|| ["main", "master"].iter().map(|n| n.to_string()).find(|n| has_ref(dir, &format!("refs/remotes/{r}/{n}"))));
+    let mut names: Vec<String> = Vec::new();
+    for name in [line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]), default].into_iter().flatten() {
+        if !names.contains(&name) && has_ref(dir, &format!("refs/remotes/{r}/{name}")) {
+            names.push(name);
+        }
     }
+    names
+}
+
+fn has_ref(dir: &Path, name: &str) -> bool {
+    git(dir, &["show-ref", "--verify", "--quiet", name]).is_some()
+}
+
+/// Ask the remote how the branch checked out and the default branch
+/// stand now (`fetch_names`), and nothing else: a repository may have a
+/// hundred branches, and the rest are fetched when they are switched to
+/// (`fetch_branch`). Where the remote is known to have neither (nothing
+/// was ever fetched), it is asked for everything, once. Nothing to do,
+/// and no failure, in a repository with no remote.
+pub fn fetch(dir: &Path) -> Result<(), String> {
+    let Some(r) = remote(dir) else { return Ok(()) };
+    let names = fetch_names(dir);
+    if names.is_empty() {
+        return net(dir, &["fetch", "--prune", "--quiet", &r]);
+    }
+    let specs: Vec<String> = names.iter().map(|n| format!("+refs/heads/{n}:refs/remotes/{r}/{n}")).collect();
+    let mut args = vec!["fetch", "--quiet", r.as_str()];
+    args.extend(specs.iter().map(String::as_str));
+    net(dir, &args)
+}
+
+/// Ask the remote for one branch as it has it now: what a switch to a
+/// branch only the remote has does first.
+pub fn fetch_branch(dir: &Path, name: &str) -> Result<(), String> {
+    let r = remote(dir).ok_or("this repository has no remote")?;
+    net(dir, &["fetch", "--quiet", &r, &format!("+refs/heads/{name}:refs/remotes/{r}/{name}")])
 }
 
 /// Whether the remote takes who is asking: the smallest question there
@@ -671,6 +713,37 @@ pub fn fast_forward(dir: &Path, name: &str) -> Result<(), String> {
 pub fn publish(dir: &Path, name: &str) -> Result<(), String> {
     let r = remote(dir).ok_or("this repository has no remote to publish to")?;
     net(dir, &["push", "--quiet", "--set-upstream", &r, &format!("refs/heads/{name}:refs/heads/{name}")])
+}
+
+/// Commit what is changed in `paths`, or with none named everything
+/// changed under `dir`, with `summary` as the message's first line and
+/// `description` after a blank one. New files are added and files gone
+/// are taken out, as the list of changes shows them. With paths named,
+/// only those are committed, whatever else is staged (`--only`); git
+/// refuses that in the middle of a merge, in its own words. No editor
+/// is opened, and a hook that refuses is reported as it speaks.
+pub fn commit(dir: &Path, summary: &str, description: &str, paths: Option<&[PathBuf]>) -> Result<(), String> {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return Err("a commit needs a summary".to_string());
+    }
+    let named: Vec<String> = paths.unwrap_or_default().iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let mut add = vec!["add", "-A", "--"];
+    if named.is_empty() {
+        add.push(".");
+    }
+    add.extend(named.iter().map(String::as_str));
+    act(dir, &add)?;
+    let mut args = vec!["commit", "--quiet", "-m", summary];
+    let description = description.trim();
+    if !description.is_empty() {
+        args.extend(["-m", description]);
+    }
+    if !named.is_empty() {
+        args.extend(["--only", "--"]);
+        args.extend(named.iter().map(String::as_str));
+    }
+    act(dir, &args)
 }
 
 /// Where the remote is, and how the machine would sign in to it: what

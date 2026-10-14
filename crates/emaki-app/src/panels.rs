@@ -21,7 +21,7 @@ use gpui::*;
 use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _};
+use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 
 use emaki_core::git;
 use emaki_core::outline::{self, Kind};
@@ -248,7 +248,7 @@ pub struct Tree {
 /// The comparison showing over the window: which file of the changed
 /// ones, and its lines against the last commit.
 pub struct Changes {
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     picked: Option<PathBuf>,
     /// The lines of `picked`, once read.
     diff: Option<(PathBuf, Rc<git::Diff>)>,
@@ -257,7 +257,7 @@ pub struct Changes {
     reading: bool,
     /// The files chosen together, `picked` among them: what a menu or
     /// Discard is asked of. Chosen as the tree's rows are.
-    marked: Vec<PathBuf>,
+    pub(crate) marked: Vec<PathBuf>,
     /// Where ⇧ and a click reaches from.
     anchor: Option<PathBuf>,
     /// A rectangle being dragged over the files: where the press was
@@ -265,6 +265,8 @@ pub struct Changes {
     band: Option<(Point<Pixels>, Point<Pixels>)>,
     band_live: bool,
     band_at: Option<std::time::Instant>,
+    /// The files a commit leaves out: every other one changed goes in.
+    pub(crate) left_out: HashSet<PathBuf>,
 }
 
 /// VS Code's colour for a git state, light then dark: the GitHub
@@ -1854,6 +1856,16 @@ impl Workbench {
                     this.tree.changed = Rc::new(status.changed());
                     this.tree.git = Some((root.clone(), Rc::new(status)));
                     cx.notify();
+                    // The comparison opened before git had answered
+                    // (⌘⇧G with the files panel never shown) shows its
+                    // first file now.
+                    let first = this.tree.changed.first().map(|(p, _)| p.clone());
+                    if let Some(c) = this.changes.as_mut().filter(|c| c.picked.is_none() && c.root == root) {
+                        c.picked = first.clone();
+                        c.anchor = first.clone();
+                        c.marked = first.into_iter().collect();
+                        this.load_diff(cx);
+                    }
                 }
                 let trouble = trouble.map(|t| (root.clone(), t));
                 if this.tree.git_trouble != trouble {
@@ -5149,7 +5161,7 @@ impl Workbench {
             if !this.tree_rename_key(e, window, cx) {
                 this.tree_key(e, cx);
             }
-        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(root_row).child(body);
+        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body);
         self.panel_in(true, el)
     }
 
@@ -5160,6 +5172,11 @@ impl Workbench {
     /// until it has been asked.
     pub(crate) fn panel_changes(&self) -> usize {
         self.files_root().filter(|root| self.tree.git.as_ref().is_some_and(|(of, _)| of == root)).map_or(0, |_| self.tree.changed.len())
+    }
+
+    /// Every file with a change, as git last had them.
+    pub(crate) fn changed_files(&self) -> Rc<Vec<(PathBuf, git::State)>> {
+        self.tree.changed.clone()
     }
 
     pub(crate) fn branches(&self) -> Option<Rc<git::Branches>> {
@@ -5350,7 +5367,7 @@ impl Workbench {
                 .background_executor()
                 .spawn(async move {
                     let was_dirty = git::dirty(&dir);
-                    let stale = if theirs { git::fetch(&dir).err() } else { None };
+                    let stale = if theirs { git::fetch_branch(&dir, &to).err() } else { None };
                     // The branch a new one starts from, brought up to the
                     // remote's: refused, nothing is made.
                     if let (true, Some(b)) = (update, &start) {
@@ -5532,10 +5549,12 @@ impl Workbench {
                 .text_size(px(11.5))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.link).flex_shrink_0())
                 .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child("Changes you left on this branch"))
-                .child(Button::new("stash-restore").outline().xsmall().label("Restore").disabled(self.branch_busy).on_click(cx.listener(|this, _, window, cx| {
-                    swallow_click(window, cx);
-                    this.branch_restore(cx)
-                })))
+                .child(crate::branches::small_pill("stash-restore", "icons/undo-2.svg", "Restore", Press::Quiet, self.branch_busy, &theme).when(!self.branch_busy, |d| {
+                    d.on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.branch_restore(cx)
+                    }))
+                }))
                 .into_any_element(),
         )
     }
@@ -5891,32 +5910,11 @@ impl Workbench {
                     .text_size(px(13.))
                     .child(Icon::new(IconName::Search).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
                     .child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.branch_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.branch_input, false, cx)))),
-            ).child(div()
-                .id("branch-new-button")
+            ).child(choice_pill("branch-new-button", "icons/plus.svg", "New Branch", Press::Quiet, false, &theme)
                 .role(Role::Button)
                 .aria_label("New Branch")
-                .flex_shrink_0()
-                // A button, beside a field: the field is a hollow in
-                // the sheet, this stands on it, with an edge and a
-                // shadow under it that a press takes away.
+                // As tall as the field it stands beside.
                 .h(px(32.))
-                .pl(px(9.))
-                .pr(px(12.))
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(theme.foreground.opacity(0.16))
-                .bg(theme.background)
-                .shadow_xs()
-                .text_size(px(13.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.muted).border_color(theme.foreground.opacity(0.28)))
-                .active(|s| s.bg(theme.foreground.opacity(0.16)).shadow_none())
-                .child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
-                .child("New Branch")
                 .on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 let typed = this.branch_input.read(cx).value().trim().to_string();
@@ -5986,9 +5984,29 @@ impl Workbench {
             files.scroll_to_item(at, ScrollStrategy::Center);
         }
         let marked: Vec<PathBuf> = picked.iter().cloned().collect();
-        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None });
+        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new() });
+        self.changes_focus_due = true;
+        // How the branch stands against the remote's, for the buttons
+        // that push and pull.
+        self.branch_fetch(false, cx);
         self.load_diff(cx);
         cx.notify();
+    }
+
+    /// ⌘⇧G: the comparison, shown or put away. Git is asked first when
+    /// the files panel never was, so the sheet does not open empty on a
+    /// folder with changes.
+    pub(crate) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
+        if self.changes.is_some() {
+            return self.close_changes(cx);
+        }
+        let Some(root) = self.files_root().filter(|r| git::inside(r)) else {
+            self.notice = Some(Notice::error("open a session in a git repository to see its changes"));
+            cx.notify();
+            return;
+        };
+        self.read_git(root, cx);
+        self.open_changes(None, cx);
     }
 
     pub(crate) fn close_changes(&mut self, cx: &mut Context<Self>) {
@@ -6177,6 +6195,8 @@ impl Workbench {
         let entity = cx.weak_entity();
         let (hover, chosen_bg, ink, quiet, mono) = (row_hover(&theme, dark), theme.primary.opacity(if dark { 0.18 } else { 0.12 }), theme.foreground, theme.muted_foreground, theme.mono_font_family.clone());
         let marked: Rc<HashSet<PathBuf>> = Rc::new(c.marked.iter().cloned().collect());
+        let left_out: Rc<HashSet<PathBuf>> = Rc::new(c.left_out.clone());
+        let (accent, on_accent) = (theme.primary, theme.primary_foreground);
         let files = uniform_list("changes-files", changed.len(), {
             let (changed, root, marked) = (changed.clone(), root.clone(), marked.clone());
             move |range: std::ops::Range<usize>, _: &mut Window, _: &mut App| {
@@ -6193,6 +6213,28 @@ impl Workbench {
                         let is = |at: Option<usize>| at.and_then(|at| changed.get(at)).is_some_and(|(p, _)| marked.contains(p));
                         let (chosen, above, below) = (marked.contains(&path), is(ix.checked_sub(1)), is(Some(ix + 1)));
                         let (entity, menu_entity, menu_path) = (entity.clone(), entity.clone(), path.clone());
+                        // The box that says the file goes into the commit.
+                        let taken = !left_out.contains(&path);
+                        let (tick_entity, tick_path) = (entity.clone(), path.clone());
+                        let tick = div()
+                            .id(("change-tick", ix))
+                            .flex_shrink_0()
+                            .size(px(15.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(if taken { accent } else { quiet.opacity(0.7) })
+                            .when(taken, |d| d.bg(accent))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .when(taken, |d| d.child(Icon::new(IconName::Check).with_size(px(10.)).text_color(on_accent)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                swallow_click(window, cx);
+                                tick_entity.update(cx, |this, cx| this.commit_tick(tick_path.clone(), cx)).ok();
+                            });
                         let row = h_flex()
                             .id(("change-row", ix))
                             .w_full()
@@ -6216,6 +6258,7 @@ impl Workbench {
                                 cx.stop_propagation();
                                 menu_entity.update(cx, |this, cx| this.changes_menu(menu_path.clone(), e.position, cx)).ok();
                             })
+                            .child(tick)
                             .child(img(crate::file_icons::path(&name, false, false, dark)).size(px(16.)).flex_shrink_0())
                             // The folders give way first, so the name stays whole.
                             .child(h_flex().flex_1().min_w_0().child(div().min_w_0().truncate().text_color(quiet).child(folder)).child(div().flex_shrink_0().text_color(ink).child(name)))
@@ -6303,14 +6346,34 @@ impl Workbench {
             .flex()
             .items_center()
             .justify_center()
+            // The strip's height over and under the sheet, so it stays in
+            // the window's middle: as a share of the height, a low
+            // window put the sheet's head under its three buttons.
+            .py(crate::workbench::TITLEBAR_H)
             .on_click(cx.listener(|this, _, _, cx| this.close_changes(cx)))
             .child(
                 v_flex()
                     .id("changes-sheet")
                     .occlude()
+                    // ⌘A chooses every file, while the sheet itself has
+                    // the keyboard: in a field of the commit's it is
+                    // the field's.
+                    .track_focus(&self.changes_focus)
+                    .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                        let keys = &e.keystroke;
+                        if keys.key == "a" && keys.modifiers.secondary() && !keys.modifiers.shift && !keys.modifiers.alt && this.changes_focus.is_focused(window) {
+                            let all: Vec<PathBuf> = this.tree.changed.iter().map(|(p, _)| p.clone()).collect();
+                            if let Some(c) = &mut this.changes {
+                                c.anchor = all.first().cloned();
+                                c.marked = all;
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
                     .on_click(|_, window, cx| swallow_click(window, cx))
                     .w(gpui::relative(0.96))
-                    .h(gpui::relative(0.92))
+                    .h_full()
                     .rounded(px(16.))
                     .overflow_hidden()
                     .bg(theme.background)
@@ -6339,16 +6402,17 @@ impl Workbench {
                             .flex_1()
                             .min_h_0()
                             .items_stretch()
-                            .child(
+                            // A clip is a rectangle, so the column's ground is
+                            // rounded where the sheet's corner is: square, it
+                            // showed past the sheet's own curve.
+                            .child(v_flex().w(CHANGES_LIST_W).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).rounded_bl(px(15.)).child(
                                 div()
                                     .id("changes-list")
                                     .relative()
-                                    .w(CHANGES_LIST_W)
-                                    .flex_shrink_0()
+                                    .w_full()
+                                    .flex_1()
+                                    .min_h_0()
                                     .py(px(6.))
-                                    .border_r_1()
-                                    .border_color(theme.border)
-                                    .bg(theme.sidebar)
                                     // A press anywhere in the list may become a
                                     // rectangle dragged over the files.
                                     .on_mouse_down(
@@ -6360,6 +6424,9 @@ impl Workbench {
                                             }
                                         }),
                                     )
+                                    // A press on the files gives the sheet the
+                                    // keyboard back from a field of the commit's.
+                                    .capture_any_mouse_down(cx.listener(|this, _, window, cx| window.focus(&this.changes_focus, cx)))
                                     .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                                         if e.pressed_button == Some(MouseButton::Left) {
                                             this.changes_band_to(e.position, cx);
@@ -6370,7 +6437,7 @@ impl Workbench {
                                     .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.changes_band_end(cx)))
                                     .child(div().relative().size_full().child(files).children(band))
                                     .vertical_scrollbar(&c.files),
-                            )
+                            ).child(self.render_commit_box(cx)))
                             .child(
                                 v_flex()
                                     .flex_1()
