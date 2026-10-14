@@ -70,6 +70,63 @@ question, dialog, shells and permission cards), the screen readers in
   went away gets no end row.
 - Nothing here stops a background command. That is the agent's or the
   terminal's to do.
+- No card is held over the composer. A card there took the
+  conversation's room for as long as it was up: with a long question in
+  a low window a few lines of the conversation were left, and nothing
+  the reader did gave them more.
+- A scroller inside a card's body is made before the body's own
+  (`card_scroll`): `route_scroll` takes the first one under the pointer.
+
+## The cards
+
+Whatever comes up for the person to read or answer while a session runs
+is a card in one column (`Workbench::render_cards`): the background
+commands' and agents' cards, the hidden terminal's screen, a terminal's
+dialog, a driver's questions and permissions. A new card goes there.
+
+- The column is drawn under the last round, inside the list's last item
+  (`render_list_item`), so it scrolls with the conversation: going up
+  leaves the cards behind and the conversation has its whole room. The
+  list is told of no item more, so nothing is spliced
+  (`docs/conversation.md`). A conversation with no round yet has no item
+  to stand them in, and there they stand over the composer.
+- What a card holds is drawn through `card_scroll`: no taller than
+  `card_most`, a share of the window's height, and past that it scrolls
+  inside the card, its head and its buttons staying. It scrolls sideways
+  too, for what cannot wrap: `wide` is that width (the terminal's rows).
+  Words wrap and need none. A text's least width in gpui is its whole
+  line, so a body cannot be sized by what it holds: one that was would
+  never wrap.
+- The body is `Inner::Chained`, as a tool call's is: a stroke begun at
+  its edge is the conversation's, so the wheel over a card still leaves
+  it behind.
+- A dialog's tabs are a strip of their own that scrolls sideways and is
+  brought to the tab showing when that changes. A sideways scroller in
+  a card takes a sideways stroke only (`restrict_scroll_to_axis`):
+  without it gpui turns the wheel's up and down into across, and the
+  strip moved together with the conversation. While the strip has more
+  tabs than show, an arrow stands at each end, lit where more lies that
+  way, and the tabs fade into the card's ground at that end; a click on
+  the arrow goes there. An arrow with no more its way keeps its room,
+  so the tabs do not shift. All of it is in motion: the strip runs to
+  where it is going (`tabs_glide_step`), also when it is brought to the
+  tab showing, and the arrows and fades come and go by `presence`.
+- The column has no gap: each card carries the room under it, which
+  moves with it as it opens and closes (`render_terminal`,
+  `card_fold`). The lines under the conversation are the same, each
+  with the air over it (`foot_line`; `docs/window.md`, Motion).
+- The reader is left where they are when the agent asks. While a card
+  is up neither the working line nor the waiting line is shown: the
+  transcript still reads as working while a question waits, and the
+  line said "Claude is working…" over a card the agent was held on.
+  With the card left behind, a line of its own says the agent is
+  waiting, with a "Show" pill that goes to the end (`cards_show`), run
+  from where the reader is (`end_glide_step`). The line opens up from
+  the composer and closes back to it, in the column with no gap. What the person asked for
+  themselves (a pill's picker, a typed command, the background
+  commands' row) goes there at once.
+- The terminal card holds the keyboard, and a card far above the view is
+  not drawn. The keyboard then goes to the composer (`cards_drawn`).
 
 ## The working row
 
@@ -200,6 +257,9 @@ needed" or "permission prompt"); the screen says which.
   choice, so the card rings the pointed choice, shows its preview in the
   mono face, sends the digit for a click on another choice, and Return
   for a click on the pointed one or on Choose.
+- A question's lines on the screen are one question on the card,
+  joined. Only an approval and the review have something before what
+  is asked (the command, the answers), which goes in the box over it.
 - `render_dialog` draws it where the permission cards sit. The terminal's
   dialog is the one that moves, and the card is the screen read again: a
   click sends the choice's digit (`sys::text_in_terminal`, the pane never
@@ -255,7 +315,8 @@ The transcript has both ends (`build::shells_of`, into `Session::shells`):
 
 The row (`render_shells`) sits where the working line does, above it when
 both are there: the count, the agent's line on what the command is for,
-how long it has run. A click opens a card with each command and the last
+how long it has run. A click opens a card at the conversation's end
+(`render_shells_card`) with each command and the last
 `SHELL_TAIL_LINES` of its output, read from the output file on the clock
 while the card is open (`file_tail`: colour sequences out, a progress line
 that rewrites itself kept as it last read).
@@ -303,7 +364,13 @@ answering. Stacked cards: the first also offers "Allow all".
 ## Probing
 
 - `EMAKI_GO=dialogdemo:preview` holds a sample question with previews on
-  the card.
+  the card. `dialogdemo:long` holds one with six tabs and more choices
+  than a card shows; `termdemo:tall` draws the terminal card on a screen
+  taller than a card. `cards:<across>:<down>` moves every card's body
+  as a wheel would and prints where each is and how far it can go.
+  `scroll:` from the conversation's end moves nothing until it is more
+  than the view's height. `tabs:left` and `tabs:right` are clicks on the
+  strip's arrows, `cardsshow` one on "Show".
 - `EMAKI_GO=dialogdemo:plan` holds a plan's dialog, with the plan the
   session showing last wrote. For the real one: `emaki-core pty <cwd>
   --keys "/plan" --keys "\r" --keys "<a prompt>" --keys "\r"` prints the

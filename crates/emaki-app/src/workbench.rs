@@ -364,6 +364,8 @@ struct TermShown {
 /// The dialog card as it was last drawn, kept the same way: the dialog
 /// it showed is drawn once more, closing, when the screen has none.
 struct DialogShown {
+    /// The tab the strip was last brought to.
+    tab: Option<usize>,
     sid: String,
     dialog: Option<emaki_core::driver::Dialog>,
     on: bool,
@@ -373,7 +375,7 @@ struct DialogShown {
 
 impl Default for DialogShown {
     fn default() -> Self {
-        DialogShown { sid: String::new(), dialog: None, on: false, at: std::time::Instant::now(), serial: 0 }
+        DialogShown { tab: None, sid: String::new(), dialog: None, on: false, at: std::time::Instant::now(), serial: 0 }
     }
 }
 
@@ -878,6 +880,79 @@ pub struct Stroke {
 /// begins a new stroke.
 pub const STROKE_GAP: Duration = Duration::from_millis(160);
 
+/// The wheel over a scroller in the conversation, heard on the element
+/// around it: the list would take the same event (gpui hands a scroll to
+/// every scrollable under the mouse) and both would move. Whose a stroke
+/// is gets decided as it starts (see `Stroke`): the scroller's own
+/// handler has run by the time this one does, so the offset before it is
+/// `at - dy`, and an edge there in the wheel's direction means it had
+/// nothing to give and the conversation takes the stroke. One whose
+/// content fits passes everything on.
+pub(crate) fn chain_wheel(handle: ScrollHandle, stroke: Rc<std::cell::RefCell<Stroke>>) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
+    move |event, window, cx| {
+        let max = handle.max_offset().y;
+        if max <= px(0.) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut s = stroke.borrow_mut();
+        let touched = matches!(event.touch_phase, TouchPhase::Started);
+        let paused = s.last.map(|t| now.duration_since(t) > STROKE_GAP).unwrap_or(true);
+        s.last = Some(now);
+        if touched || paused {
+            s.decided = false;
+            s.handed_over = false;
+        }
+        if !s.decided {
+            let dy = event.delta.pixel_delta(window.line_height()).y;
+            if dy != px(0.) {
+                let before = handle.offset().y - dy;
+                let at_bottom = before <= -max;
+                let at_top = before >= px(0.);
+                s.handed_over = (dy < px(0.) && at_bottom) || (dy > px(0.) && at_top);
+                s.decided = true;
+            }
+        }
+        if !s.handed_over {
+            cx.stop_propagation();
+        }
+    }
+}
+
+/// A card at the conversation's end shows this much of what it holds
+/// however low the window is (`Workbench::card_most`).
+const CARD_LEAST: Pixels = px(150.);
+
+/// A line under the conversation (the agent at work, waiting, commands
+/// in the background), and the air over it.
+const LINE_H: f32 = 26.;
+const LINE_AIR: f32 = 10.;
+
+/// A line under the conversation as it comes and goes: it opens up from
+/// the composer and closes back to it, the air over it part of what
+/// moves, so it stands in a column with no gap (`render_terminal`).
+/// `moving` is its `presence`.
+fn foot_line(moving: Option<(bool, u32)>, id: &str, row: impl IntoElement) -> AnyElement {
+    let tall = LINE_H + LINE_AIR;
+    let wrap = v_flex().w_full().max_w(CONTENT_W).justify_end().overflow_hidden().child(h_flex().w_full().h(px(LINE_H)).flex_shrink_0().items_center().child(row));
+    match moving {
+        Some((coming, n)) => wrap
+            .with_animation(ElementId::Name(format!("{id}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                let t = if coming { t } else { 1. - t };
+                d.h(px((tall * t).round())).opacity(t)
+            })
+            .into_any_element(),
+        None => wrap.h(px(tall)).into_any_element(),
+    }
+}
+
+/// How far in from an end of the strip its tabs fade.
+const TABS_FADE: f32 = 28.;
+
+/// How fast a dialog's strip of tabs comes to where it is going: the
+/// share of the way left that goes in this many seconds is 1 - 1/e.
+const TABS_EASE: f32 = 0.07;
+
 /// A file waiting in the composer. Images go to a driver as content blocks
 /// so the model sees the picture; everything else, and everything on the
 /// inbox channel, is named by path so Claude can read it with its own tools.
@@ -1120,6 +1195,8 @@ pub struct Workbench {
     dialog_demo: bool,
     /// `EMAKI_GO=termdemo`: the terminal card is drawn on a sample screen.
     term_demo: bool,
+    /// `EMAKI_GO=termdemo:tall`: on a screen taller and wider than a card.
+    term_demo_tall: bool,
     menu_serial: u32,
     /// The session being renamed, by its key, and the field for its name.
     renaming: Option<String>,
@@ -1215,6 +1292,31 @@ pub struct Workbench {
     /// Since when a waiting screen has been read as still being drawn.
     dialog_unsettled: Option<Instant>,
     dialog_h: Rc<std::cell::Cell<f32>>,
+    /// Whether the cards at the conversation's end were drawn since the
+    /// page was last built: they are not when the reader is far above.
+    cards_drawn: std::cell::Cell<bool>,
+    /// The conversation on its way to its end, where the cards are:
+    /// when it set off and when it last moved (`end_glide_step`).
+    end_glide: Option<(Instant, Instant)>,
+    /// Where a dialog's strip of tabs is on its way to, across, and
+    /// when it last moved (`tabs_glide_step`).
+    tabs_to: std::cell::Cell<Option<(f32, Instant)>>,
+    /// What the line for a card left behind last said, for drawing it
+    /// as it goes.
+    behind_said: std::cell::RefCell<String>,
+    /// What the waiting line last said (its words, where the answer
+    /// goes, whether a terminal holds it and whether that is ours, since
+    /// when), for drawing it as it goes.
+    waiting_kept: std::cell::RefCell<Option<(String, String, bool, bool, String)>>,
+    /// The background commands and agents last running, for drawing
+    /// their line and card as they go: commands first, then agents.
+    shells_kept: std::cell::RefCell<[Vec<emaki_core::model::Shell>; 2]>,
+    /// The permission cards last drawn, a session each, for drawing one
+    /// as it goes once it is answered.
+    asks_kept: std::cell::RefCell<Vec<(String, PermissionRequest)>>,
+    /// How tall each card that opens to its content's height is,
+    /// measured as it is drawn (`card_fold`).
+    fold_h: std::cell::RefCell<HashMap<String, Rc<std::cell::Cell<f32>>>>,
     dialog_reading: bool,
     dialog_sending: bool,
     /// `EMAKI_GO=dialog:<keys>`, `answer:<words>` or `goto:<tab>`, done once on the
@@ -1403,7 +1505,7 @@ pub struct Workbench {
     /// whether this draw used each. See `Inner`.
     inner_live: std::cell::RefCell<Vec<(ScrollHandle, Inner)>>,
     scroll_inner: Option<(ScrollHandle, Inner, Pixels)>,
-    inner_kept: std::cell::RefCell<HashMap<SharedString, (ScrollHandle, bool)>>,
+    inner_kept: std::cell::RefCell<HashMap<SharedString, (ScrollHandle, bool, Rc<std::cell::RefCell<Stroke>>)>>,
     /// The scroll positions momentum may be forwarded to.
     side_scroll: ScrollHandle,
     /// The pinned projects' own scroller, over the rest, and whether the
@@ -3248,6 +3350,7 @@ impl Workbench {
             pill_at: Rc::new(std::cell::RefCell::new(HashMap::new())),
             dialog_demo: false,
             term_demo: false,
+            term_demo_tall: false,
             menu_serial: 0,
             renaming: None,
             closed_tabs: Vec::new(),
@@ -3289,6 +3392,14 @@ impl Workbench {
             dialog_shown: std::cell::RefCell::new(DialogShown::default()),
             dialog_unsettled: None,
             dialog_h: Rc::new(std::cell::Cell::new(0.)),
+            cards_drawn: Default::default(),
+            end_glide: None,
+            tabs_to: Default::default(),
+            behind_said: Default::default(),
+            waiting_kept: Default::default(),
+            shells_kept: Default::default(),
+            asks_kept: Default::default(),
+            fold_h: Default::default(),
             dialog_reading: false,
             dialog_sending: false,
             dialog_probe: std::env::var("EMAKI_GO").ok().filter(|g| g.starts_with("dialog:") || g.starts_with("answer:") || g.starts_with("goto:")),
@@ -4839,6 +4950,52 @@ impl Workbench {
             // The terminal card on a sample of what a command asks.
             Some("termdemo") => {
                 self.term_demo = true;
+                cx.notify();
+            }
+            // Every card's body moved by that much, across and down, as
+            // a wheel over it would: `cards:-200:-80`.
+            Some(t) if t.starts_with("cards:") => {
+                let mut by = t["cards:".len()..].split(':').map(|n| n.parse::<f32>().unwrap_or(0.));
+                let (dx, dy) = (by.next().unwrap_or(0.), by.next().unwrap_or(0.));
+                for (key, kept) in self.inner_kept.borrow().iter().filter(|(key, _)| key.starts_with("card-")) {
+                    let (at, most) = (kept.0.offset(), kept.0.max_offset());
+                    kept.0.set_offset(point((at.x + px(dx)).clamp(-most.x, px(0.)), (at.y + px(dy)).clamp(-most.y, px(0.))));
+                    eprintln!("{key}: at {:?} of {:?}", kept.0.offset(), most);
+                }
+                cx.notify();
+            }
+            // A click on an arrow of the dialog's strip of tabs, and on
+            // "Show" in the line for a card left behind.
+            Some(t @ ("tabs:left" | "tabs:right")) => {
+                if let Some(scroll) = self.inner_kept.borrow().get("dialog-tabs").map(|kept| kept.0.clone()) {
+                    let by = f32::from(scroll.bounds().size.width) * 0.6 * if t == "tabs:right" { -1. } else { 1. };
+                    self.tabs_to.set(Some((f32::from(scroll.offset().x) + by, Instant::now())));
+                }
+                cx.notify();
+            }
+            Some("cardsshow") => {
+                self.cards_show();
+                cx.notify();
+            }
+            // The same on a screen with more rows than a card shows.
+            Some("termdemo:tall") => {
+                self.term_demo = true;
+                self.term_demo_tall = true;
+                cx.notify();
+            }
+            // A question of several tabs and long choices: more than a
+            // card shows, in a narrow column more tabs than fit.
+            Some("dialogdemo:long") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let rule = "─".repeat(96);
+                let choices: String = ["New work only (Recommended)", "New work and the episode engine", "Everything but the write path", "Everything, in one sweep", "Nothing: stay in SQL", "Decide a module at a time"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| format!("{} {}. {l}\n     Write the cleaning steps in dbplyr and leave the tested engine and the standardizer in SQL.\n     Lowest risk, and dplyr is where the logic is read and changed.\n", if i == 0 { "❯" } else { " " }, i + 1))
+                    .collect();
+                let screen = format!("{rule}\n←  ☐ dplyr scope  ☐ Naming  ☐ Bad files  ☐ Partitions  ☐ Tests  ✔ Submit  →\nHow much of the codebase should move to dplyr/dbplyr syntax?\n{choices}  7. Type something.\n{rule}\n  8. Chat about this\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n");
+                self.dialog_demo = true;
+                self.dialog_seen = emaki_core::driver::dialog_on_screen(&screen).map(|d| (sid, d));
                 cx.notify();
             }
             Some("dialogdemo:off") => {
@@ -7709,6 +7866,12 @@ impl Workbench {
         self.term_open = Some(sid.to_string());
         self.term_auto = auto;
         self.term_focus_due = Some(true);
+        // What the person asked for is gone to; what the agent asks
+        // waits at the conversation's end, with the reader left where
+        // they are.
+        if !auto {
+            self.cards_show();
+        }
         self.notice = None;
         if let Some(keys) = self.term_keys_probe.take() {
             let hub = Arc::clone(&self.hub);
@@ -7747,6 +7910,11 @@ impl Workbench {
     /// Escape cancels it there, and the card is not brought back for the
     /// same wait.
     fn dismiss_terminal(&mut self, cx: &mut Context<Self>) {
+        // A sample screen (`EMAKI_GO=termdemo`) closes too.
+        if std::mem::take(&mut self.term_demo) {
+            self.term_demo_tall = false;
+            cx.notify();
+        }
         let Some(sid) = self.term_open.clone() else { return };
         if self.hub.peer_for(&sid).is_some_and(|p| p.status == "waiting") {
             if let Some(pty) = self.hub.terminal_for(&sid) {
@@ -8020,6 +8188,43 @@ impl Workbench {
         entry.1 = true;
         self.inner_scroller(&entry.0, kind);
         (entry.0.clone(), new)
+    }
+
+    /// The same for a scroller in the conversation that passes a stroke
+    /// begun at its edge on to it (`Inner::Chained`), with the stroke.
+    fn kept_body(&self, key: SharedString) -> (BodyScroll, bool) {
+        let (handle, new) = self.kept_scroll(key.clone(), Inner::Chained);
+        let stroke = self.inner_kept.borrow().get(&key).map(|kept| kept.2.clone()).unwrap_or_default();
+        (BodyScroll { handle, stroke }, new)
+    }
+
+    /// The most a card at the conversation's end shows of what it holds:
+    /// the rest scrolls inside it, so no card takes the conversation's
+    /// place however much is asked.
+    fn card_most(&self) -> Pixels {
+        (self.view_h * 0.36).max(CARD_LEAST)
+    }
+
+    /// What a card at the conversation's end holds, in a box that
+    /// scrolls both ways past `card_most`: every card's body is drawn
+    /// through this. `wide` is the width of what cannot wrap (a
+    /// terminal's rows); in a column narrower than that it scrolls
+    /// sideways, where it was cut. `tail` starts it at its foot. Call it
+    /// after any scroller inside the body is made: `route_scroll` takes
+    /// the first one under the pointer.
+    pub(crate) fn card_scroll(&self, key: impl Into<SharedString>, wide: Option<Pixels>, tail: bool, body: impl IntoElement) -> AnyElement {
+        let key: SharedString = key.into();
+        let (scroll, new) = self.kept_body(key.clone());
+        if tail && new {
+            scroll.handle.scroll_to_bottom();
+        }
+        div()
+            .relative()
+            .w_full()
+            .on_scroll_wheel(chain_wheel(scroll.handle.clone(), scroll.stroke))
+            .child(div().id(key).w_full().max_h(self.card_most()).overflow_scroll().track_scroll(&scroll.handle).child(div().w_full().when_some(wide, |d, w| d.min_w(w)).child(body)))
+            .vertical_scrollbar(&scroll.handle)
+            .into_any_element()
     }
 
     fn route_scroll(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -10718,6 +10923,81 @@ impl Workbench {
         (p.2 > 0 && p.1.elapsed() < FOLD_ANIM).then_some((on, p.2))
     }
 
+    /// Whether something `presence` keeps is there or still going.
+    fn lingering(&self, id: &str) -> bool {
+        self.presences.borrow().get(id).is_some_and(|p| p.0 || p.1.elapsed() < FOLD_ANIM)
+    }
+
+    /// `presence` for what is played the first time it is seen too: a
+    /// card that comes up.
+    fn arrival(&self, id: &str, on: bool, cx: &mut Context<Self>) -> Option<(bool, u32)> {
+        if on && !self.presences.borrow().contains_key(id) {
+            self.presence(id, false, cx);
+        }
+        self.presence(id, on, cx)
+    }
+
+    /// A card of the column at the conversation's end whose height is
+    /// its content's: it opens up from the end and closes back to it,
+    /// the gap under it part of what moves, measuring itself as it is
+    /// drawn (as the dialog's card does). Going, it is drawn from what
+    /// the caller kept and takes no click. Nothing once it is gone.
+    fn card_fold(&self, key: String, on: bool, card: AnyElement, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let moving = self.arrival(&key, on, cx);
+        if !on && moving.is_none() {
+            self.fold_h.borrow_mut().remove(&key);
+            return None;
+        }
+        let tall = self.fold_h.borrow_mut().entry(key.clone()).or_default().clone();
+        let measure = on.then(|| {
+            let (tall, entity) = (tall.clone(), cx.entity().downgrade());
+            canvas(
+                move |b, _, cx| {
+                    let h = f32::from(b.size.height);
+                    if (tall.get() - h).abs() > 0.5 {
+                        tall.set(h);
+                        if let Some(e) = entity.upgrade() {
+                            cx.defer(move |cx| e.update(cx, |_, cx| cx.notify()));
+                        }
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        });
+        let gap = 8.;
+        let inner = div().relative().w_full().flex_shrink_0().child(card).children(measure).when(!on, |d| d.child(div().absolute().inset_0().occlude()));
+        let wrap = v_flex().w_full().max_w(CONTENT_W).justify_end().overflow_hidden().child(inner).child(div().h(px(gap)).flex_shrink_0());
+        Some(match moving {
+            Some((coming, n)) => wrap
+                .with_animation(ElementId::Name(format!("{key}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    let t = if coming { t } else { 1. - t };
+                    let h = tall.get();
+                    if h <= 0. { d.h(px(0.)).opacity(0.) } else { d.h(px(((h + gap) * t).ceil())).opacity(t) }
+                })
+                .into_any_element(),
+            None => wrap.into_any_element(),
+        })
+    }
+
+    /// The line that says commands, or agents, run in the background,
+    /// coming and going in motion (`foot_line`).
+    fn shells_line(&self, r: &SessionRef, list: &[emaki_core::model::Shell], agents: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let key = format!("line-{}-{}", if agents { "agents" } else { "shells" }, r.session_id);
+        let on = !list.is_empty();
+        if on {
+            self.shells_kept.borrow_mut()[agents as usize] = list.to_vec();
+        }
+        let moving = self.presence(&key, on, cx);
+        if !on && moving.is_none() {
+            return None;
+        }
+        let kept = self.shells_kept.borrow()[agents as usize].clone();
+        let row = self.render_shells(r, if on { list } else { &kept }, agents, cx)?;
+        Some(foot_line(moving, &key, row))
+    }
+
     fn toggle_folder(&mut self, project: &str, cx: &mut Context<Self>) {
         let open = self.folders_open.get_or_insert_with(HashSet::new);
         self.folders_auto.remove(project);
@@ -12424,6 +12704,7 @@ impl Workbench {
                 .into_any_element();
         };
         self.glide_step(window);
+        self.end_glide_step(window);
         // At the end, what is there has been seen.
         if let Some(d) = self.detail.as_mut().filter(|d| d.list.is_following_tail()) {
             d.seen = shape_of(&d.session);
@@ -12497,7 +12778,7 @@ impl Workbench {
             .when_some(chat_font, |d, f| d.font_family(f))
             .child(
                 gpui::list(list.clone(), move |ix, window, cx| {
-                    entity.upgrade().map(|e| e.update(cx, |this, cx| this.render_round(ix, window, cx))).unwrap_or_else(|| div().into_any_element())
+                    entity.upgrade().map(|e| e.update(cx, |this, cx| this.render_list_item(ix, window, cx))).unwrap_or_else(|| div().into_any_element())
                 })
                 .size_full(),
             )
@@ -12508,7 +12789,16 @@ impl Workbench {
         // The agent at work, said under the transcript so it is seen without
         // scrolling: the mark turns while a turn is running.
         let working = self.is_working(&r);
-        let status = working.then(|| {
+        // A card says what these lines would, and while one is up the
+        // transcript's "working" is not so: the agent waits.
+        let card_up = {
+            let shown = self.term_shown.borrow();
+            (shown.on && shown.sid == r.session_id) || self.dialog_seen.as_ref().is_some_and(|(sid, _)| *sid == r.session_id)
+        };
+        let status_on = working && !card_up;
+        let status_key = format!("line-status-{}", r.session_id);
+        let status_moving = self.presence(&status_key, status_on, cx);
+        let status = (status_on || status_moving.is_some()).then(|| {
             let st = &r.state;
             let from = if !st.turn_started.is_empty() { &st.turn_started } else if !st.since.is_empty() { &st.since } else { &r.updated };
             let card = self.card_for(&r);
@@ -12585,11 +12875,23 @@ impl Workbench {
                         .child("Stop"),
                 )
         });
+        let status = status.map(|row| foot_line(status_moving, &status_key, row));
 
         // The agent waiting on you, said in the same place: what it waits
         // for, and where to give it when the terminal holds the dialog and
         // nothing here can answer it.
-        let waiting = (!working).then(|| self.card_for(&r)).filter(|c| c.column == Column::NeedsYou).map(|card| {
+        // The cards are at the conversation's end (`render_cards`), in
+        // view while the list is there. A conversation with no round yet
+        // has no end to stand them at, and they stand over the composer.
+        let at_end = list.is_following_tail() || session.rounds.is_empty();
+        let asked = card_up || self.permissions.iter().any(|(sid, _)| *sid == r.session_id);
+        // The terminal card holds the keyboard, and one the reader has
+        // gone far above is not drawn: the keys would go nowhere.
+        if !self.cards_drawn.replace(false) && !at_end && self.term_focus.is_focused(window) {
+            let handle = self.composer.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        let waiting_now = (!working && !card_up).then(|| self.card_for(&r)).filter(|c| c.column == Column::NeedsYou).map(|card| {
             let in_terminal = card.pending.is_none();
             let question = card.pending.as_ref().map(|p| p.is_question()).unwrap_or(card.chip_kind == "ask");
             let what = if question {
@@ -12602,29 +12904,74 @@ impl Workbench {
             let from = if !r.state.since.is_empty() { r.state.since.clone() } else { r.updated.clone() };
             let own = self.own_terminal(&r.session_id);
             let where_ = if in_terminal && own { "in its terminal".to_string() } else if in_terminal { "in your terminal".to_string() } else { "below".to_string() };
-            h_flex()
+            (format!("{} is waiting for {what}", r.agent.speaker()), where_, in_terminal, own, from)
+        });
+        let waiting_on = waiting_now.is_some();
+        if waiting_on {
+            *self.waiting_kept.borrow_mut() = waiting_now;
+        }
+        let waiting_key = format!("line-waiting-{}", r.session_id);
+        let waiting_moving = self.presence(&waiting_key, waiting_on, cx);
+        // Going, it says what it last said and takes no click.
+        let waiting = self.waiting_kept.borrow().clone().filter(|_| waiting_on || waiting_moving.is_some()).map(|(said, where_, in_terminal, own, from)| {
+            let row = h_flex()
                 .w_full()
-                .max_w(CONTENT_W)
                 .px(px(6.))
                 .gap(px(8.))
                 .items_center()
                 .text_size(px(12.))
                 .text_color(theme.muted_foreground)
-                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "status-glyph"))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} is waiting for {what}", r.agent.speaker())))
+                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "waiting-glyph"))
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said))
                 .child(div().flex_1().min_w_0().truncate().child(where_))
-                .when(in_terminal, |d| d.child(Button::new("waiting-terminal").primary().small().label(if own { "Show the terminal" } else { "Open the terminal" }).on_click(cx.listener(|this, _, _, cx| this.go_to_terminal(cx)))))
-                .child(div().child(elapsed_since(&from, self.now)))
+                .when(in_terminal && waiting_on, |d| d.child(Button::new("waiting-terminal").primary().small().label(if own { "Show the terminal" } else { "Open the terminal" }).on_click(cx.listener(|this, _, _, cx| this.go_to_terminal(cx)))))
+                // The card that takes the answer, when the reader has
+                // gone up the conversation and left it behind.
+                .when(asked && !at_end && waiting_on, |d| {
+                    d.child(choice_pill("waiting-show", "icons/arrow-down.svg", "Show", Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.cards_show();
+                        cx.notify();
+                    })))
+                })
+                .child(div().child(elapsed_since(&from, self.now)));
+            foot_line(waiting_moving, &waiting_key, row)
         });
 
-        // The hidden terminal's own screen, when it has to be seen, takes
-        // the place of any card: it is the same dialog, as it is.
         let (agents, commands): (Vec<_>, Vec<_>) = self.shells_running(&r, &session).into_iter().partition(|sh| sh.agent);
-        let agents = self.render_shells(&r, &agents, true, cx);
-        let shells = self.render_shells(&r, &commands, false, cx);
-        let terminal = self.render_terminal(&r, cx);
-        let dialog = if terminal.is_some() { None } else { self.render_dialog(&r, cx) };
-        let covered = dialog.is_some() || terminal.is_some();
+        let agents = self.shells_line(&r, &agents, true, cx);
+        let shells = self.shells_line(&r, &commands, false, cx);
+        // Left behind by the reader, a card has a line of its own that
+        // goes to it.
+        let behind_on = card_up && !at_end;
+        if behind_on {
+            *self.behind_said.borrow_mut() = if self.dialog_seen.as_ref().is_some_and(|(sid, _)| *sid == r.session_id) { format!("{} is waiting for your answer", r.agent.speaker()) } else { format!("{}'s terminal is waiting", r.agent.speaker()) };
+        }
+        let behind_moving = self.presence("behind-line", behind_on, cx);
+        let behind = (behind_on || behind_moving.is_some()).then(|| {
+            let row = h_flex()
+                .w_full()
+                .px(px(6.))
+                .gap(px(8.))
+                .items_center()
+                .text_size(px(12.))
+                .text_color(theme.muted_foreground)
+                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "behind-glyph"))
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(self.behind_said.borrow().clone()))
+                .child(div().flex_1().min_w_0().truncate().child("below"))
+                .child(choice_pill("behind-show", "icons/arrow-down.svg", "Show", Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).when(behind_on, |d| {
+                    d.on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.cards_show();
+                        cx.notify();
+                    }))
+                }));
+            foot_line(behind_moving, "behind-line", row)
+        });
+        let foot_cards = session.rounds.is_empty().then(|| {
+            self.tabs_glide_step(window);
+            self.render_cards(&r, cx)
+        });
         // At the conversation's left, under the top strip: the folder's
         // files or the outline, one at a time (`panels.rs`).
         let (files_shown, outline_shown) = self.panels_shown();
@@ -12661,29 +13008,22 @@ impl Workbench {
             // moving with it.
             .when(self.find_open, |d| d.child(div().w_full().flex_shrink_0().overflow_hidden().child(self.render_find_bar(cx)).with_animation("find-bar-in", Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| if t >= 1. { d } else { d.max_h(px(FIND_BAR_MOST * t)).opacity(t) })))
             .child(transcript)
-            // The working or waiting line gets air above it: without any,
-            // it sat against the conversation's clipped edge and read as
-            // part of the last tool card.
+            // Each line and card brings its own air (`foot_line`,
+            // `render_terminal`), which moves with it as it comes and
+            // goes, so the column has no gap.
             .child(
                 v_flex()
                     .w_full()
                     .items_center()
                     .px(px(24.))
-                    .when(status.is_some() || waiting.is_some() || shells.is_some() || agents.is_some(), |d| d.pt(px(12.)))
                     .pb(px(14.))
-                    .gap(px(8.))
                     .children(agents)
                     .children(shells)
-                    .children(status.filter(|_| !covered))
-                    .children(waiting.filter(|_| !covered))
-                    // The terminal card brings its own gap (see
-                    // `render_terminal`), so it sits in a column with
-                    // none, over the rest.
-                    .child(
-                        v_flex().w_full().items_center().children(terminal).children(dialog).child(
-                            v_flex().w_full().items_center().gap(px(8.)).child(self.render_permissions(cx)).child(self.render_composer(cx)),
-                        ),
-                    ),
+                    .children(status)
+                    .children(waiting)
+                    .children(behind)
+                    .children(foot_cards)
+                    .child(v_flex().w_full().items_center().pt(px(8.)).child(self.render_composer(cx))),
             );
         v_flex()
             .flex_1()
@@ -12725,7 +13065,7 @@ impl Workbench {
                 // More was printed: the box stays at its foot if it was
                 // there.
                 if self.shell_tails.get(&sh.id) != Some(&tail) {
-                    if let Some((scroll, _)) = self.inner_kept.borrow().get(format!("shell-out-{}", sh.id).as_str()) {
+                    if let Some((scroll, _, _)) = self.inner_kept.borrow().get(format!("shell-out-{}", sh.id).as_str()) {
                         if scroll.offset().y <= -scroll.max_offset().y + px(2.) {
                             scroll.scroll_to_bottom();
                         }
@@ -12788,6 +13128,10 @@ impl Workbench {
                     this.shell_tails.clear();
                     this.read_shell_tails();
                 }
+                // The card opens at the conversation's end.
+                if if agents { &this.agents_open } else { &this.shells_open }.is_some() {
+                    this.cards_show();
+                }
                 cx.notify();
             }))
             .child(div().size(px(7.)).rounded_full().bg(theme.blue).flex_shrink_0().with_animation(if agents { "agents-dot" } else { "shells-dot" }, Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.opacity(0.35 + 0.65 * (1. - (2. * t - 1.).abs()))))
@@ -12795,9 +13139,27 @@ impl Workbench {
             .child(div().flex_1().min_w_0().truncate().child(if shells.len() == 1 { label(first) } else { String::new() }))
             .when(shells.len() == 1, |d| d.child(div().flex_shrink_0().child(elapsed_since(&first.started, self.now))))
             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronUp }).with_size(px(13.)).flex_shrink_0());
-        let mut card = v_flex().w_full().max_w(CONTENT_W);
-        if open {
-            let mut list = v_flex().w_full().gap(px(10.)).p(px(12.)).mb(px(4.)).rounded(px(10.)).border_1().border_color(theme.border).bg(theme.muted.opacity(0.25));
+        Some(v_flex().w_full().max_w(CONTENT_W).child(row).into_any_element())
+    }
+
+    /// What that row opens: a card at the conversation's end with each
+    /// command and the last of what it printed, or each agent and what
+    /// it was last seen doing.
+    fn render_shells_card(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], agents: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let open = if agents { &self.agents_open } else { &self.shells_open }.as_deref() == Some(r.session_id.as_str());
+        let on = open && !shells.is_empty();
+        let key = format!("fold-{}-{}", if agents { "agents" } else { "shells" }, r.session_id);
+        if !on && !self.lingering(&key) {
+            return None;
+        }
+        // Going because the last command ended, it is drawn from the
+        // ones last running.
+        let kept = self.shells_kept.borrow()[agents as usize].clone();
+        let shells = if shells.is_empty() { &kept[..] } else { shells };
+        let theme = cx.theme().clone();
+        let label = |sh: &emaki_core::model::Shell| if sh.description.is_empty() { sh.command.lines().next().unwrap_or("").to_string() } else { sh.description.clone() };
+        {
+            let mut list = v_flex().w_full().gap(px(10.));
             for sh in shells {
                 if agents {
                     // An agent is its task, the kind of agent it is, and
@@ -12848,9 +13210,108 @@ impl Workbench {
                         .child(self.shell_box(format!("shell-out-{}", sh.id).into(), "Output", tail.trim_end(), "nothing printed yet", true, cx)),
                 );
             }
-            card = card.child(list.with_animation(if agents { "agents-in" } else { "shells-in" }, Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)));
+            let list = self.card_scroll(if agents { "card-agents" } else { "card-shells" }, None, false, list);
+            let card = v_flex().w_full().p(px(12.)).rounded(px(10.)).border_1().border_color(theme.border).bg(theme.muted.opacity(0.25)).child(list);
+            self.card_fold(key, on, card.into_any_element(), cx)
         }
-        Some(card.child(row).into_any_element())
+    }
+
+    /// Everything that comes up for the person to read or answer while
+    /// a session runs: the background commands' and agents' cards, the
+    /// hidden terminal's screen, a terminal's dialog, a driver's
+    /// questions and permissions. They stand at the conversation's end
+    /// and scroll with it, so going up the conversation leaves them
+    /// behind, and none is taller than `card_most`. A new card goes in
+    /// this column, its body through `card_scroll`, with its own foot:
+    /// the column has no gap (`render_terminal`).
+    fn render_cards(&self, r: &SessionRef, cx: &mut Context<Self>) -> AnyElement {
+        self.cards_drawn.set(true);
+        let (agents, commands): (Vec<_>, Vec<_>) = self.detail.as_ref().map(|d| self.shells_running(r, &d.session)).unwrap_or_default().into_iter().partition(|sh| sh.agent);
+        // The terminal's own screen takes the place of the dialog's
+        // card: it is the same dialog, as it is.
+        let terminal = self.render_terminal(r, cx);
+        let dialog = if terminal.is_some() { None } else { self.render_dialog(r, cx) };
+        v_flex()
+            .w_full()
+            .items_center()
+            .children(self.render_shells_card(r, &agents, true, cx))
+            .children(self.render_shells_card(r, &commands, false, cx))
+            .children(terminal)
+            .children(dialog)
+            .child(self.render_permissions(cx))
+            .into_any_element()
+    }
+
+    /// A round as the conversation's list draws it, and under the last
+    /// one the cards (`render_cards`): part of the list's last item, so
+    /// the list is told of no item more and nothing is spliced.
+    fn render_list_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let round = self.render_round(ix, window, cx);
+        let last = self.detail.as_ref().is_some_and(|d| ix + 1 == d.session.rounds.len());
+        if last {
+            self.tabs_glide_step(window);
+        }
+        match self.selected_ref().filter(|_| last).cloned() {
+            Some(r) => v_flex().w_full().child(round).child(div().w_full().px(px(24.)).child(self.render_cards(&r, cx))).into_any_element(),
+            None => round,
+        }
+    }
+
+    /// Goes to the conversation's end, where the cards are.
+    fn cards_show(&mut self) {
+        if self.detail.as_ref().is_some_and(|d| !d.list.is_following_tail()) {
+            let now = Instant::now();
+            self.end_glide = Some((now, now));
+        }
+    }
+
+    /// One frame of the way to the conversation's end, run from where
+    /// the reader is as the move to the new messages is (`glide_frame`):
+    /// a part of what is left each frame, a way longer than
+    /// `UNREAD_CAP` skipped down to that first. At the end the list
+    /// follows it again. It ends there, or when the reader takes the
+    /// wheel.
+    fn end_glide_step(&mut self, window: &mut Window) {
+        let Some((began, last)) = self.end_glide.take() else { return };
+        let Some(list) = self.detail.as_ref().map(|d| d.list.clone()) else { return };
+        if self.content_wheel_at.is_some_and(|at| at > began) {
+            return;
+        }
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32().min(0.05);
+        let mut left = f32::from(list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y);
+        if left < 1.5 || began.elapsed() > UNREAD_MOST {
+            list.set_follow_mode(FollowMode::Tail);
+            return;
+        }
+        if left > UNREAD_CAP {
+            list.scroll_by(px(left - UNREAD_CAP));
+            left = UNREAD_CAP;
+        }
+        list.scroll_by(px((left * (1. - (-dt / UNREAD_EASE).exp())).max(left.min(1.5))));
+        self.end_glide = Some((began, now));
+        window.request_animation_frame();
+    }
+
+    /// One frame of a dialog's strip of tabs on its way across: to an
+    /// arrow's side, or to the tab that now shows.
+    fn tabs_glide_step(&self, window: &mut Window) {
+        let Some((to, last)) = self.tabs_to.take() else { return };
+        let Some(scroll) = self.inner_kept.borrow().get("dialog-tabs").map(|kept| kept.0.clone()) else { return };
+        let to = to.clamp(-f32::from(scroll.max_offset().x), 0.);
+        let at = scroll.offset();
+        let left = to - f32::from(at.x);
+        if left.abs() < 0.5 {
+            scroll.set_offset(point(px(to), at.y));
+            return;
+        }
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32().min(0.05);
+        let step = left * (1. - (-dt / TABS_EASE).exp());
+        let step = if step.abs() < 1. { left.abs().min(1.) * left.signum() } else { step };
+        scroll.set_offset(point(at.x + px(step), at.y));
+        self.tabs_to.set(Some((to, now)));
+        window.request_animation_frame();
     }
 
     /// One box of a background command's card: the command, or the last
@@ -12945,6 +13406,10 @@ impl Workbench {
         // in Claude Code's own colours (2.1.293).
         let live = live.or_else(|| {
             self.term_demo.then(|| {
+                if self.term_demo_tall {
+                    let bytes: String = (1..=44).map(|n| format!("{n:>2}  a row of the screen that runs to the last of its ninety-six columns, as none wraps {n:>4}\r\n")).collect();
+                    return emaki_core::pty::panel_rows(emaki_core::pty::rows_after(bytes.as_bytes(), 46, 96));
+                }
                 let bytes = "\x1b[1m\x1b[38;2;255;193;7mSwitch model?\x1b[0m\r\n\x1b[38;2;153;153;153mYour next response will be slower and use more tokens\x1b[0m\r\n\r\nThis conversation is cached for the current model. Switching to \x1b[1mFable 5.1\x1b[0m means the full\r\nhistory gets re-read on your next message.\r\n\r\n\x1b[38;2;177;185;249m❯ \x1b[38;2;153;153;153m1. \x1b[38;2;177;185;249mYes, switch to Fable 5.1\x1b[0m\r\n  \x1b[38;2;153;153;153m2. \x1b[0mNo, go back\r\n";
                 emaki_core::pty::panel_rows(emaki_core::pty::rows_after(bytes.as_bytes(), 12, 96))
             })
@@ -13028,9 +13493,16 @@ impl Workbench {
         let presses: Vec<_> = presses.collect();
         let rows_n = rows.len();
         let lines = look.lines;
-        // The card's height, which the animation runs: a row each, the
-        // padding over and under them (12 each) and the border (2).
-        let tall = 26. + lh * rows_n as f32;
+        // The card's height, which the animation runs: a row each and
+        // the padding over and under them (12 each), no more than a
+        // card shows (`card_scroll`), and the border (2).
+        let tall = (24. + lh * rows_n as f32).min(f32::from(self.card_most())) + 2.;
+        // The rows do not wrap: in a column narrower than the longest
+        // they scroll sideways.
+        let wide = rows.iter().map(|row| crate::term_panel::cells_before(row, usize::MAX)).max().unwrap_or(0) as f32 * cell_w + 28.;
+        // A picker's choices are at the screen's foot, so a screen
+        // taller than the card starts there.
+        let screen = self.card_scroll("card-terminal", Some(px(wide)), true, div().px(px(14.)).py(px(12.)).child(div().relative().font(look.font).text_size(px(look.text)).text_color(ink).children(lines).children(presses)));
         let card =
             v_flex()
                 .id("terminal-card")
@@ -13061,6 +13533,7 @@ impl Workbench {
                 // No head: the screen says what it is. The close button
                 // stands in the card's corner, over the screen.
                 .relative()
+                .child(screen)
                 .child(
                     div()
                         .id("terminal-close")
@@ -13079,11 +13552,10 @@ impl Workbench {
                             this.dismiss_terminal(cx);
                         }))
                         .child(Icon::new(IconName::Close).with_size(px(12.)).text_color(quiet)),
-                )
-                .child(div().px(px(14.)).py(px(12.)).child(div().relative().font(look.font).text_size(px(look.text)).text_color(ink).children(lines).children(presses)));
-        // It opens upward from the composer and closes back down onto
-        // it, fading: the card stays where it is, held by its foot, and
-        // the room it is given grows or shrinks over it.
+                );
+        // It opens upward from the conversation's end and closes back
+        // down onto it, fading: the card stays where it is, held by its
+        // foot, and the room it is given grows or shrinks over it.
         // The gap between the card and the composer is part of what grows
         // and shrinks: the card carries it as a foot of its own, in a
         // column that sets none. Set by the column, the gap came and went
@@ -13165,6 +13637,13 @@ impl Workbench {
             Some((last, rest)) => (last.clone(), rest.to_vec()),
             None => (String::new(), Vec::new()),
         };
+        // A question is all that is asked, however many lines of the
+        // screen it runs over: a long one stood half in the box that
+        // is the command's and half under it.
+        if !approval && !review {
+            title = d.body.join(" ");
+            before = Vec::new();
+        }
         // A plan's dialog: the question runs over two lines of the
         // screen and is one sentence here, and the plan is drawn from
         // its file, whole, in place of the lines of it the screen has.
@@ -13243,6 +13722,119 @@ impl Workbench {
                         .when(!o.detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(o.detail.clone()))),
                 )
         });
+        // What is asked and its choices scroll inside the card past what
+        // a card shows (`card_scroll`); its head and its buttons stay.
+        let body = v_flex()
+            .w_full()
+            .gap(px(12.))
+                .when(!before.is_empty(), |el| {
+                    el.child(
+                        v_flex()
+                            .p(px(8.))
+                            .gap(px(2.))
+                            .rounded(px(8.))
+                            .bg(theme.muted)
+                            .text_size(px(12.))
+                            .when(approval, |d| d.font_family(theme.mono_font_family.clone()))
+                            .when_some(chat_font.clone().filter(|_| !approval), |d, f| d.font_family(f))
+                            .children(before.into_iter().filter(|l| !(review && l.starts_with("Review your answers"))).map(|l| match l.strip_prefix("→ ") {
+                                // An answer under review, under its question.
+                                Some(answer) => div().pb(px(4.)).whitespace_normal().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.primary).child(answer.to_string()),
+                                None => div().whitespace_normal().when(review, |d| d.text_color(theme.muted_foreground)).child(l),
+                            })),
+                    )
+                })
+                .children(plan_box)
+                .child(div().text_size(px(14.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).child(title))
+                .when(!review, |el| el.child(v_flex().gap(px(4.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).children(rows)))
+                // The picture of the choice the pointer is on, as the
+                // terminal draws it: text in columns, so in the mono
+                // face and never wrapped.
+                .when_some(d.preview.clone().filter(|p| !p.is_empty()), |el, lines| {
+                    el.child(
+                        div().id("dialog-preview").w_full().overflow_x_scroll().restrict_scroll_to_axis().rounded(px(8.)).border_1().border_color(theme.border).bg(theme.muted).px(px(12.)).py(px(10.)).child(
+                            v_flex().font_family(theme.mono_font_family.clone()).text_size(px(12.)).line_height(px(17.)).children(lines.into_iter().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.replace(' ', "\u{a0}") }))),
+                        ),
+                    )
+                });
+        let body = self.card_scroll("card-dialog", None, false, body);
+        // The tabs in a strip that scrolls sideways when the card is
+        // narrower than they are, brought to the one showing when that
+        // changes.
+        let (tabs_scroll, _) = self.kept_scroll("dialog-tabs".into(), Inner::Held);
+        {
+            let mut shown = self.dialog_shown.borrow_mut();
+            if shown.tab != d.current {
+                shown.tab = d.current;
+                // In motion, from where the strip is, once it has been
+                // drawn and knows where its tabs are.
+                if let Some(ix) = d.current {
+                    match tabs_scroll.bounds_for_item(ix + 1) {
+                        Some(tab) => {
+                            let (view, at) = (tabs_scroll.bounds(), f32::from(tabs_scroll.offset().x));
+                            let over = f32::from(tab.right() - view.right()).max(0.);
+                            let under = f32::from(view.left() - tab.left()).max(0.);
+                            if over > 0. || under > 0. {
+                                self.tabs_to.set(Some((if under > 0. { at + under } else { at - over }, Instant::now())));
+                            }
+                        }
+                        None => tabs_scroll.scroll_to_item(ix + 1),
+                    }
+                }
+            }
+        }
+        // An arrow at each end of the strip while it has more tabs than
+        // show: lit where more lies that way, and a click goes there. It
+        // keeps its room at an end with no more, so nothing moves.
+        let tabs_arrow = |right: bool, cx: &mut Context<Self>| {
+            let (at, most) = (tabs_scroll.offset().x, tabs_scroll.max_offset().x);
+            let more = most > px(0.) && if right { at > -most + px(1.) } else { at < px(-1.) };
+            // It fades in and out as the strip comes to an end or
+            // leaves it.
+            let moving = self.presence(if right { "dialog-tabs-right" } else { "dialog-tabs-left" }, more, cx);
+            let scroll = tabs_scroll.clone();
+            (most > px(0.)).then(|| {
+                let arrow = div()
+                    .id(if right { "dialog-tabs-right" } else { "dialog-tabs-left" })
+                    .flex_shrink_0()
+                    .size(px(20.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.muted_foreground)
+                    .when(more, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(theme.muted).text_color(theme.foreground)).on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            // From where it is going, when it is on its
+                            // way: a second click goes a second step.
+                            let from = this.tabs_to.get().map(|(to, _)| to).unwrap_or(f32::from(scroll.offset().x));
+                            let by = f32::from(scroll.bounds().size.width) * 0.6 * if right { -1. } else { 1. };
+                            this.tabs_to.set(Some((from + by, Instant::now())));
+                            cx.notify();
+                        }))
+                    })
+                    .child(Icon::new(if right { IconName::ChevronRight } else { IconName::ChevronLeft }).with_size(px(13.)));
+                // Where more lies past an end the tabs fade into the
+                // card's ground there, as a block of code does: cut off
+                // clean, a tab read as the last.
+                let ground = theme.popover;
+                let (from, to) = if right { (ground.opacity(0.), ground) } else { (ground, ground.opacity(0.)) };
+                let fade = div().absolute().top_0().bottom_0().w(px(TABS_FADE)).map(|d| if right { d.right_0() } else { d.left_0() }).bg(linear_gradient(90., linear_color_stop(from, 0.), linear_color_stop(to, 1.)));
+                match moving {
+                    Some((coming, n)) => (
+                        arrow
+                            .with_animation(ElementId::Name(format!("dialog-tabs-arrow-{right}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t }))
+                            .into_any_element(),
+                        fade.with_animation(ElementId::Name(format!("dialog-tabs-fade-{right}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t }))
+                            .into_any_element(),
+                    ),
+                    None => (arrow.opacity(if more { 1. } else { 0. }).into_any_element(), fade.opacity(if more { 1. } else { 0. }).into_any_element()),
+                }
+            })
+        };
+        let (tabs_left, fade_left) = tabs_arrow(false, cx).unzip();
+        let (tabs_right, fade_right) = tabs_arrow(true, cx).unzip();
         // How tall the card is, measured as it is drawn, for the height
         // that opens and closes it.
         let tall = self.dialog_h.clone();
@@ -13282,17 +13874,18 @@ impl Workbench {
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(badge_str(head.into(), theme.primary.opacity(0.14), theme.primary))
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(says))
-                        .child(div().flex_1())
+                        .child(div().flex_shrink_0().child(badge_str(head.into(), theme.primary.opacity(0.14), theme.primary)))
+                        .child(div().flex_shrink_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(says))
                         // The questions and the review, as the terminal's
                         // tabs: the one showing ringed, an answered one
                         // ticked, and a click goes there.
-                        .children(d.tabs.iter().enumerate().map(|(ix, (name, done))| {
+                        .children(tabs_left)
+                        .child(h_flex().relative().flex_1().min_w_0().child(h_flex().id("dialog-tabs").flex_1().min_w_0().gap(px(8.)).items_center().overflow_x_scroll().restrict_scroll_to_axis().track_scroll(&tabs_scroll).child(div().flex_1()).children(d.tabs.iter().enumerate().map(|(ix, (name, done))| {
                             let here = d.current == Some(ix);
                             let reachable = d.current.is_some() && !here && !busy;
                             h_flex()
                                 .id(SharedString::from(format!("dialog-tab-{ix}")))
+                                .flex_shrink_0()
                                 .gap(px(4.))
                                 .items_center()
                                 .px(px(8.))
@@ -13312,38 +13905,10 @@ impl Workbench {
                                 })
                                 .when(*done, |d| d.child(Icon::new(IconName::Check).with_size(px(10.))))
                                 .child(if name == "Submit" { "Review".to_string() } else { name.clone() })
-                        })),
+                        }))).children(fade_left).children(fade_right))
+                        .children(tabs_right),
                 )
-                .when(!before.is_empty(), |el| {
-                    el.child(
-                        v_flex()
-                            .p(px(8.))
-                            .gap(px(2.))
-                            .rounded(px(8.))
-                            .bg(theme.muted)
-                            .text_size(px(12.))
-                            .when(approval, |d| d.font_family(theme.mono_font_family.clone()))
-                            .when_some(chat_font.clone().filter(|_| !approval), |d, f| d.font_family(f))
-                            .children(before.into_iter().filter(|l| !(review && l.starts_with("Review your answers"))).map(|l| match l.strip_prefix("→ ") {
-                                // An answer under review, under its question.
-                                Some(answer) => div().pb(px(4.)).whitespace_normal().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.primary).child(answer.to_string()),
-                                None => div().whitespace_normal().when(review, |d| d.text_color(theme.muted_foreground)).child(l),
-                            })),
-                    )
-                })
-                .children(plan_box)
-                .child(div().text_size(px(14.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).child(title))
-                .when(!review, |el| el.child(v_flex().gap(px(4.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).children(rows)))
-                // The picture of the choice the pointer is on, as the
-                // terminal draws it: text in columns, so in the mono
-                // face and never wrapped.
-                .when_some(d.preview.clone().filter(|p| !p.is_empty()), |el, lines| {
-                    el.child(
-                        div().id("dialog-preview").w_full().overflow_x_scroll().rounded(px(8.)).border_1().border_color(theme.border).bg(theme.muted).px(px(12.)).py(px(10.)).child(
-                            v_flex().font_family(theme.mono_font_family.clone()).text_size(px(12.)).line_height(px(17.)).children(lines.into_iter().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.replace(' ', "\u{a0}") }))),
-                        ),
-                    )
-                })
+                .child(body)
                 .when(review, |el| {
                     // The review's two choices are the card's buttons.
                     el.child(h_flex().gap(px(8.)).items_center().children(d.options.iter().enumerate().map(|(i, o)| {
@@ -13367,8 +13932,8 @@ impl Workbench {
                         .child(div().flex_1())
                         .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if typed { "or type an answer below" } else { "" })),
                 ));
-        // Held by its foot, it opens up from the composer and closes
-        // back down to it; the gap under it is part of what moves (see
+        // Held by its foot, it opens up from the conversation's end and
+        // closes back down to it; the gap under it is part of what moves (see
         // `render_terminal`). Until its height is known it takes none.
         let gap = 8.;
         let tall = self.dialog_h.clone();
@@ -13398,14 +13963,13 @@ impl Workbench {
         let theme = cx.theme().clone();
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         let cwd = self.selected_ref().map(|r| r.cwd.clone()).unwrap_or_default();
-        let cards: Vec<PermissionRequest> = self.permissions.iter().filter(|(s, _)| *s == sid).map(|(_, p)| p.clone()).collect();
-        let several = cards.len() > 1;
-        v_flex().w_full().max_w(CONTENT_W).gap(px(8.)).children(cards.into_iter().enumerate().map(|(i, p)| {
+        let live: Vec<PermissionRequest> = self.permissions.iter().filter(|(s, _)| *s == sid).map(|(_, p)| p.clone()).collect();
+        let several = live.len() > 1;
+        // The oldest card is the one ↩ answers, and says so (`first`).
+        let draw = |p: PermissionRequest, first: bool, cx: &mut Context<Self>| -> AnyElement {
             if p.is_question() {
                 return self.render_question(&p, cx);
             }
-            // The oldest card is the one ↩ answers, and says so.
-            let first = i == 0;
             let subject = emaki_core::build::tool_subject(&p.tool_name, &p.input, &cwd);
             let said = |key: &str| p.input.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
             let detail = match p.tool_name.as_str() {
@@ -13455,8 +14019,18 @@ impl Workbench {
                         .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(heading))
                         .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(subject)),
                 )
-                .when(!detail.is_empty(), |d| d.child(div().p(px(8.)).rounded(px(8.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_size(px(12.)).whitespace_normal().child(detail)))
-                .when(!explanation.is_empty() || explaining, |d| d.child(crate::transcript::explain_card(format!("pex-{}", p.request_id), explanation.clone(), explaining, px(13.5), cx)))
+                .when(!detail.is_empty() || !explanation.is_empty() || explaining, |d| {
+                    d.child(self.card_scroll(
+                        format!("card-ask-{}", p.request_id),
+                        None,
+                        false,
+                        v_flex()
+                            .w_full()
+                            .gap(px(8.))
+                            .when(!detail.is_empty(), |d| d.child(div().p(px(8.)).rounded(px(8.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_size(px(12.)).whitespace_normal().child(detail)))
+                            .when(!explanation.is_empty() || explaining, |d| d.child(crate::transcript::explain_card(format!("pex-{}", p.request_id), explanation.clone(), explaining, px(13.5), cx))),
+                    ))
+                })
                 .child(
                     h_flex()
                         .gap(px(8.))
@@ -13466,7 +14040,28 @@ impl Workbench {
                         .when(first && several, |d| d.child(div().flex_1()).child(Button::new("allow-all").ghost().small().label("Allow all").on_click(cx.listener(|this, _, _, cx| this.allow_all_pending(cx))))),
                 )
                 .into_any_element()
-        }))
+        };
+        // A card answered is drawn a moment more as it was, closing
+        // (`card_fold`): the cards last drawn are kept for that.
+        let fold = |p: &PermissionRequest| format!("fold-ask-{}", p.request_id);
+        let is_live = |p: &PermissionRequest| live.iter().any(|l| l.request_id == p.request_id);
+        let mut drawn: Vec<PermissionRequest> = self.asks_kept.borrow().iter().filter(|(s, p)| *s == sid && !is_live(p) && self.lingering(&fold(p))).map(|(_, p)| p.clone()).collect();
+        drawn.extend(live.iter().cloned());
+        {
+            let mut kept = self.asks_kept.borrow_mut();
+            kept.retain(|(s, _)| *s != sid);
+            kept.extend(drawn.iter().map(|p| (sid.clone(), p.clone())));
+        }
+        let oldest = live.first().map(|p| p.request_id.clone());
+        let cards: Vec<AnyElement> = drawn
+            .into_iter()
+            .filter_map(|p| {
+                let (key, on, first) = (fold(&p), is_live(&p), oldest.as_deref() == Some(p.request_id.as_str()));
+                let card = draw(p, first, cx);
+                self.card_fold(key, on, card, cx)
+            })
+            .collect();
+        v_flex().w_full().max_w(CONTENT_W).children(cards)
     }
 
     /// The go-ahead on a plan Codex has written: its terminal asks
@@ -13533,7 +14128,7 @@ impl Workbench {
                     .child(badge_str("question".into(), theme.primary.opacity(0.14), theme.primary))
                     .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(format!("{} asks", self.agent_now().speaker()))),
             )
-            .children(qs.iter().enumerate().map(|(qi, q)| {
+            .child(self.card_scroll(format!("card-ask-{}", p.request_id), None, false, v_flex().w_full().gap(px(12.)).children(qs.iter().enumerate().map(|(qi, q)| {
                 let chosen = picks.get(&q.question).cloned().unwrap_or_default();
                 v_flex()
                     .gap(px(6.))
@@ -13587,7 +14182,7 @@ impl Workbench {
                                     .when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(detail.clone()))),
                             )
                     })))
-            }))
+            }))))
             .child(
                 h_flex()
                     .gap(px(10.))

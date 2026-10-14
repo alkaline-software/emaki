@@ -13,6 +13,11 @@ About `crates/emaki-app/src/transcript.rs`, the conversation list in
   rounds, reset on a rewrite). Toggling a tool, thought, run or thumbnail
   just notifies: items render from the current session on every frame and
   are re-measured as they render.
+- The cards that come up while a session runs are drawn under the last
+  round, in the list's last item (`render_list_item`;
+  `docs/live-turn.md`, The cards). They are not an item of their own:
+  the list's count is the rounds', and everything that goes by it stays
+  as it is.
 - The hover lines under a prompt and a reply are always laid out
   (`HOVER_ROW_H`) and hidden by opacity, so nothing moves when they appear
   and the list has nothing to re-measure.

@@ -369,10 +369,11 @@ The patterns, each in use and to be used again:
   closed is kept for that moment (`menu_gone`, `pick_gone`) and drawn
   once more with no click taken. Each opening has a serial in its
   animation's name, so it plays once.
-- **A card in the column over the composer** (`render_terminal`,
-  `render_dialog`): held by its foot, its height opens up from the
-  composer and closes back to it, with the gap under it part of what
-  moves, so the conversation above slides and does not jump. What it
+- **A card at the conversation's end** (`render_terminal`,
+  `render_dialog`; `docs/live-turn.md`, The cards): held by its foot,
+  its height opens up from the end and closes back to it, with the gap
+  under it part of what moves, so the conversation above slides and
+  does not jump. What it
   last showed is kept (`TermShown`, `DialogShown`) to draw it closing. A
   card whose height is its content's measures itself as it is drawn
   (`dialog_h`) and takes no room until that is known.
@@ -424,6 +425,25 @@ The patterns, each in use and to be used again:
   plays once each time it appears. These still go at once.
 - **A bar in the flow** (the find bar): its height opens with what is
   under it moving, by a `max_h` no less than its own.
+- **A line under the conversation** (the agent at work, waiting,
+  commands in the background, a card left behind): `foot_line` on its
+  `presence`, keyed by the session so a change of tab plays nothing. It
+  opens up from the composer and closes back, the air over it part of
+  what moves. Going, it is drawn from what it last said, kept for that.
+- **A card whose height is its content's** (a permission, a driver's
+  question, the background commands' card): `card_fold`, which measures
+  the card as it is drawn. One answered is drawn a moment more from the
+  request kept, closing, under a layer that takes its clicks.
+- **A scroll that a click starts** (the arrows of a dialog's tabs, "Show"
+  for a card left behind, "New messages"): run from where the scroller
+  is, a share of what is left each frame, so it slows onto the place
+  (`tabs_glide_step`, `end_glide_step`, `glide_step`). Never
+  `set_offset` or `scroll_to` straight to the place.
+- **Something small whose room stays** (an arrow at a strip's end, the
+  fade there): `presence`, with only its opacity run.
+- **What runs past an edge of a sideways scroller** fades into the
+  ground there (a block of code, a dialog's tabs), and the fade comes
+  and goes with there being more that way.
 
 Left as they are, on purpose: a tab's page changing (the conversation
 is the content, and a cross-fade of two long lists is a blur), text
@@ -812,10 +832,10 @@ it looks at panes:
 - A gesture begun elsewhere and carried onto one does not move it. In a
   pane the event goes to the gesture's owner; on a sheet or a menu
   (`Inner::Over`) it goes nowhere.
-- A tool call's body is `Inner::Chained`: on the body its own handler
-  decides (`Stroke`: a stroke that starts at its edge is the
-  conversation's), and off the body the gesture stays with it only if it
-  moved it.
+- A tool call's body and a card's (`card_scroll`) are `Inner::Chained`:
+  on the body its own handler decides (`chain_wheel`, `Stroke`: a stroke
+  that starts at its edge is the conversation's), and off the body the
+  gesture stays with it only if it moved it.
 
 Scrollers that only go sideways (the terminal's tabs, a question's
 preview) are not named: a sideways flick moves nothing else.
