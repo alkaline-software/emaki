@@ -230,9 +230,10 @@ never both, and what is touched first says which.** With projects chosen,
 rectangle takes the kind of the row nearest to where it was pressed,
 once it reaches one, and keeps to it however far it is dragged
 (`side_band_kind`). A right click on one of several sessions is Archive
-Sessions and Delete Sessions (`side_session_menu`); on any other session
-it is that session's own menu, with Archive Session and Delete Session
-at its foot.
+Sessions and Delete Sessions, and Unarchive Sessions when one is
+archived (`side_session_menu`); on any other session it is that
+session's own menu, with Archive Session (Unarchive Session on an
+archived one) and Delete Session at its foot.
 
 Two sections stand under the last project that shows, each a heading with
 its count that opens onto its projects in motion (`toggle_section`):
@@ -307,8 +308,8 @@ projects could not be looked into at once.
 Nothing is headed by when. Each row has the day it was last touched at
 its right end (`format::day`), a project's before its chevron and a
 session's in line with it. The one heading is "Archived", over the
-projects whose every session is kept here alone, its agent having
-deleted it: what Emaki is for. A project an agent still has something of
+projects whose every session is archived, kept here alone or in
+Codex's own archive. A project with a session not archived
 is above it, and an archived session in one wears an "archived" tag. The
 pills (All, one per agent) narrow the page.
 
@@ -338,10 +339,19 @@ page's title, which read as a toolbar of the window's and not of the
 list. Each of the two asks first (`render_manage_ask`), and is done off
 the main thread (`manage_now`).
 
-- **Archive** lets go of the agent's own copy now, without waiting for
-  the agent to delete it (`archive::release`, `docs/core.md`).
-- **Delete** moves every copy to the system's trash, the agent's and
-  the archive's (`archive::everything_of`).
+- **Archive**: the agent does not continue the session until it is
+  unarchived. Claude Code's own copy is let go now, without waiting for
+  it to delete it, and Codex archives its own (`Adapter::archive`,
+  `docs/core.md`). A session archived in Codex itself is archived here
+  too: one word, one meaning, wherever the file is.
+- **Delete** moves every copy to the system's trash, Claude Code's and
+  the archive's; Codex deletes its own (`adapters::delete_session`).
+- **Unarchive** (a session's menu in the sidebar, Unarchive Session, and
+  a project's, Unarchive Sessions) puts an archived session back for
+  its agent (`Adapter::unarchive`), with nothing asked, since nothing is
+  lost, and nothing counted as running: neither agent takes up an
+  archived session. An archived session cannot be continued until it is
+  unarchived, and the composer says so.
 - Both are of sessions. Nothing in a project's folder is touched.
 - A session something is running in (`Hub::is_live`, a driver) is left
   as it is and counted in what is said.
@@ -586,10 +596,34 @@ rail of sections on the left (`SETTINGS_SECTIONS`; `settings_section` is the
 one showing) and that section's rows on the right, fading in as the section
 changes. The rows scroll under the header (`settings_scroll`).
 
-A row is a title and its control. A line under the title is there only
-where the title does not say it all: most rows have none, and one that
-does is a few words. A new row gets no line unless a person would
-otherwise not know what it does.
+A row is a name and its control, side by side: the names stand in a
+column of one width (`SETTINGS_LABEL_W`) and every control starts where
+that column ends. A set of choices or a field fills the rest of the row
+(`row`), so a page is as full at its right as at its left. What has one
+short answer is half of that (`short`): on or off, a button (`press`),
+a choice from a list as a field (`settings_pick`, not a pill). One of
+those across the whole row was too much for what it says. A control at
+the panel's right edge, and a control at its own size beside its name,
+were both tried: the first left a short name a panel's width from its
+control, the second left the page's right half bare. A new row is made
+with `row` or `short`, never laid out by hand.
+
+What is on or off is the two words as a choice (`toggle`), On in the
+green and Off in the red, each on a plate washed with its colour. A
+tick is for a list of many, where a choice a row would be too much:
+the formatters, each tick before its name.
+
+The spelling's languages are a row of their own, a flag and two letters
+each so the five fit, the name on the hover.
+
+A line on a row stands under a control that fills and beside a short
+one, in the half it leaves (the version is one, beside its button), and
+is there only where the name does not say it all: most rows have none, and one that does is a
+few words. A new row gets no line unless a person would otherwise not
+know what it does.
+
+An accent's swatch marks the chosen one with a ring inside the disc, so
+every disc is one size and the row's ends are the first and last disc.
 
 Settings asks for one text size (Fonts): the conversation's, and the
 terminal's and the file editor's go with it (`set_chat_size`,
@@ -609,13 +643,33 @@ A key is written as the Mac has it and drawn through `shortcut`
 (`kbd_hint`), which makes ⌘ "Ctrl+" off a Mac. The tooltips that name a
 key still say ⌘ everywhere.
 
-The last section, About, says who makes Emaki: the app's icon, name and
-version under "Alkaline Software presents", as a film's first card has
-it and set in the middle as one is (the studio at its GitHub
-organisation until it has a site; the name in the face and the accent
-the sidebar has it in; it and the icon are each a link to emaki.lol), then under a short rule a sentence naming its
-two owners in full, each name a link. It has nothing to set. Tried and dropped: a row a name with a line
-under it saying what each is, which read as a form.
+The last section, About, says who makes Emaki. A plain plate of the
+fields' ground, one flat shade with no edge, holds the title card, set in the middle as a film's
+first one is: "Alkaline Software presents" (the studio at its GitHub
+organisation until it has a site), the app's icon, its name in the face
+and the accent the sidebar has it in (it and the icon are each a link
+to emaki.lol), and the version in small grey words. Under the plate, a sentence
+naming its two owners in full, each name a link, and pills to the
+site, the source and the release's notes. It has nothing to set. Tried
+and dropped: a row a name with a line under it saying what each is,
+which read as a form; the card on the bare panel, which was pale; and a plate fading
+from the accent, with the version on an accent chip, which the person
+did not want: no gradients here.
+
+Dictate is one page with nothing to scroll: "Local Models", a row a
+model, the heaviest first, and the key. A row is its maker's mark on a
+plate (one colour, the ink's, as every icon here is), its name with a
+word or two on what sets it apart on the same line, its maker, size and
+languages under them, and at the right Download (a line filling as it
+comes, with Stop), Use, or "In use", with Remove once it is here.
+The one in use wears the accent's edge, and a click anywhere on a row
+that is here takes it up. A grid of cards was tried first: three across
+left a name two lines deep and the buttons crowding its foot. Under them the key, a field that takes
+the next keys pressed in it (`docs/composer.md`, Dictation), at the
+row's right, and Reset against the edge, which puts back ⌘⇧D (Ctrl and
+⇧ and D off a Mac) and is dimmed while that is the key. The field set
+in the page's middle was tried and undone. Off a Mac
+the section is one line saying it is a Mac's alone for now.
 
 The three looks in Appearance have an icon each (`choice_icon`).
 

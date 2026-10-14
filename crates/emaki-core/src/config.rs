@@ -91,11 +91,16 @@ pub struct AppConfig {
     /// The languages a save formats, by `format::LANGS`' keys, while
     /// `format_on_save` is on.
     pub format_langs: Vec<String>,
+    /// The dictation's model, by `dictate::MODELS`' keys: one at a time.
+    pub dictate_model: String,
+    /// The key that starts and stops dictation, as gpui writes a binding
+    /// (`secondary-shift-d`: ⌘⇧D, Ctrl off a Mac).
+    pub dictate_key: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys() }
+        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), dictate_model: crate::dictate::DEFAULT_MODEL.into(), dictate_key: "secondary-shift-d".into() }
     }
 }
 

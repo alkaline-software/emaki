@@ -70,6 +70,10 @@ EMAKI_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launc
 EMAKI_PAGE=new|sessions|agents ./target/debug/Emaki     # land on a page
 EMAKI_FIND=<text> ./target/debug/Emaki                 # open the find bar on that query
 EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings panel (=updates: on that section)
+EMAKI_GO="x;dictate" EMAKI_OPEN=<id> ./target/debug/Emaki   # start the system's dictation in the composer (Edit, Start Dictation); prints whether anything took it. It listens on the real microphone
+EMAKI_GO="x;unarchive:<id>" EMAKI_OPEN=<id> ./target/debug/Emaki  # Unarchive Session from that session's menu, as the sidebar does it (it asks nothing; Archive and Delete ask, and no step answers)
+EMAKI_GO="x;lightbox:<picture>" EMAKI_OPEN=<id> ./target/debug/Emaki  # that picture shown large, as a click on an attachment shows it; press:cmd-k opens the search palette
+EMAKI_GO="x;dictate:file:<wav>" EMAKI_OPEN=<id> ./target/debug/Emaki  # a 16-bit WAV file written down by the dictation's model and put in the composer, as the microphone's recording is; dictate:key presses dictation's key, dictate:get the model's Download, dictate:pretend listens to a made-up voice with no microphone, dictate:reset presses the key's Reset (docs/composer.md)
 EMAKI_TYPE=/co ./target/debug/Emaki                    # put that text in the composer
 EMAKI_QUESTION=1 EMAKI_OPEN=<id> ./target/debug/Emaki  # hold a sample question on that session
 EMAKI_GO=terminal EMAKI_OPEN=<id> ./target/debug/Emaki  # press "go to the terminal" on it
@@ -144,7 +148,7 @@ page from then on.
 `emaki-core` has a subcommand for most of what the window does, and none
 needs a window: `list`, `render`, `build`, `archive`, `sync`, `search`,
 `bench`, `shells`, `outline` (`--summarize` makes real model calls), `git`,
-`files`, `peers`, `inbox`, `options`, `explain`, `update`, `statusline`,
+`files`, `peers`, `inbox`, `options`, `explain`, `update`, `dictate`, `statusline`,
 `drive`, `pty`, `screen < text` (what a terminal screen holds).
 
 ## What a synthetic event reaches

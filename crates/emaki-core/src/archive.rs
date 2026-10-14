@@ -423,11 +423,17 @@ fn move_into(src: &Path, dst: &Path) -> bool {
 
 /// Mirror one session: its main file and every sidecar it owns.
 pub fn archive_ref(r: &SessionRef, state: &mut State, stats: &mut Stats) {
+    // An agent that deletes nothing by age, and archives sessions in a
+    // folder of its own (Codex), has nothing to rescue: its files are the
+    // only copy.
+    if crate::adapters::for_agent(r.agent).archives_itself() {
+        return;
+    }
     let own = paths::root().to_string_lossy().to_string();
     if !r.cwd.is_empty() && paths::is_explainer_cwd(&r.cwd, &own) {
         return;
     }
-    if r.archived || is_inside_archive(&r.path) {
+    if r.kept || is_inside_archive(&r.path) {
         return;
     }
     let target = archived_main(r);
@@ -469,7 +475,7 @@ pub fn archive_one(r: &SessionRef) -> Stats {
 
 /// Where the archive keeps a session's main file.
 fn archived_main(r: &SessionRef) -> PathBuf {
-    if r.archived || is_inside_archive(&r.path) {
+    if r.kept || is_inside_archive(&r.path) {
         return r.path.clone();
     }
     let slug = if r.cwd.is_empty() { paths::safe_component(&r.project_dir) } else { paths::project_slug(&r.cwd) };
@@ -502,7 +508,7 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 /// does not keep (anything in the session's folder but its sidecars, or
 /// one too large to copy) stays where it is.
 pub fn release(r: &SessionRef) -> Result<(), String> {
-    if r.archived || is_inside_archive(&r.path) {
+    if r.kept || is_inside_archive(&r.path) {
         return Ok(());
     }
     if !r.path.is_file() {
@@ -551,6 +557,81 @@ pub fn release(r: &SessionRef) -> Result<(), String> {
     Ok(())
 }
 
+/// The folder Claude Code keeps a project's transcripts in: the folder's
+/// path with every character but a letter or a digit made a dash, as
+/// Claude Code names it. None for a path long enough that Claude Code
+/// shortens it its own way, which is not guessed at.
+pub fn claude_project_dir(cwd: &str) -> Option<PathBuf> {
+    let name: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    (!cwd.is_empty() && name.len() <= 200).then(|| paths::projects_dir().join(name))
+}
+
+/// Where the agent kept a session the archive alone has now: Claude
+/// Code's project folder for its folder, or Codex's folder for the day
+/// in the rollout's name (`rollout-2026-10-10T21-42-00-<id>.jsonl`).
+pub fn restore_target(r: &SessionRef) -> Result<PathBuf, String> {
+    let name = r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    if name.contains(".gen") {
+        return Err("it is an older copy kept beside the session, not the session".into());
+    }
+    match r.agent {
+        AgentId::ClaudeCode => claude_project_dir(&r.cwd).map(|d| d.join(format!("{}.jsonl", r.session_id))).ok_or_else(|| "its folder is not known".into()),
+        AgentId::Codex => {
+            let day = name.strip_prefix("rollout-").and_then(|rest| rest.get(..10)).filter(|d| d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-').ok_or("its file's name has no day in it")?;
+            Ok(paths::codex_home().join("sessions").join(&day[..4]).join(&day[5..7]).join(&day[8..10]).join(&name))
+        }
+    }
+}
+
+/// Put a session the archive alone has back where its agent keeps it,
+/// so the agent lists it and it can be continued: the transcript and,
+/// for Claude Code, its subagents and tool results. Each file is copied
+/// beside where it goes and moved into place, and given the time now:
+/// a copy with its old time would be over the agent's thirty days and
+/// deleted the next time the agent starts. Nothing the agent has is
+/// replaced, and the archive keeps its copy.
+pub fn restore(r: &SessionRef) -> Result<PathBuf, String> {
+    if !r.kept {
+        return Err("its agent still has it".into());
+    }
+    let target = restore_target(r)?;
+    if target.exists() {
+        return Err("its agent already has a file of that name".into());
+    }
+    let mut pairs = vec![(r.path.clone(), target.clone())];
+    if r.agent == AgentId::ClaudeCode {
+        let (side_src, side_dst) = (r.path.with_extension(""), target.with_extension(""));
+        for name in SIDECAR_DIRS {
+            let mut files = Vec::new();
+            files_under(&side_src.join(name), &mut files);
+            for f in files {
+                let Ok(rel) = f.strip_prefix(&side_src) else { continue };
+                pairs.push((f.clone(), side_dst.join(rel)));
+            }
+        }
+    }
+    // The sidecars first and the transcript last, so the agent never
+    // finds the session without what it refers to.
+    for (src, dst) in pairs.iter().skip(1).chain(pairs.iter().take(1)) {
+        if dst.exists() {
+            continue;
+        }
+        let dir = dst.parent().ok_or("no folder to put it in")?;
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let tmp = dir.join(format!(".{}.emaki-restore", dst.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+        fs::copy(src, &tmp).map_err(|e| format!("{}: {e}", src.display()))?;
+        if !same_bytes(src, &tmp) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("the copy of {} did not come out the same", src.display()));
+        }
+        if let Ok(f) = fs::File::options().write(true).open(&tmp) {
+            let _ = f.set_modified(SystemTime::now());
+        }
+        fs::rename(&tmp, dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    }
+    Ok(target)
+}
+
 /// Everything a session is on disk, for deleting it: the agent's own
 /// files first, then the archive's with the generations set aside from
 /// it, then what Emaki made from them. The agent's come first so that a
@@ -558,7 +639,7 @@ pub fn release(r: &SessionRef) -> Result<(), String> {
 /// A folder is named whole.
 pub fn everything_of(r: &SessionRef) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if !(r.archived || is_inside_archive(&r.path)) {
+    if !(r.kept || is_inside_archive(&r.path)) {
         out.push(r.path.clone());
         if r.agent == AgentId::ClaudeCode {
             out.push(r.path.with_extension(""));
@@ -618,7 +699,7 @@ const PACK_MIN_BYTES: u64 = 16 * 1024;
 /// only then moved over it.
 pub fn pack_stale(refs: &[SessionRef]) -> u64 {
     let mut packed = 0;
-    for r in refs.iter().filter(|r| r.archived && now() - r.mtime > PACK_AFTER_SECS && is_inside_archive(&r.path)) {
+    for r in refs.iter().filter(|r| r.kept && now() - r.mtime > PACK_AFTER_SECS && is_inside_archive(&r.path)) {
         packed += u64::from(pack_file(&r.path));
         let beside = r.path.with_extension("");
         for name in SIDECAR_DIRS {

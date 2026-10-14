@@ -166,7 +166,7 @@ const ALL: &[Agent] = &[
             Way { os: ANY, by: "npm (needs Node.js 22 or later)", command: "npm install -g @anthropic-ai/claude-code" },
         ],
         sign_in: "claude",
-        sign_in_how: "A browser opens to sign in. Type /login in a session to change account.",
+        sign_in_how: "The first time, it asks a few questions. Pick the look you like, then choose to sign in with your Claude account. A browser opens: sign in there and come back. When Claude Code says it is ready, type /exit and press Return to leave it. Later, /login in a session changes the account.",
         plans: "Needs a paid Claude plan or a Console account.",
         key_env: &["ANTHROPIC_API_KEY"],
         home: "~/.claude",
@@ -194,7 +194,7 @@ const ALL: &[Agent] = &[
             Way { os: ANY, by: "npm (needs Node.js)", command: "npm install -g @openai/codex" },
         ],
         sign_in: "codex login",
-        sign_in_how: "A browser opens to sign in with ChatGPT. With no browser, codex login --device-auth gives a code to enter elsewhere.",
+        sign_in_how: "A browser opens: sign in with your ChatGPT account and come back. The terminal says when you are signed in. On a computer with no browser, codex login --device-auth gives a code to enter on another device.",
         plans: "Needs a paid ChatGPT plan or an OpenAI API key.",
         key_env: &["OPENAI_API_KEY"],
         home: "~/.codex",
@@ -234,6 +234,53 @@ const TOOLS: &[Agent] = &[Agent {
     with_emaki: "Emaki and GitHub Desktop work on the same repository and see each other's changes. Its sign-in does not reach git: if Fetch or Publish is refused, Emaki shows how to give git one.",
     accent: "violet",
 }];
+
+/// What gets git on a Mac: Apple's command line tools, which git
+/// comes with. Without them `/usr/bin/git` only asks for them.
+pub const GIT_MAC: &str = "xcode-select --install";
+/// Git on Ubuntu and Debian, the example the page gives for Linux.
+pub const GIT_LINUX: &str = "sudo apt install git";
+/// Where Git for Windows is downloaded.
+pub const GIT_WINDOWS: &str = "https://git-scm.com/downloads/win";
+/// What starts a shell afresh, so it reads its profile again and finds
+/// a program an installer has just put on its `PATH`.
+pub const SHELL_AGAIN: &str = "exec $SHELL -l";
+
+/// Git on this machine: whether it is there to use, and the name and
+/// address commits are signed with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Git {
+    pub ready: bool,
+    pub name: String,
+    pub email: String,
+}
+
+/// Look at git here. On a Mac, whether Apple's command line tools are
+/// set up, asked of `xcode-select` and not of git: the git a Mac comes
+/// with opens a window offering to install them when it is run without
+/// them. Its name and address only once it is there.
+pub fn git_here() -> Git {
+    let quiet = |cmd: &mut Command| cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).output().ok();
+    let ready = if cfg!(target_os = "macos") {
+        quiet(Command::new("xcode-select").arg("-p")).is_some_and(|o| o.status.success())
+    } else {
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        search_dirs().iter().any(|d| d.join(format!("git{suffix}")).is_file())
+    };
+    if !ready {
+        return Git::default();
+    }
+    let get = |key: &str| quiet(Command::new("git").args(["config", "--global", key])).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    Git { ready, name: get("user.name"), email: get("user.email") }
+}
+
+/// The line that tells git who commits are by, for the shell of `os`:
+/// each value in single quotes, which neither a shell nor PowerShell
+/// reads anything inside, and `;` between the two, which both take.
+pub fn git_identity_command(name: &str, email: &str, os: Os) -> String {
+    let quote = |v: &str| if os == Os::Windows { format!("'{}'", v.replace('\'', "''")) } else { format!("'{}'", v.replace('\'', "'\\''")) };
+    format!("git config --global user.name {}; git config --global user.email {}", quote(name), quote(email))
+}
 
 /// What looking for one agent found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -153,6 +153,34 @@ impl UsageWindow {
     }
 }
 
+/// One of the account's limits as Codex reports it. Codex keeps a limit
+/// a family of models: `codex` for the plan's shared allowance, and
+/// another for a model with an allowance of its own (`limit_name` is
+/// that model's slug). A rollout's row carries whichever Codex heard of
+/// last, so each is kept by its id.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageBucket {
+    /// Codex's `limit_id`: `codex`, or an opaque id for another limit.
+    pub id: String,
+    /// The model the limit is for, empty for the shared one.
+    pub name: String,
+    /// Its windows, the shorter first.
+    pub windows: Vec<UsageWindow>,
+    /// When a rollout recorded them, Unix seconds.
+    pub at: f64,
+}
+
+/// The id of the plan's shared limit, the one every model draws on that
+/// has none of its own.
+pub const SHARED_LIMIT: &str = "codex";
+
+/// The limit a session on `model` draws on: the one for that model when
+/// it has its own, else the shared one.
+pub fn bucket_for<'a>(buckets: &'a [UsageBucket], model: &str) -> Option<&'a UsageBucket> {
+    buckets.iter().find(|b| b.id != SHARED_LIMIT && !b.name.is_empty() && b.name.eq_ignore_ascii_case(model)).or_else(|| buckets.iter().find(|b| b.id == SHARED_LIMIT))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
@@ -500,12 +528,10 @@ pub struct Session {
     /// (Codex); 0 where it does not.
     #[serde(default)]
     pub context_window: u64,
-    /// The account's usage windows as the transcript last recorded them
-    /// (Codex), the shorter first, and when that was, Unix seconds.
+    /// The account's limits as the transcript last recorded each (Codex),
+    /// by Codex's id for it.
     #[serde(default)]
-    pub usage_windows: Vec<UsageWindow>,
-    #[serde(default)]
-    pub usage_windows_at: f64,
+    pub usage_buckets: Vec<UsageBucket>,
     /// The effort level the session was last set to with `/effort`, or
     /// empty when it never was.
     pub effort: String,

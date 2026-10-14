@@ -339,6 +339,61 @@ fn main() {
                 }
             }
         }
+        "dictate" => {
+            // emaki-core dictate models | download [key] | file <wav> [key]:
+            // the dictation's models, one downloaded as the window does it,
+            // and the words in a WAV file (16-bit), as the composer gets
+            // them. The microphone is the window's alone.
+            use emaki_core::dictate;
+            let key = |at: usize| args.get(at).map(String::as_str).unwrap_or(dictate::DEFAULT_MODEL).to_string();
+            match args.get(1).map(String::as_str) {
+                Some("download") => {
+                    let m = dictate::model(&key(2)).expect("no such model");
+                    let got = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let stop = std::sync::atomic::AtomicBool::new(false);
+                    let seen = std::sync::Arc::clone(&got);
+                    let ticker = std::thread::spawn(move || loop {
+                        let n = seen.load(std::sync::atomic::Ordering::Relaxed);
+                        eprint!("\r{} of {} MB", n / 1_000_000, m.bytes / 1_000_000);
+                        if n >= m.bytes {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    });
+                    let done = dictate::download(m, &got, &stop);
+                    got.store(m.bytes, std::sync::atomic::Ordering::Relaxed);
+                    let _ = ticker.join();
+                    eprintln!();
+                    println!("{}", done.map(|_| format!("{} is at {}", m.name, dictate::path_of(m).display())).unwrap_or_else(|e| format!("not downloaded: {e}")));
+                }
+                Some("file") => {
+                    let path = args.get(2).expect("dictate file <wav> [key]");
+                    let m = dictate::model(&key(3)).expect("no such model");
+                    let bytes = std::fs::read(path).expect("could not read the file");
+                    let (samples, channels, rate) = dictate::wav_samples(&bytes).expect("not a 16-bit WAV file");
+                    let audio = dictate::to_whisper(&samples, channels, rate);
+                    #[cfg(target_os = "macos")]
+                    {
+                        let at = std::time::Instant::now();
+                        match dictate::transcribe(m, &audio) {
+                            Ok(words) => println!("{words}\n({:.1} s of sound in {:.1} s)", audio.len() as f32 / dictate::RATE as f32, at.elapsed().as_secs_f32()),
+                            Err(e) => println!("no words: {e}"),
+                        }
+                        dictate::unload();
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = (m, audio);
+                        println!("dictation is on a Mac only for now");
+                    }
+                }
+                _ => {
+                    for m in dictate::MODELS {
+                        println!("{}  {}  {} MB  {}", m.key, m.name, m.bytes / 1_000_000, if dictate::installed(m) { "downloaded" } else { "not downloaded" });
+                    }
+                }
+            }
+        }
         "update" => {
             // emaki-core update: what the newest release is, against this
             // build. A probe of the check the app makes once a day.
@@ -566,7 +621,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | explain <command> | update | statusline [install|restore] | drive <cwd> <text> | pty <cwd> [--resume <id>] [--secs <n>] [--keys <text>]");
+            eprintln!("usage: emaki-core list | render <id> | json <id> | build <id> | archive | sync [--force] | search <words> | bench [<id>...] | peers | inbox <id> <text> | explain <command> | update | dictate [models|download|file <wav>] | statusline [install|restore] | drive <cwd> <text> | pty <cwd> [--resume <id>] [--secs <n>] [--keys <text>]");
         }
     }
 }
@@ -599,3 +654,4 @@ fn resolve(target: &str, cfg: &Config) -> PathBuf {
         .map(|r| r.path)
         .unwrap_or_else(|| panic!("no session {target}"))
 }
+

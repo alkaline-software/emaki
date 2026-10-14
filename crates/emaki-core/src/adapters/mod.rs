@@ -52,6 +52,38 @@ pub trait Adapter: Send + Sync {
         Catalogue::default()
     }
 
+    /// Whether the agent archives sessions itself, into a folder of its
+    /// own it can bring them back from, and deletes none by age (Codex).
+    /// Emaki's Archive, Unarchive and Delete are then the agent's own, and
+    /// Emaki keeps no copy: there is nothing to rescue.
+    fn archives_itself(&self) -> bool {
+        false
+    }
+
+    /// Whether the program is here to be asked (`delete_own`).
+    fn present(&self) -> bool {
+        true
+    }
+
+    /// Archive a session nothing runs in. For an agent that does not
+    /// archive itself, Emaki keeps it alone (`archive::release`).
+    fn archive(&self, r: &SessionRef) -> Result<(), String> {
+        archive::release(r)
+    }
+
+    /// Unarchive one, so the agent continues it again: Emaki's copy put
+    /// back where the agent keeps it, dated now (`archive::restore`).
+    fn unarchive(&self, r: &SessionRef) -> Result<(), String> {
+        archive::restore(r).map(|_| ())
+    }
+
+    /// Delete the agent's own copy by the agent's own word, where it has
+    /// one: true when it did. False leaves its files to go to the trash
+    /// with Emaki's.
+    fn delete_own(&self, _r: &SessionRef) -> Result<bool, String> {
+        Ok(false)
+    }
+
     fn load(&self, r: &SessionRef) -> Session {
         let mut s = self.load_path(&r.path, &r.cwd);
         if s.title.is_empty() {
@@ -88,7 +120,9 @@ pub fn load_path(path: &Path) -> Session {
 }
 
 /// Metadata for every session of every agent, newest first: what is still on
-/// disk plus what only the archive has. Archived entries are flagged.
+/// disk plus what only the archive has. Archived entries are flagged. An
+/// agent that archives sessions itself has its own files only: a copy an
+/// earlier Emaki kept of one is not read.
 pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
     // Sessions that ran under our own directory (the explainer's) are not
     // conversations; the directory's old name counts too.
@@ -105,6 +139,9 @@ pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
                 refs.push(r);
             }
         }
+        if adapter.archives_itself() {
+            continue;
+        }
         for (_project, path) in archive::iter_archived(adapter.id()) {
             let Ok(st) = std::fs::metadata(&path) else { continue };
             if st.len() < min_size {
@@ -118,12 +155,20 @@ pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
                 continue;
             }
             r.archived = true;
+            r.kept = true;
             seen.insert((r.agent, r.session_id.clone()));
             refs.push(r);
         }
     }
     refs.sort_by(|a, b| b.mtime.partial_cmp(&a.mtime).unwrap_or(std::cmp::Ordering::Equal));
     refs
+}
+
+/// Delete a session: the agent's own copy by the agent's word where it
+/// has one, then every file left of it handed to `trash`.
+pub fn delete_session(r: &SessionRef, trash: impl Fn(&Path) -> Result<(), String>) -> Result<(), String> {
+    for_agent(r.agent).delete_own(r)?;
+    archive::everything_of(r).iter().try_for_each(|p| trash(p))
 }
 
 /// Where a session stands, for agents whose transcripts carry no stop reason:

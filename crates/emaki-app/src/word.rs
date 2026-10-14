@@ -647,7 +647,9 @@ impl WordPane {
             Pick::Style => (72., 200.),
             Pick::Size => (212., 72.),
         };
-        let list = v_flex().id("word-pick").occlude().w(px(wide)).max_h(px(320.)).overflow_y_scroll().p(px(4.)).rounded(px(8.)).bg(theme.popover).border_1().border_color(theme.border).shadow_lg().text_size(px(12.5)).text_color(theme.popover_foreground).children(rows.into_iter().enumerate().map(|(ix, (words, id, params, here))| {
+        // The rows scroll inside the card's room above and below them, so
+        // one cut at the edge stays inside its corner: a clip is a rectangle.
+        let list = v_flex().id("word-pick-rows").max_h(px(312.)).overflow_y_scroll().px(px(4.)).children(rows.into_iter().enumerate().map(|(ix, (words, id, params, here))| {
             div()
                 .id(("word-pick-row", ix))
                 .h(px(26.))
@@ -667,6 +669,7 @@ impl WordPane {
                     window.focus(&this.focus, cx);
                 }))
         }));
+        let list = v_flex().id("word-pick").occlude().w(px(wide)).py(px(4.)).rounded(px(8.)).bg(theme.popover).border_1().border_color(theme.border).shadow_lg().text_size(px(12.5)).text_color(theme.popover_foreground).child(list);
         let t = (since.elapsed().as_secs_f32() / MENU.as_secs_f32()).min(1.);
         let t = if open { t } else { 1. - t };
         if t < 1. {

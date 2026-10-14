@@ -374,9 +374,9 @@ fn a_stale_copy_is_packed_and_reads_the_same() {
     let path = dir.join("old.jsonl");
     let text = "{\"type\":\"user\",\"message\":\"the same words over and over\"}\n".repeat(8000);
     fs::write(&path, &text).unwrap();
-    let r = SessionRef { agent: AgentId::ClaudeCode, session_id: "old".into(), path: path.clone(), archived: true, mtime: 1.0, ..Default::default() };
+    let r = SessionRef { agent: AgentId::ClaudeCode, session_id: "old".into(), path: path.clone(), archived: true, kept: true, mtime: 1.0, ..Default::default() };
     // One the agent still has, and one only just gone, are left alone.
-    let live = SessionRef { archived: false, ..r.clone() };
+    let live = SessionRef { archived: false, kept: false, ..r.clone() };
     assert_eq!(archive::pack_stale(std::slice::from_ref(&live)), 0);
     let fresh = SessionRef { mtime: emaki_core::transcript::mtime_secs(&fs::metadata(&path).unwrap()), ..r.clone() };
     assert_eq!(archive::pack_stale(std::slice::from_ref(&fresh)), 0);
@@ -1052,8 +1052,9 @@ fn a_codex_script_is_shown_by_what_it_ran() {
     // The row under the composer: the window's size, and the account's
     // windows named by their own lengths.
     assert_eq!((s.context_tokens, s.context_window), (700, 258400));
-    assert_eq!(s.usage_windows.iter().map(|w| (w.label(), w.used)).collect::<Vec<_>>(), vec![("5h".to_string(), 0.2), ("7d".to_string(), 0.05)]);
-    assert!(s.usage_windows_at > 0.0);
+    let shared = emaki_core::model::bucket_for(&s.usage_buckets, "gpt-5.5").unwrap();
+    assert_eq!(shared.windows.iter().map(|w| (w.label(), w.used)).collect::<Vec<_>>(), vec![("5h".to_string(), 0.2), ("7d".to_string(), 0.05)]);
+    assert!(shared.at > 0.0);
     assert_eq!(emaki_core::adapters::turn_state_from_session(&s).phase, Phase::Working);
 
     rows.extend(cx::says("06", "It printed hello.", "final_answer"));
@@ -2289,6 +2290,35 @@ fn at_names_files_under_the_folder() {
     assert_eq!(files::at_token_at("mail a@b", 8), None);
     assert_eq!(files::at_token_at("(@RE", 4), Some((1, 4, "RE".to_string())));
     assert_eq!(files::written("my file.txt"), "@\"my file.txt\"");
+}
+
+/// "@" looks under the folder and nowhere else: not at the rest of the
+/// repository the folder is in, and not through a link out of it.
+#[test]
+fn at_lists_nothing_outside_the_folder() {
+    use emaki_core::files;
+    let dir = tempfile::tempdir().unwrap();
+    let (repo, outside) = (dir.path().join("repo"), dir.path().join("outside"));
+    for d in [repo.join("inner/deep"), repo.join("other"), outside.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    for f in [repo.join("top.txt"), repo.join("other/o.txt"), repo.join("inner/i.txt"), repo.join("inner/deep/d.txt"), outside.join("secret.txt")] {
+        std::fs::write(f, "x").unwrap();
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, repo.join("inner/link")).unwrap();
+    let paths = |folder: &std::path::Path| files::list(&folder.to_string_lossy()).into_iter().map(|e| e.path).collect::<Vec<_>>();
+
+    // A folder of its own, not a repository: walked.
+    let walked = paths(&repo.join("inner"));
+    assert!(walked.contains(&"deep/d.txt".to_string()) && walked.contains(&"i.txt".to_string()), "{walked:?}");
+    assert!(!walked.iter().any(|p| p.contains("secret") || p.contains("top") || p.contains("o.txt")), "{walked:?}");
+
+    // The same folder inside a repository: git's list, still the folder's.
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+    let listed = paths(&repo.join("inner"));
+    assert!(listed.contains(&"deep/d.txt".to_string()) && listed.contains(&"i.txt".to_string()), "{listed:?}");
+    assert!(!listed.iter().any(|p| p.contains("secret") || p.contains("top") || p.contains("o.txt")), "{listed:?}");
 }
 
 #[test]
@@ -3841,4 +3871,185 @@ fn a_markdown_header_is_read_apart_from_the_text() {
     // As a table: the first field is the head, and no mark is markdown's.
     let table = emaki_core::files::front_matter_table(&[("name".into(), "a|b *c*".into()), ("steps".into(), "one\n  two".into())]);
     assert_eq!(table, "| name | a\\|b \\*c\\* |\n|---|---|\n| steps | one<br>\u{a0}\u{a0}two |\n");
+}
+
+/// A process whose parent is gone is adrift, one with a parent is not,
+/// and ending one waits until it is gone.
+#[cfg(unix)]
+#[test]
+fn a_process_left_with_no_parent_is_adrift_and_can_be_ended() {
+    use emaki_core::peer;
+    let out = std::process::Command::new("sh").args(["-c", "sleep 60 >/dev/null 2>&1 & echo $!"]).output().unwrap();
+    let pid: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+    assert!(peer::adrift(pid), "its shell has ended, so it has no parent");
+    assert!(!peer::adrift(std::process::id() as i32), "the test has a parent");
+    peer::end(pid);
+    assert!(unsafe { libc::kill(pid, 0) } != 0, "ended and gone");
+}
+
+/// The line that tells git who commits are by keeps a name with a quote
+/// in it whole, in a shell's quoting and in PowerShell's.
+#[test]
+fn the_git_identity_line_quotes_for_each_shell() {
+    use emaki_core::agents::{git_identity_command, Os};
+    assert_eq!(git_identity_command("Ada Lovelace", "ada@example.com", Os::Mac), "git config --global user.name 'Ada Lovelace'; git config --global user.email 'ada@example.com'");
+    assert_eq!(git_identity_command("Sinéad O'Brien", "s@x.ie", Os::Linux), "git config --global user.name 'Sinéad O'\\''Brien'; git config --global user.email 's@x.ie'");
+    assert_eq!(git_identity_command("Sinéad O'Brien", "s@x.ie", Os::Windows), "git config --global user.name 'Sinéad O''Brien'; git config --global user.email 's@x.ie'");
+}
+
+/// A session the archive alone has goes back where its agent keeps it:
+/// the transcript and its subagents, byte for byte, dated now so the
+/// agent's thirty days start again, and listed as the agent's again.
+#[test]
+fn an_archived_session_is_put_back_for_its_agent() {
+    let _guard = isolated();
+    let dir = emaki_core::paths::projects_dir().join("-tmp-back-again");
+    let side = dir.join("back-1").join("subagents");
+    std::fs::create_dir_all(&side).unwrap();
+    let path = dir.join("back-1.jsonl");
+    let rows = [
+        json!({"type": "user", "uuid": "u1", "sessionId": "back-1", "cwd": "/tmp/back.again", "timestamp": "2026-01-01T10:00:00Z", "message": {"role": "user", "content": "hello"}}),
+        json!({"type": "assistant", "uuid": "a1", "sessionId": "back-1", "cwd": "/tmp/back.again", "timestamp": "2026-01-01T10:00:01Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi."}]}}),
+    ];
+    let text: String = rows.iter().map(|r| format!("{r}\n")).collect();
+    std::fs::write(&path, &text).unwrap();
+    std::fs::write(side.join("agent-x.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+    let find = |id: &str| emaki_core::adapters::index_all(0, &[]).into_iter().find(|r| r.session_id == id);
+    let r = find("back-1").unwrap();
+    assert!(emaki_core::archive::restore(&r).is_err(), "its agent still has it");
+    emaki_core::archive::release(&r).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let kept = find("back-1").unwrap();
+    assert!(kept.archived);
+    // Claude Code's name for the folder: every character but a letter or a digit a dash.
+    let back = emaki_core::archive::restore(&kept).unwrap();
+    assert_eq!(back, path);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert!(side.join("agent-x.jsonl").is_file(), "its subagents come back with it");
+    let age = std::fs::metadata(&path).unwrap().modified().unwrap().elapsed().unwrap_or_default();
+    assert!(age.as_secs() < 60, "dated now, not when it was written");
+    let again = find("back-1").unwrap();
+    assert!(!again.archived, "listed as its agent's again");
+    assert!(emaki_core::archive::restore(&again).is_err(), "nothing is put back twice");
+    assert!(emaki_core::archive::archive_one(&again).errors == 0, "and the archive takes it as it took it before");
+}
+
+/// Codex keeps a limit a family of models, and a rollout's row carries
+/// whichever it heard of last. Each is kept by its id: a session on a
+/// model with a limit of its own shows that one, any other the plan's
+/// shared one, and the account keeps the newest of each.
+#[test]
+fn codex_limits_are_kept_by_their_id_and_shown_for_the_model() {
+    let mut rows = vec![json!({"timestamp": "2026-10-10T09:00:00Z", "type": "session_meta", "payload": {"id": "c3", "cwd": "/tmp/proj", "cli_version": "0.162.1"}}), cx::started("00")];
+    rows.extend(cx::prompt("01", "hello"));
+    rows.push(cx::ev("02", json!({"type": "token_count", "info": null, "rate_limits": {"limit_id": "codex", "limit_name": null, "primary": {"used_percent": 12.0, "window_minutes": 300, "resets_at": 1794215254}, "secondary": {"used_percent": 40.0, "window_minutes": 10080, "resets_at": 1794815254}}})));
+    // The last row is the other limit's, as Codex writes it.
+    rows.push(cx::ev("03", json!({"type": "token_count", "info": null, "rate_limits": {"limit_id": "codex_bengalfox", "limit_name": "gpt-5.3-codex-spark", "primary": {"used_percent": 90.0, "window_minutes": 300, "resets_at": 1794215254}, "secondary": null}})));
+    let s = build_codex(&rows, "");
+    assert_eq!(s.usage_buckets.len(), 2);
+    let pct = |b: Option<&emaki_core::model::UsageBucket>| b.map(|b| b.windows.iter().map(|w| (w.label(), (w.used * 100.0).round() as u64)).collect::<Vec<_>>()).unwrap_or_default();
+    assert_eq!(pct(emaki_core::model::bucket_for(&s.usage_buckets, "gpt-5.5")), vec![("5h".to_string(), 12), ("7d".to_string(), 40)], "an ordinary model shows the shared limit, not the last row's");
+    assert_eq!(pct(emaki_core::model::bucket_for(&s.usage_buckets, "gpt-5.3-codex-spark")), vec![("5h".to_string(), 90)], "a model with its own limit shows that one");
+
+    let mut limits = emaki_core::limits::Limits::default();
+    assert!(limits.absorb_codex(&s.usage_buckets));
+    assert!(!limits.absorb_codex(&s.usage_buckets), "nothing new the second time");
+    let mut older = s.usage_buckets.clone();
+    older[0].at -= 60.0;
+    older[0].windows[0].used = 0.99;
+    assert!(!limits.absorb_codex(&older), "an older reading of a limit does not replace a newer one");
+    assert_eq!(pct(emaki_core::model::bucket_for(&limits.codex_limits, "gpt-5.5"))[0].1, 12);
+}
+
+/// Codex archives sessions itself and deletes none by age. One in its
+/// `archived_sessions` is listed as archived and as Codex's own; Emaki
+/// copies no Codex session, and a copy an earlier Emaki kept is not read.
+#[test]
+fn a_codex_session_is_archived_where_codex_keeps_it() {
+    let (_home, _guard) = isolated();
+    let home = PathBuf::from(std::env::var("CODEX_HOME").unwrap());
+    let write = |dir: PathBuf, id: &str| {
+        fs::create_dir_all(&dir).unwrap();
+        let mut rows = vec![json!({"timestamp": "2026-10-10T09:00:00Z", "type": "session_meta", "payload": {"id": id, "cwd": "/tmp/proj"}}), cx::started("00")];
+        rows.extend(cx::prompt("01", "run the trial"));
+        rows.extend(cx::says("02", "Done.", "final_answer"));
+        rows.push(cx::complete("03"));
+        let path = dir.join(format!("rollout-2026-10-10T09-00-00-{id}.jsonl"));
+        fs::write(&path, rows.iter().map(|r| r.to_string() + "\n").collect::<String>()).unwrap();
+        path
+    };
+    write(home.join("sessions/2026/10/10"), "live");
+    let shelved = write(home.join("archived_sessions"), "shelved");
+    write(archive::archive_dir().join("codex/proj"), "old-copy");
+    let codex = ["codex".to_string()];
+    let refs = emaki_core::adapters::index_all(0, &codex);
+    let stats = archive::sweep(&refs);
+    assert_eq!(stats.files, 0, "no Codex session is copied");
+    let of = |id: &str| refs.iter().find(|r| r.session_id == id);
+    assert!(!of("live").unwrap().archived);
+    let s = of("shelved").unwrap();
+    assert!(s.archived && !s.kept, "archived, and Codex's own");
+    assert_eq!(s.path, shelved);
+    assert!(of("old-copy").is_none(), "an earlier Emaki's copy is not read");
+}
+
+/// What the microphone or a file gives, as Whisper takes it: one channel
+/// at 16 kHz. Two channels at 48 kHz come down to a third as many
+/// samples, the channels averaged; a WAV file's 16-bit samples are read
+/// as such. With no model downloaded none is chosen.
+#[test]
+fn dictation_audio_is_one_channel_at_sixteen_kilohertz() {
+    let (_home, _guard) = isolated();
+    use emaki_core::dictate;
+    let stereo: Vec<f32> = (0..4800).flat_map(|i| [i as f32 / 4800.0, 0.0]).collect();
+    let mono = dictate::to_whisper(&stereo, 2, 48_000);
+    assert_eq!(mono.len(), 1600);
+    assert!((mono[800] - 0.25).abs() < 0.01, "the channels averaged");
+    assert_eq!(dictate::to_whisper(&[0.5, 0.5], 1, dictate::RATE), vec![0.5, 0.5]);
+    // A room's hum is no voice; a second of one in it is, found where it is.
+    let rate = dictate::RATE as usize;
+    let hum: Vec<f32> = (0..rate * 3).map(|i| 0.004 * ((i * 7919 % 1000) as f32 / 500.0 - 1.0)).collect();
+    assert!(dictate::speech_span(&hum).is_none(), "a quiet room");
+    assert!(dictate::speech_span(&vec![0.0; rate * 2]).is_none(), "silence");
+    let mut said = hum.clone();
+    for (i, s) in said[rate..rate * 2].iter_mut().enumerate() {
+        *s += 0.1 * (i as f32 * 0.12).sin();
+    }
+    let span = dictate::speech_span(&said).unwrap();
+    assert!(span.start < rate && span.start > rate / 2 && span.end > rate * 2 && span.end < rate * 5 / 2, "{span:?}");
+    let mut click = hum;
+    click[rate..rate + 800].iter_mut().for_each(|s| *s = 0.5);
+    assert!(dictate::speech_span(&click).is_none(), "a key pressed is too short");
+
+    let mut wav = Vec::new();
+    let data: Vec<u8> = [0i16, i16::MAX, -i16::MAX].iter().flat_map(|s| s.to_le_bytes()).collect();
+    wav.extend(b"RIFF");
+    wav.extend(((36 + data.len()) as u32).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16u32.to_le_bytes());
+    wav.extend(1u16.to_le_bytes());
+    wav.extend(1u16.to_le_bytes());
+    wav.extend(16_000u32.to_le_bytes());
+    wav.extend(32_000u32.to_le_bytes());
+    wav.extend(2u16.to_le_bytes());
+    wav.extend(16u16.to_le_bytes());
+    wav.extend(b"data");
+    wav.extend((data.len() as u32).to_le_bytes());
+    wav.extend(&data);
+    let (samples, channels, rate) = dictate::wav_samples(&wav).unwrap();
+    assert_eq!((samples, channels, rate), (vec![0.0, 1.0, -1.0], 1, 16_000));
+
+    // Longer than a model takes at once: cut at the quiet between words,
+    // nothing lost, no piece too long.
+    let r16 = dictate::RATE as usize;
+    let mut long = vec![0.2f32; r16 * 50];
+    long[r16 * 27..r16 * 27 + r16 / 5].iter_mut().for_each(|s| *s = 0.0);
+    let cut = dictate::pieces(&long, 30_000);
+    assert_eq!(cut.len(), 2);
+    assert_eq!(cut.iter().map(|p| p.len()).sum::<usize>(), long.len());
+    assert!(cut[0].len() <= r16 * 30 && cut[0].len() >= r16 * 27 && cut[0].len() < r16 * 27 + r16 / 5, "{}", cut[0].len());
+    assert_eq!(dictate::pieces(&long, 0).len(), 1, "no limit, one piece");
+    assert!(dictate::chosen(dictate::MODELS[0].key).is_none(), "nothing downloaded");
+    assert!(!dictate::installed(&dictate::MODELS[0]));
 }

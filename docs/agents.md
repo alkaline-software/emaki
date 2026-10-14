@@ -122,14 +122,31 @@ Two levels, as the sessions page has (`Workbench::agent_open`).
   folder at the page's right, for the commands the page gives: the
   conversation's terminal panel with its shell side alone
   (`docs/channels.md`, The terminal panel).
-- Inside one: three steps on a rail, each with a tick once done. Install
-  shows where the program is, and two choices on one row with a
-  chevron between, read as a path: the system (`agent_os`, this
-  machine's to begin with), then the way on it (`agent_way`: a download
-  where there is one, and each command), the maker's first choice to
-  begin with. Under the row, what the way says to do. Tried and
+- The page is written for someone who has never used a terminal: a
+  friend's new Mac lacked git, Apple's command line tools and an agent,
+  and each step said too little. So every step says what to do a line a
+  thing, numbered: copy, open the terminal (a button in the line opens
+  the shell at the page's right), paste with the keys drawn, what a
+  password prompt looks like, start the shell afresh (`SHELL_AGAIN`,
+  since a shell opened before the install does not find the program),
+  then refresh. Keys in these lines go through `key_text`.
+- Which system the steps are for is chosen once, beside the refresh
+  button ("Steps for", `agent_os`, this machine's to begin with), and
+  every step follows it.
+- Inside one: steps on a rail, each with a tick once done. Get git comes
+  first (`agents::git_here`): on a Mac, Apple's command line tools,
+  looked for with `xcode-select -p` and never by running git, whose stub
+  opens the tools' installer. Install shows where the program is, then
+  the way on the system (`agent_way`: a download where there is one, and
+  each command), the maker's first choice to begin with. Under the row,
+  what the way says to do. On GitHub's page a step between signing in
+  and Emaki tells git who commits are by: two fields, and the line to
+  run written from them (`git_identity_command`, quoted for the shell of
+  the system chosen), done once `git config --global` has both. Tried and
   dropped: the ways in a bordered box under the system, which read as
-  one border too many and set the two controls out of line. A change of
+  one border too many and set the two controls out of line; and the
+  system beside the way on one row, which put the choice every step
+  follows inside one of them. A change of
   either choice is in motion (`agent_choose`, `AgentSwap`): what was
   there fades out where it stood as the new fades in, and their room
   runs from the old height to the new, measured as it is drawn, so the

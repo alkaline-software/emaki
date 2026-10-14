@@ -67,17 +67,44 @@ may not be running that week, and the thirty days is a setting.
   On a Mac the packed copy is made beside the file and compared byte for
   byte before it takes its place. A `.gz` beside the file was not used:
   a dozen readers go by a transcript's name and seek in it.
-- **Archived at the person's word** (`release`), a session leaves its
-  agent's folder now. Every file to be removed is first read against its
-  copy, all of it, and nothing goes unless all are the same; a file the
-  archive does not keep (anything in the session's folder but its
-  sidecars) stays. It is the one time Emaki removes a file of an
-  agent's, and only ever a whole session's, asked for on the sessions
-  page. **Deleted** (`everything_of`), a session is named whole for the
-  trash: the agent's files first, so a sweep under way has no source to
-  copy again, then the archive's with its generations, the markdown
-  rendered from it and its uploads. A session with no id names nothing:
-  its uploads folder would be everybody's.
+- **Archived** means the agent does not continue the session until it
+  is unarchived, wherever it is: Claude Code's are kept by Emaki alone
+  (`kept`), Codex's are in Codex's own `archived_sessions` (the adapter's
+  `list` flags them). The window asks the adapter
+  (`Adapter::archive`, `unarchive`, `delete_own`), so Codex makes every
+  change to its own sessions (`codex::thread_call`: `thread/archive`,
+  `thread/unarchive`, `thread/delete`) and keeps its records of them.
+- **Codex's sessions are not copied** (`archive_ref`). The archive is
+  for what an agent deletes by itself, and Codex deletes nothing by age:
+  its own files are the only copy, archived or not. What an Emaki
+  before v0.2.5 kept in `archive/codex/` is not read, and a Codex
+  session that one archived is not brought back.
+- **Archived at the person's word**, a Claude Code session leaves its
+  agent's folder now (`release`). Every file to be removed is first
+  read against its copy, all of it, and nothing goes unless all are the
+  same; a file the archive does not keep (anything in the session's
+  folder but its sidecars) stays. It is the one time Emaki removes a
+  file of an agent's, and only ever a whole session's. **Deleted**
+  (`adapters::delete_session`), Codex deletes its own, and everything
+  else of the session is named
+  for the trash (`everything_of`): Claude Code's files first, so a sweep
+  under way has no source to copy again, then the archive's with its
+  generations, the markdown rendered from it and its uploads. A session
+  with no id names nothing: its uploads folder would be everybody's.
+- **Unarchived**, a Claude Code session goes back to Claude Code's
+  project folder for its folder (`restore`; `claude_project_dir`, the
+  path with every character but a letter or a digit a dash, as Claude
+  Code names it). The sidecars go first and the transcript last, each
+  copied beside its place, compared, and moved in. Each is dated now:
+  with its old date it would be past the agent's thirty days and
+  deleted the next time the agent starts. Nothing the agent has is
+  replaced, and the archive keeps its copy, which the next sweep finds
+  the same as the source. An archived session whether Claude Code
+  deleted it or the person archived it is the same thing on disk, so
+  one restore serves both. A Codex session is unarchived by Codex,
+  which dates it now itself. The window then counts the session as
+  having nothing behind it (`Hub::mark_ended`): a turn it was cut off
+  in, dated now, would read as one at work.
 - **When** is the hub's (`spawn_scanner`): every session at launch and at
   quit; after that a session whose file changed, once its turn is over,
   and one still at work every five minutes. The scan every few seconds is

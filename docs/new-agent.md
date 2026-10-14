@@ -91,6 +91,11 @@ Read `docs/core.md` (Adapters) and `docs/transcript-format.md` first.
   archive keeps the agent's layout; `list` and `peek` are cheap, a stat
   and the head of a file.
 - `adapters/mod.rs`: in `all()` and `for_agent`.
+- An agent with an archive of its own (Codex's `archived_sessions`)
+  says so (`archives_itself`): `list` flags what is in it as archived,
+  and `archive`, `unarchive` and `delete_own` are the agent's own
+  commands, and the archive copies none of its sessions: an agent that
+  deletes nothing by age has nothing to rescue.
 - `archive.rs`: what a session's files are for it. The main file is
   mirrored for any agent; files beside it are Claude Code's alone until
   the new agent's are named.

@@ -326,7 +326,9 @@ count is said: the list's foot (Pull), a strip under the files' head
 when there are commits either way (`sync_strip`, there while the
 comparison has nothing to open for), and under the commit's button.
 Pull is refused while a turn runs in the session showing, as a switch
-is. Gone separate ways, neither is offered.
+is. Gone separate ways, neither is offered. Beside Push, in the strip
+and under the commit's button, is Undo (`undo_pill`): the history's
+Undo Commit, for the last commit while it is still only here.
 
 **Making a branch** is one sheet (`render_branch_new`, `BranchNew`),
 reached three ways: the New Branch button beside the field, words that

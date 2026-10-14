@@ -8,7 +8,7 @@
 //! centred in the rest of the window; a floating composer card at the foot
 //! of a conversation and in the middle of the home page.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -42,7 +42,7 @@ use crate::hub::{Hub, HubEvent, UpdateEvent};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
-actions!(emaki, [ReopenTab, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ReopenTab, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab, Dictate]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -217,6 +217,7 @@ impl MenuDo {
             MenuDo::Discard(_) => "icons/undo-2.svg",
             MenuDo::Sessions(ManageDo::Archive, _) => "icons/archive.svg",
             MenuDo::Sessions(ManageDo::Delete, _) => "icons/trash.svg",
+            MenuDo::Sessions(ManageDo::Unarchive, _) => "icons/undo-2.svg",
             MenuDo::CloseOthers(_) => "icons/circle-x.svg",
             MenuDo::Term(what) => what.icon(),
             MenuDo::Pdf(crate::panels::PdfDo::Copy) | MenuDo::Edit(EditDo::Copy, _) => "icons/copy.svg",
@@ -319,11 +320,38 @@ const FOLDER_ROWS: usize = 5;
 /// What the sessions page's header does to the sessions chosen.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ManageDo {
-    /// The agent's own copy is let go; Emaki's is the session from then.
+    /// The agent does not continue it until it is unarchived: Claude
+    /// Code's copy is let go and Emaki's is the session from then, and
+    /// Codex archives its own.
     Archive,
-    /// Every copy goes to the system's trash.
+    /// Every copy goes to the system's trash; Codex deletes its own.
     Delete,
+    /// An archived session goes back where its agent keeps it, to be
+    /// listed and continued there again.
+    Unarchive,
 }
+
+/// Where dictation is: listening while the person speaks, then the model
+/// writing it down (`toggle_dictation`). Off a Mac it is never on.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) enum Dictation {
+    Off,
+    /// The microphone asked for and not yet on.
+    Starting,
+    #[cfg(target_os = "macos")]
+    Listening(emaki_core::dictate::Recorder, Instant),
+    Writing,
+}
+
+/// Dictation's two sounds, Emaki's own (`scripts/dictate-sounds.py`): a
+/// chime of two notes rising as it starts to listen, and falling as it
+/// stops. A short system sound was tried and read as the Mac's alert.
+const DICTATE_START: &[u8] = include_bytes!("../assets/sounds/dictate-start.wav");
+const DICTATE_STOP: &[u8] = include_bytes!("../assets/sounds/dictate-stop.wav");
+
+/// How many of the microphone's last moments the bars under the
+/// composer show.
+const MIC_BARS: usize = 14;
 
 /// The header's height while sessions are being chosen.
 const MANAGE_BAR_H: f32 = 44.;
@@ -550,13 +578,16 @@ pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("updates", "Updates", "icons/redo-2.svg"), ("about", "About", "icons/info.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("dictate", "Dictate", "icons/microphone.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("updates", "Updates", "icons/redo-2.svg"), ("about", "About", "icons/info.svg")];
 /// The panel's size: wide enough for a rail beside the rows, and a fixed
 /// height so it reads as a sheet, not a second window (capped by the
 /// window when that is smaller).
 pub const SETTINGS_W: Pixels = px(820.);
 pub const SETTINGS_H: Pixels = px(580.);
 pub const SETTINGS_RAIL_W: Pixels = px(180.);
+/// The settings' rows: the column the names stand in, and the width a
+/// control that fills has, so a page's controls start and end together.
+pub const SETTINGS_LABEL_W: Pixels = px(150.);
 /// What the composer says when empty: on the home page, and on a session.
 /// Drawn by `render_composer_hint`.
 pub const PLACEHOLDER_NEW: &str = "Start a session…";
@@ -1140,6 +1171,13 @@ pub struct Workbench {
     pub(crate) agent_swap: Option<crate::agents_page::AgentSwap>,
     /// How tall what the install step shows was last drawn.
     pub(crate) agent_way_h: Rc<Cell<f32>>,
+    /// How tall the git step's words were, as `agent_way_h`.
+    pub(crate) agent_git_h: Rc<Cell<f32>>,
+    /// Git on this machine, as the agents page last looked.
+    pub(crate) agents_git: Option<emaki_core::agents::Git>,
+    /// The name and address the GitHub page's step writes into git's line.
+    pub(crate) git_name_input: Entity<InputState>,
+    pub(crate) git_email_input: Entity<InputState>,
     pub(crate) agents_page_scroll: ScrollHandle,
     /// How many texts of the page have been drawn selectable in this
     /// draw: each needs a name of its own.
@@ -1900,6 +1938,33 @@ pub struct Workbench {
     /// `EMAKI_GO=treefocus`: the keyboard to the files panel, at the next draw.
     pub(crate) pending_tree_focus: bool,
     pub(crate) pending_press: Vec<String>,
+    /// The probe's dictation, started at the next draw, which has the window.
+    pending_dictate: bool,
+    /// `EMAKI_GO=unarchive:<id>`: that session unarchived at the next draw,
+    /// as its menu in the sidebar does it.
+    pending_unarchive: Option<String>,
+    /// `EMAKI_GO=dictate:key`: dictation's key pressed at the next draw.
+    pending_dictate_key: bool,
+    /// The pretend recorder's redraws, started at the next draw.
+    pending_dictate_tick: bool,
+    /// `EMAKI_GO=dictate:file:<wav>`: that recording written down at the next draw.
+    pending_dictate_file: Option<String>,
+    /// Dictation, under the composer and on its key.
+    pub(crate) dictation: Dictation,
+    /// A dictation model coming down: its key, the bytes so far, and the
+    /// word that stops it.
+    dictate_dl: Option<(&'static str, Arc<std::sync::atomic::AtomicU64>, Arc<std::sync::atomic::AtomicBool>)>,
+    /// Why the last download did not finish.
+    dictate_dl_error: Option<String>,
+    /// The dictation key's field in Settings is taking the next keys.
+    dictate_key_rec: bool,
+    dictate_key_focus: FocusHandle,
+    /// What the key's field says of the keys last pressed in it.
+    dictate_key_note: Option<String>,
+    /// The microphone's loudness while it listens, the newest last, eased
+    /// frame to frame: the ring around the button and the bars under the
+    /// composer.
+    mic_levels: VecDeque<f32>,
     /// A file's pane has just been closed: the keys go to the files
     /// tree, where its row is still the chosen one.
     pub(crate) tree_focus_back: bool,
@@ -2847,6 +2912,18 @@ impl PillText {
     }
 }
 
+/// A writing language as two letters, where its name does not fit.
+fn language_code(key: &str) -> &'static str {
+    match key {
+        "en-US" => "US",
+        "en-GB" => "UK",
+        "es" => "ES",
+        "fr" => "FR",
+        "de" => "DE",
+        _ => "",
+    }
+}
+
 /// The colours of a choice with none of its own, from low to high,
 /// each on a light ground and then on a dark one: blue, green, amber,
 /// purple, red, in the shades Claude Code's two themes use, so a choice
@@ -3073,6 +3150,18 @@ impl Workbench {
             s.set_value(cfg.app.user_name.clone(), window, cx);
             s
         });
+        // The GitHub page's two fields: what is typed is written into the
+        // line it gives, as it is typed.
+        let git_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Your full name"));
+        let git_email_input = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
+        for input in [&git_name_input, &git_email_input] {
+            cx.subscribe_in(input, window, |_, _, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         // A picture kept before the sized copies were made gets them now.
         if !cfg.app.avatar.is_empty() {
             let master = PathBuf::from(&cfg.app.avatar);
@@ -3331,6 +3420,27 @@ impl Workbench {
             Ok("agents") => Page::Agents,
             _ => Page::New,
         };
+        // The dictation key's field takes the keys before any binding
+        // does, or ⌘N pressed there would open a new session: gpui runs
+        // the bindings before an element's own key listener. A click
+        // anywhere else leaves the field as it was.
+        let dictate_key_focus = cx.focus_handle();
+        cx.on_blur(&dictate_key_focus, window, |this, _, cx| {
+            if std::mem::take(&mut this.dictate_key_rec) {
+                this.dictate_key_note = None;
+                cx.notify();
+            }
+        })
+        .detach();
+        let me = cx.entity().downgrade();
+        cx.intercept_keystrokes(move |e, _, cx| {
+            let Some(me) = me.upgrade() else { return };
+            if me.read(cx).dictate_key_rec {
+                me.update(cx, |w, cx| w.dictate_key_pressed(&e.keystroke, cx));
+                cx.stop_propagation();
+            }
+        })
+        .detach();
         Self {
             hub,
             cfg,
@@ -3355,6 +3465,10 @@ impl Workbench {
             agent_way: "",
             agent_swap: None,
             agent_way_h: Rc::new(Cell::new(0.)),
+            agent_git_h: Rc::new(Cell::new(0.)),
+            agents_git: None,
+            git_name_input,
+            git_email_input,
             agents_page_scroll: ScrollHandle::new(),
             selectable_n: std::cell::Cell::new(0),
             agents_shell: false,
@@ -3641,6 +3755,18 @@ impl Workbench {
             pending_win_w: None,
             pending_tree_focus: false,
             pending_press: Vec::new(),
+            pending_dictate: false,
+            pending_unarchive: None,
+            pending_dictate_key: false,
+            pending_dictate_tick: false,
+            pending_dictate_file: None,
+            dictation: Dictation::Off,
+            dictate_dl: None,
+            dictate_dl_error: None,
+            dictate_key_rec: false,
+            dictate_key_focus,
+            dictate_key_note: None,
+            mic_levels: VecDeque::new(),
             tree_focus_back: false,
             pending_new_in: None,
             pending_answer: None,
@@ -4857,6 +4983,51 @@ impl Workbench {
                 self.agent_choose(None, Some(way), cx);
             }
             Some(t) if t.starts_with("sessions:") => self.show_sessions_in(Scope::All, Some(t["sessions:".len()..].to_string()), cx),
+            // Dictation's key, as pressed: `dictate` starts it and the
+            // next stops it.
+            Some("dictate:key") => {
+                self.pending_dictate_key = true;
+                cx.notify();
+            }
+            // Dictation listening to nothing, to see it: `dictate:pretend`.
+            #[cfg(target_os = "macos")]
+            Some("dictate:pretend") => {
+                self.mic_levels.clear();
+                self.dictation = Dictation::Listening(emaki_core::dictate::Recorder::pretend(), Instant::now());
+                self.pending_dictate_tick = true;
+                cx.notify();
+            }
+            // The dictation key's Reset, pressed.
+            Some("dictate:reset") => self.reset_dictate_key(cx),
+            // The first model not here, its Download pressed.
+            Some("dictate:get") => {
+                if let Some(m) = emaki_core::dictate::MODELS.iter().find(|m| !emaki_core::dictate::installed(m)) {
+                    self.download_model(m, cx);
+                }
+            }
+            // A recording handed in where the microphone's would be:
+            // `dictate:file:<wav>`.
+            Some(t) if t.starts_with("dictate:file:") => {
+                self.pending_dictate_file = Some(t["dictate:file:".len()..].to_string());
+                cx.notify();
+            }
+            // A picture shown large, as a click on an attachment shows it:
+            // `lightbox:<path>`.
+            Some(t) if t.starts_with("lightbox:") => {
+                let path = PathBuf::from(&t["lightbox:".len()..]);
+                self.lightbox = Some(Lightbox { title: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), source: ImageSource::from(path.clone()), path: Some(path) });
+                cx.notify();
+            }
+            // Unarchive Session from a session's menu: nothing is asked.
+            Some(t) if t.starts_with("unarchive:") => {
+                self.pending_unarchive = self.refs.iter().find(|r| r.session_id.starts_with(&t["unarchive:".len()..])).map(key_of);
+                cx.notify();
+            }
+            // The system's dictation, started in the composer.
+            Some("dictate") => {
+                self.pending_dictate = true;
+                cx.notify();
+            }
             // Whether the terminal card is up, and whether by itself.
             Some("termstate") => {
                 let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
@@ -5395,7 +5566,7 @@ impl Workbench {
             }
         }
         self.wear_outgoing(&key, &mut session);
-        if self.limits.refresh_from_statusline() | self.limits.absorb_codex(&session.usage_windows, session.usage_windows_at) {
+        if self.limits.refresh_from_statusline() | self.limits.absorb_codex(&session.usage_buckets) {
             let _ = self.limits.save();
         }
         self.refresh_context(&session.id);
@@ -5694,39 +5865,61 @@ impl Workbench {
             _ => "system",
         };
         let appearance = self.segmented("appearance", vec![("system", "System".into(), None), ("light", "Light".into(), None), ("dark", "Dark".into(), None)], appearance_key, Rc::new(|this, key, window, cx| this.set_appearance(key, window, cx)), cx);
-        // A row: a title and a line on it at the left, the choices at the right.
-        let row = |title: &'static str, detail: &'static str, control: AnyElement, theme: &gpui_component::Theme| {
-            h_flex()
-                .items_center()
-                .gap(px(12.))
-                // A line under the title only where the title does not
-                // say it all.
-                .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child(title)).when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(detail))))
-                .child(control)
+        // A row: its name in a column of one width, and its control
+        // from there on, so every control on every page starts where
+        // the others do. A set of choices or a field fills the rest of
+        // the row. What has one short answer (on or off, a button, a
+        // choice from a list) is half of that, `short`: its end is the
+        // middle of the ones that fill. A line on a row, there only
+        // where the name does not say it all, stands under a control
+        // that fills and beside a short one, in the half it leaves.
+        let lay = |title: &'static str, detail: Option<AnyElement>, control: AnyElement, short: bool, theme: &gpui_component::Theme| {
+            let mut note = detail.map(|detail| div().text_size(px(12.)).line_height(px(17.)).text_color(theme.muted_foreground).whitespace_normal().child(detail));
+            let beside = if short { note.take() } else { None };
+            v_flex()
+                .gap(px(6.))
+                .child(
+                    h_flex().items_center().child(div().w(SETTINGS_LABEL_W).flex_shrink_0().pr(px(12.)).text_size(px(13.5)).child(title)).map(|d| {
+                        if short {
+                            d.child(v_flex().w(gpui::relative(0.5)).flex_1().min_w_0().child(control)).child(v_flex().w(gpui::relative(0.5)).flex_1().min_w_0().pl(px(14.)).children(beside))
+                        } else {
+                            d.child(v_flex().flex_1().min_w_0().child(control))
+                        }
+                    }),
+                )
+                .when_some(note, |d, note| d.child(div().pl(SETTINGS_LABEL_W).child(note)))
         };
+        let words = |t: &'static str| (!t.is_empty()).then(|| div().child(t).into_any_element());
+        let row = |title: &'static str, detail: &'static str, control: AnyElement, theme: &gpui_component::Theme| lay(title, words(detail), control, false, theme);
+        let short = |title: &'static str, detail: &'static str, control: AnyElement, theme: &gpui_component::Theme| lay(title, words(detail), control, true, theme);
+        // What is on or off: the two words as a choice, in a colour each.
+        let toggle = |control: &'static str, on: bool, set: fn(&mut Self, bool, &mut Context<Self>), cx: &mut Context<Self>| self.segmented(control, vec![("off", "Off".into(), None), ("on", "On".into(), None)], if on { "on" } else { "off" }, Rc::new(move |this, key, _, cx| set(this, key == "on", cx)), cx);
 
-        // Accents are swatches: a disc of the colour, ringed when chosen.
-        let accents = h_flex().gap(px(8.)).children(crate::look::ACCENTS.iter().map(|a| {
+        // Accents are swatches: a disc of the colour, the chosen one
+        // with a ring inside it. The ring is inside so every disc is one
+        // size, and the first and the last end where the row does.
+        let accents = h_flex().justify_between().children(crate::look::ACCENTS.iter().map(|a| {
             let active = app.accent == a.key;
             let color: Hsla = gpui::Rgba::try_from(crate::look::accent_hex(a.key, dark)).map(Hsla::from).unwrap_or(theme.primary);
             let key = a.key;
+            let ring = theme.popover;
             div()
                 .id(SharedString::from(format!("accent-{}", a.key)))
-                .size(px(26.))
+                .group("accent")
+                .size(px(24.))
+                .flex_shrink_0()
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .border_2()
-                .border_color(if active { theme.foreground } else { theme.transparent })
-                .hover(|s| s.border_color(theme.muted_foreground))
+                .bg(color)
                 .managed_tooltip({
                     let name = a.name;
                     move |window, cx| crate::workbench::tip(name, window, cx)
                 })
                 .on_click(cx.listener(move |this, _, window, cx| this.set_accent(key, window, cx)))
-                .child(div().size(px(18.)).rounded_full().bg(color))
+                .child(div().size(px(16.)).rounded_full().border_2().border_color(if active { ring } else { ring.opacity(0.) }).when(!active, |d| d.group_hover("accent", |s| s.border_color(ring.opacity(0.55)))))
         }));
 
         let size_key = match app.chat_size.as_str() {
@@ -5745,15 +5938,15 @@ impl Workbench {
         // The same lists the pills under the composer open, since both
         // are whatever the agent offers: each agent's own three.
         let options = self.new_options(AgentId::ClaudeCode);
-        let modes = self.pick_pill(PickFor::DefaultMode, "default-mode", "icons/shield.svg", PillText { tail: "", ..mode_pill(&options, &default_mode, &theme) }, cx);
+        let modes = self.settings_pick(PickFor::DefaultMode, "default-mode", "icons/shield.svg", PillText { tail: "", ..mode_pill(&options, &default_mode, &theme) }, cx);
         let default_model = if self.cfg.driver.default_model.is_empty() { options.default_model.clone() } else { self.cfg.driver.default_model.clone() };
-        let models = self.pick_pill(PickFor::DefaultModel, "default-model", "icons/box.svg", PillText::plain(model_name(&options, &default_model)), cx);
-        let efforts = self.pick_pill(PickFor::DefaultEffort, "default-effort", "icons/gauge.svg", PillText { tail: "", ..effort_pill(&options, &default_model, &self.next_effort, &theme) }, cx);
+        let models = self.settings_pick(PickFor::DefaultModel, "default-model", "icons/box.svg", PillText::plain(model_name(&options, &default_model)), cx);
+        let efforts = self.settings_pick(PickFor::DefaultEffort, "default-effort", "icons/gauge.svg", PillText { tail: "", ..effort_pill(&options, &default_model, &self.next_effort, &theme) }, cx);
         let codex = self.new_options(AgentId::Codex);
         let codex_model = if self.codex_next[1].is_empty() { codex.models.first().map(|m| m.key.clone()).unwrap_or_default() } else { self.codex_next[1].clone() };
-        let codex_modes = self.pick_pill(PickFor::CodexMode, "codex-mode", "icons/shield.svg", PillText { tail: "", ..mode_pill(&codex, &self.codex_next[0], &theme) }, cx);
-        let codex_efforts = self.pick_pill(PickFor::CodexEffort, "codex-effort", "icons/gauge.svg", PillText { tail: "", ..effort_pill(&codex, &codex_model, &self.codex_next[2], &theme) }, cx);
-        let codex_models = self.pick_pill(PickFor::CodexModel, "codex-model", "icons/box.svg", PillText::plain(model_name(&codex, &codex_model)), cx);
+        let codex_modes = self.settings_pick(PickFor::CodexMode, "codex-mode", "icons/shield.svg", PillText { tail: "", ..mode_pill(&codex, &self.codex_next[0], &theme) }, cx);
+        let codex_efforts = self.settings_pick(PickFor::CodexEffort, "codex-effort", "icons/gauge.svg", PillText { tail: "", ..effort_pill(&codex, &codex_model, &self.codex_next[2], &theme) }, cx);
+        let codex_models = self.settings_pick(PickFor::CodexModel, "codex-model", "icons/box.svg", PillText::plain(model_name(&codex, &codex_model)), cx);
         // Whose three are showing: a segment an agent, by its mark, at
         // the right of the section's title, and the agent named over
         // its rows.
@@ -5811,22 +6004,21 @@ impl Workbench {
         let sans_tiles = group("Sans serif", tiles(crate::fonts::SANS, chat_now, "Ag", false, cx).into_any_element());
         let mono_tiles = tiles(crate::fonts::monos(), mono_now, "fn(0) -> 1", true, cx).into_any_element();
         let term_cursor = self.segmented("term-cursor", vec![("bar", "Bar".into(), None), ("block", "Block".into(), None), ("underline", "Underline".into(), None)], pick(&["bar", "block", "underline"], &term.cursor), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.cursor = key.into(), cx)), cx);
-        let term_blink = Checkbox::new("term-blink").checked(term.cursor_blink).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.cursor_blink = *on, cx)));
-        let term_ligatures = Checkbox::new("term-ligatures").checked(term.ligatures).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.ligatures = *on, cx)));
-        let term_copy = Checkbox::new("term-copy").checked(term.copy_on_select).on_click(cx.listener(|this, on: &bool, _, cx| this.set_terminal(|t| t.copy_on_select = *on, cx)));
+        let term_blink = toggle("term-blink", term.cursor_blink, |this, on, cx| this.set_terminal(|t| t.cursor_blink = on, cx), cx);
+        let term_ligatures = toggle("term-ligatures", term.ligatures, |this, on, cx| this.set_terminal(|t| t.ligatures = on, cx), cx);
+        let term_copy = toggle("term-copy", term.copy_on_select, |this, on, cx| this.set_terminal(|t| t.copy_on_select = on, cx), cx);
 
         // Formatting: one switch, and under it the languages in two
         // lists, there whether it is on or not and dimmed while it is off.
         let formatting = self.cfg.app.format_on_save;
-        let format_on_save = self.segmented(
+        let format_on_save = toggle(
             "format-on-save",
-            vec![("off", "Off".into(), None), ("on", "On".into(), None)],
-            if formatting { "on" } else { "off" },
-            Rc::new(|this, key, _, cx| {
-                this.cfg.app.format_on_save = key == "on";
+            formatting,
+            |this, on, cx| {
+                this.cfg.app.format_on_save = on;
                 this.save_app_config();
                 cx.notify();
-            }),
+            },
             cx,
         );
         let format_list = |title: &'static str, code: bool, cx: &mut Context<Self>| {
@@ -5839,15 +6031,7 @@ impl Workbench {
                     .h(px(30.))
                     .gap(px(9.))
                     .items_center()
-                    .child(img(crate::file_icons::path(l.file, false, false, dark)).size(px(16.)).flex_shrink_0())
-                    // The names in a column of one width, so what
-                    // follows them starts at one place down the list.
-                    .child(div().w(px(72.)).flex_shrink_0().text_size(px(13.)).child(l.name))
-                    .child(div().min_w_0().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(match needs {
-                        Some(_) => format!("provided by {}, not installed", l.by),
-                        None => format!("provided by {}", l.by),
-                    }))
-                    .child(div().flex_1())
+                    // The tick first, beside the language it is for.
                     .child(Checkbox::new(SharedString::from(format!("format-{key}"))).checked(on).disabled(!formatting).on_click(cx.listener(move |this, on: &bool, _, cx| {
                         this.cfg.app.format_langs.retain(|k| k != key);
                         if *on {
@@ -5856,15 +6040,23 @@ impl Workbench {
                         this.save_app_config();
                         cx.notify();
                     })))
+                    .child(img(crate::file_icons::path(l.file, false, false, dark)).size(px(16.)).flex_shrink_0())
+                    // The names in a column of one width, so what
+                    // follows them starts at one place down the list.
+                    .child(div().w(px(66.)).flex_shrink_0().text_size(px(13.)).child(l.name))
+                    .child(div().min_w_0().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(match needs {
+                        Some(_) => format!("provided by {}, not installed", l.by),
+                        None => format!("provided by {}", l.by),
+                    }))
             });
             v_flex().flex_1().min_w_0().child(div().pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(title)).children(rows.collect::<Vec<_>>())
         };
-        let format_lists = h_flex().items_start().gap(px(24.)).when(!formatting, |d| d.opacity(0.45)).child(format_list("Code", true, cx)).child(format_list("Documents and data", false, cx)).into_any_element();
-        let auto_cap = Checkbox::new("auto-capitalize").checked(self.cfg.app.auto_capitalize).on_click(cx.listener(|this, on: &bool, _, cx| this.set_writing(|a| a.auto_capitalize = *on, cx)));
+        let format_lists = h_flex().items_start().gap(px(16.)).when(!formatting, |d| d.opacity(0.45)).child(format_list("Code", true, cx)).child(format_list("Documents and data", false, cx)).into_any_element();
+        let auto_cap = toggle("auto-capitalize", self.cfg.app.auto_capitalize, |this, on, cx| this.set_writing(|a| a.auto_capitalize = on, cx), cx);
         let spelling = self.cfg.app.check_writing;
-        let check_writing = Checkbox::new("check-writing").checked(self.cfg.app.check_writing).on_click(cx.listener(|this, on: &bool, _, cx| this.set_writing(|a| a.check_writing = *on, cx)));
+        let check_writing = toggle("check-writing", self.cfg.app.check_writing, |this, on, cx| this.set_writing(|a| a.check_writing = on, cx), cx);
         let languages: Vec<&'static str> = emaki_core::check::LANGUAGES.iter().map(|l| l.0).collect();
-        let writing_language = self.segmented("writing-language", emaki_core::check::LANGUAGES.iter().map(|(key, name)| (*key, name.to_string(), None)).collect(), pick(&languages, &self.cfg.app.writing_language), Rc::new(|this, key, _, cx| this.set_writing(|a| a.writing_language = key.into(), cx)), cx);
+        let writing_language = self.segmented("writing-language", emaki_core::check::LANGUAGES.iter().map(|(key, _)| (*key, language_code(key).to_string(), None)).collect(), pick(&languages, &self.cfg.app.writing_language), Rc::new(|this, key, _, cx| this.set_writing(|a| a.writing_language = key.into(), cx)), cx);
         // Said only where a choice does nothing: off a Mac.
         let language_note = (!crate::sys::SYSTEM_SPELLING).then_some("Spanish, French and German are checked on a Mac only.");
 
@@ -5896,22 +6088,24 @@ impl Workbench {
         let checking = u.checking;
         let installing = u.installing;
         let notes_url = u.available.as_deref().map(update::release_page);
+        // One button the controls' width, as a field is.
+        let press = |id: &'static str, icon: &'static str, label: SharedString, kind: Press, off: bool| crate::branches::small_pill(id, icon, label, kind, off, &theme).h(px(30.)).w_full().justify_center();
         let button = if can_install {
-            let label: SharedString = format!("Update to {}", u.available.as_deref().unwrap_or("")).into();
-            pill_button("update-now", label, &theme, cx.listener(|this, _, _, cx| this.install_update_now(cx))).into_any_element()
+            press("update-now", "icons/redo-2.svg", format!("Update to {}", u.available.as_deref().unwrap_or("")).into(), Press::Primary, false).on_click(cx.listener(|this, _, _, cx| this.install_update_now(cx))).into_any_element()
         } else if installing {
-            pill_button("update-busy", "Updating…", &theme, |_, _, _| {}).into_any_element()
+            press("update-busy", "icons/redo-2.svg", "Updating…".into(), Press::Quiet, true).into_any_element()
         } else {
-            pill_button("update-check", if checking { "Checking…" } else { "Check for updates" }, &theme, cx.listener(|this, _, _, cx| this.check_updates_now(cx))).into_any_element()
+            press("update-check", "icons/redo-2.svg", if checking { "Checking…" } else { "Check for updates" }.into(), Press::Quiet, checking).on_click(cx.listener(|this, _, _, cx| this.check_updates_now(cx))).into_any_element()
         };
         let link_color = theme.muted_foreground;
         let link_hover = theme.primary;
-        let version_row = v_flex().items_end().gap(px(6.)).child(button).when_some(notes_url, |d, url| {
+        let version_detail: SharedString = if update_line.is_empty() { format!("Emaki {current}") } else { format!("Emaki {current} · {update_line}") }.into();
+        let version_note = v_flex().gap(px(2.)).child(div().child(version_detail)).when_some(notes_url, |d, url| {
             d.child(
                 div()
                     .id("update-notes")
+                    .self_start()
                     .cursor_pointer()
-                    .text_size(px(11.5))
                     .text_color(link_color)
                     .text_decoration_1()
                     .text_decoration_color(link_color.opacity(0.6))
@@ -5922,14 +6116,180 @@ impl Workbench {
                     .child("Release notes"),
             )
         });
-        let auto_check = Checkbox::new("update-auto").checked(self.cfg.app.check_updates).on_click(cx.listener(|this, on: &bool, _, cx| this.set_check_updates(*on, cx)));
-        let version_detail: SharedString = if update_line.is_empty() { format!("Emaki {current}") } else { format!("Emaki {current} · {update_line}") }.into();
+        let auto_check = toggle("update-auto", self.cfg.app.check_updates, |this, on, cx| this.set_check_updates(on, cx), cx);
+
+        // Dictation: the models as a grid of cards, each downloaded or
+        // taken off here and the one in use marked; the language, for a
+        // model that must be told; the key that starts and stops it.
+        let dictate_rows: Vec<AnyElement> = if self.settings_section != "dictate" {
+            Vec::new()
+        } else if !emaki_core::dictate::AVAILABLE {
+            vec![div().text_size(px(13.5)).text_color(theme.muted_foreground).child("Dictation is on a Mac only for now.").into_any_element()]
+        } else {
+            let in_use = emaki_core::dictate::chosen(&app.dictate_model);
+            let well = if dark { theme.sidebar } else { theme.muted };
+            // A row a model, the heaviest first: its maker's mark, its
+            // name with what it is for, its size and languages, and what
+            // is done with it at the right.
+            let rows = emaki_core::dictate::MODELS.iter().map(|m| {
+                let here = emaki_core::dictate::installed(m);
+                let using = in_use.is_some_and(|u| u.key == m.key);
+                let coming = self.dictate_dl.as_ref().filter(|(k, _, _)| *k == m.key).map(|(_, got, stop)| (got.load(std::sync::atomic::Ordering::Relaxed), Arc::clone(stop)));
+                let mark = if m.maker == "Qwen" { "icons/makers/qwen.svg" } else { "icons/agents/codex.svg" };
+                let size = if m.bytes >= 1_000_000_000 { format!("{:.1} GB", m.bytes as f64 / 1e9) } else { format!("{} MB", m.bytes / 1_000_000) };
+                let side: AnyElement = if let Some((got, stop)) = coming {
+                    let share = (got as f32 / m.bytes.max(1) as f32).clamp(0.0, 1.0);
+                    h_flex()
+                        .gap(px(10.))
+                        .items_center()
+                        .child(
+                            v_flex()
+                                .w(px(96.))
+                                .gap(px(5.))
+                                .child(div().h(px(3.)).w_full().rounded_full().bg(well).child(div().h_full().rounded_full().bg(theme.primary).w(gpui::relative(share))))
+                                .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("{}%", (share * 100.) as u32))),
+                        )
+                        .child(crate::branches::small_pill(SharedString::from(format!("dictate-stop-{}", m.key)), "icons/close.svg", "Stop", Press::Quiet, false, &theme).on_click(move |_, _, cx| {
+                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            cx.stop_propagation();
+                        }))
+                        .into_any_element()
+                } else if here {
+                    h_flex()
+                        .gap(px(8.))
+                        .items_center()
+                        .child(if using {
+                            h_flex().gap(px(5.)).items_center().text_size(px(12.)).text_color(theme.primary).child(Icon::default().path("icons/check.svg").with_size(px(13.))).child("In use").into_any_element()
+                        } else {
+                            crate::branches::small_pill(SharedString::from(format!("dictate-use-{}", m.key)), "icons/check.svg", "Use", Press::Quiet, false, &theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.cfg.app.dictate_model = m.key.to_string();
+                                    let _ = Config::edit(move |c| c.app.dictate_model = m.key.to_string());
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        })
+                        .child(crate::branches::small_pill(SharedString::from(format!("dictate-remove-{}", m.key)), "icons/trash.svg", "Remove", Press::Danger, false, &theme).on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Err(e) = emaki_core::dictate::remove(m) {
+                                this.notice = Some(Notice::error(format!("not removed: {e}")));
+                            }
+                            cx.notify();
+                        })))
+                        .into_any_element()
+                } else {
+                    crate::branches::small_pill(SharedString::from(format!("dictate-get-{}", m.key)), "icons/download.svg", "Download", Press::Primary, self.dictate_dl.is_some(), &theme)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.download_model(m, cx);
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                };
+                let hover_ring = theme.muted_foreground.opacity(0.45);
+                let edge = theme.muted_foreground.opacity(0.2);
+                h_flex()
+                    .id(SharedString::from(format!("dictate-row-{}", m.key)))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .gap(px(12.))
+                    .items_center()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(if using { theme.primary } else { edge })
+                    .when(using, |d| d.bg(theme.primary.opacity(0.05)))
+                    // A model that is here is taken up by a click anywhere
+                    // on its row.
+                    .when(here && !using, |d| {
+                        d.cursor_pointer().hover(move |s| s.border_color(hover_ring)).on_click(cx.listener(move |this, _, _, cx| {
+                            this.cfg.app.dictate_model = m.key.to_string();
+                            let _ = Config::edit(move |c| c.app.dictate_model = m.key.to_string());
+                            cx.notify();
+                        }))
+                    })
+                    .child(div().size(px(32.)).flex_shrink_0().rounded(px(8.)).bg(well).flex().items_center().justify_center().child(Icon::default().path(mark).with_size(px(17.)).text_color(theme.foreground)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(1.))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .items_baseline()
+                                    .child(div().flex_shrink_0().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(m.name))
+                                    .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(m.about)),
+                            )
+                            .child(div().text_size(px(11.5)).text_color(theme.muted_foreground.opacity(0.8)).child(format!("{} · {size} · {}", m.maker, m.languages))),
+                    )
+                    .child(div().flex_shrink_0().child(side))
+                    .into_any_element()
+            });
+            let models = v_flex()
+                .gap(px(12.))
+                .child(div().text_size(px(13.5)).child("Local Models"))
+                .child(v_flex().gap(px(8.)).children(rows))
+                .when_some(self.dictate_dl_error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(theme.danger).child(format!("The download did not finish: {e}."))))
+                .into_any_element();
+            let recording = self.dictate_key_rec;
+            let field = div()
+                .id("dictate-key")
+                .track_focus(&self.dictate_key_focus)
+                .role(Role::Button)
+                .aria_label("Dictation key")
+                .w_full()
+                .h(px(30.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .bg(if dark { theme.sidebar } else { theme.muted })
+                .border_1()
+                .border_color(if recording { theme.primary } else { gpui::transparent_black() })
+                .cursor_pointer()
+                .text_size(px(13.))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.dictate_key_rec = true;
+                    this.dictate_key_note = None;
+                    window.focus(&this.dictate_key_focus, cx);
+                    cx.notify();
+                }))
+                .child(if recording { div().text_color(theme.muted_foreground).child("Press the keys").into_any_element() } else { key_text(&binding_signs(&app.dictate_key)).into_any_element() })
+                .into_any_element();
+            let mut rows = vec![models];
+            rows.extend([
+                // The key's field at the row's right, then Reset, which
+                // puts back ⌘⇧D (Ctrl+Shift+D off a Mac), against the edge.
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().w(SETTINGS_LABEL_W).flex_shrink_0().pr(px(12.)).text_size(px(13.5)).child("Shortcut"))
+                            .child(div().flex_1())
+                            .child(div().w(px(260.)).flex_shrink_1().min_w_0().child(field))
+                            .child(
+                                crate::branches::small_pill("dictate-key-reset", "icons/rotate.svg", "Reset", Press::Quiet, app.dictate_key == emaki_core::config::AppConfig::default().dictate_key, &theme)
+                                    .h(px(30.))
+                                    .flex_shrink_0()
+                                    .on_click(cx.listener(|this, _, _, cx| this.reset_dictate_key(cx))),
+                            ),
+                    )
+                    .when_some(self.dictate_key_note.clone(), |d, n| d.child(h_flex().justify_end().text_size(px(12.)).text_color(theme.muted_foreground).child(key_text(&n))))
+                    .into_any_element(),
+            ]);
+            rows
+        };
 
         // The rows of the section showing, and the rail beside them.
         let section = self.settings_section;
         let (section_title, section_anim): (&'static str, &'static str) = match section {
             "fonts" => ("Fonts", "settings-fonts"),
             "composer" => ("Composer", "settings-composer"),
+            "dictate" => ("Dictate", "settings-dictate"),
             "sessions" => ("New sessions", "settings-sessions"),
             "terminal" => ("Terminal", "settings-terminal"),
             "files" => ("Files", "settings-files"),
@@ -5940,17 +6300,13 @@ impl Workbench {
         let rows: Vec<AnyElement> = match section {
             "composer" => vec![
                 row("Send with", send_note, send, &theme).into_any_element(),
-                row("Auto-capitalization", "", auto_cap.into_any_element(), &theme).into_any_element(),
-                // One entry: the tick turns the check on, and the languages
-                // under it are its choices, dimmed and out of the
-                // pointer's reach while it is off, as the formatters'
-                // lists are. Five choices are wider than the room beside
-                // the name, so they stand under it.
-                v_flex()
-                    .gap(px(10.))
-                    .child(row("Spelling Check", language_note.unwrap_or(""), check_writing.into_any_element(), &theme))
-                    .child(div().relative().w_full().when(!spelling, |d| d.opacity(0.45)).child(writing_language).when(!spelling, |d| d.child(div().absolute().inset_0().occlude())))
-                    .into_any_element(),
+                short("Auto-capitalization", "", auto_cap, &theme).into_any_element(),
+                // The languages are the check's choices: dimmed and out of
+                // the pointer's reach while it is off, as the formatters'
+                // lists are. A flag and two letters each, so the five
+                // fit the controls' width; the name is the hover's.
+                short("Spelling Check", "", check_writing, &theme).into_any_element(),
+                div().relative().when(!spelling, |d| d.opacity(0.45)).child(row("Language", language_note.unwrap_or(""), writing_language, &theme)).when(!spelling, |d| d.child(div().absolute().inset_0().occlude())).into_any_element(),
             ],
             "fonts" => vec![
                 div().text_size(px(13.5)).child("Chat font").into_any_element(),
@@ -5960,44 +6316,38 @@ impl Workbench {
                 mono_tiles,
                 div().pt(px(4.)).child(row("Font size", "", size.into_any_element(), &theme)).into_any_element(),
             ],
-            "files" => vec![row("Format on save", "", format_on_save, &theme).into_any_element(), format_lists],
+            "dictate" => dictate_rows,
+            "files" => vec![short("Format on save", "", format_on_save, &theme).into_any_element(), format_lists],
             "sessions" => vec![
                 agent_head,
-                row("Permission mode", "", if settings_agent == AgentId::Codex { codex_modes } else { modes }, &theme).into_any_element(),
-                row("Effort", "", if settings_agent == AgentId::Codex { codex_efforts } else { efforts }, &theme).into_any_element(),
-                row("Model", "", if settings_agent == AgentId::Codex { codex_models } else { models }, &theme).into_any_element(),
+                short("Permission mode", "", if settings_agent == AgentId::Codex { codex_modes } else { modes }, &theme).into_any_element(),
+                short("Effort", "", if settings_agent == AgentId::Codex { codex_efforts } else { efforts }, &theme).into_any_element(),
+                short("Model", "", if settings_agent == AgentId::Codex { codex_models } else { models }, &theme).into_any_element(),
             ],
             "terminal" => vec![
                 row("Theme", "", term_theme, &theme).into_any_element(),
                 // The face and the size are the window's, set in Fonts.
-                row(
+                short(
                     "Font",
                     "The window's monospace font and size.",
-                    pill_button("term-fonts", "Open Fonts", &theme, cx.listener(|this, _, _, cx| {
-                        this.settings_section = "fonts";
-                        this.settings_scroll.set_offset(point(px(0.), px(0.)));
-                        cx.notify();
-                    }))
-                    .into_any_element(),
+                    press("term-fonts", "icons/typography.svg", "Open Fonts".into(), Press::Quiet, false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_section = "fonts";
+                            this.settings_scroll.set_offset(point(px(0.), px(0.)));
+                            cx.notify();
+                        }))
+                        .into_any_element(),
                     &theme,
                 )
                 .into_any_element(),
                 row("Cursor", "", term_cursor, &theme).into_any_element(),
-                row("Blinking cursor", "", term_blink.into_any_element(), &theme).into_any_element(),
+                short("Blinking cursor", "", term_blink, &theme).into_any_element(),
                 // The marks it joins are in the face that joins them.
-                h_flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child("Ligatures")).child({
-                        let mono = |t: &'static str| div().font_family(theme.mono_font_family.clone()).child(t);
-                        h_flex().gap(px(5.)).text_size(px(12.)).text_color(theme.muted_foreground)// A zero-width mark between the two letters, or the
-                        // face would join them here and show the answer
-                        // in place of what is typed.
-                        .child("Joins").child(mono("-\u{200C}>")).child("and").child(mono("!\u{200C}=")).child("into one mark.")
-                    }))
-                    .child(term_ligatures)
-                    .into_any_element(),
-                row("Copy on select", "", term_copy.into_any_element(), &theme).into_any_element(),
+                // The marks it joins, with a zero-width mark between the
+                // two letters of each, or the window's own face would
+                // join them here.
+                short("Ligatures", "Joins -\u{200C}> and !\u{200C}= into one mark.", term_ligatures, &theme).into_any_element(),
+                short("Copy on select", "", term_copy, &theme).into_any_element(),
                 // The credit, with the name a link to Kaku's own page.
                 h_flex()
                     .text_size(px(12.))
@@ -6046,85 +6396,71 @@ impl Workbench {
                         .child(name)
                 };
                 let prose = || h_flex().flex_wrap().justify_center().text_size(px(13.5)).line_height(px(22.)).text_color(theme.muted_foreground);
+                let go = |id: &'static str, icon: &'static str, label: &'static str, url: String| crate::branches::small_pill(id, icon, label, Press::Quiet, false, &theme).on_click(move |_, _, cx| cx.open_url(&url));
+                let accent = theme.primary;
                 vec![
                     // A title card, set in the middle as a film's first
-                    // one is: who presents, the app as the sidebar
-                    // names it, and under a short rule, who they are.
+                    // one is, on a plain plate of the fields' ground, one
+                    // flat shade and no edge: who presents, the app as the sidebar names
+                    // it, and its version. Under the plate, who they
+                    // are, and where the app is found.
                     v_flex()
                         .w_full()
                         .items_center()
-                        .pt(px(36.))
-                        .pb(px(20.))
-                        .child(prose().child(link("about-studio", "Alkaline Software", "https://github.com/alkaline-software")).child(" presents"))
+                        .pt(px(30.))
+                        .pb(px(28.))
+                        .rounded(px(16.))
+                        .bg(if dark { theme.sidebar } else { theme.muted.opacity(0.6) })
+                        .child(prose().text_size(px(12.5)).child(link("about-studio", "Alkaline Software", "https://github.com/alkaline-software")).child(" presents"))
                         // The icon and the name are each a link to the
                         // app's own page: two things to press, and the
                         // room between them is not one.
-                        .child(div().id("about-icon").mt(px(22.)).cursor_pointer().hover(|s| s.opacity(0.82)).on_click(|_, _, cx| cx.open_url("https://emaki.lol")).child(img("icon/app-large.png").size(px(84.)).flex_shrink_0()))
+                        .child(div().id("about-icon").mt(px(18.)).cursor_pointer().hover(|s| s.opacity(0.82)).on_click(|_, _, cx| cx.open_url("https://emaki.lol")).child(img("icon/app-large.png").size(px(88.)).flex_shrink_0()))
                         .child(
                             div()
                                 .id("about-name")
-                                .mt(px(8.))
+                                .mt(px(6.))
                                 .cursor_pointer()
                                 .hover(|s| s.opacity(0.82))
                                 .on_click(|_, _, cx| cx.open_url("https://emaki.lol"))
-                                .text_size(px(40.))
-                                .line_height(px(46.))
-                                .text_color(theme.primary)
+                                .text_size(px(42.))
+                                .line_height(px(48.))
+                                .text_color(accent)
                                 .when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f))
                                 .child("Emaki"),
                         )
-                        .child(div().mt(px(2.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(format!("Version {current}")))
-                        .child(div().my(px(24.)).w(px(44.)).h(px(1.)).flex_shrink_0().bg(theme.foreground.opacity(0.18)))
+                        .child(div().mt(px(4.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(format!("Version {current}")))
+                        .into_any_element(),
+                    v_flex()
+                        .w_full()
+                        .items_center()
+                        .gap(px(16.))
+                        .pt(px(8.))
                         .child(prose().child("A studio by ").child(link("about-jp", "Dr. John Paul Helveston", "https://www.jhelvy.com")).child(" and ").child(link("about-pingfan", "Dr. Pingfan Hu", "https://pingfan.org")).child("."))
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .child(go("about-site", "icons/globe.svg", "Website", "https://emaki.lol".into()))
+                                .child(go("about-source", "icons/github.svg", "GitHub", update::repo_page()))
+                                .child(go("about-notes", "icons/file-text.svg", "Release Notes", update::release_page(&current))),
+                        )
                         .into_any_element(),
                 ]
             }
-            "updates" => vec![
-                h_flex()
-                    .items_start()
-                    .gap(px(12.))
-                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.5)).child("Version")).child(div().text_size(px(12.)).text_color(theme.muted_foreground).whitespace_normal().child(version_detail)))
-                    .child(version_row)
-                    .into_any_element(),
-                h_flex().items_center().gap(px(12.)).child(div().flex_1().text_size(px(13.5)).child("Check for updates automatically")).child(auto_check).into_any_element(),
-            ],
+            "updates" => vec![lay("Version", Some(version_note.into_any_element()), button, true, &theme).into_any_element(), short("Check automatically", "", auto_check, &theme).into_any_element()],
             _ => vec![
+                // The picture at the row's start, what is done with it
+                // at its end.
                 row(
                     "Avatar",
                     "",
                     h_flex()
-                        .gap(px(10.))
+                        .gap(px(8.))
                         .items_center()
                         .child(self.avatar(40., cx).id("settings-avatar").cursor_pointer().hover(|s| s.opacity(0.85)).on_click(cx.listener(|this, _, _, cx| this.pick_avatar(cx))))
-                        .child(Button::new("avatar-choose").outline().small().label("Choose…").on_click(cx.listener(|this, _, _, cx| this.pick_avatar(cx))))
-                        // Remove is a pill of our own, the size of the toolkit's
-                        // small button beside it: the toolkit's outline
-                        // button sets its own ink under the pointer, so
-                        // the red went black on hover. It stays red, on
-                        // a wash of the red under the pointer and a
-                        // stronger one while pressed, as Stop does.
-                        .when(!app.avatar.is_empty(), |d| {
-                            d.child(
-                                h_flex()
-                                    .id("avatar-remove")
-                                    .h(px(24.))
-                                    .px(px(8.))
-                                    .items_center()
-                                    .rounded(theme.radius)
-                                    .border_1()
-                                    // The line the button beside it has:
-                                    // the panel's own border is the
-                                    // panel's shade in the dark appearance.
-                                    .border_color(theme.input)
-                                    .text_size(px(14.))
-                                    .text_color(theme.danger)
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)))
-                                    .active(|s| s.bg(theme.danger.opacity(0.18)).border_color(theme.danger.opacity(0.6)))
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_avatar(String::new(), cx)))
-                                    .child("Remove"),
-                            )
-                        })
+                        .child(div().flex_1())
+                        .child(crate::branches::small_pill("avatar-choose", "icons/image.svg", "Choose…", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, _, cx| this.pick_avatar(cx))))
+                        .when(!app.avatar.is_empty(), |d| d.child(crate::branches::small_pill("avatar-remove", "icons/trash.svg", "Remove", Press::Danger, false, &theme).on_click(cx.listener(|this, _, _, cx| this.set_avatar(String::new(), cx)))))
                         .into_any_element(),
                     &theme,
                 )
@@ -6138,7 +6474,7 @@ impl Workbench {
                         .role(Role::TextInput)
                         .aria_label("Your name")
                         .aria_value(self.name_input.read(cx).value().to_string())
-                        .w(px(200.))
+                        .w_full()
                         .h(px(32.))
                         .px(px(8.))
                         .flex()
@@ -6221,8 +6557,8 @@ impl Workbench {
                                 .min_h_0()
                                 .overflow_y_scroll()
                                 .track_scroll(&self.settings_scroll)
-                                .px(px(24.))
-                                .py(px(20.))
+                                .px(px(40.))
+                                .py(px(24.))
                                 .child(page_in(section_anim, v_flex().gap(px(16.)).child(h_flex().pb(px(2.)).items_center().justify_between().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(section_title)).when(section == "sessions", |d| d.child(agent_pick))).children(rows))),
                         )
                         .vertical_scrollbar(&self.settings_scroll)
@@ -6243,6 +6579,9 @@ impl Workbench {
             .bg(if theme.mode.is_dark() { theme.sidebar } else { theme.muted.opacity(0.5) })
             .border_r_1()
             .border_color(theme.border)
+            // A clip is a rectangle: the rail's ground is rounded where
+            // it meets the panel's corner, the panel's less its border.
+            .rounded_bl(px(17.))
             .children(SETTINGS_SECTIONS.iter().map(|(key, label, icon)| {
                 let active = *key == current;
                 let key: &'static str = key;
@@ -6290,10 +6629,14 @@ impl Workbench {
         let dark = theme.mode.is_dark();
         let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
         let plate_bg = if dark { theme.secondary_active } else { theme.popover };
-        // The languages stand under their entry, not beside it, so their
-        // track is the entry's width with the choices in equal parts: its
-        // ends are then the name's left and the tick's right.
-        let fill = control == "writing-language";
+        // A choice that fills takes the width it is given, the choices
+        // sharing it: the settings' rows, whose controls start and end
+        // together, and the languages, which stand under their entry.
+        let fill = matches!(control, "writing-language" | "appearance" | "size" | "send-key" | "term-theme" | "term-cursor" | "term-blink" | "term-ligatures" | "term-copy" | "auto-capitalize" | "check-writing" | "update-auto" | "format-on-save");
+        // On and off are a colour each: the chosen word in it, on a
+        // plate washed with it.
+        let toggle = options.len() == 2 && options[0].0 == "off" && options[1].0 == "on";
+        let ink = toggle.then(|| if current == "on" { theme.success } else { theme.danger });
         let (from, to) = {
             let mut st = self.seg_state.borrow_mut();
             let e = st.entry(control).or_insert((current, current, None));
@@ -6320,6 +6663,7 @@ impl Workbench {
                     .rounded(round)
                     .bg(plate_bg)
                     .shadow_sm()
+                    .when_some(ink, |d, ink| d.child(div().size_full().rounded(round).bg(ink.opacity(0.13))))
                     .with_animation(ElementId::Name(format!("{control}-plate-{to}").into()), Animation::new(SLIDE).with_easing(ease_out_quint()), move |d, t| {
                         let x = a.origin.x + (b.origin.x - a.origin.x) * t;
                         let w = a.size.width + (b.size.width - a.size.width) * t;
@@ -6386,9 +6730,13 @@ impl Workbench {
                     .text_size(seg_text)
                     .when(fill, |d| d.flex_1().justify_center())
                     .when(active && !measured, |d| d.bg(plate_bg).shadow_sm())
-                    .when(active, |d| d.font_weight(FontWeight::MEDIUM).text_color(theme.foreground))
+                    .when(active, |d| d.font_weight(FontWeight::MEDIUM).text_color(ink.unwrap_or(theme.foreground)))
                     .when(!active, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
                     .when_some(family, |d, f| d.font_family(f))
+                    .when(control == "writing-language", |d| {
+                        let name = emaki_core::check::LANGUAGES.iter().find(|l| l.0 == key).map(|l| l.1).unwrap_or(key);
+                        d.managed_tooltip(move |window, cx| crate::workbench::tip(name, window, cx))
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| on(this, key, window, cx)))
                     // A choice of the agents page's install step has an
                     // icon before its word, in the word's ink.
@@ -6745,6 +7093,42 @@ impl Workbench {
             .into_any_element()
     }
 
+    /// `pick_pill` as a field in the settings: the controls' width, the
+    /// choice at its left and the mark of a list at its right.
+    fn settings_pick(&self, what: PickFor, id: &'static str, icon: &'static str, label: PillText, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let open = self.pick.as_ref().is_some_and(|p| p.what == what);
+        let well = if theme.mode.is_dark() { theme.sidebar } else { theme.muted };
+        let over = theme.muted_foreground.opacity(0.16);
+        div()
+            .relative()
+            .w_full()
+            .child(
+                h_flex()
+                    .id(SharedString::from(format!("{id}-trigger")))
+                    .h(px(32.))
+                    .px(px(10.))
+                    .gap(px(8.))
+                    .items_center()
+                    .rounded(px(8.))
+                    .bg(well)
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .when(open, |d| d.bg(over))
+                    .hover(move |s| s.bg(over))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        swallow_click(window, cx);
+                        this.pick_toggle(what, cx);
+                    }))
+                    .child(Icon::default().path(icon).with_size(px(14.)).text_color(theme.muted_foreground))
+                    .child(div().flex_1().min_w_0().truncate().child(tinted(&label.value, &label.tint)))
+                    .child(Icon::default().path("icons/chevrons-up-down.svg").with_size(px(13.)).text_color(theme.muted_foreground)),
+            )
+            .child(self.pick_mark(what, cx))
+            .into_any_element()
+    }
+
     /// Laid over whatever opens a list, it keeps where that is drawn.
     fn pick_mark(&self, what: PickFor, cx: &Context<Self>) -> impl IntoElement {
         let at = self.pill_at.clone();
@@ -7041,12 +7425,15 @@ impl Workbench {
         // shows them all where the window has the room.
         let what = menu.what;
         let (scroll, _) = self.kept_scroll(format!("pick-{}", menu.serial).into(), Inner::Over);
-        let mut rows = v_flex().id(("pick-rows", menu.serial as usize)).max_h(room.min(px(if what == PickFor::Folder { 440. } else { 360. }))).overflow_y_scroll().track_scroll(&scroll).p(px(5.)).gap(px(2.));
+        // The room above and below the rows is the card's, not theirs, so a
+        // row cut at an edge stays inside its corner: a clip is a rectangle.
+        let mut rows = v_flex().id(("pick-rows", menu.serial as usize)).max_h(room.min(px(if what == PickFor::Folder { 440. } else { 360. })) - px(10.)).overflow_y_scroll().track_scroll(&scroll).px(px(5.)).gap(px(2.));
         let card = v_flex()
             .id(("pick-card", menu.serial as usize))
             .absolute()
             .min_w(px(250.))
             .max_w(px(380.))
+            .py(px(5.))
             .overflow_hidden()
             .rounded(px(12.))
             .bg(theme.popover)
@@ -8138,7 +8525,7 @@ impl Workbench {
             return Err(DRAFT_WAITS);
         }
         if r.archived {
-            return Err("Archived: the agent no longer has this transcript");
+            return Err("Archived. To continue it, unarchive it from its menu in the sidebar");
         }
         if !Self::folder_exists(r) {
             return Err(FOLDER_GONE);
@@ -8244,16 +8631,25 @@ impl Workbench {
     /// after any scroller inside the body is made: `route_scroll` takes
     /// the first one under the pointer.
     pub(crate) fn card_scroll(&self, key: impl Into<SharedString>, wide: Option<Pixels>, tail: bool, body: impl IntoElement) -> AnyElement {
+        self.card_scroll_inset(key, wide, tail, px(0.), body)
+    }
+
+    /// `card_scroll` with `inset` of the card's room at each side that
+    /// does not scroll: a body with grounds of its own that runs to the
+    /// card's sides (a terminal's cells) keeps inside its corners when
+    /// scrolled sideways, since a clip is a rectangle. The bar stays at
+    /// the card's edge.
+    pub(crate) fn card_scroll_inset(&self, key: impl Into<SharedString>, wide: Option<Pixels>, tail: bool, inset: Pixels, body: impl IntoElement) -> AnyElement {
         let key: SharedString = key.into();
         let (scroll, new) = self.kept_body(key.clone());
         if tail && new {
             scroll.handle.scroll_to_bottom();
         }
-        div()
+        v_flex()
             .relative()
             .w_full()
             .on_scroll_wheel(chain_wheel(scroll.handle.clone(), scroll.stroke))
-            .child(div().id(key).w_full().max_h(self.card_most()).overflow_scroll().track_scroll(&scroll.handle).child(div().w_full().when_some(wide, |d, w| d.min_w(w)).child(body)))
+            .child(div().id(key).when(inset == px(0.), |d| d.w_full()).mx(inset).max_h(self.card_most()).overflow_scroll().track_scroll(&scroll.handle).child(div().w_full().when_some(wide, |d, w| d.min_w(w)).child(body)))
             .vertical_scrollbar(&scroll.handle)
             .into_any_element()
     }
@@ -8441,7 +8837,7 @@ impl Workbench {
         // which a second Codex must not join.
         if r.agent == AgentId::Codex {
             if r.archived {
-                return ("", "archived: Codex no longer has this session, so it cannot be resumed".into());
+                return ("", "archived. To continue it, unarchive it from its menu in the sidebar".into());
             }
             if !self.cfg.driver.enabled {
                 return ("", "the driver is off in config".into());
@@ -8474,7 +8870,7 @@ impl Workbench {
             return ("inbox", String::new());
         }
         if r.archived {
-            return ("", "archived: Claude Code no longer has this transcript, so it cannot be resumed".into());
+            return ("", "archived. To continue it, unarchive it from its menu in the sidebar".into());
         }
         if !self.cfg.driver.enabled {
             return ("", "the driver is off in config".into());
@@ -9327,7 +9723,10 @@ impl Workbench {
         let usage_color = |pct: u64| if pct >= 90 { theme.danger } else if pct >= 70 { theme.magenta } else { theme.blue };
         let windows: Vec<(String, Option<emaki_core::limits::Window>)> = match s.agent {
             AgentId::ClaudeCode => vec![("5h:".into(), self.limits.five_hour), ("7d:".into(), self.limits.seven_day)],
-            AgentId::Codex => self.limits.codex.iter().map(|w| (format!("{}:", w.label()), Some(emaki_core::limits::Window { utilization: w.used, resets_at: w.resets_at }))).collect(),
+            // The limit the session's model draws on: its own where it
+            // has one, else the plan's shared one, each window named by
+            // its own length.
+            AgentId::Codex => emaki_core::model::bucket_for(&self.limits.codex_limits, model).map(|b| b.windows.iter().map(|w| (format!("{}:", w.label()), Some(emaki_core::limits::Window { utilization: w.used, resets_at: w.resets_at }))).collect()).unwrap_or_default(),
         };
         if !ctx_known && windows.is_empty() {
             return None;
@@ -10506,11 +10905,12 @@ impl Workbench {
                 .overflow_hidden()
                 .child(h_flex().h(px(28.)).flex_shrink_0().px(px(14.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(label))
         };
-        // The rectangle, over the rows, cut to the card's room.
+        // The rectangle, over the rows, cut to the card's room less the
+        // rows' own margin, which keeps it inside the card's corners.
         let band = self.side_band.filter(|_| self.side_band_live).map(|(a, b)| {
             let room = self.side_room.get();
-            let (left, top) = (a.x.min(b.x).max(room.left()), a.y.min(b.y).max(room.top()));
-            let (right, bottom) = (a.x.max(b.x).min(room.right()), a.y.max(b.y).min(room.bottom()));
+            let (left, top) = (a.x.min(b.x).max(room.left() + px(4.)), a.y.min(b.y).max(room.top()));
+            let (right, bottom) = (a.x.max(b.x).min(room.right() - px(4.)), a.y.max(b.y).min(room.bottom() - px(4.)));
             div().absolute().left(left - room.left()).top(top - room.top()).w((right - left).max(px(0.))).h((bottom - top).max(px(0.))).rounded(px(3.)).border_1().border_color(theme.primary.opacity(0.7)).bg(theme.primary.opacity(0.12))
         });
         let room = self.side_room.clone();
@@ -10593,11 +10993,14 @@ impl Workbench {
                 })
                 .children(rule_el.map(|line| div().flex_shrink_0().px(px(4.)).child(line)))
                 .child(
+                    // The room under the rows does not scroll, so a row cut
+                    // at the foot stays inside the card's corners.
                     v_flex()
                         .relative()
                         .flex_1()
                         .min_h_0()
-                        .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(4.)).pb(px(4.)).child(scroll))
+                        .pb(px(4.))
+                        .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(4.)).child(scroll))
                         .vertical_scrollbar(&self.side_scroll),
                 )
                 .children(band),
@@ -10784,14 +11187,22 @@ impl Workbench {
         let several = self.side_sessions.len() > 1 && self.side_sessions.iter().any(|k| k == key);
         let items = if several {
             let keys = self.side_sessions.clone();
-            vec![("Archive Sessions", MenuDo::Sessions(ManageDo::Archive, keys.clone())), ("Delete Sessions", MenuDo::Sessions(ManageDo::Delete, keys))]
+            let mut items = vec![("Archive Sessions", MenuDo::Sessions(ManageDo::Archive, keys.clone()))];
+            if self.refs.iter().any(|r| r.archived && keys.iter().any(|k| *k == key_of(r))) {
+                items.push(("Unarchive Sessions", MenuDo::Sessions(ManageDo::Unarchive, keys.clone())));
+            }
+            items.push(("Delete Sessions", MenuDo::Sessions(ManageDo::Delete, keys)));
+            items
         } else {
             self.side_sessions.clear();
             self.side_marked.clear();
             let mut items = self.session_menu(key, RenameAt::Side);
             if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).filter(|r| !r.path.as_os_str().is_empty()) {
                 items.push(("", MenuDo::Rule));
-                if !r.archived {
+                if r.archived {
+                    // Back to its agent, to be continued.
+                    items.push(("Unarchive Session", MenuDo::Sessions(ManageDo::Unarchive, vec![key.to_string()])));
+                } else {
                     items.push(("Archive Session", MenuDo::Sessions(ManageDo::Archive, vec![key.to_string()])));
                 }
                 items.push(("Delete Session", MenuDo::Sessions(ManageDo::Delete, vec![key.to_string()])));
@@ -10839,6 +11250,9 @@ impl Workbench {
         if !keys.is_empty() {
             items.push(("", MenuDo::Rule));
             items.push(("Archive Sessions", MenuDo::Sessions(ManageDo::Archive, keys.clone())));
+            if self.refs.iter().any(|r| r.archived && keys.iter().any(|k| *k == key_of(r))) {
+                items.push(("Unarchive Sessions", MenuDo::Sessions(ManageDo::Unarchive, keys.clone())));
+            }
             items.push(("Delete Sessions", MenuDo::Sessions(ManageDo::Delete, keys)));
         }
         self.open_menu(at, items, cx);
@@ -11196,6 +11610,7 @@ impl Workbench {
             MenuDo::Discard(paths) => self.ask_discard(paths, cx),
             MenuDo::Commit(what, sha) => self.commit_do(what, sha, window, cx),
             MenuDo::Web(url) => cx.open_url(&url),
+            MenuDo::Sessions(ManageDo::Unarchive, keys) => self.unarchive_sessions(keys, window, cx),
             MenuDo::Sessions(what, keys) => self.manage_ask_of(what, keys, true, cx),
             MenuDo::CloseOthers(key) => {
                 for other in self.tabs.clone().into_iter().filter(|t| *t != key) {
@@ -11891,11 +12306,9 @@ impl Workbench {
             row = row.child(match born {
                 Some(at) => {
                     let widths = widths.clone();
-                    div()
-                        .flex_shrink_0()
-                        .overflow_hidden()
-                        .rounded(px(9.))
-                        .child(pill)
+                    // The pill itself is let out, not a clip around it: a
+                    // clip is a rectangle, and its end stood square.
+                    pill.overflow_hidden()
                         .with_animation(ElementId::Name(format!("pill-born-{project}").into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, _| {
                             let t = ease_out_quint()((at.elapsed().as_secs_f32() / TAB_ANIM.as_secs_f32()).min(1.));
                             d.w(px(pill_chrome(widths.len()) * t + widths.iter().map(|w| w.now()).sum::<f32>()))
@@ -11998,16 +12411,382 @@ impl Workbench {
         let mut running = 0;
         let mut go = Vec::new();
         for r in self.refs.iter().filter(|r| self.manage_keys.contains(&key_of(r))) {
-            if r.path.as_os_str().is_empty() || (what == ManageDo::Archive && r.archived) {
+            if r.path.as_os_str().is_empty() || (what == ManageDo::Archive && r.archived) || (what == ManageDo::Unarchive && !r.archived) {
                 continue;
             }
-            if self.driven(&r.session_id) || self.hub.is_live(r, self.now) {
+            // Nothing runs in an archived session, whatever its file's
+            // time says: neither agent takes one up.
+            if what != ManageDo::Unarchive && (self.driven(&r.session_id) || self.hub.is_live(r, self.now)) {
                 running += 1;
             } else {
                 go.push(r.clone());
             }
         }
         (go, running)
+    }
+
+    /// The dictation key or the microphone under the composer: start
+    /// listening, or stop and write what was said at the caret. Nothing
+    /// is done while the microphone is starting or the words are being
+    /// written.
+    pub(crate) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !emaki_core::dictate::AVAILABLE {
+            self.notice = Some(Notice::said("Dictation is on a Mac only for now."));
+            cx.notify();
+            return;
+        }
+        match std::mem::replace(&mut self.dictation, Dictation::Off) {
+            Dictation::Off => self.start_dictation(window, cx),
+            #[cfg(target_os = "macos")]
+            Dictation::Listening(rec, _) => self.finish_dictation(rec, window, cx),
+            other => self.dictation = other,
+        }
+    }
+
+    /// The microphone on, off the main thread: the first time, the system
+    /// asks the person first. With no model here, Settings opens where
+    /// one is downloaded.
+    fn start_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // No model on this Mac (none is shipped with the app): straight to
+        // where one is downloaded.
+        if emaki_core::dictate::chosen(&self.cfg.app.dictate_model).is_none() {
+            self.settings_section = "dictate";
+            self.settings_scroll.set_offset(point(px(0.), px(0.)));
+            self.pick = None;
+            self.settings_open = true;
+            window.focus(&self.focus_handle, cx);
+            self.notice = Some(Notice::said("Download a model first."));
+            cx.notify();
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.dictation = Dictation::Starting;
+            self.mic_levels.clear();
+            // The chime first and the microphone once it has mostly rung,
+            // so the chime is not in what it hears.
+            crate::sys::play_sound(DICTATE_START);
+            cx.notify();
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(300)).await;
+                let rec = cx.background_executor().spawn(async { emaki_core::dictate::Recorder::start() }).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    match rec {
+                        Ok(rec) if matches!(this.dictation, Dictation::Starting) => {
+                            this.dictation = Dictation::Listening(rec, Instant::now());
+                            this.tick_dictation(window, cx);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            this.dictation = Dictation::Off;
+                            this.notice = Some(Notice::error(format!("The microphone did not start: {e}.")));
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// Drawn again while it listens, for the loudness and the time.
+    #[cfg(target_os = "macos")]
+    fn tick_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_millis(80)).await;
+            let on = this
+                .update(cx, |this, cx| {
+                    let Dictation::Listening(rec, _) = &this.dictation else { return false };
+                    // Eased toward what the microphone last heard, so the
+                    // ring and the bars swell and fall and do not jump.
+                    let heard = (rec.level() / 0.08).clamp(0.0, 1.0);
+                    let level = this.mic_levels.back().copied().unwrap_or(0.0) * 0.5 + heard * 0.5;
+                    this.mic_levels.push_back(level);
+                    while this.mic_levels.len() > MIC_BARS {
+                        this.mic_levels.pop_front();
+                    }
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !on {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// The microphone off, and what it heard written down by the model,
+    /// off the main thread, then put at the composer's caret.
+    #[cfg(target_os = "macos")]
+    fn finish_dictation(&mut self, rec: emaki_core::dictate::Recorder, window: &mut Window, cx: &mut Context<Self>) {
+        crate::sys::play_sound(DICTATE_STOP);
+        self.write_down(move || rec.finish(), window, cx);
+    }
+
+    /// What was heard (`heard`, called off the main thread) written down
+    /// by the model and put at the caret.
+    #[cfg(target_os = "macos")]
+    fn write_down(&mut self, heard: impl FnOnce() -> Vec<f32> + std::marker::Send + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(model) = emaki_core::dictate::chosen(&self.cfg.app.dictate_model) else {
+            return;
+        };
+        self.dictation = Dictation::Writing;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let got = cx
+                .background_executor()
+                .spawn(async move {
+                    let audio = heard();
+                    // The system hands silence, not an error, to an app
+                    // the person has not let use the microphone.
+                    if audio.iter().all(|s| *s == 0.0) {
+                        return Err("No sound came in. Let Emaki use the microphone in System Settings, Privacy & Security, Microphone".to_string());
+                    }
+                    emaki_core::dictate::transcribe(model, &audio)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.dictation = Dictation::Off;
+                match got {
+                    Ok(words) if words.is_empty() => this.notice = Some(Notice::said("Nothing was heard.")),
+                    Ok(words) => this.insert_dictated(&words, window, cx),
+                    Err(e) => this.notice = Some(Notice::error(format!("{e}."))),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Words said, put at the composer's caret as if typed there: a space
+    /// between them and a word they would run into, none beside Chinese
+    /// or Japanese, which go without.
+    #[cfg(target_os = "macos")]
+    fn insert_dictated(&mut self, words: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (text, at) = {
+            let s = self.composer.read(cx);
+            (s.value().to_string(), s.cursor())
+        };
+        let at = (0..=at.min(text.len())).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+        let wide = |c: char| ('\u{3000}'..='\u{9fff}').contains(&c) || ('\u{ff00}'..='\u{ffef}').contains(&c) || ('\u{ac00}'..='\u{d7af}').contains(&c);
+        let (before, after) = (text[..at].chars().last(), text[at..].chars().next());
+        let (first, last) = (words.chars().next(), words.chars().last());
+        let mut put = String::new();
+        if before.is_some_and(|c| !c.is_whitespace() && !wide(c)) && first.is_some_and(|c| !wide(c)) {
+            put.push(' ');
+        }
+        put.push_str(words);
+        if after.is_some_and(|c| !c.is_whitespace() && !wide(c) && !c.is_ascii_punctuation()) && last.is_some_and(|c| !wide(c)) {
+            put.push(' ');
+        }
+        self.composer.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.insert(put, window, cx);
+        });
+    }
+
+    /// The microphone beside the "+": dictation started and stopped by a
+    /// click as by its key. Listening, it is the danger's colour with a
+    /// ring the voice swells and the time beside it; writing, it turns.
+    /// Each state comes in over a moment.
+    fn render_mic(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let keys = binding_signs(&self.cfg.app.dictate_key);
+        let click = cx.listener(|this, _: &ClickEvent, window, cx| {
+            swallow_click(window, cx);
+            this.toggle_dictation(window, cx);
+        });
+        let button = div().id("dictate").size(px(30.)).flex_shrink_0().rounded_full().relative().flex().items_center().justify_center().cursor_pointer();
+        let fade = |id: &'static str, el: AnyElement| div().child(el).with_animation(id, Animation::new(Duration::from_millis(180)), |d, t| d.opacity(t)).into_any_element();
+        match &self.dictation {
+            #[cfg(target_os = "macos")]
+            Dictation::Listening(..) => {
+                let level = self.mic_levels.back().copied().unwrap_or(0.0);
+                let red = theme.danger;
+                let tip_text = format!("Stop, and write it down ({keys})");
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(
+                        button
+                            .bg(red.opacity(0.14))
+                            .text_color(red)
+                            .hover(move |s| s.bg(red.opacity(0.22)))
+                            .managed_tooltip(move |window, cx| tip(tip_text.clone(), window, cx))
+                            .on_click(click)
+                            .child(div().absolute().inset(px(-1. - 5. * level)).rounded_full().border_2().border_color(red.opacity(0.18 + 0.4 * level)))
+                            .child(fade("mic-stop", Icon::default().path("icons/player-stop-filled.svg").with_size(px(11.)).into_any_element())),
+                    )
+                    .into_any_element()
+            }
+            Dictation::Starting | Dictation::Writing => {
+                let what = if matches!(self.dictation, Dictation::Writing) { "Writing down what was said…" } else { "Starting the microphone…" };
+                button
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_color(theme.muted_foreground)
+                    .managed_tooltip(move |window, cx| tip(what, window, cx))
+                    .child(fade("mic-wait", Icon::new(IconName::LoaderCircle).with_size(px(14.)).with_animation("mic-turn", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))).into_any_element()))
+                    .into_any_element()
+            }
+            _ => {
+                let tip_text = format!("Dictate ({keys})");
+                button
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
+                    .managed_tooltip(move |window, cx| tip(tip_text.clone(), window, cx))
+                    .on_click(click)
+                    .child(fade("mic-idle", Icon::default().path("icons/microphone.svg").with_size(px(15.)).into_any_element()))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// What the row under the composer says while dictation is on: a red
+    /// dot breathing, bars that follow the voice, "Listening" and the
+    /// time; then that the words are being written down. It comes in over
+    /// a moment.
+    fn render_dictation_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let line = match &self.dictation {
+            #[cfg(target_os = "macos")]
+            Dictation::Listening(_, since) => {
+                let red = theme.danger;
+                let secs = since.elapsed().as_secs();
+                let bars = (0..MIC_BARS).map(|i| {
+                    let at = (self.mic_levels.len() + i).checked_sub(MIC_BARS).and_then(|j| self.mic_levels.get(j)).copied().unwrap_or(0.0);
+                    div().w(px(2.)).h(px(2. + 9. * at)).rounded_full().bg(red.opacity(0.35 + 0.55 * at))
+                });
+                h_flex()
+                    .gap(px(7.))
+                    .items_center()
+                    .child(div().size(px(7.)).rounded_full().bg(red).with_animation("dictate-dot", Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.opacity(0.45 + 0.55 * (t * std::f32::consts::TAU).cos().abs())))
+                    .child(h_flex().h(px(12.)).gap(px(2.)).items_center().children(bars))
+                    .child(div().text_color(red).child("Listening"))
+                    .child(div().text_color(theme.muted_foreground).child(format!("{}:{:02}", secs / 60, secs % 60)))
+            }
+            Dictation::Writing => h_flex().gap(px(6.)).items_center().text_color(theme.muted_foreground).child(Icon::new(IconName::LoaderCircle).with_size(px(11.)).with_animation("dictate-writing", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU)))).child("Writing it down…"),
+            _ => return None,
+        };
+        let key = if matches!(self.dictation, Dictation::Writing) { "dictate-line-writing" } else { "dictate-line-listening" };
+        Some(line.flex_shrink_0().with_animation(key, Animation::new(Duration::from_millis(180)), |d, t| d.opacity(t)).into_any_element())
+    }
+
+    /// A model downloaded on its own thread, the panel drawn again as the
+    /// bytes come.
+    fn download_model(&mut self, m: &'static emaki_core::dictate::Model, cx: &mut Context<Self>) {
+        if self.dictate_dl.is_some() {
+            return;
+        }
+        let got = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.dictate_dl = Some((m.key, Arc::clone(&got), Arc::clone(&stop)));
+        self.dictate_dl_error = None;
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(emaki_core::dictate::download(m, &got, &stop));
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            let on = this.update(cx, |this, cx| {
+                cx.notify();
+                this.dictate_dl.is_some()
+            });
+            if !on.unwrap_or(false) {
+                break;
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let done = rx.await.unwrap_or_else(|_| Err("the download stopped".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.dictate_dl = None;
+                match done {
+                    Ok(()) => {}
+                    Err(e) if e == "stopped" => {}
+                    Err(e) => this.dictate_dl_error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The keys pressed in the dictation key's field: ⌘ or ⌥ with a key,
+    /// and ⇧ if wanted, one nothing else in the window has. Esc leaves it
+    /// as it was.
+    fn dictate_key_pressed(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        if !self.dictate_key_rec {
+            return;
+        }
+        let m = &keystroke.modifiers;
+        let key = keystroke.key.as_str();
+        if key == "escape" {
+            self.dictate_key_rec = false;
+            self.dictate_key_note = None;
+            cx.notify();
+            return;
+        }
+        if matches!(key, "shift" | "control" | "alt" | "platform" | "function" | "cmd" | "") {
+            return;
+        }
+        if !(m.platform || m.alt) || m.control || m.function {
+            self.dictate_key_note = Some(if cfg!(target_os = "macos") { "With ⌘ or ⌥." } else { "With Ctrl or Alt." }.into());
+            cx.notify();
+            return;
+        }
+        let mut binding = String::new();
+        if m.platform {
+            binding.push_str("secondary-");
+        }
+        if m.alt {
+            binding.push_str("alt-");
+        }
+        if m.shift {
+            binding.push_str("shift-");
+        }
+        binding.push_str(key);
+        if crate::key_taken(&binding).is_some() {
+            self.dictate_key_note = Some(format!("{} is taken.", binding_signs(&binding)));
+            cx.notify();
+            return;
+        }
+        let old = std::mem::replace(&mut self.cfg.app.dictate_key, binding.clone());
+        crate::move_dictate_key(&old, &binding, cx);
+        let saved = binding.clone();
+        if let Err(e) = Config::edit(move |c| c.app.dictate_key = saved) {
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+        }
+        self.dictate_key_rec = false;
+        self.dictate_key_note = None;
+        cx.notify();
+    }
+
+    /// The dictation key back to its first one, ⌘⇧D (Ctrl+Shift+D off a
+    /// Mac: the binding says `secondary`).
+    fn reset_dictate_key(&mut self, cx: &mut Context<Self>) {
+        let first = emaki_core::config::AppConfig::default().dictate_key;
+        self.dictate_key_rec = false;
+        self.dictate_key_note = None;
+        if self.cfg.app.dictate_key != first {
+            let old = std::mem::replace(&mut self.cfg.app.dictate_key, first.clone());
+            crate::move_dictate_key(&old, &first, cx);
+            if let Err(e) = Config::edit(move |c| c.app.dictate_key = first) {
+                self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Unarchive, chosen from a menu: nothing is lost by it, so nothing
+    /// is asked. Done as Archive and Delete are, off the main thread.
+    fn unarchive_sessions(&mut self, keys: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.manage_keys = keys;
+        self.manage_side = true;
+        self.manage_now(ManageDo::Unarchive, window, cx);
     }
 
     /// Archive or Delete, pressed: the question first, or why there is
@@ -12028,6 +12807,7 @@ impl Workbench {
                 (_, n) if n > 0 => format!("{} still running; nothing was done.", plural(n, "session is", "sessions are")),
                 (ManageDo::Archive, _) => "Already archived.".to_string(),
                 (ManageDo::Delete, _) => "Nothing to delete.".to_string(),
+                (ManageDo::Unarchive, _) => "Nothing to unarchive.".to_string(),
             };
             if side {
                 self.notice = Some(Notice::said(said));
@@ -12049,12 +12829,13 @@ impl Workbench {
         let (title, detail, yes) = match what {
             ManageDo::Archive => (
                 format!("Archive {n} now?"),
-                format!("Each one's own copy is removed from its agent, once Emaki's copy has been checked to be the same. It is then listed as archived, and its agent no longer lists it. Nothing in a project's folder is touched.{left}"),
+                format!("Its agent does not continue it until it is unarchived. Claude Code's copy is removed once Emaki's has been checked to be the same, and Emaki keeps it; Codex moves its own into its archive. Nothing in a project's folder is touched.{left}"),
                 "Archive",
             ),
+            ManageDo::Unarchive => (format!("Unarchive {n}?"), String::new(), "Unarchive"),
             ManageDo::Delete => (
                 format!("Delete {n}?"),
-                format!("Every copy is moved to the {}: the agent's and Emaki's. They can be put back from there by hand. Nothing in a project's folder is touched.{left}", crate::sys::TRASH_NAME),
+                format!("Emaki's copy is moved to the {}, and so is Claude Code's; Codex deletes its own. Nothing in a project's folder is touched.{left}", crate::sys::TRASH_NAME),
                 "Delete",
             ),
         };
@@ -12070,6 +12851,7 @@ impl Workbench {
         let yes = match what {
             ManageDo::Delete => choice_pill("manage-ask-yes", "icons/trash.svg", yes, Press::Danger, false, cx.theme()),
             ManageDo::Archive => choice_pill("manage-ask-yes", "icons/archive.svg", yes, Press::Primary, false, cx.theme()),
+            ManageDo::Unarchive => choice_pill("manage-ask-yes", "icons/undo-2.svg", yes, Press::Primary, false, cx.theme()),
         }
         .on_click(go);
         let no = choice_pill("manage-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
@@ -12098,8 +12880,9 @@ impl Workbench {
                     let mut failed = Vec::new();
                     for r in &work {
                         let done = match what {
-                            ManageDo::Archive => emaki_core::archive::release(r),
-                            ManageDo::Delete => emaki_core::archive::everything_of(r).iter().try_for_each(|p| crate::sys::trash_path(p)),
+                            ManageDo::Archive => emaki_core::adapters::for_agent(r.agent).archive(r),
+                            ManageDo::Delete => emaki_core::adapters::delete_session(r, crate::sys::trash_path),
+                            ManageDo::Unarchive => emaki_core::adapters::for_agent(r.agent).unarchive(r),
                         };
                         if let Err(why) = done {
                             failed.push((key_of(r), why));
@@ -12117,6 +12900,7 @@ impl Workbench {
                 let mut said = match what {
                     ManageDo::Archive => format!("{} archived.", plural(done.len(), "session", "sessions")),
                     ManageDo::Delete => format!("{} moved to the {}.", plural(done.len(), "session", "sessions"), crate::sys::TRASH_NAME),
+                    ManageDo::Unarchive => format!("{} unarchived.", plural(done.len(), "session", "sessions")),
                 };
                 if running > 0 {
                     said.push_str(&format!(" {} still running, left.", running));
@@ -12142,10 +12926,12 @@ impl Workbench {
                             this.refs.retain(|x| key_of(x) != key);
                             this.begun.retain(|x| key_of(x) != key);
                         }
-                        // Read from the archive's copy from now on: the
-                        // one showing at once, any other when its tab is
-                        // next gone to.
-                        ManageDo::Archive => {
+                        // Read from where it is now: the one showing at
+                        // once, any other when its tab is next gone to.
+                        ManageDo::Archive | ManageDo::Unarchive => {
+                            if what == ManageDo::Unarchive {
+                                this.hub.mark_ended(&r.session_id);
+                            }
                             if this.page == Page::Session && this.selected.as_deref() == Some(key.as_str()) {
                                 this.pending_select = Some(key);
                             }
@@ -12164,10 +12950,10 @@ impl Workbench {
     }
 
     /// The projects, newest first, each a row that opens onto its
-    /// sessions in place. The ones an agent still has anything of come
-    /// first; under "Archived" are those whose every session is kept
-    /// here alone, its agent having deleted it. The pills narrow the
-    /// page to an agent.
+    /// sessions in place. The ones with a session not archived come
+    /// first; under "Archived" are those whose every session is
+    /// archived, kept here alone or in Codex's own archive. The pills
+    /// narrow the page to an agent.
     fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let scope = self.scope.clone();
@@ -13553,10 +14339,10 @@ impl Workbench {
         let tall = (24. + lh * rows_n as f32).min(f32::from(self.card_most())) + 2.;
         // The rows do not wrap: in a column narrower than the longest
         // they scroll sideways.
-        let wide = rows.iter().map(|row| crate::term_panel::cells_before(row, usize::MAX)).max().unwrap_or(0) as f32 * cell_w + 28.;
+        let wide = rows.iter().map(|row| crate::term_panel::cells_before(row, usize::MAX)).max().unwrap_or(0) as f32 * cell_w;
         // A picker's choices are at the screen's foot, so a screen
         // taller than the card starts there.
-        let screen = self.card_scroll("card-terminal", Some(px(wide)), true, div().px(px(14.)).py(px(12.)).child(div().relative().font(look.font).text_size(px(look.text)).text_color(ink).children(lines).children(presses)));
+        let screen = self.card_scroll_inset("card-terminal", Some(px(wide)), true, px(14.), div().py(px(12.)).child(div().relative().font(look.font).text_size(px(look.text)).text_color(ink).children(lines).children(presses)));
         let card =
             v_flex()
                 .id("terminal-card")
@@ -15151,6 +15937,7 @@ impl Workbench {
                             }))
                             .child(Icon::new(IconName::Plus).with_size(px(15.))),
                     )
+                    .when(emaki_core::dictate::AVAILABLE, |d| d.child(self.render_mic(cx)))
                     // The pills, on every channel. Before a session
                     // exists they say what a new one starts in, set in
                     // Settings (`pill_clicked`).
@@ -15237,9 +16024,15 @@ impl Workbench {
             .text_size(px(11.5))
             .children(self.render_limits(cx))
             .child(div().flex_1())
-            // A notice that names a key has the key drawn (`key_text`),
-            // and is cut at the row's end where one without is trailed off.
-            .child(if hint.chars().any(|c| key_sign(c).is_some()) { div().min_w_0().overflow_hidden().text_color(hint_color).child(key_text(&hint)) } else { div().min_w_0().truncate().text_color(hint_color).child(hint) });
+            // While dictation listens or writes, that is what the row
+            // says; else a notice that names a key has the key drawn
+            // (`key_text`), and is cut at the row's end where one without
+            // is trailed off.
+            .child(match self.render_dictation_line(cx) {
+                Some(line) => line,
+                None if hint.chars().any(|c| key_sign(c).is_some()) => div().min_w_0().overflow_hidden().text_color(hint_color).child(key_text(&hint)).into_any_element(),
+                None => div().min_w_0().truncate().text_color(hint_color).child(hint).into_any_element(),
+            });
         // A message that is a slash command being typed opens the list of
         // commands over the card; it closes as soon as a space or a line
         // follows the name.
@@ -15360,7 +16153,7 @@ impl Workbench {
                 this.lightbox = None;
                 cx.notify();
             }))
-            .child(div().id("lightbox-img").occlude().on_click(|_, window, cx| swallow_click(window, cx)).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain)))
+            .child(div().id("lightbox-img").occlude().on_click(|_, window, cx| swallow_click(window, cx)).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain).rounded(px(12.))))
             // The bar under the picture: the whole name or path, in the mono
             // face, selectable and wrapping rather than cut short, with Open
             // and Reveal when there is a file behind it.
@@ -15465,7 +16258,7 @@ impl Workbench {
                                     .child(Input::new(&self.search_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.search_input, false, cx))),
                             ),
                     )
-                    .child(v_flex().relative().flex_1().min_h_0().vertical_scrollbar(&search_scroll).child(v_flex().id("search-results").flex_1().min_h_0().overflow_y_scroll().track_scroll(&search_scroll).p(px(8.)).map(|d| match results {
+                    .child(v_flex().relative().flex_1().min_h_0().pb(px(8.)).vertical_scrollbar(&search_scroll).child(v_flex().id("search-results").flex_1().min_h_0().overflow_y_scroll().track_scroll(&search_scroll).px(px(8.)).pt(px(8.)).map(|d| match results {
                         None => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Type to search prompts, replies, thoughts and tool calls across every session.")),
                         Some(res) if !res.error.is_empty() => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.danger).child(res.error)),
                         Some(res) if res.sessions.is_empty() => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("No matches.")),
@@ -16119,6 +16912,30 @@ pub(crate) fn key_glyph(key: &str, size: f32) -> AnyElement {
     }
 }
 
+/// A binding as gpui writes it (`secondary-shift-d`) in the Mac's signs
+/// ("⌘⇧D"), for `key_text`.
+pub(crate) fn binding_signs(binding: &str) -> String {
+    let parts: Vec<&str> = binding.split('-').collect();
+    let (mods, key) = parts.split_at(parts.len().saturating_sub(1));
+    let mut out = String::new();
+    for sign in [("secondary", "⌘"), ("cmd", "⌘"), ("alt", "⌥"), ("shift", "⇧")] {
+        if mods.contains(&sign.0) && !out.contains(sign.1) {
+            out.push_str(sign.1);
+        }
+    }
+    let key = key.first().copied().unwrap_or("");
+    out.push_str(&match key {
+        "space" => "Space".to_string(),
+        "enter" => "↩".to_string(),
+        "tab" => "⇥".to_string(),
+        "up" => "↑".to_string(),
+        "down" => "↓".to_string(),
+        k if k.chars().count() == 1 => k.to_uppercase(),
+        k => k.chars().next().map(|c| c.to_uppercase().collect::<String>() + &k[c.len_utf8()..]).unwrap_or_default(),
+    });
+    out
+}
+
 /// A shortcut beside what it does, in the quiet ink: "⌘↩".
 pub(crate) fn kbd_hint(text: &str, theme: &gpui_component::Theme) -> impl IntoElement {
     key_text(text).text_color(theme.muted_foreground)
@@ -16680,6 +17497,24 @@ impl Render for Workbench {
             if let Some(typed) = typed {
                 self.tree_input.update(cx, |s, cx| s.set_value(typed, window, cx));
             }
+        }
+        #[cfg(target_os = "macos")]
+        if std::mem::take(&mut self.pending_dictate_tick) {
+            self.tick_dictation(window, cx);
+        }
+        if std::mem::take(&mut self.pending_dictate_key) {
+            self.toggle_dictation(window, cx);
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(path) = self.pending_dictate_file.take() {
+            self.write_down(move || std::fs::read(&path).ok().and_then(|b| emaki_core::dictate::wav_samples(&b)).map(|(s, c, r)| emaki_core::dictate::to_whisper(&s, c, r)).unwrap_or_default(), window, cx);
+        }
+        if let Some(key) = self.pending_unarchive.take() {
+            self.unarchive_sessions(vec![key], window, cx);
+        }
+        if std::mem::take(&mut self.pending_dictate) {
+            self.focus_composer(window, cx);
+            window.defer(cx, |_, _| eprintln!("emaki: dictation taken {}", crate::sys::start_dictation()));
         }
         for key in std::mem::take(&mut self.pending_press) {
             window.defer(cx, move |window, cx| {

@@ -934,6 +934,10 @@ impl Workbench {
         };
 
         let mut card = v_flex().w_full().relative().rounded(px(10.)).border_1().border_color(theme.border).bg(theme.popover).overflow_hidden().children(self.reveal_mark((0, ix, jx), cx));
+        let fold = self.fold_state((0, ix, jx), open && has_body, cx);
+        // A clip is a rectangle: the head's hover is rounded as the card
+        // is, at the foot too while nothing is under it.
+        let alone = !ex_open && fold.is_none();
         card = card.child(
             h_flex()
                 .id(SharedString::from(format!("tool-{ix}-{jx}")))
@@ -942,6 +946,8 @@ impl Workbench {
                 .py(px(6.))
                 .gap(px(8.))
                 .items_center()
+                .rounded_t(px(9.))
+                .when(alone, |d| d.rounded_b(px(9.)))
                 .when(has_body, |d| d.cursor_pointer().hover(|s| s.bg(theme.list_hover)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !has_body {
@@ -974,7 +980,7 @@ impl Workbench {
             let size = px(self.cfg.app.chat_px());
             card = card.child(div().w_full().px(px(10.)).pb(px(8.)).child(explain_card(format!("ex-{ix}-{jx}"), text, explaining, size, cx)));
         }
-        if let Some(fold) = self.fold_state((0, ix, jx), open && has_body, cx) {
+        if let Some(fold) = fold {
             // The body is bounded and scrolls inside the card, so a long
             // output never takes the whole window; the clip's "n more
             // lines" note still says what was left out entirely.
