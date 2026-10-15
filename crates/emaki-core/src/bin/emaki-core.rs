@@ -343,8 +343,10 @@ fn main() {
             // emaki-core clean <key> <words | file of lines>: the dictation's
             // clean-up, as the window runs it, on words given here or on a
             // file a dictation a line: what the model wrote, and whether
-            // it was taken (`clean::accept`).
+            // it was taken (`clean::accept`). The instructions are the
+            // ones in Settings.
             use emaki_core::clean;
+            let app = emaki_core::config::Config::load().app;
             let m = clean::model(args.get(1).map(String::as_str).unwrap_or(clean::DEFAULT_MODEL)).expect("no such model");
             let given = args.get(2).expect("clean <key> <words | file>");
             let lines: Vec<String> = match std::fs::read_to_string(given) {
@@ -355,8 +357,10 @@ fn main() {
             {
                 for words in lines {
                     let at = std::time::Instant::now();
-                    match clean::rewrite(m, &words) {
+                    let words = emaki_core::dictate::spell(&words, &app.dictate_terms);
+                    match clean::rewrite(m, &words, &app.clean_prompt, &app.dictate_terms) {
                         Ok(wrote) => {
+                            let wrote = emaki_core::dictate::spell(&wrote, &app.dictate_terms);
                             let taken = clean::accept(&words, &wrote).is_some();
                             println!("SAID   {words}\nWROTE  {}\n       {} in {:.2} s\n", wrote.trim().replace('\n', "\n       "), if taken { "taken" } else { "REFUSED" }, at.elapsed().as_secs_f32());
                         }
@@ -407,7 +411,8 @@ fn main() {
                     #[cfg(target_os = "macos")]
                     {
                         let at = std::time::Instant::now();
-                        match dictate::transcribe(m, &audio) {
+                        let terms = emaki_core::config::Config::load().app.dictate_terms;
+                        match dictate::transcribe(m, &audio, &terms).map(|w| dictate::spell(&w, &terms)) {
                             Ok(words) => println!("{words}\n({:.1} s of sound in {:.1} s)", audio.len() as f32 / dictate::RATE as f32, at.elapsed().as_secs_f32()),
                             Err(e) => println!("no words: {e}"),
                         }
