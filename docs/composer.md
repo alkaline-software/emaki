@@ -137,7 +137,7 @@ voice (the loudness eased frame to frame, `mic_levels`), "Listening" and
 the time (`render_dictation_line`). While the model works the button
 turns and the row says it is writing. Two low, soft notes rising mark
 the start, the microphone opened as they die away so they are not heard,
-and the same two falling mark the stop: Emaki's own, made by
+and the same two falling mark a stop that keeps the words: Emaki's own, made by
 `scripts/dictate-sounds.py`, and always on. A short system sound was
 tried first and read as the Mac's alert; then a chime a fifth higher,
 struck, with more overtones, read as a warning.
@@ -145,7 +145,8 @@ struck, with more overtones, read as a warning.
 **Escape stops it unwritten** while the microphone starts or listens
 (`cancel_dictation`), before anything else the key does: it is caught
 at the window's root in the capture phase, so a field with the keys, an
-open Settings or a running turn never sees it. The row says so.
+open Settings or a running turn never sees it. The row says so, and no
+chime rings: the falling one would say the words are coming.
 
 Once the model is writing, Escape does nothing to it: stopping is the
 choice to keep the words.
@@ -247,7 +248,9 @@ made for this, is English only.
 
 **The words are data, never a request.** The prompt says so, and what
 the model writes is taken only when it keeps to what was said
-(`clean::accept`): no number that was not spoken, each script within
+(`clean::accept`): no number that was not spoken (in digits or in
+words, English or Chinese, so "zero point two point six" may be 0.2.6
+and "二零二六" 2026, `said_numbers`), each script within
 bounds of what it was (a sentence said in Chinese and written in English
 is a translation), few words never said, not most of it dropped. A
 list's own "1. " is not a number said. Otherwise the words go in as
@@ -261,13 +264,14 @@ Customize, in Settings, Dictate, has two buttons, each opening a sheet
 over Settings as the history does (`over_settings`, `Told`).
 
 - **Preferences** (`app.clean_prompt`) are the person's own words to
-  the post-processing model, put after its rules in the system turn,
-  which says they win where the two differ (`clean::prompt`). They are
-  saved as typed. They come before the examples: after them, 4B
-  followed them less, and with no examples it made a list of every
-  sentence. A rule the examples show against, such as no punctuation in
-  Chinese, 4B does not follow. `accept` still holds, so an instruction
-  to translate is refused.
+  the post-processing model, first in the system turn, which says they
+  win over its rules and examples (`clean::prompt`). They are saved as
+  typed. Put after the rules, 4B kept to the rules' "- " for a list
+  asked to be numbered; after the examples it followed them less, and
+  with no examples it made a list of every sentence. A rule the
+  examples show against, such as no punctuation in Chinese or digits
+  for numbers said in words, 4B does not follow. `accept` still holds,
+  so an instruction to translate is refused.
 - **Terms** (`app.dictate_terms`) are added from a field (Enter or
   Add), several at once between commas or spaces, two words kept as one
   in quotes (`dictate::terms_in`), and stand as chips with a × each; one
@@ -296,6 +300,62 @@ library's own sources from the commit transcribe-cpp synced its ggml
 from, compiled by `crates/emaki-core/build.rs` against the headers
 transcribe-cpp-sys installs, with `native/llm.cpp` between it and Rust
 (`vendor/llama.cpp/UPSTREAM.md`).
+
+### In other apps
+
+Dictation writes wherever the keyboard is, not only in the composer.
+
+- **In Emaki**, with the composer or nothing that takes words having
+  the keyboard, it is the composer, as above. With another field
+  having it (a file's editor, a sheet's field), the words are typed
+  there as keys would type them (`deliver_dictated`, by
+  `dispatch_keystroke` once the update is over, since the keys pass
+  the workbench's own listeners), and they go to the composer when
+  nothing took them.
+- **In another app**, they are pasted: the general pasteboard is set
+  (marked `org.nspasteboard.TransientType`, which clipboard managers
+  skip) and ⌘V posted, and what it held is put back 600 ms later
+  unless something else was copied meanwhile (`sys::paste_words`,
+  `restore_clipboard`). A paste reaches every app that takes text;
+  setting the focused element's value through the accessibility API
+  does not reach Electron's.
+- Where the words go is decided when they are ready, by the app in
+  front then. Where it shows is decided at the start: under the
+  composer when the composer has the keyboard in the app in front,
+  else the pill, and then the pill alone: the composer's microphone
+  stays as it is at rest.
+
+**The pill** (`pill.rs`) is a window of its own at the top of the
+screen under the pointer: black, hanging from the top edge with its
+lower corners round, a wave at its left and bars that follow the voice
+at its right, as Spokenly has it. On a screen with a notch it is as
+wide as the notch and a side on each, the wave and the bars on the menu
+bar beside it. It comes down from the edge and goes back up, writing is
+a wave running through the bars, and a few words ("Nothing heard")
+widen it before it goes. It is gpui's PopUp kind, a panel that never
+takes the keyboard, made borderless so the system lets it stand over
+the menu bar (a titled window is pushed under it), never in the way of
+the pointer and not hidden when Emaki is not in front
+(`sys::float_pill`).
+
+**Keys pressed in other apps are seen by an event tap**
+(`sys::outside_keys`): dictation's tap of modifiers there as in Emaki,
+dictation's key when it is a key (kept from that app, matched by its
+key code on the US layout), and Escape while it listens (kept from that
+app too). The tap ignores what is pressed while Emaki is in front,
+which the local monitor sees. It and the paste need Accessibility, and
+nothing on a Mac sees another app's keys without it. Until it is given,
+a note at the head of Settings, Dictate, right of the title, says so
+(as tall as the title, so the page stays put as it fades), and its Allow
+has the system ask (`AXIsProcessTrustedWithOptions` with its prompt,
+which puts Emaki in the list). The system posts
+`com.apple.accessibility.api` when that list changes
+(`sys::trust_changes`), and the tap starts then, with no need to come
+back to Emaki; the list is written a moment after the notice, so it is
+read again twice shortly after. The release and the dev build are two
+entries in the list, each allowed on its own. The dev
+build is signed with the developer's identity, so the grant outlives a
+rebuild.
 
 ## Spelling, grammar and capitals
 
@@ -597,7 +657,10 @@ own).
   `fnuse:<n>` has the window read Fn's use as `n` (0 is Do Nothing, 1 to
   3 a job) instead of the Mac's, leaving Keyboard settings alone,
 and `dictate:pretend` listening to a made-up voice with no microphone,
-to see the button and the row while it listens.
+to see the button and the row while it listens; `dictate:pill` the same
+with the pill up, `pillshot:<png>` a picture of the pill's window, and
+`dictate:away` whether Accessibility is given and the tap is on, and
+`dictate:untrusted` draws the Accessibility note as if it were not.
 - A tap can be sent for real: a `CGEvent` of type flagsChanged, with the
   virtual key (54 is Right ⌘) and the flags held after it, side bits
   included, posted to the copy's pid reaches the monitor in a background
