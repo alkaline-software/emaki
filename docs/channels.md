@@ -91,7 +91,7 @@ ends one first (`peer::end`: asked, then made to) on any start, so a
 session never has the old one and a new one writing at once.
 
 `in_terminal` is `inbox` or `pty`. `Hub::is_live` trusts the driver, the
-hidden terminal and the registry before the mtime grace. `Hub::peer_for`
+hidden terminal and the registry before the grace after the newest row. `Hub::peer_for`
 answers with the hidden terminal's own record once there is one, never
 another terminal's on the same session; `refresh_peers` keeps ours of
 the two.

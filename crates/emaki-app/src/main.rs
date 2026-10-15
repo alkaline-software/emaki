@@ -90,10 +90,11 @@ fn key_bindings() -> Vec<KeyBinding> {
         // One global binding: a context-bound one loses to a global one
         // whenever the focus sits deeper than the workbench, in the composer.
         KeyBinding::new("secondary-w", CloseTab, None),
-        // Dictation starts and stops on the key Settings gives it, one
-        // global binding for the same reason as ⌘W's.
-        KeyBinding::new(&dictate_key(&emaki_core::config::Config::load().app.dictate_key), Dictate, None),
     ];
+    // Dictation starts and stops on the key Settings gives it, one
+    // global binding for the same reason as ⌘W's. A tap of modifiers
+    // alone is no binding: the workbench watches for it.
+    keys.extend(dictate_key(&emaki_core::config::Config::load().app.dictate_key).map(|k| KeyBinding::new(&k, Dictate, None)));
     if !cfg!(target_os = "macos") {
         keys.push(KeyBinding::new("win-,", OpenSettings, None));
     }
@@ -109,16 +110,22 @@ fn key_bindings() -> Vec<KeyBinding> {
 }
 
 /// The dictation's key as a binding gpui takes: the one asked for when
-/// it is one, else the default.
-fn dictate_key(asked: &str) -> String {
-    if Keystroke::parse(asked).is_ok() { asked.to_string() } else { emaki_core::config::AppConfig::default().dictate_key }
+/// it is one, none for modifiers tapped alone (`dictate::tap`), else the
+/// default.
+fn dictate_key(asked: &str) -> Option<String> {
+    if emaki_core::dictate::tap(asked).is_some() {
+        return None;
+    }
+    Some(if Keystroke::parse(asked).is_ok() { asked.to_string() } else { emaki_core::config::AppConfig::default().dictate_key })
 }
 
 /// Dictation moved from the key `old` to `new`, at once: the old key's
 /// binding is put out by a later one to nothing, which gpui ranks above
 /// it, and the new key is bound after that.
 pub fn move_dictate_key(old: &str, new: &str, cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(&dictate_key(old), NoAction, None), KeyBinding::new(&dictate_key(new), Dictate, None)]);
+    let old = dictate_key(old).map(|k| KeyBinding::new(&k, NoAction, None));
+    let new = dictate_key(new).map(|k| KeyBinding::new(&k, Dictate, None));
+    cx.bind_keys(old.into_iter().chain(new));
 }
 
 /// The action a key already has in the window, by its name, when it has

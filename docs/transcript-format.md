@@ -57,6 +57,14 @@ depend on. The code honours each; keep it that way.
 - **A rule line on Claude Code's screen may carry text.** Test for one
   with `driver::is_rule` only.
 - **Do not assert `from-mode`** in the cross-session envelope.
+- **A transcript's file time is not when the session did anything.**
+  Claude Code appends rows with no `timestamp` (`cost-state`,
+  `last-prompt`, `custom-title`, `mode`, `permission-mode`) to a session
+  nobody touched, as a terminal of it closes. A session is as recent as
+  its newest timestamped row (`SessionRef::active`, `active_secs`): the
+  lists are ordered by it and the live grace counts from it. Ordered by
+  the file, a session left the night before went to the top and showed
+  a phase. The file's time is still how a change is noticed.
 
 ## Slash commands
 

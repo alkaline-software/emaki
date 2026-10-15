@@ -216,7 +216,9 @@ to it.
 ## Presence, without hooks
 
 There is no daemon. A session is live by the registry, by a driver of our
-own when we started the process, and by an mtime grace for anything else.
+own when we started the process, and by a grace after its newest row for
+anything else (`SessionRef::active`; a file's time is not it,
+`docs/transcript-format.md`).
 A fresh file with neither is a session that just ended (an interactive
 Claude Code always has an inbox), so the composer offers to resume it.
 

@@ -3530,12 +3530,13 @@ fn the_catalogue_of_agents_holds_together() {
     }
 
     // What stands beside the agents is in no list of agents, is found
-    // by its id, and says what it is to Emaki and how it is got.
+    // by its id, and says what it is to Emaki and how it is got. A plan
+    // it needs is said only when there is one.
     for t in agents::tools() {
         assert!(ids.insert(t.id) && all.iter().all(|a| a.id != t.id), "{}", t.id);
         assert!(agents::by_id(t.id).is_some() && t.reads.is_none(), "{}", t.id);
-        assert!(!t.with_emaki.is_empty() && !t.accent.is_empty() && !t.sign_in_how.is_empty() && !t.plans.is_empty(), "{}", t.id);
-        assert!(t.download.starts_with("https://") && !t.apps.is_empty(), "{}", t.id);
+        assert!(!t.with_emaki.is_empty() && !t.accent.is_empty() && !t.sign_in_how.is_empty(), "{}", t.id);
+        assert!(t.site.starts_with("https://") && t.docs.starts_with("https://"), "{}", t.id);
         assert!(t.install.iter().all(|w| !w.command.contains('\n') && !w.by.is_empty()), "{}", t.id);
     }
 }
@@ -3548,7 +3549,7 @@ fn an_app_is_found_where_it_is_installed() {
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path().join("Pretend.app");
     let path: &'static str = Box::leak(app.to_string_lossy().into_owned().into_boxed_str());
-    let a = Agent { id: "pretend", bins: &["pretend-nowhere"], apps: Box::leak(Box::new([path])), keychain: "", ..*agents::by_id("github-desktop").unwrap() };
+    let a = Agent { id: "pretend", bins: &["pretend-nowhere"], apps: Box::leak(Box::new([path])), keychain: "", ..*agents::by_id("github").unwrap() };
     assert!(!agents::detect_in(&a, &[]).installed());
     std::fs::create_dir(&app).unwrap();
     let found = agents::detect_in(&a, &[]);
@@ -4055,4 +4056,118 @@ fn dictation_audio_is_one_channel_at_sixteen_kilohertz() {
     assert_eq!(dictate::pieces(&long, 0).len(), 1, "no limit, one piece");
     assert!(dictate::chosen(dictate::MODELS[0].key).is_none(), "nothing downloaded");
     assert!(!dictate::installed(&dictate::MODELS[0]));
+}
+
+/// Dictation's key as modifiers alone: Right ⌘ is the right one tapped
+/// with nothing else, a pair is its two kinds in any order and on
+/// either side, and a modifier that was part of a shortcut or a click
+/// is no tap. The Mac's flags give the side by the device's bits.
+#[test]
+fn dictation_tap_is_modifiers_alone_and_nothing_else() {
+    use emaki_core::dictate::{self, held_from_mac, tap, TapWatch, FN, L_ALT, L_CMD, L_CTRL, L_SHIFT, R_ALT, R_CMD, R_SHIFT};
+    // NSEventModifierFlags with the device's side bits, as a real
+    // keyboard sends them.
+    let cmd_l = (1 << 20) | 0x08;
+    let cmd_r = (1 << 20) | 0x10;
+    let alt_l = (1 << 19) | 0x20;
+    let shift_r = (1 << 17) | 0x04;
+    let ctrl_l = (1 << 18) | 0x01;
+    assert_eq!(held_from_mac(cmd_r), R_CMD);
+    assert_eq!(held_from_mac(cmd_l | cmd_r), L_CMD | R_CMD);
+    assert_eq!(held_from_mac(alt_l | shift_r), L_ALT | R_SHIFT);
+    assert_eq!(held_from_mac(1 << 23), FN);
+    assert_eq!(held_from_mac(1 << 16), 0, "caps lock is no modifier");
+    assert_eq!(held_from_mac(1 << 20), L_CMD, "no side given counts as the left");
+    assert_eq!(held_from_mac(0x10), 0, "a side's bit with no key held is nothing");
+
+    let right_cmd = tap("tap:right-cmd").unwrap();
+    let alt_cmd = tap("tap:alt-cmd").unwrap();
+    let ctrl_shift = tap("tap:ctrl-shift").unwrap();
+    assert!(tap("secondary-shift-d").is_none() && tap("tap:nothing").is_none());
+    assert!(dictate::TAPS.iter().all(|t| tap(&format!("{}{}", dictate::TAP_PREFIX, t.key)) == Some(t)));
+
+    let press = |w: &mut TapWatch, steps: &[u16], t| steps.iter().map(|h| w.flags(*h, t)).collect::<Vec<_>>();
+    let mut w = TapWatch::default();
+    assert_eq!(press(&mut w, &[R_CMD, 0], right_cmd), [false, true], "tapped alone");
+    assert_eq!(press(&mut w, &[L_CMD, 0], right_cmd), [false, false], "the left one");
+    assert_eq!(press(&mut w, &[R_CMD, R_CMD | L_CMD, R_CMD, 0], right_cmd), [false; 4], "both");
+    w.flags(R_CMD, right_cmd);
+    w.other();
+    assert!(!w.flags(0, right_cmd), "⌘C is no tap");
+    assert!(press(&mut w, &[R_CMD, 0], right_cmd)[1], "and the next tap is one");
+    w.other();
+    assert!(press(&mut w, &[R_CMD, 0], right_cmd)[1], "a key with nothing held spoils nothing");
+
+    assert!(press(&mut w, &[L_ALT, L_ALT | R_CMD, R_CMD, 0], alt_cmd)[3], "⌥ then ⌘, ⌥ let go first");
+    assert!(press(&mut w, &[R_ALT | L_CMD, 0], alt_cmd)[1], "either side");
+    assert!(!press(&mut w, &[L_ALT, 0], alt_cmd)[1], "one of the two");
+    assert!(!press(&mut w, &[L_ALT | L_CMD, L_ALT | L_CMD | L_SHIFT, 0], alt_cmd)[2], "three");
+    assert!(press(&mut w, &[L_CTRL, L_CTRL | R_SHIFT, 0], ctrl_shift)[2]);
+    assert!(press(&mut w, &[held_from_mac(ctrl_l), held_from_mac(ctrl_l | shift_r), 0], ctrl_shift)[2], "from the Mac's flags");
+
+    w.flags(R_CMD, right_cmd);
+    w.reset();
+    assert!(!w.flags(0, right_cmd), "a key let go after the app was left");
+}
+
+/// A session is as recent as its newest row says, not its file: Claude
+/// Code writes its state to a session with no time on the rows (as a
+/// terminal of it closes), and a session left the night before went to
+/// the top of the sidebar and read as live. A file with no time in it
+/// falls back to the file's.
+#[test]
+fn sessions_are_ordered_by_their_rows_not_their_files() {
+    let (_home, _g) = isolated();
+    let dir = emaki_core::paths::projects_dir().join("-tmp-proj");
+    fs::create_dir_all(&dir).unwrap();
+    let rows = |id: &str, ts: &str| -> String {
+        [
+            json!({"type": "user", "uuid": format!("u-{id}"), "timestamp": ts, "sessionId": id, "cwd": "/tmp/proj", "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}),
+            json!({"type": "assistant", "uuid": format!("a-{id}"), "timestamp": ts, "sessionId": id, "message": {"role": "assistant", "model": "claude-x", "stop_reason": "end_turn", "content": [{"type": "text", "text": "hi"}]}}),
+        ]
+        .iter()
+        .map(|r| serde_json::to_string(r).unwrap() + "\n")
+        .collect()
+    };
+    fs::write(dir.join("recent.jsonl"), rows("recent", "2026-10-15T09:30:00Z")).unwrap();
+    // Written after, so its file is the newer: last night's session with
+    // the rows Claude Code adds on its way out.
+    let mut old = rows("old", "2026-10-14T14:03:38.737Z");
+    for t in ["cost-state", "last-prompt", "permission-mode", "atis-latch"] {
+        old.push_str(&(serde_json::to_string(&json!({"type": t, "sessionId": "old"})).unwrap() + "\n"));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(dir.join("old.jsonl"), old).unwrap();
+
+    let refs = emaki_core::adapters::index_all(0, &[]);
+    let ids: Vec<&str> = refs.iter().map(|r| r.session_id.as_str()).collect();
+    assert_eq!(ids, ["recent", "old"]);
+    let old = &refs[1];
+    assert!(old.mtime > refs[0].mtime, "the old one's file is the newer");
+    assert_eq!(old.active, 1_791_986_618.737);
+
+    let none = dir.join("none.jsonl");
+    fs::write(&none, serde_json::to_string(&json!({"type": "summary", "summary": "x"})).unwrap() + "\n").unwrap();
+    let r = peek(&none);
+    assert_eq!(r.active, r.mtime);
+}
+
+/// A way of installing that needs Homebrew, npm or winget is offered only
+/// where that program is: a script needs none.
+#[cfg(unix)]
+#[test]
+fn a_way_needs_its_program_here() {
+    use emaki_core::agents::{way_program, way_programs_in};
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(way_program("Homebrew"), Some("brew"));
+    assert_eq!(way_program("npm (needs Node.js 22 or later)"), Some("npm"));
+    assert_eq!(way_program("winget"), Some("winget"));
+    assert_eq!(way_program("Script"), None);
+    assert_eq!(way_program("PowerShell"), None);
+    let dir = tempfile::tempdir().unwrap();
+    assert!(way_programs_in(&[dir.path().to_path_buf()]).is_empty());
+    let npm = dir.path().join("npm");
+    std::fs::write(&npm, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(way_programs_in(&[dir.path().to_path_buf()]), vec!["npm"]);
 }

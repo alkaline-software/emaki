@@ -134,11 +134,12 @@ button is the danger's colour with a ring the voice swells, and the row
 under the composer says so: a red dot breathing, bars that follow the
 voice (the loudness eased frame to frame, `mic_levels`), "Listening" and
 the time (`render_dictation_line`). While the model works the button
-turns and the row says it is writing. A chime of two notes rising marks
-the start, the microphone opened as it rings down so it is not heard,
-and the same two falling marks the stop: Emaki's own, made by
+turns and the row says it is writing. Two low, soft notes rising mark
+the start, the microphone opened as they die away so they are not heard,
+and the same two falling mark the stop: Emaki's own, made by
 `scripts/dictate-sounds.py`, and always on. A short system sound was
-tried first and read as the Mac's alert.
+tried first and read as the Mac's alert; then a chime a fifth higher,
+struck, with more overtones, read as a warning.
 
 **Whisper is never handed a recording with no voice in it.** It was
 taught on videos' subtitles, and silence or a room's hum it writes down
@@ -165,6 +166,35 @@ interceptor, since gpui runs the bindings before an element's own key
 listener and ⌘N pressed there would open a session. The old key is put
 out by a later binding to `NoAction`, which gpui ranks above it, so the
 change needs no restart and nothing else bound is touched.
+
+**Modifiers alone are chosen, not pressed.** gpui binds a key with
+modifiers, never modifiers by themselves, so Right ⌘, Right ⌥, Right ⇧,
+Right ⌃, Fn and the pairs (⌥ + ⌘, ⌃ + ⌘, ⌃ + ⌥, ⇧ + ⌘, ⌥ + ⇧, ⌃ + ⇧,
+a quiet "+" between the caps, `key_combo`) are a list that rises from
+More beside the key's field (`PickFor::DictateKey`), as Spokenly offers
+them. The list says nothing but the keys. One is kept as `tap:<key>` (`dictate::TAPS`) and binds
+nothing; a tap of it starts and stops dictation. gpui does not say which
+side a modifier is on, so AppKit's own monitor in the app
+(`sys::key_events`, a Mac's alone) hands every change of the modifiers
+held, every key and every click to `dictate::TapWatch`: a tap is the
+keys held at most between nothing held and nothing held, with no key or
+click among them, so ⌘C is no tap and ⌥ then ⌘, let go in any order, is
+⌥⌘. Leaving the app forgets what was held, since a key let go elsewhere
+is never seen. The monitor sees only what is sent to this app and needs
+no permission.
+
+**Fn has a job of the Mac's own unless the person gives it up.**
+Keyboard settings, "Press 🌐 key to" (`AppleFnUsageType`, read by
+`sys::fn_key_use`), changes the input source, shows emoji or starts the
+Mac's dictation, and a tap would do that as well as ours. Emaki cannot
+stop it, so with Fn chosen and a job set, one line under the key's row
+says what Fn would also do and to set Do Nothing, with a button to
+Keyboard settings. It is asked again whenever the window comes back, and
+the line
+folds away once it is Do Nothing (`fold_under`; the settings glide down
+to it as it opens, `settings_glide_step`). Only the newest read counts
+(`fn_reads`): two overlapped and the older answer, landing last, hid the
+card. A Mac with no value set has a job for the key.
 
 A Mac's alone for now (`dictate::AVAILABLE`): transcribe.cpp is C++ built
 by CMake, which the MinGW check from a Mac cannot build, and none of it
@@ -460,6 +490,15 @@ own).
 - `EMAKI_GO=dictate:file:<wav>` hands a recording to the same path the
   microphone's takes, and puts the words in the composer;
   `dictate:key` is the key pressed, `dictate:get` the model's Download,
+  `pick:dictate-key` the list of taps under More, `dictatekey:<key>`
+  sets the key as a choice in Settings does (`dictatekey:tap:fn`), and
+  `fnuse:<n>` has the window read Fn's use as `n` (0 is Do Nothing, 1 to
+  3 a job) instead of the Mac's, leaving Keyboard settings alone,
 and `dictate:pretend` listening to a made-up voice with no microphone,
 to see the button and the row while it listens.
+- A tap can be sent for real: a `CGEvent` of type flagsChanged, with the
+  virtual key (54 is Right ⌘) and the flags held after it, side bits
+  included, posted to the copy's pid reaches the monitor in a background
+  window. Posting one wants Accessibility, which the system asks of Emaki,
+  the agent being its child.
 - `emaki-core statusline restore` puts back the previous `statusLine`.

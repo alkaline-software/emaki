@@ -1175,8 +1175,14 @@ pub struct Workbench {
     pub(crate) agent_git_h: Rc<Cell<f32>>,
     /// Git on this machine, as the agents page last looked.
     pub(crate) agents_git: Option<emaki_core::agents::Git>,
+    /// Which of Homebrew, npm and winget are here (`agents::way_programs_in`):
+    /// a way needing one that is not is not offered. `None` until looked.
+    pub(crate) agents_progs: Option<Vec<&'static str>>,
     /// The name and address the GitHub page's step writes into git's line.
     pub(crate) git_name_input: Entity<InputState>,
+    /// Git's name and address, newly read, for the fields that are empty:
+    /// put in at the next draw, which has the window.
+    pub(crate) git_fill: Option<(String, String)>,
     pub(crate) git_email_input: Entity<InputState>,
     pub(crate) agents_page_scroll: ScrollHandle,
     /// How many texts of the page have been drawn selectable in this
@@ -1961,6 +1967,20 @@ pub struct Workbench {
     dictate_key_focus: FocusHandle,
     /// What the key's field says of the keys last pressed in it.
     dictate_key_note: Option<String>,
+    /// Dictation's key when it is modifiers tapped alone: what is held.
+    tap_watch: emaki_core::dictate::TapWatch,
+    /// With Fn as dictation's key, what the Mac does with it too
+    /// (`sys::fn_key_use`); `None` until asked.
+    fn_use: Option<Option<&'static str>>,
+    /// What the key's note and Fn's guidance last said, to draw them
+    /// closing.
+    dictate_kept: std::cell::RefCell<(String, &'static str)>,
+    /// The reads of Fn's use asked for: only the newest one's answer
+    /// stands, as two can overlap.
+    fn_reads: u32,
+    /// The settings sliding down to Fn's guidance as it opens: since
+    /// when, and the last frame.
+    settings_glide: std::cell::Cell<Option<(Instant, Instant)>>,
     /// The microphone's loudness while it listens, the newest last, eased
     /// frame to frame: the ring around the button and the bars under the
     /// composer.
@@ -3022,12 +3042,23 @@ impl Workbench {
         // agents page showing, which is what they do after installing
         // one in a terminal.
         cx.spawn(async move |this, cx| {
-            let _ = this.update(cx, |this, cx| this.check_agents(false, cx));
+            let _ = this.update(cx, |this, cx| {
+                this.check_agents(false, cx);
+                this.read_fn_use(cx);
+            });
         })
         .detach();
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() && this.page == Page::Agents {
                 this.check_agents(true, cx);
+            }
+            // A key let go in another app is never seen here.
+            if !window.is_window_active() {
+                this.tap_watch.reset();
+            }
+            // Back from Keyboard settings, Fn's use may have changed.
+            if window.is_window_active() {
+                this.read_fn_use(cx);
             }
         })
         .detach();
@@ -3441,6 +3472,22 @@ impl Workbench {
             }
         })
         .detach();
+        // Dictation's key tapped alone (Right ⌘, ⌥⌘): AppKit says which
+        // side a modifier is on, and gpui does not. Elsewhere dictation
+        // does not run and nothing watches.
+        #[cfg(target_os = "macos")]
+        {
+            let mut keys = crate::sys::key_events();
+            cx.spawn_in(window, async move |this, cx| {
+                use futures::StreamExt as _;
+                while let Some(said) = keys.next().await {
+                    if this.update_in(cx, |this, window, cx| this.key_event(said, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         Self {
             hub,
             cfg,
@@ -3467,7 +3514,9 @@ impl Workbench {
             agent_way_h: Rc::new(Cell::new(0.)),
             agent_git_h: Rc::new(Cell::new(0.)),
             agents_git: None,
+            agents_progs: None,
             git_name_input,
+            git_fill: None,
             git_email_input,
             agents_page_scroll: ScrollHandle::new(),
             selectable_n: std::cell::Cell::new(0),
@@ -3766,6 +3815,11 @@ impl Workbench {
             dictate_key_rec: false,
             dictate_key_focus,
             dictate_key_note: None,
+            tap_watch: Default::default(),
+            fn_use: None,
+            dictate_kept: Default::default(),
+            fn_reads: 0,
+            settings_glide: Default::default(),
             mic_levels: VecDeque::new(),
             tree_focus_back: false,
             pending_new_in: None,
@@ -5067,6 +5121,15 @@ impl Workbench {
             Some("pick:model") => self.pick_toggle(PickFor::Model, cx),
             Some("pick:folder") => self.pick_toggle(PickFor::Folder, cx),
             Some("pick:default-mode") => self.pick_toggle(PickFor::DefaultMode, cx),
+            Some("pick:dictate-key") => self.pick_toggle(PickFor::DictateKey, cx),
+            // Fn's use on the Mac as Keyboard settings would say it,
+            // without touching them: `fnuse:0` is Do Nothing, 1 to 3 a job,
+            // then read as the window reads it on coming back.
+            Some(t) if t.starts_with("fnuse:") => {
+                crate::sys::FN_USE_PROBE.store(t["fnuse:".len()..].parse().unwrap_or(9), std::sync::atomic::Ordering::Relaxed);
+                self.read_fn_use(cx);
+            }
+            Some(t) if t.starts_with("dictatekey:") => self.set_dictate_key(t["dictatekey:".len()..].to_string(), cx),
             Some("pick:off") => self.close_pick(cx),
             Some("pick:mode") => self.pick_toggle(PickFor::Mode, cx),
             Some(t) if t.starts_with("pickmode:") => self.pill_picked(Pill::Mode, &t["pickmode:".len()..], cx),
@@ -6256,29 +6319,110 @@ impl Workbench {
                     window.focus(&this.dictate_key_focus, cx);
                     cx.notify();
                 }))
-                .child(if recording { div().text_color(theme.muted_foreground).child("Press the keys").into_any_element() } else { key_text(&binding_signs(&app.dictate_key)).into_any_element() })
+                .child(if recording { div().text_color(theme.muted_foreground).child("Press the keys").into_any_element() } else { key_combo(&dictate_key_signs(&app.dictate_key), theme.muted_foreground).into_any_element() })
                 .into_any_element();
+            // Modifiers alone, which no key pressed in the field can be,
+            // are chosen from a list that rises from More.
+            let tap = emaki_core::dictate::tap(&app.dictate_key);
+            let more_open = self.pick.as_ref().is_some_and(|p| p.what == PickFor::DictateKey);
+            let more = div()
+                .relative()
+                .flex_shrink_0()
+                .child(
+                    crate::branches::small_pill("dictate-key-more", "icons/chevron-up.svg", "More", Press::Quiet, false, &theme)
+                        .h(px(30.))
+                        .when(more_open, |d| d.bg(theme.muted_foreground.opacity(0.16)))
+                        .managed_tooltip(|window, cx| tip("Modifier keys tapped alone", window, cx))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            swallow_click(window, cx);
+                            this.dictate_key_rec = false;
+                            this.dictate_key_note = None;
+                            this.pick_toggle(PickFor::DictateKey, cx);
+                        })),
+                )
+                .child(self.pick_mark(PickFor::DictateKey, cx));
+            // Under the row: why a key was not taken, coming and going in
+            // motion from what it last said.
+            let note = self.dictate_key_note.clone();
+            if let Some(n) = &note {
+                self.dictate_kept.borrow_mut().0 = n.clone();
+            }
+            let said = self.dictate_kept.borrow().0.clone();
+            let note = self.fold_under(
+                "dictate-key-note".into(),
+                note.is_some(),
+                h_flex().w_full().justify_end().text_size(px(12.)).text_color(theme.muted_foreground).child(key_text(&said)).into_any_element(),
+                cx,
+            );
+            // With Fn chosen and the Mac giving it a job of its own, a tap
+            // would do both: how to give the Mac's up, in Keyboard settings.
+            // It goes once the window comes back with that done.
+            let fn_job = if tap.is_some_and(|t| t.key == "fn") { self.fn_use.flatten() } else { None };
+            if let Some(job) = fn_job {
+                self.dictate_kept.borrow_mut().1 = job;
+            }
+            let job = self.dictate_kept.borrow().1;
+            let also = if job.is_empty() { "Fn 🌐 also has a use in macOS.".to_string() } else { format!("Fn 🌐 would also {job}.") };
+            let warn = theme.warning;
+            let guide = h_flex()
+                .w_full()
+                .gap(px(10.))
+                .pl(px(12.))
+                .pr(px(8.))
+                .py(px(8.))
+                .rounded(px(10.))
+                .bg(warn.opacity(if dark { 0.10 } else { 0.07 }))
+                .border_1()
+                .border_color(warn.opacity(0.35))
+                .child(Icon::default().path("icons/triangle-alert.svg").with_size(px(15.)).text_color(warn).flex_shrink_0())
+                // The button goes under the words where the line is too
+                // narrow for both, never squeezing them a word a line.
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(key_text_wrap(&format!("{also} Set it to Do Nothing.")).flex_grow(1.).flex_shrink(1.).flex_basis(px(150.)).min_w_0().text_size(px(12.5)))
+                        .child(
+                            crate::branches::small_pill("dictate-fn-settings", "icons/external-link.svg", "Keyboard Settings", Press::Quiet, false, &theme)
+                                .flex_shrink_0()
+                                .on_click(|_, _, cx| cx.open_url(crate::sys::KEYBOARD_SETTINGS_URL)),
+                        ),
+                )
+                .into_any_element();
+            let guide = self.fold_under("dictate-fn-guide".into(), fn_job.is_some(), guide, cx);
             let mut rows = vec![models];
             rows.extend([
-                // The key's field at the row's right, then Reset, which
-                // puts back ⌘⇧D (Ctrl+Shift+D off a Mac), against the edge.
-                v_flex()
-                    .gap(px(6.))
+                // The key's field, More and Reset (which puts back ⌘⇧D,
+                // Ctrl+Shift+D off a Mac) in a column at the row's right,
+                // and under them, as wide, what is said of the key.
+                h_flex()
+                    .items_start()
+                    .child(div().w(SETTINGS_LABEL_W).h(px(30.)).flex().items_center().flex_shrink_0().pr(px(12.)).text_size(px(13.5)).child("Shortcut"))
+                    .child(div().flex_1())
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(div().w(SETTINGS_LABEL_W).flex_shrink_0().pr(px(12.)).text_size(px(13.5)).child("Shortcut"))
-                            .child(div().flex_1())
-                            .child(div().w(px(260.)).flex_shrink_1().min_w_0().child(field))
+                        v_flex()
+                            .w(px(440.))
+                            .flex_shrink_1()
+                            .min_w_0()
                             .child(
-                                crate::branches::small_pill("dictate-key-reset", "icons/rotate.svg", "Reset", Press::Quiet, app.dictate_key == emaki_core::config::AppConfig::default().dictate_key, &theme)
-                                    .h(px(30.))
-                                    .flex_shrink_0()
-                                    .on_click(cx.listener(|this, _, _, cx| this.reset_dictate_key(cx))),
-                            ),
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(div().flex_1().min_w_0().child(field))
+                                    .child(more)
+                                    .child(
+                                        crate::branches::small_pill("dictate-key-reset", "icons/rotate.svg", "Reset", Press::Quiet, app.dictate_key == emaki_core::config::AppConfig::default().dictate_key, &theme)
+                                            .h(px(30.))
+                                            .flex_shrink_0()
+                                            .on_click(cx.listener(|this, _, _, cx| this.reset_dictate_key(cx))),
+                                    ),
+                            )
+                            .children(note)
+                            .children(guide),
                     )
-                    .when_some(self.dictate_key_note.clone(), |d, n| d.child(h_flex().justify_end().text_size(px(12.)).text_color(theme.muted_foreground).child(key_text(&n))))
                     .into_any_element(),
             ]);
             rows
@@ -7314,6 +7458,16 @@ impl Workbench {
                 let now = options.model(&model).map(|m| m.key.clone()).unwrap_or(model);
                 (options.models.iter().map(|m| PickRow::plain(m.key.clone(), plain_default(&m.label), m.detail.clone())).collect(), now)
             }
+            // The keys alone, then under a line the pairs. What the Mac
+            // does with Fn is said under the key's row once it is chosen.
+            PickFor::DictateKey => {
+                let rows = emaki_core::dictate::TAPS
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, t)| PickRow { rule: ix > 0 && t.pair() && !emaki_core::dictate::TAPS[ix - 1].pair(), ..PickRow::plain(t.key.to_string(), t.signs.to_string(), String::new()) })
+                    .collect();
+                (rows, emaki_core::dictate::tap(&self.cfg.app.dictate_key).map(|t| t.key.to_string()).unwrap_or_default())
+            }
         }
     }
 
@@ -7382,6 +7536,7 @@ impl Workbench {
             PickFor::CodexMode => self.codex_next_set(Pill::Mode, key, cx),
             PickFor::CodexModel => self.codex_next_set(Pill::Model, key, cx),
             PickFor::CodexEffort => self.codex_next_set(Pill::Effort, key, cx),
+            PickFor::DictateKey => self.set_dictate_key(format!("{}{key}", emaki_core::dictate::TAP_PREFIX), cx),
             PickFor::Folder if key.is_empty() => self.choose_folder(cx),
             PickFor::Folder => {
                 self.new_cwd = key.to_string();
@@ -7416,23 +7571,31 @@ impl Workbench {
         // Its left edge on the pill's, unless it would not fit that way.
         // The folders' list always drops down: its strip is under the
         // composer with the page's empty half below it.
-        let (up, right) = (menu.what != PickFor::Folder && menu.by.center().y > view.height * 0.5, menu.by.left() + px(380.) > view.width - px(8.));
+        // Dictation's taps go up wherever they fit: the settings run on
+        // below the key's row.
+        let up = match menu.what {
+            PickFor::Folder => false,
+            PickFor::DictateKey => menu.by.top() > px(400.) || menu.by.center().y > view.height * 0.5,
+            _ => menu.by.center().y > view.height * 0.5,
+        };
+        let keys = menu.what == PickFor::DictateKey;
+        let right = menu.by.left() + px(if keys { 240. } else { 380. }) > view.width - px(8.);
         let gap = px(6.);
         // The list is as long as the agent makes it (a dozen models), so
         // it scrolls past the room there is.
         let room = if up { menu.by.top() - gap - px(12.) } else { view.height - menu.by.bottom() - gap - px(12.) };
         // The folders' list is seven rows and the way to another, and
-        // shows them all where the window has the room.
+        // shows them all where the window has the room; so do the taps.
         let what = menu.what;
         let (scroll, _) = self.kept_scroll(format!("pick-{}", menu.serial).into(), Inner::Over);
         // The room above and below the rows is the card's, not theirs, so a
         // row cut at an edge stays inside its corner: a clip is a rectangle.
-        let mut rows = v_flex().id(("pick-rows", menu.serial as usize)).max_h(room.min(px(if what == PickFor::Folder { 440. } else { 360. })) - px(10.)).overflow_y_scroll().track_scroll(&scroll).px(px(5.)).gap(px(2.));
+        let mut rows = v_flex().id(("pick-rows", menu.serial as usize)).max_h(room.min(px(if matches!(what, PickFor::Folder | PickFor::DictateKey) { 440. } else { 360. })) - px(10.)).overflow_y_scroll().track_scroll(&scroll).px(px(5.)).gap(px(2.));
         let card = v_flex()
             .id(("pick-card", menu.serial as usize))
             .absolute()
-            .min_w(px(250.))
-            .max_w(px(380.))
+            .min_w(px(if keys { 200. } else { 250. }))
+            .max_w(px(if keys { 240. } else { 380. }))
             .py(px(5.))
             .overflow_hidden()
             .rounded(px(12.))
@@ -7443,11 +7606,11 @@ impl Workbench {
             .map(|d| if right { d.right(view.width - menu.by.right()) } else { d.left(menu.by.left()) })
             .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
         let dark = theme.mode.is_dark();
-        for (ix, PickRow { key, name, detail, tint, mark }) in menu.rows.iter().enumerate() {
+        for (ix, PickRow { key, name, detail, tint, mark, rule }) in menu.rows.iter().enumerate() {
             let active = *key == menu.current && !key.is_empty();
             // A row with no key is not one of the choices but the way to
-            // another: a line sets it apart.
-            if key.is_empty() && ix > 0 {
+            // another: a line sets it apart, as it does another group.
+            if (key.is_empty() || *rule) && ix > 0 {
                 rows = rows.child(div().flex_shrink_0().h(px(1.)).mx(px(6.)).my(px(3.)).bg(theme.border));
             }
             let key_none = key.is_empty();
@@ -7471,11 +7634,14 @@ impl Workbench {
                             .gap(px(6.))
                             .items_center()
                             .when_some(*mark, |d, agent| d.child(agent_icon(agent, px(13.), agent_color(agent, &theme)).flex_shrink_0()))
-                            // A choice the agent shows in a colour wears it here too.
+                            // A choice the agent shows in a colour wears it
+                            // here too; a key is drawn on its caps.
                             .child(match tint {
+                                _ if keys => key_combo(name, theme.muted_foreground).text_size(px(13.)).font_weight(FontWeight::MEDIUM),
                                 Tint::Plain => div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()),
                                 tint => tinted(name, tint).text_size(px(13.)),
                             })
+                            .when(active && keys, |d| d.child(div().flex_1()))
                             .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary)))
                             // "Choose a folder…" has a key (`ChooseFolder`).
                             .when(what == PickFor::Folder && key_none, |d| d.child(div().flex_1()).child(kbd_hint("⌘O", &theme))),
@@ -11408,6 +11574,16 @@ impl Workbench {
     /// drawn (as the dialog's card does). Going, it is drawn from what
     /// the caller kept and takes no click. Nothing once it is gone.
     fn card_fold(&self, key: String, on: bool, card: AnyElement, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.fold_card(key, on, card, false, cx)
+    }
+
+    /// `card_fold` hanging from what is over it, as a note under a row of
+    /// the settings: the gap is above, and it opens downwards.
+    fn fold_under(&self, key: String, on: bool, card: AnyElement, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.fold_card(key, on, card, true, cx)
+    }
+
+    fn fold_card(&self, key: String, on: bool, card: AnyElement, under: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let moving = self.arrival(&key, on, cx);
         if !on && moving.is_none() {
             self.fold_h.borrow_mut().remove(&key);
@@ -11433,7 +11609,8 @@ impl Workbench {
         });
         let gap = 8.;
         let inner = div().relative().w_full().flex_shrink_0().child(card).children(measure).when(!on, |d| d.child(div().absolute().inset_0().occlude()));
-        let wrap = v_flex().w_full().max_w(CONTENT_W).justify_end().overflow_hidden().child(inner).child(div().h(px(gap)).flex_shrink_0());
+        let gap_box = div().h(px(gap)).flex_shrink_0();
+        let wrap = if under { v_flex().w_full().justify_start().overflow_hidden().child(gap_box).child(inner) } else { v_flex().w_full().max_w(CONTENT_W).justify_end().overflow_hidden().child(inner).child(gap_box) };
         Some(match moving {
             Some((coming, n)) => wrap
                 .with_animation(ElementId::Name(format!("{key}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
@@ -12592,7 +12769,7 @@ impl Workbench {
     /// Each state comes in over a moment.
     fn render_mic(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let keys = binding_signs(&self.cfg.app.dictate_key);
+        let keys = dictate_key_signs(&self.cfg.app.dictate_key);
         let click = cx.listener(|this, _: &ClickEvent, window, cx| {
             swallow_click(window, cx);
             this.toggle_dictation(window, cx);
@@ -12754,31 +12931,104 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let old = std::mem::replace(&mut self.cfg.app.dictate_key, binding.clone());
-        crate::move_dictate_key(&old, &binding, cx);
-        let saved = binding.clone();
-        if let Err(e) = Config::edit(move |c| c.app.dictate_key = saved) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
-        }
-        self.dictate_key_rec = false;
-        self.dictate_key_note = None;
-        cx.notify();
+        self.set_dictate_key(binding, cx);
     }
 
     /// The dictation key back to its first one, ⌘⇧D (Ctrl+Shift+D off a
     /// Mac: the binding says `secondary`).
     fn reset_dictate_key(&mut self, cx: &mut Context<Self>) {
-        let first = emaki_core::config::AppConfig::default().dictate_key;
+        self.set_dictate_key(emaki_core::config::AppConfig::default().dictate_key, cx);
+    }
+
+    /// Dictation on `key` from now: a binding, or modifiers tapped alone
+    /// (`dictate::TAP_PREFIX`). Saved, and the old key let go at once.
+    fn set_dictate_key(&mut self, key: String, cx: &mut Context<Self>) {
         self.dictate_key_rec = false;
         self.dictate_key_note = None;
-        if self.cfg.app.dictate_key != first {
-            let old = std::mem::replace(&mut self.cfg.app.dictate_key, first.clone());
-            crate::move_dictate_key(&old, &first, cx);
-            if let Err(e) = Config::edit(move |c| c.app.dictate_key = first) {
+        self.tap_watch.reset();
+        if self.cfg.app.dictate_key != key {
+            let old = std::mem::replace(&mut self.cfg.app.dictate_key, key.clone());
+            crate::move_dictate_key(&old, &key, cx);
+            if let Err(e) = Config::edit(move |c| c.app.dictate_key = key) {
                 self.notice = Some(Notice::error(format!("could not save settings: {e}")));
             }
         }
+        self.read_fn_use(cx);
         cx.notify();
+    }
+
+    /// With Fn as dictation's key, ask what the Mac does with it too, for
+    /// the guidance under the key's row. Asked again each time the
+    /// window comes back, so it goes once the person has set Do Nothing.
+    fn read_fn_use(&mut self, cx: &mut Context<Self>) {
+        if !emaki_core::dictate::tap(&self.cfg.app.dictate_key).is_some_and(|t| t.key == "fn") {
+            return;
+        }
+        self.fn_reads += 1;
+        let n = self.fn_reads;
+        cx.spawn(async move |this, cx| {
+            let job = cx.background_spawn(async { crate::sys::fn_key_use() }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.fn_reads != n || this.fn_use == Some(job) {
+                    return;
+                }
+                // Coming up under the key's row while the settings show it:
+                // the settings slide down to it as it opens.
+                if job.is_some() && this.fn_use.flatten().is_none() && this.settings_open && this.settings_section == "dictate" {
+                    let now = Instant::now();
+                    this.settings_glide.set(Some((now, now)));
+                }
+                this.fn_use = Some(job);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// One frame of the settings sliding to their end, where Fn's guidance
+    /// opens: a share of what is left each frame, for as long as the
+    /// guidance is growing and a moment after.
+    fn settings_glide_step(&self, window: &mut Window) {
+        let Some((began, last)) = self.settings_glide.take() else { return };
+        let scroll = &self.settings_scroll;
+        let to = -f32::from(scroll.max_offset().y);
+        let at = scroll.offset();
+        let left = to - f32::from(at.y);
+        let growing = began.elapsed() < FOLD_ANIM + Duration::from_millis(250);
+        if left.abs() < 0.5 && !growing {
+            return;
+        }
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32().min(0.05);
+        let step = left * (1. - (-dt / TABS_EASE).exp());
+        scroll.set_offset(point(at.x, at.y + px(step)));
+        if growing || left.abs() >= 0.5 {
+            self.settings_glide.set(Some((began, now)));
+            window.request_animation_frame();
+        }
+    }
+
+    /// A key, a click or the modifiers held changing, as AppKit saw it
+    /// (`sys::key_events`): with dictation's key a tap of modifiers
+    /// alone, the tap starts or stops it. Not while the key's field is
+    /// taking a new key.
+    #[cfg(target_os = "macos")]
+    fn key_event(&mut self, said: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("EMAKI_TAP_DEBUG").is_some() {
+            eprintln!("emaki: key event {:?} held {:?} watch {:?}", said.map(|f| format!("{f:#x}")), said.map(emaki_core::dictate::held_from_mac), self.tap_watch);
+        }
+        let Some(tap) = emaki_core::dictate::tap(&self.cfg.app.dictate_key) else { return };
+        if self.dictate_key_rec {
+            return self.tap_watch.reset();
+        }
+        match said {
+            Some(flags) => {
+                if self.tap_watch.flags(emaki_core::dictate::held_from_mac(flags), tap) {
+                    self.toggle_dictation(window, cx);
+                }
+            }
+            None => self.tap_watch.other(),
+        }
     }
 
     /// Unarchive, chosen from a menu: nothing is lost by it, so nothing
@@ -13054,7 +13304,7 @@ impl Workbench {
                 // the accent while a session of its is live, and the
                 // most pressing of their states as a chip.
                 let theme = cx.theme().clone();
-                let newest = list.iter().map(|r| r.mtime).fold(0., f64::max);
+                let newest = list.iter().map(|r| r.active).fold(0., f64::max);
                 let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
                 let chip = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| (*c, self.column_color(*c, cx)));
                 let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
@@ -13193,7 +13443,7 @@ impl Workbench {
                                     .when(!r.git_branch.is_empty(), |d| d.child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(format!("⎇ {}", r.git_branch)))),
                             )
                             .when_some(dot, |d, c| d.child(state_chip(card.column, c, &theme)))
-                            .child(when(r.mtime, &theme))
+                            .child(when(r.active, &theme))
                             .child(div().w(px(14.)).flex_shrink_0()),
                     );
                 }
@@ -16770,6 +17020,8 @@ fn key_sign(c: char) -> Option<&'static str> {
         '⌘' if cfg!(target_os = "macos") => "icons/key-command.svg",
         '⌥' if cfg!(target_os = "macos") => "icons/key-option.svg",
         '⇧' => "icons/key-shift.svg",
+        '⌃' => "icons/chevron-up.svg",
+        '🌐' => "icons/globe.svg",
         '↩' => "icons/key-return.svg",
         '⇥' => "icons/key-tab.svg",
         '↑' => "icons/arrow-up.svg",
@@ -16852,7 +17104,7 @@ fn key_pieces(text: &str) -> Vec<KeyPiece> {
 }
 
 /// The signs a key is written with.
-const KEY_SIGNS: [char; 7] = ['⌘', '⌥', '⇧', '↩', '⇥', '↑', '↓'];
+const KEY_SIGNS: [char; 9] = ['⌘', '⌥', '⇧', '⌃', '🌐', '↩', '⇥', '↑', '↓'];
 
 /// One key on its cap: a small plate, every one the same height and no
 /// narrower than that, with the key in its middle. A sign is an icon and
@@ -16903,6 +17155,32 @@ pub(crate) fn key_text(text: &str) -> Div {
     row
 }
 
+/// `key_text` that wraps, for a line of prose that names a key: each word
+/// and each shortcut is a piece the line can break between.
+pub(crate) fn key_text_wrap(text: &str) -> Div {
+    let mut row = h_flex().flex_wrap().items_center().gap_x(px(3.5)).gap_y(px(2.));
+    for piece in key_pieces(text) {
+        row = match piece {
+            KeyPiece::Words(w) => row.children(w.split_whitespace().map(|word| div().flex_shrink_0().child(word.to_string()))),
+            KeyPiece::Keys(keys) => row.child(h_flex().flex_shrink_0().gap(px(2.)).children(keys.iter().map(|k| key_cap(k)))),
+        };
+    }
+    row
+}
+
+/// Keys held together, as a tap of two is written ("⌥ + ⌘"): each on its
+/// caps, with a quiet "+" between.
+pub(crate) fn key_combo(text: &str, quiet: Hsla) -> Div {
+    let mut row = h_flex().flex_shrink_0().items_center().gap(px(5.));
+    for (ix, part) in text.split(" + ").enumerate() {
+        if ix > 0 {
+            row = row.child(div().text_color(quiet).font_weight(FontWeight::NORMAL).child("+"));
+        }
+        row = row.child(key_text(part));
+    }
+    row
+}
+
 /// A key's sign alone, with no cap of its own: for a place that draws
 /// its own (the slash list's foot).
 pub(crate) fn key_glyph(key: &str, size: f32) -> AnyElement {
@@ -16934,6 +17212,12 @@ pub(crate) fn binding_signs(binding: &str) -> String {
         k => k.chars().next().map(|c| c.to_uppercase().collect::<String>() + &k[c.len_utf8()..]).unwrap_or_default(),
     });
     out
+}
+
+/// Dictation's key in the Mac's signs, for `key_text`: a binding's
+/// ("⌘⇧D") or a tap's ("Right ⌘").
+pub(crate) fn dictate_key_signs(key: &str) -> String {
+    emaki_core::dictate::tap(key).map(|t| t.signs.to_string()).unwrap_or_else(|| binding_signs(key))
 }
 
 /// A shortcut beside what it does, in the quiet ink: "⌘↩".
@@ -17272,6 +17556,9 @@ pub(crate) enum PickFor {
     CodexEffort,
     /// On the home page, the folder a new session starts in.
     Folder,
+    /// In Settings, dictation's key as modifiers tapped alone, which no
+    /// key pressed in its field can be: the More beside it.
+    DictateKey,
 }
 
 /// A pill's list while it is open: every choice with a line on what it
@@ -17295,15 +17582,17 @@ pub(crate) struct PickRow {
     tint: Tint,
     /// The agent whose mark stands before the name, on the agents' list.
     mark: Option<AgentId>,
+    /// A line above it, the first of another group.
+    rule: bool,
 }
 
 impl PickRow {
     fn plain(key: String, name: String, detail: String) -> Self {
-        PickRow { key, name, detail, tint: Tint::Plain, mark: None }
+        PickRow { key, name, detail, tint: Tint::Plain, mark: None, rule: false }
     }
 
     fn tinted(key: String, name: String, detail: String, tint: Tint) -> Self {
-        PickRow { key, name, detail, tint, mark: None }
+        PickRow { key, name, detail, tint, mark: None, rule: false }
     }
 }
 
@@ -17316,6 +17605,18 @@ impl Render for Workbench {
         self.sync_draft(window, cx);
         self.writing_sync(cx);
         self.sync_folders(cx);
+        if self.settings_open {
+            self.settings_glide_step(window);
+        }
+        // What git already has stands in the fields, so the line under them
+        // is what they say.
+        if let Some((name, email)) = self.git_fill.take() {
+            for (input, value) in [(self.git_name_input.clone(), name), (self.git_email_input.clone(), email)] {
+                if !value.is_empty() && input.read(cx).value().trim().is_empty() {
+                    input.update(cx, |s, cx| s.set_value(value, window, cx));
+                }
+            }
+        }
         // The key let go while the window was not looking (⌘Tab to
         // another app sends no release here) takes the numbers with it.
         if self.hint_press.is_some() && !(window.is_window_active() && window.modifiers().secondary()) {

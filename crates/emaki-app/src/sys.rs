@@ -278,6 +278,66 @@ pub fn start_dictation() -> bool {
     false
 }
 
+/// What the keyboard and the pointer do in this app, for dictation's key
+/// when it is modifiers tapped alone (`dictate::TapWatch`): the Mac's
+/// modifier flags when the keys held change, `None` for a key pressed or
+/// a click. gpui says which modifiers are held but not on which side, so
+/// this is AppKit's own monitor, which sees every event the app is sent
+/// and lets it through as it was. Only while the app is the active one,
+/// as any other key of the window's.
+#[cfg(target_os = "macos")]
+pub fn key_events() -> futures::channel::mpsc::UnboundedReceiver<Option<u64>> {
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventType};
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let mask = NSEventMask::FlagsChanged | NSEventMask::KeyDown | NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
+    let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+        let e = unsafe { event.as_ref() };
+        let said = (e.r#type() == NSEventType::FlagsChanged).then(|| e.modifierFlags().0 as u64);
+        let _ = tx.unbounded_send(said);
+        event.as_ptr()
+    });
+    // Kept for the app's life: AppKit holds the handler until the
+    // monitor is removed, and it never is.
+    std::mem::forget(unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) });
+    rx
+}
+
+/// What the Mac does with Fn, the globe key, pressed alone: Keyboard
+/// settings, "Press 🌐 key to" (`AppleFnUsageType` in HIToolbox's
+/// domain). `None` when it does nothing; otherwise what it does, as a
+/// clause ("show emoji and symbols"), empty when the value is not one
+/// known here. A Mac that never had it set has a job for the key, so no
+/// value is a job too. Asks `defaults`, so off the main thread.
+#[cfg(target_os = "macos")]
+pub fn fn_key_use() -> Option<&'static str> {
+    let probe = FN_USE_PROBE.load(std::sync::atomic::Ordering::Relaxed);
+    let value = if probe >= 0 {
+        probe.to_string()
+    } else {
+        let out = std::process::Command::new("defaults").args(["read", "com.apple.HIToolbox", "AppleFnUsageType"]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    match value.as_str() {
+        "0" => None,
+        "1" => Some("change the input source"),
+        "2" => Some("show emoji and symbols"),
+        "3" => Some("start Apple's dictation"),
+        _ => Some(""),
+    }
+}
+/// Elsewhere the key has no such setting.
+#[cfg(not(target_os = "macos"))]
+pub fn fn_key_use() -> Option<&'static str> {
+    None
+}
+
+/// `EMAKI_GO=fnuse:<n>`: the value `fn_key_use` reads in place of the
+/// Mac's, so the guidance can be seen without touching Keyboard settings.
+pub static FN_USE_PROBE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Keyboard settings in System Settings, where Fn's use is set.
+pub const KEYBOARD_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.Keyboard-Settings.extension";
+
 /// A sound of the app's own (a WAV file's bytes) played once, quietly:
 /// dictation's start and stop. The last one played is held until the
 /// next, or the system would let it go before it had sounded.

@@ -3913,6 +3913,7 @@ dependencies = [
  "blitz-html",
  "blitz-paint",
  "blitz-traits",
+ "block2 0.6.2",
  "chrono",
  "deckcraft-pptx",
  "deckcraft-render",
