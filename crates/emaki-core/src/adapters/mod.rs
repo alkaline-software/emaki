@@ -119,7 +119,8 @@ pub fn load_path(path: &Path) -> Session {
     for_agent(agent_for_path(path)).load_path(path, "")
 }
 
-/// Metadata for every session of every agent, newest first: what is still on
+/// Metadata for every session of every agent, the last active first
+/// (`SessionRef::active`): what is still on
 /// disk plus what only the archive has. Archived entries are flagged. An
 /// agent that archives sessions itself has its own files only: a copy an
 /// earlier Emaki kept of one is not read.
@@ -160,7 +161,7 @@ pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
             refs.push(r);
         }
     }
-    refs.sort_by(|a, b| b.mtime.partial_cmp(&a.mtime).unwrap_or(std::cmp::Ordering::Equal));
+    refs.sort_by(|a, b| b.active.total_cmp(&a.active));
     refs
 }
 

@@ -29,7 +29,7 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
 - **Every key the window shows is drawn by `key_text`** (`workbench.rs`),
   now and for anything added. A shortcut is its keys on caps
   (`key_cap`): small plates of one height, none narrower than that,
-  each key in its plate's middle, a sign (⌘ ⇧ ⌥ ↩ ⇥ ↑ ↓) as an icon
+  each key in its plate's middle, a sign (⌘ ⇧ ⌥ ⌃ 🌐 ↩ ⇥ ↑ ↓) as an icon
   (`icons/key-*.svg`, Tabler's, and the two arrows) and a letter as a
   letter, both of one size. Tried and dropped, twice: the signs as
   characters, each from whichever face has it, so ⌘ and ↩ stood at two

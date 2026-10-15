@@ -54,24 +54,41 @@ of whether Google still serves the account.
 ## Beside the agents
 
 `agents::tools()` is what is worth having with the agents and is not
-one: GitHub Desktop, today. It is an `Agent` in every way the page
-needs (a card, a page of steps, looked for with the rest, found by
-`by_id`) and is in no list of agents: `all()` does not have it, so a new
-session cannot be given to it. What sets it apart is in four fields:
+one: GitHub, today, marked Recommended, under "Version control". Emaki needs
+no git to keep, search or continue sessions; with git it shows a
+project's changes and branches and commits, and with GitHub's sign-in
+it fetches and publishes. It is an `Agent` in every way the page needs
+(a card, a page of steps, found by `by_id`) and is in no list of
+agents, so a new session cannot be given to it.
 
-- `apps`: where the app is installed, a path a system. It has a window
-  and no program on `PATH`, so it is found there (`find_in`) and never
-  run to be asked its version, which would open it.
-- `download`: where its installer is got, shown as a button before the
-  commands, which are the other way.
-- `with_emaki`: what having it does for Emaki, in place of the step
-  about sessions. It says GitHub Desktop's sign-in does not reach git,
-  as the sign-in sheet does (`docs/panels.md`).
-- `accent`: the accent of `look::ACCENTS` it wears where an agent wears
-  its own colour (`agent_ink`): violet, GitHub Desktop's purple.
-
-Its sign-in is seen as any is, by its keychain item's name on a Mac.
-Elsewhere none is seen and the line says so.
+- Installed, on its card, chip and first step, is git itself
+  (`installed_here`, from `git_here`), never by running git. What its
+  `bins` finds is GitHub's `gh`, and its sign-in is gh's (`hosts.yml`,
+  or the keychain item `gh:github.com`).
+- Its page has three steps: install git, sign in to GitHub
+  and name your commits, in that order so the email asked
+  for is the account's just signed in to. Signing in is gh's install command for the system and
+  `gh auth login`, which signs git in, as the sign-in sheet does
+  (`docs/panels.md`). GitHub Desktop is a line with its download under
+  that step, not a step: nothing here needs it, and its own sign-in
+  does not reach git. It had a page of its own before, which read as
+  part of the set-up.
+- Naming commits always shows its fields and command: git refuses a
+  commit without a name and email, and signing in sets neither. The
+  fields hold this machine's own (`git config --global`), never anything
+  built in, and the title's right says nothing, the fields saying it. It says, that the name
+  can be anything, and that GitHub credits a commit by its email (as
+  GitHub's docs have it; `gh auth login` sets no name or email, and
+  GitHub Desktop's set-up writes both to git's global settings, so a
+  machine set up with it has the step ticked already): read as one more sign-in beside gh's,
+  it looked like the two could conflict. Its fields hold what git has
+  (`git_fill`, put in at the next draw), so they and the line under
+  them agree; empty fields under a filled line read as a mistake.
+- The agents' pages have no git step: git is optional for Emaki and
+  this page has it.
+- An agent's last step says Emaki keeps sessions the agent has deleted
+  only where Emaki keeps copies (Claude Code); Codex archives its own
+  and deletes none (`archives_itself`).
 
 ## Looking
 
@@ -122,21 +139,46 @@ Two levels, as the sessions page has (`Workbench::agent_open`).
   folder at the page's right, for the commands the page gives: the
   conversation's terminal panel with its shell side alone
   (`docs/channels.md`, The terminal panel).
-- The page is written for someone who has never used a terminal: a
-  friend's new Mac lacked git, Apple's command line tools and an agent,
-  and each step said too little. So every step says what to do a line a
-  thing, numbered: copy, open the terminal (a button in the line opens
-  the shell at the page's right), paste with the keys drawn, what a
-  password prompt looks like, start the shell afresh (`SHELL_AGAIN`,
-  since a shell opened before the install does not find the program),
-  then refresh. Keys in these lines go through `key_text`.
-- Which system the steps are for is chosen once, beside the refresh
-  button ("Steps for", `agent_os`, this machine's to begin with), and
-  every step follows it.
-- Inside one: steps on a rail, each with a tick once done. Get git comes
-  first (`agents::git_here`): on a Mac, Apple's command line tools,
-  looked for with `xcode-select -p` and never by running git, whose stub
-  opens the tools' installer. Install shows where the program is, then
+- The steps are enough for anyone to follow and no more: they take for
+  granted that the person can copy, paste and type a password. Each is a
+  numbered line, its words first and its command under them, never the
+  other way: run in the terminal, then restart the shell (`SHELL_AGAIN`,
+  since a shell opened before the install does not find the program).
+  The way's name is the choice over the steps and is not said again over
+  the command; a way's own needs (npm's Node.js) are the person's to
+  meet. There is nothing to press when a step is done: the page looks
+  again every few seconds while the shell is open beside it
+  (`look_for_agents`, from `term_panel_watch`), and as before when the
+  window comes back. A command for this machine has a square button
+  just outside its box at the right, as tall as a box of one line and
+  drawn as the box is (its edge and corners, no ground of its own), that
+  opens or closes the shell beside the page; while the shell shows it
+  takes the box's ground. A command for another system has none. Tried
+  and dropped: the button inside the box beside Copy, and the top
+  right's segmented button copied beside each box, which read as a
+  second control strip. An earlier page explained pasting with the keys
+  drawn, the password prompt and what each tick meant, and was too long
+  to read.
+- The steps are this machine's system's alone (`Os::here()`): the page
+  can tick only what it sees here. A choice of systems was there and
+  went; the ways that fit this machine (Script, Homebrew, npm) are
+  still a choice, and only those whose program is here: a way that
+  needs Homebrew, npm or winget is left out where that program is not
+  found (`way_program`, `way_programs_in`, `usable_ways`). With none
+  left, GitHub's step links to GitHub CLI's installation page.
+- No alternative sign-in is offered (an API key in the environment, a
+  device code): the steps are the basic way, and the rest is the
+  maker's documentation.
+- GitHub's chip says Ready, Not signed in or No git: nothing called
+  GitHub is installed.
+- Inside one: steps on a rail, each with a tick once done. Under a
+  step's title is only what to do. What this machine has that a tick
+  cannot say (the tools, the version and where it is) stands at the title's right, small, quiet and slanted, with the tick
+  and only with it: a fact in the place and type of an instruction was
+  read as one. No word says "Done"; the tick does. Git's install
+  step looks for git with `agents::git_here`: on a Mac, Apple's command
+  line tools, looked for with `xcode-select -p` and never by running
+  git, whose stub opens the tools' installer. Install shows where the program is, then
   the way on the system (`agent_way`: a download where there is one, and
   each command), the maker's first choice to begin with. Under the row,
   what the way says to do. On GitHub's page a step between signing in
@@ -160,8 +202,9 @@ Two levels, as the sessions page has (`Workbench::agent_open`).
   that is done: for another machine, or to do it again.
 - A command's words are escaped down to the colon (`selectable`): the
   markdown view made a link of an address in a command and drew the
-  escapes inside it. The third says whether Emaki
-  reads its sessions. The sessions themselves are not listed here: All
+  escapes inside it. An agent's steps are installing and signing in;
+  a step on where its sessions go said what the row under the steps
+  says. The sessions themselves are not listed here: All
   Sessions has them, and narrows to an agent. A list of an agent's
   projects stood under the steps and was removed for saying it twice.
   In its place is one row under the steps with the count of sessions,
@@ -178,7 +221,7 @@ says the same and more.
 ## Marks
 
 `agent_mark`: Claude's own, then a file in `assets/icons/agents/` for
-the agents in `MARKS` (Simple Icons' drawings of the makers' marks, CC0),
+the agents and Git in `MARKS` (Simple Icons' drawings of the makers' marks, CC0),
 then the first letter of the name, for an agent added with no mark yet.
 
 A mark's colour is its agent's and never the accent's: Claude's

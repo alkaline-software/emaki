@@ -150,6 +150,15 @@ pub fn mtime_secs(st: &fs::Metadata) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// When something last happened in a session, in seconds since the
+/// epoch: the newest row's own time (`updated`), else the file's. Not the
+/// file's first: Claude Code writes rows with no time to a session nobody
+/// touched (its state, as a terminal of it closes), and a night-old
+/// session went to the top of the list and read as live.
+pub fn active_secs(updated: &str, mtime: f64) -> f64 {
+    chrono::DateTime::parse_from_rfc3339(updated).map(|t| t.timestamp_millis() as f64 / 1000.0).unwrap_or(mtime)
+}
+
 fn mtime_ns(st: &fs::Metadata) -> u128 {
     st.modified()
         .ok()
@@ -230,7 +239,13 @@ pub struct SessionRef {
     pub started: String,
     pub updated: String,
     pub size: u64,
+    /// The file's time: whether it changed. When the session last did
+    /// anything is `active`.
     pub mtime: f64,
+    /// When something last happened in it (`active_secs`): what the lists
+    /// are ordered by and what the grace for a live session counts from.
+    #[serde(default)]
+    pub active: f64,
     pub git_branch: String,
     pub version: String,
     pub slug: String,
@@ -339,6 +354,7 @@ fn tail_rows(fh: &mut fs::File, size: u64, tail_bytes: u64) -> Vec<Value> {
 fn peek_into(r: &mut SessionRef, st: &fs::Metadata) {
     r.size = st.len();
     r.mtime = mtime_secs(st);
+    r.active = r.mtime;
     let Ok(mut fh) = fs::File::open(&r.path) else {
         return;
     };
@@ -396,6 +412,7 @@ fn peek_into(r: &mut SessionRef, st: &fs::Metadata) {
     if let Some(max) = tail.iter().map(|x| str_of(x, "timestamp")).filter(|s| !s.is_empty()).max() {
         r.updated = max.to_string();
     }
+    r.active = active_secs(&r.updated, r.mtime);
     let all: Vec<Value> = head.iter().chain(tail.iter()).cloned().collect();
     r.title = pick_title(&all);
     r.named = custom_title(&all);

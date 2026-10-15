@@ -1338,7 +1338,7 @@ impl Workbench {
                 steps.push(prose(format!("This repository is on {host}. Sign git in to it the way {host} documents, then check again.")).into_any_element());
             }
             Some(a) if a.ssh => {
-                steps.push(step(1, "Check your key", vec![self.command_box("gate-ssh".into(), "ssh -T git@github.com".into(), cx), quiet("This repository is reached over ssh, with a key and no password. GitHub answers with your name when it knows the key.".into()).into_any_element()]).into_any_element());
+                steps.push(step(1, "Check your key", vec![self.command_box("gate-ssh".into(), "ssh -T git@github.com".into(), false, cx), quiet("This repository is reached over ssh, with a key and no password. GitHub answers with your name when it knows the key.".into()).into_any_element()]).into_any_element());
                 let link = pill_button("gate-ssh-docs", "How to add a key", &theme, |_, _, cx| cx.open_url("https://docs.github.com/en/authentication/connecting-to-github-with-ssh"));
                 steps.push(step(2, "Add a key if it does not", vec![h_flex().child(link).into_any_element()]).into_any_element());
             }
@@ -1347,9 +1347,9 @@ impl Workbench {
                 if a.gh.is_none() {
                     n += 1;
                     let install: AnyElement = if cfg!(target_os = "macos") {
-                        self.command_box("gate-gh-install".into(), "brew install gh".into(), cx)
+                        self.command_box("gate-gh-install".into(), "brew install gh".into(), false, cx)
                     } else if cfg!(windows) {
-                        self.command_box("gate-gh-install".into(), "winget install --id GitHub.cli".into(), cx)
+                        self.command_box("gate-gh-install".into(), "winget install --id GitHub.cli".into(), false, cx)
                     } else {
                         h_flex().child(pill_button("gate-gh-linux", "How to install it on Linux", &theme, |_, _, cx| cx.open_url("https://github.com/cli/cli/blob/trunk/docs/install_linux.md"))).into_any_element()
                     };
@@ -1357,10 +1357,10 @@ impl Workbench {
                 }
                 if !a.gh_signed {
                     n += 1;
-                    steps.push(step(n, "Sign in", vec![self.command_box("gate-gh-login".into(), "gh auth login".into(), cx), quiet("Choose GitHub.com and HTTPS, answer yes to signing git in with your GitHub credentials, and sign in with a web browser.".into()).into_any_element()]).into_any_element());
+                    steps.push(step(n, "Sign in", vec![self.command_box("gate-gh-login".into(), "gh auth login".into(), false, cx), quiet("Choose GitHub.com and HTTPS, answer yes to signing git in with your GitHub credentials, and sign in with a web browser.".into()).into_any_element()]).into_any_element());
                 } else {
                     n += 1;
-                    steps.push(step(n, "Hand git the sign-in", vec![self.command_box("gate-gh-setup".into(), "gh auth setup-git".into(), cx), quiet("GitHub's tool is signed in on this machine, and git was refused all the same. This has git use that sign-in. If it was refused again after it, the account signed in has no right to this repository.".into()).into_any_element()]).into_any_element());
+                    steps.push(step(n, "Hand git the sign-in", vec![self.command_box("gate-gh-setup".into(), "gh auth setup-git".into(), false, cx), quiet("GitHub's tool is signed in on this machine, and git was refused all the same. This has git use that sign-in. If it was refused again after it, the account signed in has no right to this repository.".into()).into_any_element()]).into_any_element());
                 }
             }
         }

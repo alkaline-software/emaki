@@ -38,6 +38,8 @@ const BLINK: Duration = Duration::from_millis(500);
 const TERM_PANEL_ANIM: Duration = Duration::from_millis(200);
 /// How often a panel that shows looks for something new on its screen.
 const POLL: Duration = Duration::from_millis(33);
+/// How often the agents' page looks again while the shell is beside it.
+const LOOK_AGAIN: Duration = Duration::from_secs(4);
 /// How long the panel says a selection was copied.
 const COPIED_FOR: Duration = Duration::from_millis(2500);
 /// The head over a side, as tall as the path bar over the conversation.
@@ -503,6 +505,11 @@ impl Workbench {
             let on = this.update(cx, |this, cx| {
                 if this.term_on().is_none() {
                     return false;
+                }
+                // Beside an agent's page, the page looks again now and then
+                // for what the commands run here have installed.
+                if this.term_at_agents() && this.agent_open.is_some() && !this.agents_checking && this.agents_checked.is_none_or(|at| at.elapsed() > LOOK_AGAIN) {
+                    this.look_for_agents(cx);
                 }
                 // The cursor's blink is a draw too, while the panel has the keyboard.
                 let blink = this.side_focused && this.cfg.terminal.cursor_blink && this.blink_on() != this.side_blink_on;

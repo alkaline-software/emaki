@@ -166,7 +166,7 @@ const ALL: &[Agent] = &[
             Way { os: ANY, by: "npm (needs Node.js 22 or later)", command: "npm install -g @anthropic-ai/claude-code" },
         ],
         sign_in: "claude",
-        sign_in_how: "The first time, it asks a few questions. Pick the look you like, then choose to sign in with your Claude account. A browser opens: sign in there and come back. When Claude Code says it is ready, type /exit and press Return to leave it. Later, /login in a session changes the account.",
+        sign_in_how: "Choose to sign in with your Claude account and finish in the browser.",
         plans: "Needs a paid Claude plan or a Console account.",
         key_env: &["ANTHROPIC_API_KEY"],
         home: "~/.claude",
@@ -194,7 +194,7 @@ const ALL: &[Agent] = &[
             Way { os: ANY, by: "npm (needs Node.js)", command: "npm install -g @openai/codex" },
         ],
         sign_in: "codex login",
-        sign_in_how: "A browser opens: sign in with your ChatGPT account and come back. The terminal says when you are signed in. On a computer with no browser, codex login --device-auth gives a code to enter on another device.",
+        sign_in_how: "Sign in with your ChatGPT account in the browser.",
         plans: "Needs a paid ChatGPT plan or an OpenAI API key.",
         key_env: &["OPENAI_API_KEY"],
         home: "~/.codex",
@@ -211,29 +211,40 @@ const ALL: &[Agent] = &[
     },
 ];
 
+/// What is worth having with the agents and is not one: git, optional
+/// for Emaki, with GitHub's tool for a repository online. It stands as
+/// an `Agent` for its card and page; installed on its page means git
+/// (`git_here`), and what `bins` finds is GitHub's `gh`.
 const TOOLS: &[Agent] = &[Agent {
-    id: "github-desktop",
-    name: "GitHub Desktop",
-    maker: "GitHub",
-    about: "GitHub's app for git: clone, commit, push and pull without a command line.",
-    bins: &["github-desktop"],
-    install: &[Way { os: MAC, by: "Homebrew", command: "brew install --cask github" }, Way { os: WINDOWS, by: "winget", command: "winget install github-desktop" }],
-    sign_in: "",
-    sign_in_how: "In GitHub Desktop: Settings, Accounts, Sign in to GitHub.com (Options under File on Windows).",
-    plans: "Any GitHub account works.",
+    id: "github",
+    name: "GitHub",
+    maker: "Recommended",
+    about: "Git and GitHub let Emaki show changes and branches, commit, fetch and publish.",
+    bins: &["gh"],
+    install: &[Way { os: MAC, by: "Homebrew", command: "brew install gh" }, Way { os: WINDOWS, by: "winget", command: "winget install --id GitHub.cli" }],
+    sign_in: "gh auth login",
+    sign_in_how: "Choose GitHub.com and HTTPS, and say yes to signing git in.",
+    plans: "",
     key_env: &[],
     home: "",
-    signed: &[],
-    keychain: "GitHub - https://api.github.com",
-    version_arg: "",
-    site: "https://desktop.github.com",
-    docs: "https://docs.github.com/desktop",
+    signed: &["~/.config/gh/hosts.yml"],
+    keychain: "gh:github.com",
+    version_arg: "--version",
+    site: "https://github.com",
+    docs: "https://cli.github.com/manual/",
     reads: None,
-    apps: &["/Applications/GitHub Desktop.app", "~/Applications/GitHub Desktop.app", "%LOCALAPPDATA%/GitHubDesktop/GitHubDesktop.exe"],
-    download: "https://desktop.github.com/download/",
-    with_emaki: "Emaki and GitHub Desktop work on the same repository and see each other's changes. Its sign-in does not reach git: if Fetch or Publish is refused, Emaki shows how to give git one.",
+    apps: &[],
+    download: "",
+    with_emaki: "Lets Emaki show changes and branches, and commit.",
+    // Violet, as GitHub Desktop wore: the terracotta is Claude Code's.
     accent: "violet",
 }];
+
+/// Where GitHub Desktop is downloaded: an app for the same repositories,
+/// offered on Git's page and needed by nothing here.
+pub const GITHUB_DESKTOP: &str = "https://desktop.github.com/download/";
+/// GitHub's tool for a system with no command of ours for it.
+pub const GH_INSTALL: &str = "https://github.com/cli/cli#installation";
 
 /// What gets git on a Mac: Apple's command line tools, which git
 /// comes with. Without them `/usr/bin/git` only asks for them.
@@ -242,6 +253,25 @@ pub const GIT_MAC: &str = "xcode-select --install";
 pub const GIT_LINUX: &str = "sudo apt install git";
 /// Where Git for Windows is downloaded.
 pub const GIT_WINDOWS: &str = "https://git-scm.com/downloads/win";
+/// The program a way of installing needs on the machine, for a way that
+/// needs one the machine may lack: Homebrew, npm, winget. A script or
+/// PowerShell needs none.
+pub fn way_program(by: &str) -> Option<&'static str> {
+    match by.split_whitespace().next().unwrap_or("") {
+        "Homebrew" => Some("brew"),
+        "npm" => Some("npm"),
+        "winget" => Some("winget"),
+        _ => None,
+    }
+}
+
+/// Which of the programs ways need (`way_program`) are here, found in
+/// `dirs` as an agent's program is.
+pub fn way_programs_in(dirs: &[PathBuf]) -> Vec<&'static str> {
+    let suffixes: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ""] } else { &[""] };
+    ["brew", "npm", "winget"].into_iter().filter(|p| dirs.iter().any(|d| suffixes.iter().any(|s| d.join(format!("{p}{s}")).is_file()))).collect()
+}
+
 /// What starts a shell afresh, so it reads its profile again and finds
 /// a program an installer has just put on its `PATH`.
 pub const SHELL_AGAIN: &str = "exec $SHELL -l";

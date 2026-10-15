@@ -520,3 +520,164 @@ pub fn pieces(audio: &[f32], longest_ms: i64) -> Vec<&[f32]> {
     out.push(&audio[at..]);
     out
 }
+
+/// What a dictation key that is modifiers alone is kept as in the
+/// config, before the tap's key: `tap:right-cmd`. Any other key is a
+/// binding gpui takes (`secondary-shift-d`).
+pub const TAP_PREFIX: &str = "tap:";
+
+/// A modifier key tapped alone as dictation's key: one of the right
+/// side's (the left ones are in every shortcut), Fn, or two together.
+/// gpui binds a key with modifiers, never modifiers alone, so these are
+/// chosen from a list and watched for by `TapWatch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tap {
+    /// As kept in the config, after `TAP_PREFIX`.
+    pub key: &'static str,
+    /// As the window writes it, in the Mac's signs (🌐 is Fn's), a pair
+    /// with a "+" between.
+    pub signs: &'static str,
+    /// What has to have been held, and nothing else.
+    want: Want,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// These keys, on this side.
+    Keys(u16),
+    /// These kinds of key, on either side.
+    Kinds(u8),
+}
+
+/// The modifiers held, a bit a key: `held_from_mac` reads them.
+pub const L_CTRL: u16 = 1;
+pub const R_CTRL: u16 = 1 << 1;
+pub const L_ALT: u16 = 1 << 2;
+pub const R_ALT: u16 = 1 << 3;
+pub const L_SHIFT: u16 = 1 << 4;
+pub const R_SHIFT: u16 = 1 << 5;
+pub const L_CMD: u16 = 1 << 6;
+pub const R_CMD: u16 = 1 << 7;
+pub const FN: u16 = 1 << 8;
+
+const CTRL: u8 = 1;
+const ALT: u8 = 1 << 1;
+const SHIFT: u8 = 1 << 2;
+const CMD: u8 = 1 << 3;
+const FN_KIND: u8 = 1 << 4;
+
+/// The taps offered, as the Mac orders its signs (⌃⌥⇧⌘): the keys
+/// alone, then the pairs.
+pub const TAPS: &[Tap] = &[
+    Tap { key: "right-cmd", signs: "Right ⌘", want: Want::Keys(R_CMD) },
+    Tap { key: "right-alt", signs: "Right ⌥", want: Want::Keys(R_ALT) },
+    Tap { key: "right-shift", signs: "Right ⇧", want: Want::Keys(R_SHIFT) },
+    Tap { key: "right-ctrl", signs: "Right ⌃", want: Want::Keys(R_CTRL) },
+    Tap { key: "fn", signs: "Fn 🌐", want: Want::Keys(FN) },
+    Tap { key: "alt-cmd", signs: "⌥ + ⌘", want: Want::Kinds(ALT | CMD) },
+    Tap { key: "ctrl-cmd", signs: "⌃ + ⌘", want: Want::Kinds(CTRL | CMD) },
+    Tap { key: "ctrl-alt", signs: "⌃ + ⌥", want: Want::Kinds(CTRL | ALT) },
+    Tap { key: "shift-cmd", signs: "⇧ + ⌘", want: Want::Kinds(SHIFT | CMD) },
+    Tap { key: "alt-shift", signs: "⌥ + ⇧", want: Want::Kinds(ALT | SHIFT) },
+    Tap { key: "ctrl-shift", signs: "⌃ + ⇧", want: Want::Kinds(CTRL | SHIFT) },
+];
+
+impl Tap {
+    /// Whether these keys, held together at most, are this tap.
+    pub fn is(&self, held: u16) -> bool {
+        match self.want {
+            Want::Keys(keys) => held == keys,
+            Want::Kinds(kinds) => kinds_of(held) == kinds,
+        }
+    }
+
+    /// Two keys together, not one alone.
+    pub fn pair(&self) -> bool {
+        matches!(self.want, Want::Kinds(_))
+    }
+}
+
+/// The tap a dictation key names, when it names one.
+pub fn tap(key: &str) -> Option<&'static Tap> {
+    let key = key.strip_prefix(TAP_PREFIX)?;
+    TAPS.iter().find(|t| t.key == key)
+}
+
+fn kinds_of(held: u16) -> u8 {
+    let mut kinds = 0;
+    for (keys, kind) in [(L_CTRL | R_CTRL, CTRL), (L_ALT | R_ALT, ALT), (L_SHIFT | R_SHIFT, SHIFT), (L_CMD | R_CMD, CMD), (FN, FN_KIND)] {
+        if held & keys != 0 {
+            kinds |= kind;
+        }
+    }
+    kinds
+}
+
+/// The modifiers held, from the flags of a Mac's key event
+/// (`NSEvent.modifierFlags`). The flags for a kind of key say it is
+/// held and the device's bits say on which side; a keyboard that gives
+/// no side has it count as the left, so it never makes a right-hand tap.
+/// Caps Lock is not a modifier here.
+pub fn held_from_mac(flags: u64) -> u16 {
+    // NSEventModifierFlag* and the NX_DEVICE*KEYMASK bits.
+    const SIDES: [(u64, u64, u64, u16, u16); 4] = [
+        (1 << 18, 0x0001, 0x2000, L_CTRL, R_CTRL),
+        (1 << 19, 0x0020, 0x0040, L_ALT, R_ALT),
+        (1 << 17, 0x0002, 0x0004, L_SHIFT, R_SHIFT),
+        (1 << 20, 0x0008, 0x0010, L_CMD, R_CMD),
+    ];
+    let mut held = 0;
+    for (kind, left, right, l, r) in SIDES {
+        if flags & kind == 0 {
+            continue;
+        }
+        if flags & right != 0 {
+            held |= r;
+        }
+        if flags & left != 0 || flags & right == 0 {
+            held |= l;
+        }
+    }
+    if flags & (1 << 23) != 0 {
+        held |= FN;
+    }
+    held
+}
+
+/// Watches the modifiers for a tap: keys pressed with nothing held and
+/// let go with no other key or click among them. It goes on the keys
+/// held at most, so ⌥ then ⌘, let go in any order, is ⌥⌘, and ⌘ that was
+/// part of ⌘C is no tap.
+#[derive(Debug, Default, Clone)]
+pub struct TapWatch {
+    held: u16,
+    most: u16,
+    spoiled: bool,
+}
+
+impl TapWatch {
+    /// The modifiers held now. True when this lets go of a tap of `tap`.
+    pub fn flags(&mut self, held: u16, tap: &Tap) -> bool {
+        if held != 0 {
+            self.held = held;
+            self.most |= held;
+            return false;
+        }
+        let hit = !self.spoiled && tap.is(self.most);
+        *self = Self::default();
+        hit
+    }
+
+    /// A key or a click: with modifiers held it was a shortcut, not a tap.
+    pub fn other(&mut self) {
+        if self.held != 0 {
+            self.spoiled = true;
+        }
+    }
+
+    /// Forget what is held: the app was left, and a key let go elsewhere
+    /// is never seen.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}

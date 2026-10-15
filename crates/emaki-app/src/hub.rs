@@ -569,7 +569,10 @@ impl Hub {
         // way through a turn. A short quiet tells the two apart; the long
         // grace kept a killed session "working" with its clock running.
         let working = matches!(r.state.phase, emaki_core::build::Phase::Working);
-        now - r.mtime < if working { WORKING_GRACE_S } else { LIVE_GRACE_S }
+        // From the newest row's time, not the file's: Claude Code writes a
+        // session's state to it as a terminal of it closes, and that is
+        // not the session doing anything.
+        now - r.active < if working { WORKING_GRACE_S } else { LIVE_GRACE_S }
     }
 
     // -- hidden terminals ---------------------------------------------------

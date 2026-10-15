@@ -166,6 +166,10 @@ impl Adapter for CodexAdapter {
         r.named = thread_name(&s.id);
         r.started = s.started.clone();
         r.updated = s.updated.clone();
+        // Every line of a rollout is something that happened, and a round
+        // under way has only its start as `updated`: the file's time is
+        // when it last did anything.
+        r.active = r.mtime;
         r.git_branch = s.git_branch.clone();
         r.version = s.version.clone();
         r.state = turn_state_from_session(&s);

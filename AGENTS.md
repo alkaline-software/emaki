@@ -63,6 +63,9 @@ this unasked. The person has asked many times.
   around it: a card, a line, an arrow, a scroll a click starts. A jump is
   a bug. Use the pattern its neighbours use. (`docs/window.md`, Motion)
 - **What is cut says so:** it fades out at that edge and can be reached.
+- **Words are few.** Say what to do once, to someone who can use a
+  computer: no line on how to paste or type a password, and no note
+  that repeats what the control above it already shows.
 - **Look before saying it is done:** at all the change shows, hides or
   moves, and at the layout in a narrow window.
 

@@ -135,7 +135,8 @@ Debug prints: `EMAKI_TIMING=1` (load and hand-over per open),
 `EMAKI_GLIDE_DEBUG=1` (the outline's move and the move to the new
 messages, tick by tick),
 `EMAKI_OUTLINE_DEBUG=1`, `EMAKI_PTY_LOG=<file>` (the hidden terminal's raw
-output).
+output), `EMAKI_TAP_DEBUG=1` (every key, click and change of the
+modifiers AppKit hands dictation's tap watch, with what it holds).
 
 A variable that steers one launch (`EMAKI_PAGE`, `EMAKI_GO`, `EMAKI_SHOT`
 and the rest above) is not handed to the agent's child
