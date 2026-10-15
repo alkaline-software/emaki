@@ -916,6 +916,11 @@ it looks at panes:
 - A gesture begun elsewhere and carried onto one does not move it. In a
   pane the event goes to the gesture's owner; on a sheet or a menu
   (`Inner::Over`) it goes nowhere.
+- A sheet over Settings names itself first (`Inner::Wall`, on its
+  scrim), so a gesture begun on it finds nothing under it, though
+  nothing on it has more to show: the empty Terms sheet scrolled the
+  settings. The event goes on to gpui, where a field on the sheet
+  scrolls itself.
 - A tool call's body and a card's (`card_scroll`) are `Inner::Chained`:
   on the body its own handler decides (`chain_wheel`, `Stroke`: a stroke
   that starts at its edge is the conversation's), and off the body the

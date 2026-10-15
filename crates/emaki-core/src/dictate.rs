@@ -571,7 +571,7 @@ mod engine {
     /// were spoken in, told apart by the model. Empty when nothing was
     /// said. Blocking: a second or two for a minute of speech on Apple
     /// silicon.
-    pub fn transcribe(m: &Model, audio: &[f32]) -> Result<String, String> {
+    pub fn transcribe(m: &Model, audio: &[f32], terms: &[String]) -> Result<String, String> {
         let Some(span) = speech_span(audio) else {
             return Ok(String::new());
         };
@@ -584,7 +584,9 @@ mod engine {
         let model = loaded(m)?;
         let longest = model.capabilities().map(|c| c.max_audio_ms).unwrap_or(0);
         let mut session = model.session().map_err(|e| e.to_string())?;
-        let options = transcribe_cpp::RunOptions::default();
+        // The person's terms, for the model to hear them as they are
+        // spelled (`spell` makes sure of it after).
+        let options = transcribe_cpp::RunOptions { vocabulary: terms.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(), ..Default::default() };
         // A model that takes no more than so long at a time is handed the
         // speech in pieces cut where it is quietest.
         let mut words = String::new();
@@ -600,6 +602,91 @@ mod engine {
         }
         Ok(words)
     }
+}
+
+/// The terms typed in one go: apart where there is a comma or a space,
+/// and a term of two words or more in quotes ("Acme Cloud").
+pub fn terms_in(typed: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut term = String::new();
+    let mut quoted: Option<char> = None;
+    for c in typed.chars().chain(std::iter::once(',')) {
+        match (quoted, c) {
+            (Some(close), c) if c == close => quoted = None,
+            (Some(_), c) => term.push(c),
+            (None, '"') => quoted = Some('"'),
+            (None, '“') => quoted = Some('”'),
+            (None, c) if c == ',' || c == '，' || c == '、' || c == ';' || c == '；' || c.is_whitespace() => {
+                let t = term.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !t.is_empty() && !out.iter().any(|o| o.to_lowercase() == t.to_lowercase()) {
+                    out.push(t);
+                }
+                term.clear();
+            }
+            (None, c) => term.push(c),
+        }
+    }
+    // A quote never closed holds the rest.
+    let t = term.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !t.is_empty() && !out.iter().any(|o| o.to_lowercase() == t.to_lowercase()) {
+        out.push(t);
+    }
+    out
+}
+
+/// The person's terms written as they saved them, wherever the words have
+/// one in other capitals, or split by a space or a hyphen ("Data down"
+/// is "datadown", "kes-trel" "Kestrel"). A term is a whole word or
+/// words, Chinese around it or not; one in Chinese or Japanese may sit
+/// inside others. The longest
+/// term is tried first.
+pub fn spell(words: &str, terms: &[String]) -> String {
+    let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let gap = |c: char| c == ' ' || c == '-' || c == '\u{a0}';
+    let wide = |c: char| ('\u{2e80}'..='\u{9fff}').contains(&c) || ('\u{ac00}'..='\u{d7af}').contains(&c) || ('\u{f900}'..='\u{faff}').contains(&c);
+    let mut keys: Vec<(Vec<char>, &str, bool)> = terms.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).map(|t| (t.chars().filter(|c| !gap(*c)).map(lower).collect::<Vec<_>>(), t, t.chars().any(wide))).collect();
+    keys.sort_by_key(|(k, _, _)| std::cmp::Reverse(k.len()));
+    let chars: Vec<char> = words.chars().collect();
+    // Where the key ends when the words from `at` are it, a space or a
+    // hyphen allowed between two of its letters.
+    let ends = |at: usize, key: &[char]| -> Option<usize> {
+        let mut j = at;
+        for (n, k) in key.iter().enumerate() {
+            if n > 0 && chars.get(j).is_some_and(|c| gap(*c)) && chars.get(j + 1).is_some_and(|c| lower(*c) == *k) {
+                j += 1;
+            }
+            if lower(*chars.get(j)?) != *k {
+                return None;
+            }
+            j += 1;
+        }
+        Some(j)
+    };
+    let mut out = String::with_capacity(words.len());
+    let mut i = 0;
+    while i < chars.len() {
+        // Chinese beside a Latin term is no part of it: "在emaki里".
+        let letter = |c: &char| c.is_alphanumeric() && !wide(*c);
+        let joined = i > 0 && letter(&chars[i - 1]);
+        let hit = keys.iter().find_map(|(key, term, wide)| {
+            if joined && !wide {
+                return None;
+            }
+            let end = ends(i, key)?;
+            (*wide || !chars.get(end).is_some_and(letter)).then_some((end, *term))
+        });
+        match hit {
+            Some((end, term)) => {
+                out.push_str(term);
+                i = end;
+            }
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// The speech cut into pieces no longer than `longest_ms` (none when it is

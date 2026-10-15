@@ -133,10 +133,24 @@ with it, unless it is the one showing or a process of ours is behind it
 (a session begun here is blank for a moment). `emaki-core list` leaves it
 out. Once something is said there it is a session like any other.
 
+## Rows that are not read
+
+Claude Code writes a record of every request it sends (`api-request`,
+`api-request-blob`, `api-request-shape`). Nothing here uses them, and in
+a long session they are over half the file: 141 MB of one of 261 MB.
+`transcript::parse_row` passes over any row that starts
+`{"type":"api-request` without parsing it, which took that session's
+open from 0.8 s to 0.2 s and made the same conversation. The archive
+still copies every byte.
+
 ## A change that lands during a read
 
 The conversation showing is reloaded when its file changes
-(`HubEvent::Changed`). A change that comes while a load is under way must
+(`HubEvent::Changed`), and when an index finds its size or time other
+than when it was last read (`loaded_as`, taken from the file as the
+load begins). Not by the newest row's time: a session that ends in rows
+after its last reply had an index time the conversation never reached,
+and was read whole again at every index, every four seconds. A change that comes while a load is under way must
 be read again: `reload_wanted` marks it, and the load, once back, runs
 again. A prompt with a pasted picture is one long row: a load that began
 as it was being written read the file without it, the small rows 8 ms

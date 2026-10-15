@@ -24,7 +24,7 @@ use crate::paths;
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 fn parse_row(raw: &[u8]) -> Option<Value> {
-    if raw.iter().all(u8::is_ascii_whitespace) {
+    if raw.iter().all(u8::is_ascii_whitespace) || unshown(raw) {
         return None;
     }
     let text = String::from_utf8_lossy(raw);
@@ -32,6 +32,14 @@ fn parse_row(raw: &[u8]) -> Option<Value> {
         Ok(v) if v.is_object() => Some(v),
         _ => None,
     }
+}
+
+/// A row nothing here reads, known by how it starts, so it is not parsed:
+/// Claude Code's own record of each request it sent (`api-request`,
+/// `api-request-blob`, `api-request-shape`). They are over half of a long
+/// session's bytes, and parsing them was most of its open.
+fn unshown(raw: &[u8]) -> bool {
+    raw.starts_with(b"{\"type\":\"api-request")
 }
 
 /// Parse an entire transcript. Bad lines are skipped, not fatal.

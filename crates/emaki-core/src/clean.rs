@@ -106,11 +106,22 @@ const EXAMPLES: &[(&str, &str)] = &[
 
 /// The whole prompt in the models' chat form (ChatML, with an empty
 /// thought, as Qwen3.5's template writes one with thinking off), ending
-/// where the model's answer starts. Anything in the words that would
-/// read as the form's own markers is broken up first.
-pub fn prompt(words: &str) -> String {
+/// where the model's answer starts. The person's own instructions
+/// (`rules`, Settings, Dictate) follow ours and win where the two
+/// differ, then their terms. Anything in the words that would read as
+/// the form's own markers is broken up first.
+pub fn prompt(words: &str, rules: &str, terms: &[String]) -> String {
     let words = words.replace("<|", "< |");
-    let mut p = format!("<|im_start|>system\n{SYSTEM}<|im_end|>\n");
+    let rules = rules.trim().replace("<|", "< |");
+    let terms = terms.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(", ").replace("<|", "< |");
+    let mut p = format!("<|im_start|>system\n{SYSTEM}");
+    if !rules.is_empty() {
+        p.push_str(&format!("\n\nThe speaker's own instructions. Where they differ from the rules above or the examples, follow these:\n{rules}"));
+    }
+    if !terms.is_empty() {
+        p.push_str(&format!("\n\nWrite these terms exactly as given, capitals included, even at the start of a sentence, wherever the speaker says one or something that sounds like it: {terms}"));
+    }
+    p.push_str("<|im_end|>\n");
     for (said, written) in EXAMPLES {
         p.push_str(&format!("<|im_start|>user\n{said}<|im_end|>\n<|im_start|>assistant\n{written}<|im_end|>\n"));
     }
@@ -255,15 +266,17 @@ mod engine {
     /// rewriting did not keep to them (`accept`). Blocking: under a
     /// second for a sentence on Apple silicon, longer the first time, as
     /// the model loads.
-    pub fn tidy(m: &Model, words: &str) -> Result<Option<String>, String> {
+    /// The person's terms are spelled their way in what is taken.
+    pub fn tidy(m: &Model, words: &str, rules: &str, terms: &[String]) -> Result<Option<String>, String> {
         if words.trim().is_empty() {
             return Ok(None);
         }
-        Ok(accept(words, &rewrite(m, words)?))
+        Ok(accept(words, &rewrite(m, words, rules, terms)?).map(|w| crate::dictate::spell(&w, terms)))
     }
 
-    /// What the model writes for the words, as it writes it.
-    pub fn rewrite(m: &Model, words: &str) -> Result<String, String> {
+    /// What the model writes for the words, as it writes it, told the
+    /// person's own instructions and terms too.
+    pub fn rewrite(m: &Model, words: &str, rules: &str, terms: &[String]) -> Result<String, String> {
         let mut g = LOADED.lock().unwrap();
         if g.as_ref().is_none_or(|(file, _, _)| file != m.file) {
             *g = None;
@@ -276,7 +289,7 @@ mod engine {
         }
         let (_, llm, at) = g.as_mut().expect("loaded above");
         *at = Instant::now();
-        let p = CString::new(prompt(words)).map_err(|e| e.to_string())?;
+        let p = CString::new(prompt(words, rules, terms)).map_err(|e| e.to_string())?;
         // As long again as what was said, and room for a list's marks.
         let max_new = (words.len() as c_int / 2 + 64).min(CTX_TOKENS / 2);
         let mut out = vec![0u8; 64 * 1024];
