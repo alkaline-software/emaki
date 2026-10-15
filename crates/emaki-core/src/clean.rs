@@ -90,7 +90,7 @@ Rewrite it as the speaker meant to write it:
 - When the speaker takes something back (no, no wait, I mean, sorry, 不对, 不是, 我是说), keep only what they said after it: the later word or number replaces the earlier one.
 - Mend grammar and punctuation, changing as little as possible. Keep the speaker's own words, tone and meaning.
 - Keep each language exactly as it was spoken. Never translate. What was said in Chinese is written in Chinese, what was said in English is written in English, mixed in one sentence when spoken so.
-- When the speaker names several items or steps, write them as a list, one per line, each starting with \"- \", or with \"1. \", \"2. \" when they were counted.
+- When the speaker names several items or steps, write them as a list, one per line, each starting with \"- \", or with \"1. \", \"2. \" when they were counted, unless the speaker's own instructions above say otherwise.
 - Start a new paragraph where the speaker moves to another subject.
 
 Reply with the cleaned text alone.";
@@ -107,17 +107,19 @@ const EXAMPLES: &[(&str, &str)] = &[
 /// The whole prompt in the models' chat form (ChatML, with an empty
 /// thought, as Qwen3.5's template writes one with thinking off), ending
 /// where the model's answer starts. The person's own instructions
-/// (`rules`, Settings, Dictate) follow ours and win where the two
-/// differ, then their terms. Anything in the words that would read as
+/// (`rules`, Settings, Dictate) come before ours and win where the two
+/// differ: put after them, the 4B kept to our rules and examples. Their
+/// terms come last. Anything in the words that would read as
 /// the form's own markers is broken up first.
 pub fn prompt(words: &str, rules: &str, terms: &[String]) -> String {
     let words = words.replace("<|", "< |");
     let rules = rules.trim().replace("<|", "< |");
     let terms = terms.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(", ").replace("<|", "< |");
-    let mut p = format!("<|im_start|>system\n{SYSTEM}");
+    let mut p = "<|im_start|>system\n".to_string();
     if !rules.is_empty() {
-        p.push_str(&format!("\n\nThe speaker's own instructions. Where they differ from the rules above or the examples, follow these:\n{rules}"));
+        p.push_str(&format!("The speaker's own instructions come first. They win over every rule and example below:\n{rules}\n\n"));
     }
+    p.push_str(SYSTEM);
     if !terms.is_empty() {
         p.push_str(&format!("\n\nWrite these terms exactly as given, capitals included, even at the start of a sentence, wherever the speaker says one or something that sounds like it: {terms}"));
     }
@@ -145,20 +147,9 @@ pub fn accept(said: &str, wrote: &str) -> Option<String> {
     }
     let bare = |text: &str| -> String { text.lines().map(|l| strip_marker(l.trim_start())).collect::<Vec<_>>().join("\n") };
     let (said_bare, wrote_bare) = (bare(said), bare(wrote));
-    let numbers = |text: &str| -> Vec<String> {
-        let mut out = Vec::new();
-        let mut run = String::new();
-        for c in text.chars().chain(std::iter::once(' ')) {
-            if c.is_ascii_digit() {
-                run.push(c);
-            } else if !run.is_empty() {
-                out.push(std::mem::take(&mut run));
-            }
-        }
-        out
-    };
-    let spoken = numbers(&said_bare);
-    if numbers(&wrote_bare).iter().any(|n| !spoken.contains(n)) {
+    // A number said in words counts as said: "two pears" may be "2 pears".
+    let spoken = said_numbers(&said_bare);
+    if digit_runs(&wrote_bare).iter().any(|n| !spoken.contains(n)) {
         return None;
     }
     // Each script weighed on its own, letters and digits only (what
@@ -170,20 +161,199 @@ pub fn accept(said: &str, wrote: &str) -> Option<String> {
         let rest = text.chars().filter(|c| c.is_alphanumeric() && !cjk(c)).count() as f32;
         (wide, rest)
     };
-    let ((wide_before, rest_before), (wide_after, rest_after)) = (weigh(&said_bare), weigh(&wrote_bare));
+    let ((wide_before, rest_before), (wide_after, rest_after)) = (weigh(&without_numbers(&said_bare)), weigh(&without_numbers(&wrote_bare)));
     let off = |before: f32, after: f32| after > before * 1.15 + 12.0 || (before >= 4.0 && after < before * 0.35);
     if off(wide_before, wide_after) || off(rest_before, rest_after) {
         return None;
     }
     // Words that were never said: a few come with mended grammar, more
-    // is something made up.
-    let words = |text: &str| -> Vec<String> { text.split(|c: char| !c.is_ascii_alphanumeric() && c != '\'').filter(|w| w.len() >= 3).map(|w| w.to_ascii_lowercase()).collect() };
+    // is something made up. Numbers were weighed above.
+    let words = |text: &str| -> Vec<String> { text.split(|c: char| !c.is_ascii_alphanumeric() && c != '\'').filter(|w| w.len() >= 3 && !w.bytes().any(|b| b.is_ascii_digit())).map(|w| w.to_ascii_lowercase()).collect() };
     let (heard, written) = (words(&said_bare), words(&wrote_bare));
     let new = written.iter().filter(|w| !heard.contains(w)).count();
     if new > 2 && new * 5 > written.len() {
         return None;
     }
     Some(wrote.to_string())
+}
+
+/// What an English word says as a number: "six" 6, "forty" 40,
+/// "hundred" 100, "third" 3, "twentieth" 20.
+fn english_number(w: &str) -> Option<u64> {
+    const UNITS: [&str; 20] = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+    const TENS: [&str; 8] = ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+    const ORDINALS: [(&str, u64); 7] = [("first", 1), ("second", 2), ("third", 3), ("fifth", 5), ("eighth", 8), ("ninth", 9), ("twelfth", 12)];
+    let plain = |w: &str| UNITS.iter().position(|u| *u == w).map(|i| i as u64).or_else(|| TENS.iter().position(|t| *t == w).map(|i| 20 + 10 * i as u64));
+    let scale = match w {
+        "hundred" | "hundredth" => Some(100),
+        "thousand" | "thousandth" => Some(1_000),
+        "million" | "millionth" => Some(1_000_000),
+        "billion" | "billionth" => Some(1_000_000_000),
+        _ => None,
+    };
+    plain(w)
+        .or(scale)
+        .or_else(|| ORDINALS.iter().find(|(o, _)| *o == w).map(|(_, n)| *n))
+        .or_else(|| w.strip_suffix("ieth").and_then(|s| plain(&format!("{s}y"))))
+        .or_else(|| w.strip_suffix("th").and_then(plain))
+}
+
+/// A Chinese digit: 一 1, 两 2, 零 0.
+fn chinese_digit(c: char) -> Option<u64> {
+    "零〇一二三四五六七八九".chars().position(|d| d == c).map(|i| if i == 0 { 0 } else { i as u64 - 1 }).or((c == '两').then_some(2))
+}
+
+/// A Chinese numeral's place: 十 10, 万 10,000.
+fn chinese_unit(c: char) -> Option<u64> {
+    match c {
+        '十' => Some(10),
+        '百' => Some(100),
+        '千' => Some(1_000),
+        '万' => Some(10_000),
+        '亿' => Some(100_000_000),
+        _ => None,
+    }
+}
+
+fn chinese_numeral(c: char) -> bool {
+    chinese_digit(c).is_some() || chinese_unit(c).is_some()
+}
+
+/// The text with its numbers left out, digits or words, so what a
+/// number is written as does not count as words dropped or added.
+fn without_numbers(text: &str) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_alphabetic() && !chinese_numeral(c) && !('\u{2e80}'..='\u{9fff}').contains(&c) {
+            word.push(c);
+            continue;
+        }
+        if !word.is_empty() && english_number(&word.to_lowercase()).is_none() {
+            out.push_str(&word);
+        }
+        word.clear();
+        if !c.is_ascii_digit() && !chinese_numeral(c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The runs of digits in a text: "v0.2.6" has 0, 2 and 6.
+fn digit_runs(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut run = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() {
+            run.push(c);
+        } else if !run.is_empty() {
+            out.push(std::mem::take(&mut run));
+        }
+    }
+    out
+}
+
+/// Every number the words say, in digits: those written so, and those
+/// said in English or Chinese words, each as a whole ("two hundred and
+/// fifty", "三百五十"), as its parts, and as its parts run together, as
+/// a year or a code is said ("twenty twenty six", "一二三", "二零二六").
+fn said_numbers(text: &str) -> Vec<String> {
+    let mut out = digit_runs(text);
+    let lower = text.to_lowercase();
+    let mut run: Vec<u64> = Vec::new();
+    let words = lower.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).chain(std::iter::once(""));
+    for w in words {
+        match english_number(w) {
+            Some(n) => run.push(n),
+            // "and" inside a number, as in "two hundred and fifty".
+            None if w == "and" && run.last().is_some_and(|n| *n >= 100) => {}
+            None => {
+                if !run.is_empty() {
+                    english_numbers(&std::mem::take(&mut run), &mut out);
+                }
+            }
+        }
+    }
+    // Chinese: a run of its numerals.
+    let mut run: Vec<char> = Vec::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if chinese_numeral(c) {
+            run.push(c);
+            continue;
+        }
+        if run.is_empty() {
+            continue;
+        }
+        let ds: Vec<u64> = run.iter().filter_map(|c| chinese_digit(*c)).collect();
+        out.extend(ds.iter().map(u64::to_string));
+        if run.iter().all(|c| chinese_digit(*c).is_some()) {
+            out.push(ds.iter().map(u64::to_string).collect());
+        } else {
+            let (mut total, mut section, mut number) = (0u64, 0u64, 0u64);
+            for c in &run {
+                match (chinese_digit(*c), chinese_unit(*c)) {
+                    (Some(d), _) => number = d,
+                    (_, Some(u)) if u >= 10_000 => {
+                        total = (total + section + number) * u;
+                        (section, number) = (0, 0);
+                    }
+                    (_, Some(u)) => {
+                        section += number.max(1) * u;
+                        number = 0;
+                    }
+                    _ => {}
+                }
+            }
+            out.push((total + section + number).to_string());
+        }
+        run.clear();
+    }
+    out
+}
+
+/// The numbers a run of English number words may be written as: the
+/// groups it falls into ("twenty six" is one, "one two" two), the whole
+/// of each with its hundreds and thousands, and any groups side by side
+/// run together ("twenty twenty six" is 20, 26 and 2026).
+fn english_numbers(run: &[u64], out: &mut Vec<String>) {
+    let mut groups: Vec<u64> = Vec::new();
+    let (mut big, mut small, mut last): (u64, u64, Option<u64>) = (0, 0, None);
+    let close = |big: &mut u64, small: &mut u64, groups: &mut Vec<u64>| {
+        groups.push(*big + *small);
+        (*big, *small) = (0, 0);
+    };
+    for &n in run {
+        match n {
+            100 => small = small.max(1) * 100,
+            1_000.. => {
+                big += small.max(1) * n;
+                small = 0;
+            }
+            _ => {
+                // A word that cannot follow the one before in one number
+                // starts another: "one two", "twenty thirty".
+                let joins = match last {
+                    None => true,
+                    Some(p) if p >= 100 => true,
+                    Some(p) if p >= 20 && p % 10 == 0 => n < 10,
+                    _ => false,
+                };
+                if !joins && last.is_some() {
+                    close(&mut big, &mut small, &mut groups);
+                }
+                small += n;
+            }
+        }
+        last = Some(n);
+    }
+    close(&mut big, &mut small, &mut groups);
+    out.extend(run.iter().map(u64::to_string));
+    for i in 0..groups.len() {
+        for j in i..groups.len() {
+            out.push(groups[i..=j].iter().map(u64::to_string).collect());
+        }
+    }
 }
 
 /// A line without the mark that makes it an item of a list: "- ", "• ",

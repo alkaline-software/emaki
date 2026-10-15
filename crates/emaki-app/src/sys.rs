@@ -517,3 +517,423 @@ pub fn spelling(text: &str, language: &str) -> Vec<emaki_core::check::Issue> {
 pub fn spelling(_text: &str, _language: &str) -> Vec<emaki_core::check::Issue> {
     Vec::new()
 }
+
+// Dictation in other apps. What is pressed while another app is in front
+// is seen through an event tap, and the words go into that app by a paste:
+// both need Accessibility, which the person grants in System Settings.
+
+
+/// What was pressed while another app was in front (`outside_keys`).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+pub enum Outside {
+    /// The modifiers held changed: the Mac's flags.
+    Flags(u64),
+    /// Any other key, or a click.
+    Other,
+    /// Dictation's key, when it is a key and not a tap. Kept from the app.
+    Key,
+    /// Escape while dictation listens. Kept from the app.
+    Escape,
+}
+
+#[cfg(target_os = "macos")]
+mod outside {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+
+    type Ref = *mut c_void;
+    type TapCallback = extern "C" fn(proxy: Ref, kind: u32, event: Ref, info: Ref) -> Ref;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: Ref) -> bool;
+        static kAXTrustedCheckOptionPrompt: Ref;
+        fn CGEventTapCreate(tap: u32, place: u32, options: u32, mask: u64, callback: TapCallback, info: Ref) -> Ref;
+        fn CGEventTapEnable(tap: Ref, enable: bool);
+        fn CGEventGetFlags(event: Ref) -> u64;
+        fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
+        fn CGEventCreateKeyboardEvent(source: Ref, key: u16, down: bool) -> Ref;
+        fn CGEventSetFlags(event: Ref, flags: u64);
+        fn CGEventPost(tap: u32, event: Ref);
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFMachPortCreateRunLoopSource(alloc: Ref, port: Ref, order: isize) -> Ref;
+        fn CFRunLoopGetMain() -> Ref;
+        fn CFRunLoopAddSource(rl: Ref, source: Ref, mode: Ref);
+        fn CFDictionaryCreate(alloc: Ref, keys: *const Ref, values: *const Ref, n: isize, key_cb: Ref, value_cb: Ref) -> Ref;
+        fn CFRelease(r: Ref);
+        static kCFRunLoopCommonModes: Ref;
+        static kCFBooleanTrue: Ref;
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
+    }
+
+    const SESSION_TAP: u32 = 1;
+    const HID_TAP: u32 = 0;
+    const KEY_DOWN: u32 = 10;
+    const FLAGS_CHANGED: u32 = 12;
+    const DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
+    const DISABLED_BY_USER: u32 = 0xFFFF_FFFF;
+    const KEYCODE_FIELD: u32 = 9;
+    const AUTOREPEAT_FIELD: u32 = 8;
+    const ESCAPE: i64 = 53;
+    /// ⌘, ⇧, ⌃ and ⌥, of the Mac's flags.
+    pub const MODS: u64 = 0x10_0000 | 0x2_0000 | 0x4_0000 | 0x8_0000;
+
+    static PORT: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+    /// Dictation's key as the key's code and the modifiers with it; 0 for
+    /// none (a tap, or nothing bound). The code is in the low 16 bits.
+    pub static KEY: AtomicU64 = AtomicU64::new(0);
+    pub static ESCAPE_TAKEN: AtomicBool = AtomicBool::new(false);
+
+    pub fn trusted() -> bool {
+        unsafe { AXIsProcessTrusted() }
+    }
+
+    /// Asks the system to list the app in Accessibility, with its own
+    /// prompt the first time.
+    pub fn ask_trust() -> bool {
+        unsafe {
+            let keys = [kAXTrustedCheckOptionPrompt];
+            let values = [kCFBooleanTrue];
+            let options = CFDictionaryCreate(std::ptr::null_mut(), keys.as_ptr(), values.as_ptr(), 1, &kCFTypeDictionaryKeyCallBacks as *const c_void as Ref, &kCFTypeDictionaryValueCallBacks as *const c_void as Ref);
+            let ok = AXIsProcessTrustedWithOptions(options);
+            CFRelease(options);
+            ok
+        }
+    }
+
+    extern "C" fn seen(_proxy: Ref, kind: u32, event: Ref, info: Ref) -> Ref {
+        if kind == DISABLED_BY_TIMEOUT || kind == DISABLED_BY_USER {
+            let port = PORT.load(Ordering::Relaxed);
+            if !port.is_null() {
+                unsafe { CGEventTapEnable(port, true) };
+            }
+            return event;
+        }
+        // The app's own keys are its local monitor's (`key_events`).
+        if super::app_is_active() {
+            return event;
+        }
+        let tx = unsafe { &*(info as *const futures::channel::mpsc::UnboundedSender<super::Outside>) };
+        let said = match kind {
+            FLAGS_CHANGED => super::Outside::Flags(unsafe { CGEventGetFlags(event) }),
+            KEY_DOWN => {
+                let code = unsafe { CGEventGetIntegerValueField(event, KEYCODE_FIELD) };
+                let mods = unsafe { CGEventGetFlags(event) } & MODS;
+                let key = KEY.load(Ordering::Relaxed);
+                if code == ESCAPE && mods == 0 && ESCAPE_TAKEN.load(Ordering::Relaxed) {
+                    let _ = tx.unbounded_send(super::Outside::Escape);
+                    return std::ptr::null_mut();
+                }
+                if key != 0 && code as u64 == key & 0xFFFF && mods == key & MODS {
+                    if unsafe { CGEventGetIntegerValueField(event, AUTOREPEAT_FIELD) } == 0 {
+                        let _ = tx.unbounded_send(super::Outside::Key);
+                    }
+                    return std::ptr::null_mut();
+                }
+                super::Outside::Other
+            }
+            _ => super::Outside::Other,
+        };
+        let _ = tx.unbounded_send(said);
+        event
+    }
+
+    /// The tap, on the main run loop, for the app's life. False when the
+    /// system refuses it: Accessibility is not granted.
+    pub fn start(tx: futures::channel::mpsc::UnboundedSender<super::Outside>) -> bool {
+        let mask = [KEY_DOWN, FLAGS_CHANGED, 1, 3, 25].iter().fold(0u64, |m, t| m | 1 << t);
+        let info = Box::into_raw(Box::new(tx)) as Ref;
+        let port = unsafe { CGEventTapCreate(SESSION_TAP, 0, 0, mask, seen, info) };
+        if port.is_null() {
+            drop(unsafe { Box::from_raw(info as *mut futures::channel::mpsc::UnboundedSender<super::Outside>) });
+            return false;
+        }
+        PORT.store(port, Ordering::Relaxed);
+        unsafe {
+            let source = CFMachPortCreateRunLoopSource(std::ptr::null_mut(), port, 0);
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+            CFRelease(source);
+            CGEventTapEnable(port, true);
+        }
+        true
+    }
+
+    /// ⌘V, as if pressed.
+    pub fn press_paste() {
+        const V: u16 = 9;
+        const CMD: u64 = 0x10_0000;
+        unsafe {
+            for down in [true, false] {
+                let e = CGEventCreateKeyboardEvent(std::ptr::null_mut(), V, down);
+                if e.is_null() {
+                    return;
+                }
+                CGEventSetFlags(e, CMD);
+                CGEventPost(HID_TAP, e);
+                CFRelease(e);
+            }
+        }
+    }
+}
+
+/// Whether this app is the one in front.
+#[cfg(target_os = "macos")]
+fn app_is_active() -> bool {
+    use objc2_app_kit::NSRunningApplication;
+    NSRunningApplication::currentApplication().isActive()
+}
+
+/// Whether the app may watch keys pressed in other apps and press keys in
+/// them: Accessibility, in System Settings.
+#[cfg(target_os = "macos")]
+pub fn trusted() -> bool {
+    outside::trusted()
+}
+
+/// A message each time Accessibility's list changes, for any app: the
+/// system's own notice, so nothing asks over and over.
+#[cfg(target_os = "macos")]
+pub fn trust_changes() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSOperationQueue, NSString};
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| {
+        let _ = tx.unbounded_send(());
+    });
+    let center = NSDistributedNotificationCenter::defaultCenter();
+    let observer = unsafe { center.addObserverForName_object_queue_usingBlock(Some(&NSString::from_str("com.apple.accessibility.api")), None, Some(&NSOperationQueue::mainQueue()), &block) };
+    // Kept for the app's life, as the key monitor is.
+    std::mem::forget(observer);
+    rx
+}
+
+/// The system's own question, which puts the app in Accessibility's
+/// list and offers to open it there.
+#[cfg(target_os = "macos")]
+pub fn ask_trust() -> bool {
+    outside::ask_trust()
+}
+#[cfg(not(target_os = "macos"))]
+pub fn ask_trust() -> bool {
+    false
+}
+
+/// What is pressed while another app is in front, for dictation started
+/// and stopped there. None until Accessibility is granted; asked again
+/// once it is.
+#[cfg(target_os = "macos")]
+pub fn outside_keys() -> Option<futures::channel::mpsc::UnboundedReceiver<Outside>> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    outside::start(tx).then_some(rx)
+}
+
+/// Dictation's key as the tap matches it in other apps: a gpui binding
+/// ("cmd-shift-d"), or None for a tap of modifiers or a key that has no
+/// code here.
+#[cfg(target_os = "macos")]
+pub fn set_outside_key(binding: Option<&gpui::Keystroke>) {
+    let code = binding.and_then(|k| key_code(&k.key).map(|c| (c, k)));
+    let packed = code.map_or(0, |(c, k)| {
+        let m = &k.modifiers;
+        let mut mods = 0u64;
+        if m.platform {
+            mods |= 0x10_0000;
+        }
+        if m.shift {
+            mods |= 0x2_0000;
+        }
+        if m.control {
+            mods |= 0x4_0000;
+        }
+        if m.alt {
+            mods |= 0x8_0000;
+        }
+        mods | c as u64
+    });
+    outside::KEY.store(packed, std::sync::atomic::Ordering::Relaxed);
+}
+#[cfg(not(target_os = "macos"))]
+pub fn set_outside_key(_binding: Option<&gpui::Keystroke>) {}
+
+/// Escape in another app cancels dictation, and is kept from that app,
+/// while this is on.
+#[cfg(target_os = "macos")]
+pub fn take_escape(on: bool) {
+    outside::ESCAPE_TAKEN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+#[cfg(not(target_os = "macos"))]
+pub fn take_escape(_on: bool) {}
+
+/// The Mac's code for a key as gpui names it, on the US layout, as the
+/// system's own shortcuts are.
+#[cfg(target_os = "macos")]
+fn key_code(key: &str) -> Option<u16> {
+    const LETTERS: [u16; 26] = [0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6];
+    const DIGITS: [u16; 10] = [29, 18, 19, 20, 21, 23, 22, 26, 28, 25];
+    const F: [u16; 12] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111];
+    let mut chars = key.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if c.is_ascii_lowercase() {
+            return Some(LETTERS[(c as u8 - b'a') as usize]);
+        }
+        if c.is_ascii_digit() {
+            return Some(DIGITS[(c as u8 - b'0') as usize]);
+        }
+    }
+    if let Some(n) = key.strip_prefix('f').and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=12).contains(n)) {
+        return Some(F[n - 1]);
+    }
+    Some(match key {
+        "space" => 49,
+        "enter" => 36,
+        "tab" => 48,
+        "-" => 27,
+        "=" => 24,
+        "[" => 33,
+        "]" => 30,
+        "\\" => 42,
+        ";" => 41,
+        "'" => 39,
+        "," => 43,
+        "." => 47,
+        "/" => 44,
+        "`" => 50,
+        _ => return None,
+    })
+}
+
+/// What the general pasteboard holds, every item in every type, to put
+/// back after a paste of our own.
+#[cfg(target_os = "macos")]
+pub struct Clipboard {
+    items: Vec<Vec<(String, Vec<u8>)>>,
+    count: isize,
+}
+
+/// The words pasted into the app in front, by the pasteboard and ⌘V. The
+/// pasteboard is marked as passing through, which clipboard managers skip;
+/// what it held is returned, to be put back once the app has read it.
+#[cfg(target_os = "macos")]
+pub fn paste_words(words: &str) -> Clipboard {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use objc2_foundation::{NSData, NSString};
+    let board = NSPasteboard::generalPasteboard();
+    let mut items = Vec::new();
+    if let Some(held) = board.pasteboardItems() {
+        for item in held.iter() {
+            let mut kept = Vec::new();
+            for kind in item.types().iter() {
+                if let Some(data) = item.dataForType(&kind) {
+                    kept.push((kind.to_string(), data.to_vec()));
+                }
+            }
+            items.push(kept);
+        }
+    }
+    board.clearContents();
+    unsafe {
+        board.setString_forType(&NSString::from_str(words), NSPasteboardTypeString);
+        board.setData_forType(Some(&NSData::new()), &NSString::from_str("org.nspasteboard.TransientType"));
+    }
+    let count = board.changeCount();
+    outside::press_paste();
+    Clipboard { items, count }
+}
+
+/// The pasteboard as it was before `paste_words`, unless something else
+/// has been copied since.
+#[cfg(target_os = "macos")]
+pub fn restore_clipboard(was: Clipboard) {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSData, NSString};
+    let board = NSPasteboard::generalPasteboard();
+    if board.changeCount() != was.count {
+        return;
+    }
+    board.clearContents();
+    if was.items.is_empty() {
+        return;
+    }
+    let objects: Vec<objc2::rc::Retained<ProtocolObject<dyn NSPasteboardWriting>>> = was
+        .items
+        .iter()
+        .map(|kinds| {
+            let item = NSPasteboardItem::new();
+            for (kind, data) in kinds {
+                item.setData_forType(&NSData::with_bytes(data), &NSString::from_str(kind));
+            }
+            ProtocolObject::from_retained(item)
+        })
+        .collect();
+    board.writeObjects(&NSArray::from_retained_slice(&objects));
+}
+
+/// Where the pill that shows dictation in other apps goes: the screen
+/// under the pointer, by its display's id and width, and its notch when
+/// it has one, as the width of the menu bar on either side of it and the
+/// notch's height.
+#[cfg(target_os = "macos")]
+pub struct PillPlace {
+    pub display: u32,
+    pub width: f32,
+    pub notch: Option<(f32, f32, f32)>,
+}
+
+#[cfg(target_os = "macos")]
+pub fn pill_place() -> Option<PillPlace> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSEvent, NSScreen};
+    use objc2_foundation::{NSNumber, NSString};
+    let mtm = MainThreadMarker::new()?;
+    let at = NSEvent::mouseLocation();
+    let screens = NSScreen::screens(mtm);
+    let screen = screens
+        .iter()
+        .find(|s| {
+            let f = s.frame();
+            at.x >= f.origin.x && at.x < f.origin.x + f.size.width && at.y >= f.origin.y && at.y < f.origin.y + f.size.height
+        })
+        .or_else(|| screens.firstObject())?;
+    let id = screen.deviceDescription().objectForKey(&NSString::from_str("NSScreenNumber"))?;
+    let id = id.downcast_ref::<NSNumber>()?.unsignedIntValue();
+    let width = screen.frame().size.width as f32;
+    let top = screen.safeAreaInsets().top as f32;
+    let notch = (top > 0.).then(|| (screen.auxiliaryTopLeftArea().size.width as f32, screen.auxiliaryTopRightArea().size.width as f32, top));
+    Some(PillPlace { display: id, width, notch })
+}
+
+/// The pill's window made to stay over every app and every space, never
+/// in the way of the pointer, and drawn with no shadow of the system's.
+/// It has no title bar, so the system lets it stand over the menu bar,
+/// against the screen's top edge.
+#[cfg(target_os = "macos")]
+pub fn float_pill(window: &gpui::Window) {
+    use objc2_app_kit::NSWindowStyleMask;
+    let Some(view) = ns_view(window) else { return };
+    let Some(native) = view.window() else { return };
+    native.setIgnoresMouseEvents(true);
+    native.setHidesOnDeactivate(false);
+    native.setHasShadow(false);
+    native.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    if let Some(screen) = native.screen() {
+        let mut frame = native.frame();
+        let top = screen.frame();
+        frame.origin.y = top.origin.y + top.size.height - frame.size.height;
+        native.setFrame_display(frame, true);
+    }
+}
+
+/// The window kept over every other app's, for a probe.
+#[cfg(target_os = "macos")]
+pub fn keep_on_top(window: &gpui::Window) {
+    if let Some(native) = ns_view(window).and_then(|v| v.window()) {
+        native.setLevel(objc2_app_kit::NSFloatingWindowLevel);
+    }
+}
+#[cfg(not(target_os = "macos"))]
+pub fn keep_on_top(_window: &gpui::Window) {}

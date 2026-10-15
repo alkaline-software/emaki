@@ -381,6 +381,9 @@ impl Lane {
 const DICTATE_START: &[u8] = include_bytes!("../assets/sounds/dictate-start.wav");
 const DICTATE_STOP: &[u8] = include_bytes!("../assets/sounds/dictate-stop.wav");
 
+/// How long the note that Accessibility is wanted takes to fade.
+const AX_FADE: Duration = Duration::from_millis(200);
+
 /// How many of the microphone's last moments the bars under the
 /// composer show.
 const MIC_BARS: usize = 14;
@@ -2073,6 +2076,17 @@ pub struct Workbench {
     /// The words written down are being cleaned up: the line under the
     /// composer says so. Set off the main thread.
     dictate_cleaning: Arc<std::sync::atomic::AtomicBool>,
+    /// The pill at the top of the screen, while dictation's words go
+    /// somewhere other than the composer (`crate::pill`).
+    #[cfg(target_os = "macos")]
+    pill: Option<WindowHandle<crate::pill::Pill>>,
+    /// Whether keys pressed in other apps are seen (`sys::outside_keys`),
+    /// which Accessibility allows; and whether that is being waited for.
+    outside_on: bool,
+    #[cfg(target_os = "macos")]
+    outside_waiting: bool,
+    /// When the tap came on, for the note at Dictate's head to fade.
+    outside_on_at: Option<Instant>,
     /// The history just closed, drawn a moment more as it fades.
     dictated_gone: Option<(Rc<Vec<emaki_core::dictate::Said>>, u32, Instant)>,
     dictated_serial: u32,
@@ -3154,9 +3168,12 @@ impl Workbench {
             if !window.is_window_active() {
                 this.tap_watch.reset();
             }
-            // Back from Keyboard settings, Fn's use may have changed.
+            // Back from Keyboard settings, Fn's use may have changed; back
+            // from Accessibility, other apps' keys may be seen.
             if window.is_window_active() {
                 this.read_fn_use(cx);
+                #[cfg(target_os = "macos")]
+                this.watch_outside(window, cx);
             }
         })
         .detach();
@@ -3609,6 +3626,17 @@ impl Workbench {
                 }
             })
             .detach();
+            // And in other apps, once Accessibility allows it.
+            cx.spawn_in(window, async move |this, cx| {
+                let _ = this.update_in(cx, |this, window, cx| this.watch_outside(window, cx));
+            })
+            .detach();
+        }
+        // A probe's window over the others, where it draws: under another
+        // app's it draws nothing, opens no session and runs no step, and
+        // the system no longer lets an app step in front of the one in use.
+        if std::env::var_os("EMAKI_GO").is_some() {
+            crate::sys::keep_on_top(window);
         }
         Self {
             hub,
@@ -3954,6 +3982,12 @@ impl Workbench {
             term_new: Vec::new(),
             terms_leaving: Vec::new(),
             dictate_cleaning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(target_os = "macos")]
+            pill: None,
+            outside_on: false,
+            #[cfg(target_os = "macos")]
+            outside_waiting: false,
+            outside_on_at: None,
             dictated_gone: None,
             dictated_serial: 0,
             tree_focus_back: false,
@@ -5188,6 +5222,33 @@ impl Workbench {
                 self.pending_dictate_tick = true;
                 cx.notify();
             }
+            // The same, as dictation for another app shows it, at the top
+            // of the screen: `dictate:pill`; `pillshot:<png>` writes a
+            // picture of it; `dictate:away` prints what decides where
+            // the words go.
+            #[cfg(target_os = "macos")]
+            Some("dictate:pill") => {
+                self.mic_levels.clear();
+                self.pill = crate::pill::open(cx);
+                self.dictation = Dictation::Listening(emaki_core::dictate::Recorder::pretend(), Instant::now());
+                self.pending_dictate_tick = true;
+                cx.notify();
+            }
+            #[cfg(target_os = "macos")]
+            Some(t) if t.starts_with("pillshot:") => {
+                let path = PathBuf::from(&t["pillshot:".len()..]);
+                if let Some(pill) = self.pill {
+                    let _ = pill.update(cx, |_, window, _| eprintln!("emaki: pill {:?} {:?}", window.bounds(), crate::sys::shoot_window(window, &path)));
+                }
+            }
+            // The Accessibility card drawn as if it were not given.
+            Some("dictate:untrusted") => {
+                self.outside_on = false;
+                self.outside_on_at = None;
+                cx.notify();
+            }
+            #[cfg(target_os = "macos")]
+            Some("dictate:away") => eprintln!("emaki: trusted {} outside {}", crate::sys::trusted(), self.outside_on),
             // The dictation key's Reset, pressed.
             Some("dictate:reset") => self.reset_dictate_key(cx),
             // Settings' History, opened; `dictate:copy` presses the
@@ -6153,11 +6214,12 @@ impl Workbench {
             _ => "medium",
         };
         let size = self.segmented("size", vec![("small", "Small".into(), None), ("medium", "Medium".into(), None), ("large", "Large".into(), None)], size_key, Rc::new(|this, key, _, cx| this.set_chat_size(key, cx)), cx);
-        // The key that sends, named as the keyboard has it.
+        // The key that sends, drawn as the keyboard has it (`key_text`:
+        // the Mac's signs on a Mac, Ctrl in words elsewhere), as short as
+        // a switch, with what makes a new line beside it.
         let enter_sends = app.send_key == "enter";
-        let with = if cfg!(target_os = "macos") { "Cmd + Enter" } else { "Ctrl + Enter" };
-        let send = self.segmented("send-key", vec![("cmd-enter", with.into(), None), ("enter", "Enter".into(), None)], if enter_sends { "enter" } else { "cmd-enter" }, Rc::new(|this, key, _, cx| this.set_send_key(key, cx)), cx);
-        let send_note = if enter_sends { "Shift + Enter starts a new line." } else { "Enter or Shift + Enter starts a new line." };
+        let send = self.segmented("send-key", vec![("cmd-enter", "⌘↩".into(), None), ("enter", "↩".into(), None)], if enter_sends { "enter" } else { "cmd-enter" }, Rc::new(|this, key, _, cx| this.set_send_key(key, cx)), cx);
+        let send_note = key_text_wrap(if enter_sends { "⇧↩ for a new line" } else { "↩ or ⇧↩ for a new line" }).into_any_element();
 
         let default_mode = if self.cfg.driver.default_mode.is_empty() { "default".to_string() } else { self.cfg.driver.default_mode.clone() };
         // The same lists the pills under the composer open, since both
@@ -6569,6 +6631,35 @@ impl Workbench {
             rows
         };
 
+        // Dictation in other apps waits on Accessibility: said at the
+        // section's head, with the button that has the system ask, until
+        // it is given, and fading as it goes.
+        let ax_going = match self.outside_on_at {
+            None => Some(false),
+            Some(at) if at.elapsed() < AX_FADE => Some(true),
+            Some(_) => None,
+        };
+        // As tall as the title, the button standing out of it, so the
+        // page under it stays put as it comes and goes.
+        let ax_note = ax_going.filter(|_| emaki_core::dictate::AVAILABLE).map(|going| {
+            h_flex()
+                .h(px(20.))
+                .min_w_0()
+                .ml(px(16.))
+                .gap(px(10.))
+                .items_center()
+                .child(Icon::default().path("icons/info.svg").with_size(px(14.)).text_color(theme.primary).flex_shrink_0())
+                .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(12.5)).text_color(theme.muted_foreground).child("Other apps need Accessibility"))
+                .child(
+                    crate::branches::small_pill("dictate-ax-allow", "icons/shield.svg", "Allow", Press::Quiet, false, &theme)
+                        .flex_shrink_0()
+                        .on_click(|_, _, _| {
+                            crate::sys::ask_trust();
+                        }),
+                )
+                .with_animation(if going { "dictate-ax-out" } else { "dictate-ax-in" }, Animation::new(AX_FADE), move |d, t| d.opacity(if going { 1. - t } else { t }))
+        });
+
         // The rows of the section showing, and the rail beside them.
         let section = self.settings_section;
         let (section_title, section_anim): (&'static str, &'static str) = match section {
@@ -6584,7 +6675,7 @@ impl Workbench {
         };
         let rows: Vec<AnyElement> = match section {
             "composer" => vec![
-                row("Send with", send_note, send, &theme).into_any_element(),
+                lay("Send with", Some(send_note), send, true, &theme).into_any_element(),
                 short("Auto-capitalization", "", auto_cap, &theme).into_any_element(),
                 // The languages are the check's choices: dimmed and out of
                 // the pointer's reach while it is off, as the formatters'
@@ -6844,7 +6935,7 @@ impl Workbench {
                                 .track_scroll(&self.settings_scroll)
                                 .px(px(40.))
                                 .py(px(24.))
-                                .child(page_in(section_anim, v_flex().gap(px(16.)).child(h_flex().pb(px(2.)).items_center().justify_between().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(section_title)).when(section == "sessions", |d| d.child(agent_pick))).children(rows))),
+                                .child(page_in(section_anim, v_flex().gap(px(16.)).child(h_flex().pb(px(2.)).items_center().justify_between().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(section_title)).when(section == "sessions", |d| d.child(agent_pick)).when(section == "dictate", |d| d.children(ax_note))).children(rows))),
                         )
                         .vertical_scrollbar(&self.settings_scroll)
                     })),
@@ -7040,7 +7131,8 @@ impl Workbench {
                     // A language has its flag before its name, in its
                     // own colours.
                     .when_some(flag_of(control, key), |d, flag| d.gap(px(6.)).child(img(flag).w(px(17.)).h(px(12.)).flex_shrink_0()))
-                    .child(label)
+                    // Keys are drawn on their caps.
+                    .map(|d| if control == "send-key" { d.child(key_text(&label)) } else { d.child(label) })
             }));
         h_flex()
             .id(SharedString::from(format!("{control}-track")))
@@ -12830,7 +12922,8 @@ impl Workbench {
     }
 
     /// Escape while the microphone starts or listens: it stops, and what
-    /// it heard is let go unwritten. False when there is nothing to stop,
+    /// it heard is let go unwritten, with no chime: the falling one says
+    /// the words are being written. False when there is nothing to stop,
     /// so the key does what it does otherwise.
     fn cancel_dictation(&mut self, cx: &mut Context<Self>) -> bool {
         match self.dictation {
@@ -12842,8 +12935,9 @@ impl Workbench {
         // The recorder dropped closes the microphone; one still starting
         // is dropped when it comes (`start_dictation`).
         self.dictation = Dictation::Off;
+        crate::sys::take_escape(false);
         #[cfg(target_os = "macos")]
-        crate::sys::play_sound(DICTATE_STOP);
+        self.pill_leave(cx);
         cx.notify();
         true
     }
@@ -12855,6 +12949,7 @@ impl Workbench {
         // No model on this Mac (none is shipped with the app): straight to
         // where one is downloaded.
         if emaki_core::dictate::chosen(&self.cfg.app.dictate_model).is_none() {
+            cx.activate(true);
             self.settings_section = "dictate";
             self.settings_scroll.set_offset(point(px(0.), px(0.)));
             self.pick = None;
@@ -12868,6 +12963,12 @@ impl Workbench {
         {
             self.dictation = Dictation::Starting;
             self.mic_levels.clear();
+            crate::sys::take_escape(true);
+            // Words for another app, or another of Emaki's fields: shown at
+            // the top of the screen, not under the composer.
+            if self.pill.is_none() && !(window.is_window_active() && self.composer_has_keys(window, cx)) {
+                self.pill = crate::pill::open(cx);
+            }
             // The chime first and the microphone once it has mostly rung,
             // so the chime is not in what it hears.
             crate::sys::play_sound(DICTATE_START);
@@ -12884,6 +12985,8 @@ impl Workbench {
                         Ok(_) => {}
                         Err(e) => {
                             this.dictation = Dictation::Off;
+                            crate::sys::take_escape(false);
+                            this.pill_say("No microphone", window, cx);
                             this.notice = Some(Notice::error(format!("The microphone did not start: {e}.")));
                         }
                     }
@@ -12910,6 +13013,10 @@ impl Workbench {
                     while this.mic_levels.len() > MIC_BARS {
                         this.mic_levels.pop_front();
                     }
+                    if let Some(pill) = this.pill {
+                        let levels = this.mic_levels.clone();
+                        let _ = pill.update(cx, |pill, _, cx| pill.set_levels(&levels, cx));
+                    }
                     cx.notify();
                     true
                 })
@@ -12925,6 +13032,7 @@ impl Workbench {
     /// off the main thread, then put at the composer's caret.
     #[cfg(target_os = "macos")]
     fn finish_dictation(&mut self, rec: emaki_core::dictate::Recorder, window: &mut Window, cx: &mut Context<Self>) {
+        crate::sys::take_escape(false);
         crate::sys::play_sound(DICTATE_STOP);
         self.write_down(move || rec.finish(), window, cx);
     }
@@ -12944,6 +13052,9 @@ impl Workbench {
         let cleaning = Arc::clone(&self.dictate_cleaning);
         cleaning.store(false, std::sync::atomic::Ordering::Relaxed);
         self.dictation = Dictation::Writing;
+        if let Some(pill) = self.pill {
+            let _ = pill.update(cx, |pill, _, cx| pill.set_phase(crate::pill::Phase::Writing, cx));
+        }
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let got = cx
@@ -12981,17 +13092,164 @@ impl Workbench {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.dictation = Dictation::Off;
                 match got {
-                    Ok(words) if words.is_empty() => this.notice = Some(Notice::said("Nothing was heard.")),
+                    Ok(words) if words.is_empty() => {
+                        this.pill_say("Nothing heard", window, cx);
+                        this.notice = Some(Notice::said("Nothing was heard."));
+                    }
                     Ok(words) => {
-                        this.insert_dictated(&words, window, cx);
+                        this.pill_leave(cx);
+                        this.deliver_dictated(&words, window, cx);
                         this.refresh_dictated(cx);
                     }
-                    Err(e) => this.notice = Some(Notice::error(format!("{e}."))),
+                    Err(e) => {
+                        this.pill_say("Nothing written", window, cx);
+                        this.notice = Some(Notice::error(format!("{e}.")));
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Whether what is typed in the window goes to the composer: it has
+    /// the keyboard, or nothing that takes words does.
+    #[cfg(target_os = "macos")]
+    fn composer_has_keys(&self, window: &Window, cx: &App) -> bool {
+        match window.focused(cx) {
+            None => true,
+            Some(f) => f == self.focus_handle || f == self.composer.read(cx).focus_handle(cx),
+        }
+    }
+
+    /// The words where the person is now. In Emaki, the field with the
+    /// keyboard takes them as if typed, and the composer when none does.
+    /// In another app they are pasted, and what the clipboard held is put
+    /// back once that app has read it.
+    #[cfg(target_os = "macos")]
+    fn deliver_dictated(&mut self, words: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if window.is_window_active() || !crate::sys::trusted() {
+            if self.composer_has_keys(window, cx) {
+                self.insert_dictated(words, window, cx);
+                return;
+            }
+            // Typed once this update is over: the keys pass through the
+            // window's listeners, this one's among them.
+            let (this, words) = (cx.entity().downgrade(), words.to_string());
+            window.defer(cx, move |window, cx| {
+                let typed = gpui::Keystroke { modifiers: gpui::Modifiers::default(), key: String::new(), key_char: Some(words.clone()) };
+                if !window.dispatch_keystroke(typed, cx) {
+                    let _ = this.update(cx, |this, cx| this.insert_dictated(&words, window, cx));
+                }
+            });
+            return;
+        }
+        let was = crate::sys::paste_words(words);
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(Duration::from_millis(600)).await;
+            cx.update(|_| crate::sys::restore_clipboard(was));
+        })
+        .detach();
+    }
+
+    /// The pill goes back up, its window closing behind it.
+    #[cfg(target_os = "macos")]
+    fn pill_leave(&mut self, cx: &mut Context<Self>) {
+        if let Some(pill) = self.pill.take() {
+            let _ = pill.update(cx, |pill, window, cx| pill.leave(window, cx));
+        }
+    }
+
+    /// A few words in the pill, then it goes.
+    #[cfg(target_os = "macos")]
+    fn pill_say(&mut self, words: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pill) = self.pill.take() else { return };
+        let _ = pill.update(cx, |pill, _, cx| pill.set_phase(crate::pill::Phase::Said(words.into()), cx));
+        cx.spawn_in(window, async move |_, cx| {
+            cx.background_executor().timer(Duration::from_millis(1600)).await;
+            let _ = pill.update(cx, |pill, window, cx| pill.leave(window, cx));
+        })
+        .detach();
+    }
+
+    /// Keys pressed in other apps seen from now, once Accessibility allows
+    /// it: dictation's key or tap starts and stops it there, and Escape
+    /// cancels it.
+    #[cfg(target_os = "macos")]
+    fn watch_outside(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.outside_on {
+            return;
+        }
+        // Not yet allowed: the system says when anything in
+        // Accessibility's list changes, and it is asked again then, so
+        // the keys work in other apps as soon as it is switched on.
+        if !crate::sys::trusted() {
+            if !self.outside_waiting {
+                self.outside_waiting = true;
+                let mut changes = crate::sys::trust_changes();
+                cx.spawn_in(window, async move |this, cx| {
+                    use futures::StreamExt as _;
+                    while changes.next().await.is_some() {
+                        // The list is written a moment after it says so.
+                        for wait in [0, 250, 1000] {
+                            cx.background_executor().timer(Duration::from_millis(wait)).await;
+                            if crate::sys::trusted() {
+                                let _ = this.update_in(cx, |this, window, cx| this.watch_outside(window, cx));
+                                return;
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }
+            return;
+        }
+        let Some(mut keys) = crate::sys::outside_keys() else { return };
+        self.outside_on = true;
+        self.outside_on_at = Some(Instant::now());
+        // Drawn once more when the note at Dictate's head has faded.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AX_FADE + Duration::from_millis(30)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        self.send_outside_key();
+        cx.spawn_in(window, async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(said) = keys.next().await {
+                if this.update_in(cx, |this, window, cx| this.outside_event(said, window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn outside_event(&mut self, said: crate::sys::Outside, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::sys::Outside;
+        match said {
+            Outside::Flags(flags) => self.key_event(Some(flags), window, cx),
+            Outside::Other => self.key_event(None, window, cx),
+            Outside::Key if !self.dictate_key_rec => self.toggle_dictation(window, cx),
+            Outside::Key => {}
+            Outside::Escape => {
+                self.cancel_dictation(cx);
+            }
+        }
+    }
+
+    /// Dictation's key, when it is a key, for the tap over other apps to
+    /// match.
+    fn send_outside_key(&self) {
+        let key = &self.cfg.app.dictate_key;
+        let stroke = if emaki_core::dictate::tap(key).is_some() {
+            None
+        } else {
+            gpui::Keystroke::parse(key).ok().or_else(|| gpui::Keystroke::parse(&emaki_core::config::AppConfig::default().dictate_key).ok())
+        };
+        crate::sys::set_outside_key(stroke.as_ref());
     }
 
     /// Words said, put at the composer's caret as if typed there: a space
@@ -13034,7 +13292,13 @@ impl Workbench {
         });
         let button = div().id("dictate").size(px(30.)).flex_shrink_0().rounded_full().relative().flex().items_center().justify_center().cursor_pointer();
         let fade = |id: &'static str, el: AnyElement| div().child(el).with_animation(id, Animation::new(Duration::from_millis(180)), |d, t| d.opacity(t)).into_any_element();
-        match &self.dictation {
+        // Words for another field or app are shown by the pill alone.
+        #[cfg(target_os = "macos")]
+        let away = self.pill.is_some();
+        #[cfg(not(target_os = "macos"))]
+        let away = false;
+        let off = Dictation::Off;
+        match if away { &off } else { &self.dictation } {
             #[cfg(target_os = "macos")]
             Dictation::Listening(..) => {
                 let level = self.mic_levels.back().copied().unwrap_or(0.0);
@@ -13085,6 +13349,11 @@ impl Workbench {
     /// time; then that the words are being written down. It comes in over
     /// a moment.
     fn render_dictation_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Shown at the top of the screen instead.
+        #[cfg(target_os = "macos")]
+        if self.pill.is_some() {
+            return None;
+        }
         let theme = cx.theme();
         let line = match &self.dictation {
             #[cfg(target_os = "macos")]
@@ -13947,6 +14216,7 @@ impl Workbench {
             if let Err(e) = Config::edit(move |c| c.app.dictate_key = key) {
                 self.notice = Some(Notice::error(format!("could not save settings: {e}")));
             }
+            self.send_outside_key();
         }
         self.read_fn_use(cx);
         cx.notify();
@@ -15070,6 +15340,9 @@ impl Workbench {
         self.sync_file_editor(window, cx);
         if let Some((state, words, caret)) = self.pending_edit.take() {
             state.update(cx, |s, cx| s.replace_bytes(0..0, &words, caret, window, cx));
+            // With the keyboard, as typing there would leave it.
+            let to = state.read(cx).focus_handle(cx);
+            window.focus(&to, cx);
         }
         if let Some(step) = self.pending_cell.take() {
             self.table_probe(&step, window, cx);

@@ -5,6 +5,17 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.7
+
+- Dictation works in any app: the shortcut starts and stops it in WeChat, Obsidian, Notes and the rest, and the words are pasted where you type, your clipboard put back after. A pill at the top of the screen shows it listening. Allow Accessibility from Settings, Dictate.
+- In Emaki, dictation writes into the field you are in, such as a file's editor, not only the composer.
+- Dictation Preferences: your own instructions for post-processing, in plain words, which it follows over its own rules.
+- Dictation Terms: names and words written exactly as you save them, capitals and all, added several at once.
+- Post-processing writes numbers said in words as digits when asked, and numbers lists when asked.
+- The dictation history's folder is a click away, and a shorter time trims it at once.
+- Long sessions open about four times faster.
+- Settings, Composer shows the send keys as keys. Esc cancelling dictation no longer plays the stop sound.
+
 ## v0.2.6
 
 - Dictation post-processing: a small model downloaded to this Mac (Qwen3.5 4B, 2B or 0.8B) removes hesitations, applies corrections ("100, no, 200"), mends grammar and makes lists, in any language, without translating. Turn it on in Settings, Dictate.

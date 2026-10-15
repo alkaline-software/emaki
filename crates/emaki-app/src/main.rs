@@ -15,6 +15,8 @@ mod word;
 mod hub;
 mod look;
 mod panels;
+#[cfg(target_os = "macos")]
+mod pill;
 mod sys;
 mod term_panel;
 mod transcript;
