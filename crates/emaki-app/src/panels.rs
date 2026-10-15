@@ -27,7 +27,7 @@ use emaki_core::git;
 use emaki_core::outline::{self, Kind};
 
 use crate::format::{clock, plural};
-use crate::workbench::{choice_pill, float_shadow, pill_button, Press, pill_button_danger, swallow_click, MenuDo, Notice, Page, Workbench};
+use crate::workbench::{choice_pill, float_shadow, Press, swallow_click, MenuDo, Notice, Page, Workbench};
 
 /// How wide a panel is; both are, so one takes the other's place without
 /// moving the conversation.
@@ -2780,7 +2780,7 @@ impl Workbench {
                     .rounded_t(px(9.))
                     .child(div().flex_1().min_w_0().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(format!("{title}, against git's copy")))
                     .when(peek.can_revert, |d| {
-                        d.child(Button::new("file-peek-revert").outline().xsmall().label("Revert").on_click(cx.listener(|this, _, window, cx| {
+                        d.child(crate::branches::small_pill("file-peek-revert", "icons/undo-2.svg", "Revert", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.revert_file_peek(window, cx)
                         })))
@@ -5861,7 +5861,7 @@ impl Workbench {
                     .child(div().size(px(36.)).rounded_full().bg(theme.primary.opacity(0.10)).flex().items_center().justify_center().child(Icon::default().path("icons/git-branch.svg").with_size(px(17.)).text_color(theme.primary)))
                     .child(div().pt(px(4.)).text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child("Sorry, I can't find that branch"))
                     .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("Do you want to create a new branch instead?"))
-                    .child(div().pt(px(8.)).w_full().child(Button::new("branch-make-new").primary().small().w_full().label("Create New Branch").on_click(cx.listener(move |this, _, window, cx| {
+                    .child(div().pt(px(8.)).w_full().child(choice_pill("branch-make-new", "icons/git-branch.svg", "Create New Branch", Press::Primary, false, &theme).w_full().justify_center().on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
                         this.branch_new_open(Some(typed.clone()).filter(|t| !t.is_empty()), window, cx);
                     }))))
@@ -6320,9 +6320,9 @@ impl Workbench {
                             .when(chosen && above, |d| d.rounded_t(px(0.)))
                             .when(chosen && below, |d| d.rounded_b(px(0.)))
                             .when(!chosen, |d| d.hover(move |s| s.bg(hover)))
-                            .on_click(move |e: &ClickEvent, _, cx| {
+                            .on_click(move |e: &ClickEvent, window, cx| {
                                 // Not the list's too, which lets go.
-                                cx.stop_propagation();
+                                swallow_click(window, cx);
                                 entity.update(cx, |this, cx| this.change_click(path.clone(), e.modifiers(), cx)).ok();
                             })
                             .on_mouse_down(MouseButton::Right, move |e: &MouseDownEvent, _, cx| {
@@ -6568,12 +6568,12 @@ impl Workbench {
                                             })
                                             .when_some(discard, |el, p| {
                                                 let this = cx.entity().downgrade();
-                                                el.child(pill_button_danger("changes-discard", discard_label.clone(), &theme, move |_, _, cx| {
+                                                el.child(crate::branches::small_pill("changes-discard", "icons/undo-2.svg", discard_label.clone(), Press::Danger, false, &theme).on_click(move |_, _, cx| {
                                                     let _ = this.update(cx, |this, cx| this.ask_discard(p.clone(), cx));
                                                 }))
                                             })
-                                            .when_some(open, |el, p| el.child(pill_button("changes-open", "Open", &theme, move |_, _, _| crate::sys::open_path(&p))))
-                                            .when_some(reveal, |el, p| el.child(pill_button("changes-reveal", crate::sys::REVEAL_LABEL, &theme, move |_, _, _| crate::sys::reveal_path(&p)))),
+                                            .when_some(open, |el, p| el.child(crate::branches::small_pill("changes-open", "icons/external-link.svg", "Open", Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&p))))
+                                            .when_some(reveal, |el, p| el.child(crate::branches::small_pill("changes-reveal", "icons/folder-open.svg", crate::sys::REVEAL_LABEL, Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::reveal_path(&p)))),
                                     )
                                     .child(div().flex_1().min_h_0().child(body)),
                             )
@@ -6823,7 +6823,7 @@ impl Workbench {
                 .text_color(theme.muted_foreground)
                 .child(Icon::default().path(crate::assets::file_icon_path(&name)).with_size(px(36.)))
                 .child(div().text_size(px(13.)).text_center().child(why.clone()))
-                .child(pill_button("file-open-default", "Open with default app", &theme, move |_, _, _| crate::sys::open_path(&open_too)))
+                .child(choice_pill("file-open-default", "icons/external-link.svg", "Open with default app", Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&open_too)))
                 .into_any_element(),
         };
         // Code, and markdown or a table as it is written: the toolkit's
@@ -7123,7 +7123,7 @@ impl Workbench {
                     )
                     .when(dirty, |d| {
                         d.child(
-                            div().id("file-save-tip").flex_shrink_0().managed_tooltip(|window, cx| crate::workbench::tip("Save (⌘S)", window, cx)).child(Button::new("file-save").outline().xsmall().label("Save").on_click(cx.listener(|this, _, window, cx| {
+                            div().id("file-save-tip").flex_shrink_0().managed_tooltip(|window, cx| crate::workbench::tip("Save (⌘S)", window, cx)).child(crate::branches::small_pill("file-save", "icons/device-floppy.svg", "Save", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                                 swallow_click(window, cx);
                                 this.save_file(window, cx)
                             })))
@@ -7698,6 +7698,18 @@ impl Workbench {
             // A key pressed as the keyboard presses it, through every
             // listener and binding on the way: press:shift-up.
             t if t.starts_with("press:") => self.pending_press.push(t["press:".len()..].to_string()),
+            // The pointer moved there, in points from the window's top
+            // left, as the mouse moves it: pointer:832:166; clickat: is
+            // a press and a release there.
+            // wheel:<x>:<y>:<dy> is a scroll of that many points there.
+            t if t.starts_with("pointer:") || t.starts_with("clickat:") || t.starts_with("wheel:") => {
+                let mut at = t.splitn(2, ':').nth(1).unwrap_or("").split(':').filter_map(|v| v.parse::<f32>().ok());
+                if let (Some(x), Some(y)) = (at.next(), at.next()) {
+                    let how = if t.starts_with("clickat:") { Some(0.) } else if t.starts_with("wheel:") { Some(at.next().unwrap_or(-200.)) } else { None };
+                    self.pending_pointer.push((point(px(x), px(y)), how));
+                    cx.notify();
+                }
+            }
             "treecaret" => {
                 let s = self.tree_input.read(cx);
                 eprintln!("emaki: tree field {:?} of {}", s.selected_range(), s.value().len());

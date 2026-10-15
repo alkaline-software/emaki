@@ -16,7 +16,7 @@ use emaki_core::agents::{self, Agent, Found, Os};
 use emaki_core::transcript::SessionRef;
 
 use crate::format::plural;
-use crate::workbench::{page_in, pill_button, Page, Scope, Workbench, CONTENT_W};
+use crate::workbench::{page_in, Page, Press, Scope, Workbench, CONTENT_W};
 
 /// How old what was found may be before a visit to the page looks again.
 const AGENTS_FRESH: Duration = Duration::from_secs(20);
@@ -646,7 +646,7 @@ impl Workbench {
             .child(Icon::new(IconName::ChevronRight).with_size(px(11.)))
             .child(div().min_w_0().truncate().child(a.name));
 
-        let link = |id: &'static str, label: &'static str, url: &'static str, theme: &gpui_component::Theme| pill_button(id, label, theme, move |_, _, cx| cx.open_url(url));
+        let link = |id: &'static str, label: &'static str, url: &'static str, theme: &gpui_component::Theme| crate::branches::small_pill(id, "icons/external-link.svg", label, Press::Quiet, false, theme).on_click(move |_, _, cx| cx.open_url(url));
         let head = h_flex()
             .gap(px(16.))
             .items_center()

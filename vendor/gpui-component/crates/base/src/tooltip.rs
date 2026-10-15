@@ -1,9 +1,9 @@
-use std::{rc::Rc, time::Duration};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Div, ElementId, InteractiveElement, IntoElement,
     ParentElement, Pixels, Render, RenderOnce, Role, Stateful, StatefulInteractiveElement, Styled,
-    Task, Window, deferred, div, prelude::FluentBuilder as _, px,
+    Task, Window, canvas, deferred, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::{Placement, Positioner};
@@ -100,6 +100,11 @@ pub struct TooltipOverlay {
     show_task: Option<Task<()>>,
     hide_task: Option<Task<()>>,
     renderer: TooltipRenderer,
+    /// Whether a trigger under the pointer was drawn this frame
+    /// (`claim`). (Emaki addition: a tooltip whose trigger went away
+    /// without the pointer leaving it, a sheet closed by a key or a
+    /// show landing after its trigger had gone, stayed for good.)
+    claimed: Rc<Cell<bool>>,
 }
 
 impl TooltipOverlay {
@@ -114,6 +119,7 @@ impl TooltipOverlay {
             show_task: None,
             hide_task: None,
             renderer: Rc::new(|view, _, _, _| div().child(view).into_any_element()),
+            claimed: Rc::new(Cell::new(false)),
         }
     }
 
@@ -183,6 +189,12 @@ impl TooltipOverlay {
         }));
     }
 
+    /// Said by a trigger as it is drawn with the pointer on it: the
+    /// tooltip showing still has something to belong to.
+    pub fn claim(&self) {
+        self.claimed.set(true);
+    }
+
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         let changed = self.content.is_some()
             || self.previous_bounds.is_some()
@@ -224,12 +236,35 @@ impl Render for TooltipOverlay {
             },
         };
         let rendered = (self.renderer)(view, transition, window, cx);
+        // Deferred, this is prepainted after every trigger in the window:
+        // with none under the pointer drawn this frame, and no hide
+        // already on its way, the tooltip has lost its trigger and goes.
+        self.claimed.set(false);
+        let claimed = self.claimed.clone();
+        let this = cx.entity().downgrade();
+        let orphan = canvas(
+            move |_, _, cx| {
+                if !claimed.get() {
+                    let this = this.clone();
+                    cx.defer(move |cx| {
+                        let _ = this.update(cx, |o, cx| {
+                            if !o.claimed.get() && o.hide_task.is_none() {
+                                o.hide(cx);
+                            }
+                        });
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0();
         deferred(
             TooltipPositioner::new(content.trigger_bounds)
                 .when_some(content.preferred_placement, |this, placement| {
                     this.placement(placement)
                 })
-                .child(rendered),
+                .child(div().relative().child(rendered).child(orphan)),
         )
         .with_priority(2)
         .into_any_element()

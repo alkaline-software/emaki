@@ -343,6 +343,30 @@ pub(crate) enum Dictation {
     Writing,
 }
 
+/// The two halves of Settings, Dictate: the models that write down what
+/// is said, and the ones that clean it up after.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Lane {
+    Speech,
+    Clean,
+}
+
+impl Lane {
+    fn models(self) -> &'static [emaki_core::dictate::Model] {
+        match self {
+            Lane::Speech => emaki_core::dictate::MODELS,
+            Lane::Clean => emaki_core::clean::MODELS,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Lane::Speech => "speech",
+            Lane::Clean => "clean",
+        }
+    }
+}
+
 /// Dictation's two sounds, Emaki's own (`scripts/dictate-sounds.py`): a
 /// chime of two notes rising as it starts to listen, and falling as it
 /// stops. A short system sound was tried and read as the Mac's alert.
@@ -584,6 +608,13 @@ pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearanc
 /// window when that is smaller).
 pub const SETTINGS_W: Pixels = px(820.);
 pub const SETTINGS_H: Pixels = px(580.);
+/// The two slots at a dictation model's right: in use or Use or the
+/// download's line, then Remove or Download or Stop.
+const MODEL_SLOT_W: Pixels = px(96.);
+
+/// More and Reset beside the dictation key's field, each this wide; Show
+/// History under them is both and the gap.
+const DICTATE_PILL_W: Pixels = px(100.);
 pub const SETTINGS_RAIL_W: Pixels = px(180.);
 /// The settings' rows: the column the names stand in, and the width a
 /// control that fills has, so a page's controls start and end together.
@@ -711,6 +742,21 @@ const FOLDER_GONE: &str = "The session's folder is gone";
 /// `el`, which lies over the whole window, fading in over a moment when
 /// it first appears. The id is the element's own: it is forgotten once
 /// the element is no longer drawn, so each appearing plays once.
+/// "Today", "Yesterday", or the date, for dictation's history.
+fn said_day(d: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    let today = chrono::Local::now().date_naive();
+    if d == today {
+        "Today".into()
+    } else if Some(d) == today.pred_opt() {
+        "Yesterday".into()
+    } else if d.year() == today.year() {
+        d.format("%A, %b %-d").to_string()
+    } else {
+        d.format("%b %-d, %Y").to_string()
+    }
+}
+
 fn fade_in(id: &'static str, el: impl IntoElement) -> impl IntoElement {
     div().absolute().inset_0().child(el).with_animation(id, Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| d.opacity(t))
 }
@@ -1944,6 +1990,9 @@ pub struct Workbench {
     /// `EMAKI_GO=treefocus`: the keyboard to the files panel, at the next draw.
     pub(crate) pending_tree_focus: bool,
     pub(crate) pending_press: Vec<String>,
+    /// Where `EMAKI_GO=pointer:<x>:<y>` moves the pointer to.
+    /// None a move, Some(0) a click, Some(dy) a scroll of dy points.
+    pub(crate) pending_pointer: Vec<(Point<Pixels>, Option<f32>)>,
     /// The probe's dictation, started at the next draw, which has the window.
     pending_dictate: bool,
     /// `EMAKI_GO=unarchive:<id>`: that session unarchived at the next draw,
@@ -1957,10 +2006,10 @@ pub struct Workbench {
     pending_dictate_file: Option<String>,
     /// Dictation, under the composer and on its key.
     pub(crate) dictation: Dictation,
-    /// A dictation model coming down: its key, the bytes so far, and the
-    /// word that stops it.
-    dictate_dl: Option<(&'static str, Arc<std::sync::atomic::AtomicU64>, Arc<std::sync::atomic::AtomicBool>)>,
-    /// Why the last download did not finish.
+    /// The models coming down, any number at once: each one's key, the
+    /// bytes so far, and the word that stops it.
+    dictate_dl: Vec<(&'static str, Arc<std::sync::atomic::AtomicU64>, Arc<std::sync::atomic::AtomicBool>)>,
+    /// Which download last did not finish, and why.
     dictate_dl_error: Option<String>,
     /// The dictation key's field in Settings is taking the next keys.
     dictate_key_rec: bool,
@@ -1985,6 +2034,18 @@ pub struct Workbench {
     /// frame to frame: the ring around the button and the bars under the
     /// composer.
     mic_levels: VecDeque<f32>,
+    /// Dictation's history, over Settings while it is open: what is
+    /// kept, the newest first, and the serial its coming in plays under.
+    dictated: Option<(Rc<Vec<emaki_core::dictate::Said>>, u32)>,
+    /// Settings, Dictate: whether each lane's other models are folded
+    /// out under its chosen one, speech first.
+    lanes_open: [bool; 2],
+    /// The words written down are being cleaned up: the line under the
+    /// composer says so. Set off the main thread.
+    dictate_cleaning: Arc<std::sync::atomic::AtomicBool>,
+    /// The history just closed, drawn a moment more as it fades.
+    dictated_gone: Option<(Rc<Vec<emaki_core::dictate::Said>>, u32, Instant)>,
+    dictated_serial: u32,
     /// A file's pane has just been closed: the keys go to the files
     /// tree, where its row is still the chosen one.
     pub(crate) tree_focus_back: bool,
@@ -3022,6 +3083,13 @@ fn effort_pill(options: &Options, model: &str, effort: &str, theme: &gpui_compon
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut cfg = Config::load();
+        // Dictation's history lets go of what has grown too old for it.
+        let keep = cfg.app.dictate_keep.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = emaki_core::dictate::prune(&keep) {
+                eprintln!("emaki: the dictation's history: {e}");
+            }
+        });
         // What Settings no longer asks is what it used to begin at:
         // explanations for the calls waiting on a card, the terminal's
         // rows and margins at their middle step, and its text the size
@@ -3804,13 +3872,14 @@ impl Workbench {
             pending_win_w: None,
             pending_tree_focus: false,
             pending_press: Vec::new(),
+            pending_pointer: Vec::new(),
             pending_dictate: false,
             pending_unarchive: None,
             pending_dictate_key: false,
             pending_dictate_tick: false,
             pending_dictate_file: None,
             dictation: Dictation::Off,
-            dictate_dl: None,
+            dictate_dl: Vec::new(),
             dictate_dl_error: None,
             dictate_key_rec: false,
             dictate_key_focus,
@@ -3821,6 +3890,11 @@ impl Workbench {
             fn_reads: 0,
             settings_glide: Default::default(),
             mic_levels: VecDeque::new(),
+            dictated: None,
+            lanes_open: [false; 2],
+            dictate_cleaning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            dictated_gone: None,
+            dictated_serial: 0,
             tree_focus_back: false,
             pending_new_in: None,
             pending_answer: None,
@@ -5053,6 +5127,22 @@ impl Workbench {
             }
             // The dictation key's Reset, pressed.
             Some("dictate:reset") => self.reset_dictate_key(cx),
+            // Settings' History, opened; `dictate:copy` presses the
+            // newest one's Copy, and `pick:dictate-keep` opens the list
+            // of how long it is kept.
+            Some("dictate:history") => self.open_dictated(cx),
+            Some("dictate:copy") => {
+                if let Some(said) = self.dictated.as_ref().and_then(|(all, _)| all.first().cloned()) {
+                    self.copy_text(format!("said-{}-0", said.at).into(), said.words, cx);
+                }
+            }
+            // The newest one's Copy of what was heard.
+            Some("dictate:copyraw") => {
+                if let Some((at, raw)) = self.dictated.as_ref().and_then(|(all, _)| all.first().and_then(|s| Some((s.at, s.raw.clone()?)))) {
+                    self.copy_text(format!("said-raw-{at}-0").into(), raw, cx);
+                }
+            }
+            Some("pick:dictate-keep") => self.pick_toggle(PickFor::DictateKeep, cx),
             // The first model not here, its Download pressed.
             Some("dictate:get") => {
                 if let Some(m) = emaki_core::dictate::MODELS.iter().find(|m| !emaki_core::dictate::installed(m)) {
@@ -5296,6 +5386,8 @@ impl Workbench {
     pub(crate) fn over_page(&self) -> bool {
         self.search_open
             || self.settings_open
+            || self.dictated.is_some()
+            || self.dictated_gone.as_ref().is_some_and(|(_, _, at)| at.elapsed() < MENU_OUT)
             || self.changes.is_some()
             || self.lightbox.is_some()
             || (self.renaming.is_some() && self.rename_at == RenameAt::Sheet)
@@ -6189,111 +6281,13 @@ impl Workbench {
         } else if !emaki_core::dictate::AVAILABLE {
             vec![div().text_size(px(13.5)).text_color(theme.muted_foreground).child("Dictation is on a Mac only for now.").into_any_element()]
         } else {
-            let in_use = emaki_core::dictate::chosen(&app.dictate_model);
-            let well = if dark { theme.sidebar } else { theme.muted };
-            // A row a model, the heaviest first: its maker's mark, its
-            // name with what it is for, its size and languages, and what
-            // is done with it at the right.
-            let rows = emaki_core::dictate::MODELS.iter().map(|m| {
-                let here = emaki_core::dictate::installed(m);
-                let using = in_use.is_some_and(|u| u.key == m.key);
-                let coming = self.dictate_dl.as_ref().filter(|(k, _, _)| *k == m.key).map(|(_, got, stop)| (got.load(std::sync::atomic::Ordering::Relaxed), Arc::clone(stop)));
-                let mark = if m.maker == "Qwen" { "icons/makers/qwen.svg" } else { "icons/agents/codex.svg" };
-                let size = if m.bytes >= 1_000_000_000 { format!("{:.1} GB", m.bytes as f64 / 1e9) } else { format!("{} MB", m.bytes / 1_000_000) };
-                let side: AnyElement = if let Some((got, stop)) = coming {
-                    let share = (got as f32 / m.bytes.max(1) as f32).clamp(0.0, 1.0);
-                    h_flex()
-                        .gap(px(10.))
-                        .items_center()
-                        .child(
-                            v_flex()
-                                .w(px(96.))
-                                .gap(px(5.))
-                                .child(div().h(px(3.)).w_full().rounded_full().bg(well).child(div().h_full().rounded_full().bg(theme.primary).w(gpui::relative(share))))
-                                .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("{}%", (share * 100.) as u32))),
-                        )
-                        .child(crate::branches::small_pill(SharedString::from(format!("dictate-stop-{}", m.key)), "icons/close.svg", "Stop", Press::Quiet, false, &theme).on_click(move |_, _, cx| {
-                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                            cx.stop_propagation();
-                        }))
-                        .into_any_element()
-                } else if here {
-                    h_flex()
-                        .gap(px(8.))
-                        .items_center()
-                        .child(if using {
-                            h_flex().gap(px(5.)).items_center().text_size(px(12.)).text_color(theme.primary).child(Icon::default().path("icons/check.svg").with_size(px(13.))).child("In use").into_any_element()
-                        } else {
-                            crate::branches::small_pill(SharedString::from(format!("dictate-use-{}", m.key)), "icons/check.svg", "Use", Press::Quiet, false, &theme)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.cfg.app.dictate_model = m.key.to_string();
-                                    let _ = Config::edit(move |c| c.app.dictate_model = m.key.to_string());
-                                    cx.notify();
-                                }))
-                                .into_any_element()
-                        })
-                        .child(crate::branches::small_pill(SharedString::from(format!("dictate-remove-{}", m.key)), "icons/trash.svg", "Remove", Press::Danger, false, &theme).on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if let Err(e) = emaki_core::dictate::remove(m) {
-                                this.notice = Some(Notice::error(format!("not removed: {e}")));
-                            }
-                            cx.notify();
-                        })))
-                        .into_any_element()
-                } else {
-                    crate::branches::small_pill(SharedString::from(format!("dictate-get-{}", m.key)), "icons/download.svg", "Download", Press::Primary, self.dictate_dl.is_some(), &theme)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.download_model(m, cx);
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                };
-                let hover_ring = theme.muted_foreground.opacity(0.45);
-                let edge = theme.muted_foreground.opacity(0.2);
-                h_flex()
-                    .id(SharedString::from(format!("dictate-row-{}", m.key)))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .gap(px(12.))
-                    .items_center()
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(if using { theme.primary } else { edge })
-                    .when(using, |d| d.bg(theme.primary.opacity(0.05)))
-                    // A model that is here is taken up by a click anywhere
-                    // on its row.
-                    .when(here && !using, |d| {
-                        d.cursor_pointer().hover(move |s| s.border_color(hover_ring)).on_click(cx.listener(move |this, _, _, cx| {
-                            this.cfg.app.dictate_model = m.key.to_string();
-                            let _ = Config::edit(move |c| c.app.dictate_model = m.key.to_string());
-                            cx.notify();
-                        }))
-                    })
-                    .child(div().size(px(32.)).flex_shrink_0().rounded(px(8.)).bg(well).flex().items_center().justify_center().child(Icon::default().path(mark).with_size(px(17.)).text_color(theme.foreground)))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(1.))
-                            .child(
-                                h_flex()
-                                    .gap(px(8.))
-                                    .items_baseline()
-                                    .child(div().flex_shrink_0().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(m.name))
-                                    .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(m.about)),
-                            )
-                            .child(div().text_size(px(11.5)).text_color(theme.muted_foreground.opacity(0.8)).child(format!("{} · {size} · {}", m.maker, m.languages))),
-                    )
-                    .child(div().flex_shrink_0().child(side))
-                    .into_any_element()
-            });
+            // Speech to text over the clean-up, each its chosen model with
+            // the others folded under it, and why a download stopped.
             let models = v_flex()
-                .gap(px(12.))
-                .child(div().text_size(px(13.5)).child("Local Models"))
-                .child(v_flex().gap(px(8.)).children(rows))
-                .when_some(self.dictate_dl_error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(theme.danger).child(format!("The download did not finish: {e}."))))
+                .gap(px(22.))
+                .child(self.dictate_lane(Lane::Speech, cx))
+                .child(self.dictate_lane(Lane::Clean, cx))
+                .when_some(self.dictate_dl_error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(theme.danger).child(e)))
                 .into_any_element();
             let recording = self.dictate_key_rec;
             let field = div()
@@ -6331,6 +6325,8 @@ impl Workbench {
                 .child(
                     crate::branches::small_pill("dictate-key-more", "icons/chevron-up.svg", "More", Press::Quiet, false, &theme)
                         .h(px(30.))
+                        .w(DICTATE_PILL_W)
+                        .justify_center()
                         .when(more_open, |d| d.bg(theme.muted_foreground.opacity(0.16)))
                         .managed_tooltip(|window, cx| tip("Modifier keys tapped alone", window, cx))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -6416,12 +6412,44 @@ impl Workbench {
                                     .child(
                                         crate::branches::small_pill("dictate-key-reset", "icons/rotate.svg", "Reset", Press::Quiet, app.dictate_key == emaki_core::config::AppConfig::default().dictate_key, &theme)
                                             .h(px(30.))
+                                            .w(DICTATE_PILL_W)
+                                            .justify_center()
                                             .flex_shrink_0()
                                             .on_click(cx.listener(|this, _, _, cx| this.reset_dictate_key(cx))),
                                     ),
                             )
                             .children(note)
                             .children(guide),
+                    )
+                    .into_any_element(),
+                // How long what dictation writes is kept, and the way to
+                // it: the words go to the composer in view, which may
+                // not be the one meant.
+                h_flex()
+                    .items_center()
+                    .child(div().w(SETTINGS_LABEL_W).flex_shrink_0().pr(px(12.)).text_size(px(13.5)).child("History"))
+                    .child(div().flex_1())
+                    .child(
+                        h_flex()
+                            .w(px(440.))
+                            .flex_shrink_1()
+                            .min_w_0()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().flex_1().min_w_0().child(self.settings_pick_h(PickFor::DictateKeep, "dictate-keep", "icons/history.svg", PillText::plain(emaki_core::dictate::keep(&app.dictate_keep).1.to_string()), px(30.), cx)))
+                            .child(
+                                // As wide as More and Reset above it, so the
+                                // two fields end level.
+                                crate::branches::small_pill("dictate-history", "icons/list-bullets.svg", "Show History", Press::Quiet, false, &theme)
+                                    .h(px(30.))
+                                    .w(DICTATE_PILL_W * 2. + px(8.))
+                                    .justify_center()
+                                    .flex_shrink_0()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        swallow_click(window, cx);
+                                        this.open_dictated(cx);
+                                    })),
+                            ),
                     )
                     .into_any_element(),
             ]);
@@ -6818,6 +6846,8 @@ impl Workbench {
         };
         let measured = plate.is_some();
         let ids: Vec<String> = options.iter().map(|(k, _, _)| format!("{control}-{k}")).collect();
+        let flipped: &'static str = if current == "on" { "off" } else { "on" };
+        let on_track = on.clone();
         let seg_bounds = self.seg_bounds.clone();
         let entity = cx.entity().downgrade();
         let row = h_flex()
@@ -6881,7 +6911,16 @@ impl Workbench {
                         let name = emaki_core::check::LANGUAGES.iter().find(|l| l.0 == key).map(|l| l.1).unwrap_or(key);
                         d.managed_tooltip(move |window, cx| crate::workbench::tip(name, window, cx))
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| on(this, key, window, cx)))
+                    // On and off is a switch: a press on either word, or
+                    // anywhere on the track, turns it the other way.
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if toggle {
+                            swallow_click(window, cx);
+                            on(this, flipped, window, cx)
+                        } else {
+                            on(this, key, window, cx)
+                        }
+                    }))
                     // A choice of the agents page's install step has an
                     // icon before its word, in the word's ink.
                     .when_some(crate::agents_page::choice_icon(control, key), |d, icon| d.gap(px(4.)).child(Icon::default().path(icon).with_size(seg_text + px(1.5))))
@@ -6890,7 +6929,22 @@ impl Workbench {
                     .when_some(flag_of(control, key), |d, flag| d.gap(px(6.)).child(img(flag).w(px(17.)).h(px(12.)).flex_shrink_0()))
                     .child(label)
             }));
-        h_flex().relative().p(pad).rounded(round + px(2.)).bg(track_bg).map(|d| if fill { d.w_full() } else { d.flex_shrink_0() }).children(plate).child(row).into_any_element()
+        h_flex()
+            .id(SharedString::from(format!("{control}-track")))
+            .relative()
+            .p(pad)
+            .rounded(round + px(2.))
+            .bg(track_bg)
+            .map(|d| if fill { d.w_full() } else { d.flex_shrink_0() })
+            .when(toggle, |d| {
+                d.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    on_track(this, flipped, window, cx)
+                }))
+            })
+            .children(plate)
+            .child(row)
+            .into_any_element()
     }
 
     // -- find in the conversation ------------------------------------------
@@ -7240,6 +7294,12 @@ impl Workbench {
     /// `pick_pill` as a field in the settings: the controls' width, the
     /// choice at its left and the mark of a list at its right.
     fn settings_pick(&self, what: PickFor, id: &'static str, icon: &'static str, label: PillText, cx: &Context<Self>) -> AnyElement {
+        self.settings_pick_h(what, id, icon, label, px(32.), cx)
+    }
+
+    /// `settings_pick` that tall, to stand level with a pill of that
+    /// height beside it.
+    fn settings_pick_h(&self, what: PickFor, id: &'static str, icon: &'static str, label: PillText, h: Pixels, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let open = self.pick.as_ref().is_some_and(|p| p.what == what);
         let well = if theme.mode.is_dark() { theme.sidebar } else { theme.muted };
@@ -7250,7 +7310,7 @@ impl Workbench {
             .child(
                 h_flex()
                     .id(SharedString::from(format!("{id}-trigger")))
-                    .h(px(32.))
+                    .h(h)
                     .px(px(10.))
                     .gap(px(8.))
                     .items_center()
@@ -7468,6 +7528,11 @@ impl Workbench {
                     .collect();
                 (rows, emaki_core::dictate::tap(&self.cfg.app.dictate_key).map(|t| t.key.to_string()).unwrap_or_default())
             }
+            // Not saving, then the times, then always.
+            PickFor::DictateKeep => {
+                let rows = emaki_core::dictate::KEEPS.iter().enumerate().map(|(ix, k)| PickRow { rule: ix == 1, ..PickRow::plain(k.0.to_string(), k.1.to_string(), String::new()) }).collect();
+                (rows, emaki_core::dictate::keep(&self.cfg.app.dictate_keep).0.to_string())
+            }
         }
     }
 
@@ -7537,6 +7602,7 @@ impl Workbench {
             PickFor::CodexModel => self.codex_next_set(Pill::Model, key, cx),
             PickFor::CodexEffort => self.codex_next_set(Pill::Effort, key, cx),
             PickFor::DictateKey => self.set_dictate_key(format!("{}{key}", emaki_core::dictate::TAP_PREFIX), cx),
+            PickFor::DictateKeep => self.set_dictate_keep(key, cx),
             PickFor::Folder if key.is_empty() => self.choose_folder(cx),
             PickFor::Folder => {
                 self.new_cwd = key.to_string();
@@ -7575,11 +7641,13 @@ impl Workbench {
         // below the key's row.
         let up = match menu.what {
             PickFor::Folder => false,
-            PickFor::DictateKey => menu.by.top() > px(400.) || menu.by.center().y > view.height * 0.5,
+            PickFor::DictateKey | PickFor::DictateKeep => menu.by.top() > px(400.) || menu.by.center().y > view.height * 0.5,
             _ => menu.by.center().y > view.height * 0.5,
         };
         let keys = menu.what == PickFor::DictateKey;
-        let right = menu.by.left() + px(if keys { 240. } else { 380. }) > view.width - px(8.);
+        // The times kept are a few words each: the list is the field's width.
+        let narrow = keys || menu.what == PickFor::DictateKeep;
+        let right = menu.by.left() + px(if narrow { 240. } else { 380. }) > view.width - px(8.);
         let gap = px(6.);
         // The list is as long as the agent makes it (a dozen models), so
         // it scrolls past the room there is.
@@ -7594,8 +7662,8 @@ impl Workbench {
         let card = v_flex()
             .id(("pick-card", menu.serial as usize))
             .absolute()
-            .min_w(px(if keys { 200. } else { 250. }))
-            .max_w(px(if keys { 240. } else { 380. }))
+            .min_w(if menu.what == PickFor::DictateKeep { menu.by.size.width } else { px(if keys { 200. } else { 250. }) })
+            .max_w(px(if narrow { 240. } else { 380. }))
             .py(px(5.))
             .overflow_hidden()
             .rounded(px(12.))
@@ -7641,7 +7709,7 @@ impl Workbench {
                                 Tint::Plain => div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()),
                                 tint => tinted(name, tint).text_size(px(13.)),
                             })
-                            .when(active && keys, |d| d.child(div().flex_1()))
+                            .when(active && narrow, |d| d.child(div().flex_1()))
                             .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary)))
                             // "Choose a folder…" has a key (`ChooseFolder`).
                             .when(what == PickFor::Folder && key_none, |d| d.child(div().flex_1()).child(kbd_hint("⌘O", &theme))),
@@ -8886,7 +8954,9 @@ impl Workbench {
         };
         // A scroller inside a pane, or on a sheet over the window, with
         // something to scroll: the gesture that begins in it is its own.
-        let inner = self.inner_live.borrow().iter().find(|(h, _)| h.max_offset().y > px(0.) && h.bounds().contains(&e.position)).cloned();
+        // The last drawn is the one on top: a sheet's list over the
+        // settings', a pill's list over a page.
+        let inner = self.inner_live.borrow().iter().rev().find(|(h, _)| h.max_offset().y > px(0.) && h.bounds().contains(&e.position)).cloned();
         let begins = match e.touch_phase {
             TouchPhase::Started => true,
             TouchPhase::Moved => fresh || self.scroll_owner.is_none(),
@@ -9397,7 +9467,9 @@ impl Workbench {
     /// What Escape closes, nearest first: the lightbox, then the search;
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open_ask.is_some() {
+        if self.dictated.is_some() {
+            self.close_dictated(cx);
+        } else if self.open_ask.is_some() {
             self.open_ask = None;
             cx.notify();
         } else if self.manage_ask.is_some() {
@@ -10848,7 +10920,7 @@ impl Workbench {
                         .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                             // The card's own click, which lets the chosen
                             // go, does not hear this one.
-                            cx.stop_propagation();
+                            swallow_click(window, cx);
                             if this.side_banded() {
                                 return;
                             }
@@ -12620,6 +12692,25 @@ impl Workbench {
         }
     }
 
+    /// Escape while the microphone starts or listens: it stops, and what
+    /// it heard is let go unwritten. False when there is nothing to stop,
+    /// so the key does what it does otherwise.
+    fn cancel_dictation(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.dictation {
+            Dictation::Starting => {}
+            #[cfg(target_os = "macos")]
+            Dictation::Listening(..) => {}
+            _ => return false,
+        }
+        // The recorder dropped closes the microphone; one still starting
+        // is dropped when it comes (`start_dictation`).
+        self.dictation = Dictation::Off;
+        #[cfg(target_os = "macos")]
+        crate::sys::play_sound(DICTATE_STOP);
+        cx.notify();
+        true
+    }
+
     /// The microphone on, off the main thread: the first time, the system
     /// asks the person first. With no model here, Settings opens where
     /// one is downloaded.
@@ -12708,6 +12799,11 @@ impl Workbench {
         let Some(model) = emaki_core::dictate::chosen(&self.cfg.app.dictate_model) else {
             return;
         };
+        let keep = self.cfg.app.dictate_keep.clone();
+        // The clean-up's model, when it is on and one is here.
+        let cleaner = emaki_core::clean::chosen(&self.cfg.app.clean_model).filter(|_| self.cfg.app.clean_on);
+        let cleaning = Arc::clone(&self.dictate_cleaning);
+        cleaning.store(false, std::sync::atomic::Ordering::Relaxed);
         self.dictation = Dictation::Writing;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -12720,14 +12816,37 @@ impl Workbench {
                     if audio.iter().all(|s| *s == 0.0) {
                         return Err("No sound came in. Let Emaki use the microphone in System Settings, Privacy & Security, Microphone".to_string());
                     }
-                    emaki_core::dictate::transcribe(model, &audio)
+                    let heard = emaki_core::dictate::transcribe(model, &audio)?;
+                    // Cleaned up when that is on; as it was heard when the
+                    // model fails or does not keep to what was said.
+                    let mut words = heard.clone();
+                    if let Some(cleaner) = cleaner.filter(|_| !heard.is_empty()) {
+                        cleaning.store(true, std::sync::atomic::Ordering::Relaxed);
+                        match emaki_core::clean::tidy(cleaner, &heard) {
+                            Ok(Some(tidied)) => words = tidied,
+                            Ok(None) => {}
+                            Err(e) => eprintln!("emaki: the clean-up: {e}"),
+                        }
+                        cleaning.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if !words.is_empty() {
+                        let raw = (words != heard).then(|| heard.clone());
+                        let said = emaki_core::dictate::Said { at: chrono::Utc::now().timestamp(), words: words.clone(), secs: audio.len() as f32 / emaki_core::dictate::RATE as f32, model: model.key.to_string(), raw };
+                        if let Err(e) = emaki_core::dictate::remember(&said, &keep) {
+                            eprintln!("emaki: the dictation's history: {e}");
+                        }
+                    }
+                    Ok(words)
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.dictation = Dictation::Off;
                 match got {
                     Ok(words) if words.is_empty() => this.notice = Some(Notice::said("Nothing was heard.")),
-                    Ok(words) => this.insert_dictated(&words, window, cx),
+                    Ok(words) => {
+                        this.insert_dictated(&words, window, cx);
+                        this.refresh_dictated(cx);
+                    }
                     Err(e) => this.notice = Some(Notice::error(format!("{e}."))),
                 }
                 cx.notify();
@@ -12844,47 +12963,500 @@ impl Workbench {
                     .child(h_flex().h(px(12.)).gap(px(2.)).items_center().children(bars))
                     .child(div().text_color(red).child("Listening"))
                     .child(div().text_color(theme.muted_foreground).child(format!("{}:{:02}", secs / 60, secs % 60)))
+                    .child(key_text("Esc to cancel").ml(px(4.)).text_color(theme.muted_foreground.opacity(0.75)))
             }
-            Dictation::Writing => h_flex().gap(px(6.)).items_center().text_color(theme.muted_foreground).child(Icon::new(IconName::LoaderCircle).with_size(px(11.)).with_animation("dictate-writing", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU)))).child("Writing it down…"),
+            Dictation::Writing => {
+                // Then, with the clean-up on, that it is being cleaned up:
+                // the words come in over a moment as they change.
+                let cleaning = self.dictate_cleaning.load(std::sync::atomic::Ordering::Relaxed);
+                let said = if cleaning { "Post-processing…" } else { "Writing it down…" };
+                h_flex()
+                    .gap(px(6.))
+                    .items_center()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(IconName::LoaderCircle).with_size(px(11.)).with_animation("dictate-writing", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
+                    .child(div().child(said).with_animation(("dictate-phase", cleaning as usize), Animation::new(Duration::from_millis(180)), |d, t| d.opacity(t)))
+            }
             _ => return None,
         };
         let key = if matches!(self.dictation, Dictation::Writing) { "dictate-line-writing" } else { "dictate-line-listening" };
         Some(line.flex_shrink_0().with_animation(key, Animation::new(Duration::from_millis(180)), |d, t| d.opacity(t)).into_any_element())
     }
 
+    /// A lane's model in use: the one chosen when it is here, else the
+    /// first that is.
+    fn lane_chosen(&self, lane: Lane) -> Option<&'static emaki_core::dictate::Model> {
+        match lane {
+            Lane::Speech => emaki_core::dictate::chosen(&self.cfg.app.dictate_model),
+            Lane::Clean => emaki_core::clean::chosen(&self.cfg.app.clean_model),
+        }
+    }
+
+    /// A model of the lane taken up.
+    fn lane_use(&mut self, lane: Lane, m: &'static emaki_core::dictate::Model, cx: &mut Context<Self>) {
+        match lane {
+            Lane::Speech => {
+                self.cfg.app.dictate_model = m.key.to_string();
+                let _ = Config::edit(move |c| c.app.dictate_model = m.key.to_string());
+            }
+            Lane::Clean => {
+                self.cfg.app.clean_model = m.key.to_string();
+                let _ = Config::edit(move |c| c.app.clean_model = m.key.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// The clean-up turned on or off. On asks for a model on this Mac:
+    /// with none, the list opens where one is downloaded.
+    fn set_clean_on(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && self.lane_chosen(Lane::Clean).is_none() {
+            self.lanes_open[1] = true;
+            self.notice = Some(Notice::said("Download a post-processing model first."));
+            cx.notify();
+            return;
+        }
+        self.cfg.app.clean_on = on;
+        let _ = Config::edit(move |c| c.app.clean_on = on);
+        cx.notify();
+    }
+
+    /// One lane of Settings, Dictate, as a list that drops down: its name
+    /// (the clean-up's with its switch), the model in use, and under it,
+    /// folding out from a press on it, the others, the most capable first.
+    /// With none downloaded, the lane's first choice stands in its place.
+    fn dictate_lane(&self, lane: Lane, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let in_use = self.lane_chosen(lane);
+        let (wanted, title) = match lane {
+            Lane::Speech => (self.cfg.app.dictate_model.as_str(), "Speech to Text"),
+            Lane::Clean => (self.cfg.app.clean_model.as_str(), "Post-processing"),
+        };
+        let models = lane.models();
+        let top = in_use.or_else(|| models.iter().find(|m| m.key == wanted)).unwrap_or(&models[0]);
+        let open = self.lanes_open[lane as usize];
+        let ix = lane as usize;
+        // Post-processing off: its name and its models fade to grey, over a
+        // moment; the switch stays as it is.
+        let live = lane == Lane::Speech || (self.cfg.app.clean_on && in_use.is_some());
+        let fade = self.presence(&format!("lane-live-{}", lane.key()), live, cx);
+        let dim = move |d: Div| -> AnyElement {
+            match fade {
+                Some((coming, n)) => d
+                    .with_animation(ElementId::Name(format!("lane-fade-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { 0.5 + 0.5 * t } else { 1. - 0.5 * t }))
+                    .into_any_element(),
+                None => d.opacity(if live { 1. } else { 0.5 }).into_any_element(),
+            }
+        };
+        let head = h_flex()
+            .h(px(28.))
+            .items_center()
+            .child(div().flex_1().child(dim(div().text_size(px(13.5)).child(title))))
+            .when(lane == Lane::Clean, |d| {
+                let on = self.cfg.app.clean_on && in_use.is_some();
+                d.child(div().flex_shrink_0().child(self.segmented_sized("clean-on", vec![("off", "Off".into(), None), ("on", "On".into(), None)], if on { "on" } else { "off" }, Rc::new(|this, key, _, cx| this.set_clean_on(key == "on", cx)), true, cx)))
+            });
+        // The model in use, with the mark that it opens the others.
+        let chevron = div()
+            .id(SharedString::from(format!("lane-more-{}", lane.key())))
+            .size(px(26.))
+            .flex_shrink_0()
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(theme.muted_foreground)
+            .hover(|s| s.bg(theme.muted))
+            .managed_tooltip(move |window, cx| tip(if open { "Fewer models" } else { "All models" }, window, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                swallow_click(window, cx);
+                this.lanes_open[ix] = !this.lanes_open[ix];
+                cx.notify();
+            }))
+            .child(
+                Icon::default()
+                    .path("icons/chevron-down.svg")
+                    .with_size(px(15.))
+                    .with_animation(ElementId::Name(format!("lane-turn-{}-{open}", lane.key()).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |icon, t| {
+                        let turned = if open { t } else { 1. - t };
+                        icon.rotate(gpui::Radians(turned * std::f32::consts::PI))
+                    }),
+            );
+        let first = self.model_row(lane, top, in_use, Some(chevron.into_any_element()), cx);
+        let others: Vec<AnyElement> = models.iter().filter(|m| m.key != top.key).map(|m| self.model_row(lane, m, in_use, None, cx)).collect();
+        let rest = self.fold_under(format!("lane-rest-{}", lane.key()), open, v_flex().w_full().gap(px(8.)).children(others).into_any_element(), cx);
+        v_flex().gap(px(10.)).child(head).child(dim(v_flex().child(first).children(rest))).into_any_element()
+    }
+
+    /// One model on its row: its maker's mark, its name with what sets it
+    /// apart, its size and languages, and at the right what is done with
+    /// it: Download (a line filling as it comes, with Stop), Use, or "In
+    /// use", with Remove once it is here. The one in use wears the
+    /// accent's edge, and a click on a row that is here takes it up; on
+    /// the lane's first row, `more` stands at the end and the click opens
+    /// the others.
+    fn model_row(&self, lane: Lane, m: &'static emaki_core::dictate::Model, in_use: Option<&'static emaki_core::dictate::Model>, more: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let well = if dark { theme.sidebar } else { theme.muted };
+        let here = emaki_core::dictate::installed(m);
+        let using = in_use.is_some_and(|u| u.key == m.key);
+        // A clean-up model chosen while the clean-up is off is not in use.
+        let resting = lane == Lane::Clean && !self.cfg.app.clean_on;
+        let coming = self.dictate_dl.iter().find(|(k, _, _)| *k == m.key).map(|(_, got, stop)| (got.load(std::sync::atomic::Ordering::Relaxed), Arc::clone(stop)));
+        let mark = if m.maker == "Qwen" { "icons/makers/qwen.svg" } else { "icons/agents/codex.svg" };
+        let size = if m.bytes >= 1_000_000_000 { format!("{:.1} GB", m.bytes as f64 / 1e9) } else { format!("{} MB", m.bytes / 1_000_000) };
+        // Two slots of one width at the right, so every row's buttons are
+        // one size and stand in one column: what the model is to this Mac
+        // (in use, Use, or how much has come), then what can be done to it
+        // (Remove, Download, Stop).
+        let slot = |el: AnyElement| div().w(MODEL_SLOT_W).flex_shrink_0().flex().justify_center().child(el).into_any_element();
+        // Post-processing turned off is grey throughout: no accent, no red.
+        let pill = |id: String, icon: &'static str, word: &'static str, kind: Press| crate::branches::small_pill(SharedString::from(id), icon, word, if resting { Press::Quiet } else { kind }, false, &theme).w(MODEL_SLOT_W).px(px(8.)).justify_center();
+        let (first, second): (Option<AnyElement>, AnyElement) = if let Some((got, stop)) = coming {
+            let share = (got as f32 / m.bytes.max(1) as f32).clamp(0.0, 1.0);
+            let bar = v_flex()
+                .w_full()
+                .gap(px(5.))
+                .child(div().h(px(3.)).w_full().rounded_full().bg(well).child(div().h_full().rounded_full().bg(theme.primary).w(gpui::relative(share))))
+                .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("{}%", (share * 100.) as u32)))
+                .into_any_element();
+            let stop = pill(format!("dictate-stop-{}", m.key), "icons/close.svg", "Stop", Press::Quiet).on_click(move |_, window, cx| {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                swallow_click(window, cx);
+            });
+            (Some(bar), stop.into_any_element())
+        } else if here {
+            let state = if using {
+                let ink = if resting { theme.muted_foreground } else { theme.primary };
+                h_flex().gap(px(5.)).items_center().text_size(px(12.)).text_color(ink).child(Icon::default().path("icons/check.svg").with_size(px(13.))).child(if resting { "Chosen" } else { "In use" }).into_any_element()
+            } else {
+                pill(format!("dictate-use-{}", m.key), "icons/check.svg", "Use", Press::Quiet)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.lane_use(lane, m, cx);
+                    }))
+                    .into_any_element()
+            };
+            let remove = pill(format!("dictate-remove-{}", m.key), "icons/trash.svg", "Remove", Press::Danger).on_click(cx.listener(move |this, _, window, cx| {
+                swallow_click(window, cx);
+                let gone = match lane {
+                    Lane::Speech => emaki_core::dictate::remove(m),
+                    Lane::Clean => emaki_core::clean::remove(m),
+                };
+                if let Err(e) = gone {
+                    this.notice = Some(Notice::error(format!("not removed: {e}")));
+                }
+                cx.notify();
+            }));
+            (Some(state), remove.into_any_element())
+        } else {
+            let get = pill(format!("dictate-get-{}", m.key), "icons/download.svg", "Download", Press::Primary).on_click(cx.listener(move |this, _, window, cx| {
+                swallow_click(window, cx);
+                this.download_model(m, cx);
+                cx.notify();
+            }));
+            (None, get.into_any_element())
+        };
+        let side: AnyElement = h_flex().gap(px(8.)).items_center().child(slot(first.unwrap_or_else(|| div().into_any_element()))).child(slot(second)).into_any_element();
+        let hover_ring = theme.muted_foreground.opacity(0.45);
+        let edge = theme.muted_foreground.opacity(0.2);
+        let lit = using && !resting;
+        let opens = more.is_some();
+        let ix = lane as usize;
+        h_flex()
+            .id(SharedString::from(format!("dictate-row-{}", m.key)))
+            .w_full()
+            .pl(px(12.))
+            .pr(px(8.))
+            .py(px(8.))
+            .gap(px(12.))
+            .items_center()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(if lit { theme.primary } else { edge })
+            .when(lit, |d| d.bg(theme.primary.opacity(0.05)))
+            // The lane's first row opens the others; any other that is
+            // here is taken up by a click anywhere on it.
+            .when(opens, |d| {
+                d.cursor_pointer().hover(move |s| s.border_color(hover_ring)).on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.lanes_open[ix] = !this.lanes_open[ix];
+                    cx.notify();
+                }))
+            })
+            .when(!opens && here && !using, |d| {
+                d.cursor_pointer().hover(move |s| s.border_color(hover_ring)).on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.lane_use(lane, m, cx);
+                }))
+            })
+            .child(div().size(px(32.)).flex_shrink_0().rounded(px(8.)).bg(well).flex().items_center().justify_center().child(Icon::default().path(mark).with_size(px(17.)).text_color(theme.foreground)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(1.))
+                    // The name and its size, then what sets it apart and
+                    // the languages it knows; the maker is its mark.
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_baseline()
+                            .child(div().flex_shrink_0().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(m.name))
+                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(theme.muted_foreground).child(size)),
+                    )
+                    .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(format!("{} · {}", m.about, m.languages))),
+            )
+            .child(div().flex_shrink_0().child(side))
+            // Every row keeps the chevron's room, so what is at the right
+            // stands at one edge down the lane.
+            .child(more.unwrap_or_else(|| div().w(px(26.)).flex_shrink_0().into_any_element()))
+            .into_any_element()
+    }
+
+    /// How long dictation's history keeps what it wrote: set, and what
+    /// is older let go of now, off the main thread.
+    fn set_dictate_keep(&mut self, key: &str, cx: &mut Context<Self>) {
+        let key = emaki_core::dictate::keep(key).0.to_string();
+        self.cfg.app.dictate_keep = key.clone();
+        let _ = Config::edit({
+            let key = key.clone();
+            move |c| c.app.dictate_keep = key
+        });
+        cx.spawn(async move |this, cx| {
+            let pruned = cx.background_executor().spawn(async move { emaki_core::dictate::prune(&key) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(e) = pruned {
+                    this.notice = Some(Notice::error(format!("The history was not trimmed: {e}.")));
+                }
+                this.refresh_dictated(cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Dictation's history, opened over Settings.
+    fn open_dictated(&mut self, cx: &mut Context<Self>) {
+        self.dictated_serial += 1;
+        self.dictated_gone = None;
+        self.dictated = Some((Rc::new(emaki_core::dictate::history(&self.cfg.app.dictate_keep)), self.dictated_serial));
+        cx.notify();
+    }
+
+    /// The history read again while it is open, keeping its serial so
+    /// it does not come in again.
+    fn refresh_dictated(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, serial)) = self.dictated.take() {
+            self.dictated = Some((Rc::new(emaki_core::dictate::history(&self.cfg.app.dictate_keep)), serial));
+            cx.notify();
+        }
+    }
+
+    /// The history put away: it fades where it was, taking no click.
+    fn close_dictated(&mut self, cx: &mut Context<Self>) {
+        if let Some((all, serial)) = self.dictated.take() {
+            self.dictated_gone = Some((all, serial, Instant::now()));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(MENU_OUT + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.dictated_gone.as_ref().is_some_and(|(_, _, at)| at.elapsed() >= MENU_OUT) {
+                        this.dictated_gone = None;
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// Dictation's history: a sheet over Settings, the newest first under
+    /// the day each was said, every one with its time, its length and a
+    /// Copy that shows on the pointer. It rises in as it fades in, and
+    /// fades out where it was (`gone`), taking no click then.
+    fn render_dictated(&self, all: Rc<Vec<emaki_core::dictate::Said>>, serial: u32, gone: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let keep = emaki_core::dictate::keep(&self.cfg.app.dictate_keep);
+        let (scroll, _) = self.kept_scroll(format!("history-{serial}").into(), Inner::Over);
+        let well = if dark { theme.sidebar } else { theme.muted };
+        let hover_bg = if dark { theme.foreground.opacity(0.05) } else { theme.muted.opacity(0.7) };
+        let count = all.len();
+        // Under the title, how many and for how long; with none kept the
+        // middle of the sheet says it.
+        let sub = match (count, keep.2) {
+            (0, _) => None,
+            (n, None) => Some(format!("{} · kept on this Mac", plural(n, "dictation", "dictations"))),
+            (n, Some(_)) => Some(format!("{} · {} on this Mac", plural(n, "dictation", "dictations"), keep.1.to_lowercase().replacen("keep", "kept", 1))),
+        };
+        let mut body = v_flex().px(px(12.)).pt(px(6.)).pb(px(14.));
+        let mut day = String::new();
+        for (ix, said) in all.iter().enumerate() {
+            let at = chrono::DateTime::from_timestamp(said.at, 0).map(|t| t.with_timezone(&chrono::Local));
+            let this_day = at.map(|t| said_day(t.date_naive())).unwrap_or_default();
+            if this_day != day {
+                body = body.child(div().flex_shrink_0().px(px(10.)).pt(px(if ix == 0 { 6. } else { 14. })).pb(px(4.)).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(this_day.clone()));
+                day = this_day;
+            }
+            let secs = said.secs.round() as u64;
+            let mut meta = vec![at.map(|t| t.format("%H:%M").to_string()).unwrap_or_default(), format!("{}:{:02}", secs / 60, secs % 60)];
+            meta.extend(emaki_core::dictate::model(&said.model).map(|m| m.name.to_string()));
+            let group: SharedString = format!("said-row-{ix}").into();
+            // A Copy beside each text it copies: the words that went in,
+            // and what was heard when post-processing changed them. They
+            // show on the pointer, and the one pressed keeps its tick a
+            // moment.
+            let copy = |key: SharedString, text: String, said: &'static str, cx: &mut Context<Self>| {
+                let done = self.copied.as_ref() == Some(&key);
+                div()
+                    .id(key.clone())
+                    .size(px(26.))
+                    .flex_shrink_0()
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .opacity(if done { 1. } else { 0. })
+                    .group_hover(group.clone(), |s| s.opacity(1.))
+                    .hover(move |s| s.bg(well))
+                    .managed_tooltip(move |window, cx| tip(if done { "Copied" } else { said }, window, cx))
+                    .when(!gone, |d| {
+                        d.on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.copy_text(key.clone(), text.clone(), cx);
+                        }))
+                    })
+                    .child(Icon::default().path(if done { "icons/check.svg" } else { "icons/copy.svg" }).with_size(px(13.)).text_color(if done { theme.primary } else { theme.muted_foreground }))
+            };
+            let line = |text: AnyElement, button: AnyElement| h_flex().items_start().gap(px(10.)).child(div().flex_1().min_w_0().child(text)).child(button);
+            let heard = said.raw.clone();
+            let words = line(
+                div().text_size(px(13.5)).line_height(px(20.)).whitespace_normal().child(said.words.clone()).into_any_element(),
+                copy(format!("said-{}-{ix}", said.at).into(), said.words.clone(), if heard.is_some() { "Copy post-processed" } else { "Copy" }, cx).into_any_element(),
+            );
+            let heard = heard.map(|raw| {
+                line(
+                    div().text_size(px(12.5)).line_height(px(18.)).whitespace_normal().text_color(theme.muted_foreground).child(raw.clone()).into_any_element(),
+                    copy(format!("said-raw-{}-{ix}", said.at).into(), raw, "Copy as heard", cx).into_any_element(),
+                )
+            });
+            body = body.child(
+                v_flex()
+                    .id(("said", ix))
+                    .group(group.clone())
+                    .flex_shrink_0()
+                    .pl(px(10.))
+                    .pr(px(8.))
+                    .py(px(8.))
+                    .gap(px(4.))
+                    .rounded(px(10.))
+                    .hover(move |s| s.bg(hover_bg))
+                    .child(words)
+                    // As it was heard, when post-processing changed it.
+                    .children(heard)
+                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground.opacity(0.85)).child(meta.join(" · "))),
+            );
+        }
+        // Nothing to show: a mark on a plate and a line, in the middle.
+        let empty = (count == 0).then(|| {
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap(px(10.))
+                .pb(px(24.))
+                .child(div().size(px(44.)).rounded_full().bg(well).flex().items_center().justify_center().child(Icon::default().path("icons/history.svg").with_size(px(20.)).text_color(theme.muted_foreground)))
+                .child(div().text_size(px(13.5)).text_color(theme.muted_foreground).child(if keep.2 == Some(0) { "Dictations are not saved." } else { "Nothing dictated yet." }))
+        });
+        let sheet = v_flex()
+            .id(("history-sheet", serial as usize))
+            .occlude()
+            .on_click(|_, window, cx| swallow_click(window, cx))
+            // Smaller than Settings both ways, so it reads as lying on it.
+            .w(px(540.))
+            .h(SETTINGS_H - px(72.))
+            .max_w(gpui::relative(0.86))
+            .max_h(gpui::relative(0.76))
+            .rounded(px(18.))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(float_shadow(&theme))
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .pl(px(22.))
+                    .pr(px(14.))
+                    .pt(px(16.))
+                    .pb(px(14.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Dictation History")).children(sub.map(|sub| div().text_size(px(12.)).text_color(theme.muted_foreground).child(sub))))
+                    .child(Button::new("history-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").when(!gone, |b| b.on_click(cx.listener(|this, _, _, cx| this.close_dictated(cx))))),
+            )
+            .map(|d| match empty {
+                Some(empty) => d.child(empty),
+                None => d.child(v_flex().relative().flex_1().min_h_0().child(v_flex().id(("history-rows", serial as usize)).flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).child(body)).vertical_scrollbar(&scroll)),
+            });
+        let scrim = div().id(("history-scrim", serial as usize)).absolute().inset_0().occlude().bg(theme.overlay).flex().items_center().justify_center();
+        if gone {
+            return scrim.child(sheet).with_animation(ElementId::Name(format!("history-out-{serial}").into()), Animation::new(MENU_OUT), |d, t| d.opacity(1. - t)).into_any_element();
+        }
+        scrim
+            .on_click(cx.listener(|this, _, _, cx| this.close_dictated(cx)))
+            .child(sheet.with_animation(ElementId::Name(format!("history-rise-{serial}").into()), Animation::new(MENU_IN * 2).with_easing(ease_out_quint()), |d, t| d.mt(px(14.) * (1. - t))))
+            .with_animation(ElementId::Name(format!("history-in-{serial}").into()), Animation::new(MENU_IN * 2).with_easing(ease_out_quint()), |d, t| d.opacity(t))
+            .into_any_element()
+    }
+
     /// A model downloaded on its own thread, the panel drawn again as the
     /// bytes come.
+    /// Any number of models come at once, each on its own thread; one
+    /// already coming is not asked for twice.
     fn download_model(&mut self, m: &'static emaki_core::dictate::Model, cx: &mut Context<Self>) {
-        if self.dictate_dl.is_some() {
+        if self.dictate_dl.iter().any(|(k, _, _)| *k == m.key) {
             return;
         }
         let got = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.dictate_dl = Some((m.key, Arc::clone(&got), Arc::clone(&stop)));
+        let ticking = !self.dictate_dl.is_empty();
+        self.dictate_dl.push((m.key, Arc::clone(&got), Arc::clone(&stop)));
         self.dictate_dl_error = None;
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
             let _ = tx.send(emaki_core::dictate::download(m, &got, &stop));
         });
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_millis(250)).await;
-            let on = this.update(cx, |this, cx| {
-                cx.notify();
-                this.dictate_dl.is_some()
-            });
-            if !on.unwrap_or(false) {
-                break;
-            }
-        })
-        .detach();
+        // One clock draws them all again while any is coming.
+        if !ticking {
+            cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let on = this.update(cx, |this, cx| {
+                    cx.notify();
+                    !this.dictate_dl.is_empty()
+                });
+                if !on.unwrap_or(false) {
+                    break;
+                }
+            })
+            .detach();
+        }
         cx.spawn(async move |this, cx| {
             let done = rx.await.unwrap_or_else(|_| Err("the download stopped".into()));
             let _ = this.update(cx, |this, cx| {
-                this.dictate_dl = None;
+                this.dictate_dl.retain(|(k, _, _)| *k != m.key);
                 match done {
                     Ok(()) => {}
                     Err(e) if e == "stopped" => {}
-                    Err(e) => this.dictate_dl_error = Some(e),
+                    Err(e) => this.dictate_dl_error = Some(format!("{} did not finish downloading: {e}.", m.name)),
                 }
                 cx.notify();
             });
@@ -13380,8 +13952,8 @@ impl Workbench {
                                 .id(SharedString::from(format!("srow-chevron-{p}")))
                                 .flex_shrink_0()
                                 .when(manage, |d| {
-                                    d.p(px(6.)).m(px(-6.)).rounded(px(6.)).hover(|s| s.bg(theme.border)).on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
+                                    d.p(px(6.)).m(px(-6.)).rounded(px(6.)).hover(|s| s.bg(theme.border)).on_click(cx.listener(move |this, _, window, cx| {
+                                        swallow_click(window, cx);
                                         this.sessions_toggle(&chevron_of, cx);
                                     }))
                                 })
@@ -14014,7 +14586,10 @@ impl Workbench {
                 .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "waiting-glyph"))
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said))
                 .child(div().flex_1().min_w_0().truncate().child(where_))
-                .when(in_terminal && waiting_on, |d| d.child(Button::new("waiting-terminal").primary().small().label(if own { "Show the terminal" } else { "Open the terminal" }).on_click(cx.listener(|this, _, _, cx| this.go_to_terminal(cx)))))
+                .when(in_terminal && waiting_on, |d| d.child(crate::branches::small_pill("waiting-terminal", "icons/terminal.svg", if own { "Show the terminal" } else { "Open the terminal" }, Press::Primary, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.go_to_terminal(cx)
+                }))))
                 // The card that takes the answer, when the reader has
                 // gone up the conversation and left it behind.
                 .when(asked && !at_end && waiting_on, |d| {
@@ -15003,9 +15578,14 @@ impl Workbench {
                     // The review's two choices are the card's buttons.
                     el.child(h_flex().gap(px(8.)).items_center().children(d.options.iter().enumerate().map(|(i, o)| {
                         let n = o.n;
-                        let b = Button::new(SharedString::from(format!("dialog-review-{n}"))).small().label(o.label.clone()).disabled(busy);
-                        let b = if i == 0 { b.primary() } else { b.outline() };
-                        b.on_click(cx.listener(move |this, _, _, cx| this.dialog_send(vec![DialogStep { keys: n.to_string(), until: None }], cx)))
+                        // The first is the answer the review is for.
+                        let (icon, kind) = if i == 0 { ("icons/check.svg", Press::Primary) } else { ("icons/close.svg", Press::Quiet) };
+                        choice_pill(SharedString::from(format!("dialog-review-{n}")), icon, o.label.clone(), kind, busy, &theme).when(!busy, |b| {
+                            b.on_click(cx.listener(move |this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.dialog_send(vec![DialogStep { keys: n.to_string(), until: None }], cx)
+                            }))
+                        })
                     })))
                 })
                 .when(!review, |el| el.child(
@@ -15013,12 +15593,21 @@ impl Workbench {
                         .gap(px(10.))
                         .items_center()
                         .when(d.multi, |el| {
-                            el.child(Button::new("dialog-next").primary().small().label("Next").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\t".into(), until: None }], cx))))
+                            el.child(choice_pill("dialog-next", "icons/arrow-right.svg", "Next", Press::Primary, busy, &theme).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.dialog_send(vec![DialogStep { keys: "\t".into(), until: None }], cx)
+                            }))))
                         })
                         .when(previews, |el| {
-                            el.child(Button::new("dialog-choose").primary().small().label("Choose").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\r".into(), until: None }], cx))))
+                            el.child(choice_pill("dialog-choose", "icons/check.svg", "Choose", Press::Primary, busy, &theme).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.dialog_send(vec![DialogStep { keys: "\r".into(), until: None }], cx)
+                            }))))
                         })
-                        .child(Button::new("dialog-cancel").ghost().small().label("Cancel  esc").disabled(busy).on_click(cx.listener(|this, _, _, cx| this.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx))))
+                        .child(choice_pill("dialog-cancel", "icons/close.svg", "Cancel", Press::Quiet, busy, &theme).child(key_text("Esc")).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx)
+                        }))))
                         .child(div().flex_1())
                         .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if typed { "or type an answer below" } else { "" })),
                 ));
@@ -15133,7 +15722,10 @@ impl Workbench {
                             swallow_click(window, cx);
                             this.answer_permission(id_deny.clone(), false, cx)
                         })))
-                        .when(first && several, |d| d.child(div().flex_1()).child(Button::new("allow-all").ghost().small().label("Allow all").on_click(cx.listener(|this, _, _, cx| this.allow_all_pending(cx))))),
+                        .when(first && several, |d| d.child(div().flex_1()).child(choice_pill("allow-all", "icons/circle-check.svg", "Allow all", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.allow_all_pending(cx)
+                        })))),
                 )
                 .into_any_element()
         };
@@ -15291,7 +15883,12 @@ impl Workbench {
                     .items_center()
                     .when(by_button, |d| {
                         let rid = p.request_id.clone();
-                        d.child(Button::new(SharedString::from(format!("answer-{}", p.request_id))).primary().small().label("Answer").disabled(!ready).on_click(cx.listener(move |this, _, _, cx| this.submit_question(rid.clone(), cx))))
+                        d.child(choice_pill(SharedString::from(format!("answer-{}", p.request_id)), "icons/check.svg", "Answer", Press::Primary, !ready, &theme).when(ready, |b| {
+                            b.on_click(cx.listener(move |this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.submit_question(rid.clone(), cx)
+                            }))
+                        }))
                     })
                     .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child("or type an answer below")),
             )
@@ -16141,7 +16738,7 @@ impl Workbench {
                         // the key to itself otherwise.
                         if this.slash_key(SlashKey::Close, window, cx) {
                             cx.stop_propagation();
-                        } else if this.pick.is_some() || this.dialog_seen.is_some() || this.settings_open || this.lightbox.is_some() || this.search_open || this.find_open || this.term_open.is_some() {
+                        } else if this.pick.is_some() || this.dictated.is_some() || this.dialog_seen.is_some() || this.settings_open || this.lightbox.is_some() || this.search_open || this.find_open || this.term_open.is_some() {
                             this.escape(window, cx);
                             cx.stop_propagation();
                         } else if this.escape_stops(cx) {
@@ -16345,7 +16942,7 @@ impl Workbench {
                     .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child("No coding agent is installed"))
                     .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("A session needs Claude Code or Codex. Install either one to begin.")),
             )
-            .child(pill_button("home-agents", "Set up an agent", &theme, cx.listener(|this, _, window, cx| {
+            .child(choice_pill("home-agents", "icons/sparkles.svg", "Set up an agent", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.show_agents(None, cx);
             })));
@@ -16436,8 +17033,8 @@ impl Workbench {
                             .flex_shrink_0()
                             .gap(px(4.))
                             .items_center()
-                            .when_some(path_open, |d, p| d.child(pill_button("lb-open", "Open", &theme, move |_, _, _| crate::sys::open_path(&p))))
-                            .when_some(path_reveal, |d, p| d.child(pill_button("lb-reveal", crate::sys::REVEAL_LABEL, &theme, move |_, _, _| crate::sys::reveal_path(&p))))
+                            .when_some(path_open, |d, p| d.child(choice_pill("lb-open", "icons/external-link.svg", "Open", Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&p))))
+                            .when_some(path_reveal, |d, p| d.child(choice_pill("lb-reveal", "icons/folder-open.svg", crate::sys::REVEAL_LABEL, Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::reveal_path(&p))))
                             .child(Button::new("lb-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| {
                                 this.lightbox = None;
                                 cx.notify();
@@ -16914,33 +17511,6 @@ pub fn agent_glyph(agent: AgentId, size: Pixels, color: Hsla, working: bool, id:
     }
 }
 
-/// A small outlined pill with a word on it, the same drawing as the Explain
-/// pill on a tool row: the label sits in the middle of a fixed height, so
-/// two of them side by side line up.
-pub fn pill_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: &gpui_component::Theme, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
-    h_flex()
-        .id(id)
-        .flex_shrink_0()
-        .h(px(24.))
-        .px(px(10.))
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .border_1()
-        // The line an input has: a panel's own border is the panel's
-        // shade in the dark appearance, and the button had no edge.
-        .border_color(theme.input)
-        .cursor_pointer()
-        .text_size(px(12.))
-        .text_color(theme.foreground)
-        .hover(|s| s.border_color(theme.primary.opacity(0.6)).bg(theme.primary.opacity(0.10)))
-        .active(|s| s.border_color(theme.primary).bg(theme.primary.opacity(0.22)))
-        .on_click(on_click)
-        .child(label.into())
-}
-
-/// `pill_button` for something that cannot be taken back: in the
-/// theme's red, at rest too.
 /// What a choice on a card is, which is how its pill is drawn.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Press {
@@ -16989,28 +17559,6 @@ pub(crate) fn choice_pill(id: impl Into<ElementId>, icon: &'static str, label: i
         .when(!icon.is_empty(), |d| d.child(Icon::default().path(icon).with_size(px(14.)).text_color(ink)))
         .child(label.into())
         .map(|d| if off { d.opacity(0.4) } else { d.cursor_pointer().hover(move |s| s.bg(hover)) })
-}
-
-pub fn pill_button_danger(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: &gpui_component::Theme, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
-    let red = theme.danger;
-    h_flex()
-        .id(id)
-        .flex_shrink_0()
-        .h(px(24.))
-        .px(px(10.))
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .border_1()
-        .border_color(red.opacity(0.55))
-        .bg(red.opacity(0.10))
-        .cursor_pointer()
-        .text_size(px(12.))
-        .text_color(red)
-        .hover(move |s| s.border_color(red).bg(red.opacity(0.20)))
-        .active(move |s| s.border_color(red).bg(red.opacity(0.32)))
-        .on_click(on_click)
-        .child(label.into())
 }
 
 /// The icon a key's sign is drawn with: none for a character that is
@@ -17559,6 +18107,8 @@ pub(crate) enum PickFor {
     /// In Settings, dictation's key as modifiers tapped alone, which no
     /// key pressed in its field can be: the More beside it.
     DictateKey,
+    /// In Settings, how long dictation's history keeps what it wrote.
+    DictateKeep,
 }
 
 /// A pill's list while it is open: every choice with a line on what it
@@ -17817,6 +18367,17 @@ impl Render for Workbench {
             self.focus_composer(window, cx);
             window.defer(cx, |_, _| eprintln!("emaki: dictation taken {}", crate::sys::start_dictation()));
         }
+        for (at, how) in std::mem::take(&mut self.pending_pointer) {
+            window.defer(cx, move |window, cx| {
+                window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                if let Some(dy) = how.filter(|dy| *dy != 0.) {
+                    window.dispatch_event(gpui::PlatformInput::ScrollWheel(ScrollWheelEvent { position: at, delta: ScrollDelta::Pixels(point(px(0.), px(dy))), modifiers: Modifiers::default(), touch_phase: TouchPhase::Started }), cx);
+                } else if how.is_some() {
+                    window.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }), cx);
+                    window.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: 1 }), cx);
+                }
+            });
+        }
         for key in std::mem::take(&mut self.pending_press) {
             window.defer(cx, move |window, cx| {
                 if let Ok(key) = gpui::Keystroke::parse(&key) {
@@ -18018,6 +18579,18 @@ impl Render for Workbench {
             // ⌘⇧G steps the find bar back while it is open, and is
             // the comparison's key otherwise.
             .on_action(cx.listener(|this, _: &FindPrev, _, cx| if this.find_open { this.find_step(-1, cx) } else { this.toggle_changes(cx) }))
+            // Escape stops dictation before anything else it does, in
+            // whatever field has the keys.
+            .capture_action(cx.listener(|this, _: &Escape, _, cx| {
+                if this.cancel_dictation(cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_component::input::Escape, _, cx| {
+                if this.cancel_dictation(cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 if this.narrow && this.sidebar_peek {
                     this.sidebar_peek = false;
@@ -18086,6 +18659,8 @@ impl Render for Workbench {
             // one, they opened behind it. Only a menu or a list, which
             // the settings open themselves, is over them.
             .when(self.settings_open, |d| d.child(self.render_settings(cx)))
+            .when_some(self.dictated_gone.clone().filter(|(_, _, at)| at.elapsed() < MENU_OUT), |d, (all, serial, _)| d.child(self.render_dictated(all, serial, true, cx)))
+            .when_some(self.dictated.clone(), |d, (all, serial)| d.child(self.render_dictated(all, serial, false, cx)))
             .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
             .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
             .when_some(self.pick_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))

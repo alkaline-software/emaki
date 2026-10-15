@@ -12,7 +12,11 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`,
   answer a card is for. Every choice on a card that asks something is
   one, and so is any new button; the toolkit's `Button` is not used for
   a new one. A choice in a menu has an icon too (`MenuDo::icon`).
-  On a strip or a foot line it is the smaller `branches::small_pill`.
+  On a strip or a foot line it is the smaller `branches::small_pill`. No button has
+  a word and no icon, and none is the toolkit's `Button` with a label:
+  the last of those, and the plain outlined pill they were drawn as
+  before, were taken out. The toolkit's `Button` stays for a button that
+  is an icon alone (a sheet's close).
 - **A clip in gpui is a rectangle,** `overflow_hidden` too: a ground
   (a fill, a hover, a chosen row, a header strip, a rail, a picture)
   that reaches a rounded card's corner stands square past its curve.

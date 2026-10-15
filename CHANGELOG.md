@@ -5,6 +5,16 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.6
+
+- Dictation post-processing: a small model downloaded to this Mac (Qwen3.5 4B, 2B or 0.8B) removes hesitations, applies corrections ("100, no, 200"), mends grammar and makes lists, in any language, without translating. Turn it on in Settings, Dictate.
+- Settings, Dictate has two lists, Speech to Text and Post-processing, each showing the model in use and opening to the rest. Several models can download at once.
+- Dictation history: kept on this Mac for as long as you choose, with a window to look back and copy what was said, as heard or post-processed.
+- Dictation starts and stops on a modifier tapped alone, such as Right ⌘ or Fn, chosen under More; Esc cancels it while listening. Softer chimes.
+- The Agents page shows the steps for this machine only, and GitHub in place of GitHub Desktop.
+- Every button has an icon, and every Off and On switch turns at a click anywhere on it.
+- Fixes: sessions ordered by when they last did something; a tooltip left on screen after its sheet closed; text that went on selecting after a click in the Changes sheet; scrolling in a window over Settings.
+
 ## v0.2.5
 
 - Dictation: talk into the composer with the microphone button or ⌘⇧D. A model you download in Settings, Dictate (Qwen3-ASR or Whisper) writes it down on this Mac, Chinese and English mixed. Mac only for now.

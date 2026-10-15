@@ -21,7 +21,7 @@ use emaki_core::model::AgentId;
 use emaki_core::transcript::SessionRef;
 use emaki_core::pty::{self, Pty};
 
-use crate::workbench::{pill_button, swallow_click, term_bytes, MenuDo, Page, TabGhost, CloseTab, TermBackTab, TermClear, TermNewTab, TermTab, Workbench, TERMINAL_CONTEXT};
+use crate::workbench::{swallow_click, Press, term_bytes, MenuDo, Page, TabGhost, CloseTab, TermBackTab, TermClear, TermNewTab, TermTab, Workbench, TERMINAL_CONTEXT};
 
 /// How wide the panel is to begin with, and the least it is dragged to.
 pub(crate) const TERM_W: Pixels = px(520.);
@@ -1449,7 +1449,7 @@ impl Workbench {
                         .text_color(hsla(mix(ink, ground, 0.4)))
                         .child(if agent { "The agent's terminal has ended." } else { "The shell has ended." })
                         .when(!agent, |d| {
-                            d.child(pill_button("term-again", "New shell", &theme, cx.listener(move |this, _, window, cx| {
+                            d.child(crate::branches::small_pill("term-again", "icons/terminal.svg", "New shell", Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
                                 swallow_click(window, cx);
                                 // A new one in the ended one's tab's place.
                                 if let Some((ix, id)) = this.shells.get(&sid).and_then(|s| s.tabs.iter().position(|t| t.id == s.on).map(|ix| (ix, s.on))) {

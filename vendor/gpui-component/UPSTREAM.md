@@ -232,6 +232,13 @@ upstream revision finds them.
    too, not a textarea only. Both had a branch for one line (change to
    `select_up`, above) that no key reached, so ⇧ with up or down did
    nothing in any name, search or find field.
+30. `crates/base/src/tooltip.rs` (`TooltipOverlay::claim`, the canvas in
+   its `render`), `crates/ui/src/tooltip.rs` (`managed_tooltip`'s
+   prepaint): a trigger drawn with the pointer on it claims the tooltip
+   each frame, and one nobody claimed, with no hide on its way, goes.
+   gpui sends a hover's end only to an element it still draws, so a
+   tooltip whose trigger went (a sheet closed under the pointer, or a
+   show that landed after its trigger had gone) stayed for good.
 
 ## Updating
 

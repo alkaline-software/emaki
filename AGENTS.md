@@ -152,7 +152,7 @@ handed work on one of these files is told to read the doc too.
 | You are about to touch | Read first |
 |---|---|
 | `emaki-app/src/transcript.rs`; the conversation's list, find, or reload in `workbench.rs`; `emaki-core/src/find.rs` | `docs/conversation.md` |
-| The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, dictation, the notice and limits row in `workbench.rs`; `a11y.rs`; `emaki-core/src/files.rs`, `check.rs`, `dictate.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
+| The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, dictation, the notice and limits row in `workbench.rs`; `a11y.rs`; `emaki-core/src/files.rs`, `check.rs`, `dictate.rs`, `clean.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
 | The pills, pickers, mode/model/effort notices; `emaki-core/src/options.rs`; `mode_*`, `effort_*`, `model_*`, `options_from` in `driver.rs` | `docs/modes.md` |
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
@@ -192,6 +192,8 @@ crates/emaki-core/        everything without a window
   src/explain.rs             opaque tool calls in plain words, via `claude -p`
   src/check.rs               the composer's writing: Harper's English, what counts as prose, the capital a sentence starts with
   src/dictate.rs             the composer's dictation: the models and their downloads, the microphone, Whisper on the GPU (a Mac's alone)
+  src/clean.rs               the dictation's clean-up: the small language models, the prompt, what of their rewriting is taken
+  native/llm.cpp build.rs    libllama (vendor/llama.cpp) on transcribe.cpp's ggml, for the clean-up: one ggml in the program
   src/git.rs                 what git says of a folder's files, as VS Code's explorer shows it
   src/files.rs               a folder's files for "@" in the composer: the list, the match, the tokens; a table's rows, and where a cell of one is written
   src/parquet_file.rs        a Parquet file read for showing: its columns, its row count, its first rows

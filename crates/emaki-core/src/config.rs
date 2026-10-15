@@ -96,11 +96,18 @@ pub struct AppConfig {
     /// The key that starts and stops dictation, as gpui writes a binding
     /// (`secondary-shift-d`: ⌘⇧D, Ctrl off a Mac).
     pub dictate_key: String,
+    /// How long the dictation's history keeps what it wrote, by
+    /// `dictate::KEEPS`' keys.
+    pub dictate_keep: String,
+    /// Whether what dictation writes is cleaned up by a model after
+    /// (`clean`), and by which, by `clean::MODELS`' keys.
+    pub clean_on: bool,
+    pub clean_model: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), dictate_model: crate::dictate::DEFAULT_MODEL.into(), dictate_key: "secondary-shift-d".into() }
+        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "terracotta".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), dictate_model: crate::dictate::DEFAULT_MODEL.into(), dictate_key: "secondary-shift-d".into(), dictate_keep: crate::dictate::DEFAULT_KEEP.into(), clean_on: false, clean_model: crate::clean::DEFAULT_MODEL.into() }
     }
 }
 
