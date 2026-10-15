@@ -379,6 +379,7 @@ fn main() {
         // GPU's memory, so it is let go first.
         cx.on_app_quit(|_| {
             emaki_core::dictate::unload();
+            emaki_core::clean::unload();
             async {}
         })
         .detach();

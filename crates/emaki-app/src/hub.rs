@@ -282,6 +282,7 @@ impl Hub {
                     // A dictation model holds about a gigabyte while
                     // loaded; ten minutes unused and it goes.
                     emaki_core::dictate::release_idle(Duration::from_secs(600));
+                    emaki_core::clean::release_idle(Duration::from_secs(600));
                     match wake_rx.recv_timeout(Duration::from_millis(interval.max(500))) {
                         Ok(()) | Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => return,

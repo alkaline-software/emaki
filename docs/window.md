@@ -609,7 +609,9 @@ control, the second left the page's right half bare. A new row is made
 with `row` or `short`, never laid out by hand.
 
 What is on or off is the two words as a choice (`toggle`), On in the
-green and Off in the red, each on a plate washed with its colour. A
+green and Off in the red, each on a plate washed with its colour. It is
+a switch: a press anywhere on it, either word or the track's edge,
+turns it the other way (`segmented_sized`, for every Off and On). A
 tick is for a list of many, where a choice a row would be too much:
 the formatters, each tick before its name.
 
@@ -656,18 +658,38 @@ which read as a form; the card on the bare panel, which was pale; and a plate fa
 from the accent, with the version on an accent chip, which the person
 did not want: no gradients here.
 
-Dictate is one page with nothing to scroll: "Local Models", a row a
-model, the heaviest first, and the key. A row is its maker's mark on a
-plate (one colour, the ink's, as every icon here is), its name with a
-word or two on what sets it apart on the same line, its maker, size and
-languages under them, and at the right Download (a line filling as it
-comes, with Stop), Use, or "In use", with Remove once it is here.
+Dictate is two lanes of models, Speech to Text over Post-processing,
+then the key and History. A lane is its name (Post-processing's with
+its On and Off)
+and the model in use, and it drops down like a list: a press on that
+row, or its chevron, folds out the others under it, the most capable
+first (`dictate_lane`, `lanes_open`, `fold_under`; the chevron turns).
+With none downloaded the lane's first choice stands there with its
+Download. At a row's right are two slots of one width (`MODEL_SLOT_W`):
+in use, Use or the download's line, then Remove, Download or Stop, so
+every button is one size and one column. On for post-processing with
+no model here opens its lane and
+says to download one. Every row keeps the chevron's room, so Remove and
+"In use" stand at one edge down a lane. Any number of models download
+at once (`dictate_dl`), each with its own line and Stop. A row is its maker's mark on a
+plate (one colour, the ink's, as every icon here is), its name with its
+size, under them a few words on what sets it apart and its languages
+(the maker is its mark; with the words beside the name they were cut
+short once the buttons were one width), and at the right Download (a
+line filling as it comes, with Stop), Use, or "In use", with Remove
+once it is here. Post-processing turned off fades its name and models
+to grey over a moment, the accent and the red gone from them, and its
+switch stays as it is (`presence` on `lane-live-clean`).
 The one in use wears the accent's edge, and a click anywhere on a row
 that is here takes it up. A grid of cards was tried first: three across
 left a name two lines deep and the buttons crowding its foot. Under them the key, a field that takes
 the next keys pressed in it (`docs/composer.md`, Dictation), at the
 row's right, and Reset against the edge, which puts back ⌘⇧D (Ctrl and
-⇧ and D off a Mac) and is dimmed while that is the key. The field set
+⇧ and D off a Mac) and is dimmed while that is the key. Under it History:
+how long what is dictated is kept, a field with its list, and Show
+History, which opens the dictations on a sheet over Settings, smaller
+than it both ways so it reads as lying on it. It rises in as it fades
+in, and fades out where it was. The field set
 in the page's middle was tried and undone. Off a Mac
 the section is one line saying it is a Mac's alone for now.
 
@@ -872,7 +894,10 @@ event is just `Moved`. So a flick in one pane followed by a move to another
 scrolled the second.
 
 `Workbench::route_scroll` runs in the capture phase from a raw listener a
-zero-size `canvas` registers at paint, before any container. The pane under
+zero-size `canvas` registers at paint, before any container. Of the
+scrollers that name themselves (`inner_live`), the one under the pointer
+drawn last is the one on top and takes the gesture: History's list over
+the settings', which scrolled the settings while it was first. The pane under
 the pointer at `Started`, or at the first event after `SCROLL_GAP` (a mouse
 wheel sends no phases), owns the gesture. An event that lands in another
 pane is applied to the owner's scroll position (`ListState::scroll_by` for

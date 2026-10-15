@@ -256,8 +256,15 @@ pub trait ManagedTooltipExt:
         let trigger_bounds_cell: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
         let bounds_writer = trigger_bounds_cell.clone();
 
-        self.on_prepaint(move |bounds, _, _| {
+        self.on_prepaint(move |bounds, window, cx| {
             bounds_writer.set(bounds);
+            // Drawn with the pointer on it: the tooltip showing is not
+            // left without a trigger (`TooltipOverlay::claim`).
+            if bounds.contains(&window.mouse_position()) {
+                if let Some(overlay) = Root::tooltip_overlay(window, cx) {
+                    overlay.read(cx).claim();
+                }
+            }
         })
         .on_hover({
             let trigger_bounds_cell = trigger_bounds_cell.clone();

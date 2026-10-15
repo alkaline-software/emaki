@@ -36,8 +36,8 @@ pub struct Model {
     pub name: &'static str,
     /// Who made it, as its row names them; the window draws their mark.
     pub maker: &'static str,
-    /// What sets it apart from the others, in a few words that stay on
-    /// the name's line.
+    /// What sets it apart from the others, in a few words: with the
+    /// languages, one line under the name.
     pub about: &'static str,
     /// The languages it hears, as said on its row.
     pub languages: &'static str,
@@ -64,7 +64,7 @@ pub const MODELS: &[Model] = &[
         key: "qwen3-asr-1.7b",
         name: "Qwen3-ASR 1.7B",
         maker: "Qwen",
-        about: "Most accurate with mixed speech",
+        about: "Best with mixed speech",
         languages: "30 languages",
         license: "Apache 2.0",
         file: "Qwen3-ASR-1.7B-Q5_K_M.gguf",
@@ -76,7 +76,7 @@ pub const MODELS: &[Model] = &[
         key: "qwen3-asr-0.6b",
         name: "Qwen3-ASR 0.6B",
         maker: "Qwen",
-        about: "Nearly as accurate, and faster",
+        about: "Nearly as good, faster",
         languages: "30 languages",
         license: "Apache 2.0",
         file: "Qwen3-ASR-0.6B-Q6_K.gguf",
@@ -100,7 +100,7 @@ pub const MODELS: &[Model] = &[
         key: "whisper-small",
         name: "Whisper Small",
         maker: "OpenAI",
-        about: "Lightest, weaker with Chinese",
+        about: "Lightest, weaker Chinese",
         languages: "99 languages",
         license: "MIT",
         file: "whisper-small-Q6_K.gguf",
@@ -115,6 +115,106 @@ pub const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 
 pub fn model(key: &str) -> Option<&'static Model> {
     MODELS.iter().find(|m| m.key == key)
+}
+
+/// How long what dictation wrote is kept (`app.dictate_keep`): the key,
+/// its name in Settings, and the days, `None` for always. "off" keeps
+/// nothing and lets go of what was kept.
+pub const KEEPS: &[(&str, &str, Option<i64>)] = &[
+    ("off", "Don't save", Some(0)),
+    ("day", "Keep 1 day", Some(1)),
+    ("week", "Keep 1 week", Some(7)),
+    ("month", "Keep 1 month", Some(30)),
+    ("year", "Keep 1 year", Some(365)),
+    ("forever", "Keep forever", None),
+];
+
+/// What a new install keeps.
+pub const DEFAULT_KEEP: &str = "week";
+
+/// A setting's entry in `KEEPS`; one not known is the default's.
+pub fn keep(key: &str) -> &'static (&'static str, &'static str, Option<i64>) {
+    KEEPS.iter().find(|k| k.0 == key).or_else(|| KEEPS.iter().find(|k| k.0 == DEFAULT_KEEP)).expect("the default is listed")
+}
+
+/// One dictation as it was written down, kept on this machine alone.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Said {
+    /// When it was written, in seconds since the epoch.
+    pub at: i64,
+    pub words: String,
+    /// How long the recording was, in seconds.
+    pub secs: f32,
+    /// The model that wrote it, by its key.
+    pub model: String,
+    /// The words as the speech model wrote them, when the clean-up
+    /// changed them (`clean`): `words` is what went in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
+/// The history: a line of JSON a dictation, the oldest first.
+pub fn history_file() -> PathBuf {
+    paths::root().join("dictation").join("history.jsonl")
+}
+
+/// What is kept and still young enough for `keep`, the newest first.
+pub fn history(keep_key: &str) -> Vec<Said> {
+    let mut all = read_history();
+    let oldest = oldest_kept(keep_key);
+    all.retain(|s| s.at >= oldest);
+    all.reverse();
+    all
+}
+
+/// A dictation added to the history, unless it is kept for no time;
+/// what has grown too old goes as it is.
+pub fn remember(said: &Said, keep_key: &str) -> std::io::Result<()> {
+    if keep(keep_key).2 == Some(0) {
+        return prune(keep_key);
+    }
+    let path = history_file();
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(f, "{}", serde_json::to_string(said).map_err(std::io::Error::other)?)?;
+    prune(keep_key)
+}
+
+/// Lets go of what `keep` no longer keeps: all of it for "off".
+pub fn prune(keep_key: &str) -> std::io::Result<()> {
+    let path = history_file();
+    if keep(keep_key).2 == Some(0) {
+        return match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let all = read_history();
+    let oldest = oldest_kept(keep_key);
+    if all.iter().all(|s| s.at >= oldest) {
+        return Ok(());
+    }
+    let mut out = String::new();
+    for s in all.iter().filter(|s| s.at >= oldest) {
+        out.push_str(&serde_json::to_string(s).map_err(std::io::Error::other)?);
+        out.push('\n');
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    fs::write(&tmp, out)?;
+    fs::rename(&tmp, &path)
+}
+
+fn read_history() -> Vec<Said> {
+    fs::read_to_string(history_file()).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+fn oldest_kept(keep_key: &str) -> i64 {
+    match keep(keep_key).2 {
+        Some(days) => chrono::Utc::now().timestamp() - days * 86_400,
+        None => i64::MIN,
+    }
 }
 
 pub fn models_dir() -> PathBuf {

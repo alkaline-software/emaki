@@ -339,6 +339,38 @@ fn main() {
                 }
             }
         }
+        "clean" => {
+            // emaki-core clean <key> <words | file of lines>: the dictation's
+            // clean-up, as the window runs it, on words given here or on a
+            // file a dictation a line: what the model wrote, and whether
+            // it was taken (`clean::accept`).
+            use emaki_core::clean;
+            let m = clean::model(args.get(1).map(String::as_str).unwrap_or(clean::DEFAULT_MODEL)).expect("no such model");
+            let given = args.get(2).expect("clean <key> <words | file>");
+            let lines: Vec<String> = match std::fs::read_to_string(given) {
+                Ok(text) => text.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect(),
+                Err(_) => vec![given.clone()],
+            };
+            #[cfg(target_os = "macos")]
+            {
+                for words in lines {
+                    let at = std::time::Instant::now();
+                    match clean::rewrite(m, &words) {
+                        Ok(wrote) => {
+                            let taken = clean::accept(&words, &wrote).is_some();
+                            println!("SAID   {words}\nWROTE  {}\n       {} in {:.2} s\n", wrote.trim().replace('\n', "\n       "), if taken { "taken" } else { "REFUSED" }, at.elapsed().as_secs_f32());
+                        }
+                        Err(e) => println!("SAID   {words}\nFAILED {e}\n"),
+                    }
+                }
+                clean::unload();
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (m, lines);
+                println!("dictation is on a Mac only for now");
+            }
+        }
         "dictate" => {
             // emaki-core dictate models | download [key] | file <wav> [key]:
             // the dictation's models, one downloaded as the window does it,

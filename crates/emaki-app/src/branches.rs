@@ -9,7 +9,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
-use gpui_component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _};
+use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 
 use emaki_core::git;
 
@@ -20,7 +20,7 @@ use std::rc::Rc;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::tooltip::ManagedTooltipExt as _;
 
-use crate::workbench::{choice_pill, float_shadow, pill_button, MenuDo, Press, swallow_click, Notice, Workbench};
+use crate::workbench::{choice_pill, float_shadow, MenuDo, Press, swallow_click, Notice, Workbench};
 
 /// How old the last word from the remote may be before the list of
 /// branches asks again when it is opened.
@@ -836,7 +836,7 @@ impl Workbench {
             .border_color(theme.border)
             // A press here is not one on the list of files over it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_click(|_, window, cx| swallow_click(window, cx))
             .child(field("commit-summary", summary_focus).h(px(32.)).items_center().child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.commit_summary).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_summary, false, cx)))).child(star))
             .child(field("commit-body", body_focus).py(px(4.)).items_start().child(gpui_component::input::Textarea::new(&self.commit_body).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_body, false, cx))))
             .child(choice_pill("commit-go", "icons/check.svg", label, Press::Primary, off, &theme).w_full().min_w_0().justify_center().children(branch.map(|b| div().min_w_0().truncate().ml(px(-2.)).font_weight(FontWeight::SEMIBOLD).child(b))).managed_tooltip(|window, cx| crate::workbench::tip("Commit (⌘↩)", window, cx)).when(!off, |d| {
@@ -1117,10 +1117,12 @@ impl Workbench {
                     .gap(px(8.))
                     .items_start()
                     .child(div().flex_1().min_w_0().child(quiet(format!("{default} has {} not pushed to {origin}. The new branch will have {}.", plural(*ahead, "commit", "commits"), if *ahead == 1 { "it" } else { "them" }))))
-                    .child(Button::new("branch-new-push").outline().xsmall().label(if new.pushing { "Pushing…".to_string() } else { format!("Push {default}") }).disabled(new.pushing).on_click(cx.listener(|this, _, window, cx| {
-                        swallow_click(window, cx);
-                        this.branch_new_push(cx)
-                    })))
+                    .child(small_pill("branch-new-push", "icons/arrow-up.svg", if new.pushing { "Pushing…".to_string() } else { format!("Push {default}") }, Press::Quiet, new.pushing, &theme).when(!new.pushing, |d| {
+                        d.on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.branch_new_push(cx)
+                        }))
+                    }))
                     .into_any_element(),
             ),
             BaseSync::Known { ahead, behind } => Some(quiet(format!("{default} here and on {origin} have gone separate ways: {} here, {} there. Bringing them together takes a merge, which is yours to make, so the branch is made from {default} as it is here.", plural(*ahead, "commit", "commits"), plural(*behind, "commit", "commits"))).into_any_element()),
@@ -1139,7 +1141,7 @@ impl Workbench {
                         .child(Icon::new(IconName::TriangleAlert).with_size(px(12.)).mt(px(3.)).text_color(theme.danger).flex_shrink_0())
                         .child(div().flex_1().min_w_0().text_size(px(12.)).line_height(px(18.)).child(words))
                         .when(sign_in, |d| {
-                            d.child(Button::new("branch-new-sign-in").outline().xsmall().label("Sign in…").on_click(cx.listener(move |this, _, window, cx| {
+                            d.child(small_pill("branch-new-sign-in", "icons/circle-user.svg", "Sign in…", Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
                                 swallow_click(window, cx);
                                 this.open_gate("fetch".into(), reason.clone(), cx)
                             })))
@@ -1339,7 +1341,7 @@ impl Workbench {
             }
             Some(a) if a.ssh => {
                 steps.push(step(1, "Check your key", vec![self.command_box("gate-ssh".into(), "ssh -T git@github.com".into(), false, cx), quiet("This repository is reached over ssh, with a key and no password. GitHub answers with your name when it knows the key.".into()).into_any_element()]).into_any_element());
-                let link = pill_button("gate-ssh-docs", "How to add a key", &theme, |_, _, cx| cx.open_url("https://docs.github.com/en/authentication/connecting-to-github-with-ssh"));
+                let link = small_pill("gate-ssh-docs", "icons/external-link.svg", "How to add a key", Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://docs.github.com/en/authentication/connecting-to-github-with-ssh"));
                 steps.push(step(2, "Add a key if it does not", vec![h_flex().child(link).into_any_element()]).into_any_element());
             }
             Some(a) => {
@@ -1351,7 +1353,7 @@ impl Workbench {
                     } else if cfg!(windows) {
                         self.command_box("gate-gh-install".into(), "winget install --id GitHub.cli".into(), false, cx)
                     } else {
-                        h_flex().child(pill_button("gate-gh-linux", "How to install it on Linux", &theme, |_, _, cx| cx.open_url("https://github.com/cli/cli/blob/trunk/docs/install_linux.md"))).into_any_element()
+                        h_flex().child(small_pill("gate-gh-linux", "icons/external-link.svg", "How to install it on Linux", Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://github.com/cli/cli/blob/trunk/docs/install_linux.md"))).into_any_element()
                     };
                     steps.push(step(n, "Install GitHub's command line tool", vec![install, quiet("It signs in through the browser and hands git the sign-in, with no token to copy.".into()).into_any_element()]).into_any_element());
                 }
@@ -1389,7 +1391,7 @@ impl Workbench {
                         .gap(px(8.))
                         .items_center()
                         .child(quiet("No account yet?".into()))
-                        .child(pill_button("gate-signup", "Create one on GitHub", &theme, |_, _, cx| cx.open_url("https://github.com/signup"))),
+                        .child(small_pill("gate-signup", "icons/external-link.svg", "Create one on GitHub", Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://github.com/signup"))),
                 )
             })
             .child(

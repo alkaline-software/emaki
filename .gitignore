@@ -23,6 +23,9 @@ emaki-export-*.html
 *.swp
 *~
 
-# Rust
-/target
+# Rust. Build output at any depth: cargo run inside vendor/gpui-component,
+# which is a workspace of its own, builds there. Its lock is not ours either:
+# the one pin is the root Cargo.lock.
+target/
 /dist
+/vendor/*/Cargo.lock

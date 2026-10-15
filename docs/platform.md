@@ -6,6 +6,14 @@ About `vendor/`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/`,
 
 ## Rules
 
+- `vendor/llama.cpp` is built against transcribe-cpp's ggml and must
+  come from the llama.cpp commit that ggml was synced from
+  (`vendor/llama.cpp/UPSTREAM.md`). Update the two together.
+- Build and test from the repository's root, never inside
+  `vendor/gpui-component`. It is a workspace of its own: cargo there
+  resolves its own lock against another gpui, writes a second `target/`
+  of gigabytes, and its library tests do not compile against our pin.
+  `.gitignore` keeps both out of the changes.
 - Never put a `rev` on our own gpui dependency. gpui-component depends on
   the unpinned zed git source, and a `rev` makes a second copy of gpui it
   does not build against. The pin is in `Cargo.lock`:
