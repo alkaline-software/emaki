@@ -395,9 +395,16 @@ impl Hub {
                 }
             }
         }
+        // Of several records on one session, ours first, then a job of
+        // Claude Code's daemon, which runs the turns of a session it took
+        // over: a terminal parked on the job (`peer::unpark`) names the
+        // same session, and taken first, a window whose own terminal is
+        // another view of the job had no record it would accept, and
+        // showed neither the turn nor what ran in the background.
+        let rank = |p: &Peer| if ours.contains(&p.pid) { 0 } else if !p.job.is_empty() { 1 } else { 2 };
         let mut fresh: HashMap<String, Peer> = HashMap::new();
         for p in all {
-            if ours.contains(&p.pid) || !fresh.contains_key(&p.session_id) {
+            if fresh.get(&p.session_id).is_none_or(|had| rank(&p) < rank(had)) {
                 fresh.insert(p.session_id.clone(), p);
             }
         }
