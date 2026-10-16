@@ -198,6 +198,11 @@ old id and adds `parkedJobId`.
   the job's record is the session's status (`Hub::peer_for`). Waiting
   for a record of the terminal's own, a message from the composer was
   never typed.
+- **Of several records on a session, the job's comes after ours and
+  before the rest** (`refresh_peers`). Another Emaki's terminal parked on
+  the job names the session too; kept first, this window's own view of
+  the job had no record it took, and neither the turn nor a command in
+  the background was shown.
 
 ## The inbox
 
