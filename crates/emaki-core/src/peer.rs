@@ -66,7 +66,7 @@ const ENVELOPE_TAG: &str = "cross-session-message";
 pub const HELD_MODES: &[&str] = &["bypassPermissions", "auto"];
 
 /// A live session's inbox, as published in the registry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Peer {
     pub session_id: String,
     pub pid: i32,
@@ -82,6 +82,29 @@ pub struct Peer {
     pub started_at: f64,
     pub proc_start: String,
     pub key_path: String,
+    /// A background session's job, as Claude Code's daemon names it
+    /// (`jobId`); empty for any other.
+    pub job: String,
+    /// The job an interactive Claude Code is parked on (`parkedJobId`):
+    /// its conversation went on in a background session, and this
+    /// terminal shows that session. Empty for any other.
+    pub parked: String,
+}
+
+/// A terminal parked on a background session is on that session: its
+/// record keeps the session it began with, and names the job. It takes
+/// the job's session and status, since the job is what runs the turns,
+/// and stays its own process. With no job of that name running, it is
+/// left as it says.
+pub fn unpark(peers: &mut [Peer]) {
+    let jobs: Vec<(String, String, String, f64)> = peers.iter().filter(|p| !p.job.is_empty()).map(|p| (p.job.clone(), p.session_id.clone(), p.status.clone(), p.status_at)).collect();
+    for p in peers.iter_mut().filter(|p| !p.parked.is_empty()) {
+        if let Some((_, sid, status, at)) = jobs.iter().find(|(job, ..)| *job == p.parked) {
+            p.session_id = sid.clone();
+            p.status = status.clone();
+            p.status_at = *at;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -195,9 +218,10 @@ pub fn registry_all() -> Vec<Peer> {
         }
         let s = |k: &str| obj.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         peers.push(
-            Peer { session_id: sid, pid, socket_path: sock, cwd: s("cwd"), kind: s("kind"), name: s("name"), status: s("status"), status_at: obj.get("statusUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, started_at: obj.get("startedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, proc_start: s("procStart"), key_path: keys.get(&pid).cloned().unwrap_or_default() },
+            Peer { session_id: sid, pid, socket_path: sock, cwd: s("cwd"), kind: s("kind"), name: s("name"), status: s("status"), status_at: obj.get("statusUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, started_at: obj.get("startedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, proc_start: s("procStart"), key_path: keys.get(&pid).cloned().unwrap_or_default(), job: s("jobId"), parked: s("parkedJobId") },
         );
     }
+    unpark(&mut peers);
     peers
 }
 
@@ -329,7 +353,7 @@ mod tests {
             stream.write_all(b"{\"status\":\"delivered\"}\n").unwrap();
             lines
         });
-        let peer = Peer { session_id: "sid".into(), pid: 1234, socket_path: sock.to_string_lossy().into(), cwd: String::new(), kind: String::new(), name: String::new(), status: String::new(), status_at: 0.0, started_at: 0.0, proc_start: "s1".into(), key_path: key.to_string_lossy().into() };
+        let peer = Peer { session_id: "sid".into(), pid: 1234, socket_path: sock.to_string_lossy().into(), proc_start: "s1".into(), key_path: key.to_string_lossy().into(), ..Default::default() };
         let d = send(&peer, "hello there", false).unwrap();
         assert_eq!(d.status, "delivered");
         let lines = server.join().unwrap();
@@ -345,6 +369,20 @@ mod tests {
         // A reused pid: the key's procStart disagrees, so no token, no send.
         let stale = Peer { proc_start: "other".into(), ..peer.clone() };
         assert!(send(&stale, "x", false).is_err());
+    }
+
+    /// A terminal parked on a background job is on the job's session,
+    /// busy or idle as the job is; one whose job is gone stays put.
+    #[test]
+    fn a_parked_terminal_is_on_its_jobs_session() {
+        let mut peers = vec![
+            Peer { session_id: "old".into(), pid: 10, kind: "interactive".into(), status: "idle".into(), parked: "f2b83e78".into(), ..Default::default() },
+            Peer { session_id: "f2b83e78-f9ad".into(), pid: 20, kind: "bg".into(), status: "busy".into(), status_at: 5.0, job: "f2b83e78".into(), ..Default::default() },
+            Peer { session_id: "other".into(), pid: 30, kind: "interactive".into(), status: "idle".into(), parked: "gone".into(), ..Default::default() },
+        ];
+        unpark(&mut peers);
+        assert_eq!((peers[0].session_id.as_str(), peers[0].status.as_str(), peers[0].status_at, peers[0].pid), ("f2b83e78-f9ad", "busy", 5.0, 10));
+        assert_eq!(peers[2].session_id, "other");
     }
 
     #[test]

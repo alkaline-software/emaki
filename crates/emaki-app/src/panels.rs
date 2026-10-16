@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Datelike as _;
@@ -255,6 +256,9 @@ pub struct Changes {
     /// The lines of `picked`, once read; in the history, of the commit's
     /// file, under the name `history_key` gives the two.
     pub(crate) diff: Option<(PathBuf, Rc<git::Diff>)>,
+    /// A compared picture's two sides as gpui draws them, made when
+    /// `diff` is: made at each draw they were hashed and copied each time.
+    pub(crate) pictures: [Option<Arc<gpui::Image>>; 2],
     pub(crate) list: ListState,
     pub(crate) files: UniformListScrollHandle,
     pub(crate) reading: bool,
@@ -926,6 +930,80 @@ pub enum FilePrompt {
 
 fn is_picture(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "tiff"))
+}
+
+/// A compared picture's sides as gpui draws them: before, then after.
+pub(crate) fn picture_sides(path: &Path, d: &git::Diff) -> [Option<Arc<gpui::Image>>; 2] {
+    use gpui::ImageFormat as F;
+    let kind = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("png") => F::Png,
+        Some("jpg" | "jpeg") => F::Jpeg,
+        Some("webp") => F::Webp,
+        Some("gif") => F::Gif,
+        Some("svg") => F::Svg,
+        Some("bmp") => F::Bmp,
+        Some("tif" | "tiff") => F::Tiff,
+        Some("ico") => F::Ico,
+        Some("pbm" | "pgm" | "ppm") => F::Pnm,
+        _ => return [None, None],
+    };
+    let Some(p) = &d.pictures else { return [None, None] };
+    let made = |b: &Option<Arc<[u8]>>| b.as_ref().map(|b| Arc::new(gpui::Image::from_bytes(kind, b.to_vec())));
+    [made(&p.before), made(&p.after)]
+}
+
+/// A changed picture, as GitHub shows one: what it was beside what it is,
+/// each on its own plate under a word for its side, its size in pixels
+/// and in bytes. A picture added or deleted has the one side, the
+/// width to itself. A large picture is brought down to its plate; a small
+/// one keeps its size.
+fn picture_compare(p: &git::Pictures, drawn: &[Option<Arc<gpui::Image>>; 2], theme: &gpui_component::Theme) -> AnyElement {
+    let dark = theme.mode.is_dark();
+    // GitHub's red and green, as the lines' numbers wear them.
+    let (gone, put) = if dark { (rgb(0xf85149), rgb(0x3fb950)) } else { (rgb(0xcf222e), rgb(0x1a7f37)) };
+    let both = p.before.is_some() && p.after.is_some();
+    let side = |bytes: &Option<Arc<[u8]>>, image: &Option<Arc<gpui::Image>>, word: &'static str, mark: Rgba| {
+        let (bytes, image) = (bytes.clone()?, image.clone()?);
+        let size = match crate::workbench::image_dims(&bytes) {
+            Some((w, h)) => format!("{w} × {h} · {}", human_size(bytes.len() as u64)),
+            None => human_size(bytes.len() as u64),
+        };
+        Some(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(10.))
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .items_center()
+                        .text_size(px(12.))
+                        .child(div().size(px(7.)).rounded_full().bg(mark))
+                        .child(div().font_weight(FontWeight::MEDIUM).child(word))
+                        .child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(size)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .p(px(16.))
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(if dark { theme.sidebar } else { theme.muted.opacity(0.4) })
+                        .child(img(ImageSource::Image(image)).size_full().object_fit(ObjectFit::ScaleDown)),
+                ),
+        )
+    };
+    let (was, now) = if both { ("Before", "After") } else { ("Deleted", "Added") };
+    h_flex()
+        .size_full()
+        .p(px(20.))
+        .gap(px(16.))
+        .items_stretch()
+        .children(side(&p.before, &drawn[0], was, gone))
+        .children(side(&p.after, &drawn[1], now, put))
+        .into_any_element()
 }
 
 fn human_size(n: u64) -> String {
@@ -5310,8 +5388,8 @@ impl Workbench {
     }
 
     /// Check a branch out, or make one and check it out. Git does it
-    /// and git may refuse; nothing is forced. Not under a running turn:
-    /// the agent is writing to the files a switch would change.
+    /// and git may refuse; nothing is forced. An agent at work in the
+    /// folder is no reason to wait: git is the person's to run.
     pub(crate) fn branch_go(&mut self, name: String, create: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.branch_begin(name, create, None, false, window, cx);
     }
@@ -5323,10 +5401,6 @@ impl Workbench {
         self.close_branch_menu(window, cx);
         let Some(root) = self.files_root() else { return };
         if self.branches().is_some_and(|b| b.current.as_deref() == Some(&name)) || self.branch_busy {
-            return;
-        }
-        if self.selected_ref().is_some_and(|r| self.is_working(r)) {
-            self.notice = Some(Notice::error("a turn is running here; switch branches when it is over"));
             return;
         }
         if create && !git::valid_name(&name) {
@@ -5384,10 +5458,6 @@ impl Workbench {
         self.branch_ask = None;
         let Some(root) = self.files_root() else { return };
         if self.branch_busy {
-            return;
-        }
-        if self.selected_ref().is_some_and(|r| self.is_working(r)) {
-            self.notice = Some(Notice::error("a turn is running here; switch branches when it is over"));
             return;
         }
         let from = self.branches().map(|b| b.label()).unwrap_or_default();
@@ -5471,10 +5541,6 @@ impl Workbench {
     fn branch_restore(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.files_root() else { return };
         if self.branch_busy {
-            return;
-        }
-        if self.selected_ref().is_some_and(|r| self.is_working(r)) {
-            self.notice = Some(Notice::error("a turn is running here; put the changes back when it is over"));
             return;
         }
         self.branch_busy = true;
@@ -6033,7 +6099,7 @@ impl Workbench {
             files.scroll_to_item(at, ScrollStrategy::Center);
         }
         let marked: Vec<PathBuf> = picked.iter().cloned().collect();
-        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, top: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None });
+        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, pictures: [None, None], list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, top: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None });
         self.changes_focus_due = true;
         // How the branch stands against the remote's, for the buttons
         // that push and pull.
@@ -6244,6 +6310,7 @@ impl Workbench {
                 }
                 if c.diff.as_ref().is_none_or(|(was, d)| *was != path || **d != diff) {
                     c.list.reset(diff.rows.len());
+                    c.pictures = picture_sides(&path, &diff);
                     c.diff = Some((path, Rc::new(diff)));
                     cx.notify();
                 }
@@ -6354,6 +6421,7 @@ impl Workbench {
         let (add, add_no, del, del_no) = if dark { (rgba_of(0x2ea043, 0.16), rgba_of(0x3fb950, 0.30), rgba_of(0xf85149, 0.14), rgba_of(0xf85149, 0.30)) } else { (Hsla::from(rgb(0xe6ffec)), Hsla::from(rgb(0xccffd8)), Hsla::from(rgb(0xffebe9)), Hsla::from(rgb(0xffd7d5))) };
         let body = match &shown {
             None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { "Reading…" } else if c.history { "" } else { "Nothing has changed since the last commit." }).into_any_element(),
+            Some(d) if d.pictures.is_some() => picture_compare(d.pictures.as_ref().unwrap(), &c.pictures, &theme),
             Some(d) if d.binary => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child("This file is not text, so there are no lines to compare.").into_any_element(),
             Some(d) if d.rows.is_empty() => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child("No lines differ (the file is empty, or only its mode changed).").into_any_element(),
             Some(d) => {

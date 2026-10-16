@@ -109,7 +109,9 @@ anything set out in columns (a table, a mock of a screen) came apart, and
 the terminal was where it could be read. The scroller is the toolkit's
 own, the one a table has, and takes a sideways gesture only, so a wheel
 over a block still moves the conversation. Where more lies past an edge
-the text fades out there: cut off clean, a line read as all there was.
+the text fades out there: cut off clean, a line read as all there was. A
+selection dragged to a block's edge scrolls it that way, as a field does
+(`code_drag`, vendored `node.rs`).
 
 ## Copy buttons and times
 

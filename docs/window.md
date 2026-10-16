@@ -105,8 +105,8 @@ window remembers.
 - A name asked for is never drawn as the session's title before the
   transcript says it. The title stays the transcript's, with the mark
   beside it. Typed is not taken: only the index puts a name away.
-- The settings panel's body is a flex column inside a flex column. A block
-  wrapper around it collapsed the panel to its header.
+- The settings panel's page is a flex column inside a flex column. A
+  block wrapper around it collapsed the panel to its top band.
 - A round in the conversation list is wrapped in an explicit centring
   parent. The list lays each item out alone, so an auto margin has nothing
   to push against.
@@ -581,7 +581,7 @@ Laid out like the Claude desktop app.
 - Floating cards (composer, search palette, settings) lift with
   `float_shadow`, a drop in the ink's own hue, not a grey halo.
 - The composer's textarea grows with its content, which also keeps the caret
-  laid out, so the caret rectangle macOS asks for (dictation, the
+  laid out, so the caret rectangle macOS asks for (a dictation app, the
   input-source badge) is real.
 - Replies stop `REPLY_INSET` short of the prompts' right edge so the two
   voices sit at different widths.
@@ -591,41 +591,35 @@ Laid out like the Claude desktop app.
 
 ## The settings panel
 
-A fixed sheet (`SETTINGS_W` by `SETTINGS_H`, capped by the window) with a
-rail of sections on the left (`SETTINGS_SECTIONS`; `settings_section` is the
-one showing) and that section's rows on the right, fading in as the section
-changes. The rows scroll under the header (`settings_scroll`).
+A fixed sheet with a rail of sections on the left (`SETTINGS_SECTIONS`;
+`settings_section` is the one showing) and that section's groups on the
+right, its name in a band at the top, both fading in as the section
+changes (`workbench/settings.rs`). Its sizes, grounds and controls are
+in `docs/design.md`, The settings panel. The rows scroll under the band
+(`settings_scroll`), which a section that fits never needs.
 
-A row is a name and its control, side by side: the names stand in a
-column of one width (`SETTINGS_LABEL_W`) and every control starts where
-that column ends. A set of choices or a field fills the rest of the row
-(`row`), so a page is as full at its right as at its left. What has one
-short answer is half of that (`short`): on or off, a button (`press`),
-a choice from a list as a field (`settings_pick`, not a pill). One of
-those across the whole row was too much for what it says. A control at
-the panel's right edge, and a control at its own size beside its name,
-were both tried: the first left a short name a panel's width from its
-control, the second left the page's right half bare. A new row is made
-with `row` or `short`, never laid out by hand.
+A group is a card of rows (`group`, `line`): a name at the left with a
+line under it where the name does not say it all, the control at the
+right. A new row is made with `line` in a `group`, never laid out by
+hand. The widest controls are `CONTROL_W`, so a page's start and end
+together; a switch, a pill and the avatar stand at their own size at
+the same right edge. A control at the panel's right with its name a
+column's width away (one column of names, the controls filling the rest
+of the row) was the layout until v0.2.8.
 
-What is on or off is the two words as a choice (`toggle`), On in the
-green and Off in the red, each on a plate washed with its colour. It is
-a switch: a press anywhere on it, either word or the track's edge,
-turns it the other way (`segmented_sized`, for every Off and On). A
-tick is for a list of many, where a choice a row would be too much:
-the formatters, each tick before its name.
+What is on or off is a switch (`switch`): the track fills with the accent
+and the knob slides, over a moment (`presence`), at a press anywhere on
+it. It took the place of the two words as a choice, On in the green and
+Off in the red. A tick is for a list of many, where a switch a row would
+be too much: the formatters, each tick before its name.
 
 The spelling's languages are a row of their own, a flag and two letters
-each so the five fit, the name on the hover.
+each so the five fit, the name on the hover; dimmed and out of the
+pointer's reach while the check is off.
 
-A line on a row stands under a control that fills and beside a short
-one, in the half it leaves (the version is one, beside its button), and
-is there only where the name does not say it all: most rows have none, and one that does is a
-few words. A new row gets no line unless a person would otherwise not
-know what it does.
-
-An accent's swatch marks the chosen one with a ring inside the disc, so
-every disc is one size and the row's ends are the first and last disc.
+An accent's swatch marks the chosen one with a ring inside the disc in
+the card's ground, so every disc is one size and the row's ends are the
+first and last disc. The chosen one's name is the row's line.
 
 Settings asks for one text size (Fonts): the conversation's, and the
 terminal's and the file editor's go with it (`set_chat_size`,
@@ -633,6 +627,10 @@ terminal's and the file editor's go with it (`set_chat_size`,
 own size, its line spacing and its padding were rows once; they are the
 middle step now, set at launch whatever `config.json` says. The
 terminal's section sends a person to Fonts for its face and size.
+
+New sessions shows one agent's three at a time, its mark and name at
+the group's head and the agents' marks as a small segmented control at
+the head's right.
 
 A choice is named as the agent names it, less the "(recommended)"
 Claude Code writes after its default (`plain_default`).
@@ -645,53 +643,18 @@ A key is written as the Mac has it and drawn through `shortcut`
 (`kbd_hint`), which makes ⌘ "Ctrl+" off a Mac. The tooltips that name a
 key still say ⌘ everywhere.
 
-The last section, About, says who makes Emaki. A plain plate of the
-fields' ground, one flat shade with no edge, holds the title card, set in the middle as a film's
+The last section, About, says who makes Emaki. A card, the groups' ground
+and edge, holds the title card, set in the middle as a film's
 first one is: "Alkaline Software presents" (the studio at its GitHub
 organisation until it has a site), the app's icon, its name in the face
 and the accent the sidebar has it in (it and the icon are each a link
-to emaki.lol), and the version in small grey words. Under the plate, a sentence
+to emaki.lol), and the version in small grey words. Under it, a sentence
 naming its two owners in full, each name a link, and pills to the
 site, the source and the release's notes. It has nothing to set. Tried
 and dropped: a row a name with a line under it saying what each is,
 which read as a form; the card on the bare panel, which was pale; and a plate fading
 from the accent, with the version on an accent chip, which the person
 did not want: no gradients here.
-
-Dictate is two lanes of models, Speech to Text over Post-processing,
-then the key and History. A lane is its name (Post-processing's with
-its On and Off)
-and the model in use, and it drops down like a list: a press on that
-row, or its chevron, folds out the others under it, the most capable
-first (`dictate_lane`, `lanes_open`, `fold_under`; the chevron turns).
-With none downloaded the lane's first choice stands there with its
-Download. At a row's right are two slots of one width (`MODEL_SLOT_W`):
-in use, Use or the download's line, then Remove, Download or Stop, so
-every button is one size and one column. On for post-processing with
-no model here opens its lane and
-says to download one. Every row keeps the chevron's room, so Remove and
-"In use" stand at one edge down a lane. Any number of models download
-at once (`dictate_dl`), each with its own line and Stop. A row is its maker's mark on a
-plate (one colour, the ink's, as every icon here is), its name with its
-size, under them a few words on what sets it apart and its languages
-(the maker is its mark; with the words beside the name they were cut
-short once the buttons were one width), and at the right Download (a
-line filling as it comes, with Stop), Use, or "In use", with Remove
-once it is here. Post-processing turned off fades its name and models
-to grey over a moment, the accent and the red gone from them, and its
-switch stays as it is (`presence` on `lane-live-clean`).
-The one in use wears the accent's edge, and a click anywhere on a row
-that is here takes it up. A grid of cards was tried first: three across
-left a name two lines deep and the buttons crowding its foot. Under them the key, a field that takes
-the next keys pressed in it (`docs/composer.md`, Dictation), at the
-row's right, and Reset against the edge, which puts back ⌘⇧D (Ctrl and
-⇧ and D off a Mac) and is dimmed while that is the key. Under it History:
-how long what is dictated is kept, a field with its list, and Show
-History, which opens the dictations on a sheet over Settings, smaller
-than it both ways so it reads as lying on it. It rises in as it fades
-in, and fades out where it was. The field set
-in the page's middle was tried and undone. Off a Mac
-the section is one line saying it is a Mac's alone for now.
 
 The three looks in Appearance have an icon each (`choice_icon`).
 
@@ -916,11 +879,6 @@ it looks at panes:
 - A gesture begun elsewhere and carried onto one does not move it. In a
   pane the event goes to the gesture's owner; on a sheet or a menu
   (`Inner::Over`) it goes nowhere.
-- A sheet over Settings names itself first (`Inner::Wall`, on its
-  scrim), so a gesture begun on it finds nothing under it, though
-  nothing on it has more to show: the empty Terms sheet scrolled the
-  settings. The event goes on to gpui, where a field on the sheet
-  scrolls itself.
 - A tool call's body and a card's (`card_scroll`) are `Inner::Chained`:
   on the body its own handler decides (`chain_wheel`, `Stroke`: a stroke
   that starts at its edge is the conversation's), and off the body the

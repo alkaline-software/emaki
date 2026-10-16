@@ -54,7 +54,6 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>Emaki listens while you dictate into the composer. What you say is turned into words on this Mac and sent nowhere.</string>
 </dict>
 </plist>
 PLIST

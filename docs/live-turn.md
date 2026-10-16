@@ -80,8 +80,8 @@ question, dialog, shells and permission cards), the screen readers in
 ## The cards
 
 Whatever comes up for the person to read or answer while a session runs
-is a card in one column (`Workbench::render_cards`): the background
-commands' and agents' cards, the hidden terminal's screen, a terminal's
+is a card in one column (`Workbench::render_cards`): the published
+pages', the background commands' and agents' cards, the hidden terminal's screen, a terminal's
 dialog, a driver's questions and permissions. A new card goes there.
 
 - The column is drawn under the last round, inside the list's last item
@@ -339,6 +339,12 @@ kind of thing and is kept in the same list, as a `Shell` with `agent` set.
 - End: the `<task-notification>` whose `task-id` is that `agentId`, as for
   a command. The agent's report also arrives as a peer row
   (`<agent-message>`), which ends nothing.
+- Resumed: a `SendMessage` whose result says `resumedAgentId` starts the
+  agent again, until its next notification, which comes each time it
+  stops. One that ran before is its row again from the resume; one that
+  first ran in the foreground gets a row from its own `Agent` call. Taken
+  as ended at its first notification, an agent sent more work showed no
+  row while it did it.
 - `Shell::command` is the kind of agent (`subagent_type`, often empty) and
   there is no output file. The path Claude Code names as the output file
   is the agent's whole transcript and is never read here.
@@ -352,6 +358,23 @@ transcript (`build::agent_transcript`,
 `<session>/subagents/agent-<id>.jsonl`), read on the clock while the card
 is open (`read_agent_steps`). The same rule says whether one with no end
 is running (`shells_running`).
+
+## Artifacts
+
+A page the agent published with Claude's Artifact tool is the session's
+(`build::artifacts_of`, into `Session::artifacts`): an `Artifact` result
+whose sidecar names the page (`url`, `artifact_id`, `title`, `icon`,
+`path`), from a call that publishes (no `action`, or `publish`) and does
+not upload an asset. A read or a list names a page too and is not one.
+A page published again is the same one, its title and time the newest.
+
+The line (`artifacts_line`) heads the column over the composer, for as
+long as the session has any: how many, the newest's title, and with one
+an Open pill. It is not the background rows' kind of thing, which come
+and go with what runs; it stays. A click opens a card at the
+conversation's end (`render_artifacts_card`) with each page, newest
+first: its title, where it is, when it was last published, and Open. A
+click anywhere on a page's row opens it too.
 
 ## The permission card's keys
 
@@ -378,7 +401,7 @@ answering. Stacked cards: the first also offers "Allow all".
 - `EMAKI_GO=dialog:<digit>` or `dialog:tab` presses that in the terminal's
   dialog; `answer:<words>` types an answer; `goto:<n>` goes to that tab.
 - `EMAKI_GO=shells` opens the background commands' card, `EMAKI_GO=agents`
-  the background subagents'. `emaki-core shells <id>` lists both, with
+  the background subagents', `EMAKI_GO=artifacts` the published pages'. `emaki-core shells <id>` lists both, with
   each agent's last step.
 - `emaki-core screen < text` says what a screen holds; `emaki-core shells
   <id>` lists a session's commands; `emaki-core drive` answers a question

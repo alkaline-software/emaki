@@ -86,7 +86,8 @@ creams a step from each other tired the eye and gave it nowhere to rest.
   a trace of warmth, its greys (panels, tracks, bubbles, lines) the old
   creams with most of their colour taken out. In the dark appearance the
   page is the darkest ground there is.
-- The accent, the one warm colour left, which is why it now stands out.
+- The accent, the one colour the window wears of its own, which is why
+  it stands out (`docs/design.md`, The accents).
 
 A track of buttons (a segmented control, the tabs' pill, the strip's two
 tracks, the tray under the composer) is `tab_bar.segmented.background`
@@ -128,8 +129,7 @@ place. Tabler's own `file-plus` has it in the middle of the sheet.
 Not Tabler: the flags in `icons/flags` and the handscroll's landscape in `icons/home`
 (`docs/window.md`), drawn here, `bubble-tail.svg`, the tail of a prompt's bubble
 (`docs/conversation.md`), `claude.svg`, Claude's own mark, the other agents' marks in
-`icons/agents/` (`docs/agents.md`; Codex wears OpenAI's everywhere), the dictation models' makers' (Qwen's) in
-`icons/makers/` (LobeHub's icons, MIT, `LOBEHUB-LICENSE` beside them), `mark.svg`, and eleven toolkit icons
+`icons/agents/` (`docs/agents.md`; Codex wears OpenAI's everywhere), `mark.svg`, and eleven toolkit icons
 that were never replaced (the window controls, the right and bottom
 panels, `inspector`, `resize-corner`, `star-off`), none of which the
 window draws.
@@ -246,9 +246,12 @@ Four settings in `config.json` under `app`, changed in the settings panel
 face):
 
 - `appearance` (`system`, `light`, `dark`), drawn by `look::apply`.
-- `accent`, a name from `look::ACCENTS`. The palette stays in
-  `themes/emaki.json`; an accent is a substitution over the keys that carry
-  the terracotta there.
+- `accent`, a name from `look::ACCENTS`, periwinkle to begin with. The
+  palette stays in `themes/emaki.json`; an accent is a substitution over
+  the keys that carry periwinkle there, and what is drawn on it
+  (`primary.foreground`) with them. A name from before the seven
+  (`terracotta`, `blue`, `graphite`) is periwinkle, `violet` orchid,
+  `green` jade and `brass` amber (`look::accent`).
 - `chat_font`, one of the eight chat faces (The faces).
 - `chat_size` (`small`, `medium`, `large`), the window's one text size
   ("Font size"): the terminal's goes with it. `AppConfig::chat_px`

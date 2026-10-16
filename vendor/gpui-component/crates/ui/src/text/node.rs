@@ -1235,6 +1235,10 @@ impl CodeBlock {
         // stands. (Emaki addition.)
         let key = SharedString::from(format!("codeblock-scroll-{:p}", Arc::as_ptr(&self.state)));
         let scroll = window.use_keyed_state(key, cx, |_, _| ScrollHandle::default()).read(cx).clone();
+        // A selection dragged to an edge of the block scrolls it that
+        // way, as a text field does. (Emaki addition.)
+        let drag_key = SharedString::from(format!("codeblock-drag-{:p}", Arc::as_ptr(&self.state)));
+        let drag = window.use_keyed_state(drag_key, cx, |_, _| CodeDrag::default());
 
         div()
             .w_full()
@@ -1302,6 +1306,7 @@ impl CodeBlock {
                             ))
                             .when(at > px(1.), |d| d.child(fade(true)))
                             .when(most - at > px(1.), |d| d.child(fade(false)))
+                            .child(code_drag(drag.clone(), scroll.clone()).absolute().inset_0())
                     })
                     // On the block and not on the text's own box: there
                     // it lay over the last line.
@@ -1323,6 +1328,77 @@ impl CodeBlock {
             )
             .into_any_element()
     }
+}
+
+/// A drag that began on a code block's text: where the pointer is while
+/// the button that began it is held, and whether it has moved since, so
+/// a press alone (the copy button, near the right edge) scrolls nothing.
+/// (Emaki addition.)
+#[derive(Default)]
+struct CodeDrag {
+    at: Option<gpui::Point<gpui::Pixels>>,
+    moved: bool,
+}
+
+/// Laid over a code block's text, it scrolls the block sideways while a
+/// drag that began on the text is held near or past its left or right
+/// edge: a step a frame, longer the further out the pointer is, so a
+/// selection reaches what lies past the edge. A press on the block's
+/// scrollbar is under the text's box and begins nothing, so dragging the
+/// bar is the bar's alone. The selection follows by itself: it is kept
+/// as points in the window, read against the text where it now stands.
+/// (Emaki addition.)
+fn code_drag(drag: gpui::Entity<CodeDrag>, scroll: ScrollHandle) -> gpui::Canvas<()> {
+    use gpui::{DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, point};
+    /// How near an edge the pointer starts the scroll.
+    const EDGE: f32 = 24.;
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| {
+            {
+                let drag = drag.clone();
+                window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && e.button == MouseButton::Left && bounds.contains(&e.position) {
+                        drag.update(cx, |d, _| *d = CodeDrag { at: Some(e.position), moved: false });
+                    }
+                });
+            }
+            {
+                let drag = drag.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture || drag.read(cx).at.is_none() {
+                        return;
+                    }
+                    let held = e.pressed_button == Some(MouseButton::Left);
+                    drag.update(cx, |d, _| *d = CodeDrag { at: held.then_some(e.position), moved: held });
+                    if held {
+                        window.refresh();
+                    }
+                });
+            }
+            {
+                let drag = drag.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && drag.read(cx).at.is_some() {
+                        drag.update(cx, |d, _| d.at = None);
+                    }
+                });
+            }
+            let Some(at) = drag.read(cx).at.filter(|_| drag.read(cx).moved) else { return };
+            let (x, left, right) = (f32::from(at.x), f32::from(bounds.left()) + EDGE, f32::from(bounds.right()) - EDGE);
+            let past = if x > right { x - right } else if x < left { x - left } else { 0. };
+            if past == 0. {
+                return;
+            }
+            let step = (past.abs() / 3.).clamp(2., 28.) * past.signum();
+            let (now, most) = (f32::from(scroll.offset().x), f32::from(scroll.max_offset().x));
+            let to = (now - step).clamp(-most, 0.);
+            if (to - now).abs() > 0.01 {
+                scroll.set_offset(point(px(to), scroll.offset().y));
+                window.request_animation_frame();
+            }
+        },
+    )
 }
 
 /// A context for rendering nodes, contains link references.

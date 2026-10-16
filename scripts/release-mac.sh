@@ -50,12 +50,11 @@ APP=dist/Emaki.app
 
 # Sign the bundle. The hardened runtime (--options runtime) and a secure
 # timestamp are what notarization requires; --deep reaches the CLI beside
-# the app binary too. Under the hardened runtime the microphone, for
-# dictation, needs its entitlement, or the system hands it silence.
+# the app binary too.
 if [[ "$IDENTITY" == "-" ]]; then
   codesign --force --deep --sign - "$APP"
 else
-  codesign --force --deep --sign "$IDENTITY" --options runtime --timestamp --entitlements crates/emaki-app/macos/Emaki.entitlements "$APP"
+  codesign --force --deep --sign "$IDENTITY" --options runtime --timestamp "$APP"
 fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 

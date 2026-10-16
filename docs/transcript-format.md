@@ -52,6 +52,20 @@ depend on. The code honours each; keep it that way.
   `thinking` (`build::is_narration`). A narration is reply text. Taken
   for a thought it was folded shut, and inside a run of tool calls it
   was out of sight until the run was opened.
+- **A session can go on under another id.** Claude Code (2.1.301) moves
+  a conversation into a background session run by its daemon: it copies
+  the whole conversation into a new transcript (`--fork-session`) and ends
+  the old one with a `continued-in` row naming the new id
+  (`continuedInSessionId`), followed by its state rows. The old is
+  history; the new is where the conversation is. `SessionRef::continued_in`
+  says so, and the window lists the newest of a chain alone
+  (`docs/channels.md`, A session that went on).
+- **A background agent runs more than once.** Its `<task-notification>`
+  comes each time it stops, and a `SendMessage` whose sidecar says
+  `resumedAgentId` sets it going again (`build::shells_of`).
+- **An `Artifact` result's sidecar is the page** (`url`, `artifact_id`,
+  `title`, `icon`, `path`, `version`), for a read as for a publish: the
+  call's `action` says which (`build::artifacts_of`).
 - **Do not ignore `attachment` rows.** A message sent mid-turn exists only
   as one.
 - **A rule line on Claude Code's screen may carry text.** Test for one

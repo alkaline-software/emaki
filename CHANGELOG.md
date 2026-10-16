@@ -5,6 +5,19 @@ GitHub Release as its notes. Write it for the person installing the app, and
 keep it short: one line per change, a dozen lines at most, small fixes
 grouped into one. The reasoning belongs in AGENTS.md.
 
+## v0.2.8
+
+- A new accent, periwinkle, the blue of emaki.lol, and six more to choose from in Settings, Appearance: orchid, rose, amber, moss, jade and teal. Terracotta and graphite are gone; a window that wore one now wears periwinkle.
+- The icon's rolls are periwinkle.
+- Settings is redrawn: groups of rows on cards, a switch for what is on or off, and every section fitting without a scroll.
+- The pages an agent publishes as artifacts are listed over the composer, each a click from opening.
+- A background agent sent more work is shown running again over the composer.
+- The Changes sheet shows a changed picture (PNG, JPEG, GIF, WebP, SVG and the rest) before and after, side by side.
+- Making or switching a branch, pulling, reverting and restoring are no longer refused while an agent works.
+- A selection dragged to the edge of a wide code block scrolls it. In the light terminal, a diff and the Copied note are soft on the cream.
+- A conversation Claude Code moves into a background session stays one session in the sidebar, and the composer reaches it. The terminal pane pastes screenshots.
+- Dictation has moved out of Emaki into Kotoba, the studio's dictation app, which types into the composer as into any field. Its models, key, pill and history are gone from Emaki.
+
 ## v0.2.7
 
 - Dictation works in any app: the shortcut starts and stops it in WeChat, Obsidian, Notes and the rest, and the words are pasted where you type, your clipboard put back after. A pill at the top of the screen shows it listening. Allow Accessibility from Settings, Dictate.

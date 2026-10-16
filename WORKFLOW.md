@@ -271,7 +271,7 @@ Change the drawing, run the script, rebuild, commit the assets.
 
 **The disk-image background.** `scripts/dmg/background.png`, drawn by
 `scripts/dmg/background.py` (Pillow, LXGW WenKai Medium) in the app's cream
-and terracotta: "Drag Emaki to Applications" and an arrow, 1320x840 at 2x
+and its periwinkle accent: "Drag Emaki to Applications" and an arrow, 1320x840 at 2x
 for the 660x420 Finder window. Run the script only when the picture changes;
 the PNG is committed.
 

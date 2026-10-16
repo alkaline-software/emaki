@@ -169,6 +169,36 @@ Stop, the queue and the pills' setters are the same code for both.
 - Not done: a rename from the window. Its other commands (`/rename`, `/status`,
   `/review`) are typed in its terminal on the panel.
 
+## A session that went on
+
+Claude Code can move a conversation into a background session of its
+daemon (`claude daemon`, a record of `kind: "bg"` with a `jobId`, the new
+id's first eight letters): the conversation goes on under a new id, and
+the old transcript ends with `continued-in` (`docs/transcript-format.md`).
+The terminal it was in stays as a view of the job: its record keeps the
+old id and adds `parkedJobId`.
+
+- **The window lists the newest of the chain alone.** The index drops a
+  session whose `continued_in` it has, and a tab, a selection or a pending
+  one on it goes to the newest (`HubEvent::Index`). Listed both, the two
+  had one name, the window stayed on the old one, which nothing writes
+  to, and no reply showed.
+- **A parked terminal is on its job's session** (`peer::unpark`, in
+  `registry_all`): its record is read with the job's session id and the
+  job's status, busy or idle, since the job runs the turns.
+  `follow_terminals` then moves our hidden terminal to the new id as it
+  does for `/clear`, and the composer types into it, which is where the
+  conversation is. Started there anew, a second `claude --resume` on the
+  old id would fork the conversation again.
+- **A resume of a job joins it.** `claude --resume` of a session the
+  daemon runs becomes `claude attach <job>` in the same process, a view
+  of the job like the parked one, and it writes no registry record. So a
+  hidden terminal is ready when the prompt is on its screen and the
+  session has a record, its own or the job's (`type_message_now`), and
+  the job's record is the session's status (`Hub::peer_for`). Waiting
+  for a record of the terminal's own, a message from the composer was
+  never typed.
+
 ## The inbox
 
 `Hub::send_to_inbox`: one connection per message, wrapped in Claude
@@ -397,7 +427,9 @@ no close button: the strip's button puts the panel away.
   own, a step up from the page: Kaku's blue-black stood cold beside a
   warm-black page. Its ink and its violet cursor are still Kaku's. The light
   scheme keeps Kaku's cream beside a page that is near white: the page's
-  own ground was tried there and the terminal stopped reading as one. The sixteen
+  own ground was tried there and the terminal stopped reading as one. Its
+  "Copied" toast is the window's graphite with paper words: Kaku's dark
+  gold read as a stain on the cream. The sixteen
   named colours are the window's own inks for code (`docs/look.md`,
   Code's colours), no longer Kaku's. A span keeps which named colour it asked for
   (`Span::fg_ix`, `bg_ix`), so those are drawn from the scheme and not
@@ -412,6 +444,13 @@ no close button: the strip's button puts the panel away.
   the scheme's ink. Claude Code set to a dark theme draws a near-black
   band behind each prompt, which on the light scheme was a black bar
   across the screen, as it is in Kaku.
+- A coloured ground from the other side of the scale is a soft tint of
+  its own hue (`tint`): its brightest channel brought up to full, a
+  little of it over the scheme's ground, more of it the brighter it
+  began, so a word marked inside a marked line stays stronger than the
+  line. A light ink on it is the scheme's ink. Claude Code's diff for a
+  dark terminal, deep green and red bars, is a pale green and pink on
+  the light scheme.
 - The face is the window's one monospace face (Settings, Fonts;
   `docs/look.md`, The code font), to begin with JetBrains Mono with Kaku's fallbacks, built in
   (`fonts::TERM_FAMILY`, `assets/fonts`), no ligatures, no italic, plain
@@ -432,6 +471,12 @@ no close button: the strip's button puts the panel away.
   that is on and off by half seconds from when it last moved and still
   without the keyboard, and its "Copied" toast.
 
+- **A paste** (⌘V, the menu, the middle button) is what the clipboard
+  holds: words, a picture as the path of the file it is kept in
+  (`keep_image`, in the session's uploads, as the composer keeps one),
+  which Claude Code takes for a picture, or files copied in the Finder as
+  their paths. A terminal takes words alone, and a screenshot pasted
+  there did nothing.
 - **Shell.** The person's login shell (`pty::shell_argv`) in the
   session's folder, a tab each in the side's head (`Workbench::shells`, a
   `Shells` a session; `render_shell_tabs`). The first is made when the

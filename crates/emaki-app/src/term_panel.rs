@@ -986,14 +986,34 @@ impl Workbench {
         Some(Link { row, from, to, target })
     }
 
-    /// What is on the clipboard is pasted at the prompt.
+    /// What is on the clipboard is pasted at the prompt: its words, or a
+    /// picture as the path of a file it is kept in, which Claude Code
+    /// takes for a picture (`[Image #1]`) as it does one the window sends,
+    /// or files copied in the Finder as their paths. A terminal takes
+    /// words alone, and a screenshot pasted there did nothing.
     fn term_paste(&mut self, cx: &mut Context<Self>) {
+        use gpui::ClipboardEntry;
         let Some(pty) = self.term_panel_pty().filter(|p| p.alive()) else { return };
-        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-            pty.paste(&text);
-            self.side_back = 0;
-            self.side_sel = None;
+        let Some(item) = cx.read_from_clipboard() else { return };
+        let dir = emaki_core::paths::uploads_dir(&self.term_owner().map(|r| r.session_id).unwrap_or_else(|| "terminal".into()));
+        let mut said: Vec<String> = Vec::new();
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::Image(img) => match crate::workbench::keep_image(&dir, img.format.mime_type(), &img.bytes) {
+                    Ok(path) => said.push(path.to_string_lossy().to_string()),
+                    Err(e) => self.notice = Some(crate::workbench::Notice::error(e)),
+                },
+                ClipboardEntry::ExternalPaths(paths) => said.extend(paths.paths().iter().map(|p| p.to_string_lossy().to_string())),
+                ClipboardEntry::String(s) => said.push(s.text().to_string()),
+            }
         }
+        if said.is_empty() {
+            return cx.notify();
+        }
+        pty.paste(&said.join(" "));
+        self.side_back = 0;
+        self.side_sel = None;
+        cx.notify();
     }
 
     /// A choice of the panel's menu.
@@ -1855,7 +1875,9 @@ static KAKU_LIGHT: Scheme = Scheme {
     tab_on: 0xe8e6db,
     tab_hover: 0xe8e6db,
     tab_off: 0x4a4946,
-    toast: (0x8e6b02, 0x1a1a1a),
+    // The window's graphite and paper, as its frame is: Kaku's dark
+    // gold read as a stain on the cream.
+    toast: (0x3d3a36, 0xf3f1ea),
     ansi: {
         let k = &crate::look::INKS_LIGHT;
         [0x100f0f, k.red, k.green, k.gold, k.blue, k.violet, k.teal, 0x575653, 0x6f6e69, k.red, k.green, k.gold, k.blue, k.violet, k.teal, 0x403e3c]
@@ -1889,6 +1911,18 @@ fn swapped(table: &[(u32, u32)], c: u32) -> u32 {
 fn grey(c: u32) -> bool {
     let ch = [c >> 16 & 0xff, c >> 8 & 0xff, c & 0xff];
     ch.iter().max().unwrap() - ch.iter().min().unwrap() < 28
+}
+
+/// `c`'s hue, brought to the scheme's side of the scale: its brightest
+/// channel full, then a little of it over the scheme's ground. A brighter
+/// ground to begin with (a word marked within a marked line) keeps more,
+/// so what was stronger stays stronger.
+fn tint(c: u32, ground: u32, light: bool) -> u32 {
+    let top = (c >> 16 & 0xff).max(c >> 8 & 0xff).max(c & 0xff).max(1) as f32;
+    let ch = |sh: u32| (((c >> sh & 0xff) as f32 * 255. / top).round() as u32).min(255);
+    let vivid = ch(16) << 16 | ch(8) << 8 | ch(0);
+    let b = brightness(c);
+    mix(ground, vivid, if light { 0.14 + 0.5 * b } else { 0.2 + 0.2 * (1. - b) })
 }
 
 /// How bright a colour is to the eye, 0 to 1.
@@ -1954,6 +1988,17 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
             if bg.is_some_and(|c| s.bg_ix.is_none() && grey(c) && if light { brightness(c) < 0.2 } else { brightness(c) > 0.5 }) {
                 bg = Some(k.wash);
                 if s.fg_ix.is_none() && grey(fg) && if light { brightness(fg) > 0.4 } else { brightness(fg) < 0.2 } {
+                    fg = k.fg;
+                }
+            }
+            // A coloured ground from the other side of the scale (Claude
+            // Code's diff, green and red, set for a dark terminal) is a
+            // soft tint of its own hue on this one, and a light ink on it
+            // the scheme's: as bars of deep green and red on the light
+            // scheme they were the loudest thing on the screen.
+            else if let Some(c) = bg.filter(|c| s.bg_ix.is_none() && !grey(*c) && if light { brightness(*c) < 0.35 } else { brightness(*c) > 0.45 }) {
+                bg = Some(tint(c, k.bg, light));
+                if s.fg_ix.is_none() && if light { brightness(fg) > 0.4 } else { brightness(fg) < 0.2 } {
                     fg = k.fg;
                 }
             }
