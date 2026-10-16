@@ -91,9 +91,6 @@ cargo build -p emaki-app && ./target/debug/Emaki
 target/debug/emaki-core help
 ```
 
-On a Mac the build needs CMake (`brew install cmake`), for the
-dictation's model runner.
-
 `AGENTS.md` explains the code and the reasoning behind it. `WORKFLOW.md` is
 how a release is cut.
 

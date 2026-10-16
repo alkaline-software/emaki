@@ -60,8 +60,11 @@ About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
   commit.
 - Nothing here signs in. The sign-in sheet gives commands to paste, as
   the agents page does, and "Check again" asks the remote.
-- A branch switch is refused while a turn runs in the session showing: the
-  agent is writing the files a switch would change.
+- Git is the person's to run whenever they like: a branch made or
+  switched, a pull, a revert or a restore is never refused because an
+  agent is at work in the folder. Refusing them was tried and the person
+  did not want it: the two are unrelated, and git says itself when it
+  cannot.
 - The comparison changes two things, each on its own button: a commit
   of the files ticked, and Discard, on the file showing (`ask_discard`, `discard_now`,
   `git::discard`): a file the last commit has goes back to what that
@@ -325,8 +328,7 @@ fetched and the row under the composer says so.
 count is said: the list's foot (Pull), a strip under the files' head
 when there are commits either way (`sync_strip`, there while the
 comparison has nothing to open for), and under the commit's button.
-Pull is refused while a turn runs in the session showing, as a switch
-is. Gone separate ways, neither is offered. Beside Push, in the strip
+Gone separate ways, neither is offered. Beside Push, in the strip
 and under the commit's button, is Undo (`undo_pill`): the history's
 Undo Commit, for the last commit while it is still only here.
 
@@ -399,8 +401,6 @@ stash cannot hold it, so the dialog says which files to resolve first.
 there is one, `stash_strip` under the head says so with a Restore button
 (`branch_restore`, `git::restore`: `git stash pop` of the newest). Nothing
 here drops a stash; discarding one is `git stash drop` in a terminal.
-Restore, like a switch, is refused while a turn runs in the session
-showing.
 
 ## Changes
 
@@ -495,6 +495,14 @@ reading of the picked change is off while the history shows
   tree's clock while the sheet shows, and replaced only when they differ,
   so reading on does not move the reader. `DIFF_LINES` at most; a file
   that is not text says so.
+- A picture (`git::is_picture`: what gpui draws, so not `.icns` or HEIC)
+  is two pictures, not lines: the last commit's bytes (`git show
+  HEAD:./path`) beside the file's own, or a commit's parent's beside the
+  commit's, on two plates under "Before" and "After" with their size in
+  pixels and bytes (`picture_compare`). A picture added or deleted is one
+  plate. The gpui images are made when the bytes are read
+  (`Changes::pictures`), not at each draw, which hashed and copied them.
+  An SVG shows as a picture here, though it is text.
 
 ## What the tree does, taken back and done again
 

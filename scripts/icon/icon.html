@@ -53,7 +53,7 @@
 <script>
 // The icon is drawn in a 100-unit box. `bleed` fills the whole canvas as a
 // square; otherwise the body is an inset squircle with a shadow (the app icon).
-const NAVY = '#2b2556', AMBER = '#ffb83e', VIOLET = '#6a3fd9', TERRACOTTA = '#eaa27e';
+const NAVY = '#2b2556', AMBER = '#ffb83e', VIOLET = '#6a3fd9', PERIWINKLE = '#94a7ed';
 
 const stroke = (ctx, pts, style, width, cap = 'round') => {
   ctx.strokeStyle = style; ctx.lineWidth = width; ctx.lineCap = cap; ctx.lineJoin = 'round';
@@ -74,7 +74,7 @@ function sheet(ctx) {
 function paperRoll(ctx, x) {
   ctx.fillStyle = NAVY; rr(ctx, x - 2.5, 19.5, 5, 61, 2.2); ctx.fill();
   rr(ctx, x - 5, 25, 10, 50, 3.8);
-  ctx.fillStyle = TERRACOTTA; ctx.fill();
+  ctx.fillStyle = PERIWINKLE; ctx.fill();
   ctx.strokeStyle = NAVY; ctx.lineWidth = 2.6; ctx.stroke();
 }
 
@@ -90,7 +90,7 @@ function dialogue(ctx) {
 const ICONS = [
   {
     id: 'emaki', name: 'Handscroll',
-    desc: 'An emaki is a picture scroll, and this is one seen from the front: a sheet held between two rolls of paper on their axles. On the sheet is a conversation, the agent on the left with its spark and your reply on the right. The ground and the line colours are those of the Alkaline Software icon; the terracotta of the rolls is carried over from the first Emaki icon.',
+    desc: 'An emaki is a picture scroll, and this is one seen from the front: a sheet held between two rolls of paper on their axles. On the sheet is a conversation, the agent on the left with its spark and your reply on the right. The ground and the line colours are those of the Alkaline Software icon; the periwinkle of the rolls is the accent emaki.lol and the window wear, in the place of the terracotta the first icon had.',
     bg: ['#fdf8ee', '#f1e4d0'],   // top left to bottom right
     glyph(ctx) {
       sheet(ctx);

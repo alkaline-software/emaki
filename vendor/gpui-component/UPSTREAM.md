@@ -239,6 +239,14 @@ upstream revision finds them.
    gpui sends a hover's end only to an element it still draws, so a
    tooltip whose trigger went (a sheet closed under the pointer, or a
    show that landed after its trigger had gone) stayed for good.
+31. `crates/ui/src/text/node.rs` (`code_drag`, `CodeDrag`): a selection
+   dragged to a code block's left or right edge scrolls the block that
+   way, a step a frame, longer the further past the edge the pointer is.
+   It begins only with a press on the text and a move with the button
+   held, so the copy button and the scrollbar are left alone. The text
+   view keeps a selection as points in the window and reads them
+   against the text where it stands, so the selection follows the
+   scroll with nothing else changed.
 
 ## Updating
 

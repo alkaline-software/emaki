@@ -225,8 +225,9 @@ the agents and Git in `MARKS` (Simple Icons' drawings of the makers' marks, CC0)
 then the first letter of the name, for an agent added with no mark yet.
 
 A mark's colour is its agent's and never the accent's: Claude's
-terracotta, Codex's green (`workbench::agent_color`, the two accents of
-those names in `look::ACCENTS`, each with its shade for the appearance).
+terracotta, Codex's green (`workbench::agent_color`, from
+`look::agent_hex`, each with its shade for the appearance). Neither is an
+accent the window can wear (`docs/design.md`).
 The words beside a mark that say the agent is at work wear the same.
 Two places keep a mark grey until there is a reason: an idle session's
 row, and the terminal button in the top strip until it is pointed at or

@@ -262,17 +262,12 @@ impl Workbench {
 
     /// Pull: bring the branch checked out up to the remote's as last
     /// fetched, which only adds commits (`git::fast_forward`). Push:
-    /// send its commits to the remote. Neither is done unasked. A pull
-    /// writes files, so not under a running turn, as a switch is not.
+    /// send its commits to the remote. Neither is done unasked. Either
+    /// may be done while an agent works: git is the person's to run.
     pub(crate) fn sync_go(&mut self, pull: bool, cx: &mut Context<Self>) {
         let (Some(root), Some(b)) = (self.files_root(), self.branches()) else { return };
         let Some(name) = b.current.clone() else { return };
         if self.syncing.is_some() {
-            return;
-        }
-        if pull && self.selected_ref().is_some_and(|r| self.is_working(r)) {
-            self.notice = Some(Notice::error("a turn is running here; pull when it is over"));
-            cx.notify();
             return;
         }
         let origin = b.origin.clone().unwrap_or_else(|| "origin".into());
@@ -420,10 +415,12 @@ impl Workbench {
         let (root, key) = (c.root.clone(), history_key(c));
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let diff = cx.background_executor().spawn(async move { git::commit_diff(&root, &sha, &path) }).await;
+            let of = path.clone();
+            let diff = cx.background_executor().spawn(async move { git::commit_diff(&root, &sha, &of) }).await;
             this.update(cx, |this, cx| {
                 let Some(c) = this.changes.as_mut().filter(|c| c.history && history_key(c) == key) else { return };
                 c.list.reset(diff.rows.len());
+                c.pictures = crate::panels::picture_sides(std::path::Path::new(&path), &diff);
                 c.diff = key.map(|k| (k, Rc::new(diff)));
                 cx.notify();
             })
@@ -497,8 +494,7 @@ impl Workbench {
     }
 
     /// Do what the commit's menu was asked. Undo and Revert are git's
-    /// own and may be refused; nothing is forced. A revert writes files,
-    /// so not under a running turn.
+    /// own and may be refused; nothing is forced.
     pub(crate) fn commit_do(&mut self, what: CommitDo, sha: String, window: &mut Window, cx: &mut Context<Self>) {
         // From the history's menu, or for Undo from the strip under the
         // files' head, where no sheet is up.
@@ -510,10 +506,6 @@ impl Workbench {
                     cx.open_url(&url);
                 }
                 return;
-            }
-            CommitDo::Revert if self.selected_ref().is_some_and(|r| self.is_working(r)) => {
-                self.notice = Some(Notice::error("a turn is running here; revert when it is over"));
-                return cx.notify();
             }
             _ => {}
         }

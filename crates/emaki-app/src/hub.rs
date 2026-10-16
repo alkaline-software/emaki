@@ -279,10 +279,6 @@ impl Hub {
                     }
                     hub.reap_drivers();
                     hub.reap_terminals();
-                    // A dictation model holds about a gigabyte while
-                    // loaded; ten minutes unused and it goes.
-                    emaki_core::dictate::release_idle(Duration::from_secs(600));
-                    emaki_core::clean::release_idle(Duration::from_secs(600));
                     match wake_rx.recv_timeout(Duration::from_millis(interval.max(500))) {
                         Ok(()) | Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -537,7 +533,9 @@ impl Hub {
     pub fn peer_for(&self, session_id: &str) -> Option<Peer> {
         let peer = self.peers.lock().unwrap().get(session_id).cloned();
         match self.terminal_for(session_id) {
-            Some(pty) => peer.filter(|p| p.pid == pty.pid),
+            // Ours, or the daemon's job our terminal is joined to: the
+            // job runs the turns, and its record says busy or idle.
+            Some(pty) => peer.filter(|p| p.pid == pty.pid || !p.job.is_empty()),
             None => peer,
         }
     }
@@ -760,7 +758,11 @@ impl Hub {
             if !pty.alive() {
                 return Err("claude exited before it took the message".into());
             }
-            let registered = !peer::available() || peer::registry_all().iter().any(|p| p.pid == pty.pid);
+            // Claude Code up and registered: its own record, or, for a
+            // session its daemon runs as a job, the job's, since a
+            // terminal that joins a job (`claude attach`, which a resume
+            // of one becomes) writes none and waited here for ever.
+            let registered = !peer::available() || peer::registry_all().iter().any(|p| p.pid == pty.pid || (!p.job.is_empty() && p.session_id == sid));
             if registered && driver::prompt_on_screen(&pty.styled()).is_some() {
                 break;
             }

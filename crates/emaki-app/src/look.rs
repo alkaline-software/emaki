@@ -3,11 +3,11 @@
 //!
 //! The palette itself stays in `themes/emaki.json`, one config per
 //! appearance. An accent is a substitution over the handful of keys that
-//! carry the terracotta there (the primary button, the focus ring, links,
-//! the active row's border, the drag border, the selection tint), applied
-//! to both configs before they are handed to the toolkit, so
-//! `Theme::change` keeps re-applying the chosen accent on every appearance
-//! switch with nothing to patch afterwards.
+//! carry it there (the primary button, the focus ring, links, the active
+//! row's border, the drag border, the selection tint), applied to both
+//! configs before they are handed to the toolkit, so `Theme::change`
+//! keeps re-applying the chosen accent on every appearance switch with
+//! nothing to patch afterwards.
 
 use gpui::{App, Window};
 use gpui_component::theme::{Theme, ThemeConfig, ThemeMode, ThemeSet};
@@ -23,16 +23,37 @@ pub struct Accent {
     pub link: [&'static str; 2],
 }
 
+/// Seven hues of one lightness and chroma in OKLCH, the first emaki.lol's
+/// indigo: 0.52 and 0.13 in the light appearance, 0.74 and 0.105 in the
+/// dark, the chroma eased for the hues that are loud at it and amber's
+/// light shade a little lighter, where an orange at 0.52 is brown. They
+/// go round the wheel in even steps and leave out Claude's red-orange
+/// and the other blues (`docs/design.md`, The accents).
 pub const ACCENTS: &[Accent] = &[
-    Accent { key: "terracotta", name: "Terracotta", light: ["#D97757", "#C96A4B", "#B85F3F"], dark: ["#D97757", "#E0866A", "#B85F3F"], link: ["#B85F3F", "#E39A7F"] },
-    Accent { key: "blue", name: "Blue", light: ["#5B7FB8", "#4F72AA", "#43649A"], dark: ["#7A9BD1", "#8FAADB", "#6386BE"], link: ["#4A6CA8", "#9DB6E0"] },
-    Accent { key: "green", name: "Green", light: ["#5F9E6E", "#549162", "#4A8257"], dark: ["#79B487", "#8CC099", "#66A074"], link: ["#4B8A5A", "#9BCBA7"] },
-    Accent { key: "violet", name: "Violet", light: ["#9B6FB5", "#8D62A7", "#7E5697"], dark: ["#B08AC8", "#BD9CD2", "#9C77B7"], link: ["#8A5EA6", "#C4A5D8"] },
-    Accent { key: "teal", name: "Teal", light: ["#4E9AA6", "#458C97", "#3D7D87"], dark: ["#6FB5BF", "#85C1CA", "#5EA3AD"], link: ["#3F8791", "#93CBD3"] },
-    Accent { key: "graphite", name: "Graphite", light: ["#5C5951", "#4E4B44", "#403E38"], dark: ["#A8A59C", "#B6B3AB", "#97948B"], link: ["#4E4B44", "#C2BFB6"] },
+    Accent { key: "periwinkle", name: "Periwinkle", light: ["#5061B3", "#4A5BAC", "#4050A0"], dark: ["#94A7ED", "#A0B3FB", "#879AE0"], link: ["#4A5BAC", "#94A7ED"] },
+    Accent { key: "orchid", name: "Orchid", light: ["#845293", "#7E4C8D", "#724181"], dark: ["#C498D2", "#D1A4DF", "#B78BC4"], link: ["#7E4C8D", "#C498D2"] },
+    Accent { key: "rose", name: "Rose", light: ["#9C4A66", "#954360", "#893856"], dark: ["#DA93A9", "#E79FB5", "#CC879C"], link: ["#954360", "#DA93A9"] },
+    Accent { key: "amber", name: "Amber", light: ["#A86003", "#A05B00", "#905203"], dark: ["#DD9B5F", "#EAA76B", "#CF8E52"], link: ["#A05B00", "#DD9B5F"] },
+    Accent { key: "moss", name: "Moss", light: ["#5A723A", "#556C34", "#4A6129"], dark: ["#9CB67C", "#A7C288", "#8FA86F"], link: ["#556C34", "#9CB67C"] },
+    Accent { key: "jade", name: "Jade", light: ["#327860", "#2B725A", "#1E6750"], dark: ["#77BCA1", "#83C8AD", "#6AAE95"], link: ["#2B725A", "#77BCA1"] },
+    Accent { key: "teal", name: "Teal", light: ["#277580", "#1F6F79", "#0E646E"], dark: ["#6FB9C4", "#7BC5D0", "#61ACB7"], link: ["#1F6F79", "#6FB9C4"] },
 ];
 
+/// What is drawn on an accent: white on the light appearance's shade,
+/// the ink on the dark one's, each 5 to 1 or more on every accent.
+const ON_LIGHT: &str = "#FFFFFF";
+const ON_DARK: &str = "#1F1E1D";
+
+/// The accent by its key. A key from before the seven was a colour of
+/// its own; the nearest of these stands for it, and the rest (terracotta,
+/// graphite, blue) are the first.
 pub fn accent(key: &str) -> &'static Accent {
+    let key = match key {
+        "violet" => "orchid",
+        "green" => "jade",
+        "brass" => "amber",
+        k => k,
+    };
     ACCENTS.iter().find(|a| a.key == key).unwrap_or(&ACCENTS[0])
 }
 
@@ -40,6 +61,34 @@ pub fn accent(key: &str) -> &'static Accent {
 pub fn accent_hex(key: &str, dark: bool) -> &'static str {
     let a = accent(key);
     if dark { a.dark[0] } else { a.light[0] }
+}
+
+/// The accent installed last, for what stands on the window's frame.
+static INSTALLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The accent as the frame wears it, base and the ink on it. The frame
+/// is graphite beside a light page and lighter than a dark one, so it
+/// takes the dark appearance's shade in both, as emaki.lol's navbar does:
+/// the light one is 2 to 1 on graphite.
+pub fn on_frame() -> (&'static str, &'static str) {
+    let a = &ACCENTS[INSTALLED.load(std::sync::atomic::Ordering::Relaxed).min(ACCENTS.len() - 1)];
+    (a.dark[0], ON_DARK)
+}
+
+/// The colours of the agents' own marks, their makers': Claude's
+/// terracotta and Codex's green, whatever accent the window wears. Not
+/// accents: no window wears them.
+pub fn agent_hex(agent: emaki_core::model::AgentId, dark: bool) -> &'static str {
+    match agent {
+        emaki_core::model::AgentId::ClaudeCode => "#D97757",
+        emaki_core::model::AgentId::Codex => {
+            if dark {
+                "#79B487"
+            } else {
+                "#5F9E6E"
+            }
+        }
+    }
 }
 
 /// The inks code is written in, one set an appearance: every place that
@@ -81,8 +130,11 @@ fn paint(cfg: &mut ThemeConfig, a: &Accent) {
     let dark = cfg.mode.is_dark();
     let [base, hover, active] = if dark { a.dark } else { a.light };
     let link = if dark { a.link[1] } else { a.link[0] };
+    let on = if dark { ON_DARK } else { ON_LIGHT };
     let c = &mut cfg.colors;
     c.primary = Some(base.into());
+    c.primary_foreground = Some(on.into());
+    c.sidebar_primary_foreground = Some(on.into());
     c.primary_hover = Some(hover.into());
     c.primary_active = Some(active.into());
     c.ring = Some(base.into());
@@ -111,6 +163,7 @@ pub fn install(accent_key: &str, mono: &str, cx: &mut App) {
         }
     };
     let a = accent(accent_key);
+    INSTALLED.store(ACCENTS.iter().position(|x| std::ptr::eq(x, a)).unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
     let code = crate::fonts::term_family(mono, cx);
     let theme = Theme::global_mut(cx);
     for mut cfg in set.themes {

@@ -134,9 +134,6 @@ What is gated, and its fallback:
   folders on Windows; Homebrew's folders and `/usr/bin` elsewhere, the
   Mac's `/usr/bin/git` only with Xcode's tools there.
 - `paths::decode_project_dir` knows the `C--Users-...` shape.
-- Dictation (`dictate.rs`) is a Mac's alone: transcribe.cpp and the
-  microphone are dependencies for macOS only, and elsewhere the button
-  is not drawn and Settings says so (`docs/composer.md`).
 
 Without a Windows machine the closest check is a MinGW type check, which
 catches every `cfg` mistake but not a linker one:
@@ -150,9 +147,6 @@ CARGO_TARGET_DIR=target/xwingnu CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc 
 The MSVC target cannot be checked from a Mac (bundled SQLite wants the
 Windows headers) and neither can Linux (fontconfig wants a pkg-config
 sysroot). `rust.yml` is the real test for both.
-
-Building on a Mac needs CMake (`brew install cmake`) for transcribe.cpp.
-The runners have it; `rust.yml` installs it on Linux already.
 
 ## CI and releases
 
@@ -187,7 +181,8 @@ old name, on purpose, to read what was written under it:
 
 `scripts/icon/icon.html` is the source, drawn on a canvas: a handscroll
 (絵巻) seen from the front with a conversation on its sheet, in the
-Alkaline Software organisation icon's colours plus terracotta. It was
+Alkaline Software organisation icon's colours, the rolls in periwinkle
+(`docs/design.md`, The icon). It was
 designed outside this repository; this copy is the app's source.
 
 - `drawIcon(canvas, icon, px, bleed)` draws any pixel size, as the full

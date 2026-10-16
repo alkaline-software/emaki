@@ -54,9 +54,10 @@ something the model lacks, get it from the transcript.
 
 ## The standard
 
-Emaki is an elegant app, held to that everywhere: a considered layout,
-and motion wherever anything changes. Every change to the window meets
-this unasked. The person has asked many times.
+Emaki is an elegant app, held to the bar of the work that wins Awwwards,
+the Webbys and the FWA (`docs/design.md`; read it before changing anything
+a person sees): a considered layout, and motion wherever anything
+changes. Every change meets this unasked. The person has asked many times.
 
 - **Nothing changes from one frame to the next.** What appears, goes,
   opens, closes, grows or moves does so over a moment, with what is
@@ -152,13 +153,14 @@ handed work on one of these files is told to read the doc too.
 | You are about to touch | Read first |
 |---|---|
 | `emaki-app/src/transcript.rs`; the conversation's list, find, or reload in `workbench.rs`; `emaki-core/src/find.rs` | `docs/conversation.md` |
-| The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, dictation, the notice and limits row in `workbench.rs`; `a11y.rs`; `pill.rs`; `emaki-core/src/files.rs`, `check.rs`, `dictate.rs`, `clean.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
+| The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, the notice and limits row in `workbench.rs`; `a11y.rs`; `emaki-core/src/files.rs`, `check.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
 | The pills, pickers, mode/model/effort notices; `emaki-core/src/options.rs`; `mode_*`, `effort_*`, `model_*`, `options_from` in `driver.rs` | `docs/modes.md` |
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`; a table's cells in `files.rs` | `docs/panels.md` |
-| The sidebar, sessions page, tabs, settings panel, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
+| The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
+| Anything a person sees, new or changed: a control, a colour, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings panel: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
@@ -191,9 +193,6 @@ crates/emaki-core/        everything without a window
   src/options.rs             the modes, models and effort levels an agent offers, as it lists them
   src/explain.rs             opaque tool calls in plain words, via `claude -p`
   src/check.rs               the composer's writing: Harper's English, what counts as prose, the capital a sentence starts with
-  src/dictate.rs             the composer's dictation: the models and their downloads, the microphone, Whisper on the GPU (a Mac's alone)
-  src/clean.rs               the dictation's clean-up: the small language models, the prompt, what of their rewriting is taken
-  native/llm.cpp build.rs    libllama (vendor/llama.cpp) on transcribe.cpp's ggml, for the clean-up: one ggml in the program
   src/git.rs                 what git says of a folder's files, as VS Code's explorer shows it
   src/files.rs               a folder's files for "@" in the composer: the list, the match, the tokens; a table's rows, and where a cell of one is written
   src/parquet_file.rs        a Parquet file read for showing: its columns, its row count, its first rows
@@ -211,6 +210,7 @@ crates/emaki-core/        everything without a window
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
   src/workbench.rs           sidebar, session list, search, composer
+  src/workbench/settings.rs  the settings panel: its rail, groups, rows, switches
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/panels.rs              beside a conversation: the folder's files as a tree, and the outline
   src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions
@@ -220,7 +220,6 @@ crates/emaki-app/         the window
   src/html_web.rs            an HTML file in the system's web view, set in the file's pane; hidden while the window draws over it
   src/html_shot.rs           the same file as a picture by Blitz, where no web view can be set: Linux
   src/term_panel.rs          the terminal at a conversation's right: a shell, and the agent's hidden terminal drawn whole
-  src/pill.rs                dictation shown at the top of the screen, its words going to another app or field
   src/main.rs                menus, key bindings, the window
   src/sys.rs                 open, reveal, the person's name: per OS; a session's hidden terminal by its pid
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers

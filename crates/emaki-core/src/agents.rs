@@ -236,8 +236,8 @@ const TOOLS: &[Agent] = &[Agent {
     apps: &[],
     download: "",
     with_emaki: "Lets Emaki show changes and branches, and commit.",
-    // Violet, as GitHub Desktop wore: the terracotta is Claude Code's.
-    accent: "violet",
+    // Orchid, near the violet GitHub Desktop wore.
+    accent: "orchid",
 }];
 
 /// Where GitHub Desktop is downloaded: an app for the same repositories,

@@ -930,6 +930,7 @@ pub fn build(input: BuildInput) -> Session {
     let mut queue = Queue::default();
     if !input.nested {
         session.shells = shells_of(&main_rows);
+        session.artifacts = artifacts_of(&main_rows);
     }
 
     for row in &main_rows {
@@ -992,11 +993,18 @@ pub fn build(input: BuildInput) -> Session {
 /// for (`KillShell`, `TaskStop`) ends it too. A subagent is the same
 /// with another start: an `Agent` result whose sidecar says `isAsync`
 /// and names the `agentId`, which is the id its notification carries.
-/// A command still running
+/// An agent is started again by a `SendMessage` whose result says it
+/// resumed it (`resumedAgentId`), and ends again at its next
+/// notification: one that ran before is that row again, from the
+/// resume, and one that first ran in the foreground gets a row from its
+/// own `Agent` call. A command still running
 /// when its Claude Code went away gets no row at all, so whether one
 /// without an end is running is for the caller to say, from the process.
 fn shells_of(rows: &[&Value]) -> Vec<Shell> {
     let mut calls: HashMap<String, (String, String)> = HashMap::new();
+    // Every subagent seen, by its id: its kind and its task, for one
+    // resumed that has no row yet.
+    let mut agents: HashMap<String, (String, String)> = HashMap::new();
     let mut shells: Vec<Shell> = Vec::new();
     let end = |shells: &mut Vec<Shell>, id: &str, status: &str, summary: &str, ts: &str| {
         if let Some(sh) = shells.iter_mut().find(|sh| sh.id == id && sh.ended.is_empty()) {
@@ -1039,6 +1047,29 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
                     continue;
                 }
                 let side = row.get("toolUseResult");
+                let call_of = || blocks(row).into_iter().find(|x| block_type(x) == "tool_result").map(|x| str_of(&x, "tool_use_id").to_string()).unwrap_or_default();
+                if let Some(id) = side.and_then(|r| r.get("agentId")).and_then(Value::as_str) {
+                    let (kind, mut description) = calls.get(&call_of()).cloned().unwrap_or_default();
+                    if description.is_empty() {
+                        description = side.map(|r| str_of(r, "description")).unwrap_or("").into();
+                    }
+                    agents.insert(id.into(), (kind, description));
+                }
+                if let Some(id) = side.and_then(|r| r.get("resumedAgentId")).and_then(Value::as_str) {
+                    match shells.iter_mut().find(|sh| sh.id == id) {
+                        Some(sh) => {
+                            sh.started = ts.into();
+                            sh.ended.clear();
+                            sh.status.clear();
+                            sh.summary.clear();
+                        }
+                        None => {
+                            let (command, description) = agents.get(id).cloned().unwrap_or_default();
+                            shells.push(Shell { id: id.into(), agent: true, command, description, started: ts.into(), ..Default::default() });
+                        }
+                    }
+                    continue;
+                }
                 if let Some(id) = side.filter(|r| r.get("isAsync").and_then(Value::as_bool) == Some(true)).and_then(|r| r.get("agentId")).and_then(Value::as_str) {
                     let call = blocks(row).into_iter().find(|x| block_type(x) == "tool_result").map(|x| str_of(&x, "tool_use_id").to_string()).unwrap_or_default();
                     let (kind, mut description) = calls.get(&call).cloned().unwrap_or_default();
@@ -1069,6 +1100,52 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
         }
     }
     shells
+}
+
+/// The pages the agent published as claude.ai artifacts: an `Artifact`
+/// result whose sidecar names the page (`url` and `artifact_id`), the
+/// call a publish (no `action`, or `publish`) and not a read or a list,
+/// which name a page too. A page published again is the same one, its
+/// title and time the newest.
+fn artifacts_of(rows: &[&Value]) -> Vec<Artifact> {
+    let mut publishes: HashSet<String> = HashSet::new();
+    let mut out: Vec<Artifact> = Vec::new();
+    for row in rows {
+        match str_of(row, "type") {
+            "assistant" => {
+                for block in blocks(row).iter().filter(|x| block_type(x) == "tool_use" && str_of(x, "name") == "Artifact") {
+                    let action = block.get("input").and_then(|i| i.get("action")).and_then(Value::as_str).unwrap_or("publish");
+                    // An upload into a page's store names the page too.
+                    let asset = block.get("input").and_then(|i| i.get("asset")).and_then(Value::as_bool) == Some(true);
+                    if action == "publish" && !asset {
+                        publishes.insert(str_of(block, "id").into());
+                    }
+                }
+            }
+            "user" => {
+                let Some(side) = row.get("toolUseResult").filter(|s| s.get("artifact_id").is_some()) else { continue };
+                let url = str_of(side, "url");
+                let call = blocks(row).into_iter().find(|x| block_type(x) == "tool_result").map(|x| str_of(&x, "tool_use_id").to_string()).unwrap_or_default();
+                if url.is_empty() || !publishes.contains(&call) {
+                    continue;
+                }
+                let ts = str_of(row, "timestamp");
+                let (title, icon, path) = (str_of(side, "title"), str_of(side, "icon"), str_of(side, "path"));
+                match out.iter_mut().find(|a| a.url == url) {
+                    Some(a) => {
+                        a.last = ts.into();
+                        a.times += 1;
+                        if !title.is_empty() {
+                            a.title = title.into();
+                        }
+                    }
+                    None => out.push(Artifact { url: url.into(), title: title.into(), icon: icon.into(), path: path.into(), first: ts.into(), last: ts.into(), times: 1 }),
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Where a background subagent of the session at `transcript_path`

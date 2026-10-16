@@ -268,6 +268,11 @@ pub struct SessionRef {
     /// queued. `/clear` leaves one behind, named after the session it
     /// cleared. It is archived like any other and listed nowhere.
     pub blank: bool,
+    /// The session this one goes on in, when Claude Code moved it into a
+    /// background session (`continued-in`, which copies the conversation
+    /// under a new id and leaves this one as it was). Empty otherwise.
+    #[serde(default)]
+    pub continued_in: String,
     pub state: TurnState,
 }
 
@@ -432,6 +437,7 @@ fn peek_into(r: &mut SessionRef, st: &fs::Metadata) {
     }
     r.state = turn_state(state_rows, &r.cwd);
     r.blank = whole && !head.iter().any(says_something);
+    r.continued_in = tail.iter().rev().find(|row| str_of(row, "type") == "continued-in").map(|row| str_of(row, "continuedInSessionId").to_string()).unwrap_or_default();
 }
 
 /// Whether a row is part of a conversation: a reply, a message queued, a

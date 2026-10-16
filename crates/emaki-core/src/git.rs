@@ -812,8 +812,13 @@ pub fn commit_files(dir: &Path, sha: &str) -> Vec<(String, State)> {
         .collect()
 }
 
-/// One file's lines as a commit changed them.
+/// One file's lines as a commit changed them, or a picture's two sides.
 pub fn commit_diff(dir: &Path, sha: &str, path: &str) -> Diff {
+    if is_picture(Path::new(path)) {
+        // Before is the first parent's, none for a first commit.
+        let (before, after) = (blob(dir, &format!("{sha}^:{path}")), blob(dir, &format!("{sha}:{path}")));
+        return Diff { binary: true, pictures: Some(Pictures { before, after }), ..Default::default() };
+    }
     let out = command().arg("-C").arg(dir).args(["show", "--no-color", "--no-ext-diff", "--first-parent", "--format=", sha, "--", &format!(":/{path}")]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success());
     out.map(|o| parse_diff(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
 }
@@ -1167,11 +1172,49 @@ pub struct Diff {
     pub binary: bool,
     /// Longer than is kept; the rows are its beginning.
     pub cut: bool,
+    /// A picture's bytes before and after, in place of lines: none for
+    /// a file of another kind.
+    pub pictures: Option<Pictures>,
+}
+
+/// A picture as the last commit had it and as it is now, or as a commit
+/// found it and left it. A side is `None` where the file was not there:
+/// added, or deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pictures {
+    pub before: Option<std::sync::Arc<[u8]>>,
+    pub after: Option<std::sync::Arc<[u8]>>,
+}
+
+/// The kinds of picture compared as pictures: what the window can draw.
+pub const PICTURE_KINDS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff", "ico", "pbm", "pgm", "ppm"];
+
+/// Whether `path` is a picture the window can draw, by its extension.
+pub fn is_picture(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| PICTURE_KINDS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// The most of one side of a picture that is read.
+const PICTURE_BYTES: usize = 40_000_000;
+
+/// A file as git has it at `spec` (`HEAD:./a.png`, `<sha>:a.png`), when
+/// it has it and it is not too large to show.
+fn blob(dir: &Path, spec: &str) -> Option<std::sync::Arc<[u8]>> {
+    let out = command().arg("-C").arg(dir).args(["show", spec]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success())?;
+    (out.stdout.len() <= PICTURE_BYTES).then(|| out.stdout.into())
 }
 
 /// What `path` holds now against what the last commit has. A file git
 /// does not track yet is all new lines.
 pub fn diff(dir: &Path, path: &Path, state: State) -> Diff {
+    if is_picture(path) {
+        // The last commit's copy, else the one staged before the first
+        // commit; and the file as it is, unless it has gone.
+        let rel = path.strip_prefix(dir).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        let before = if state == State::Untracked { None } else { blob(dir, &format!("HEAD:./{rel}")).or_else(|| blob(dir, &format!(":./{rel}"))) };
+        let after = std::fs::read(path).ok().filter(|b| b.len() <= PICTURE_BYTES).map(Into::into);
+        return Diff { binary: true, pictures: Some(Pictures { before, after }), ..Default::default() };
+    }
     if state == State::Untracked {
         return whole_file(path);
     }

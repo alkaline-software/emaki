@@ -555,6 +555,10 @@ pub struct Session {
     /// order it started them, each with how it ended once it has.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shells: Vec<Shell>,
+    /// The pages the agent published with Claude's Artifact tool, in the
+    /// order it first published each, as each last stands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
     pub transcript_path: String,
     pub log_path: String,
 }
@@ -585,6 +589,21 @@ pub struct Shell {
     pub status: String,
     /// Claude Code's sentence on how it ended.
     pub summary: String,
+}
+
+/// A page published as a claude.ai artifact: where it is, its title and
+/// icon's word, and when it was last published.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub url: String,
+    pub title: String,
+    pub icon: String,
+    /// The file it was published from.
+    pub path: String,
+    pub first: String,
+    pub last: String,
+    /// How many times it was published.
+    pub times: usize,
 }
 
 impl Session {

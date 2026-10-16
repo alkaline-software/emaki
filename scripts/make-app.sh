@@ -31,7 +31,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSHumanReadableCopyright</key><string>MIT</string>
-  <key>NSMicrophoneUsageDescription</key><string>Emaki listens while you dictate into the composer. What you say is turned into words on this Mac and sent nowhere.</string>
 </dict>
 </plist>
 PLIST
