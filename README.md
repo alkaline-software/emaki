@@ -1,6 +1,6 @@
 # Emaki
 
-*Every coding-agent session on your machine, kept for good, in one window you can read, search and talk to.*
+*The agentic development environment.*
 
 [Website](https://emaki.lol) · [Download](https://github.com/alkaline-software/emaki/releases/latest) · [Changelog](CHANGELOG.md)
 
