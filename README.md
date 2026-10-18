@@ -4,7 +4,7 @@
 
 [Website](https://emaki.lol) · [Download](https://github.com/alkaline-software/emaki/releases/latest) · [Changelog](CHANGELOG.md)
 
-## Why
+## Motivation
 
 Emaki (絵巻) is a Japanese picture scroll: a long roll, read from one end to the other. A coding-agent session is the same thing, and Emaki is where it is kept and read.
 
@@ -12,7 +12,7 @@ Claude Code deletes its transcripts after 30 days, with no warning. Every other 
 
 Emaki never writes to a transcript and adds nothing to a session's context. The agent runs as it always does; Emaki watches, keeps and shows.
 
-## Quick Start
+## Get Started
 
 Download the [latest release](https://github.com/alkaline-software/emaki/releases/latest) for your system:
 
@@ -25,23 +25,65 @@ Download the [latest release](https://github.com/alkaline-software/emaki/release
 
 On a Mac, open the image and drag Emaki into Applications. The Mac image is signed and notarized. Windows is unsigned, so SmartScreen asks once: *More info*, then *Run anyway*.
 
-Open the app. The first launch copies every Claude Code session on the machine into `~/.emaki/archive` and lists it beside your Codex sessions; every later launch catches up. Emaki needs at least one agent installed: the Agents page (⌘E) walks through installing Claude Code or Codex and signing in. The app updates itself from Settings.
+Open the app. The first launch copies every Claude Code session on the machine into `~/.emaki/archive` and lists it beside your Codex sessions; every later launch catches up, so Emaki does not have to stay running. It needs at least one agent installed: the Agents page (⌘E) walks through installing Claude Code or Codex and signing in. The app updates itself from Settings.
+
+Everything Emaki keeps is in `~/.emaki`, and `archive/` is the one folder that cannot be rebuilt. The one setting it touches outside is Claude Code's status line, which feeds the context and rate limits under the composer; `emaki-core statusline restore` puts the old one back.
 
 ## Features
 
-- **Kept for good**: Every Claude Code session is archived before Claude Code can delete it, and a deleted one stays listed, searchable and readable, marked as kept
-- **One place**: Sessions by project in the sidebar, by day on All Sessions, and in tabs; pin a project, rename a session, archive or delete several at once
-- **Readable**: Prompts, replies, tool calls, thoughts and subagents laid out like the Claude app, with an opaque tool call explained in one plain sentence
-- **Search**: ⌘K searches every session on the machine; ⌘F finds inside the one showing
-- **Talk back**: Reply from the composer with attachments, `@` for a file, `/` for a command, and the agent's mode, model and effort on pills; questions, approvals and plans come up as cards
-- **Two agents**: Claude Code and Codex, each started, continued and stopped from the window, each in its own color
-- **Four panels**: The files panel (the project as a tree, with branches, changes, commits and history) and the outline panel at the left; the shell terminal and the agent terminal at the right
-- **Files open**: Code with an editor and format on save, markdown, CSV as a grid, Word, PowerPoint, Excel, PDF, HTML, Parquet and pictures, beside the conversation
+### Project Management
+
+- **Every session, by project**: The sidebar lists each project with its sessions; pin one to the top, hide one, or open its folder
+- **By day**: All Sessions (⌘L) groups every session on the machine by day, with archived projects in their own section
+- **Kept for good**: A session Claude Code has deleted stays listed, searchable and readable, marked as kept
+- **Search**: ⌘K searches the full text of every session
+- **Tabs**: Open sessions sit in tabs grouped by project; switch with ⌘1 to ⌘9, close with ⌘W, reopen with ⌘⇧T
+- **Housekeeping**: Rename a session, or select several with ⌘-click, ⇧-click or a dragged rectangle and archive or delete them at once; a project's folder is never touched
+- **Two agents**: Claude Code and Codex, each in its own color; the Agents page (⌘E) says which is installed and signed in
+- **New sessions**: From the home page, from a project's plus, with ⌘T in the current project or ⌘O in any folder, with the agent, mode, model and effort chosen on the strip under the composer
+
+### Conversation (Main Panel)
+
+- **Readable**: Prompts, replies, tool calls, thoughts and subagents laid out like the Claude app, with code colored and wide blocks scrolling sideways
+- **Explained**: An opaque tool call gets one plain sentence on what it does, written by the session's own agent
+- **Talk back**: Reply from the composer with attachments, `@` for a file, `/` for a command, and the mode, model and effort on pills; ⌘↩ sends
+- **Cards**: Questions, approvals, plans and background commands come up as cards at the conversation's end, answered there; Stop gives your message back
+- **Live**: A session running in a terminal is followed as it writes, with its context and rate limits under the composer and "New messages" when you are reading higher up
+- **Find**: ⌘F finds inside the session showing
+- **Artifacts**: The pages an agent publishes are listed over the composer, a click from opening
 - **A record you own**: Every session also renders to markdown under `~/.emaki/logs`
 
-## Usage Guide
+### Files Panel
 
-| Action | Shortcut |
+- **The project as a tree**: The session's folder with git's marks, kept current as the agent writes
+- **Branches**: Switch, carrying your changes along or leaving them to restore later; make a branch, publish one, fetch
+- **Changes**: A sheet of what changed, with a diff per file; commit the files you tick, push, pull, browse history, undo or revert a commit
+- **A file manager**: Drag files in, drag rows to move, cut, copy, duplicate, rename in place, remove with ⌘⌫, and take it back with ⌘Z
+- **Files open beside the conversation**: Code in an editor with ⌘S and format on save, markdown as it reads or as written, CSV as a grid, Word as pages you can write in, PowerPoint, Excel, PDF with search and selection, HTML, Parquet and pictures
+- **Room**: Drag the panel's edge, double-click it to fit, or enlarge a file over the conversation
+
+### Outline Panel
+
+- **An entry a round**: What you asked, in a short label, with the time
+- **Go there**: Click an entry and the conversation glides to that round
+- **Labels by a small model**: Written by the session's own agent, Claude Code's Haiku or Codex's light model, and cached
+
+### Shell Terminal Panel
+
+- **A shell in the session's folder**: At the conversation's right, in tabs; ⌘T opens one, ⌘W closes it
+- **A Mac terminal's keys**: ⌘←, ⌘→, ⌘⌫, ⇧↩ and ⌘K, with mouse selection copied on release and programs that take the mouse
+- **Kaku's look**: Its dark and light schemes, with the font and size set in Settings, Terminal
+
+### Agent Terminal Panel
+
+- **The session's own agent, drawn whole**: Claude Code or Codex as it runs, in a terminal of Emaki's own; nothing opens a terminal app
+- **One session, two views**: A turn typed in the terminal shows in the conversation, and a message sent from the composer shows in the terminal
+- **Whatever the agent asks is shown**: A question with no card of its own comes up on the terminal card and never waits unseen
+- **Copy and paste**: Copying reaches the clipboard, and a pasted screenshot goes to the agent
+
+## Keys
+
+| Action | Key |
 | :--- | :--- |
 | Search every session | `⌘ K` |
 | Find in this session | `⌘ F` |
@@ -62,38 +104,6 @@ Open the app. The first launch copies every Claude Code session on the machine i
 | Settings | `⌘ ,` |
 
 Off a Mac, Ctrl stands in for ⌘.
-
-## FAQ
-
-- **Does Emaki change my sessions?** No. Nothing is written to a transcript and nothing enters a session's context. The one setting Emaki touches is Claude Code's status line, which feeds the context and rate limits under the composer; `emaki-core statusline restore` puts the old one back
-- **Does it have to be running?** No. Every launch catches up on every session since the last one. A Claude Code session deleted before Emaki first saw it is gone, though, so open the app once before the 30 days are up
-- **Where is my data?** In `~/.emaki`. Only `archive/` cannot be rebuilt, so that is the folder to back up
-- **Does anything leave my machine?** There is no server. The explanations and the outline's labels are calls to your own agent on your own account, Claude Code's Haiku or Codex's light model, and the update check reads GitHub's releases page
-- **Why are Codex sessions not in the archive?** Codex never deletes a session by age, so its files are the only copy. Emaki reads them where they are, and archives or deletes one through Codex itself
-- **Windows and Linux?** Both build and ship, and both are less tested than the Mac. On Linux an HTML file is drawn as a picture, since no web view can be set in the window
-- **Where did dictation go?** Into [Kotoba](https://github.com/alkaline-software/kotoba), the studio's dictation app, which types into Emaki as into any field
-
-## Docs
-
-- [AGENTS.md](AGENTS.md) - what Emaki is, the rules that hold everywhere, and the layout of the code
-- [docs/](docs/) - how each part works and its traps, one file per part
-- [WORKFLOW.md](WORKFLOW.md) - how a release is cut
-- [CHANGELOG.md](CHANGELOG.md) - what each release changed
-
-## Background
-
-Emaki began as a Python tool that rebuilt conversations from Claude Code's hooks, and its own README conceded the result was not a full audit trail. The JSONL transcript Claude Code writes is complete, so the app was rewritten around it: copy first, render second, and get everything from the transcript. The Python tool and its web daemon were removed in September 2026.
-
-The window is Rust on [GPUI](https://www.gpui.rs), the Zed editor's UI framework, with [gpui-component](https://github.com/longbridge/gpui-component). There is no daemon, no browser and no hook. The terminal's look is [Kaku](https://github.com/tw93/Kaku)'s.
-
-## Development
-
-```bash
-cargo test -p emaki-core
-cargo build -p emaki-app && ./target/debug/Emaki
-```
-
-Run one Emaki at a time: two share `~/.emaki`. CI tests and builds on macOS, Windows and Linux on every push, and a `v*` tag builds the installers.
 
 ## License
 
