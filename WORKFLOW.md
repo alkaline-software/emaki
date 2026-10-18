@@ -66,11 +66,11 @@ The release workflow refuses a tag whose number disagrees with `Cargo.toml`.
 ### 2. Write the changelog section
 
 Add `## vX.Y.Z` to `CHANGELOG.md`, newest first, written for the person
-installing the app: what changed for them, not which files moved. Keep it
-short: one line per change, a dozen lines at most, small fixes grouped
-into one. The
-workflow refuses a tag with no section, and `scripts/release-notes.sh X.Y.Z`
-prints exactly what the release page will show.
+installing the app: what changed for them, not which files moved. It is a
+numbered list, a topic in bold and then one sentence, small fixes gathered
+under **Fixes**, ten items at most. The workflow refuses a tag with no
+section, and `scripts/release-notes.sh X.Y.Z` prints exactly what the
+release page will show.
 
 ### 3. Check it before the tag
 
@@ -81,7 +81,7 @@ scripts/release-check.sh X.Y.Z
 ```
 
 It holds the commit to everything the tag will be held to: the version in
-`Cargo.toml`, a changelog section of a dozen lines at most, a notary
+`Cargo.toml`, a changelog section of ten items at most, a notary
 service that answers to the saved credential (step 5 needs it, an hour
 later), a lock that builds with `--locked`, a clean tree, the core tests,
 the app build, and a Windows type check (MinGW; `brew install mingw-w64 && rustup target add

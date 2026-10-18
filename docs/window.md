@@ -66,7 +66,7 @@ window remembers.
   where none does. That covers a file closed with the keyboard in it, a
   field put away, a panel folded, and whatever is added later. It waits
   a draw because a thing focused as it first appears is in no frame yet.
-- A file's pane closed with the files tree beside it gives the keys to
+- A file's pane closed with the files panel beside it gives the keys to
   the tree (`tree_focus_back`): the file's row is still lit there, and
   ⌘⌫, ⌘C and the arrows are the tree's only while it has the focus.
   Not when the composer is being typed in.
@@ -706,8 +706,8 @@ plays once) and, put away, fades where it was (`close_menu`, `menu_gone`,
 - A session offers one menu wherever it is right-clicked, in the sidebar,
   on the sessions page and on its tab (`session_menu`): Rename; Copy
   Session ID and Copy Resume Command (the agent's own, after a `cd` to
-  its folder); Open in Terminal, which shows the session in the terminal
-  panel; Open Folder and Reveal Transcript in
+  its folder); Open in Terminal, which shows the session in the agent
+  terminal; Open Folder and Reveal Transcript in
   the file manager; and, when it has a tab, Close Tab and Close Other
   Tabs. `MenuDo::Rule` is a line between groups.
 - The conversation offers Copy for what is selected in it
@@ -889,8 +889,8 @@ preview) are not named: a sideways flick moves nothing else.
 
 ## The top strip of a session
 
-One control at the top right, of two segments: the shell and the agent's
-terminal, which open the panel at the conversation's right
+One control at the top right, of two segments: the shell terminal and
+the agent terminal, which open the terminal panel at the conversation's right
 (`term_panel.rs`, `docs/channels.md`). The project
 folder and the transcript are on the session's right-click menu, and the
 folder is also the path line under the strip

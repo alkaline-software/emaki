@@ -262,7 +262,7 @@ needed" or "permission prompt"); the screen says which.
   is asked (the command, the answers), which goes in the box over it.
 - `render_dialog` draws it where the permission cards sit. The terminal's
   dialog is the one that moves, and the card is the screen read again: a
-  click sends the choice's digit (`sys::text_in_terminal`, the pane never
+  click sends the choice's digit (`sys::text_in_terminal`, no terminal
   coming forward), Next sends Tab, Cancel sends Escape.
 - The chips are the terminal's tabs, the review last. The one showing is
   ringed (`Dialog::current`), which the terminal says by a ground colour,

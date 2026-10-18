@@ -14,8 +14,9 @@ fail() { print -u2 "release-check: $1"; exit 1; }
 
 grep -q "^version = \"$v\"$" Cargo.toml || fail "Cargo.toml does not say version = \"$v\""
 scripts/release-notes.sh "$v" > /dev/null || fail "CHANGELOG.md has no section for v$v"
-lines=$(scripts/release-notes.sh "$v" | grep -c '^- ' || true)
-(( lines <= 12 )) || fail "the v$v changelog section has $lines lines; a dozen at most"
+lines=$(scripts/release-notes.sh "$v" | grep -c '^[0-9][0-9]*\. ' || true)
+(( lines >= 1 )) || fail "the v$v changelog section has no numbered item"
+(( lines <= 10 )) || fail "the v$v changelog section has $lines items; ten at most"
 # The notary service is asked now, with what release-mac.sh will use: a
 # credential it cannot reach is found here, not after the tag is out.
 if [[ "$(uname)" == Darwin ]]; then

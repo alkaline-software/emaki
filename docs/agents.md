@@ -137,7 +137,7 @@ Two levels, as the sessions page has (`Workbench::agent_open`).
   conversation's own menu). The agents' names and the cards are not.
 - Inside one, a button at the strip's right opens a shell in the home
   folder at the page's right, for the commands the page gives: the
-  conversation's terminal panel with its shell side alone
+  conversation's terminal panel with the shell terminal alone
   (`docs/channels.md`, The terminal panel).
 - The steps are enough for anyone to follow and no more: they take for
   granted that the person can copy, paste and type a password. Each is a
