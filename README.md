@@ -31,55 +31,12 @@ Everything Emaki keeps is in `~/.emaki`, and `archive/` is the one folder that c
 
 ## Features
 
-### Project Management
-
-- **Every session, by project**: The sidebar lists each project with its sessions; pin one to the top, hide one, or open its folder
-- **By day**: All Sessions (⌘L) groups every session on the machine by day, with archived projects in their own section
-- **Kept for good**: A session Claude Code has deleted stays listed, searchable and readable, marked as kept
-- **Search**: ⌘K searches the full text of every session
-- **Tabs**: Open sessions sit in tabs grouped by project; switch with ⌘1 to ⌘9, close with ⌘W, reopen with ⌘⇧T
-- **Housekeeping**: Rename a session, or select several with ⌘-click, ⇧-click or a dragged rectangle and archive or delete them at once; a project's folder is never touched
-- **Two agents**: Claude Code and Codex, each in its own color; the Agents page (⌘E) says which is installed and signed in
-- **New sessions**: From the home page, from a project's plus, with ⌘T in the current project or ⌘O in any folder, with the agent, mode, model and effort chosen on the strip under the composer
-
-### Conversation (Main Panel)
-
-- **Readable**: Prompts, replies, tool calls, thoughts and subagents laid out like the Claude app, with code colored and wide blocks scrolling sideways
-- **Explained**: An opaque tool call gets one plain sentence on what it does, written by the session's own agent
-- **Talk back**: Reply from the composer with attachments, `@` for a file, `/` for a command, and the mode, model and effort on pills; ⌘↩ sends
-- **Cards**: Questions, approvals, plans and background commands come up as cards at the conversation's end, answered there; Stop gives your message back
-- **Live**: A session running in a terminal is followed as it writes, with its context and rate limits under the composer and "New messages" when you are reading higher up
-- **Find**: ⌘F finds inside the session showing
-- **Artifacts**: The pages an agent publishes are listed over the composer, a click from opening
-- **A record you own**: Every session also renders to markdown under `~/.emaki/logs`
-
-### Files Panel
-
-- **The project as a tree**: The session's folder with git's marks, kept current as the agent writes
-- **Branches**: Switch, carrying your changes along or leaving them to restore later; make a branch, publish one, fetch
-- **Changes**: A sheet of what changed, with a diff per file; commit the files you tick, push, pull, browse history, undo or revert a commit
-- **A file manager**: Drag files in, drag rows to move, cut, copy, duplicate, rename in place, remove with ⌘⌫, and take it back with ⌘Z
-- **Files open beside the conversation**: Code in an editor with ⌘S and format on save, markdown as it reads or as written, CSV as a grid, Word as pages you can write in, PowerPoint, Excel, PDF with search and selection, HTML, Parquet and pictures
-- **Room**: Drag the panel's edge, double-click it to fit, or enlarge a file over the conversation
-
-### Outline Panel
-
-- **An entry a round**: What you asked, in a short label, with the time
-- **Go there**: Click an entry and the conversation glides to that round
-- **Labels by a small model**: Written by the session's own agent, Claude Code's Haiku or Codex's light model, and cached
-
-### Shell Terminal Panel
-
-- **A shell in the session's folder**: At the conversation's right, in tabs; ⌘T opens one, ⌘W closes it
-- **A Mac terminal's keys**: ⌘←, ⌘→, ⌘⌫, ⇧↩ and ⌘K, with mouse selection copied on release and programs that take the mouse
-- **Kaku's look**: Its dark and light schemes, with the font and size set in Settings, Terminal
-
-### Agent Terminal Panel
-
-- **The session's own agent, drawn whole**: Claude Code or Codex as it runs, in a terminal of Emaki's own; nothing opens a terminal app
-- **One session, two views**: A turn typed in the terminal shows in the conversation, and a message sent from the composer shows in the terminal
-- **Whatever the agent asks is shown**: A question with no card of its own comes up on the terminal card and never waits unseen
-- **Copy and paste**: Copying reaches the clipboard, and a pasted screenshot goes to the agent
+- **Project Management**: Every session on the machine, by project in the sidebar and by day on All Sessions, in tabs, searched in full with ⌘K; one Claude Code has deleted stays, marked as kept, and several are renamed, archived or deleted at once without touching a project's folder
+- **Conversation (Main Panel)**: Prompts, replies, tool calls, thoughts and subagents laid out like the Claude app, an opaque call explained in one sentence, and a composer to reply from, with attachments, `@` for a file, `/` for a command, the mode, model and effort on pills, and the agent's questions, approvals and plans answered on cards
+- **Files Panel**: The project as a tree with git's marks, branches to switch, make and publish, a Changes sheet to commit, push, pull and revert from, and every file open beside the conversation: code in an editor, markdown, CSV, Word, PowerPoint, Excel, PDF, HTML, Parquet and pictures
+- **Outline Panel**: An entry a round, labeled in a few words by the session's own agent; click one and the conversation glides there
+- **Shell Terminal Panel**: A shell in the session's folder at the conversation's right, in tabs, with a Mac terminal's keys and Kaku's look
+- **Agent Terminal Panel**: The session's own Claude Code or Codex drawn whole, in a terminal of Emaki's own, so a turn typed there shows in the conversation and whatever the agent asks is never missed
 
 ## Keys
 
