@@ -212,14 +212,14 @@ crates/emaki-app/         the window
   src/workbench.rs           sidebar, session list, search, composer
   src/workbench/settings.rs  the settings panel: its rail, groups, rows, switches
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
-  src/panels.rs              beside a conversation: the folder's files as a tree, and the outline
+  src/panels.rs              the files panel and the outline panel, at a conversation's left: the folder's files as a tree, and an entry a round
   src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions
   src/branches.rs            the list of branches and its remote: fetching, making a branch on its sheet, publishing one, the sign-in sheet
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets
   src/word.rs                a Word document written in: WordCraft's engine with the pane's own pages, caret, keys and strip
   src/html_web.rs            an HTML file in the system's web view, set in the file's pane; hidden while the window draws over it
   src/html_shot.rs           the same file as a picture by Blitz, where no web view can be set: Linux
-  src/term_panel.rs          the terminal at a conversation's right: a shell, and the agent's hidden terminal drawn whole
+  src/term_panel.rs          the terminal panel at a conversation's right: the shell terminal, and the agent terminal, the agent's hidden terminal drawn whole
   src/main.rs                menus, key bindings, the window
   src/sys.rs                 open, reveal, the person's name: per OS; a session's hidden terminal by its pid
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers

@@ -3,9 +3,21 @@
 About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
 `crates/emaki-core/src/outline.rs` and `git.rs`.
 
+Four panels can stand beside a conversation, each shown and put away by
+a button on the top strip and a key. At the left, one at a time: the
+**files panel** (the session's folder as a tree, with its branches and
+changes) and the **outline panel** (an entry a round). At the right,
+one at a time, in the terminal panel (`docs/channels.md`): the **shell
+terminal** (a shell in the session's folder) and the **agent terminal**
+(the agent's own terminal, drawn whole). These are their names, in the
+window, in every doc and on the site. "Panel" is a region beside the
+conversation that comes and goes; a file opened inside the files panel
+is the file's pane, not a panel of its own.
+
 ## Rules
 
-- One panel shows at most, at the conversation's left, and both have one
+- One panel shows at most at the conversation's left, the files panel or
+  the outline panel, and both have one
   width (`panel_w`), so one takes the other's place without moving the
   conversation. Tried and dropped: both at the right, side by side.
 - The tree is not `files.rs`. That is git's flat list for "@", without
@@ -113,7 +125,7 @@ About `crates/emaki-app/src/panels.rs` and `file_icons.rs`, and
 - A change to `SUMMARY_PROMPT` raises `SUMMARY_VERSION`, which is part of
   a label's name in the cache, so labels made by the old wording are
   asked for again as they come into view.
-- Every scroller in a panel, card or sheet is a pane of its own to
+- Every scroller in a panel, card or sheet is a `Pane` of its own to
   `route_scroll` (`Pane::Branches`, `ChangeFiles`, `ChangeLines`, and
   `Nowhere` for the rest while a card is up), or momentum from it scrolls
   what lies beneath.
@@ -150,42 +162,42 @@ its lines are cut at any width.
 ## A narrow window
 
 The window is never dragged narrower than the conversation at its least
-with one pane beside it (`main::MIN_W`, the conversation's
-`CONVERSATION_MIN` and the terminal's least, the wider of the two
-panes). So the files, the outline or the terminal, asked for, always
-has room, and its button never lights over nothing.
+with one panel beside it (`main::MIN_W`, the conversation's
+`CONVERSATION_MIN` and the terminal panel's least, the wider of the
+two). So the files panel, the outline panel or the terminal panel, asked
+for, always has room, and its button never lights over nothing.
 
-Under the width at which the panel at the left and the terminal both
-fit (`room_for_both`), there is one of them at a time: asking for one
+Under the width at which the panel at the left and the terminal panel
+both fit (`room_for_both`), there is one of them at a time: asking for one
 puts the other away, in motion (`toggle_panel`, `term_go`). A window
-dragged narrower with both showing puts the terminal away, always the
-terminal, so it is known beforehand which goes (`Workbench::render`,
+dragged narrower with both showing puts the terminal panel away, always
+the terminal panel, so it is known beforehand which goes (`Workbench::render`,
 through `term_go` so its button goes out with it). Either way it is put away for
 good, not kept for a wider window: what the buttons say is what is
 there. The sidebar has given its room up before any of this.
 
-- What puts a pane away goes by `conv_need`, the conversation's need as
+- What puts a panel away goes by `conv_need`, the conversation's need as
   last measured with room to spare, never by `conv_min`. `conv_min` is
   raised whenever the composer's row is squeezed, which it is for a
-  moment while the sidebar and a pane are both in motion, and a pane
+  moment while the sidebar and a panel are both in motion, and a panel
   put away on that reading stayed away: which of the two went came out
   differently from one time to the next.
-- The room of a terminal put away for the window's width still counts
+- The room of a terminal panel put away for the window's width still counts
   against the sidebar (`term_folded`), until the window is `FOLD_SLACK`
   wider than where both fit, or a panel's button is pressed. Without
   it, a window dragged narrower lost the sidebar, then the terminal,
   then got the sidebar back in the terminal's room, then lost it again.
-- A terminal put away takes the keyboard to the window with it, whoever
+- A terminal panel put away takes the keyboard to the window with it, whoever
   put it away (`Workbench::render`). Left in a terminal not drawn, no
   key binding was heard until a click.
 
 The file shown is the one thing still not drawn for want of room
 (`fold_file`), with a line under the composer saying so.
 
-Tried and dropped: a pane with no room drawn over the conversation. It
+Tried and dropped: a panel with no room drawn over the conversation. It
 covered the composer, and two of them lay on each other.
 
-## The files tree
+## The files panel: the tree
 
 `Tree` is the session's folder. A folder is read from disk when it is
 opened (`list_dir`: folders first, then by name, `.git` and `.DS_Store`
@@ -482,7 +494,7 @@ Commit Hash, and View on the Web where the remote's host has such a
 page (`git::commit_url`). A right click on one of its files
 (`history_file_menu`) is the file as it is on disk now, where it still
 is (Open, Reveal), its two paths, and its page on the host as that
-commit has it (`git::file_url`). The two lists are panes of their own to
+commit has it (`git::file_url`). The two lists are `Pane`s of their own to
 `route_scroll` (`Pane::HistoryCommits`, `HistoryFiles`). The clock's
 reading of the picked change is off while the history shows
 (`load_diff`): it took the commit's lines' place.
@@ -1069,7 +1081,7 @@ The trash is `sys::trash_path` (the `trash` crate). On macOS it uses the
 file manager's own call, since the crate's default asks Finder by
 AppleScript.
 
-## The outline: entries and labels
+## The outline panel: entries and labels
 
 `emaki_core::outline` makes an entry per round, saying what the person
 asked there and nothing of the reply, once per load (`Detail::outline`).
@@ -1105,7 +1117,7 @@ markdown in it, more than eight words) is dropped and asked for once more. What 
 has none shows the message's own first words and is asked again at the
 next launch (`outline_failed`).
 
-## The outline: days and the mark
+## The outline panel: days and the mark
 
 Entries sit under a head for each day. The last head above the view is
 drawn pinned at the panel's top, so a time is always under its day. The
@@ -1120,7 +1132,7 @@ the view is where the click put it (`outline_pick`). The outline brings
 the marked entry into sight when the mark changes (`outline_at`). An
 outline at its foot stays at its foot as it grows.
 
-## The outline: the glide
+## The outline panel: the glide
 
 Choosing an entry moves the conversation to its round, and the move is
 drawn (`outline_go`, `Glide`): a task steps the list every `GLIDE_TICK`

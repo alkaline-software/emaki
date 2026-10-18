@@ -242,7 +242,8 @@ to a transcript.
 `pty.rs`: the interactive `claude --resume <id>` (`--session-id` for a
 new session, in the mode and model chosen) on a pty this process owns
 (`portable-pty`), its output fed to a screen model that draws nothing
-(`vt100`). The child is an ordinary interactive session: it registers
+(`vt100`). The agent terminal (The terminal panel, below) is this screen
+drawn whole. The child is an ordinary interactive session: it registers
 with an inbox, runs the status line and writes the same transcript, so
 the code that follows a terminal follows it unchanged.
 
@@ -368,8 +369,7 @@ sits in the conversation.
   the card, and the card goes when the prompt is back. Before this the
   card was put up for the trust question (`TerminalNeeded`) and taken
   down a second later by the same reader, which saw no `waiting`. With
-  the agent's side of the terminal panel showing, the person has that
-  screen already and no card comes up.
+  the agent terminal showing, the person has that screen already and no card comes up.
 - A choice with no number ("❯ No, exit" over "Yes, I trust this
   folder") takes a click as a numbered one does (`pty::hits`), on a
   screen with no numbered choice. ⇧Tab and Stop never show it; a click on the mode pill is one
@@ -382,16 +382,19 @@ sits in the conversation.
 
 ## The terminal panel
 
-`term_panel.rs`: a terminal at the conversation's right, under the top
-strip. The agent's side is Claude Code's hidden terminal, or Codex's
-own terminal joined to its driver (`Hub::agent_screen`; Codex above).
-It shows one of two things, one at a time, each with a button at
-the strip's right end (`term_buttons`, the same two-segment control as
-the files and the outline at the left: the shell's first, then the
-agent's) and a key (⌘⇧S for the shell, ⌘⇧A for the agent; Ctrl off a
-Mac). The window calls them the Shell Terminal and the Agent Terminal, on
-the buttons and in the View menu. A press on the other swaps the side and slides the plate, a
-press on the one showing puts the panel away (`toggle_term`, `term_go`).
+`term_panel.rs`: the terminal panel, at the conversation's right under
+the top strip. It shows one of two terminals, one at a time: the **shell
+terminal**, a shell in the session's folder, and the **agent terminal**,
+Claude Code's hidden terminal or Codex's own terminal joined to its
+driver (`Hub::agent_screen`; Codex above), drawn whole. Each has a
+button at the strip's right end (`term_buttons`, the same two-segment
+control as the files panel and the outline panel have at the left: the
+shell terminal's first, then the agent terminal's) and a key (⌘⇧S for
+the shell terminal, ⌘⇧A for the agent terminal; Ctrl off a Mac). Those
+are their names, on the buttons, in the View menu and in every doc; in
+the code the two are the panel's sides. A press on the other swaps the
+side and slides the plate, a press on the one showing puts the panel
+away (`toggle_term`, `term_go`).
 `side_term_anim` keeps the side before the press and the one after, and
 the sides come, go and take each other's place as the two panels at the
 left do (`render_term_panel`; the side that goes is drawn for that moment
@@ -399,8 +402,8 @@ as it was, with nothing started, sized or measured for it). The side and
 the width are in `ui.json`. A double click on the panel's edge puts the
 width back to the one it began with.
 
-Inside an agent on the agents page the same panel shows with its shell
-side alone, under a one-segment button (`term_shell_button`). There is
+Inside an agent on the agents page the same panel shows with the shell
+terminal alone, under a one-segment button (`term_shell_button`). There is
 no session there, so `term_owner` answers with one that is none: the
 home folder, and a name no session has to keep that page's shells under.
 Whether it shows there is its own choice (`agents_shell`), which neither
@@ -410,13 +413,13 @@ opens nor closes the panel beside a conversation. Everything in
 The conversation keeps its least width (`Workbench::conv_min`,
 `docs/panels.md`) between the panels at its two sides, the width at
 which the composer's pills and send button still fit their card. Both panels are drawn no wider than leaves it
-(`term_panel_w`, `panel_w_now`): the terminal gives way first, down to
-its least, then the files or the outline. The conversation is never
+(`term_panel_w`, `panel_w_now`): the terminal panel gives way first,
+down to its least, then the files panel or the outline panel. The conversation is never
 squeezed under that width (`Workbench::render`): where the panels asked
 for do not fit beside it at their least, the sidebar folds away as it
 does in a narrow window, and in a window too narrow even so for the
-panel at the left and the terminal together, there is one of them at a
-time (`docs/panels.md`, A narrow window).
+panel at the left and the terminal panel together, there is one of them
+at a time (`docs/panels.md`, A narrow window).
 
 A side's head is as tall as the path bar over the conversation, so the
 heads read as one line across the window, and it is a row of tabs on the
@@ -580,8 +583,8 @@ How it works:
   double click and the wheel in Claude Code's screen are Claude Code's to
   answer. With Shift held the press is the panel's and selects, as in any
   terminal. Nothing is told while the panel is scrolled back.
-- Both sides are one terminal: everything above holds for the shell and
-  for the agent alike.
+- Both sides are one terminal: everything above holds for the shell
+  terminal and the agent terminal alike.
 - Not done, of Kaku's: its keys beyond the ones above, a link that runs
   over two rows, a tab named by its shell's folder, the scroll bar and
   the split panes. Also not done: a drag followed past the panel's edge
@@ -592,7 +595,7 @@ How it works:
 Embedding a terminal app was looked at and dropped: Kaku is WezTerm with
 its own window and renderer, not a view another app can hold.
 
-"Open in Terminal" on a session's menu is this panel on the agent's side
+"Open in Terminal" on a session's menu is the agent terminal
 (`open_term_panel_agent`), and there the agent is started when it is not
 running and may be: the person asked for it by name.
 

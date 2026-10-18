@@ -109,7 +109,7 @@ right and foot.
 Every icon is Tabler's outline (tabler.io/icons), drawn with a stroke of
 1.75 where Tabler's own is 2: at the sizes the window uses, 2 reads heavy.
 They took the place of Phosphor's in v0.1.8, whose corners read as sharp.
-The files tree keeps Catppuccin's (`docs/panels.md`). The toolkit ships Lucide's and
+The files panel's tree keeps Catppuccin's (`docs/panels.md`). The toolkit ships Lucide's and
 asks for each by file name (`IconName::Close` is `icons/close.svg`), and
 `assets.rs` answers for a path before the toolkit's own set does. So
 `assets/icons/` holds a Tabler icon under each toolkit name (`close.svg`

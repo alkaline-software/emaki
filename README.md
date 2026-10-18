@@ -1,97 +1,100 @@
 # Emaki
 
-**Every coding-agent session on your machine, kept for good, in one window
-you can also talk to.**
+*Every coding-agent session on your machine, kept for good, in one window you can read, search and talk to.*
 
-Claude Code deletes its transcripts after 30 days, with no warning. Emaki
-copies every Claude Code and Codex session before that happens, renders and
-searches all of them, and lets you continue a Claude Code session from the
-window. It never writes to a transcript and adds nothing to a session's
-context.
+[Website](https://emaki.lol) · [Download](https://github.com/alkaline-software/emaki/releases/latest) · [Changelog](CHANGELOG.md)
 
-## Install
+## Why
 
-Download the installer from the
-[latest release](https://github.com/alkaline-software/emaki/releases/latest):
+Emaki (絵巻) is a Japanese picture scroll: a long roll, read from one end to the other. A coding-agent session is the same thing, and Emaki is where it is kept and read.
 
-```
-Emaki-mac-arm64.dmg            Apple silicon
-Emaki-mac-x64.dmg              Intel Mac
-Emaki-windows-x64-setup.exe    Windows
-Emaki-linux-x64.AppImage       Linux (a .deb is there too)
-```
+Claude Code deletes its transcripts after 30 days, with no warning. Every other tool that reads them inherits that expiry. Emaki copies each session byte for byte before anything else touches it, so if rendering fails, the bytes are already safe. Codex keeps its own sessions and never expires them, so Emaki reads those in place.
 
-The Mac image is signed and notarized. Windows is unsigned, so SmartScreen
-asks once: *More info*, then *Run anyway*. The app updates itself from
-Settings.
+Emaki never writes to a transcript and adds nothing to a session's context. The agent runs as it always does; Emaki watches, keeps and shows.
 
-## Use
+## Quick Start
 
-Open the app. The first launch copies every transcript it finds into
-`~/.emaki/archive`, and every later launch catches up.
+Download the [latest release](https://github.com/alkaline-software/emaki/releases/latest) for your system:
 
-- **Home.** Pick a folder, type a message, and a new Claude Code session
-  starts there.
-- **Sessions.** Every session, grouped by day. One that Claude Code has
-  deleted is still there, marked *kept*.
-- **Search.** ⌘K searches every session. ⌘F finds inside the one showing.
-- **Conversation.** Prompts, replies, tool calls and subagents, laid out
-  like the Claude app. Type in the composer to reply: a session running in
-  a terminal gets the message through Claude Code's inbox, and a finished
-  one resumes under Emaki. Attach files by paste, drop or the "+" button.
-- **Terminal.** The button at the top right opens a terminal beside the
-  conversation: a shell in the session's folder, or the session's own
-  Claude Code. A session's right-click menu opens its folder and shows
-  its transcript file.
-- **Settings.** ⌘, sets the appearance, accent, font, text size and what a
-  new session starts with.
+| File | System |
+| :--- | :--- |
+| `Emaki-mac-arm64.dmg` | Mac, Apple silicon |
+| `Emaki-mac-x64.dmg` | Mac, Intel |
+| `Emaki-windows-x64-setup.exe` | Windows |
+| `Emaki-linux-x64.AppImage`, `Emaki-linux-x64.deb` | Linux |
 
-Emaki sets one thing in Claude Code's settings: its status line, which
-feeds the context and rate limits shown under the composer.
-`emaki-core statusline restore` puts the old one back.
+On a Mac, open the image and drag Emaki into Applications. The Mac image is signed and notarized. Windows is unsigned, so SmartScreen asks once: *More info*, then *Run anyway*.
 
-Everything is in `~/.emaki`. Only `archive/` cannot be rebuilt, so that is
-the directory to back up.
+Open the app. The first launch copies every Claude Code session on the machine into `~/.emaki/archive` and lists it beside your Codex sessions; every later launch catches up. Emaki needs at least one agent installed: the Agents page (⌘E) walks through installing Claude Code or Codex and signing in. The app updates itself from Settings.
 
-## How it is built
+## Features
 
-Rust, with [GPUI](https://www.gpui.rs) (the Zed editor's UI framework) and
-[gpui-component](https://github.com/longbridge/gpui-component) for the
-window. There is no daemon, no browser and no hook.
+- **Kept for good**: Every Claude Code session is archived before Claude Code can delete it, and a deleted one stays listed, searchable and readable, marked as kept
+- **One place**: Sessions by project in the sidebar, by day on All Sessions, and in tabs; pin a project, rename a session, archive or delete several at once
+- **Readable**: Prompts, replies, tool calls, thoughts and subagents laid out like the Claude app, with an opaque tool call explained in one plain sentence
+- **Search**: ⌘K searches every session on the machine; ⌘F finds inside the one showing
+- **Talk back**: Reply from the composer with attachments, `@` for a file, `/` for a command, and the agent's mode, model and effort on pills; questions, approvals and plans come up as cards
+- **Two agents**: Claude Code and Codex, each started, continued and stopped from the window, each in its own color
+- **Four panels**: The files panel (the project as a tree, with branches, changes, commits and history) and the outline panel at the left; the shell terminal and the agent terminal at the right
+- **Files open**: Code with an editor and format on save, markdown, CSV as a grid, Word, PowerPoint, Excel, PDF, HTML, Parquet and pictures, beside the conversation
+- **A record you own**: Every session also renders to markdown under `~/.emaki/logs`
 
-```
-crates/emaki-core    everything without a window, plus the emaki-core CLI
-crates/emaki-app     the window
-vendor/              the gpui-component crates, with a few changes of ours
-scripts/             packaging, the icon, the status line
-```
+## Usage Guide
 
-The core works in this order:
+| Action | Shortcut |
+| :--- | :--- |
+| Search every session | `⌘ K` |
+| Find in this session | `⌘ F` |
+| New session | `⌘ N` |
+| New session in this project | `⌘ T` |
+| Choose a folder | `⌘ O` |
+| All Sessions | `⌘ L` |
+| Agents | `⌘ E` |
+| Sidebar | `⌘ B` |
+| Files panel | `⌘ ⇧ E` |
+| Outline panel | `⌘ ⇧ O` |
+| Shell terminal | `⌘ ⇧ S` |
+| Agent terminal | `⌘ ⇧ A` |
+| Send | `⌘ ↩` (or `↩`, from Settings) |
+| Save the file showing | `⌘ S` |
+| Switch tab | `⌘ 1` to `⌘ 9` |
+| Close tab, reopen tab | `⌘ W`, `⌘ ⇧ T` |
+| Settings | `⌘ ,` |
 
-1. **Adapters** (one per agent) find each agent's sessions on disk.
-2. **Archive** copies them byte for byte, before anything else touches them.
-3. **Build** parses the JSONL transcript into a model of rounds, items and
-   tool calls. The transcript is the only source of truth.
-4. **Render** writes that model as markdown under `~/.emaki/logs`.
-5. **Search** indexes every item in SQLite FTS5.
+Off a Mac, Ctrl stands in for ⌘.
 
-The app reads the same model and draws it. A file watcher says when to look
-again. To reply, it either writes to a terminal session's inbox socket or
-runs a headless `claude -p --resume` child that appends to the same
-transcript.
+## FAQ
 
-CI tests and builds on macOS, Windows and Linux on every push. A `v*` tag
-builds the installers with cargo-packager.
+- **Does Emaki change my sessions?** No. Nothing is written to a transcript and nothing enters a session's context. The one setting Emaki touches is Claude Code's status line, which feeds the context and rate limits under the composer; `emaki-core statusline restore` puts the old one back
+- **Does it have to be running?** No. Every launch catches up on every session since the last one. A Claude Code session deleted before Emaki first saw it is gone, though, so open the app once before the 30 days are up
+- **Where is my data?** In `~/.emaki`. Only `archive/` cannot be rebuilt, so that is the folder to back up
+- **Does anything leave my machine?** There is no server. The explanations and the outline's labels are calls to your own agent on your own account, Claude Code's Haiku or Codex's light model, and the update check reads GitHub's releases page
+- **Why are Codex sessions not in the archive?** Codex never deletes a session by age, so its files are the only copy. Emaki reads them where they are, and archives or deletes one through Codex itself
+- **Windows and Linux?** Both build and ship, and both are less tested than the Mac. On Linux an HTML file is drawn as a picture, since no web view can be set in the window
+- **Where did dictation go?** Into [Kotoba](https://github.com/alkaline-software/kotoba), the studio's dictation app, which types into Emaki as into any field
+
+## Docs
+
+- [AGENTS.md](AGENTS.md) - what Emaki is, the rules that hold everywhere, and the layout of the code
+- [docs/](docs/) - how each part works and its traps, one file per part
+- [WORKFLOW.md](WORKFLOW.md) - how a release is cut
+- [CHANGELOG.md](CHANGELOG.md) - what each release changed
+
+## Background
+
+Emaki began as a Python tool that rebuilt conversations from Claude Code's hooks, and its own README conceded the result was not a full audit trail. The JSONL transcript Claude Code writes is complete, so the app was rewritten around it: copy first, render second, and get everything from the transcript. The Python tool and its web daemon were removed in September 2026.
+
+The window is Rust on [GPUI](https://www.gpui.rs), the Zed editor's UI framework, with [gpui-component](https://github.com/longbridge/gpui-component). There is no daemon, no browser and no hook. The terminal's look is [Kaku](https://github.com/tw93/Kaku)'s.
 
 ## Development
 
-```
+```bash
 cargo test -p emaki-core
 cargo build -p emaki-app && ./target/debug/Emaki
-target/debug/emaki-core help
 ```
 
-`AGENTS.md` explains the code and the reasoning behind it. `WORKFLOW.md` is
-how a release is cut.
+Run one Emaki at a time: two share `~/.emaki`. CI tests and builds on macOS, Windows and Linux on every push, and a `v*` tag builds the installers.
+
+## License
 
 MIT.

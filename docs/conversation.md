@@ -91,14 +91,14 @@ an absolute child hanging past the bubble's edge.
 
 The bubble stops short of the column's left edge and a reply as short
 of its right (`REPLY_INSET`), a share of the column, which is as narrow
-as the panes beside the conversation leave it. A long prompt fills the
+as the panels beside the conversation leave it. A long prompt fills the
 width it is given, and without the inset it sat edge to edge like a
 reply. The bubble has no most of its own: it had one, and in a wide
 column stood further from its edge than a reply from its own.
 
 The bubble is the one item of a row, which shrinks it to the room there
 is (`min_w_0`). As an item of a column aligned to its end it took the
-width of its words up to its most, and in a pane narrower than that ran
+width of its words up to its most, and in a column narrower than that ran
 off the left edge, with its height still that of the narrow wrap.
 
 ## Code blocks
