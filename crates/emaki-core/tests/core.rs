@@ -4283,3 +4283,56 @@ fn a_session_says_where_it_went_on() {
     std::fs::write(&path, rows[..2].iter().map(|r| r.to_string()).collect::<Vec<_>>().join("\n") + "\n").unwrap();
     assert_eq!(peek(&path).continued_in, "");
 }
+
+/// Deleted, a session goes to the trash, archived so its agent lets it
+/// go, with thirty days to run. Put back, it is its agent's again and
+/// its days are forgotten: deleted again, they start over. Past them,
+/// or deleted from the trash, every file of it is gone.
+#[test]
+fn a_deleted_session_waits_in_the_trash_and_comes_back_whole() {
+    use emaki_core::trash;
+    let _guard = isolated();
+    let dir = emaki_core::paths::projects_dir().join("-tmp-trash-me");
+    std::fs::create_dir_all(dir.join("bin-1").join("subagents")).unwrap();
+    let path = dir.join("bin-1.jsonl");
+    let rows = [
+        json!({"type": "user", "uuid": "u1", "sessionId": "bin-1", "cwd": "/tmp/trash.me", "timestamp": "2026-01-01T10:00:00Z", "message": {"role": "user", "content": "hello"}}),
+        json!({"type": "assistant", "uuid": "a1", "sessionId": "bin-1", "cwd": "/tmp/trash.me", "timestamp": "2026-01-01T10:00:01Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi."}]}}),
+    ];
+    let text: String = rows.iter().map(|r| format!("{r}\n")).collect();
+    std::fs::write(&path, &text).unwrap();
+    std::fs::write(dir.join("bin-1").join("subagents").join("agent-x.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+    let find = |id: &str| emaki_core::adapters::index_all(0, &[]).into_iter().find(|r| r.session_id == id);
+
+    let r = find("bin-1").unwrap();
+    trash::put(&r).unwrap();
+    let entry = trash::load().get(&trash::key(&r)).cloned().unwrap();
+    assert!(entry.archived_here);
+    assert_eq!(entry.days_left(trash::now()), 30);
+    assert!(!path.exists(), "its agent lets it go");
+    let kept = find("bin-1").unwrap();
+    assert!(kept.archived, "Emaki keeps it");
+
+    trash::put_back(&kept).unwrap();
+    assert!(trash::load().is_empty(), "its days are forgotten");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "its agent has it again, byte for byte");
+    assert!(!find("bin-1").unwrap().archived);
+
+    // An archived session deleted stays archived when put back.
+    let back = find("bin-1").unwrap();
+    emaki_core::archive::release(&back).unwrap();
+    let archived = find("bin-1").unwrap();
+    trash::put(&archived).unwrap();
+    assert!(!trash::load().get(&trash::key(&archived)).unwrap().archived_here);
+    trash::put_back(&archived).unwrap();
+    assert!(find("bin-1").unwrap().archived);
+
+    trash::put(&archived).unwrap();
+    let e = trash::load().get(&trash::key(&archived)).cloned().unwrap();
+    assert_eq!(e.days_left(e.at + 29.5 * 86400.), 1, "one day left on its last");
+    assert!(!e.due(e.at + 29.9 * 86400.) && e.due(e.at + 30. * 86400.));
+    trash::purge(&archived).unwrap();
+    assert!(find("bin-1").is_none(), "gone for good");
+    assert!(emaki_core::archive::everything_of(&archived).is_empty());
+    assert!(trash::load().is_empty());
+}

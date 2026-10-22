@@ -37,6 +37,7 @@ pub mod statusline;
 pub mod store;
 pub mod terminal;
 pub mod transcript;
+pub mod trash;
 pub mod update;
 pub mod watcher;
 

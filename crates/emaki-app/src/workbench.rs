@@ -222,7 +222,8 @@ impl MenuDo {
             MenuDo::Discard(_) => "icons/undo-2.svg",
             MenuDo::Sessions(ManageDo::Archive, _) => "icons/archive.svg",
             MenuDo::Sessions(ManageDo::Delete, _) => "icons/trash.svg",
-            MenuDo::Sessions(ManageDo::Unarchive, _) => "icons/undo-2.svg",
+            MenuDo::Sessions(ManageDo::Unarchive | ManageDo::PutBack, _) => "icons/undo-2.svg",
+            MenuDo::Sessions(ManageDo::Purge, _) => "icons/trash.svg",
             MenuDo::CloseOthers(_) => "icons/circle-x.svg",
             MenuDo::Term(what) => what.icon(),
             MenuDo::Pdf(crate::panels::PdfDo::Copy) | MenuDo::Edit(EditDo::Copy, _) => "icons/copy.svg",
@@ -329,11 +330,17 @@ pub(crate) enum ManageDo {
     /// Code's copy is let go and Emaki's is the session from then, and
     /// Codex archives its own.
     Archive,
-    /// Every copy goes to the system's trash; Codex deletes its own.
+    /// To the Trash at the sidebar's foot, stopped first if something
+    /// of ours runs in it (`emaki_core::trash::put`).
     Delete,
     /// An archived session goes back where its agent keeps it, to be
     /// listed and continued there again.
     Unarchive,
+    /// A session in the Trash goes back to how it was before it was
+    /// deleted.
+    PutBack,
+    /// A session in the Trash is removed for good, before its days are up.
+    Purge,
 }
 
 /// The header's height while sessions are being chosen.
@@ -1658,6 +1665,13 @@ pub struct Workbench {
     /// Whether "Temporary" shows its projects. Neither section is
     /// remembered open: both are shut at every launch.
     temp_open: bool,
+    /// The sessions deleted and not yet gone for good, as the trash's
+    /// file has them (`emaki_core::trash`); those of them the index has,
+    /// the last deleted first, kept out of `refs` and every list but the
+    /// Trash's at the sidebar's foot; and whether that section is open.
+    trash: emaki_core::trash::Trash,
+    trashed: Vec<SessionRef>,
+    trash_open: bool,
     /// The projects chosen together in the sidebar (⌘ and a click, ⇧
     /// and one, as the files tree has it), the one a range is taken
     /// from, and the projects as last drawn, in their order, which a
@@ -3897,6 +3911,9 @@ impl Workbench {
             hidden: ui.hidden.clone(),
             hidden_open: false,
             temp_open: false,
+            trash: emaki_core::trash::load(),
+            trashed: Vec::new(),
+            trash_open: false,
             side_marked: Vec::new(),
             side_sessions: Vec::new(),
             side_sess_anchor: None,
@@ -3943,6 +3960,25 @@ impl Workbench {
                 // showing or it is one of ours getting under way.
                 let shown = self.selected.clone();
                 let mut dropped: HashSet<String> = HashSet::new();
+                // The sessions in the Trash are listed there alone, the
+                // last deleted first; a tab on one goes. Read again each
+                // time: the scanner removes those past their days, and
+                // another Emaki may have deleted or put back.
+                self.trash = emaki_core::trash::load();
+                let mut trashed: Vec<SessionRef> = Vec::new();
+                refs.retain(|r| {
+                    let gone = self.trash.contains_key(&key_of(r));
+                    if gone {
+                        dropped.insert(key_of(r));
+                        trashed.push(r.clone());
+                    }
+                    !gone
+                });
+                trashed.sort_by(|a, b| {
+                    let at = |r: &SessionRef| self.trash.get(&key_of(r)).map(|e| e.at).unwrap_or(0.);
+                    at(b).total_cmp(&at(a))
+                });
+                self.trashed = trashed;
                 // A session Claude Code went on with in a background
                 // session is that one: listed once, as the newest of the
                 // chain, and a tab or a selection on an older one goes to
@@ -6305,6 +6341,8 @@ impl Workbench {
         self.search_task = Some(cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
+                let mut res = res;
+                res.sessions.retain(|s| !this.trash.contains_key(&format!("{}:{}", s.agent, s.id)));
                 this.search_results = Some(res);
                 cx.notify();
             })
@@ -10188,6 +10226,148 @@ impl Workbench {
             }
         }
 
+        // "Trash", under everything: the sessions deleted, the last
+        // first, as one list whatever their projects. Each says the days
+        // it has left, and under the pointer Put Back takes their place.
+        // It is shut at every launch, as the two above are.
+        let trash_head = self.presence("side-trash-head", !self.trashed.is_empty(), cx);
+        if !self.trashed.is_empty() || trash_head.is_some() {
+            let theme = Self::shell_theme(cx);
+            let open = self.trash_open && !self.trashed.is_empty();
+            let moving = self.presence("side-trash", open, cx);
+            let count = self.trashed.len();
+            let head = h_flex()
+                .id("side-trash")
+                .h(SIDE_ROW_H)
+                .mt(px(6.))
+                .px(px(10.))
+                .gap(px(6.))
+                .flex_shrink_0()
+                .items_center()
+                .rounded(px(8.))
+                .cursor_pointer()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                .on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(2, cx) }))
+                .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)))
+                .child(div().flex_1().child("Trash"))
+                .child(div().font_weight(FontWeight::NORMAL).child(count.to_string()))
+                .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground));
+            scroll = scroll.child(match trash_head {
+                Some((coming, serial)) => div()
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .child(head)
+                    .with_animation(ElementId::Name(format!("side-trash-head-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                        let t = if coming { t } else { 1. - t };
+                        d.h((SIDE_ROW_H + px(6.)) * t).opacity(t)
+                    })
+                    .into_any_element(),
+                None => head.into_any_element(),
+            });
+            if open || moving.is_some() {
+                // The name no project can have, so the rows' coming and
+                // going is the Trash's own.
+                const TRASH_ROWS: &str = "\u{0}trash";
+                self.side_rows_changed(TRASH_ROWS, self.trashed.iter().map(|r| SideRow { key: key_of(r), title: r.title.clone(), agent: r.agent }).collect(), cx);
+                let row_of = |row: &SideRow, days: Option<u32>, theme: &gpui_component::Theme, cx: &mut Context<Self>| {
+                    let (key, group) = (row.key.clone(), SharedString::from(format!("trash-row-{}", row.key)));
+                    let (menu_key, back_key) = (key.clone(), key.clone());
+                    h_flex()
+                        .id(SharedString::from(format!("trash-{key}")))
+                        .h(SIDE_SESSION_H)
+                        .flex_shrink_0()
+                        .px(px(10.))
+                        .gap(px(10.))
+                        .rounded(px(7.))
+                        .group(group.clone())
+                        .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.trash_menu(Some(&menu_key), ev.position, cx)))
+                        .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(row.agent, px(13.), theme.muted_foreground.opacity(0.75), false, SharedString::from(format!("trash-glyph-{key}")))))
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme.sidebar_foreground).child(row.title.clone()))
+                        .children(days.map(|days| {
+                            div()
+                                .relative()
+                                .min_w(px(46.))
+                                .h(px(18.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .child(div().text_size(px(11.)).text_color(theme.muted_foreground).group_hover(group.clone(), |s| s.opacity(0.)).child(plural(days as usize, "day", "days")))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("trash-back-{key}")))
+                                        .absolute()
+                                        .right_0()
+                                        .top_0()
+                                        .size(px(18.))
+                                        .rounded(px(5.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .opacity(0.)
+                                        .group_hover(group.clone(), |s| s.opacity(1.))
+                                        .text_color(theme.muted_foreground)
+                                        .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
+                                        .managed_tooltip(|window, cx| crate::workbench::tip("Put Back", window, cx))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            swallow_click(window, cx);
+                                            cx.stop_propagation();
+                                            this.manage_straight(ManageDo::PutBack, vec![back_key.clone()], window, cx);
+                                        }))
+                                        .child(Icon::default().path("icons/undo-2.svg").with_size(px(13.))),
+                                )
+                        }))
+                };
+                let ghosts = |after: Option<&str>, theme: &gpui_component::Theme, cx: &mut Context<Self>| -> Vec<AnyElement> {
+                    let gone: Vec<SideRow> = self.side_gone.borrow().iter().filter(|g| g.folder == TRASH_ROWS && g.after.as_deref() == after).map(|g| g.row.clone()).collect();
+                    gone.into_iter()
+                        .map(|row| {
+                            div()
+                                .overflow_hidden()
+                                .flex_shrink_0()
+                                .child(row_of(&row, None, theme, cx))
+                                .with_animation(ElementId::Name(format!("trash-out-{}", row.key).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), |d, t| d.h(SIDE_SESSION_H * (1. - t)).opacity(1. - t))
+                                .into_any_element()
+                        })
+                        .collect()
+                };
+                let now = emaki_core::trash::now();
+                let mut block = v_flex().flex_shrink_0().overflow_hidden().children(ghosts(None, &theme, cx));
+                for r in &self.trashed {
+                    let row = SideRow { key: key_of(r), title: r.title.clone(), agent: r.agent };
+                    let days = self.trash.get(&row.key).map(|e| e.days_left(now)).unwrap_or(emaki_core::trash::KEEP_DAYS as u32);
+                    let el = row_of(&row, Some(days), &theme, cx);
+                    block = block.child(if self.side_born.borrow().contains_key(&row.key) {
+                        div()
+                            .overflow_hidden()
+                            .flex_shrink_0()
+                            .child(el)
+                            .with_animation(ElementId::Name(format!("trash-in-{}", row.key).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), |d, t| d.h(SIDE_SESSION_H * t).opacity(t))
+                            .into_any_element()
+                    } else {
+                        el.into_any_element()
+                    });
+                    block = block.children(ghosts(Some(row.key.as_str()), &theme, cx));
+                }
+                let full = f32::from(SIDE_SESSION_H) * count as f32;
+                scroll = scroll.child(match moving {
+                    Some((coming, serial)) => block
+                        .with_animation(ElementId::Name(format!("side-trash-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                            let t = if coming { t } else { 1. - t };
+                            d.h(px(full * t)).opacity(t)
+                        })
+                        .into_any_element(),
+                    None => block.into_any_element(),
+                });
+            } else {
+                self.side_prev.borrow_mut().remove("\u{0}trash");
+            }
+        }
+
         let footer = h_flex()
             .flex_shrink_0()
             .px(px(14.))
@@ -10570,6 +10750,16 @@ impl Workbench {
         self.open_menu(at, items, cx);
     }
 
+    /// A right click in the Trash: on a session, Put Back and Delete
+    /// Now; on its heading, Empty Trash.
+    fn trash_menu(&mut self, key: Option<&str>, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let items = match key {
+            Some(key) => vec![("Put Back", MenuDo::Sessions(ManageDo::PutBack, vec![key.to_string()])), ("Delete Now", MenuDo::Sessions(ManageDo::Purge, vec![key.to_string()]))],
+            None => vec![("Empty Trash", MenuDo::Sessions(ManageDo::Purge, self.trashed.iter().map(key_of).collect()))],
+        };
+        self.open_menu(at, items, cx);
+    }
+
     fn side_band_end(&mut self, cx: &mut Context<Self>) {
         self.side_band_kind = None;
         if std::mem::take(&mut self.side_band_live) {
@@ -10678,7 +10868,7 @@ impl Workbench {
             "open-ask",
             serial,
             format!("Open {} folders?", folders.len()),
-            format!("Each opens in a window of its own in {}.", crate::sys::FILE_MANAGER),
+            String::new(),
             choice_pill("open-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel),
             choice_pill("open-ask-yes", "icons/folder-open.svg", "Open", Press::Primary, false, cx.theme()).on_click(go),
             cx,
@@ -10690,7 +10880,8 @@ impl Workbench {
     fn toggle_section(&mut self, section: usize, cx: &mut Context<Self>) {
         match section {
             0 => self.temp_open = !self.temp_open,
-            _ => self.hidden_open = !self.hidden_open,
+            1 => self.hidden_open = !self.hidden_open,
+            _ => self.trash_open = !self.trash_open,
         }
         cx.notify();
     }
@@ -11071,6 +11262,7 @@ impl Workbench {
             MenuDo::Commit(what, sha) => self.commit_do(what, sha, window, cx),
             MenuDo::Web(url) => cx.open_url(&url),
             MenuDo::Sessions(ManageDo::Unarchive, keys) => self.unarchive_sessions(keys, window, cx),
+            MenuDo::Sessions(what @ ManageDo::PutBack, keys) => self.manage_straight(what, keys, window, cx),
             MenuDo::Sessions(what, keys) => self.manage_ask_of(what, keys, true, cx),
             MenuDo::CloseOthers(key) => {
                 for other in self.tabs.clone().into_iter().filter(|t| *t != key) {
@@ -11864,10 +12056,14 @@ impl Workbench {
     }
 
     /// Of the sessions chosen, the ones `what` is done to, and how many
-    /// are left as they are because something is running in them. One
-    /// begun here with nothing sent has no file, and an archived one is
-    /// not archived again: neither is counted.
+    /// are running: left as they are by Archive, and stopped by Delete,
+    /// which is done to every one. One begun here with nothing sent has
+    /// no file, and an archived one is not archived again: neither is
+    /// counted. Put Back and Purge are of the sessions in the Trash.
     fn manage_targets(&self, what: ManageDo) -> (Vec<SessionRef>, usize) {
+        if matches!(what, ManageDo::PutBack | ManageDo::Purge) {
+            return (self.trashed.iter().filter(|r| self.manage_keys.contains(&key_of(r))).cloned().collect(), 0);
+        }
         let mut running = 0;
         let mut go = Vec::new();
         for r in self.refs.iter().filter(|r| self.manage_keys.contains(&key_of(r))) {
@@ -11876,7 +12072,10 @@ impl Workbench {
             }
             // Nothing runs in an archived session, whatever its file's
             // time says: neither agent takes one up.
-            if what != ManageDo::Unarchive && (self.driven(&r.session_id) || self.hub.is_live(r, self.now)) {
+            if what == ManageDo::Delete {
+                running += (self.hub.is_live(r, self.now) && self.is_working(r)) as usize;
+                go.push(r.clone());
+            } else if what != ManageDo::Unarchive && (self.driven(&r.session_id) || self.hub.is_live(r, self.now)) {
                 running += 1;
             } else {
                 go.push(r.clone());
@@ -11888,9 +12087,15 @@ impl Workbench {
     /// Unarchive, chosen from a menu: nothing is lost by it, so nothing
     /// is asked. Done as Archive and Delete are, off the main thread.
     fn unarchive_sessions(&mut self, keys: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.manage_straight(ManageDo::Unarchive, keys, window, cx);
+    }
+
+    /// What loses nothing, done with nothing asked: Unarchive, and Put
+    /// Back from the Trash.
+    fn manage_straight(&mut self, what: ManageDo, keys: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.manage_keys = keys;
         self.manage_side = true;
-        self.manage_now(ManageDo::Unarchive, window, cx);
+        self.manage_now(what, window, cx);
     }
 
     /// Archive or Delete, pressed: the question first, or why there is
@@ -11910,8 +12115,9 @@ impl Workbench {
             let said = match (what, running) {
                 (_, n) if n > 0 => format!("{} still running; nothing was done.", plural(n, "session is", "sessions are")),
                 (ManageDo::Archive, _) => "Already archived.".to_string(),
-                (ManageDo::Delete, _) => "Nothing to delete.".to_string(),
+                (ManageDo::Delete | ManageDo::Purge, _) => "Nothing to delete.".to_string(),
                 (ManageDo::Unarchive, _) => "Nothing to unarchive.".to_string(),
+                (ManageDo::PutBack, _) => "Nothing to put back.".to_string(),
             };
             if side {
                 self.notice = Some(Notice::said(said));
@@ -11929,19 +12135,21 @@ impl Workbench {
         let Some((what, serial)) = self.manage_ask else { return div().into_any_element() };
         let (go, running) = self.manage_targets(what);
         let n = plural(go.len(), "session", "sessions");
-        let left = if running > 0 { format!(" {} still running and left as {}.", plural(running, "session is", "sessions are"), if running == 1 { "it is" } else { "they are" }) } else { String::new() };
+        let one = go.len() == 1;
         let (title, detail, yes) = match what {
-            ManageDo::Archive => (
-                format!("Archive {n} now?"),
-                format!("Its agent does not continue it until it is unarchived. Claude Code's copy is removed once Emaki's has been checked to be the same, and Emaki keeps it; Codex moves its own into its archive. Nothing in a project's folder is touched.{left}"),
-                "Archive",
-            ),
-            ManageDo::Unarchive => (format!("Unarchive {n}?"), String::new(), "Unarchive"),
+            ManageDo::Archive => (format!("Archive {n}?"), if running > 0 { format!("{} skipped.", plural(running, "running session is", "running sessions are")) } else { String::new() }, "Archive"),
+            ManageDo::Unarchive | ManageDo::PutBack => (format!("Unarchive {n}?"), String::new(), "Unarchive"),
             ManageDo::Delete => (
                 format!("Delete {n}?"),
-                format!("Emaki's copy is moved to the {}, and so is Claude Code's; Codex deletes its own. Nothing in a project's folder is touched.{left}", crate::sys::TRASH_NAME),
+                format!(
+                    "{} will be moved to Trash and stay for {} days until permanently deleted.{}",
+                    if one { "It" } else { "They" },
+                    emaki_core::trash::KEEP_DAYS as u32,
+                    if running > 0 { format!(" {} will be stopped.", plural(running, "running session", "running sessions")) } else { String::new() }
+                ),
                 "Delete",
             ),
+            ManageDo::Purge => (format!("Delete {n} permanently?"), "This can't be undone.".to_string(), "Delete"),
         };
         let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
             swallow_click(window, cx);
@@ -11953,9 +12161,9 @@ impl Workbench {
             this.manage_now(what, window, cx);
         });
         let yes = match what {
-            ManageDo::Delete => choice_pill("manage-ask-yes", "icons/trash.svg", yes, Press::Danger, false, cx.theme()),
+            ManageDo::Delete | ManageDo::Purge => choice_pill("manage-ask-yes", "icons/trash.svg", yes, Press::Danger, false, cx.theme()),
             ManageDo::Archive => choice_pill("manage-ask-yes", "icons/archive.svg", yes, Press::Primary, false, cx.theme()),
-            ManageDo::Unarchive => choice_pill("manage-ask-yes", "icons/undo-2.svg", yes, Press::Primary, false, cx.theme()),
+            ManageDo::Unarchive | ManageDo::PutBack => choice_pill("manage-ask-yes", "icons/undo-2.svg", yes, Press::Primary, false, cx.theme()),
         }
         .on_click(go);
         let no = choice_pill("manage-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
@@ -11965,13 +12173,28 @@ impl Workbench {
     /// The question answered yes: it is done off the main thread, a
     /// session at a time, and what came of it is said in the header.
     /// Only the sessions' own files are touched, the agent's and
-    /// Emaki's: never anything in a project's folder.
+    /// Emaki's: never anything in a project's folder. A session deleted
+    /// with something of ours running in it, a turn or a terminal
+    /// waiting, has that stopped first; one run in a terminal of the
+    /// person's goes on there, and is in the Trash all the same.
     fn manage_now(&mut self, what: ManageDo, window: &mut Window, cx: &mut Context<Self>) {
         self.manage_ask = None;
         let (go, running) = self.manage_targets(what);
         if go.is_empty() || self.manage_busy {
             cx.notify();
             return;
+        }
+        let mut stopped = false;
+        if what == ManageDo::Delete {
+            for r in &go {
+                let sid = &r.session_id;
+                if self.drivers.remove(sid).is_some() || self.hub.driver_for(sid).is_some() || self.hub.terminal_for(sid).is_some() {
+                    self.hub.stop_driver(sid);
+                    self.hub.stop_terminal(sid);
+                    self.hub.mark_ended(sid);
+                    stopped = true;
+                }
+            }
         }
         self.manage_busy = true;
         self.manage_said = None;
@@ -11981,12 +12204,19 @@ impl Workbench {
             let failed: Vec<(String, String)> = cx
                 .background_executor()
                 .spawn(async move {
+                    // What was stopped is given a moment to write its
+                    // last and let go of its file.
+                    if stopped {
+                        std::thread::sleep(Duration::from_millis(800));
+                    }
                     let mut failed = Vec::new();
                     for r in &work {
                         let done = match what {
                             ManageDo::Archive => emaki_core::adapters::for_agent(r.agent).archive(r),
-                            ManageDo::Delete => emaki_core::adapters::delete_session(r, crate::sys::trash_path),
+                            ManageDo::Delete => emaki_core::trash::put(r),
                             ManageDo::Unarchive => emaki_core::adapters::for_agent(r.agent).unarchive(r),
+                            ManageDo::PutBack => emaki_core::trash::put_back(r),
+                            ManageDo::Purge => emaki_core::trash::purge(r),
                         };
                         if let Err(why) = done {
                             failed.push((key_of(r), why));
@@ -12000,13 +12230,16 @@ impl Workbench {
                 this.picked.clear();
                 this.side_sessions.clear();
                 this.side_marked.clear();
+                this.trash = emaki_core::trash::load();
                 let done: Vec<&SessionRef> = go.iter().filter(|r| !failed.iter().any(|(k, _)| *k == key_of(r))).collect();
                 let mut said = match what {
                     ManageDo::Archive => format!("{} archived.", plural(done.len(), "session", "sessions")),
-                    ManageDo::Delete => format!("{} moved to the {}.", plural(done.len(), "session", "sessions"), crate::sys::TRASH_NAME),
+                    ManageDo::Delete => format!("{} moved to the Trash.", plural(done.len(), "session", "sessions")),
                     ManageDo::Unarchive => format!("{} unarchived.", plural(done.len(), "session", "sessions")),
+                    ManageDo::PutBack => format!("{} put back.", plural(done.len(), "session", "sessions")),
+                    ManageDo::Purge => format!("{} deleted.", plural(done.len(), "session", "sessions")),
                 };
-                if running > 0 {
+                if running > 0 && what == ManageDo::Archive {
                     said.push_str(&format!(" {} still running, left.", running));
                 }
                 if let Some((_, why)) = failed.first() {
@@ -12023,12 +12256,22 @@ impl Workbench {
                 for r in done {
                     let key = key_of(r);
                     match what {
-                        // Gone: its tab with it, and its row at once.
+                        // Gone from every list: its tab with it, and its
+                        // row at once, to the Trash's head.
                         ManageDo::Delete => {
                             this.close_tab(&key, window, cx);
                             this.closed_tabs.retain(|k| *k != key);
                             this.refs.retain(|x| key_of(x) != key);
                             this.begun.retain(|x| key_of(x) != key);
+                            if this.trash.contains_key(&key) && !this.trashed.iter().any(|x| key_of(x) == key) {
+                                this.trashed.insert(0, r.clone());
+                            }
+                        }
+                        // Out of the Trash; back in the lists when the
+                        // index next has it, with nothing behind it.
+                        ManageDo::PutBack | ManageDo::Purge => {
+                            this.trashed.retain(|x| key_of(x) != key);
+                            this.hub.mark_ended(&r.session_id);
                         }
                         // Read from where it is now: the one showing at
                         // once, any other when its tab is next gone to.
@@ -12103,8 +12346,6 @@ impl Workbench {
         // still has and the ones kept here alone, and the projects each
         // kind is in. A project with both is counted for both.
         let gone_n = folders.iter().flat_map(|(_, list)| list.iter()).filter(|r| r.archived).count();
-        let active_in = folders.iter().filter(|(_, list)| list.iter().any(|r| !r.archived)).count();
-        let gone_in = folders.iter().filter(|(_, list)| list.iter().any(|r| r.archived)).count();
         // While sessions are being chosen each row has a box before it:
         // ticked, or for a project with some of its sessions chosen, a
         // dash. It comes in and goes out with the header.
@@ -12315,6 +12556,103 @@ impl Workbench {
                 rows.push(if follow { v_flex().w_full().flex_shrink_0().child(body).child(follow_foot(&self.sessions_scroll, body_h + PAGE_PROJECT_H)).into_any_element() } else { body });
             }
         }
+        // The Trash, under everything: the sessions deleted, the last
+        // first, as one list whatever their projects, as the sidebar's
+        // is. Each says the days it has left, and under the pointer Put
+        // Back takes their place. Nothing in it is chosen with the
+        // rest; while choosing, its rows keep the boxes' room.
+        let trashed: Vec<&SessionRef> = self.trashed.iter().filter(|r| match &scope {
+            Scope::All => true,
+            Scope::Agent(a) => r.agent == *a,
+        }).collect();
+        let trash_n = trashed.len();
+        if !trashed.is_empty() {
+            rows.push(
+                div()
+                    .id("sessions-trash")
+                    .pt(if rows.is_empty() { px(4.) } else { px(18.) })
+                    .pb(px(6.))
+                    .px(px(12.))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
+                    .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)))
+                    .child("Trash")
+                    .into_any_element(),
+            );
+            let now = emaki_core::trash::now();
+            for r in trashed {
+                let key = key_of(r);
+                let days = self.trash.get(&key).map(|e| e.days_left(now)).unwrap_or(emaki_core::trash::KEEP_DAYS as u32);
+                let group = SharedString::from(format!("trash-page-row-{key}"));
+                let (menu_key, back_key) = (key.clone(), key.clone());
+                rows.push(
+                    h_flex()
+                        .id(SharedString::from(format!("trash-page-{key}")))
+                        .h(PAGE_SESSION_H)
+                        .flex_shrink_0()
+                        .px(px(12.))
+                        .gap(px(12.))
+                        .items_center()
+                        .rounded(px(10.))
+                        .group(group.clone())
+                        .hover(|s| s.bg(theme.muted))
+                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.trash_menu(Some(&menu_key), ev.position, cx)))
+                        .children(pick_box(format!("t-{key}"), 0, &theme).map(|b| div().invisible().child(b)))
+                        .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), theme.muted_foreground.opacity(0.75), false, SharedString::from(format!("trash-page-glyph-{key}")))))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(2.))
+                                .child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .items_center()
+                                        .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).when(self.unnamed(r), |d| d.italic()).child(r.title.clone()))
+                                        .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
+                                )
+                                .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(r.project())),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .min_w(px(52.))
+                                .h(px(22.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .child(div().text_size(px(12.)).text_color(theme.muted_foreground).group_hover(group.clone(), |s| s.opacity(0.)).child(plural(days as usize, "day", "days")))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("trash-page-back-{key}")))
+                                        .absolute()
+                                        .right_0()
+                                        .top_0()
+                                        .size(px(22.))
+                                        .rounded(px(6.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .opacity(0.)
+                                        .group_hover(group.clone(), |s| s.opacity(1.))
+                                        .text_color(theme.muted_foreground)
+                                        .hover(|s| s.bg(theme.border).text_color(theme.foreground))
+                                        .managed_tooltip(|window, cx| crate::workbench::tip("Put Back", window, cx))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            swallow_click(window, cx);
+                                            this.manage_straight(ManageDo::PutBack, vec![back_key.clone()], window, cx);
+                                        }))
+                                        .child(Icon::default().path("icons/undo-2.svg").with_size(px(14.))),
+                                ),
+                        )
+                        .child(div().w(px(14.)).flex_shrink_0())
+                        .into_any_element(),
+                );
+            }
+        }
         if rows.is_empty() {
             rows.push(div().px(px(12.)).py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child("Nothing here.").into_any_element());
         }
@@ -12323,11 +12661,11 @@ impl Workbench {
             Scope::All => "All Sessions".to_string(),
             Scope::Agent(a) => format!("{} sessions", a.display_name()),
         };
-        // Two figures, a label each: the count of sessions is what is
-        // read first, in the page's ink, and its projects follow in
-        // the muted one. As one sentence in one grey the four numbers
-        // had nothing to tell them apart.
-        let figures = [("Active", count - gone_n, active_in), ("Archived", gone_n, gone_in)];
+        // A figure a kind: the count in the page's ink, then its word in
+        // the muted one. Archived and the Trash are said only when there
+        // are some. The projects each kind is in are the list's to show:
+        // counted here too, the line ran past a narrow page.
+        let figures: Vec<(usize, &'static str)> = [(count - gone_n, "active"), (gone_n, "archived"), (trash_n, "in Trash")].into_iter().enumerate().filter(|(at, (n, _))| *at == 0 || *n > 0).map(|(_, f)| f).collect();
         let display = crate::fonts::display_family(cx);
         // The line over the first project: what is here, and "Select"
         // at its right. Choosing, it is a plate with a box for every
@@ -12359,21 +12697,28 @@ impl Workbench {
                     .w_full()
                     .gap(px(12.))
                     .items_center()
-                    .child(h_flex().flex_1().min_w_0().overflow_hidden().gap(px(14.)).items_center().text_size(px(12.5)).text_color(theme.muted_foreground).children(figures.iter().enumerate().map(|(at, (label, sessions, projects))| {
+                    .child(
                         h_flex()
-                            .flex_shrink_0()
-                            .gap(px(14.))
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .gap(px(12.))
                             .items_center()
-                            .when(at > 0, |d| d.child(div().w(px(1.)).h(px(14.)).bg(theme.border)))
-                            .child(
+                            .text_size(px(12.5))
+                            .text_color(theme.muted_foreground)
+                            .children(figures.iter().enumerate().map(|(at, (n, word))| {
                                 h_flex()
-                                    .gap(px(7.))
-                                    .items_baseline()
-                                    .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child(label.to_uppercase()))
-                                    .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(plural(*sessions, "session", "sessions")))
-                                    .child(div().child(format!("in {}", plural(*projects, "project", "projects")))),
-                            )
-                    })))
+                                    .flex_shrink_0()
+                                    .gap(px(12.))
+                                    .items_center()
+                                    .when(at > 0, |d| d.child(div().w(px(1.)).h(px(14.)).bg(theme.border)))
+                                    .child(h_flex().gap(px(5.)).items_baseline().child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(n.to_string())).child(div().child(*word)))
+                            }))
+                            // Cut by a page too narrow, the line fades out
+                            // at its end; with room it fades nothing.
+                            .child(div().absolute().top_0().bottom_0().right_0().w(px(24.)).bg(linear_gradient(90., linear_color_stop(theme.background.opacity(0.), 0.), linear_color_stop(theme.background, 1.)))),
+                    )
                     .child(pill("sessions-select", Some("icons/select-all.svg"), "Select", 0, false, &theme, cx, |this, cx| this.manage_toggle(cx)));
             }
             let all = all_keys.clone();

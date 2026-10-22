@@ -182,15 +182,6 @@ pub fn trash_path(path: &Path) -> Result<(), String> {
 }
 
 /// What opening a folder in the file manager is called where we are.
-/// What the system's file manager is called.
-pub const FILE_MANAGER: &str = if cfg!(target_os = "macos") {
-    "Finder"
-} else if cfg!(target_os = "windows") {
-    "Explorer"
-} else {
-    "the file manager"
-};
-
 pub const OPEN_FOLDER_LABEL: &str = if cfg!(target_os = "macos") {
     "Open in Finder"
 } else if cfg!(target_os = "windows") {

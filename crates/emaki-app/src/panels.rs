@@ -4994,7 +4994,7 @@ impl Workbench {
                     .border_color(theme.border)
                     .shadow(float_shadow(&theme))
                     .child(div().w_full().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(title))
-                    .child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child(detail))
+                    .when(!detail.is_empty(), |d| d.child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child(detail)))
                     .child(h_flex().w_full().pt(px(2.)).gap(px(8.)).child(div().flex_1()).child(no).child(yes))
                     .with_animation(ElementId::Name(format!("{id}-in-{serial}").into()), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-6. * (1. - t)))),
             )
@@ -5072,15 +5072,15 @@ impl Workbench {
         let new = paths.iter().filter(|path| self.tree.changed.iter().any(|(p, s)| p == *path && matches!(s, git::State::Untracked | git::State::Added))).count();
         let (title, detail, yes) = if paths.len() > 1 {
             let detail = match new {
-                0 => "Each file goes back to what the last commit has. This cannot be undone from here.".to_string(),
-                n if n == paths.len() => format!("The last commit has none of them, so discarding them moves them to the {}. They can be put back from there.", crate::sys::TRASH_NAME),
-                n => format!("Each goes back to what the last commit has, which cannot be undone from here. {} the last commit does not have {} to the {}.", plural(n, "file", "files"), if n == 1 { "goes" } else { "go" }, crate::sys::TRASH_NAME),
+                0 => "This can't be undone.".to_string(),
+                n if n == paths.len() => format!("They move to the {}.", crate::sys::TRASH_NAME),
+                _ => format!("New files move to the {}. The rest can't be undone.", crate::sys::TRASH_NAME),
             };
             (format!("Discard the changes to {} files?", paths.len()), detail, "Discard Changes")
         } else if new == 1 {
-            (format!("Move {name} to the {}?", crate::sys::TRASH_NAME), "The last commit has no such file, so discarding it removes it. It can be put back from there.".to_string(), crate::sys::TRASH_LABEL)
+            (format!("Move {name} to the {}?", crate::sys::TRASH_NAME), String::new(), crate::sys::TRASH_LABEL)
         } else {
-            (format!("Discard the changes to {name}?"), "The file goes back to what the last commit has. This cannot be undone from here.".to_string(), "Discard Changes")
+            (format!("Discard the changes to {name}?"), "This can't be undone.".to_string(), "Discard Changes")
         };
         let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
             swallow_click(window, cx);
@@ -6180,19 +6180,21 @@ impl Workbench {
         }
         // Bringing is offered once git has said the changes fit there.
         let fits = ask.fit.as_ref().is_some_and(Vec::is_empty);
+        // An option says more than its name only when it cannot be
+        // taken yet, or at all.
         let bring_line = match &ask.fit {
-            None => "Checking whether your changes fit there…".to_string(),
-            Some(bad) if bad.is_empty() => "Your work in progress follows you to the new branch.".to_string(),
-            Some(bad) => format!("Not possible: {} would conflict there ({}). Leave them here, or commit them first.", plural(bad.len(), "file", "files"), git::name_some(bad)),
+            None => Some("Checking…".to_string()),
+            Some(bad) if bad.is_empty() => None,
+            Some(bad) => Some(format!("{} would conflict there ({}).", plural(bad.len(), "file", "files"), git::name_some(bad))),
         };
-        let option = |id: &'static str, on: bool, enabled: bool, title: String, line: String| {
+        let option = |id: &'static str, on: bool, enabled: bool, title: String, line: Option<String>| {
             h_flex()
                 .id(id)
                 .w_full()
                 .px(px(12.))
                 .py(px(10.))
                 .gap(px(10.))
-                .items_start()
+                .map(|d| if line.is_some() { d.items_start() } else { d.items_center() })
                 .when(on, |d| d.bg(theme.primary.opacity(0.07)))
                 .when(enabled && !on, |d| d.cursor_pointer().hover(|s| s.bg(theme.muted.opacity(0.6))))
                 // Rounded where the box is, the first at its top and the
@@ -6200,9 +6202,9 @@ impl Workbench {
                 .map(|d| if id == "ask-leave" { d.rounded_t(px(9.)) } else { d.rounded_b(px(9.)) })
                 .when(!enabled, |d| d.opacity(0.45))
                 .child(
-                    div().mt(px(2.)).size(px(14.)).flex_shrink_0().rounded_full().border_1().border_color(if on { theme.primary } else { theme.muted_foreground.opacity(0.6) }).flex().items_center().justify_center().when(on, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.primary))),
+                    div().when(line.is_some(), |d| d.mt(px(2.))).size(px(14.)).flex_shrink_0().rounded_full().border_1().border_color(if on { theme.primary } else { theme.muted_foreground.opacity(0.6) }).flex().items_center().justify_center().when(on, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.primary))),
                 )
-                .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(title)).child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(line)))
+                .child(v_flex().flex_1().min_w_0().gap(px(2.)).child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(title)).children(line.map(|line| div().text_size(px(12.)).text_color(theme.muted_foreground).child(line))))
         };
         let pick = |leave: bool| {
             cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -6253,7 +6255,7 @@ impl Workbench {
                     .border_color(theme.border)
                     .shadow(float_shadow(&theme))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(if create { "Create branch" } else { "Switch branch" }))
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("You have changes on this branch. What would you like to do with them?"))
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("You have uncommitted changes."))
                     .child(
                         v_flex()
                             .w_full()
@@ -6261,7 +6263,7 @@ impl Workbench {
                             .border_1()
                             .border_color(theme.border)
                             .overflow_hidden()
-                            .child(option("ask-leave", leave, can_leave, format!("Leave my changes on {from}"), "Your work in progress is stashed on this branch for you to return to later.".to_string()).on_click(pick(true)))
+                            .child(option("ask-leave", leave, can_leave, format!("Leave my changes on {from}"), None).on_click(pick(true)))
                             .child(div().h(px(1.)).w_full().bg(theme.border))
                             .child(option("ask-bring", !leave && fits, fits, format!("Bring my changes to {name}"), bring_line).on_click(pick(false))),
                     )

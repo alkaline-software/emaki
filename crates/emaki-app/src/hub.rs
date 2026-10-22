@@ -43,6 +43,8 @@ const ARCHIVE_EVERY: Duration = Duration::from_secs(300);
 /// How often the copies the agents no longer have are looked over for
 /// packing, after the look at launch.
 const PACK_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// How often the trash is looked over for sessions past their days.
+const PURGE_EVERY: Duration = Duration::from_secs(3600);
 
 pub enum HubEvent {
     Index(Vec<SessionRef>),
@@ -222,6 +224,7 @@ impl Hub {
                 // time, and when it was taken.
                 let mut taken: HashMap<String, (u64, f64, Instant)> = HashMap::new();
                 let mut packed_at: Option<Instant> = None;
+                let mut purged_at: Option<Instant> = None;
                 loop {
                     let (interval, agents) = {
                         let cfg = hub.cfg.read().unwrap();
@@ -270,6 +273,12 @@ impl Hub {
                         let _ = thread::Builder::new().name("emaki-pack".into()).spawn(move || {
                             let _ = archive::pack_stale(&stale);
                         });
+                    }
+                    // The sessions deleted thirty days ago go for good:
+                    // once after launch, then every hour.
+                    if purged_at.is_none_or(|at| at.elapsed() >= PURGE_EVERY) {
+                        purged_at = Some(Instant::now());
+                        let _ = thread::Builder::new().name("emaki-purge".into()).spawn(emaki_core::trash::purge_due);
                     }
                     if changed {
                         if let Ok(s) = hub.search_tx.lock() {
