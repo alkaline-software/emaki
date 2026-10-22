@@ -63,6 +63,12 @@ hands. Read this before checking a change to the app by eye.
   `sideask:delete` ask it of what is chosen (nothing answers), and
   `sidesel` prints what is chosen. `sideband:<y>` counts from the first
   project's row, not from the card's heading.
+- The Trash is drawn from `<home>/state/trash.json`: write
+  `{"claude-code:<id>": {"at": <unix seconds>}}` before the launch to
+  have sessions in it without deleting any (the question is not answered
+  from a script). An `at` thirty days back is removed for good by the
+  copy at launch. A copy without `CODEX_HOME` reads the real Codex
+  sessions: point it at an empty folder when anything is deleted.
 - A folder Claude Code asks about trusting is a new git repository
   beside others (not one under `/tmp`, nor an empty folder). Nothing
   answers the question from a script.

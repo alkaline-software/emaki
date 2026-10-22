@@ -321,11 +321,11 @@ live) moves nothing.
 
 ### Choosing sessions
 
-The line over the first project counts the sessions an agent still has
-and the archived ones, each with the projects it is in (a project with
-both is counted for both), as two labelled figures with the session
-counts in the page's ink, with
-"Select" at its right. Pressed, the line becomes a plate (`manage`,
+The line over the first project counts the sessions active, archived
+and in the Trash, each a number in the page's ink and a word in the
+muted one, the last two only when there are some, with "Select" at its
+right. It counted each kind's projects too and ran past a narrow page;
+the list shows the projects. Cut all the same, it fades at its end. Pressed, the line becomes a plate (`manage`,
 `picked`) and every row gets a box before it. A session's row chooses
 it; a project's row chooses all of its sessions, and its chevron is
 then what opens it. The plate has a box for everything the pills leave,
@@ -344,8 +344,22 @@ the main thread (`manage_now`).
   it to delete it, and Codex archives its own (`Adapter::archive`,
   `docs/core.md`). A session archived in Codex itself is archived here
   too: one word, one meaning, wherever the file is.
-- **Delete** moves every copy to the system's trash, Claude Code's and
-  the archive's; Codex deletes its own (`adapters::delete_session`).
+- **Delete** puts the session in the Trash, at the foot of the
+  sidebar's Projects card (`emaki_core::trash`, `docs/core.md`). It is
+  done to every session chosen, whatever is running: a turn or a hidden
+  terminal of ours is stopped first (`manage_now`); one running in a
+  terminal of the person's goes on there, since nothing is ended in a
+  terminal of theirs, and is in the Trash all the same.
+- **The Trash** lists the deleted sessions as one list, whatever their
+  projects, the last deleted first, each with the days it has left.
+  Under the pointer Put Back takes the place of the days; a right click
+  has Put Back and Delete Now, and one on the heading Empty Trash, both
+  asked first. The sessions page has the same list at its foot, under
+  "Trash", whose rows are not chosen with the rest. Put back, a session is as it was before it was deleted
+  and its days are forgotten. Nothing in the Trash is in a project's
+  list, another count or search; it is kept out of `refs` (`trashed`)
+  as the index comes in. The sidebar's is shut at every launch, as
+  Temporary and Hidden are.
 - **Unarchive** (a session's menu in the sidebar, Unarchive Session, and
   a project's, Unarchive Sessions) puts an archived session back for
   its agent (`Adapter::unarchive`), with nothing asked, since nothing is
@@ -354,7 +368,7 @@ the main thread (`manage_now`).
   unarchived, and the composer says so.
 - Both are of sessions. Nothing in a project's folder is touched.
 - A session something is running in (`Hub::is_live`, a driver) is left
-  as it is and counted in what is said.
+  as it is by Archive and counted in what is said.
 - The question is not answered from a script: the probe's steps stop at
   asking.
 

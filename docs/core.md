@@ -105,6 +105,16 @@ may not be running that week, and the thirty days is a setting.
   which dates it now itself. The window then counts the session as
   having nothing behind it (`Hub::mark_ended`): a turn it was cut off
   in, dated now, would read as one at work.
+- **The trash** (`trash.rs`, `state/trash.json`): a session deleted in
+  the window is archived (`Adapter::archive`, so its agent no longer
+  lists or continues it) and recorded with when, and the window lists
+  it in the Trash alone. Put back, it is unarchived only when deleting
+  archived it, and its record goes. Thirty days after it was deleted the
+  scanner removes every file of it for good (`purge_due`, at launch and
+  hourly): Codex deletes its own, and the rest is unlinked, not handed
+  to the system's trash, since this is the trash. One that could not be
+  archived (a terminal of the person's still writing it) is recorded all
+  the same and removed whole when its days are up.
 - **When** is the hub's (`spawn_scanner`): every session at launch and at
   quit; after that a session whose file changed, once its turn is over,
   and one still at work every five minutes. The scan every few seconds is
