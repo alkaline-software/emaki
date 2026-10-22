@@ -6,6 +6,18 @@ a numbered list: a topic in bold, then one sentence on what changed for
 them, with small fixes gathered under **Fixes**. Ten items at most. The
 reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.2.9
+
+1. **Settings**: A window of its own, with Text Size as a section of whole-point presets and a Custom size per place; Escape closes it.
+2. **Trash**: Deleted sessions wait in a Trash at the foot of the sidebar and of the sessions page for 30 days, with Put Back, Delete Now and Empty Trash; Delete takes any session, a running turn stopped first, and every confirmation says one line or none.
+3. **Repositories**: A folder of checkouts shows the one in use on a button before the branch, with a list to switch; the count, the branch list, the comparison and the commit are that checkout's, each keeping its own commit words.
+4. **Branches**: Delete Branch on a branch's right click, never for the default branch, with a tick that also deletes it on the remote; View on GitHub at the foot of the branch list.
+5. **Editor**: Pairs close as their open is typed and wrap a selection, as in VS Code; find with case, whole word, regex and replace; ⌘F finds in a file as it reads.
+6. **Spelling**: Markdown, Quarto and plain text files are checked in the editor as the composer is, in the same language, with corrections on a right click.
+7. **Panels**: ⌘⇧F for the files panel and ⌘⇧B for the sidebar; a panel put away for a narrow window comes back when it is wide again, and the panels give way by rank.
+8. **Attachments**: Thumbnails for TIFF, HEIC and other pictures, and attachments as even rows of pictures and file tiles by kind.
+9. **Fixes**: The figures over the sessions page fit a narrow width; question cards stack their buttons when narrow; chat markdown no longer reads setext headings, indented code or HTML; a selection in the transcript stays on release; drafts belong to the Emaki that wrote them.
+
 ## v0.2.8
 
 1. **Accents**: Periwinkle, the blue of emaki.lol, with orchid, rose, amber, moss, jade and teal beside it in Settings, Appearance; terracotta and graphite are gone, and the icon's rolls are periwinkle.
