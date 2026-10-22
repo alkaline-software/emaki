@@ -291,6 +291,22 @@ upstream revision finds them.
    selection's colour, the others in a grey of it), numbered in the
    order the view paints, and records where the current one stands.
 
+38. `crates/base/src/input/editor/pairs.rs` (`AutoPairs`, `Typed`),
+   `base/state.rs` (`set_auto_pairs`, `auto_closed`), `base/movement.rs`:
+   in a code editor with the language's pairs set, an open typed puts
+   its close after the caret, as VS Code does and only where it does
+   (at a line's end or before what ends a term, a quote not after a
+   word nor inside a string begun on the line, a bracket not where a
+   close further on lacks its open); a close typed where the editor put
+   that close steps over it; Backspace between the two takes both; and
+   an open typed over a selection puts the pair around it, the
+   selection kept. The closes the editor put in are tracked by offset,
+   moved with each edit, and let go for good once the caret leaves the
+   pair, as VS Code lets its go, so a close typed by hand is never
+   stepped over and never taken with Backspace. Typed only: a paste,
+   the editor's own edits and an input method composing go in as they
+   are.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

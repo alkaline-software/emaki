@@ -26,6 +26,7 @@ pub mod model;
 pub mod office;
 pub mod options;
 pub mod outline;
+pub mod pairs;
 pub mod parquet_file;
 pub mod paths;
 pub mod peer;

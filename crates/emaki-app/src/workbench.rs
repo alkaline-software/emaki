@@ -653,6 +653,7 @@ pub enum Pane {
     /// What scrolls on a card or a sheet over the window: the list of
     /// branches, and the comparison's files and lines.
     Branches,
+    Repos,
     ChangeFiles,
     ChangeLines,
     /// In the comparison's history: the commits, and one's files.
@@ -1550,6 +1551,9 @@ pub struct Workbench {
     /// The window is too narrow for the sidebar beside the content; it is
     /// hidden and only shows over the content, on request (`sidebar_peek`).
     pub(crate) narrow: bool,
+    /// The window's width as last drawn, for a card that lays its
+    /// buttons out by the room it has.
+    pub(crate) win_w: Pixels,
     /// The content pane's width as of the last draw, for layouts that
     /// choose their column count from it (the board).
     pub(crate) pane_w: Pixels,
@@ -2069,6 +2073,12 @@ pub struct Workbench {
     pub(crate) file_prompt: Option<crate::panels::FilePrompt>,
     /// The list of branches, open under where its button was clicked.
     pub(crate) branch_menu: Option<Point<Pixels>>,
+    /// Where the list of a folder's checkouts was opened, while it is;
+    /// its scroller; and a checkout a probe step chose, taken up where
+    /// there is a window.
+    pub(crate) repo_menu: Option<Point<Pixels>>,
+    pub(crate) repo_scroll: ScrollHandle,
+    pub(crate) repo_probe: Option<PathBuf>,
     pub(crate) branch_input: Entity<InputState>,
     pub(crate) branch_scroll: ScrollHandle,
     /// A switch is under way.
@@ -3673,6 +3683,7 @@ impl Workbench {
             window_rect: Some(rect_of(window.bounds())),
             last_ui_save: std::time::Instant::now(),
             narrow: false,
+            win_w: px(0.),
             pane_w: px(1180.),
             conv_min: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
             composer_row_w: Rc::new(Cell::new(px(0.))),
@@ -3855,6 +3866,9 @@ impl Workbench {
             ignored: emaki_core::check::ignored(),
             file_prompt: None,
             branch_menu: None,
+            repo_menu: None,
+            repo_scroll: ScrollHandle::new(),
+            repo_probe: None,
             branch_input,
             branch_scroll: ScrollHandle::new(),
             branch_busy: false,
@@ -5335,6 +5349,7 @@ impl Workbench {
             || self.lightbox.is_some()
             || (self.renaming.is_some() && self.rename_at == RenameAt::Sheet)
             || self.branch_menu.is_some()
+            || self.repo_menu.is_some()
             || self.branch_new.is_some()
             || self.branch_ask.is_some()
             || self.git_gate.is_some()
@@ -8069,16 +8084,18 @@ impl Workbench {
         // A card or a sheet of ours is over the window: its scrollers are
         // the only panes there are, and nothing under it moves. A flick
         // carried off the list it began in stays with that list.
-        if self.branch_menu.is_some() || self.changes.is_some() {
+        let listed = self.branch_menu.is_some() || self.repo_menu.is_some();
+        if listed || self.changes.is_some() {
             self.scroll_inner = None;
             let here = match &self.changes {
                 _ if self.branch_menu.is_some() && self.branch_scroll.bounds().contains(&e.position) => Pane::Branches,
+                _ if self.repo_menu.is_some() && self.repo_scroll.bounds().contains(&e.position) => Pane::Repos,
                 // The history draws its own two lists where the files
                 // are; the files' handle still has the place it had.
-                Some(c) if self.branch_menu.is_none() && c.history && c.commits_scroll.bounds().contains(&e.position) => Pane::HistoryCommits,
-                Some(c) if self.branch_menu.is_none() && c.history && c.cfiles_scroll.bounds().contains(&e.position) => Pane::HistoryFiles,
-                Some(c) if self.branch_menu.is_none() && !c.history && c.files.0.borrow().base_handle.bounds().contains(&e.position) => Pane::ChangeFiles,
-                Some(c) if self.branch_menu.is_none() && c.list.viewport_bounds().contains(&e.position) => Pane::ChangeLines,
+                Some(c) if !listed && c.history && c.commits_scroll.bounds().contains(&e.position) => Pane::HistoryCommits,
+                Some(c) if !listed && c.history && c.cfiles_scroll.bounds().contains(&e.position) => Pane::HistoryFiles,
+                Some(c) if !listed && !c.history && c.files.0.borrow().base_handle.bounds().contains(&e.position) => Pane::ChangeFiles,
+                Some(c) if !listed && c.list.viewport_bounds().contains(&e.position) => Pane::ChangeLines,
                 _ => Pane::Nowhere,
             };
             match e.touch_phase {
@@ -8097,6 +8114,7 @@ impl Workbench {
             };
             match (owner, &self.changes) {
                 (Pane::Branches, _) if self.branch_menu.is_some() => held(&self.branch_scroll),
+                (Pane::Repos, _) if self.repo_menu.is_some() => held(&self.repo_scroll),
                 (Pane::ChangeFiles, Some(c)) => held(&c.files.0.borrow().base_handle),
                 (Pane::HistoryCommits, Some(c)) => held(&c.commits_scroll),
                 (Pane::HistoryFiles, Some(c)) => held(&c.cfiles_scroll),
@@ -8213,7 +8231,7 @@ impl Workbench {
                 Page::Agents => self.agents_page_scroll.set_offset(self.agents_page_scroll.offset() + delta),
             },
             // Momentum left over from a card or sheet that has gone.
-            Pane::Branches | Pane::ChangeFiles | Pane::ChangeLines | Pane::HistoryCommits | Pane::HistoryFiles | Pane::Nowhere | Pane::Terminal => {}
+            Pane::Branches | Pane::Repos | Pane::ChangeFiles | Pane::ChangeLines | Pane::HistoryCommits | Pane::HistoryFiles | Pane::Nowhere | Pane::Terminal => {}
         }
         cx.stop_propagation();
         cx.notify();
@@ -8671,6 +8689,8 @@ impl Workbench {
             cx.notify();
         } else if self.branch_new.is_some() {
             self.branch_new_close(window, cx);
+        } else if self.repo_menu.is_some() {
+            self.close_repo_menu(cx);
         } else if self.branch_menu.is_some() {
             self.close_branch_menu(window, cx);
         } else if self.file_prompt.is_some() {
@@ -10869,6 +10889,7 @@ impl Workbench {
             serial,
             format!("Open {} folders?", folders.len()),
             String::new(),
+            ["Cancel", "Open"],
             choice_pill("open-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel),
             choice_pill("open-ask-yes", "icons/folder-open.svg", "Open", Press::Primary, false, cx.theme()).on_click(go),
             cx,
@@ -12160,6 +12181,7 @@ impl Workbench {
             swallow_click(window, cx);
             this.manage_now(what, window, cx);
         });
+        let yes_label = yes;
         let yes = match what {
             ManageDo::Delete | ManageDo::Purge => choice_pill("manage-ask-yes", "icons/trash.svg", yes, Press::Danger, false, cx.theme()),
             ManageDo::Archive => choice_pill("manage-ask-yes", "icons/archive.svg", yes, Press::Primary, false, cx.theme()),
@@ -12167,7 +12189,7 @@ impl Workbench {
         }
         .on_click(go);
         let no = choice_pill("manage-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
-        self.ask_card("manage-ask", serial, title, detail, no, yes, cx)
+        self.ask_card("manage-ask", serial, title, detail, ["Cancel", yes_label], no, yes, cx)
     }
 
     /// The question answered yes: it is done off the main thread, a
@@ -16832,6 +16854,9 @@ impl Render for Workbench {
         if std::mem::take(&mut self.branch_new_go_probe) {
             self.branch_new_go(window, cx);
         }
+        if let Some(dir) = self.repo_probe.take() {
+            self.repo_pick(dir, window, cx);
+        }
         if let Some(typed) = self.branch_probe.take() {
             if self.branch_menu.is_none() {
                 self.branch_menu_toggle(point(px(230.), px(66.)), window, cx);
@@ -16888,6 +16913,7 @@ impl Render for Workbench {
         // the room of those put away for the window's width
         // (`side_away`), leave it no room.
         let held = if sides > px(0.) { self.side_away.iter().fold(px(0.), |a, (s, _)| a + s.least()) } else { px(0.) };
+        self.win_w = vw + FRAME;
         self.narrow = vw < NARROW_W || (sides > px(0.) && vw < self.sidebar_w + self.conv_min.get() + sides + held);
         if !self.narrow {
             self.sidebar_peek = false;
@@ -17203,6 +17229,7 @@ impl Render for Workbench {
             // row and no tab to write it in, or neither is drawn.
             .when(self.renaming.is_some() && (self.rename_at == RenameAt::Sheet || !self.rename_drawn.get()), |d| d.child(fade_in("rename-in", self.render_rename(cx))))
             .when_some(self.branch_menu, |d, at| d.child(fade_in("branch-menu-in", self.render_branch_menu(at, window, cx))))
+            .when_some(self.repo_menu, |d, at| d.child(fade_in("repo-menu-in", self.render_repo_menu(at, window, cx))))
             .when(self.branch_new.is_some(), |d| d.child(fade_in("branch-new-in", self.render_branch_new(cx))))
             .when(self.branch_ask.is_some(), |d| d.child(fade_in("branch-ask-in", self.render_branch_ask(cx))))
             .when(self.git_gate.is_some(), |d| d.child(fade_in("git-gate-in", self.render_git_gate(cx))))

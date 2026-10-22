@@ -49,6 +49,8 @@ mod native;
 mod rope_ext;
 #[path = "editor/search.rs"]
 mod search;
+#[path = "editor/pairs.rs"]
+mod pairs;
 #[path = "base/selection.rs"]
 mod selection;
 #[path = "base/state.rs"]
@@ -94,6 +96,7 @@ pub use native::set_text_content_type;
 pub use native::{NativeMenu, NativeMenuItem};
 pub use rope_ext::{InputEdit, Point, RopeExt, RopeLines};
 pub use ropey::Rope;
+pub use pairs::{AutoPairs, Typed};
 pub use search::{SEARCH_ANIM, SearchMatcher, SearchOptions, SearchSession};
 pub use state::*;
 pub use textarea::{Textarea, TextareaState};

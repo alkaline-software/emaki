@@ -415,6 +415,11 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) silent_replace_text: bool,
     /// The application's rule for a new line's indent. (Emaki addition.)
     pub(super) next_line_indent: Option<Rc<dyn Fn(&str, &str) -> Option<String>>>,
+    /// The pairs the editor closes and surrounds with, and the closes it
+    /// put in that the caret has stayed inside since, each as the
+    /// open's offset and the close's. (Emaki addition.)
+    pub(super) auto_pairs: Option<crate::input::AutoPairs>,
+    pub(super) auto_closed: Vec<(usize, usize)>,
     /// Marks in the margin, between the line numbers and the text.
     /// (Emaki addition.)
     pub(super) gutter_marks: Vec<GutterMark>,
@@ -690,6 +695,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             overlay_action_handler: None,
             silent_replace_text: false,
             next_line_indent: None,
+            auto_pairs: None,
+            auto_closed: Vec::new(),
             gutter_marks: Vec::new(),
             gutter_click: None,
             fold_anim: Rc::new(std::cell::Cell::new(None)),
@@ -1618,6 +1625,54 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.next_line_indent = Some(Rc::new(rule));
     }
 
+    /// The pairs the editor closes as an open is typed and puts around
+    /// a selection, the language's (`pairs.rs`). (Emaki addition.)
+    pub fn set_auto_pairs(&mut self, pairs: crate::input::AutoPairs) {
+        self.auto_pairs = Some(pairs);
+        self.auto_closed.clear();
+    }
+
+    /// The closes the editor put in are kept while the caret, or the
+    /// selection, stays between the open and the close on one line, as
+    /// VS Code keeps them; the rest are let go, for good. (Emaki addition.)
+    pub(super) fn auto_closed_check(&mut self) {
+        if self.auto_closed.is_empty() {
+            return;
+        }
+        let (sel, text) = (self.selected_range, &self.text);
+        self.auto_closed.retain(|(o, c)| *o < sel.start && sel.end <= *c && *c < text.len() && !text.slice(*o..*c).to_string().contains('\n'));
+    }
+
+    /// Whether the character at the caret is a close the editor put in,
+    /// the caret inside since.
+    fn auto_closed_here(&mut self) -> bool {
+        self.auto_closed_check();
+        let at = self.cursor();
+        self.auto_closed.iter().any(|(_, c)| *c == at)
+    }
+
+    /// The caret's line, up to the caret and after it.
+    fn line_around_cursor(&self) -> (String, String) {
+        let (start, end, at) = (self.start_of_line(), self.end_of_line(), self.cursor());
+        (self.text.slice(start..at).to_string(), self.text.slice(at..end).to_string())
+    }
+
+    /// Backspace between an open and the close the editor put after it:
+    /// both are taken, as one edit. Whether that is so, the selection
+    /// set to the two. (Emaki addition.)
+    fn auto_pair_delete(&mut self) -> bool {
+        let Some(pairs) = self.auto_pairs.clone() else { return false };
+        let here = self.auto_closed_here();
+        let (before, after) = self.line_around_cursor();
+        if !pairs.deletes_pair(&before, &after, here) {
+            return false;
+        }
+        let at = self.cursor();
+        self.auto_closed.retain(|(_, c)| *c != at);
+        self.selected_range = (at - 1..at + 1).into();
+        true
+    }
+
     pub(super) fn indent_of_next_line(&mut self) -> String {
         if self.is_single_line() {
             return "".into();
@@ -1656,8 +1711,14 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         let intent = if self.selected_range.is_empty() {
-            self.select_to(self.previous_boundary(self.cursor()), cx);
-            EditIntent::Backspace
+            // An open with the close the editor put after it: both go.
+            // (Emaki addition.)
+            if M::CODE_EDITOR && self.auto_pair_delete() {
+                EditIntent::Atomic
+            } else {
+                self.select_to(self.previous_boundary(self.cursor()), cx);
+                EditIntent::Backspace
+            }
         } else {
             EditIntent::Atomic
         };
@@ -2446,7 +2507,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         if self.selected_range.is_empty() {
             self.update_preferred_column();
         }
-        cx.notify()
+        cx.notify();
+        self.auto_closed_check();
     }
 
     /// Unselects the currently selected text.
@@ -2915,7 +2977,45 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         // NOTE: The normalization keeps the UTF-16 length, but may change the
         // UTF-8 byte length, so all the byte-offset calculations below must
         // use the normalized text.
-        let new_text = self.normalize_input(new_text);
+        let mut new_text = self.normalize_input(new_text).to_string();
+
+        // A character typed in a code editor, with the language's pairs
+        // set: an open puts its close after the caret, or over a
+        // selection goes around it with its close; a close typed where
+        // the editor put that close steps over it. Typed, not pasted
+        // or put in by the editor itself, and not while an input
+        // method composes. (Emaki addition.)
+        let mut pair_open: Option<usize> = None;
+        let mut pair_select: Option<Range<usize>> = None;
+        if M::CODE_EDITOR && requested_intent.is_none() && !self.silent_replace_text && range_utf16.is_none() && self.ime_marked_range.is_none() {
+            let one = new_text.chars().next().filter(|_| new_text.chars().count() == 1);
+            if let (Some(pairs), Some(ch)) = (self.auto_pairs.clone(), one) {
+                let sel = self.selected_range;
+                let selected = (!sel.is_empty()).then(|| self.text.slice(sel.start..sel.end).to_string());
+                let here = self.auto_closed_here();
+                let (before, after) = self.line_around_cursor();
+                match pairs.typed(ch, &before, &after, selected.as_deref(), here) {
+                    crate::input::Typed::Close(close) => {
+                        pair_open = Some(sel.start);
+                        new_text.push(close);
+                    }
+                    crate::input::Typed::StepOver => {
+                        let at = self.cursor() + ch.len_utf8();
+                        self.auto_closed.retain(|(_, c)| *c != sel.start);
+                        self.selected_range = (at..at).into();
+                        self.preferred_column = None;
+                        cx.notify();
+                        return;
+                    }
+                    crate::input::Typed::Surround(close) => {
+                        let inner = selected.unwrap_or_default();
+                        pair_select = Some(sel.start + ch.len_utf8()..sel.start + ch.len_utf8() + inner.len());
+                        new_text = format!("{ch}{inner}{close}");
+                    }
+                    crate::input::Typed::Plain => {}
+                }
+            }
+        }
         let new_text: &str = &new_text;
 
         let range = range_utf16
@@ -3013,6 +3113,35 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         self.update_fold_candidates_incremental(&range, new_text);
         M::refresh_language_features(self, window, cx);
         self.selected_range = (new_offset..new_offset).into();
+        // The closes the editor put in move with the text, and one the
+        // edit wrote over goes; the close just put in is kept with the
+        // caret before it, and a pair put around a selection keeps the
+        // selection. (Emaki addition.)
+        if M::CODE_EDITOR {
+            let delta = new_text.len() as isize - range.len() as isize;
+            let shift = |n: usize| (n as isize + delta).max(0) as usize;
+            self.auto_closed.retain_mut(|(o, c)| {
+                if range.end <= *o {
+                    (*o, *c) = (shift(*o), shift(*c));
+                    true
+                } else if range.start > *c {
+                    true
+                } else if range.start > *o && range.end <= *c {
+                    *c = shift(*c);
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Some(o) = pair_open {
+                let close_at = o + new_text.len() - 1;
+                self.auto_closed.push((o, close_at));
+                self.selected_range = (close_at..close_at).into();
+            }
+            if let Some(sel) = pair_select {
+                self.selected_range = sel.into();
+            }
+        }
         self.ime_marked_range.take();
         // The layout still shows the text from before this edit, so the
         // column cannot be measured yet: it would come out stale or

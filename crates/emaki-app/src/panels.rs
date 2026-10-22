@@ -57,6 +57,9 @@ const PIN_LEAD: Pixels = px(10.);
 pub(crate) const CONVERSATION_MIN: Pixels = px(480.);
 /// How wide the strip at the panel's edge that takes the drag is.
 const PANEL_GRIP: Pixels = px(8.);
+/// In a folder of checkouts, the panel width from which the branch is
+/// named in the head beside the checkout.
+const NAMED_BRANCH_AT: Pixels = px(300.);
 /// A panel's head is as tall as the folder's band beside it, so the two
 /// read as one band across the pane.
 const HEAD_H: Pixels = px(31.);
@@ -282,6 +285,9 @@ pub struct Changes {
     band_at: Option<std::time::Instant>,
     /// The files a commit leaves out: every other one changed goes in.
     pub(crate) left_out: HashSet<PathBuf>,
+    /// Of a folder of checkouts, the commit's words typed for each one
+    /// the comparison has left, put back in the fields on the way back.
+    pub(crate) drafts: HashMap<PathBuf, (String, String)>,
     /// The history shows, not the changes: the branch's commits, the
     /// one picked by its hash, the files it changed (kept with the hash
     /// they are of), and the one of those whose lines show.
@@ -326,15 +332,6 @@ fn git_read(dir: &Path) -> GitRead {
     // Asked only of a folder git gave nothing for.
     let trouble = if repos.is_empty() { git::trouble(dir) } else { None };
     (all, each, repos, changed, trouble)
-}
-
-/// A row of the comparison's list: a changed file, by its place in
-/// `Tree::changed`, or, in a folder of checkouts, the head of one
-/// checkout's files: its folder, its branch and how many.
-#[derive(Clone)]
-pub(crate) enum ChangeRow {
-    Repo { dir: PathBuf, branch: Option<String>, count: usize },
-    File(usize),
 }
 
 /// The file pane's find: the card's own height and the room around it.
@@ -2215,23 +2212,12 @@ impl Workbench {
                     // committed, or discarded) lets it go: its lines
                     // stood there after a commit, beside an empty list.
                     // Of a folder of checkouts, the first left in the one
-                    // the comparison is on, else the first; and the
-                    // comparison goes with it to its checkout.
+                    // the comparison is on: with none, it says so, and
+                    // the others are in the list behind its button.
                     let on = this.changes.as_ref().map(|c| c.root.clone());
-                    let first = this.tree.changed.iter().find(|(p, _)| on.as_ref().is_some_and(|r| p.starts_with(r))).or(this.tree.changed.first()).map(|(p, _)| p.clone());
-                    let first_repo = first.as_ref().and_then(|p| this.repo_of(p));
+                    let first = on.as_ref().and_then(|r| this.repo_rows(r).first().and_then(|i| this.tree.changed.get(*i)).map(|(p, _)| p.clone()));
                     let still: HashSet<PathBuf> = this.tree.changed.iter().map(|(p, _)| p.clone()).collect();
                     if let Some(c) = this.changes.as_mut().filter(|c| c.root.starts_with(&root) && c.picked.as_ref().is_none_or(|p| !still.contains(p))) {
-                        if let Some(repo) = first_repo.filter(|r| *r != c.root) {
-                            c.root = repo.clone();
-                            c.commits = None;
-                            c.commit = None;
-                            c.commit_files = None;
-                            c.commit_file = None;
-                            c.top = None;
-                            this.tree.repo = Some(repo);
-                        }
-                        let Some(c) = this.changes.as_mut() else { return };
                         c.marked.retain(|p| still.contains(p));
                         c.left_out.retain(|p| still.contains(p));
                         c.picked = first.clone();
@@ -3105,6 +3091,10 @@ impl Workbench {
         let state = cx.new(|cx| {
             let mut state = gpui_component::input::EditorState::new(window, cx).language(language).line_number(true).soft_wrap(true).tab_size(gpui_component::input::TabSize { tab_size: columns, hard_tabs: tabs });
             state.set_next_line_indent(move |before, above| Some(emaki_core::indent::after(lang, before, above, &step)));
+            // A pair's close as its open is typed, and a pair around a
+            // selection, as VS Code has them for the language.
+            let (closing, surround) = emaki_core::pairs::for_lang(lang);
+            state.set_auto_pairs(gpui_component::input::AutoPairs { closing, surround });
             state.set_value(text, window, cx);
             state
         });
@@ -3503,6 +3493,10 @@ impl Workbench {
         // question is that pane's. Else in the middle of the window.
         let over = self.file_pane_bounds().filter(|b| self.file_view.as_ref().is_some_and(|v| v.path == ask.path) && b.size.width > px(120.));
         let card_w = over.map(|b| (b.size.width - px(24.)).min(px(420.))).unwrap_or(px(420.));
+        // Three buttons in a row, or one under another where the card
+        // is too narrow for the row: a row that wrapped put one alone
+        // on a line of its own.
+        let stack = Self::pills_stack(&["Don't Save", "Cancel", "Save"], card_w.min(self.card_room(420.)) - px(32.));
         let answer = |answer: FileAnswer| {
             cx.listener(move |this, _: &ClickEvent, window, cx| {
                 swallow_click(window, cx);
@@ -3543,17 +3537,16 @@ impl Workbench {
                     .shadow(float_shadow(&theme))
                     .child(div().w_full().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(format!("Do you want to save the changes you made to {name}?")))
                     .child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child("Your changes will be lost if you don't save them."))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .pt(px(2.))
-                            .gap(px(8.))
-                            .flex_wrap()
-                            .child(choice_pill("file-ask-discard", "icons/trash.svg", "Don't Save", Press::Danger, false, &theme).on_click(answer(FileAnswer::Discard)))
-                            .child(div().flex_1())
-                            .child(choice_pill("file-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(answer(FileAnswer::Cancel)))
-                            .child(choice_pill("file-ask-save", "icons/check.svg", "Save", Press::Primary, false, &theme).on_click(answer(FileAnswer::Save))),
-                    )
+                    .child({
+                        let discard = choice_pill("file-ask-discard", "icons/trash.svg", "Don't Save", Press::Danger, false, &theme).on_click(answer(FileAnswer::Discard));
+                        let cancel = choice_pill("file-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(answer(FileAnswer::Cancel));
+                        let save = choice_pill("file-ask-save", "icons/check.svg", "Save", Press::Primary, false, &theme).on_click(answer(FileAnswer::Save));
+                        if stack {
+                            v_flex().w_full().pt(px(2.)).gap(px(8.)).child(save.w_full().justify_center()).child(discard.w_full().justify_center()).child(cancel.w_full().justify_center()).into_any_element()
+                        } else {
+                            h_flex().w_full().pt(px(2.)).gap(px(8.)).child(discard).child(div().flex_1()).child(cancel).child(save).into_any_element()
+                        }
+                    })
                     .with_animation(ElementId::Name(format!("file-ask-in-{}", self.file_ask_serial).into()), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-6. * (1. - t)))),
             )
             .into_any_element()
@@ -4964,11 +4957,26 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Whether a card's buttons go one under another: when a row of them,
+    /// by their words, is wider than the room the card has at this
+    /// window width. Stacked, the one that does the thing is first and
+    /// Cancel last, as the Mac stacks them.
+    pub(crate) fn pills_stack(labels: &[&str], room: Pixels) -> bool {
+        let row: f32 = labels.iter().map(|l| 43. + l.chars().count() as f32 * 7.).sum::<f32>() + 8. * labels.len().saturating_sub(1) as f32;
+        px(row) > room
+    }
+
+    /// How wide a card of `w` at most is in this window.
+    pub(crate) fn card_room(&self, w: f32) -> Pixels {
+        px(w).min(self.win_w * 0.94)
+    }
+
     /// A question on the window's own card over everything: a line, a
-    /// line under it, and its two buttons.
+    /// line under it, and its two buttons, which `labels` name.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, no: impl IntoElement, yes: impl IntoElement, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, labels: [&str; 2], no: Stateful<Div>, yes: Stateful<Div>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let stack = Self::pills_stack(&labels, self.card_room(420.) - px(32.));
         div()
             .id(SharedString::from(format!("{id}-overlay")))
             .absolute()
@@ -4995,7 +5003,11 @@ impl Workbench {
                     .shadow(float_shadow(&theme))
                     .child(div().w_full().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(title))
                     .when(!detail.is_empty(), |d| d.child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child(detail)))
-                    .child(h_flex().w_full().pt(px(2.)).gap(px(8.)).child(div().flex_1()).child(no).child(yes))
+                    .child(if stack {
+                        v_flex().w_full().pt(px(2.)).gap(px(8.)).child(yes.w_full().justify_center()).child(no.w_full().justify_center()).into_any_element()
+                    } else {
+                        h_flex().w_full().pt(px(2.)).gap(px(8.)).child(div().flex_1()).child(no).child(yes).into_any_element()
+                    })
                     .with_animation(ElementId::Name(format!("{id}-in-{serial}").into()), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-6. * (1. - t)))),
             )
             .into_any_element()
@@ -5092,8 +5104,8 @@ impl Workbench {
             this.discard_now(cx);
         });
         let no = choice_pill("discard-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
-        let yes = choice_pill("discard-ask-yes", if new > 0 && new == paths.len() { "icons/trash.svg" } else { "icons/undo-2.svg" }, yes, Press::Danger, false, cx.theme()).on_click(go);
-        self.ask_card("discard-ask", serial, title, detail, no, yes, cx)
+        let yes_el = choice_pill("discard-ask-yes", if new > 0 && new == paths.len() { "icons/trash.svg" } else { "icons/undo-2.svg" }, yes, Press::Danger, false, cx.theme()).on_click(go);
+        self.ask_card("discard-ask", serial, title, detail, ["Cancel", yes], no, yes_el, cx)
     }
 
     /// "@path" at the end of what is typed, as the composer's own "@"
@@ -5663,7 +5675,7 @@ impl Workbench {
             if !this.tree_rename_key(e, window, cx) {
                 this.tree_key(e, cx);
             }
-        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.branch_pill(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body);
+        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body);
         self.panel_in(true, el)
     }
 
@@ -5715,36 +5727,76 @@ impl Workbench {
             .or_else(|| repos.first().cloned())
     }
 
-    /// The comparison's rows: the changed files, under a head for each
-    /// checkout that has any in a folder of them.
-    pub(crate) fn change_rows(&self) -> Vec<ChangeRow> {
-        let changed = &self.tree.changed;
-        let repos = self.folder_repos();
-        if repos.is_empty() {
-            return (0..changed.len()).map(ChangeRow::File).collect();
-        }
-        let mut rows = Vec::new();
-        for dir in repos {
-            let files: Vec<usize> = changed.iter().enumerate().filter(|(_, (p, _))| p.starts_with(&dir)).map(|(i, _)| i).collect();
-            if files.is_empty() {
-                continue;
-            }
-            let branch = self.tree.branches.iter().find(|(of, _)| *of == dir).map(|(_, b)| b.label());
-            rows.push(ChangeRow::Repo { dir, branch, count: files.len() });
-            rows.extend(files.into_iter().map(ChangeRow::File));
-        }
-        rows
+    /// The comparison's rows: the changed files of the checkout it is
+    /// on, by their place in `Tree::changed`.
+    pub(crate) fn change_rows(&self) -> Vec<usize> {
+        self.changes.as_ref().map(|c| self.repo_rows(&c.root)).unwrap_or_default()
     }
 
-    /// A click on a checkout's head: the comparison goes to it, on its
-    /// first file.
-    fn change_repo(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        let Some(first) = self.tree.changed.iter().find(|(p, _)| p.starts_with(&dir)).map(|(p, _)| p.clone()) else { return };
-        if let Some(c) = &mut self.changes {
-            c.marked = vec![first.clone()];
-            c.anchor = Some(first.clone());
+    /// The changed files under `root`, by their place in `Tree::changed`:
+    /// every one in a folder that is a repository, and in a folder of
+    /// checkouts that checkout's own.
+    pub(crate) fn repo_rows(&self, root: &Path) -> Vec<usize> {
+        let one_of = self.repo_of(root).is_some();
+        self.tree.changed.iter().enumerate().filter(|(_, (p, _))| !one_of || p.starts_with(root)).map(|(i, _)| i).collect()
+    }
+
+    /// How many files have a change in the checkout at `dir`.
+    pub(crate) fn repo_changes(&self, dir: &Path) -> usize {
+        self.tree.changed.iter().filter(|(p, _)| p.starts_with(dir)).count()
+    }
+
+    /// A checkout's name: its folder's.
+    pub(crate) fn repo_name(dir: &Path) -> String {
+        dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    }
+
+    /// Where a commit or a push went, for the notice line: the branch,
+    /// and in a folder of checkouts the checkout's name before it.
+    pub(crate) fn git_where(&self) -> String {
+        let branch = self.branches().map(|b| b.label()).unwrap_or_default();
+        match self.git_dir().filter(|d| self.repo_of(d).is_some()) {
+            Some(d) => format!("{} / {branch}", Self::repo_name(&d)),
+            None => branch,
         }
-        self.pick_change(first, cx);
+    }
+
+    /// The comparison taken to another checkout of the folder: its
+    /// files, its commit, its history and its branch. The words typed
+    /// for a commit here are kept for the way back, and any typed there
+    /// before are put in the fields.
+    pub(crate) fn change_repo(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let first = self.repo_rows(&dir).first().and_then(|i| self.tree.changed.get(*i)).map(|(p, _)| p.clone());
+        let (summary, body) = (self.commit_summary.read(cx).value().to_string(), self.commit_body.read(cx).value().to_string());
+        let Some(c) = &mut self.changes else { return };
+        if c.root == dir {
+            return;
+        }
+        let was = std::mem::replace(&mut c.root, dir.clone());
+        c.drafts.insert(was, (summary, body));
+        let (summary, body) = c.drafts.remove(&dir).unwrap_or_default();
+        c.marked = first.iter().cloned().collect();
+        c.anchor = first.clone();
+        c.picked = first;
+        c.diff = None;
+        c.reading = false;
+        c.list.reset(0);
+        c.commits = None;
+        c.commit = None;
+        c.commit_files = None;
+        c.commit_file = None;
+        c.top = None;
+        c.files.scroll_to_item(0, ScrollStrategy::Top);
+        let history = c.history;
+        self.tree.repo = Some(dir);
+        self.commit_summary.update(cx, |s, cx| s.set_value(summary, window, cx));
+        self.commit_body.update(cx, |s, cx| s.set_value(body, window, cx));
+        self.branch_fetch(false, cx);
+        if history {
+            self.history_load(cx);
+        } else {
+            self.load_diff(cx);
+        }
         cx.notify();
     }
 
@@ -5766,11 +5818,14 @@ impl Workbench {
     }
 
     /// At the right of the files' head: the branch checked out, on a
-    /// button that opens the list of them.
-    fn branch_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// button that opens the list of them. Without `named` it is the
+    /// icon alone, the name its hover label: a folder of checkouts in a
+    /// narrow panel, where the checkout's name is the one that matters.
+    fn branch_pill(&self, named: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
         let b = self.branches()?;
         let open = self.branch_menu.is_some();
+        let label = b.label();
         Some(
             h_flex()
                 .id("branch-pill")
@@ -5796,13 +5851,182 @@ impl Workbench {
                         move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![("Copy Branch Name", MenuDo::Copy(name.clone()))], cx)
                     }),
                 )
+                .when(!named, |d| d.flex_shrink_0().managed_tooltip(move |window, cx| crate::workbench::tip(label.clone(), window, cx)))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
-                // Of a folder of checkouts, which one: the branch is its.
-                .when_some(self.git_dir().filter(|d| self.repo_of(d).is_some()).and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string())), |d, repo| d.child(div().flex_shrink_0().text_color(theme.muted_foreground).child(format!("{repo} /"))))
-                .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(b.label()))
+                .when(named, |d| d.child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(b.label())))
                 .child(Icon::new(IconName::ChevronDown).with_size(px(9.)).text_color(theme.muted_foreground).flex_shrink_0())
                 .into_any_element(),
         )
+    }
+
+    /// Before the branch, in a folder of checkouts: which one, on a
+    /// button that opens the list of them. `id` tells the head's from
+    /// the comparison's.
+    pub(crate) fn repo_pill(&self, id: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let dir = self.git_dir().filter(|d| self.repo_of(d).is_some())?;
+        let open = self.repo_menu.is_some();
+        Some(
+            h_flex()
+                .id(id)
+                .min_w_0()
+                .max_w(px(150.))
+                .h(px(21.))
+                .px(px(7.))
+                .gap(px(4.))
+                .items_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(if open { theme.muted } else { theme.background.opacity(0.6) })
+                .hover(|s| s.bg(theme.muted))
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(theme.foreground)
+                .managed_tooltip(|window, cx| crate::workbench::tip("Switch repositories", window, cx))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| this.repo_menu_toggle(ev.position(), window, cx)))
+                .child(Icon::default().path("icons/folder.svg").with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
+                .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(Self::repo_name(&dir)))
+                .child(Icon::new(IconName::ChevronDown).with_size(px(9.)).text_color(theme.muted_foreground).flex_shrink_0())
+                .into_any_element(),
+        )
+    }
+
+    /// The head's git buttons: the repository, in a folder of checkouts,
+    /// then the branch. None outside a repository. With both, the
+    /// branch's name goes under `NAMED_BRANCH_AT`: at the panel's own
+    /// width the two names and the count do not fit beside "Files".
+    fn git_pills(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let repo = self.repo_pill("repo-pill", cx);
+        let branch = self.branch_pill(repo.is_none() || self.panel_w_now() >= NAMED_BRANCH_AT, cx)?;
+        Some(h_flex().min_w_0().gap(px(6.)).items_center().children(repo).child(branch).into_any_element())
+    }
+
+    pub(crate) fn repo_menu_toggle(&mut self, at: Point<Pixels>, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.repo_menu.take().is_none() {
+            self.repo_menu = Some(at);
+            // The counts as they are now, not as the clock last read them.
+            if let Some(root) = self.files_root() {
+                self.read_git(root, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn close_repo_menu(&mut self, cx: &mut Context<Self>) {
+        self.repo_menu = None;
+        cx.notify();
+    }
+
+    /// A checkout chosen in the list: git is asked of it from here, and
+    /// the comparison, while it is up, goes to it.
+    pub(crate) fn repo_pick(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.repo_menu = None;
+        self.tree.repo = Some(dir.clone());
+        if self.changes.is_some() {
+            self.change_repo(dir, window, cx);
+        } else {
+            self.branch_fetch(false, cx);
+        }
+        cx.notify();
+    }
+
+    /// The folder's checkouts, as VS Code's Repositories view lists
+    /// them: each one's name, its branch, how it stands against the
+    /// remote's as last fetched, and how many of its files have a
+    /// change; the one in use ticked. A click takes git, and the
+    /// comparison, to it.
+    pub(crate) fn render_repo_menu(&self, at: Point<Pixels>, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let using = self.git_dir();
+        let view = window.viewport_size();
+        let w = px(380.).min(view.width - px(16.));
+        let x = (at.x - px(40.)).min(view.width - w - px(8.)).max(px(8.));
+        let y = (at.y + px(16.)).min(view.height - px(200.)).max(px(8.));
+        let mut list = v_flex().w_full();
+        for (ix, dir) in self.folder_repos().into_iter().enumerate() {
+            let here = using.as_ref() == Some(&dir);
+            let b = self.tree.branches.iter().find(|(of, _)| *of == dir).map(|(_, b)| b.clone());
+            let n = self.repo_changes(&dir);
+            let to = dir.clone();
+            list = list.child(
+                h_flex()
+                    .id(("repo-row", ix))
+                    .h(BRANCH_ROW_H)
+                    .flex_shrink_0()
+                    .px(px(8.))
+                    .gap(px(8.))
+                    .items_center()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .hover(|s| s.bg(theme.sidebar_accent))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.repo_pick(to.clone(), window, cx)
+                    }))
+                    .child(div().w(px(14.)).flex_shrink_0().when(here, |d| d.child(Icon::new(IconName::Check).with_size(px(13.)))))
+                    .child(div().flex_shrink_0().max_w(px(150.)).truncate().when(here, |d| d.font_weight(FontWeight::MEDIUM)).child(Self::repo_name(&dir)))
+                    .child(
+                        h_flex().flex_1().min_w_0().gap(px(3.)).items_center().text_size(px(11.5)).text_color(theme.muted_foreground).children(b.as_ref().map(|b| {
+                            [Icon::default().path("icons/git-branch.svg").with_size(px(11.)).flex_shrink_0().into_any_element(), div().min_w_0().truncate().child(b.label()).into_any_element()]
+                        }).into_iter().flatten()),
+                    )
+                    // Against the remote's, as last fetched: up with
+                    // commits to push, down with commits to pull.
+                    .children(b.as_ref().filter(|b| b.ahead > 0 || b.behind > 0).map(|b| {
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap(px(4.))
+                            .items_center()
+                            .text_size(px(11.))
+                            .text_color(theme.muted_foreground)
+                            .when(b.ahead > 0, |d| d.child(h_flex().gap(px(1.)).items_center().child(Icon::new(IconName::ArrowUp).with_size(px(10.))).child(b.ahead.to_string())))
+                            .when(b.behind > 0, |d| d.child(h_flex().gap(px(1.)).items_center().child(Icon::new(IconName::ArrowDown).with_size(px(10.))).child(b.behind.to_string())))
+                    }))
+                    .child(div().w(px(26.)).flex_shrink_0().text_right().text_size(px(11.5)).text_color(theme.foreground).when(n > 0, |d| d.child(crate::format::thousands(n)))),
+            );
+        }
+        let card = v_flex()
+            .id("repo-card")
+            .absolute()
+            .left(x)
+            .top(y)
+            .w(w)
+            .max_h(view.height - y - px(8.))
+            .rounded(px(12.))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(float_shadow(&theme))
+            .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx))
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .pl(px(14.))
+                    .pr(px(8.))
+                    .pt(px(10.))
+                    .pb(px(8.))
+                    .items_center()
+                    .justify_between()
+                    .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Repositories"))
+                    .child(Button::new("repo-close").ghost().xsmall().icon(IconName::Close).on_click(cx.listener(|this, _, _, cx| this.close_repo_menu(cx)))),
+            )
+            .child(
+                v_flex()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .pb(px(2.))
+                    .child(v_flex().id("repo-scroll").max_h(BRANCH_ROW_H * 10. + px(10.)).overflow_y_scroll().track_scroll(&self.repo_scroll).p(px(5.)).child(list))
+                    .vertical_scrollbar(&self.repo_scroll),
+            );
+        let shut = |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| this.close_repo_menu(cx);
+        div().id("repo-sheet").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(shut)).on_mouse_down(MouseButton::Right, cx.listener(shut)).child(card).into_any_element()
     }
 
     pub(crate) fn branch_menu_toggle(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
@@ -6223,6 +6447,8 @@ impl Workbench {
         // Leaving is the choice to begin with, as in GitHub Desktop, where
         // there is a branch to leave them on.
         let (name, create, leave) = (ask.name.clone(), ask.create, ask.leave && can_leave);
+        let go_label = if create { "Create branch" } else { "Switch branch" };
+        let stack = Self::pills_stack(&["Cancel", go_label], self.card_room(440.) - px(32.));
         // With neither on offer (a detached head whose changes do not
         // fit) there is nothing to go ahead with.
         let ready = leave || fits;
@@ -6267,23 +6493,24 @@ impl Workbench {
                             .child(div().h(px(1.)).w_full().bg(theme.border))
                             .child(option("ask-bring", !leave && fits, fits, format!("Bring my changes to {name}"), bring_line).on_click(pick(false))),
                     )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_end()
-                            .gap(px(8.))
-                            .child(choice_pill("ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                    .child({
+                        let cancel = choice_pill("ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.branch_ask = None;
+                            cx.notify();
+                        }));
+                        let go = choice_pill("ask-go", "icons/git-branch.svg", go_label, Press::Primary, !ready, &theme).when(ready, |d| {
+                            d.on_click(cx.listener(move |this, _, window, cx| {
                                 swallow_click(window, cx);
-                                this.branch_ask = None;
-                                cx.notify();
-                            })))
-                            .child(choice_pill("ask-go", "icons/git-branch.svg", if create { "Create branch" } else { "Switch branch" }, Press::Primary, !ready, &theme).when(ready, |d| {
-                                d.on_click(cx.listener(move |this, _, window, cx| {
-                                    swallow_click(window, cx);
-                                    this.branch_run(name.clone(), create, if leave { git::Carry::Leave } else { git::Carry::Bring }, cx);
-                                }))
-                            })),
-                    ),
+                                this.branch_run(name.clone(), create, if leave { git::Carry::Leave } else { git::Carry::Bring }, cx);
+                            }))
+                        });
+                        if stack {
+                            v_flex().w_full().gap(px(8.)).child(go.w_full().justify_center()).child(cancel.w_full().justify_center()).into_any_element()
+                        } else {
+                            h_flex().w_full().justify_end().gap(px(8.)).child(cancel).child(go).into_any_element()
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -6532,7 +6759,11 @@ impl Workbench {
         // There in any repository, with nothing changed too: the sheet
         // it opens has the history as well, and Push.
         self.branches()?;
-        let n = self.tree.git.as_ref().filter(|(of, _)| *of == root).map_or(0, |_| self.tree.changed.len());
+        // Of a folder of checkouts, the one in use's.
+        let n = self.tree.git.as_ref().filter(|(of, _)| *of == root).map_or(0, |_| match self.git_dir() {
+            Some(d) if self.repo_of(&d).is_some() => self.repo_changes(&d),
+            _ => self.tree.changed.len(),
+        });
         // A button as the branch's is, lit while its sheet is up.
         let open = self.changes.is_some();
         let tip = if n > 0 { format!("{} \u{b7} Changes and History (⌘⇧G)", plural(n, "changed file", "changed files")) } else { "Changes and History (⌘⇧G)".to_string() };
@@ -6564,19 +6795,20 @@ impl Workbench {
     /// Show the comparison, on that file or on the first changed one.
     pub(crate) fn open_changes(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
         let Some(folder) = self.files_root() else { return };
-        // Of a folder of checkouts, the one in use, and its first change.
-        let repo = self.git_dir().filter(|d| *d != folder);
-        let picked = path.or_else(|| self.tree.changed.iter().find(|(p, _)| repo.as_ref().is_none_or(|r| p.starts_with(r))).or(self.tree.changed.first()).map(|(p, _)| p.clone()));
-        let root = picked.as_ref().and_then(|p| self.repo_of(p)).or(repo).unwrap_or(folder);
+        // Of a folder of checkouts, the one the file named is in, else
+        // the one in use; and with no file named, its first change.
+        let root = path.as_ref().and_then(|p| self.repo_of(p)).or_else(|| self.git_dir()).unwrap_or(folder);
         if self.repo_of(&root).is_some() {
             self.tree.repo = Some(root.clone());
         }
+        let rows = self.repo_rows(&root);
+        let picked = path.or_else(|| rows.first().and_then(|i| self.tree.changed.get(*i)).map(|(p, _)| p.clone()));
         let files = UniformListScrollHandle::new();
-        if let Some(at) = picked.as_ref().and_then(|p| self.change_rows().iter().position(|r| matches!(r, ChangeRow::File(i) if self.tree.changed.get(*i).is_some_and(|(c, _)| c == p)))) {
+        if let Some(at) = picked.as_ref().and_then(|p| rows.iter().position(|i| self.tree.changed.get(*i).is_some_and(|(c, _)| c == p))) {
             files.scroll_to_item(at, ScrollStrategy::Center);
         }
         let marked: Vec<PathBuf> = picked.iter().cloned().collect();
-        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, pictures: [None, None], list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, top: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None });
+        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, pictures: [None, None], list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), drafts: HashMap::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, top: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None });
         self.changes_focus_due = true;
         // How the branch stands against the remote's, for the buttons
         // that push and pull.
@@ -6621,20 +6853,6 @@ impl Workbench {
     }
 
     fn pick_change(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        // Of a folder of checkouts, a file of another one takes the
-        // comparison there: its commit, its history and its branch.
-        let repo = self.repo_of(&path);
-        let Some(c) = &mut self.changes else { return };
-        if let Some(repo) = repo.filter(|r| *r != c.root) {
-            c.root = repo.clone();
-            c.commits = None;
-            c.commit = None;
-            c.commit_files = None;
-            c.commit_file = None;
-            c.top = None;
-            self.tree.repo = Some(repo);
-            self.branch_fetch(false, cx);
-        }
         let Some(c) = &mut self.changes else { return };
         if c.picked.as_ref() != Some(&path) {
             c.picked = Some(path);
@@ -6649,7 +6867,7 @@ impl Workbench {
     /// the last one clicked to it is chosen. The file shown is one of
     /// them while any is chosen.
     fn change_click(&mut self, path: PathBuf, m: Modifiers, cx: &mut Context<Self>) {
-        let order: Vec<PathBuf> = self.tree.changed.iter().map(|(p, _)| p.clone()).collect();
+        let order: Vec<PathBuf> = self.change_rows().iter().filter_map(|i| self.tree.changed.get(*i)).map(|(p, _)| p.clone()).collect();
         let Some(c) = &mut self.changes else { return };
         // The click that comes with letting a rectangle go is no click.
         if c.band_live || c.band_at.is_some_and(|at| at.elapsed() < Duration::from_millis(300)) {
@@ -6708,10 +6926,7 @@ impl Workbench {
                 let y = top + CHANGE_ROW_H * *ix as f32;
                 y < last && y + CHANGE_ROW_H > first
             })
-            .filter_map(|(_, row)| match row {
-                ChangeRow::File(i) => changed.get(*i).map(|(p, _)| p.clone()),
-                ChangeRow::Repo { .. } => None,
-            })
+            .filter_map(|(_, i)| changed.get(*i).map(|(p, _)| p.clone()))
             .collect();
         cx.notify();
     }
@@ -6831,66 +7046,27 @@ impl Workbench {
         let left_out: Rc<HashSet<PathBuf>> = Rc::new(c.left_out.clone());
         let (accent, on_accent) = (theme.primary, theme.primary_foreground);
         let rows = Rc::new(self.change_rows());
-        let repos = Rc::new(self.folder_repos());
+        // Of a folder of checkouts, which one the comparison is on: its
+        // name in what is said, and its button in the head.
+        let repo_name = self.repo_of(&root).map(|d| Self::repo_name(&d));
+        let repo_pill = self.repo_pill("changes-repo-pill", cx);
         let files = uniform_list("changes-files", rows.len(), {
             let (changed, root, marked, rows) = (changed.clone(), root.clone(), marked.clone(), rows.clone());
             move |range: std::ops::Range<usize>, _: &mut Window, _: &mut App| {
                 range
                     .map(|ix| {
-                        let fx = match &rows[ix] {
-                            ChangeRow::File(fx) => *fx,
-                            // A checkout's head, over its files: its
-                            // folder, its branch, how many; the one the
-                            // comparison is on in the accent. A click
-                            // takes the comparison to it.
-                            ChangeRow::Repo { dir, branch, count } => {
-                                let on = *dir == root;
-                                let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                                let (head_entity, to) = (entity.clone(), dir.clone());
-                                return div()
-                                    .w_full()
-                                    .h(CHANGE_ROW_H)
-                                    .px(px(6.))
-                                    .child(
-                                        h_flex()
-                                            .id(("change-repo", ix))
-                                            .w_full()
-                                            .h_full()
-                                            .px(px(8.))
-                                            .gap(px(6.))
-                                            .items_center()
-                                            .rounded(px(6.))
-                                            .cursor_pointer()
-                                            .text_size(px(12.))
-                                            .hover(move |s| s.bg(hover))
-                                            .on_click(move |_, window, cx| {
-                                                swallow_click(window, cx);
-                                                head_entity.update(cx, |this, cx| this.change_repo(to.clone(), cx)).ok();
-                                            })
-                                            .child(img(crate::file_icons::path(&name, true, true, dark)).size(px(16.)).flex_shrink_0())
-                                            .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(if on { accent } else { ink }).child(name))
-                                            .when_some(branch.clone(), |d, b| {
-                                                d.child(h_flex().min_w_0().gap(px(3.)).items_center().text_color(quiet).child(Icon::default().path("icons/git-branch.svg").with_size(px(11.)).flex_shrink_0()).child(div().min_w_0().truncate().child(b)))
-                                            })
-                                            .child(div().flex_1())
-                                            .child(div().flex_shrink_0().text_size(px(11.)).text_color(quiet).child(count.to_string())),
-                                    )
-                                    .into_any_element();
-                            }
-                        };
+                        let (at, fx) = (ix, rows[ix]);
                         let (path, state) = changed[fx].clone();
                         let ix = fx;
-                        let base = repos.iter().find(|r| path.starts_with(r)).unwrap_or(&root);
-                        let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+                        let rel = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
                         let (folder, name) = match rel.rfind('/') {
                             Some(cut) => (rel[..=cut].to_string(), rel[cut + 1..].to_string()),
                             None => (String::new(), rel.clone()),
                         };
                         let tint = git_color(state, dark);
                         // Chosen rows one under another are one lit block.
-                        let row_at = rows.iter().position(|r| matches!(r, ChangeRow::File(i) if *i == fx)).unwrap_or(0);
-                        let is = |at: Option<usize>| at.and_then(|at| rows.get(at)).is_some_and(|r| matches!(r, ChangeRow::File(i) if changed.get(*i).is_some_and(|(p, _)| marked.contains(p))));
-                        let (chosen, above, below) = (marked.contains(&path), is(row_at.checked_sub(1)), is(Some(row_at + 1)));
+                        let is = |at: Option<usize>| at.and_then(|at| rows.get(at)).is_some_and(|i| changed.get(*i).is_some_and(|(p, _)| marked.contains(p)));
+                        let (chosen, above, below) = (marked.contains(&path), is(at.checked_sub(1)), is(Some(at + 1)));
                         let (entity, menu_entity, menu_path) = (entity.clone(), entity.clone(), path.clone());
                         // The box that says the file goes into the commit.
                         let taken = !left_out.contains(&path);
@@ -6961,7 +7137,7 @@ impl Workbench {
         let rgba_of = |hex: u32, a: f32| Hsla::from(rgb(hex)).opacity(a);
         let (add, add_no, del, del_no) = if dark { (rgba_of(0x2ea043, 0.16), rgba_of(0x3fb950, 0.30), rgba_of(0xf85149, 0.14), rgba_of(0xf85149, 0.30)) } else { (Hsla::from(rgb(0xe6ffec)), Hsla::from(rgb(0xccffd8)), Hsla::from(rgb(0xffebe9)), Hsla::from(rgb(0xffd7d5))) };
         let body = match &shown {
-            None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { "Reading…" } else if c.history { "" } else { "Nothing has changed since the last commit." }).into_any_element(),
+            None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { "Reading…".to_string() } else if c.history { String::new() } else { match &repo_name { Some(r) => format!("Nothing has changed in {r} since the last commit."), None => "Nothing has changed since the last commit.".to_string() } }).into_any_element(),
             Some(d) if d.pictures.is_some() => picture_compare(d.pictures.as_ref().unwrap(), &c.pictures, &theme),
             Some(d) if d.binary => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child("This file is not text, so there are no lines to compare.").into_any_element(),
             Some(d) if d.rows.is_empty() => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child("No lines differ (the file is empty, or only its mode changed).").into_any_element(),
@@ -7023,13 +7199,7 @@ impl Workbench {
             div().absolute().left(left - room.left()).top(top - room.top()).w((right - left).max(px(0.))).h((bottom - top).max(px(0.))).rounded(px(3.)).border_1().border_color(theme.primary.opacity(0.7)).bg(theme.primary.opacity(0.12))
         });
         let counts = shown.as_ref().filter(|d| !d.binary).map(|d| (d.added, d.removed));
-        // Of a folder of checkouts, the branch is the one of the checkout
-        // the comparison is on, named with it.
-        let repo_name = self.repo_of(&root).and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()));
-        let branch = self.branches().map(|b| match &repo_name {
-            Some(repo) => format!("{repo} / {}", b.label()),
-            None => b.label(),
-        });
+        let branch = self.branches().map(|b| b.label());
         div()
             .id("changes-overlay")
             .absolute()
@@ -7070,7 +7240,7 @@ impl Workbench {
                             return;
                         }
                         if keys.key == "a" && keys.modifiers.secondary() && !keys.modifiers.shift && !keys.modifiers.alt && this.changes_focus.is_focused(window) {
-                            let all: Vec<PathBuf> = this.tree.changed.iter().map(|(p, _)| p.clone()).collect();
+                            let all: Vec<PathBuf> = this.change_rows().iter().filter_map(|i| this.tree.changed.get(*i)).map(|(p, _)| p.clone()).collect();
                             if let Some(c) = &mut this.changes {
                                 c.anchor = all.first().cloned();
                                 c.marked = all;
@@ -7115,8 +7285,10 @@ impl Workbench {
                                 true,
                                 cx,
                             )))
-                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(quiet).child(if c.history { c.commits.as_ref().map(|l| plural(l.len(), "commit", "commits")).unwrap_or_default() } else { plural(changed.len(), "file", "files") }))
-                            .when_some(branch, |el, b| el.child(h_flex().min_w_0().gap(px(4.)).items_center().text_size(px(12.)).text_color(quiet).child("on").child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).flex_shrink_0()).child(div().min_w_0().truncate().text_color(ink).child(b))))
+                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(quiet).child(if c.history { c.commits.as_ref().map(|l| plural(l.len(), "commit", "commits")).unwrap_or_default() } else { plural(rows.len(), "file", "files") }))
+                            // Of a folder of checkouts, the one the sheet
+                            // is on stands before the branch, a button.
+                            .when_some(branch, |el, b| el.child(h_flex().min_w_0().gap(px(6.)).items_center().text_size(px(12.)).text_color(quiet).child("on").children(repo_pill).child(h_flex().min_w_0().gap(px(4.)).items_center().child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).flex_shrink_0()).child(div().min_w_0().truncate().text_color(ink).child(b)))))
                             .child(div().flex_1())
                             .child(Button::new("changes-close").ghost().small().icon(IconName::Close).on_click(cx.listener(|this, _, _, cx| this.close_changes(cx)))),
                     )
@@ -8249,6 +8421,10 @@ impl Workbench {
             "branches" => self.branch_probe = Some(String::new()),
             // The comparison, on the first changed file or on that one.
             "changes" => self.open_changes(None, cx),
+            // Of a folder of checkouts: the list of them, and one chosen
+            // by its name.
+            "repolist" => self.repo_menu = Some(point(px(80.), px(90.))),
+            t if t.starts_with("repo:") => self.repo_probe = self.folder_repos().into_iter().find(|d| Self::repo_name(d) == t["repo:".len()..]),
             // The comparison's other side, and ↓ in it.
             "history" => self.history_show(true, cx),
             "history:down" => self.history_step(true, cx),

@@ -4336,3 +4336,19 @@ fn a_deleted_session_waits_in_the_trash_and_comes_back_whole() {
     assert!(emaki_core::archive::everything_of(&archived).is_empty());
     assert!(trash::load().is_empty());
 }
+
+/// The editor's pairs follow the language, as VS Code's configurations
+/// have them: markdown closes no quote and surrounds with its marks,
+/// Rust closes its double quote, JSON has no parentheses.
+#[test]
+fn the_editors_pairs_follow_the_language() {
+    use emaki_core::pairs::for_lang;
+    let (md_close, md_round) = for_lang("md");
+    assert!(md_close.contains(&('<', '>')) && !md_close.contains(&('\'', '\'')));
+    assert!(md_round.contains(&('*', '*')) && md_round.contains(&('`', '`')));
+    let (rs_close, rs_round) = for_lang("rust");
+    assert!(rs_close.contains(&('"', '"')) && !rs_close.contains(&('\'', '\'')) && rs_round.contains(&('<', '>')));
+    let (json_close, _) = for_lang("json");
+    assert!(!json_close.contains(&('(', ')')));
+    assert_eq!(for_lang("nothing-known"), for_lang(""));
+}
