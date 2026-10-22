@@ -573,7 +573,7 @@ impl Workbench {
             .cursor_pointer()
             .text_color(if on { lit } else { theme.muted_foreground })
             .hover(move |s| s.bg(hover).text_color(lit))
-            .managed_tooltip(|window, cx| crate::workbench::tip("Shell Terminal in your home folder", window, cx))
+            .managed_tooltip(|window, cx| crate::workbench::tip("Shell Terminal in your home folder (⌘⇧S)", window, cx))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
             .children(fill)
             .child(Icon::default().path("icons/terminal.svg").with_size(px(15.)).relative());

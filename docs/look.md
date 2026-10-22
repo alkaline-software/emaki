@@ -253,12 +253,14 @@ face):
   (`terracotta`, `blue`, `graphite`) is periwinkle, `violet` orchid,
   `green` jade and `brass` amber (`look::accent`).
 - `chat_font`, one of the eight chat faces (The faces).
-- `chat_size` (`small`, `medium`, `large`), the window's one text size
-  ("Font size"): the terminal's goes with it. `AppConfig::chat_px`
-  turns it into the reply's pixel size, the prompt and thoughts a little
-  under. Medium is the Claude desktop app's body size and line height, read
-  from its stylesheet, which also sets bold to weight 600, matched through
-  the vendored toolkit's `strong_font_weight`.
+- `chat_size` (`small`, `medium`, `large`, `custom`) and `sizes`: how
+  large text is set in each place (`AppConfig::text_sizes`), a preset's
+  set or, Custom, the person's own, kept in `sizes` while a preset is
+  chosen (Text Size, `docs/window.md`).
+  `chat_px` is the reply's size, the prompt and thoughts a little under.
+  Medium's conversation is the Claude desktop app's body size and line
+  height, read from its stylesheet, which also sets bold to weight 600,
+  matched through the vendored toolkit's `strong_font_weight`.
 
 The window also sets `driver.default_mode` and `driver.default_model`.
 The terminal's own settings are under `terminal`, in the window's Terminal

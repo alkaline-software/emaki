@@ -31,6 +31,27 @@ const OWN: &[(&str, &[u8])] = &[
     ("icons/flags/fr.svg", include_bytes!("../assets/icons/flags/fr.svg")),
     ("icons/flags/de.svg", include_bytes!("../assets/icons/flags/de.svg")),
     ("icons/refresh.svg", include_bytes!("../assets/icons/refresh.svg")),
+    // The editor's find: whole word and replace all drawn in Tabler's
+    // manner, which has neither; regex is Tabler's.
+    ("icons/whole-word.svg", include_bytes!("../assets/icons/whole-word.svg")),
+    ("icons/regex.svg", include_bytes!("../assets/icons/regex.svg")),
+    ("icons/replace-all.svg", include_bytes!("../assets/icons/replace-all.svg")),
+    // Text Size's reset of one place to Medium's size.
+    ("icons/rotate.svg", include_bytes!("../assets/icons/rotate.svg")),
+    // A file's kind on its tile (`pictures::kind`).
+    ("icons/kinds/file-type-pdf.svg", include_bytes!("../assets/icons/kinds/file-type-pdf.svg")),
+    ("icons/kinds/file-word.svg", include_bytes!("../assets/icons/kinds/file-word.svg")),
+    ("icons/kinds/file-spreadsheet.svg", include_bytes!("../assets/icons/kinds/file-spreadsheet.svg")),
+    ("icons/kinds/presentation.svg", include_bytes!("../assets/icons/kinds/presentation.svg")),
+    ("icons/kinds/file-text.svg", include_bytes!("../assets/icons/kinds/file-text.svg")),
+    ("icons/kinds/markdown.svg", include_bytes!("../assets/icons/kinds/markdown.svg")),
+    ("icons/kinds/file-code.svg", include_bytes!("../assets/icons/kinds/file-code.svg")),
+    ("icons/kinds/file-database.svg", include_bytes!("../assets/icons/kinds/file-database.svg")),
+    ("icons/kinds/file-zip.svg", include_bytes!("../assets/icons/kinds/file-zip.svg")),
+    ("icons/kinds/file-music.svg", include_bytes!("../assets/icons/kinds/file-music.svg")),
+    ("icons/kinds/movie.svg", include_bytes!("../assets/icons/kinds/movie.svg")),
+    ("icons/kinds/photo.svg", include_bytes!("../assets/icons/kinds/photo.svg")),
+    ("icons/kinds/file.svg", include_bytes!("../assets/icons/kinds/file.svg")),
     ("icons/scroll.svg", include_bytes!("../assets/icons/scroll.svg")),
     ("icons/archive.svg", include_bytes!("../assets/icons/archive.svg")),
     ("icons/bubble-tail.svg", include_bytes!("../assets/icons/bubble-tail.svg")),
@@ -177,21 +198,6 @@ const OWN: &[(&str, &[u8])] = &[
     ("icons/undo.svg", include_bytes!("../assets/icons/undo.svg")),
     ("icons/user.svg", include_bytes!("../assets/icons/user.svg")),
 ];
-
-/// The icon that stands for a file of this name when there is no thumbnail.
-pub fn file_icon_path(name: &str) -> &'static str {
-    let ext = std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    match ext.as_str() {
-        "md" | "txt" | "rtf" | "doc" | "docx" | "pdf" | "pages" | "tex" | "log" => "icons/file-text.svg",
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "json" | "toml" | "yaml" | "yml" | "html" | "css" | "sh" | "zsh" | "go" | "c" | "h" | "cpp" | "java" | "rb" | "swift" | "sql" | "r" | "jl" | "lua" => "icons/file-code.svg",
-        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "dmg" => "icons/file-archive.svg",
-        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "aiff" => "icons/file-audio.svg",
-        "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" => "icons/file-video.svg",
-        "csv" | "tsv" | "xls" | "xlsx" | "numbers" | "parquet" => "icons/file-table.svg",
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "heic" | "bmp" | "tiff" => "icons/file-image.svg",
-        _ => "icons/file.svg",
-    }
-}
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {

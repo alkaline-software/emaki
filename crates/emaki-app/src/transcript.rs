@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use std::collections::HashSet;
 
-use crate::workbench::{agent_color, agent_glyph, agent_icon, badge_str, file_icon, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W, OUTGOING};
+use crate::workbench::{agent_color, agent_glyph, agent_icon, badge_str, file_kind, fit_thumb, human_size, swallow_click, Workbench, CONTENT_W, OUTGOING};
 
 const MAX_BODY: usize = 6000;
 /// An opened tool call shows at most this much before it scrolls inside
@@ -102,16 +102,22 @@ static CHAT_MARKDOWN: std::sync::LazyLock<gpui_component::text::MarkdownExtensio
 /// smaller cut of the monospace face (`fonts::inline_mono_family`), so
 /// it stands no taller than they do.
 pub(crate) fn chat_md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, cx)
 }
 
 /// Markdown as a document draws it, a file's or a page's: all of GFM,
 /// as GitHub reads the file.
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, cx)
 }
 
-fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, cx: &App) -> impl IntoElement {
+/// `md_view`, with words found in it painted (`TextFind`): a file as it
+/// reads, with its find open.
+pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component::text::TextFind>, cx: &App) -> impl IntoElement {
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, find, cx)
+}
+
+fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, find: Option<gpui_component::text::TextFind>, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown as it is, in a code block,
     // rather than taking the window down.
@@ -121,10 +127,14 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, c
     let border = theme.border;
     TextView::markdown(SharedString::from(format!("{id}-{}", if dark { "d" } else { "l" })), text)
         .selectable(true)
+        .find(find)
         .when(chat, |v| v.markdown_extensions(CHAT_MARKDOWN.clone()))
         .style(
             TextViewStyle {
-                heading_base_font_size: px(15.),
+                // The headings' sizes go from the text's own where the view
+                // stands (the vendored `node.rs`): set from a fixed size,
+                // they stayed as they were when the text was made larger.
+                heading_base_font_size: Pixels::ZERO,
                 // The toolkit's sizes, but for the first level: twice
                 // the text's was a poster's headline over a reply.
                 heading_font_size: Some(std::sync::Arc::new(|level, base| {
@@ -182,6 +192,20 @@ pub(crate) fn explain_card(id: String, text: String, pending: bool, size: Pixels
 
 /// The strip under a picture tile: its name, centred, in the mono face on
 /// a muted ground, wrapping when it is long.
+/// The box a prompt's picture is drawn in: `GALLERY_H` tall, as wide as
+/// its shape gives within `GALLERY_W`, so pictures of every shape stand
+/// in one even row. One whose size is not known gets a 4:3 box.
+pub(crate) fn gallery_box(size: Option<(u32, u32)>) -> (f32, f32) {
+    let w = match size {
+        Some((w, h)) if w > 0 && h > 0 => GALLERY_H * w as f32 / h as f32,
+        _ => GALLERY_H * 4. / 3.,
+    };
+    (w.clamp(GALLERY_W.0, GALLERY_W.1), GALLERY_H)
+}
+
+const GALLERY_H: f32 = 132.;
+const GALLERY_W: (f32, f32) = (84., 264.);
+
 pub(crate) fn tile_caption(w: f32, name: String, theme: &gpui_component::Theme) -> impl IntoElement {
     div()
         .w(px(w))
@@ -194,7 +218,7 @@ pub(crate) fn tile_caption(w: f32, name: String, theme: &gpui_component::Theme) 
         .text_size(px(11.))
         .text_color(theme.muted_foreground)
         .text_center()
-        .whitespace_normal()
+        .truncate()
         .child(name)
 }
 
@@ -694,14 +718,22 @@ impl Workbench {
         let thumb_key = format!("{}:{}", a.uuid, a.index);
         let is_image = a.kind == "image";
         let (t2, p2, k2) = (title.clone(), path.clone(), thumb_key.clone());
+        let dark = theme.mode.is_dark();
         // Resolve the picture, and its size, before the click listener
         // borrows `cx`. The size shapes the tile so the whole picture shows.
         let mut size: Option<(u32, u32)> = None;
+        // A kept file is drawn from itself, or from the PNG made of a
+        // picture gpui does not read (`pictures::picture_source`).
+        let kept = path.as_ref().filter(|p| p.is_file()).and_then(|p| self.picture_source(p, cx));
         let source: Option<ImageSource> = if !is_image {
             None
-        } else if let Some(p) = path.as_ref().filter(|p| p.is_file()) {
-            size = self.kept_image_size(p);
-            Some(ImageSource::from(p.clone()))
+        } else if let Some(p) = kept.clone() {
+            size = self.kept_image_size(&p);
+            Some(ImageSource::from(p))
+        } else if path.as_ref().is_some_and(|p| p.is_file()) {
+            // A picture with no thumbnail to draw yet, or none at all:
+            // its tile, as any other file wears.
+            None
         } else if !a.uuid.is_empty() {
             self.thumb(ix, &a.uuid, a.index, cx).map(|t| {
                 size = t.size;
@@ -732,7 +764,7 @@ impl Workbench {
                             let pic = if !is_image {
                                 None
                             } else if let Some(p) = kept.clone() {
-                                Some(crate::workbench::Pic::File(p))
+                                this.picture_source(&p, cx).map(crate::workbench::Pic::File)
                             } else {
                                 this.detail.as_ref().and_then(|d| d.thumbs.get(&k3).cloned().flatten()).map(|t| crate::workbench::Pic::Bytes(t.image))
                             };
@@ -744,38 +776,37 @@ impl Workbench {
                     let image = if !is_image {
                         None
                     } else if let Some(p) = p2.as_ref().filter(|p| p.is_file()) {
-                        Some(ImageSource::from(p.clone()))
+                        this.picture_source(p, cx).map(ImageSource::from)
                     } else {
                         this.detail.as_ref().and_then(|d| d.thumbs.get(&k2).cloned().flatten()).map(|t| ImageSource::from(t.image))
                     };
-                    if is_image && image.is_none() {
+                    if is_image && image.is_none() && !p2.as_ref().is_some_and(|p| p.is_file()) {
                         return;
                     }
                     this.preview_attachment(t2.clone(), p2.clone(), image, window, cx);
                 }))
                 .child(el)
         };
-        if a.kind == "image" {
-            return match source {
-                Some(src) => {
-                    // The tile takes the picture's own shape, up to 240 by
-                    // 180, so nothing is cropped away; a picture whose size
-                    // the header did not give gets the old box, letterboxed.
-                    let (w, h) = fit_thumb(size, 240., 180., (176., 118.));
-                    let caption = if a.name.is_empty() { "image".to_string() } else { a.name.clone() };
-                    frame(
-                        v_flex()
-                            .child(img(src).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain))
-                            .child(tile_caption(w, caption, &theme))
-                            .into_any_element(),
-                    )
-                    .into_any_element()
-                }
-                None => frame(
-                    h_flex().h(px(48.)).px(px(12.)).gap(px(8.)).items_center().text_size(px(12.)).text_color(theme.muted_foreground).child(file_icon("x.png", px(18.), theme.muted_foreground)).child(if a.name.is_empty() { "image".to_string() } else { a.name.clone() }).into_any_element(),
-                )
-                .into_any_element(),
-            };
+        if let Some(src) = source.filter(|_| is_image) {
+            // Every picture of a prompt is one height, as wide as its own
+            // shape makes it within a range, so a row of them lines up;
+            // past the range the picture is letterboxed, never cropped.
+            let (w, h) = gallery_box(size);
+            let caption = if a.name.is_empty() { "image".to_string() } else { a.name.clone() };
+            return frame(
+                v_flex()
+                    .child(img(src).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain).bg(theme.muted))
+                    .child(tile_caption(w, caption, &theme))
+                    .into_any_element(),
+            )
+            .into_any_element();
+        }
+        if is_image && path.is_none() {
+            // A pasted block not read yet.
+            return frame(
+                h_flex().h(px(48.)).px(px(12.)).gap(px(8.)).items_center().text_size(px(12.)).text_color(theme.muted_foreground).child(crate::pictures::kind_tile("x.png", 32., dark)).child(title.clone()).into_any_element(),
+            )
+            .into_any_element();
         }
         frame(
             h_flex()
@@ -784,7 +815,7 @@ impl Workbench {
                 .pr(px(12.))
                 .gap(px(8.))
                 .items_center()
-                .child(div().size(px(32.)).rounded(px(8.)).bg(theme.muted).flex().items_center().justify_center().child(file_icon(&a.name, px(18.), theme.muted_foreground)))
+                .child(crate::pictures::kind_tile(&a.name, 32., dark))
                 .child(
                     v_flex()
                         .gap(px(1.))

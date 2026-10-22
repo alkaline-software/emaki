@@ -22,6 +22,25 @@ pub(crate) fn init(_cx: &mut App) {
     // No app-level init needed — TooltipOverlay is per-window via Root.
 }
 
+/// Emaki: how the application draws a hover's label, for the toolkit's
+/// own (the search panel's), so a key named in it is drawn as the
+/// application draws keys. Unset, the label is plain text.
+static LABEL: std::sync::OnceLock<fn(SharedString, &mut Window, &mut App) -> AnyView> = std::sync::OnceLock::new();
+
+/// Emaki: set how a hover's label is drawn (`label`).
+pub fn set_label(build: fn(SharedString, &mut Window, &mut App) -> AnyView) {
+    let _ = LABEL.set(build);
+}
+
+/// Emaki: a hover's label as the application draws it.
+pub fn label(text: impl Into<SharedString>, window: &mut Window, cx: &mut App) -> AnyView {
+    let text = text.into();
+    match LABEL.get() {
+        Some(build) => build(text, window, cx),
+        None => Tooltip::new(text).build(window, cx),
+    }
+}
+
 // ── Tooltip view (unchanged API) ────────────────────────────────────────────
 
 enum TooltipContext {

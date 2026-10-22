@@ -295,7 +295,8 @@ pub(crate) fn init(cx: &mut App) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-shift-f", Replace, Some(CONTEXT)),
+        // Emaki: ⌥⌘F, as VS Code has it; ⌘⇧F is the window's files panel.
+        KeyBinding::new("cmd-alt-f", Replace, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-h", Replace, Some(CONTEXT)),
     ]);

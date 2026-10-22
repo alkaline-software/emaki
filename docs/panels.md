@@ -135,7 +135,7 @@ is the file's pane, not a panel of its own.
 The panel is chosen with one control of two segments at the top strip's
 left end (`panel_buttons`): a press on the other segment swaps the panel
 and slides the plate, a press on the one showing puts the panel away
-(`toggle_panel`, ⌘⇧E and ⌘⇧O). `panel_anim` keeps what showed before the
+(`toggle_panel`, ⌘⇧F and ⌘⇧O). `panel_anim` keeps what showed before the
 press and what after. The segments are a fixed size, so the plate's place
 is known without measuring, unlike `segmented`. A panel that comes beside
 nothing widens and fades in; one that takes the other's place fades in
@@ -193,8 +193,15 @@ was put away again the moment it opened.
   three squeezed), and a window dragged narrower (`Workbench::render`,
   deferred).
 - The panel at the left and the terminal go through their buttons'
-  calls, so the button goes out with them, and they go for good, not
-  kept for a wider window: what the buttons say is what is there.
+  calls, so the button goes out with them: what the buttons say is
+  what is there. Put away for the window's width, each is remembered
+  with what it showed (`side_away`) and comes back, the highest in the
+  rank first, where it fits again beside every panel asked for, the
+  file not drawn too, `FOLD_SLACK` past its least (`sides_back`,
+  `side_away_back`). Coming back leaves the rank as it was, or the
+  next narrowing put the other panel away. A press of its button
+  forgets it. Put away for a panel asked for, it is the person's
+  choice and stays away.
 - The file has no button, and what is not saved in it must not go: it
   is only not drawn (`fold_file`), and comes back when there is room
   for it again, or at a click on it in the tree, which asks for it
@@ -205,12 +212,12 @@ was put away again the moment it opened.
   moment while the sidebar and a panel are both in motion, and a panel
   put away on that reading stayed away: which of the two went came out
   differently from one time to the next.
-- The room of a panel put away for the window's width still counts
-  against the sidebar (`room_held`), until the window is `FOLD_SLACK`
-  wider than where what stays fits with it, or a panel's button is
-  pressed. Without it, a window dragged narrower lost the sidebar, then
-  the terminal, then got the sidebar back in the terminal's room, then
-  lost it again.
+- The room of a panel put away for the window's width counts against
+  the sidebar until it comes back, so a window dragged wider brings the
+  panels back before the sidebar, as a narrower one put the sidebar
+  away first. Without it, a window dragged narrower lost the sidebar,
+  then the terminal, then got the sidebar back in the terminal's room,
+  then lost it again.
 - A terminal panel put away takes the keyboard to the window with it, whoever
   put it away (`Workbench::render`). Left in a terminal not drawn, no
   key binding was heard until a click.
@@ -306,8 +313,23 @@ the first draw of a folder not asked about yet), into a state per path.
 - Which repository, as VS Code's explorer has it (`git::inside`): the
   one the folder is in, when the folder is its top or a tracked part of
   it. A folder that repository ignores (`target/x` under a checkout) is
-  in none: no branch, no marks, no count. A folder that only holds
-  repositories is in none either, and nothing is said of its children's.
+  in none: no branch, no marks, no count.
+- A folder in no repository that holds checkouts side by side (a
+  folder of projects, each its own repository) is VS Code's folder of
+  several: `git::repos_under` finds them one level down, as VS Code's
+  `git.repositoryScanMaxDepth` does by default, and `git_read` reads
+  each one's status and branches, the statuses merged
+  (`Status::merge`), so the tree marks every checkout's files and the
+  count is all of theirs. Its files are listed checkout by checkout.
+- Of such a folder one checkout is in use (`Tree::repo`, `git_dir`):
+  the one of the file last opened, or picked in the comparison, else
+  the first with a change. The branch pill names it ("emaki / main"),
+  and every git action goes to it: the list of branches, a switch and
+  its question, fetch, push, the comparison's commit and its history.
+  `read_git` always reads the whole folder, whichever checkout an
+  action was in, or the others' marks went with it. A switch asks of
+  the checkout's own changes (`repo_dirty`): the folder's status is
+  nobody's.
 - A folder part way down a repository is asked about by itself (`git
   status -- .`): the marks, the count and the comparison are of what is
   under it. The branch is the repository's, and so is the question a
@@ -452,7 +474,14 @@ head is never under the window's three buttons. "Show changes" in a
 changed file's menu opens it on that file.
 
 - The file list is a `uniform_list`, since a commit of icons is a
-  thousand rows.
+  thousand rows. Of a folder of checkouts, each checkout's files stand
+  under a head of their own (`ChangeRow::Repo`: its folder, its branch,
+  how many), the one the comparison is on in the accent; a row is one
+  height either way, so a rectangle still finds its rows by number. A
+  click on a head, or on a file of another checkout, takes the
+  comparison there (`pick_change`): the commit is of that checkout's
+  ticked files alone (`commit_files`), and its history and branch are
+  its own.
 - Files are chosen in it as rows are in the tree (`Changes::marked`,
   `change_click`, `changes_band_to`): a click is one, ⌘ and a click
   adds or takes one, ⇧ and a click reaches from the last one clicked,
@@ -792,7 +821,9 @@ far from the tree.
 - Code, and markdown or a table as it is written, are drawn by the
   toolkit's code editor (`sync_file_editor`, `FileEditor`): line
   numbers, folding, the language's colours, and its own selection, copy
-  and find (⌘F). The editor is made again when the file, or
+  and find (⌘F, the vendored `SearchPanel`: a card as the conversation's
+  find bar is, with case, whole word and regular expression, and a
+  replace row its chevron or ⌥⌘F opens; ⌘F in it closes it). The editor is made again when the file, or
   what it holds, is another, and scrolls by itself, so the pane's own
   scroller is not drawn around it. Its right click is Copy and Select
   All and no more, each with its icon (the vendored `on_secondary_click`): what is asked of
@@ -979,10 +1010,21 @@ far from the tree.
   word, a third the line, ⇧ and a click reaches from the selection; ⌘C
   copies, ⌘A selects all, and a right click offers both (`PdfDo`).
   The pane has a focus of its own (`file_focus`) for those keys.
-- ⌘F with the keyboard in a PDF opens that file's own find row
-  (`pdf_find_open`, tried first in `open_find`): every place marked,
-  the one it is on darker and brought into view, ↩ and ⇧↩ to step,
-  Escape to close. Escape then drops a selection.
+- ⌘F with the keyboard in a PDF, or in a file as it reads (markdown,
+  a notebook, a document), opens that file's own find (`pdf_find_open`,
+  `text_find_open_here`, tried first in `open_find`), a card as the
+  code editor's find is, without replace, under the head: every place
+  marked, the one it is on darker and brought into view, ↩ and ⇧↩ to
+  step, Escape or ⌘F again to close. Escape then drops a selection. A
+  file as it reads is found in by its view (the vendored `TextFind`):
+  each run of text marks its matches as it paints, numbered in the
+  order the page paints, and says where the current one stands, which
+  the pane scrolls to a frame later (`text_find_show`). Code blocks
+  are runs too.
+- A file opened, or turned to as it reads or as written, has the
+  keyboard (`file_focus_due`, `file_focus_land`): its editor when it is
+  drawn as written, else the pane. So ⌘F finds in a file just opened,
+  with no click first.
 - A PDF's head has two segments for what stands beside its pages
   (`pdf_side`, `pdf_side_toggle`, kept in `ui.json`): the pages small,
   or the file's table of contents, and neither at a second press on the

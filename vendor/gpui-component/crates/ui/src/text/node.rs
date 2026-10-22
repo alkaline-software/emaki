@@ -2425,9 +2425,16 @@ impl BlockNode {
                     _ => (rems(1.), FontWeight::NORMAL),
                 };
 
-                let mut text_size = text_size.to_pixels(node_cx.style.heading_base_font_size);
+                // Emaki: a base of none is the text's own size where the
+                // view stands, so a heading grows with the words under it.
+                let base = if node_cx.style.heading_base_font_size == gpui::Pixels::ZERO {
+                    window.text_style().font_size.to_pixels(window.rem_size())
+                } else {
+                    node_cx.style.heading_base_font_size
+                };
+                let mut text_size = text_size.to_pixels(base);
                 if let Some(f) = node_cx.style.heading_font_size.as_ref() {
-                    text_size = (f)(*level, node_cx.style.heading_base_font_size);
+                    text_size = (f)(*level, base);
                 }
 
                 div()

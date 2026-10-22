@@ -1,4 +1,5 @@
 mod document;
+mod find;
 mod format;
 mod inline;
 mod inline_flow;
@@ -14,6 +15,7 @@ mod utils;
 mod window_selection;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
+pub use find::TextFind;
 pub use markdown_ext::*;
 pub use state::*;
 pub use style::*;

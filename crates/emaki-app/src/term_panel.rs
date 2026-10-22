@@ -287,12 +287,12 @@ impl Workbench {
         if from == to {
             return;
         }
-        self.room_held = px(0.);
         // The agents page's shell is its own choice: it neither opens
         // the panel beside a conversation nor closes it.
         if self.term_at_agents() {
             self.agents_shell = to.is_some();
         } else {
+            self.side_away.retain(|(s, _)| *s != crate::panels::Side::Term);
             self.side_term = to.is_some();
             if let Some(agent) = to {
                 self.side_term_agent = agent;

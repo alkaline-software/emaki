@@ -31,6 +31,11 @@ hands. Read this before checking a change to the app by eye.
   `EMAKI_KEYS` names send an action to the focus instead, which finds
   nothing wrong when a key never becomes its action. `treecaret` prints
   the selection in the tree's name field.
+- `EMAKI_GO` step `attach:<path>` puts that file in the composer, as a
+  drop does.
+- `EMAKI_GO` step `size:<small|medium|large|custom>` picks Text Size's
+  preset; `textsize:<place>:<points>` sets one place's size
+  (conversation, composer, preview, editor, terminal).
 - `EMAKI_GO` step `pointer:<x>:<y>` moves the pointer there, in points
   from the window's top left, through the window as the mouse does, so a
   hover and its tooltip can be drawn; `wheel:<x>:<y>:<dy>` scrolls that

@@ -5348,7 +5348,6 @@ dependencies = [
 name = "gpui-base"
 version = "0.5.2"
 dependencies = [
- "aho-corasick",
  "anyhow",
  "async-channel",
  "chrono",

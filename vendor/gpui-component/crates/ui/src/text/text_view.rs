@@ -72,6 +72,8 @@ pub struct TextView {
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
+    /// Emaki: the words found in it (`TextFind`).
+    find: Option<super::TextFind>,
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -113,6 +115,7 @@ impl TextView {
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
+            find: None,
         }
     }
 
@@ -131,6 +134,7 @@ impl TextView {
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
+            find: None,
         }
     }
 
@@ -149,6 +153,7 @@ impl TextView {
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
+            find: None,
         }
     }
 
@@ -159,6 +164,13 @@ impl TextView {
     }
 
     /// Set the text view to be selectable, default is false.
+    /// Emaki: find these words in it, each match painted behind its
+    /// letters and the current one stronger (`TextFind`).
+    pub fn find(mut self, find: Option<super::TextFind>) -> Self {
+        self.find = find;
+        self
+    }
+
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
         self
@@ -335,6 +347,7 @@ impl Element for TextView {
             state.selectable = self.selectable;
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;
+            state.find = self.find.clone();
             if state.text_view_style != self.text_view_style {
                 state.selection_revision = state.selection_revision.wrapping_add(1);
             }
@@ -406,11 +419,20 @@ impl Element for TextView {
             state.update(cx, |state, _| state.selection_adapter.begin_frame());
         }
 
+        // Emaki: the matches are numbered as the runs paint, so the
+        // count is the frame's whole.
+        let find = state.read(cx).find.clone();
+        if let Some(find) = &find {
+            find.begin_frame();
+        }
         UiGlobalState::global_mut(cx)
             .text_view_state_stack
             .push(state.clone());
         request_layout.element.paint(window, cx);
         UiGlobalState::global_mut(cx).text_view_state_stack.pop();
+        if let Some(find) = &find {
+            find.end_frame();
+        }
 
         if self.selectable {
             let (adapter, scroll_offset, content_bounds) = {

@@ -1,28 +1,48 @@
 use ropey::Rope;
-use rust_i18n::t;
 use std::ops::Range;
+use std::time::Instant;
 
 use gpui::{
-    App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable, Half,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Styled, Subscription,
-    WeakEntity, Window, actions, div, prelude::FluentBuilder as _,
+    Animation, AnimationExt as _, App, AppContext as _, Context, ElementId, Empty, Entity,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _,
+    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    WeakEntity, Window, actions, div, percentage, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
-    ActiveTheme, Disableable, ElementExt, IconName, Selectable, Sizable,
-    button::{Button, ButtonVariants},
+    ActiveTheme, ElementExt as _, Icon, IconName, Sizable,
+    animation::ease_out_cubic,
     h_flex,
     input::{
         Enter, Escape, IndentInline, Input, InputBaseState, InputEvent, InputState, OutdentInline,
-        Replace,
+        Replace, Search,
     },
-    label::Label,
+    tooltip::ManagedTooltipExt as _,
     v_flex,
 };
+use gpui_base::input::{SEARCH_ANIM, SearchOptions};
 
 const CONTEXT: &'static str = "SearchPanel";
 
-actions!(input, [Tab]);
+actions!(input, [Tab, ToggleMatchCase, ToggleWholeWord, ToggleRegex]);
+
+/// Emaki: the panel's own keys for its three toggles, as VS Code has them.
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-c", ToggleMatchCase, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-w", ToggleWholeWord, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-r", ToggleRegex, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-c", ToggleMatchCase, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-w", ToggleWholeWord, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-r", ToggleRegex, Some(CONTEXT)),
+    ]);
+}
 
 #[cfg(test)]
 use gpui_base::input::SearchMatcher;
@@ -58,12 +78,31 @@ fn prev_scroll_direction(
     }
 }
 
+/// One row of the panel, and a button in it.
+const ROW_H: f32 = 28.;
+const TOOL: f32 = 22.;
+/// Narrower than this, the toggles, the count and the steps go to a
+/// row of their own under the field, which keeps the room for the words.
+const ONE_ROW_W: f32 = 380.;
+
+/// Emaki: drawn as the window's find bar is drawn, a card with the
+/// field, the match's place and the steps, after VS Code's: a chevron
+/// that opens the replace row, and the case, whole word and regular
+/// expression toggles in the field. It comes and goes in motion, and so
+/// does the replace row. Upstream had a bar of the toolkit's buttons.
 pub(super) struct SearchPanel<M: crate::input::overlay::OverlayMode> {
     editor: WeakEntity<InputBaseState<M>>,
     search_input: Entity<InputState>,
     replace_input: Entity<InputState>,
     session: gpui_base::input::SearchSession,
     input_width: Pixels,
+    /// The card's own size as last drawn: its width for the layout of
+    /// its rows, its height for the motion that opens and closes it.
+    width: Pixels,
+    height: Pixels,
+    /// The replace row's last turn: on or off, when, and a serial for
+    /// its motion.
+    replace_turn: Option<(bool, Instant, u64)>,
 
     _subscriptions: Vec<Subscription>,
 }
@@ -78,8 +117,8 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
-        let search_input = cx.new(|cx| InputState::new(window, cx));
-        let replace_input = cx.new(|cx| InputState::new(window, cx));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+        let replace_input = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
 
         cx.new(|cx| {
             let _subscriptions =
@@ -101,6 +140,9 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
                 replace_input,
                 session: gpui_base::input::SearchSession::default(),
                 input_width: Pixels::ZERO,
+                width: Pixels::ZERO,
+                height: Pixels::ZERO,
+                replace_turn: None,
                 _subscriptions,
             }
         })
@@ -118,10 +160,8 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
         self.session.open = true;
         self.session.replace_mode = replace_mode;
         if focus {
-            self.search_input
-                .read(cx)
-                .focus_handle(cx)
-                .focus(window, cx);
+            let field = if replace_mode { &self.replace_input } else { &self.search_input };
+            field.read(cx).focus_handle(cx).focus(window, cx);
         }
 
         self.search_input.update(cx, |this, cx| {
@@ -146,9 +186,10 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
         cx: &mut Context<Self>,
     ) {
         let query = self.search_input.read(cx).value();
+        let options = self.session.options();
         let editor = self.editor.clone();
         let _ = editor.update(cx, |state, cx| {
-            state.set_search_query(query.clone(), self.session.case_insensitive, cx);
+            state.set_search_options(query.clone(), options, cx);
         });
         if let Ok(session) = editor.read_with(cx, |state, _| state.search_session().clone()) {
             self.session = session;
@@ -159,6 +200,31 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
                 .update_cursor_by_offset(visible_range_offset.start);
         }
         cx.notify();
+    }
+
+    fn set_options(&mut self, options: SearchOptions, cx: &mut Context<Self>) {
+        self.session.case_insensitive = options.case_insensitive;
+        self.session.whole_word = options.whole_word;
+        self.session.regex = options.regex;
+        self.update_search_query(None, cx);
+    }
+
+    fn toggle_case(&mut self, cx: &mut Context<Self>) {
+        let mut options = self.session.options();
+        options.case_insensitive = !options.case_insensitive;
+        self.set_options(options, cx);
+    }
+
+    fn toggle_word(&mut self, cx: &mut Context<Self>) {
+        let mut options = self.session.options();
+        options.whole_word = !options.whole_word;
+        self.set_options(options, cx);
+    }
+
+    fn toggle_regex(&mut self, cx: &mut Context<Self>) {
+        let mut options = self.session.options();
+        options.regex = !options.regex;
+        self.set_options(options, cx);
     }
 
     fn replaceable(&self, cx: &App) -> bool {
@@ -177,18 +243,38 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let was_open = self.session.open;
         self.session.open = false;
         let _ = self.editor.update(cx, |state, cx| state.close_search(cx));
+        if let Ok(session) = self.editor.read_with(cx, |state, _| state.search_session().clone()) {
+            self.session = session;
+        }
         if focus_editor {
             if let Some(editor) = self.editor.upgrade() {
                 editor.read(cx).focus_handle(cx).focus(window, cx);
             }
         }
+        if was_open {
+            // Drawn while it goes: the editor once more when it has.
+            let editor = self.editor.clone();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(SEARCH_ANIM + std::time::Duration::from_millis(20)).await;
+                let _ = editor.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
         cx.notify();
     }
 
     fn on_action_enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if action.shift {
+        // In the replace field ↩ replaces the match and ⌘↩ every one.
+        if self.session.replace_mode && self.replace_input.read(cx).focus_handle(cx).is_focused(window) {
+            if action.secondary {
+                self.replace_all(window, cx);
+            } else {
+                self.replace_next(window, cx);
+            }
+        } else if action.shift {
             self.prev(window, cx);
         } else {
             self.next(window, cx);
@@ -196,6 +282,11 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
     }
 
     fn on_action_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide(window, cx);
+    }
+
+    /// ⌘F in the panel puts it away, as ⌘F in the window's find bar does.
+    fn on_action_search(&mut self, _: &Search, window: &mut Window, cx: &mut Context<Self>) {
         self.hide(window, cx);
     }
 
@@ -242,6 +333,8 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
 
         self.session.replace_mode = !self.session.replace_mode;
         let replace_mode = self.session.replace_mode;
+        let serial = self.replace_turn.map(|(_, _, n)| n + 1).unwrap_or(1);
+        self.replace_turn = Some((replace_mode, Instant::now(), serial));
         let _ = self.editor.update(cx, |state, cx| {
             state.set_search_replace_mode(replace_mode, cx);
         });
@@ -251,6 +344,14 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
             self.search_input.read(cx).focus_handle(cx)
         };
         focus_handle.focus(window, cx);
+        if !replace_mode {
+            // The row is drawn while it goes: once more when it has.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEARCH_ANIM + std::time::Duration::from_millis(20)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -291,6 +392,48 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
             _ = state.replace_all_search_matches(&replacement, window, cx);
         });
     }
+
+    /// A small button of the panel: an icon, its label on hover, lit in
+    /// the accent while `on`, quiet while it can do nothing.
+    fn tool(
+        &self,
+        id: &'static str,
+        icon: Icon,
+        tip: &'static str,
+        on: bool,
+        enabled: bool,
+        size: f32,
+        cx: &mut Context<Self>,
+        act: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let lit = theme.primary;
+        let ink = if !enabled {
+            theme.muted_foreground.opacity(0.45)
+        } else if on {
+            lit
+        } else {
+            theme.muted_foreground
+        };
+        let hover = if on { lit.opacity(0.2) } else { theme.foreground.opacity(0.07) };
+        div()
+            .id(id)
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded(px(5.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(on, |d| d.bg(lit.opacity(0.13)))
+            .when(enabled, |d| {
+                d.cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(move |this, _, window, cx| act(this, window, cx)))
+            })
+            .managed_tooltip(move |window, cx| crate::tooltip::label(tip, window, cx))
+            .child(icon.with_size(px(14.)).text_color(ink))
+            .into_any_element()
+    }
 }
 
 impl<M: crate::input::overlay::OverlayMode> Focusable for SearchPanel<M> {
@@ -301,158 +444,214 @@ impl<M: crate::input::overlay::OverlayMode> Focusable for SearchPanel<M> {
 
 impl<M: crate::input::overlay::OverlayMode> Render for SearchPanel<M> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.session.open {
+        let open = self.session.open;
+        if !open && !self.session.closing() {
             return Empty.into_any_element();
         }
 
-        let has_matches = !self.session.matcher.is_empty();
+        let theme = cx.theme().clone();
+        let matcher = &self.session.matcher;
+        let has_matches = !matcher.is_empty();
         let allow_replace = self.replaceable(cx);
         if !allow_replace {
             self.session.replace_mode = false;
         }
+        let replace_mode = self.session.replace_mode;
+        let options = self.session.options();
+        let empty = self.search_input.read(cx).value().is_empty();
+        let narrow = self.width > Pixels::ZERO && self.width < px(ONE_ROW_W);
+        let (n, at) = (matcher.len(), matcher.current_match_index() + 1);
+        let (count, bad): (SharedString, bool) = if empty {
+            ("".into(), false)
+        } else if matcher.is_invalid() {
+            ("invalid".into(), true)
+        } else if n == 0 {
+            ("no matches".into(), true)
+        } else {
+            (format!("{at} of {n}").into(), false)
+        };
 
-        v_flex()
+        // The replace row: drawn while it is on, and while it goes.
+        let (row_on, row_at, row_serial) =
+            self.replace_turn.unwrap_or((replace_mode, Instant::now() - SEARCH_ANIM, 0));
+        let row_shown = allow_replace && (replace_mode || (!row_on && row_at.elapsed() < SEARCH_ANIM));
+        let turned_at_open = self.replace_turn.is_none();
+
+        let chevron = allow_replace.then(|| {
+            let (from, to) = if replace_mode { (0., 0.25) } else { (0.25, 0.) };
+            let icon = Icon::new(IconName::ChevronRight);
+            let still = turned_at_open;
+            div()
+                .id("search-replace-toggle")
+                .size(px(TOOL))
+                .flex_shrink_0()
+                .rounded(px(5.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.foreground.opacity(0.07)))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_replace_mode(window, cx)))
+                .managed_tooltip(|window, cx| crate::tooltip::label("Replace (⌥⌘F)", window, cx))
+                .child(
+                    icon.with_size(px(14.))
+                        .text_color(theme.muted_foreground)
+                        .with_animation(
+                            ElementId::Name(format!("search-chevron-{row_serial}").into()),
+                            Animation::new(SEARCH_ANIM).with_easing(ease_out_cubic),
+                            move |icon, t| icon.rotate(percentage(if still { to } else { from + (to - from) * t })),
+                        ),
+                )
+        });
+
+        let mut toggles = Some(h_flex()
+            .gap(px(1.))
+            .child(self.tool("search-case", Icon::new(IconName::CaseSensitive), "Match Case (⌥⌘C)", !options.case_insensitive, true, 20., cx, |this, _, cx| this.toggle_case(cx)))
+            .child(self.tool("search-word", Icon::default().path("icons/whole-word.svg"), "Whole Word (⌥⌘W)", options.whole_word, true, 20., cx, |this, _, cx| this.toggle_word(cx)))
+            .child(self.tool("search-regex", Icon::default().path("icons/regex.svg"), "Regular Expression (⌥⌘R)", options.regex, true, 20., cx, |this, _, cx| this.toggle_regex(cx))));
+
+        let field = div()
+            .flex_1()
+            .min_w(px(64.))
+            .child({
+                let input = Input::new(&self.search_input).focus_bordered(false).small().w_full().shadow_none();
+                match toggles.take_if(|_| !narrow) {
+                    Some(toggles) => input.suffix(toggles),
+                    None => input,
+                }
+            })
+            .on_prepaint({
+                let view = cx.entity();
+                move |bounds, _, cx| view.update(cx, |r, _| r.input_width = bounds.size.width)
+            });
+        let count = (!count.is_empty()).then(|| {
+            div()
+                .flex_shrink_0()
+                .px(px(2.))
+                .text_size(px(11.5))
+                .text_color(if bad { theme.danger } else { theme.muted_foreground })
+                .child(count)
+        });
+        let prev = self.tool("search-prev", Icon::new(IconName::ChevronUp), "Previous (⇧↩)", false, has_matches, TOOL, cx, |this, window, cx| this.prev(window, cx));
+        let next = self.tool("search-next", Icon::new(IconName::ChevronDown), "Next (↩)", false, has_matches, TOOL, cx, |this, window, cx| this.next(window, cx));
+        let close = self.tool("search-close", Icon::new(IconName::Close), "Close (esc)", false, true, TOOL, cx, |this, window, cx| this.hide(window, cx));
+        let mut find_row = h_flex().h(px(ROW_H)).gap(px(4.)).items_center().children(chevron).child(field);
+        // Narrow, the field has the row with the close button, and what
+        // stands beside it in a wide panel goes under it.
+        let mut meta_row = None;
+        if narrow {
+            find_row = find_row.child(close);
+            meta_row = Some(
+                h_flex()
+                    .pt(px(4.))
+                    .h(px(ROW_H + 4.))
+                    .gap(px(4.))
+                    .items_center()
+                    .when(allow_replace, |d| d.child(div().w(px(TOOL)).flex_shrink_0()))
+                    .children(toggles.take())
+                    .child(div().flex_1())
+                    .children(count)
+                    .child(prev)
+                    .child(next),
+            );
+        } else {
+            find_row = find_row.children(count).child(prev).child(next).child(close);
+        }
+
+        let replace_row = row_shown.then(|| {
+            let row = h_flex()
+                .pt(px(4.))
+                .h(px(ROW_H + 4.))
+                .gap(px(4.))
+                .items_center()
+                .child(div().w(px(TOOL)).flex_shrink_0())
+                .child({
+                    // As wide as the find field, so the two line up; narrow,
+                    // the field takes what the buttons leave.
+                    let input = Input::new(&self.replace_input).focus_bordered(false).small().shadow_none();
+                    if narrow { div().flex_1().min_w(px(64.)).child(input.w_full()) } else { div().child(input.w(self.input_width)) }
+                })
+                .child(self.tool("search-replace-one", Icon::new(IconName::Replace), "Replace (↩)", false, has_matches, TOOL, cx, |this, window, cx| this.replace_next(window, cx)))
+                .child(self.tool("search-replace-all", Icon::default().path("icons/replace-all.svg"), "Replace All (⌘↩)", false, has_matches, TOOL, cx, |this, window, cx| this.replace_all(window, cx)));
+            div().overflow_hidden().child(row).with_animation(
+                ElementId::Name(format!("search-replace-row-{row_serial}").into()),
+                Animation::new(SEARCH_ANIM).with_easing(ease_out_cubic),
+                move |d, t| {
+                    if turned_at_open || (row_on && t >= 1.) {
+                        return d;
+                    }
+                    let k = if row_on { t } else { 1. - t };
+                    d.max_h(px((ROW_H + 4.) * k)).opacity(k)
+                },
+            )
+        });
+
+        let card = v_flex()
             .id("search-panel")
             .occlude()
             .track_focus(&self.focus_handle(cx))
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::on_action_enter))
             .on_action(cx.listener(Self::on_action_escape))
+            .on_action(cx.listener(Self::on_action_search))
             .on_action(cx.listener(Self::on_action_tab))
             .on_action(cx.listener(Self::on_action_tab_prev))
             .on_action(cx.listener(Self::on_action_replace))
-            .font_family(cx.theme().font_family.clone())
-            .items_center()
-            .py_2()
-            .px_3()
-            .w_full()
-            .gap_1()
-            .bg(cx.theme().tokens.popover)
-            .border_b_1()
-            .rounded(cx.theme().radius.half())
-            .border_color(cx.theme().border)
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(
-                                Input::new(&self.search_input)
-                                    .focus_bordered(false)
-                                    .suffix(
-                                        Button::new("case-insensitive")
-                                            .selected(!self.session.case_insensitive)
-                                            .toggled(!self.session.case_insensitive)
-                                            .xsmall()
-                                            .compact()
-                                            .text()
-                                            .icon(IconName::CaseSensitive)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.session.case_insensitive =
-                                                    !this.session.case_insensitive;
-                                                this.update_search_query(None, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .small()
-                                    .w_full()
-                                    .shadow_none(),
-                            )
-                            .on_prepaint({
-                                let view = cx.entity();
-                                move |bounds, _, cx| {
-                                    view.update(cx, |r, _| r.input_width = bounds.size.width)
-                                }
-                            }),
-                    )
-                    .when(allow_replace, |this| {
-                        this.child(
-                            Button::new("replace-mode")
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::Replace)
-                                .selected(self.session.replace_mode)
-                                .toggled(self.session.replace_mode)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_replace_mode(window, cx);
-                                })),
-                        )
+            .on_action(cx.listener(|this, _: &ToggleMatchCase, _, cx| this.toggle_case(cx)))
+            .on_action(cx.listener(|this, _: &ToggleWholeWord, _, cx| this.toggle_word(cx)))
+            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| this.toggle_regex(cx)))
+            .font_family(theme.font_family.clone())
+            .px(px(6.))
+            .py(px(5.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_sm()
+            // Its own height whatever the room the motion gives it, so the
+            // height measured is the card's.
+            .flex_shrink_0()
+            .on_prepaint({
+                let view = cx.entity();
+                move |bounds, _, cx| {
+                    view.update(cx, |r, _| {
+                        r.width = bounds.size.width;
+                        r.height = bounds.size.height;
                     })
-                    .child(
-                        Button::new("prev")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ChevronLeft)
-                            .disabled(!has_matches)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.prev(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("next")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ChevronRight)
-                            .disabled(!has_matches)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.next(window, cx);
-                            })),
-                    )
-                    .child(
-                        Label::new(self.session.matcher.label())
-                            .when(!has_matches, |this| {
-                                this.text_color(cx.theme().muted_foreground)
-                            })
-                            .text_left()
-                            .min_w_16(),
-                    )
-                    .child(div().w_7())
-                    .child(
-                        Button::new("close")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Close)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.on_action_escape(&Escape, window, cx);
-                            })),
-                    ),
-            )
-            .when(self.session.replace_mode && allow_replace, |this| {
-                this.child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            Input::new(&self.replace_input)
-                                .focus_bordered(false)
-                                .small()
-                                .w(self.input_width)
-                                .shadow_none(),
-                        )
-                        .child(
-                            Button::new("replace-one")
-                                .small()
-                                .label(t!("Input.Replace"))
-                                .disabled(!has_matches)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.replace_next(window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("replace-all")
-                                .small()
-                                .label(t!("Input.Replace All"))
-                                .disabled(!has_matches)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.replace_all(window, cx);
-                                })),
-                        ),
-                )
+                }
             })
+            .child(find_row)
+            .children(meta_row)
+            .children(replace_row);
+
+        // The panel opens and closes over a moment, the text under it
+        // moving with it. The motion is over the card's height as
+        // measured, and its room around it: a height guessed over the
+        // card's left the close standing still before it moved.
+        let rows = 1. + if narrow { 1. } else { 0. } + if replace_mode { 1. } else { 0. };
+        let guess = 5. * 2. + 2. + ROW_H * rows + 4. * (rows - 1.);
+        let most = 6. + 4. + if self.height > Pixels::ZERO { f32::from(self.height) } else { guess };
+        let opened = self.session.opened;
+        let (key, going) = if open { ("search-panel-in", false) } else { ("search-panel-out", true) };
+        // The room around the card is inside what is cut: on the box
+        // that closes, padding is the least it shrinks to, and the close
+        // stood still at it before the panel went.
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .child(div().w_full().flex_shrink_0().px(px(8.)).pt(px(6.)).pb(px(4.)).child(card))
+            .with_animation(
+                ElementId::Name(format!("{key}-{opened}").into()),
+                Animation::new(SEARCH_ANIM).with_easing(ease_out_cubic),
+                move |d, t| {
+                    if !going && t >= 1. {
+                        return d;
+                    }
+                    let k = if going { 1. - t } else { t };
+                    d.max_h(px(most * k)).opacity(k)
+                },
+            )
             .into_any_element()
     }
 }

@@ -109,7 +109,7 @@ impl Workbench {
     /// Ask the remote what it has, off the main thread, when the last
     /// answer is old. The list is read again when it is in.
     pub(crate) fn branch_fetch(&mut self, force: bool, cx: &mut Context<Self>) {
-        let Some(root) = self.files_root() else { return };
+        let Some(root) = self.git_dir() else { return };
         if self.branches().is_none_or(|b| b.origin.is_none()) || self.branch_fetching {
             return;
         }
@@ -141,7 +141,7 @@ impl Workbench {
         let theme = cx.theme().clone();
         let b = self.branches()?;
         let origin = b.origin.clone()?;
-        let root = self.files_root()?;
+        let root = self.git_dir()?;
         let last = self.branch_fetched.as_ref().filter(|(of, _)| *of == root).map(|(_, r)| r.clone());
         let row = h_flex().flex_shrink_0().min_h(px(44.)).px(px(12.)).py(px(8.)).gap(px(8.)).items_center().border_t_1().border_color(theme.border).text_size(px(11.5)).text_color(theme.muted_foreground);
         let fetch = small_pill("branch-fetch-again", "icons/refresh.svg", if matches!(last, Some(Err(_))) { "Try Again" } else { "Fetch" }, Press::Quiet, self.branch_fetching, &theme).when(!self.branch_fetching, |d| {
@@ -265,7 +265,7 @@ impl Workbench {
     /// send its commits to the remote. Neither is done unasked. Either
     /// may be done while an agent works: git is the person's to run.
     pub(crate) fn sync_go(&mut self, pull: bool, cx: &mut Context<Self>) {
-        let (Some(root), Some(b)) = (self.files_root(), self.branches()) else { return };
+        let (Some(root), Some(b)) = (self.git_dir(), self.branches()) else { return };
         let Some(name) = b.current.clone() else { return };
         if self.syncing.is_some() {
             return;
@@ -707,9 +707,12 @@ impl Workbench {
     /// The files a commit takes: every changed one not left out, and
     /// whether that is all of them.
     pub(crate) fn commit_files(&self) -> (Vec<std::path::PathBuf>, bool) {
-        let changed = self.changed_files();
+        // The repository's own: of a folder of checkouts, the one the
+        // comparison is on.
+        let root = self.changes.as_ref().map(|c| c.root.clone());
+        let changed: Vec<std::path::PathBuf> = self.changed_files().iter().map(|(p, _)| p.clone()).filter(|p| root.as_ref().is_none_or(|r| p.starts_with(r))).collect();
         let out = self.changes.as_ref().map(|c| &c.left_out);
-        let taken: Vec<std::path::PathBuf> = changed.iter().map(|(p, _)| p.clone()).filter(|p| out.is_none_or(|o| !o.contains(p))).collect();
+        let taken: Vec<std::path::PathBuf> = changed.iter().filter(|p| out.is_none_or(|o| !o.contains(*p))).cloned().collect();
         let all = taken.len() == changed.len();
         (taken, all)
     }
@@ -857,7 +860,7 @@ impl Workbench {
 
     /// Send a branch made here to the remote, where it is not yet.
     pub(crate) fn branch_publish(&mut self, name: String, cx: &mut Context<Self>) {
-        let Some(root) = self.files_root() else { return };
+        let Some(root) = self.git_dir() else { return };
         if self.branch_publishing.is_some() {
             return;
         }
@@ -921,7 +924,7 @@ impl Workbench {
     /// from the list's button, from words that name no branch, and from
     /// ⌘⇧N anywhere.
     pub(crate) fn branch_new_open(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.files_root() else {
+        let Some(root) = self.git_dir() else {
             self.notice = Some(Notice::error("open a session in a git repository to make a branch"));
             cx.notify();
             return;
@@ -1000,7 +1003,7 @@ impl Workbench {
     /// Push the default branch's own commits from the sheet, so that the
     /// new branch starts from what the remote has too.
     fn branch_new_push(&mut self, cx: &mut Context<Self>) {
-        let (Some(root), Some(default)) = (self.files_root(), self.branches().and_then(|b| b.default.clone())) else { return };
+        let (Some(root), Some(default)) = (self.git_dir(), self.branches().and_then(|b| b.default.clone())) else { return };
         if let Some(n) = self.branch_new.as_mut() {
             n.pushing = true;
         }
@@ -1262,7 +1265,7 @@ impl Workbench {
         self.branch_menu = None;
         self.git_gate = Some(GitGate { what, why, account: None, checking: false });
         cx.notify();
-        let Some(root) = self.files_root() else { return };
+        let Some(root) = self.git_dir() else { return };
         cx.spawn(async move |this, cx| {
             let account = cx.background_executor().spawn(async move { git::account(&root) }).await;
             this.update(cx, |this, cx| {
@@ -1279,7 +1282,7 @@ impl Workbench {
     /// "Check again" on the sheet: ask the remote the smallest question
     /// there is. An answer puts the sheet away.
     fn gate_check(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.files_root() else { return };
+        let Some(root) = self.git_dir() else { return };
         let Some(g) = self.git_gate.as_mut().filter(|g| !g.checking) else { return };
         g.checking = true;
         cx.notify();

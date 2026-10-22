@@ -57,8 +57,12 @@ pub struct AppConfig {
     /// The conversation's typeface: `serif` (Anthropic Serif) or `sans`
     /// (Anthropic Sans).
     pub chat_font: String,
-    /// How large the conversation is set: `small`, `medium` or `large`.
+    /// How large text is set: `small`, `medium` or `large`, each a set of
+    /// sizes (`TextSizes::preset`), or `custom`, the sizes in `sizes`.
     pub chat_size: String,
+    /// The person's own sizes, kept while a preset is chosen and back when
+    /// Custom is; none until Custom was first chosen.
+    pub sizes: Option<TextSizes>,
     /// The key that sends a message: `cmd-enter` (Ctrl off a Mac) or
     /// `enter`. Shift with Enter is a new line either way.
     pub send_key: String,
@@ -95,22 +99,90 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys() }
+        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys() }
+    }
+}
+
+/// How large text is set in each place it is read or written, in points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextSizes {
+    /// The conversation: a reply at this size, a prompt half a point under.
+    pub conversation: f32,
+    /// What is typed in the composer.
+    pub composer: f32,
+    /// A file as it reads in the file's pane: markdown, a document, a
+    /// notebook, a page.
+    pub preview: f32,
+    /// A file as it is written, in the file's editor.
+    pub editor: f32,
+    /// The shell terminal and the agent terminal.
+    pub terminal: f32,
+}
+
+impl Default for TextSizes {
+    fn default() -> Self {
+        Self::MEDIUM
+    }
+}
+
+impl TextSizes {
+    /// The default. The conversation at the Claude desktop app's own body
+    /// size (its stylesheet's `font-claude-response-body`: 16px, line
+    /// height 1.5); what is written and read beside it a step under, so
+    /// the conversation leads; code and the terminal at the size a Mac's
+    /// editors set monospace. Every preset's sizes are whole points.
+    pub const MEDIUM: Self = Self { conversation: 16., composer: 14., preview: 15., editor: 13., terminal: 13. };
+    pub const SMALL: Self = Self { conversation: 15., composer: 13., preview: 14., editor: 12., terminal: 12. };
+    pub const LARGE: Self = Self { conversation: 18., composer: 16., preview: 17., editor: 15., terminal: 15. };
+    /// What a size may be set to.
+    pub const LEAST: f32 = 9.;
+    pub const MOST: f32 = 32.;
+
+    /// A step up or down from `value`: a whole point, to the next whole
+    /// one from a size typed with a tenth.
+    pub fn step(value: f32, up: bool) -> f32 {
+        let to = if up { value.floor() + 1. } else { value.ceil() - 1. };
+        to.clamp(Self::LEAST, Self::MOST)
+    }
+
+    /// A size as typed: one decimal at most, in range.
+    pub fn typed(value: f32) -> f32 {
+        ((value * 10.).round() / 10.).clamp(Self::LEAST, Self::MOST)
+    }
+
+    /// The set a preset's name stands for.
+    pub fn preset(name: &str) -> Option<Self> {
+        match name {
+            "small" => Some(Self::SMALL),
+            "medium" => Some(Self::MEDIUM),
+            "large" => Some(Self::LARGE),
+            _ => None,
+        }
+    }
+
+    /// The preset these sizes are, if they are one.
+    pub fn preset_name(&self) -> Option<&'static str> {
+        ["small", "medium", "large"].into_iter().find(|n| Self::preset(n).as_ref() == Some(self))
+    }
+
+    /// Each size to a tenth, between the least and the most: a size
+    /// written by hand in `config.json` reads as one the settings can set.
+    pub fn clamped(self) -> Self {
+        let c = Self::typed;
+        Self { conversation: c(self.conversation), composer: c(self.composer), preview: c(self.preview), editor: c(self.editor), terminal: c(self.terminal) }
     }
 }
 
 impl AppConfig {
-    /// The reply's pixel size for `chat_size`, the prompt half a pixel
-    /// under. Medium is the Claude
-    /// desktop app's own body size (its stylesheet's
-    /// `font-claude-response-body`: 16px, line height 1.5); the others
-    /// step a point and a half either side.
+    /// The sizes text is set at: the preset's, or each place's own.
+    pub fn text_sizes(&self) -> TextSizes {
+        TextSizes::preset(&self.chat_size).unwrap_or_else(|| self.sizes.unwrap_or(TextSizes::MEDIUM).clamped())
+    }
+
+    /// The reply's size, the prompt half a point under.
     pub fn chat_px(&self) -> f32 {
-        match self.chat_size.as_str() {
-            "small" => 14.5,
-            "large" => 17.5,
-            _ => 16.0,
-        }
+        self.text_sizes().conversation
     }
 }
 

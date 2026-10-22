@@ -6,6 +6,7 @@ mod otp_input;
 mod overlay;
 pub(crate) mod popovers;
 mod search;
+pub(crate) use search::init as search_init;
 
 pub(crate) use clear_button::*;
 pub use content_type::*;

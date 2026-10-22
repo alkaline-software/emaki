@@ -273,7 +273,7 @@ is the sum of its fixed-height rows (`SIDE_ROW_H`, `SIDE_SESSION_H`), which
 drawn until the time is up.
 
 Narrower than `NARROW_W` the sidebar leaves the row and comes back only as
-an overlay over a scrim (the strip button, ⌘B), which any click or Escape
+an overlay over a scrim (the strip button, ⌘⇧B or ⌘B), which any click or Escape
 puts away. Each of these is in motion (Motion, below). `sidebar_open` keeps the preference for when the window is wide
 again.
 
@@ -444,8 +444,9 @@ The patterns, each in use and to be used again:
   the scrollers it knows (`inner_scroller`) are the main window's, by
   that window's coordinates.
 - What the settings window held goes when it closes (`settings_detach`,
-  on the view's release), never on a question first: ⌘W closes it from
-  code (`remove_window`), which asks nothing. It closes with the main
+  on the view's release), never on a question first: ⌘W, and Escape
+  with no list open in it, close it from code (`remove_window`), which
+  asks nothing. It closes with the main
   window. ⌘W or Close Window that reaches no view closes the window it
   was pressed in: `with_workbench` hands the main window's workbench
   only to the main window.
@@ -644,12 +645,24 @@ An accent's swatch marks the chosen one with a ring inside the disc in
 the card's ground, so every disc is one size and the row's ends are the
 first and last disc. The chosen one's name is the row's line.
 
-Settings asks for one text size (Fonts): the conversation's, and the
-terminal's and the file editor's go with it (`set_chat_size`,
-`term_px`, `editor_px`). The terminal's
-own size, its line spacing and its padding were rows once; they are the
-middle step now, set at launch whatever `config.json` says. The
-terminal's section sends a person to Fonts for its face and size.
+Text Size has its own section: a preset (Small, Medium, Large, each of
+whole points) for every place at once, and under it each place's size:
+the conversation, the composer, the file preview, the file editor, the
+terminal (`stepper`). Custom is the person's own set, kept in
+`config.json` while a preset is chosen and back when Custom is;
+Medium's sizes until it is first set. The sizes are set
+under Custom alone; under a preset they are the preset's, shown quiet.
+A step is a whole point, from a size with a tenth to the next whole
+one (`TextSizes::step`); a tenth is only typed, in the number's own
+field with "pt" fixed after it, taken at ↩ or when the field is left
+(`size_commit`), anything else put back. The fields are made with the
+settings window (`size_inputs`). Under Custom a size not Medium's has a
+reset beside it that puts it back to Medium's (`size_reset`), coming
+and going in motion. The
+faces stay in Fonts. The terminal's line spacing and padding were rows
+once; they are the middle step now, set at launch whatever
+`config.json` says. The terminal's section sends a person to Fonts for
+its face and to Text Size for its size, on a pill that says it.
 
 New sessions shows one agent's three at a time, its mark and name at
 the group's head and the agents' marks as a small segmented control at

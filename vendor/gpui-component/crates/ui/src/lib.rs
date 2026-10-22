@@ -135,6 +135,8 @@ pub fn init(cx: &mut App) {
     table::init(cx);
     text::init(cx);
     tooltip::init(cx);
+    // Emaki: the search panel's keys for its toggles.
+    input::search_init(cx);
 }
 
 #[inline]
