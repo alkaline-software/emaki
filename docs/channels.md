@@ -417,9 +417,9 @@ which the composer's pills and send button still fit their card. Both panels are
 down to its least, then the files panel or the outline panel. The conversation is never
 squeezed under that width (`Workbench::render`): where the panels asked
 for do not fit beside it at their least, the sidebar folds away as it
-does in a narrow window, and in a window too narrow even so for the
-panel at the left and the terminal panel together, there is one of them
-at a time (`docs/panels.md`, A narrow window).
+does in a narrow window, and in a window too narrow even so, the side
+panel lowest in its rank goes: the one opened or used least lately
+(`docs/panels.md`, A narrow window).
 
 A side's head is as tall as the path bar over the conversation, so the
 heads read as one line across the window, and it is a row of tabs on the
@@ -468,7 +468,7 @@ no close button: the strip's button puts the panel away.
 - Those are Kaku's own; ours are the middle step of the row's
   height and of the room around the screen, and stay there: Settings
   asked for both and for the text's size once, and no longer does
-  (`docs/window.md`, The settings panel). `terminal` in `config.json`
+  (`docs/window.md`, The settings window). `terminal` in `config.json`
   (`config::Terminal`), changed in Settings, Terminal, chooses the scheme
   (the window's, or one kept), the cursor's shape
   and whether it blinks, ligatures, and whether a selection is copied

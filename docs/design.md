@@ -1,7 +1,7 @@
 # Design
 
 The standard every part of Emaki a person sees is held to: the window,
-its pages, sheets, cards and menus, the settings panel, the icon. The bar
+its pages, sheets, cards and menus, the settings window, the icon. The bar
 is the work that wins Awwwards, the Webbys and the FWA: minimal, calm,
 intuitive, finished in every state. Kotoba, the studio's dictation app,
 is held to the same (`../kotoba/docs/design.md`), and so is emaki.lol
@@ -17,8 +17,8 @@ work, and the motion each uses, is in `docs/window.md`.
   quiet. The agents' own colours (Claude's terracotta, Codex's green)
   mark the agent and nothing else, and are never an accent.
 - **Everything fits.** Every section of the settings shows all it has
-  without scrolling. The page still scrolls, for a window smaller than
-  the panel; a new row that would push a section past the panel means
+  without scrolling. The page still scrolls, for a window made smaller;
+  a new row that would push a section past the window as it opens means
   the section is reworked, not left to scroll.
 - **Nothing jumps.** What appears, goes, opens, closes, grows, moves,
   fills or turns does so over a moment, with the pattern its neighbours
@@ -86,19 +86,25 @@ the first and the one a new install wears.
   lightness, its contrast checked on and off it in both appearances. The
   icon's rolls are periwinkle's dark shade whatever accent is worn.
 
-## The settings panel
+## The settings window
 
-A sheet over the window, 820 by 600 (capped by the window), rounded 18,
-on the popover's ground. `crates/emaki-app/src/workbench/settings.rs`.
+Kotoba's settings window: a window of its own, 820 by 600 as it opens,
+on the popover's ground, its title bar clear with the traffic lights
+over the rail. It is never narrower than it opens, since its rows are
+laid out for that width (Kotoba's goes to 700, where Emaki's names
+broke mid-word); it goes down to 460 tall, and the page scrolls.
+`crates/emaki-app/src/workbench/settings.rs`.
 
 - **The rail** at the left, 190 wide, on the muted shade at half in the
-  light appearance and the sidebar's in the dark. Its top band holds
-  "Settings", 13 points semibold in the quiet ink. Under it a row a
-  section, 30 tall, an icon and a name, the chosen one on a plate.
-  Updates wears a dot in the accent while a newer Emaki waits.
-- **The page** has a margin of 36 at either side. Its top band is 52
-  tall: the section's name, 15 points semibold, and the close button at
-  the right. The name and the page fade in with each section.
+  light appearance and the sidebar's in the dark. Its rows start under
+  the traffic lights, one a section, 30 tall, an icon and a name, the
+  chosen one on a plate. Updates wears a dot in the accent while a newer
+  Emaki waits.
+- **The page** has a margin of 36 at either side. The section's name
+  stands in the window's top (52 tall), level with the traffic lights,
+  15 points semibold, as the Mac's own settings have it. There is no
+  close button: the window closes as any does. The name and the page
+  fade in with each section.
 - **Groups**, 18 apart. A group is its name, 12 points semibold in the
   quiet ink, 6 over its card, in line with the rows' names (14 in from
   the card's edge). What belongs to the whole group (whose new sessions

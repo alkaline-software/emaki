@@ -247,6 +247,18 @@ upstream revision finds them.
    view keeps a selection as points in the window and reads them
    against the text where it stands, so the selection follows the
    scroll with nothing else changed.
+32. `crates/ui/src/highlighter/highlighter.rs`
+   (`MAX_INLINE_INJECTION_PARSES`): markdown's inline content is parsed
+   a block at a time, up to a budget of its own, past which the rest are
+   one combined layer as upstream has them all. Combined, an emphasis
+   opened in one paragraph closed in another (two Quarto includes,
+   `_a.html` and `_b.html`, set the page between them in italics), which
+   CommonMark never allows. The test is
+   `test_markdown_emphasis_does_not_cross_blocks`.
+33. `crates/ui/src/text/markdown_ext.rs`
+   (`MarkdownExtensions::parse_options_with`): a view's parse options
+   can be changed over GFM's, for the conversation, which turns off what
+   chat text sets off by accident (`docs/conversation.md`).
 
 ## Updating
 

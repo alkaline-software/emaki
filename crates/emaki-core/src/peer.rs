@@ -129,6 +129,12 @@ pub fn sessions_dir() -> PathBuf {
     paths::claude_home().join("sessions")
 }
 
+/// Whether a process with this id is running. Off Unix nothing can be
+/// asked, and none is.
+pub fn process_alive(pid: u32) -> bool {
+    i32::try_from(pid).is_ok_and(alive)
+}
+
 #[cfg(unix)]
 fn alive(pid: i32) -> bool {
     if pid <= 0 {

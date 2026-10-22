@@ -189,6 +189,9 @@ pub fn apply(appearance: &str, window: Option<&mut Window>, cx: &mut App) {
         "dark" => Theme::change(ThemeMode::Dark, window, cx),
         _ => Theme::sync_system_appearance(window, cx),
     }
+    // The toolkit draws again only the window it is handed; the main
+    // window and the settings window both wear the palette.
+    cx.refresh_windows();
 }
 
 /// The grammars the toolkit does not carry. R is one: its own crate has

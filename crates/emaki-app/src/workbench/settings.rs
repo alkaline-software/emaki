@@ -1,21 +1,27 @@
-//! The settings panel (⌘,), laid out as Kotoba's settings window is
-//! (`docs/design.md`): a rail of sections at the left, and at the right
-//! the chosen section's name over its groups, each a card of rows with a
-//! name at the left and a control at the right. Every change is drawn at
-//! once and written to `config.json`.
+//! The settings window (⌘,), Kotoba's settings window in Emaki
+//! (`docs/design.md`): a window of its own, the rail of sections at its
+//! left under the traffic lights, and at the right the chosen section's
+//! name in the window's top over its groups, each a card of rows with a
+//! name at the left and a control at the right. The window draws the
+//! workbench's own state (`SettingsView`), so every change is drawn at
+//! once in both windows and written to `config.json`.
 
 use super::*;
 
-/// The panel's size: wide enough for a rail beside the rows, and a fixed
-/// height so it reads as a sheet, not a second window (capped by the
-/// window when that is smaller). Every section fits in it unscrolled.
+/// The window's size when it opens, and the least it is dragged to.
+/// Every section fits the first unscrolled. It is never narrower than
+/// it opens: the rows are laid out for that width (the controls'
+/// `CONTROL_W` beside a name and its line), and narrower, names broke
+/// mid-word and the monospace tiles cut their faces' names. Shorter, the
+/// page scrolls.
 pub const SETTINGS_W: Pixels = px(820.);
 pub const SETTINGS_H: Pixels = px(600.);
+const SETTINGS_MIN: Size<Pixels> = Size { width: SETTINGS_W, height: px(460.) };
 /// The rail's width, and the page's margin at either side.
 pub const SETTINGS_RAIL_W: Pixels = px(190.);
 const PAGE_X: Pixels = px(36.);
-/// The band at the top of the page that holds the section's name, and
-/// of the rail, where "Settings" stands level with it.
+/// The window's top, clear for the traffic lights and dragged by, where
+/// the section's name stands level with them.
 const TOP_H: Pixels = px(52.);
 /// What the widest controls at a row's right take, so those on a page
 /// start and end together.
@@ -26,11 +32,194 @@ const CONTROL_H: Pixels = px(28.);
 const UPDATE_W: Pixels = px(190.);
 /// A card's corner.
 const CARD_R: Pixels = px(12.);
+/// The key context of the settings window, where Escape puts a list away.
+pub const SETTINGS_CONTEXT: &str = "Settings";
+
+/// The settings window's root: the workbench's settings, drawn in a
+/// window of their own. Everything it draws is the workbench's, so a
+/// listener on it is the workbench's too.
+pub struct SettingsView {
+    workbench: WeakEntity<Workbench>,
+}
+
+impl SettingsView {
+    fn new(workbench: WeakEntity<Workbench>, cx: &mut Context<Self>) -> Self {
+        if let Some(w) = workbench.upgrade() {
+            cx.observe(&w, |_, _, cx| cx.notify()).detach();
+        }
+        // The window is gone: what belonged to it goes with it. Closing
+        // it from code (⌘W) never asks, so this is the one place to hear.
+        cx.on_release(|this: &mut Self, cx| {
+            if let Some(w) = this.workbench.upgrade() {
+                w.update(cx, |w, cx| w.settings_detach(cx));
+            }
+        })
+        .detach();
+        Self { workbench }
+    }
+}
+
+impl Render for SettingsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.workbench.upgrade() {
+            Some(w) => w.update(cx, |w, cx| w.render_settings(window, cx)),
+            None => div().into_any_element(),
+        }
+    }
+}
+
+/// Open the settings window, centred on the screen, as a Mac's settings
+/// window opens.
+fn open_settings_window(workbench: WeakEntity<Workbench>, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(SETTINGS_W, SETTINGS_H), cx);
+    let titlebar = if cfg!(target_os = "macos") {
+        TitlebarOptions { title: Some("Settings".into()), appears_transparent: true, traffic_light_position: Some(point(px(17.), px(19.))) }
+    } else {
+        TitlebarOptions { title: Some("Settings".into()), appears_transparent: false, traffic_light_position: None }
+    };
+    let opened = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(titlebar),
+            window_min_size: Some(SETTINGS_MIN),
+            app_id: Some("emaki".into()),
+            // The top is the app's to drag by (`drag_region`): left to
+            // AppKit, a press on a control there moved the window.
+            app_owns_titlebar_drag: true,
+            ..Default::default()
+        },
+        |window, cx| {
+            crate::a11y::install_window_focus_forwarder(window);
+            if let Some(w) = workbench.upgrade() {
+                w.update(cx, |w, cx| w.settings_attach(window, cx));
+            }
+            let view = cx.new(|cx| SettingsView::new(workbench.clone(), cx));
+            cx.new(|cx| gpui_component::Root::new(view, window, cx))
+        },
+    );
+    match opened {
+        Ok(handle) => {
+            let _ = handle.update(cx, |_, window, _| {
+                // A probe's windows stand over the others, where they draw.
+                if std::env::var_os("EMAKI_GO").is_some() {
+                    crate::sys::keep_on_top(window);
+                }
+                window.activate_window();
+            });
+        }
+        Err(e) => eprintln!("emaki: could not open the settings: {e}"),
+    }
+}
 
 impl Workbench {
-    pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // The page's scroller is named before anything on it.
-        self.inner_scroller(&self.settings_scroll, Inner::Over);
+    /// Show the settings, on `section` when one is asked for: the window
+    /// comes forward, or opens. It is opened once the update asking for
+    /// it is over, since its first draw is the workbench's.
+    pub(crate) fn open_settings(&mut self, section: Option<&'static str>, cx: &mut Context<Self>) {
+        if let Some(s) = section.filter(|s| SETTINGS_SECTIONS.iter().any(|(k, _, _)| k == s)) {
+            if self.settings_section != s {
+                self.settings_section = s;
+                self.settings_scroll.set_offset(point(px(0.), px(0.)));
+            }
+            if self.pick.as_ref().is_some_and(|p| p.in_settings) {
+                self.close_pick(cx);
+            }
+        }
+        cx.notify();
+        let this = cx.entity().downgrade();
+        let open = self.settings_window;
+        cx.defer(move |cx| {
+            cx.activate(true);
+            if let Some(h) = open {
+                if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
+                    return;
+                }
+            }
+            open_settings_window(this, cx);
+        });
+    }
+
+    /// Whether `window` is the settings window: a list or a menu opened
+    /// in it is drawn there, not in the main window.
+    pub(crate) fn is_settings_window(&self, window: &Window) -> bool {
+        self.settings_window.is_some_and(|h| h.window_id() == window.window_handle().window_id())
+    }
+
+    /// Close the settings window, with the main window or at ⌘W.
+    pub(crate) fn close_settings(&mut self, cx: &mut App) {
+        if let Some(h) = self.settings_window {
+            let _ = h.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+
+    /// The window just opened: the name's field, which belongs to a
+    /// window, made in it, and the keys given to the window.
+    fn settings_attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_window = Some(window.window_handle());
+        let machine = crate::sys::user_first_name();
+        let saved = self.cfg.app.user_name.clone();
+        let name_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx).placeholder(if machine.is_empty() { "Your name".to_string() } else { machine });
+            s.set_value(saved, window, cx);
+            s
+        });
+        cx.subscribe_in(&name_input, window, |this, input, ev: &InputEvent, _, cx| {
+            if let InputEvent::Change = ev {
+                let name = input.read(cx).value().trim().to_string();
+                if name != this.cfg.app.user_name {
+                    this.user_name = if name.is_empty() { crate::sys::user_first_name() } else { name.clone() };
+                    this.cfg.app.user_name = name;
+                    this.save_app_config();
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        self.name_input = Some(name_input);
+        // A list or a menu open in the window goes when another window is
+        // used, as the Mac's own do.
+        cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.close_settings_lists(cx);
+            }
+        })
+        .detach();
+        window.focus(&self.settings_focus, cx);
+    }
+
+    /// The window is gone: its field, and a list or a menu it had open.
+    fn settings_detach(&mut self, cx: &mut Context<Self>) {
+        self.settings_window = None;
+        self.name_input = None;
+        if self.pick.as_ref().is_some_and(|p| p.in_settings) {
+            self.pick = None;
+        }
+        if self.pick_gone.as_ref().is_some_and(|(p, _)| p.in_settings) {
+            self.pick_gone = None;
+        }
+        if self.menu.as_ref().is_some_and(|m| m.in_settings) {
+            self.menu = None;
+        }
+        if self.menu_gone.as_ref().is_some_and(|(m, _)| m.in_settings) {
+            self.menu_gone = None;
+        }
+        cx.notify();
+    }
+
+    /// Put away a list or a menu open in the settings window.
+    fn close_settings_lists(&mut self, cx: &mut Context<Self>) {
+        if self.pick.as_ref().is_some_and(|p| p.in_settings) {
+            self.close_pick(cx);
+        }
+        if self.menu.as_ref().is_some_and(|m| m.in_settings) {
+            self.close_menu(cx);
+        }
+    }
+
+    /// The settings window's content: the rail, and the section with its
+    /// name in the window's top, and over them a list or a menu opened
+    /// here.
+    pub(super) fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let section = self.settings_section;
         let rows = match section {
@@ -54,70 +243,42 @@ impl Workbench {
             "about" => ("title-about", "page-about"),
             _ => ("title-appearance", "page-appearance"),
         };
-
-        // The scrim is a flex box, so the panel sits in the middle of the
-        // window both ways (an absolute panel with auto margins did not).
-        // The panel occludes, as every sheet on a scrim that closes at a
-        // click does: the scrim's bounds take the panel in, so a press in
-        // the panel let go outside it, or the other way, was a click on
-        // the scrim and closed it.
         div()
-            .id("settings-overlay")
-            .absolute()
-            .inset_0()
-            .occlude()
-            .bg(theme.overlay)
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.settings_open = false;
-                cx.notify();
-            }))
+            .id("settings-window")
+            .key_context(SETTINGS_CONTEXT)
+            .track_focus(&self.settings_focus)
+            .size_full()
+            .relative()
+            .bg(theme.popover)
+            .text_color(theme.foreground)
+            .text_size(px(13.))
+            // Escape puts away a list or a menu opened here; the window
+            // itself closes as a Mac's settings window does, at ⌘W.
+            .on_action(cx.listener(|this, _: &Escape, _, cx| this.close_settings_lists(cx)))
+            .on_action(cx.listener(|_, _: &CloseTab, window, _| window.remove_window()))
+            .on_action(cx.listener(|_, _: &crate::CloseWindow, window, _| window.remove_window()))
+            .on_action(cx.listener(|_, _: &OpenSettings, window, _| window.activate_window()))
             .child(
                 h_flex()
-                    .id("settings-panel")
-                    .occlude()
-                    .on_click(|_, window, cx| swallow_click(window, cx))
-                    .w(SETTINGS_W)
-                    .h(SETTINGS_H)
-                    .max_w(gpui::relative(0.94))
-                    .max_h(gpui::relative(0.9))
+                    .size_full()
                     .items_stretch()
-                    .rounded(px(18.))
-                    .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow(float_shadow(&theme))
-                    .overflow_hidden()
                     .child(self.settings_rail(cx))
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
-                            // The section's name in the top band, fading
-                            // in with its page, and the way out at its end.
-                            .child(
-                                h_flex()
-                                    .h(TOP_H)
-                                    .flex_shrink_0()
-                                    .pl(PAGE_X)
-                                    .pr(px(14.))
-                                    .items_center()
-                                    .child(page_in(title_anim, div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title)))
-                                    .child(div().flex_1())
-                                    .child(Button::new("settings-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_open = false;
-                                        cx.notify();
-                                    }))),
-                            )
-                            // The rows scroll under the band with the
+                            // The window's top is dragged by, and holds the
+                            // section's name level with the traffic lights,
+                            // as the Mac's own settings do. It fades in with
+                            // the page.
+                            .child(Self::drag_region(h_flex().h(TOP_H).flex_shrink_0().w_full().px(PAGE_X).items_center(), cx).child(page_in(title_anim, div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title))))
+                            // The rows scroll under the top with the
                             // toolkit's scrollbar at their edge (it fades a
                             // second after the last scroll, as every
-                            // scrollbar in the window does). Every section
-                            // fits unscrolled; the scroll is for a window
-                            // smaller than the panel.
+                            // scrollbar in the app does). Every section
+                            // fits the window as it opens; the scroll is
+                            // for a window made smaller.
                             .child(
                                 v_flex()
                                     .relative()
@@ -139,57 +300,67 @@ impl Workbench {
                             ),
                     ),
             )
+            .when_some(self.menu_gone.clone().filter(|(m, at)| m.in_settings && at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
+            .when_some(self.menu.clone().filter(|m| m.in_settings), |d, m| d.child(self.render_menu(m, None, window, cx)))
+            .when_some(self.pick_gone.clone().filter(|(m, at)| m.in_settings && at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))
+            // Where its field is now, not where it was when the list opened.
+            .when_some(self.pick.clone().filter(|m| m.in_settings), |d, mut m| {
+                m.by = self.pill_at.borrow().get(&(m.what, true)).copied().unwrap_or(m.by);
+                d.child(self.render_pick(m, false, window, cx))
+            })
+            .into_any_element()
     }
 
-    /// The rail of sections at the panel's left: "Settings" in the top
-    /// band, level with the section's name, then an icon and a name per
-    /// section, the chosen one on a plate. Updates wears a dot while a
-    /// newer Emaki waits.
+    /// The rail of sections at the window's left, under its traffic
+    /// lights: an icon and a name per section, the chosen one on a plate.
+    /// Updates wears a dot while a newer Emaki waits. Its empty room drags
+    /// the window, as the top does.
     fn settings_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let current = self.settings_section;
         let update_waiting = self.update.available.is_some();
-        v_flex()
-            .w(SETTINGS_RAIL_W)
-            .flex_shrink_0()
-            .px(px(10.))
-            .pb(px(10.))
-            .gap(px(2.))
-            .bg(if theme.mode.is_dark() { theme.sidebar } else { theme.muted.opacity(0.5) })
-            .border_r_1()
-            .border_color(theme.border)
-            // A clip is a rectangle: the rail's ground is rounded where
-            // it meets the panel's corners, the panel's less its border.
-            .rounded_tl(px(17.))
-            .rounded_bl(px(17.))
-            .child(h_flex().h(TOP_H).flex_shrink_0().px(px(10.)).items_center().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("Settings"))
-            .children(SETTINGS_SECTIONS.iter().map(|(key, label, icon)| {
-                let active = *key == current;
-                let key: &'static str = key;
-                let dot = key == "updates" && update_waiting;
-                h_flex()
-                    .id(SharedString::from(format!("settings-nav-{key}")))
-                    .h(px(30.))
-                    .px(px(10.))
-                    .gap(px(9.))
-                    .items_center()
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .when(active, |d| d.bg(theme.sidebar_accent))
-                    .when(!active, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.6))))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.settings_section != key {
-                            this.settings_section = key;
-                            this.settings_scroll.set_offset(point(px(0.), px(0.)));
-                            this.close_pick(cx);
-                        }
-                        cx.notify();
-                    }))
-                    .child(Icon::default().path(*icon).with_size(px(15.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
-                    .child(div().flex_1().text_size(px(13.)).when(active, |d| d.font_weight(FontWeight::MEDIUM)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(*label))
-                    .when(dot, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.primary)))
-            }))
-            .into_any_element()
+        Self::drag_region(
+            v_flex()
+                .w(SETTINGS_RAIL_W)
+                .h_full()
+                .flex_shrink_0()
+                .pt(TOP_H)
+                .px(px(10.))
+                .gap(px(2.))
+                .bg(if theme.mode.is_dark() { theme.sidebar } else { theme.muted.opacity(0.5) })
+                .border_r_1()
+                .border_color(theme.border),
+            cx,
+        )
+        .children(SETTINGS_SECTIONS.iter().map(|(key, label, icon)| {
+            let active = *key == current;
+            let key: &'static str = key;
+            let dot = key == "updates" && update_waiting;
+            h_flex()
+                .id(SharedString::from(format!("settings-nav-{key}")))
+                .h(px(30.))
+                .px(px(10.))
+                .gap(px(9.))
+                .items_center()
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(active, |d| d.bg(theme.sidebar_accent))
+                .when(!active, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.6))))
+                // A press on a section is not a drag of the window.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.settings_section != key {
+                        this.settings_section = key;
+                        this.settings_scroll.set_offset(point(px(0.), px(0.)));
+                        this.close_settings_lists(cx);
+                    }
+                    cx.notify();
+                }))
+                .child(Icon::default().path(*icon).with_size(px(15.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
+                .child(div().flex_1().text_size(px(13.)).when(active, |d| d.font_weight(FontWeight::MEDIUM)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(*label))
+                .when(dot, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.primary)))
+        }))
+        .into_any_element()
     }
 
     /// A switch, for what is on or off: a track that fills with the
@@ -233,15 +404,17 @@ impl Workbench {
     }
 
     /// A field in the settings, the controls' width: the name's text
-    /// field (`name_input`), in the focus wrapper every own input has.
+    /// field (`name_input`, made with the window), in the focus wrapper
+    /// every own input has.
     fn your_name_field(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let Some(input) = self.name_input.clone() else { return div().w(CONTROL_W).h(CONTROL_H).into_any_element() };
         div()
             .id("name-field")
-            .track_focus(&self.name_input.read(cx).focus_handle(cx))
+            .track_focus(&input.read(cx).focus_handle(cx))
             .role(Role::TextInput)
             .aria_label("Your name")
-            .aria_value(self.name_input.read(cx).value().to_string())
+            .aria_value(input.read(cx).value().to_string())
             .w(CONTROL_W)
             .h(CONTROL_H)
             .px(px(8.))
@@ -250,7 +423,7 @@ impl Workbench {
             .rounded(px(8.))
             .bg(theme.muted)
             .text_size(px(12.5))
-            .child(Input::new(&self.name_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.name_input, false, cx)))
+            .child(Input::new(&input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&input, false, cx)))
             .into_any_element()
     }
 
@@ -603,7 +776,7 @@ impl Workbench {
             )
         });
         let auto_check = self.switch("update-auto", self.cfg.app.check_updates, Rc::new(|this, on, _, cx| this.set_check_updates(on, cx)), cx);
-        vec![group(None, None, vec![line("Version", Some(version_note.into_any_element()), button, &theme), line("Check automatically", None, auto_check, &theme)], &theme)]
+        vec![group(None, None, vec![line("Version", Some(version_note.into_any_element()), button, &theme), line("Check automatically", Some(div().child("Once a day. Nothing is installed without you.").into_any_element()), auto_check, &theme)], &theme)]
     }
 
     /// Who makes Emaki: the app on a title card, and a sentence naming

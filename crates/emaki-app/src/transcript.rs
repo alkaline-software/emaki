@@ -42,19 +42,23 @@ const HOVER_ROW_H: Pixels = px(24.);
 /// a Codex tool result produces. A panic inside an element's layout takes
 /// the app down, so every text is tried here first, under `catch_unwind`,
 /// once per distinct text (the answer is kept by hash).
-fn markdown_is_safe(text: &str) -> bool {
+fn markdown_is_safe(text: &str, chat: bool) -> bool {
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
     thread_local! {
         static SEEN: std::cell::RefCell<HashMap<u64, bool>> = std::cell::RefCell::new(HashMap::new());
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h);
+    (text, chat).hash(&mut h);
     let key = h.finish();
     if let Some(known) = SEEN.with(|s| s.borrow().get(&key).copied()) {
         return known;
     }
-    let opts = markdown::ParseOptions::gfm();
+    // The options the view parses with, or the check proves nothing.
+    let mut opts = markdown::ParseOptions::gfm();
+    if chat {
+        chat_parse_options(&mut opts);
+    }
     let safe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(text, &opts).is_ok())).unwrap_or(false);
     SEEN.with(|s| {
         let mut s = s.borrow_mut();
@@ -66,27 +70,58 @@ fn markdown_is_safe(text: &str) -> bool {
     safe
 }
 
-/// Markdown as a conversation draws it: `md_view` with the code among
-/// its words in the smaller cut of the monospace face
-/// (`fonts::inline_mono_family`), so it stands no taller than they do.
+/// What a conversation reads as markdown: GFM, less what chat sets
+/// down by accident. A prompt is typed as plain text, and a reply is
+/// read in a terminal as well, where none of these are drawn; so a sign
+/// that prose uses for something else is left as it is written.
+///
+/// - A line of `-` or `=` under a line of text is a line of its own, not
+///   the line above turned into a heading (setext). `---` after text is
+///   then a rule, as a model writing it means.
+/// - Text indented four spaces is text, not a block of code. Code comes
+///   between fences.
+/// - A tag in a sentence (`<Input>`, `<div>`) is its words: raw HTML was
+///   parsed as a tag and drawn as nothing.
+/// - One tilde is a tilde ("~30% … ~40%"): strikethrough takes two.
+pub(crate) fn chat_parse_options(opts: &mut markdown::ParseOptions) {
+    opts.constructs.heading_setext = false;
+    opts.constructs.code_indented = false;
+    opts.constructs.html_flow = false;
+    opts.constructs.html_text = false;
+    opts.gfm_strikethrough_single_tilde = false;
+}
+
+/// The conversation's markdown options, made once. A set made anew
+/// takes a new revision, and the view reads its text again at every
+/// new revision: made at each draw, every text was parsed again every
+/// frame, and a selection was gone the moment the mouse let go.
+static CHAT_MARKDOWN: std::sync::LazyLock<gpui_component::text::MarkdownExtensions> = std::sync::LazyLock::new(|| gpui_component::text::MarkdownExtensions::default().parse_options_with(chat_parse_options));
+
+/// Markdown as a conversation draws it: `md_view` read with
+/// `chat_parse_options`, and with the code among its words in the
+/// smaller cut of the monospace face (`fonts::inline_mono_family`), so
+/// it stands no taller than they do.
 pub(crate) fn chat_md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, crate::fonts::inline_mono_family(cx), cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, cx)
 }
 
+/// Markdown as a document draws it, a file's or a page's: all of GFM,
+/// as GitHub reads the file.
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, cx)
 }
 
-fn md_view_in(id: String, text: String, inline_mono: SharedString, cx: &App) -> impl IntoElement {
+fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown as it is, in a code block,
     // rather than taking the window down.
-    let text = if markdown_is_safe(&text) { text } else { code_block(&text, "text") };
+    let text = if markdown_is_safe(&text, chat) { text } else { code_block(&text, "text") };
     let dark = theme.mode.is_dark();
     let code_bg = theme.muted;
     let border = theme.border;
     TextView::markdown(SharedString::from(format!("{id}-{}", if dark { "d" } else { "l" })), text)
         .selectable(true)
+        .when(chat, |v| v.markdown_extensions(CHAT_MARKDOWN.clone()))
         .style(
             TextViewStyle {
                 heading_base_font_size: px(15.),
@@ -1301,5 +1336,52 @@ impl Workbench {
             }
         }
         v.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chat_parse_options;
+    use markdown::mdast::Node;
+
+    fn chat(text: &str) -> Node {
+        let mut opts = markdown::ParseOptions::gfm();
+        chat_parse_options(&mut opts);
+        markdown::to_mdast(text, &opts).unwrap()
+    }
+
+    fn has(node: &Node, want: &dyn Fn(&Node) -> bool) -> bool {
+        want(node) || node.children().is_some_and(|kids| kids.iter().any(|k| has(k, want)))
+    }
+
+    fn heading(n: &Node) -> bool {
+        matches!(n, Node::Heading(_))
+    }
+
+    #[test]
+    fn lines_split_by_a_dash_are_not_headings() {
+        // A prompt that split a list into parts with a dash on a line.
+        let prompt = "Also, I'd like to have division lines to split them into 3 parts:\n\nGet Started\n-\nProjects\nConversation\n-\nFile Panel\nOutline Panel\n-\nSettings\nKeys\n";
+        assert!(!has(&chat(prompt), &heading));
+        assert!(!has(&chat("Title\n====\n"), &heading));
+        // A model's rule under a paragraph stays a rule.
+        assert!(has(&chat("Done.\n---\nNext part.\n"), &|n| matches!(n, Node::ThematicBreak(_))));
+    }
+
+    #[test]
+    fn prose_signs_stay_text() {
+        assert!(!has(&chat("    indented, as pasted\n"), &|n| matches!(n, Node::Code(_))));
+        assert!(!has(&chat("Use the <Input> field here.\n"), &|n| matches!(n, Node::Html(_))));
+        assert!(!has(&chat("It took ~30% then ~40% of the time.\n"), &|n| matches!(n, Node::Delete(_))));
+    }
+
+    #[test]
+    fn markdown_meant_as_markdown_still_reads() {
+        assert!(has(&chat("## A heading\n"), &heading));
+        assert!(has(&chat("Some **bold** words.\n"), &|n| matches!(n, Node::Strong(_))));
+        assert!(has(&chat("```rust\nfn x() {}\n```\n"), &|n| matches!(n, Node::Code(_))));
+        assert!(has(&chat("~~gone~~\n"), &|n| matches!(n, Node::Delete(_))));
+        assert!(has(&chat("| a | b |\n|---|---|\n| 1 | 2 |\n"), &|n| matches!(n, Node::Table(_))));
+        assert!(has(&chat("- one\n- two\n"), &|n| matches!(n, Node::List(_))));
     }
 }

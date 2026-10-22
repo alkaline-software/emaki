@@ -167,32 +167,54 @@ with one panel beside it (`main::MIN_W`, the conversation's
 two). So the files panel, the outline panel or the terminal panel, asked
 for, always has room, and its button never lights over nothing.
 
-Under the width at which the panel at the left and the terminal panel
-both fit (`room_for_both`), there is one of them at a time: asking for one
-puts the other away, in motion (`toggle_panel`, `term_go`). A window
-dragged narrower with both showing puts the terminal panel away, always
-the terminal panel, so it is known beforehand which goes (`Workbench::render`,
-through `term_go` so its button goes out with it). Either way it is put away for
-good, not kept for a wider window: what the buttons say is what is
-there. The sidebar has given its room up before any of this.
+Beside the conversation stand up to three side panels (`panels::Side`):
+the file shown, the files or the outline at the left, and the terminal
+at the right. Where they do not all fit at their least, the ones lowest
+in their rank give their room up (`side_rank`, `sides_fit`,
+`fit_sides`). The rank is the person's: a panel opened, or pressed
+in (`side_pressed`), goes to its top, and a file opened takes the files
+it was found in up with it when they are what shows at the left. Before
+any is used it is the file, the panel at the left, then the terminal:
+the file was asked for to be read, and the terminal goes on running
+away and is one key from coming back. So a file opened from the tree
+beside a terminal puts the terminal away, and a terminal opened last
+puts away the panel at the left. The sidebar has given its room up
+before any of this, for its overlay.
 
+**A panel asked for is always shown.** The one at the top of the rank
+fits whatever else does not, even where the composer's measured need
+and the panel's least are more than the window holds: the conversation
+is then what is left, never under `CONVERSATION_MIN` (`main::MIN_W`).
+Judged like the others, a terminal asked for in the narrowest window
+was put away again the moment it opened.
+
+- One rule for every way room runs out: a panel asked for (`panel_go`,
+  `term_go`, `file_preview` fit at once, so the frame never draws all
+  three squeezed), and a window dragged narrower (`Workbench::render`,
+  deferred).
+- The panel at the left and the terminal go through their buttons'
+  calls, so the button goes out with them, and they go for good, not
+  kept for a wider window: what the buttons say is what is there.
+- The file has no button, and what is not saved in it must not go: it
+  is only not drawn (`fold_file`), and comes back when there is room
+  for it again, or at a click on it in the tree, which asks for it
+  as opening it does (a click on the file shown closes it).
 - What puts a panel away goes by `conv_need`, the conversation's need as
   last measured with room to spare, never by `conv_min`. `conv_min` is
   raised whenever the composer's row is squeezed, which it is for a
   moment while the sidebar and a panel are both in motion, and a panel
   put away on that reading stayed away: which of the two went came out
   differently from one time to the next.
-- The room of a terminal panel put away for the window's width still counts
-  against the sidebar (`term_folded`), until the window is `FOLD_SLACK`
-  wider than where both fit, or a panel's button is pressed. Without
-  it, a window dragged narrower lost the sidebar, then the terminal,
-  then got the sidebar back in the terminal's room, then lost it again.
+- The room of a panel put away for the window's width still counts
+  against the sidebar (`room_held`), until the window is `FOLD_SLACK`
+  wider than where what stays fits with it, or a panel's button is
+  pressed. Without it, a window dragged narrower lost the sidebar, then
+  the terminal, then got the sidebar back in the terminal's room, then
+  lost it again.
 - A terminal panel put away takes the keyboard to the window with it, whoever
   put it away (`Workbench::render`). Left in a terminal not drawn, no
   key binding was heard until a click.
 
-The file shown is the one thing still not drawn for want of room
-(`fold_file`), with a line under the composer saying so.
 
 Tried and dropped: a panel with no room drawn over the conversation. It
 covered the composer, and two of them lay on each other.
@@ -612,6 +634,15 @@ far from the tree.
   lets go of what is selected there, as an editor's does
   (`file_unselect`): the editor's selection, words selected in a file
   as it reads, a block of a table's cells.
+- The head fits the pane at any width. Where its row would leave the
+  file's name less than `HEAD_NAME_ROOM`, Open and Reveal fold into one
+  More button whose list is the two the file's row in the tree has, and
+  Save shows as its icon, the words in its tip; they fade as they
+  change places. The file's size (a PDF's page) is said where it and the
+  whole name fit, and left out where they do not, the name first; the
+  name then takes the room, all of it with no folder to say. Nothing in
+  the head is cut. With changes not saved, Save stands in its place. At the pane's least the full row ran past the edge and
+  cut the close button in half.
 - The head's enlarge button gives the pane the conversation's room too
   (`file_enlarge`, `file_big`), and its next press or closing the file
   gives it back. The width runs from one to the other
@@ -623,9 +654,9 @@ far from the tree.
   for the window, not between launches. "Add to message" was in the
   head and was removed; it is on the tree's menu.
 - It is the first to give room up: narrower before the terminal and the
-  tree are (`file_pane_w`, and `file_pane_least` in their own widths),
-  and in a window with no room for its least it is not drawn
-  (`fold_file`), with a line under the composer saying so.
+  tree are (`file_pane_w`, and `file_pane_least` in their own widths).
+  Where the side panels do not all fit at their least, which goes is by
+  their rank (A narrow window).
 - What is shown (`FileBody`, `read_file`): markdown as the conversation
   draws it, and a YAML header it opens with as a table of its fields over
   the text (`files::front_matter`, `front_matter_table`; markdown itself
@@ -817,6 +848,15 @@ far from the tree.
     since) and read at launch. The app can be ended with no moment to
     ask (`scripts/relaunch.sh`, a crash, the system shutting down), and
     nothing typed is lost to that; the undo history is.
+  - Each row says which Emaki wrote it (`pid`): two can run on one
+    `~/.emaki` (the installed app beside a build). A launch takes up only
+    the rows of an Emaki no longer running (`drafts_left`); a row with
+    no writer, from an Emaki from before rows had one, only while no
+    other Emaki runs. A write keeps every row that is not its own but
+    those it took up (`drafts_rows`), and writes its own again when
+    another Emaki's write left them out. Taking up a running Emaki's row
+    showed a file saved there as not saved here, with the older words,
+    whose Save would have put them back over the saved file.
   - A new line starts where the language says (`emaki_core::indent`,
     asked through the vendored `set_next_line_indent`): a step in after
     Python's or YAML's `:` and after an opening bracket, a step out

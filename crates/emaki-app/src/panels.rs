@@ -457,6 +457,37 @@ const TREE_SPRING: Duration = Duration::from_millis(650);
 /// How wide the pane is to begin with, and the least it is dragged to.
 pub(crate) const FILE_W: Pixels = px(460.);
 pub(crate) const FILE_MIN: Pixels = px(280.);
+/// What the file pane's head keeps for the file's name before it folds
+/// Open and Reveal into one More button, and Save into its icon.
+const HEAD_NAME_ROOM: f32 = 110.;
+
+/// A panel beside the conversation that gives its room up when the
+/// window has too little: the file shown, the files or the outline at
+/// the left, and the terminal at the right. The sidebar is not one: it
+/// leaves the row first, for an overlay. Which goes is by their rank
+/// (`Workbench::side_rank`), the one opened or used last at its top.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Side {
+    File,
+    Left,
+    Term,
+}
+
+impl Side {
+    /// The order before any is opened or used: the file, which was asked
+    /// for to be read; the panel the file is found in; the terminal,
+    /// which goes on running away and is one key from coming back.
+    pub(crate) const RANK: [Side; 3] = [Side::File, Side::Left, Side::Term];
+
+    /// The least it takes of the row.
+    pub(crate) fn least(self) -> Pixels {
+        match self {
+            Side::File => FILE_MIN,
+            Side::Left => PANEL_MIN,
+            Side::Term => crate::term_panel::TERM_MIN,
+        }
+    }
+}
 
 /// One page of a PDF: its picture and that picture's size in pixels,
 /// the page's own size in its units, and which of the document's glyphs
@@ -707,10 +738,37 @@ fn drafts_path() -> PathBuf {
     emaki_core::paths::state_dir().join("file_drafts.json")
 }
 
-/// The drafts kept from the last run (`keep_drafts`).
-pub(crate) fn load_drafts() -> HashMap<PathBuf, Draft> {
-    let Some(serde_json::Value::Array(rows)) = emaki_core::paths::read_json(&drafts_path()) else { return HashMap::new() };
+/// Whether a row of `state/file_drafts.json` is another Emaki's that is
+/// running now: its drafts are its own, still being typed in, and
+/// neither taken up here nor written over. A row with no writer is from
+/// an Emaki from before rows had one: another Emaki's while one runs
+/// (`others_running`), which may be that one, else no one's.
+fn row_is_live_other(row: &serde_json::Value, own: u32, alive: &dyn Fn(u32) -> bool, others_running: bool) -> bool {
+    match row.get("pid").and_then(|p| p.as_u64()) {
+        Some(pid) => u32::try_from(pid).is_ok_and(|pid| pid != own && alive(pid)),
+        None => others_running,
+    }
+}
+
+/// Whether another Emaki is running on this machine now. `pgrep` leaves
+/// out its own ancestors, this Emaki among them. Off Unix none is known.
+fn other_emaki_running() -> bool {
+    if cfg!(unix) {
+        std::process::Command::new("pgrep").args(["-x", "Emaki"]).output().is_ok_and(|o| o.status.success())
+    } else {
+        false
+    }
+}
+
+/// The drafts this launch takes up: those of an Emaki that is no longer
+/// running, which ended with no moment to ask (`keep_drafts`). Another
+/// Emaki running now beside this one (the installed app beside a build)
+/// writes to the same file, and its drafts are not left over: taken up,
+/// a file saved there later showed here as not saved, with the older
+/// words.
+fn drafts_left(rows: &[serde_json::Value], own: u32, alive: &dyn Fn(u32) -> bool, others_running: bool) -> HashMap<PathBuf, Draft> {
     rows.iter()
+        .filter(|row| !row_is_live_other(row, own, alive, others_running))
         .filter_map(|row| {
             let path = PathBuf::from(row.get("path")?.as_str()?);
             let text = row.get("text")?.as_str()?.to_string();
@@ -723,6 +781,37 @@ pub(crate) fn load_drafts() -> HashMap<PathBuf, Draft> {
             Some((path, Draft { text, base }))
         })
         .collect()
+}
+
+/// A row of the drafts file as who wrote it and the file it is for.
+fn row_key(row: &serde_json::Value) -> (Option<u64>, Option<String>) {
+    (row.get("pid").and_then(|p| p.as_u64()), row.get("path").and_then(|p| p.as_str()).map(str::to_string))
+}
+
+/// The rows this launch took up (`load_drafts`): written again as this
+/// Emaki's, so they leave the file under their old writer.
+static DRAFTS_TAKEN: std::sync::OnceLock<Vec<(Option<u64>, Option<String>)>> = std::sync::OnceLock::new();
+
+/// The drafts kept from the last run (`keep_drafts`).
+pub(crate) fn load_drafts() -> HashMap<PathBuf, Draft> {
+    let Some(serde_json::Value::Array(rows)) = emaki_core::paths::read_json(&drafts_path()) else { return HashMap::new() };
+    let (own, alive, others) = (std::process::id(), &emaki_core::peer::process_alive, other_emaki_running());
+    let _ = DRAFTS_TAKEN.set(rows.iter().filter(|row| !row_is_live_other(row, own, alive, others)).map(row_key).collect());
+    drafts_left(&rows, own, alive, others)
+}
+
+/// What `state/file_drafts.json` is written as: this Emaki's drafts, each
+/// with its writer, and every other row but those this launch took up.
+/// Another Emaki's are its own to change, and one that ended left its
+/// own for its next launch: written over here, a build relaunched
+/// beside the installed app lost what it had kept.
+fn drafts_rows(all: &HashMap<PathBuf, Draft>, on_disk: &[serde_json::Value], own: u32, taken: &[(Option<u64>, Option<String>)]) -> Vec<serde_json::Value> {
+    let mut rows: Vec<serde_json::Value> = on_disk.iter().filter(|row| row_key(row).0 != Some(own as u64) && !taken.contains(&row_key(row))).cloned().collect();
+    rows.extend(all.iter().map(|(path, d)| {
+        let since = d.base.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        serde_json::json!({ "path": path.to_string_lossy(), "text": d.text, "secs": since.map(|s| s.as_secs()), "nanos": since.map(|s| s.subsec_nanos()), "pid": own })
+    }));
+    rows
 }
 
 /// What was being done when a file with changes not saved stood in the
@@ -1489,18 +1578,98 @@ impl Workbench {
     /// takes the place of the one that was.
     pub(crate) fn toggle_panel(&mut self, files: bool, cx: &mut Context<Self>) {
         let to = (self.panel_on() != Some(files)).then_some(files);
-        // With room for one of the two beside the conversation, the
-        // terminal gives its place up.
-        if to.is_some() && self.page == Page::Session && self.side_term && !self.room_for_both() {
-            self.term_go(None, cx);
-        }
         self.panel_go(to, cx);
     }
 
-    /// Whether the panel at the left and the terminal both fit beside
-    /// the conversation at its least.
-    pub(crate) fn room_for_both(&self) -> bool {
-        self.view_w >= self.conv_need.get() + PANEL_MIN + crate::term_panel::TERM_MIN
+    /// Which of the side panels asked for do not fit beside the
+    /// conversation in `room`, the content's width with the sidebar
+    /// away: each from the top of the rank down takes its least while
+    /// the conversation keeps its own (`conv_need`), and those left over
+    /// do not fit. The one at the top always fits: a panel asked for is
+    /// shown, whatever else gives way, and in the narrowest window the
+    /// conversation is what is left (`main::MIN_W` keeps that at least
+    /// `CONVERSATION_MIN`). Beside a conversation only.
+    ///
+    /// Also the least the ones that fit take of the row together.
+    pub(crate) fn sides_fit(&self, room: Pixels) -> (Vec<Side>, Pixels) {
+        let (mut unfit, mut fits) = (Vec::new(), px(0.));
+        if self.page != Page::Session || self.detail.is_none() {
+            return (unfit, fits);
+        }
+        let need = self.conv_need.get();
+        for side in self.side_rank.into_iter().filter(|s| self.side_wanted(*s)) {
+            if fits == px(0.) || need + fits + side.least() <= room {
+                fits += side.least();
+            } else {
+                unfit.push(side);
+            }
+        }
+        (unfit, fits)
+    }
+
+    /// Whether a side panel is asked for, whether or not it fits.
+    pub(crate) fn side_wanted(&self, side: Side) -> bool {
+        match side {
+            Side::File => self.file_view.is_some(),
+            Side::Left => self.files_on || self.outline_on,
+            Side::Term => self.side_term,
+        }
+    }
+
+    /// A side panel was asked for: it is the last to give its room up,
+    /// and the others that no longer fit beside it go.
+    pub(crate) fn side_asked(&mut self, side: Side, cx: &mut Context<Self>) {
+        self.side_used(side);
+        self.fit_sides(false, cx);
+    }
+
+    /// A side panel was opened or used: it is the last to give its room
+    /// up.
+    pub(crate) fn side_used(&mut self, side: Side) {
+        if self.side_rank[0] != side {
+            let mut rank = vec![side];
+            rank.extend(self.side_rank.iter().copied().filter(|s| *s != side));
+            self.side_rank.copy_from_slice(&rank);
+        }
+    }
+
+    /// A press in a side panel: it is used, and keeps its room longest.
+    /// What the press does is the panel's own; this only ranks it.
+    pub(crate) fn side_pressed(&mut self, at: Point<Pixels>) {
+        let (files, outline) = self.panels_shown();
+        let side = if self.term_panel_bounds().is_some_and(|b| b.contains(&at)) {
+            Side::Term
+        } else if self.file_pane_bounds().is_some_and(|b| b.contains(&at)) {
+            Side::File
+        } else if (files && self.files_scroll.bounds().contains(&at)) || (outline && self.outline_scroll.bounds().contains(&at)) {
+            Side::Left
+        } else {
+            return;
+        };
+        self.side_used(side);
+    }
+
+    /// The side panels that do not fit go, by their rank: the panel at
+    /// the left and the terminal are put away as their buttons put them
+    /// away, and the file shown is only not drawn (`fold_file`), so what
+    /// is not saved in it stays. `held`: put away for the window's width,
+    /// so their room still counts against the sidebar (`room_held`).
+    pub(crate) fn fit_sides(&mut self, held: bool, cx: &mut Context<Self>) {
+        // Putting a panel away clears what is held, as a press of its
+        // button does; what this fit puts away is counted after.
+        let was_held = self.room_held;
+        let mut freed = px(0.);
+        for side in self.sides_fit(self.view_w - crate::workbench::FRAME).0 {
+            match side {
+                Side::Left => self.panel_go(None, cx),
+                Side::Term => self.term_go(None, cx),
+                Side::File => continue,
+            }
+            freed += side.least();
+        }
+        if held {
+            self.room_held = was_held + freed;
+        }
     }
 
     /// The panel goes to the files, to the outline, or away, and the
@@ -1510,9 +1679,12 @@ impl Workbench {
         if from == to {
             return;
         }
-        self.term_folded = false;
+        self.room_held = px(0.);
         self.files_on = to == Some(true);
         self.outline_on = to == Some(false);
+        if to.is_some() {
+            self.side_asked(Side::Left, cx);
+        }
         self.outline_at = None;
         self.panel_anim = Some((from, to, std::time::Instant::now(), self.panel_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
         self.save_ui(true);
@@ -2010,7 +2182,14 @@ impl Workbench {
     fn file_clicked(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_view.as_ref().is_some_and(|v| v.path == path) {
             self.tree.picked = Some(path.to_path_buf());
-            self.close_file_view(cx);
+            if self.file_pane_shown() {
+                self.close_file_view(cx);
+            } else {
+                // Folded for want of room: the click asks for it, and
+                // what gives way is by the rank.
+                self.side_asked(Side::File, cx);
+                cx.notify();
+            }
         } else {
             self.file_preview(path, window, cx);
         }
@@ -2038,9 +2217,13 @@ impl Workbench {
             self.file_gone = None;
             self.file_anim = Some((true, std::time::Instant::now(), self.file_serial));
         }
-        if self.fold_file {
-            self.notice = Some(Notice::said("the window is too narrow to show the file beside the conversation"));
+        // The file is the last to give its room up, and the files it is
+        // found in, when they are what shows at the left, are next: the
+        // panels that no longer fit beside them go.
+        if self.files_on {
+            self.side_used(Side::Left);
         }
+        self.side_asked(Side::File, cx);
         // A file opened from the tree leaves the keyboard in the tree: the
         // row is still what ⌘C and ⌘V are about, until a click in the
         // file's pane takes it there. Opened any other way, the keyboard
@@ -2956,16 +3139,21 @@ impl Workbench {
         for ed in self.file_editor.iter().chain(self.file_parked.iter()).filter(|ed| ed.dirty(cx)) {
             all.insert(ed.path.clone(), Draft { text: ed.state.read(cx).value().to_string(), base: ed.mtime });
         }
-        if all == self.drafts_kept {
+        if all == self.drafts_kept && all.is_empty() {
             return;
         }
-        let rows: Vec<serde_json::Value> = all
-            .iter()
-            .map(|(path, d)| {
-                let since = d.base.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-                serde_json::json!({ "path": path.to_string_lossy(), "text": d.text, "secs": since.map(|s| s.as_secs()), "nanos": since.map(|s| s.subsec_nanos()) })
-            })
-            .collect();
+        let on_disk = match emaki_core::paths::read_json(&drafts_path()) {
+            Some(serde_json::Value::Array(rows)) => rows,
+            _ => Vec::new(),
+        };
+        // Nothing new, and the file still holds them: another Emaki
+        // writing the file (one from before rows had a writer writes
+        // its own and nothing else) can leave them out.
+        let own = Some(std::process::id() as u64);
+        if all == self.drafts_kept && all.keys().all(|p| on_disk.iter().any(|row| row_key(row) == (own, Some(p.to_string_lossy().to_string())))) {
+            return;
+        }
+        let rows = drafts_rows(&all, &on_disk, std::process::id(), DRAFTS_TAKEN.get().map(Vec::as_slice).unwrap_or_default());
         if emaki_core::paths::write_json(&drafts_path(), &serde_json::Value::Array(rows)).is_ok() {
             self.drafts_kept = all;
         }
@@ -3099,6 +3287,7 @@ impl Workbench {
     pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_guard(FileThen::CloseWindow, cx) {
             self.keep_composers(cx);
+            self.close_settings(cx);
             window.remove_window();
         }
     }
@@ -6696,7 +6885,7 @@ impl Workbench {
         let theme = cx.theme().clone();
         let name = v.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let folder = v.rel.strip_suffix(&name).unwrap_or("").trim_end_matches(['/', '\\']).to_string();
-        let (open, open_too, reveal) = (v.path.clone(), v.path.clone(), v.path.clone());
+        let (open, open_too, reveal, more) = (v.path.clone(), v.path.clone(), v.path.clone(), v.path.clone());
         let big = self.file_big;
         // A table's grid runs to the pane's edges.
         let grid = (matches!(v.body, FileBody::Table(..)) && !self.file_raw) || matches!(v.body, FileBody::Sheets(_));
@@ -6989,6 +7178,23 @@ impl Workbench {
         } else {
             None
         };
+        // Whether the head's row is the narrow one: what its parts take
+        // without the name (its padding, the file's icon, Save, the two
+        // segments, four buttons of 24, the gaps of 7 between) leaves the
+        // name less than `HEAD_NAME_ROOM`.
+        let gap = 7.;
+        let parts = |save: f32, buttons: f32| 12. + 6. + 15. + gap + if dirty { save + gap } else { 0. } + if modes.is_some() { 58. + gap } else { 0. } + buttons * (24. + gap);
+        let compact = !leaving && f32::from(w) < parts(68., 4.) + HEAD_NAME_ROOM;
+        // The size (a PDF's page) is said where it and the whole name fit
+        // in the room the words share, and left out, never cut, where
+        // they do not: the name comes first. Their widths are their
+        // letters' at the head's sizes, a little over.
+        let words_room = f32::from(w) - if compact { parts(24., 3.) } else { parts(68., 4.) };
+        let size_text = match &v.body {
+            FileBody::Pages(Some(doc)) => format!("page {} of {}", self.pdf_page_now() + 1, doc.total),
+            _ => human_size(v.size),
+        };
+        let size_said = words_room >= name.chars().count() as f32 * 7.4 + gap + size_text.chars().count() as f32 * 6.4;
         // Beside a PDF's pages: the pages small, or the file's table of
         // contents. A click goes to the page; the one in view is marked.
         let side_live = self.pdf_side_anim.filter(|(_, at, _)| at.elapsed() < FILE_ANIM);
@@ -7177,31 +7383,48 @@ impl Workbench {
                             .min_w_0()
                             .gap(px(7.))
                             .items_baseline()
-                            .child(div().flex_shrink_0().max_w(relative(0.6)).truncate().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+                            // The name before the folder, which takes what
+                            // is left; with no folder to say, all of it.
+                            .child(div().flex_shrink_0().when(!folder.is_empty(), |d| d.max_w(relative(0.6))).max_w_full().truncate().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(name.clone()))
 
                             .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(10.5)).text_color(theme.muted_foreground).child(folder))
                             // The size is the file's on disk: not said of one
                             // with changes not saved, where Save stands instead.
-                            .when(!dirty, |d| {
-                                d.child(div().flex_shrink_0().text_size(px(10.5)).text_color(theme.muted_foreground).child(match &v.body {
-                                    FileBody::Pages(Some(doc)) => format!("page {} of {}", self.pdf_page_now() + 1, doc.total),
-                                    _ => human_size(v.size),
-                                }))
-                            }),
+                            .when(!dirty && size_said, |d| d.child(div().flex_shrink_0().text_size(px(10.5)).text_color(theme.muted_foreground).child(size_text))),
                     )
                     .when(dirty, |d| {
+                        let save = |this: &mut Self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
+                            swallow_click(window, cx);
+                            this.save_file(window, cx)
+                        };
+                        let button = if compact {
+                            Button::new("file-save").ghost().small().icon(Icon::default().path("icons/device-floppy.svg")).on_click(cx.listener(save)).into_any_element()
+                        } else {
+                            crate::branches::small_pill("file-save", "icons/device-floppy.svg", "Save", Press::Quiet, false, &theme).on_click(cx.listener(save)).into_any_element()
+                        };
                         d.child(
-                            div().id("file-save-tip").flex_shrink_0().managed_tooltip(|window, cx| crate::workbench::tip("Save (⌘S)", window, cx)).child(crate::branches::small_pill("file-save", "icons/device-floppy.svg", "Save", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
-                                swallow_click(window, cx);
-                                this.save_file(window, cx)
-                            })))
-                            .with_animation("file-save-in", Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
+                            div().id("file-save-tip").flex_shrink_0().managed_tooltip(|window, cx| crate::workbench::tip("Save (⌘S)", window, cx)).child(button)
+                            .with_animation(if compact { "file-save-in-compact" } else { "file-save-in" }, Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
                         )
                     })
                     .children(modes)
                     .when(!leaving, |d| {
-                        d.child(tool("file-open", Icon::default().path("icons/external-link.svg"), "Open with default app").on_click(move |_, _, _| crate::sys::open_path(&open)))
-                        .child(tool("file-reveal", Icon::default().path("icons/folder-open.svg"), crate::sys::REVEAL_LABEL).on_click(move |_, _, _| crate::sys::reveal_path(&reveal)))
+                        // In a narrow pane Open and Reveal are one More
+                        // button's list, the two the file's row in the
+                        // tree has; they fade in as they change places.
+                        let ways = if compact {
+                            let path = more.clone();
+                            h_flex().child(tool("file-more", Icon::new(IconName::Ellipsis), "More").on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                                swallow_click(window, cx);
+                                this.open_menu(e.position(), vec![("Open", MenuDo::File(FileDo::Open, path.clone())), (crate::sys::REVEAL_LABEL, MenuDo::File(FileDo::Reveal, path.clone()))], cx);
+                            })))
+                        } else {
+                            h_flex()
+                                .gap(px(7.))
+                                .child(tool("file-open", Icon::default().path("icons/external-link.svg"), "Open with default app").on_click(move |_, _, _| crate::sys::open_path(&open)))
+                                .child(tool("file-reveal", Icon::default().path("icons/folder-open.svg"), crate::sys::REVEAL_LABEL).on_click(move |_, _, _| crate::sys::reveal_path(&reveal)))
+                        };
+                        d.child(ways.flex_shrink_0().with_animation(if compact { "file-ways-compact" } else { "file-ways" }, Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)))
                         .child(tool("file-enlarge", Icon::default().path(if big { "icons/minimize.svg" } else { "icons/maximize.svg" }), if big { "Restore" } else { "Enlarge" }).on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.file_enlarge(window, cx)
@@ -7917,5 +8140,77 @@ impl Workbench {
             _ => return false,
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::{drafts_left, drafts_rows, row_key, Draft};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn row(path: &str, text: &str, pid: Option<u64>) -> serde_json::Value {
+        match pid {
+            Some(pid) => serde_json::json!({ "path": path, "text": text, "pid": pid }),
+            None => serde_json::json!({ "path": path, "text": text }),
+        }
+    }
+
+    const OWN: u32 = 100;
+    const LIVE: u32 = 200;
+    const GONE: u32 = 300;
+    fn alive(pid: u32) -> bool {
+        pid == LIVE
+    }
+
+    #[test]
+    fn a_running_emakis_drafts_are_not_taken_up() {
+        let rows = [row("/no/such/live.qmd", "typed there", Some(LIVE as u64))];
+        assert!(drafts_left(&rows, OWN, &alive, false).is_empty());
+    }
+
+    #[test]
+    fn an_ended_emakis_drafts_are_taken_up() {
+        let rows = [row("/no/such/gone.qmd", "typed", Some(GONE as u64)), row("/no/such/old.qmd", "typed", None)];
+        let left = drafts_left(&rows, OWN, &alive, false);
+        assert!(left.contains_key(&PathBuf::from("/no/such/gone.qmd")));
+        assert!(left.contains_key(&PathBuf::from("/no/such/old.qmd")), "a row from before rows had a writer is no one's with no other Emaki running");
+    }
+
+    #[test]
+    fn a_row_with_no_writer_waits_while_another_emaki_runs() {
+        // The installed app from before rows had a writer, typing now.
+        let rows = [row("/no/such/old.qmd", "typed", None)];
+        assert!(drafts_left(&rows, OWN, &alive, true).is_empty());
+    }
+
+    #[test]
+    fn a_draft_the_file_already_holds_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("emaki-draft-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("same.md");
+        std::fs::write(&path, "saved words").unwrap();
+        let rows = [row(&path.to_string_lossy(), "saved words", Some(GONE as u64))];
+        assert!(drafts_left(&rows, OWN, &alive, false).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_write_keeps_what_is_not_its_own() {
+        let on_disk = [
+            row("/a", "live other", Some(LIVE as u64)),
+            row("/b", "ended other, not taken", Some(GONE as u64)),
+            row("/c", "taken up here", Some(GONE as u64)),
+            row("/d", "written here before", Some(OWN as u64)),
+        ];
+        let taken = vec![row_key(&on_disk[2])];
+        let mine: HashMap<PathBuf, Draft> = [(PathBuf::from("/c"), Draft { text: "taken up here".into(), base: None })].into();
+        let rows = drafts_rows(&mine, &on_disk, OWN, &taken);
+        let keys: Vec<_> = rows.iter().map(row_key).collect();
+        assert!(keys.contains(&(Some(LIVE as u64), Some("/a".into()))));
+        assert!(keys.contains(&(Some(GONE as u64), Some("/b".into()))), "an ended Emaki's rows wait for its next launch");
+        assert!(!keys.contains(&(Some(GONE as u64), Some("/c".into()))), "a row taken up leaves under its old writer");
+        assert!(keys.contains(&(Some(OWN as u64), Some("/c".into()))), "and is written as this Emaki's");
+        assert!(!keys.contains(&(Some(OWN as u64), Some("/d".into()))), "this Emaki's old rows are replaced by what it has now");
     }
 }

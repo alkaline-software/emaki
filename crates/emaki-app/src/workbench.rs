@@ -72,6 +72,8 @@ pub(crate) struct Menu {
     at: Point<Pixels>,
     items: Vec<(&'static str, MenuDo)>,
     serial: u32,
+    /// Opened in the settings window, and drawn there.
+    in_settings: bool,
 }
 
 /// A picture to put on the clipboard: a file, or the bytes read back out
@@ -1239,7 +1241,7 @@ pub struct Workbench {
     pick: Option<PickMenu>,
     pick_gone: Option<(PickMenu, Instant)>,
     pick_serial: u32,
-    pill_at: Rc<std::cell::RefCell<HashMap<PickFor, Bounds<Pixels>>>>,
+    pill_at: Rc<std::cell::RefCell<HashMap<(PickFor, bool), Bounds<Pixels>>>>,
     /// `EMAKI_GO=dialogdemo`: a sample question is held on the card.
     dialog_demo: bool,
     /// `EMAKI_GO=termdemo`: the terminal card is drawn on a sample screen.
@@ -1257,8 +1259,8 @@ pub struct Workbench {
     rename_at: RenameAt,
     rename_drawn: std::cell::Cell<bool>,
     pub(crate) rename_input: Entity<InputState>,
-    /// The name field in Settings.
-    name_input: Entity<InputState>,
+    /// The name's field in the settings, made with their window.
+    name_input: Option<Entity<InputState>>,
     /// The names the person gave that the sessions' transcripts do not
     /// say, by session key (`state/titles.json`). One for a session that
     /// can be asked (`can_ask`) is still to be given to it and is shown
@@ -1283,8 +1285,14 @@ pub struct Workbench {
     pub lightbox: Option<Lightbox>,
     pub search_input: Entity<InputState>,
     pub search_open: bool,
-    pub settings_open: bool,
-    /// Which section of the settings panel is showing; see `SETTINGS_SECTIONS`.
+    /// The settings window, while it is open (`workbench/settings.rs`).
+    settings_window: Option<AnyWindowHandle>,
+    /// What the settings window's keys are given to.
+    settings_focus: FocusHandle,
+    /// The scroll of a list opened in the settings window, which has no
+    /// `route_scroll` of its own to keep one.
+    settings_pick_scroll: ScrollHandle,
+    /// Which section of the settings is showing; see `SETTINGS_SECTIONS`.
     pub settings_section: &'static str,
     /// Whose new sessions the New sessions section is showing.
     settings_agent: AgentId,
@@ -1541,7 +1549,11 @@ pub struct Workbench {
     /// against the sidebar, or the sidebar came back into the room the
     /// terminal left and went again a few points on. Until the window
     /// is wide enough for both again, or a panel's button is pressed.
-    pub(crate) term_folded: bool,
+    /// The least of the side panel put away for the window's width.
+    pub(crate) room_held: Pixels,
+    /// The side panels by which keeps its room longest: the one opened
+    /// or used last first (`panels::Side`).
+    pub(crate) side_rank: [crate::panels::Side; 3],
     /// A probe's steps: say where the panes stand at the next draw, and
     /// put the keyboard in the terminal as a click on it does.
     pending_panes: bool,
@@ -2188,8 +2200,8 @@ fn file_tail(path: &str, bytes: u64, lines: usize) -> Option<String> {
 
 /// Narrower than this, the sidebar no longer sits beside the content.
 const NARROW_W: Pixels = px(880.);
-/// How far past the width the terminal was put away at the window is
-/// dragged back before the sidebar may have its room (`term_folded`).
+/// How far past the width a side panel was put away at the window is
+/// dragged back before the sidebar may have its room (`room_held`).
 const FOLD_SLACK: Pixels = px(40.);
 
 impl Workbench {
@@ -3128,12 +3140,6 @@ impl Workbench {
         })
         .detach();
         let commit_body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 8).placeholder("Description"));
-        let machine_name = crate::sys::user_first_name();
-        let name_input = cx.new(|cx| {
-            let mut s = InputState::new(window, cx).placeholder(if machine_name.is_empty() { "Your name".to_string() } else { machine_name.clone() });
-            s.set_value(cfg.app.user_name.clone(), window, cx);
-            s
-        });
         // The GitHub page's two fields: what is typed is written into the
         // line it gives, as it is typed.
         let git_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Your full name"));
@@ -3155,19 +3161,7 @@ impl Workbench {
                 });
             }
         }
-        let user_name = if cfg.app.user_name.trim().is_empty() { machine_name } else { cfg.app.user_name.trim().to_string() };
-        cx.subscribe_in(&name_input, window, |this, input, ev: &InputEvent, _, cx| {
-            if let InputEvent::Change = ev {
-                let name = input.read(cx).value().trim().to_string();
-                if name != this.cfg.app.user_name {
-                    this.user_name = if name.is_empty() { crate::sys::user_first_name() } else { name.clone() };
-                    this.cfg.app.user_name = name;
-                    this.save_app_config();
-                    cx.notify();
-                }
-            }
-        })
-        .detach();
+        let user_name = if cfg.app.user_name.trim().is_empty() { crate::sys::user_first_name() } else { cfg.app.user_name.trim().to_string() };
         cx.subscribe_in(&search_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::Change => this.run_search(window, cx),
             InputEvent::PressEnter { .. } => {
@@ -3240,7 +3234,7 @@ impl Workbench {
         // and `EMAKI_PAGE=new|sessions` picks the page. For probing
         // the window from a script with no accessibility access,
         // `EMAKI_FIND=<text>` opens the find bar on that query,
-        // `EMAKI_SETTINGS=1` opens the settings panel, `EMAKI_TYPE=<text>`
+        // `EMAKI_SETTINGS=1` opens the settings, `EMAKI_TYPE=<text>`
         // puts that text in the composer, and `EMAKI_QUESTION=1` holds a
         // sample question of Claude's on the session opened, as a driver
         // would (nothing answers it).
@@ -3383,12 +3377,19 @@ impl Workbench {
         // few seconds in (`EMAKI_SHOT_AFTER`, five by default) and quits:
         // with the variables above, any state is one launch away from
         // being looked at, and the app needs no access to capture itself.
+        // With the settings window open it is the one taken.
         if let Some(path) = std::env::var_os("EMAKI_SHOT").filter(|p| !p.is_empty()) {
             let after = std::env::var("EMAKI_SHOT_AFTER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(5.0);
-            cx.spawn_in(window, async move |_, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs_f64(after)).await;
+                let settings = this.update(cx, |this, _| this.settings_window).ok().flatten();
                 let _ = cx.update(|window, cx| {
-                    if let Err(e) = crate::sys::shoot_window(window, std::path::Path::new(&path)) {
+                    let path = std::path::Path::new(&path);
+                    let shot = match settings {
+                        Some(h) => h.update(cx, |_, window, _| crate::sys::shoot_window(window, path)).unwrap_or_else(|e| Err(e.to_string())),
+                        None => crate::sys::shoot_window(window, path),
+                    };
+                    if let Err(e) = shot {
                         eprintln!("emaki: EMAKI_SHOT: {e}");
                     }
                     cx.quit();
@@ -3396,37 +3397,50 @@ impl Workbench {
             })
             .detach();
         }
-        // `EMAKI_SETTINGS_SHOTS=<folder>` opens the settings on every
-        // section in turn, light then dark, writes a picture of each
-        // there (`<section>-<light|dark>.png`) and quits: the whole panel
+        // `EMAKI_SETTINGS_SHOTS=<folder>` opens the settings window on
+        // every section in turn, light then dark, writes a picture of it
+        // there (`<section>-<light|dark>.png`) and quits: the whole window
         // looked at in one launch. The appearance is drawn, not saved.
         if let Some(dir) = std::env::var_os("EMAKI_SETTINGS_SHOTS").filter(|d| !d.is_empty()).map(PathBuf::from) {
-            cx.spawn_in(window, async move |this, cx| {
+            cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
+                let _ = this.update(cx, |this, cx| this.open_settings(None, cx));
+                cx.background_executor().timer(Duration::from_millis(900)).await;
                 for look in ["light", "dark"] {
                     for (key, _, _) in SETTINGS_SECTIONS {
-                        let _ = this.update_in(cx, |this, window, cx| {
-                            this.settings_open = true;
+                        let Ok(Some(h)) = this.update(cx, |this, cx| {
                             this.settings_section = key;
                             this.settings_scroll.set_offset(point(px(0.), px(0.)));
-                            crate::look::apply(look, Some(window), cx);
+                            crate::look::apply(look, None, cx);
                             cx.notify();
-                        });
+                            this.settings_window
+                        }) else {
+                            break;
+                        };
                         cx.background_executor().timer(Duration::from_millis(900)).await;
                         let path = dir.join(format!("{key}-{look}.png"));
-                        let _ = cx.update(|window, _| {
-                            if let Err(e) = crate::sys::shoot_window(window, &path) {
-                                eprintln!("emaki: EMAKI_SETTINGS_SHOTS: {e}");
-                            }
+                        let _ = cx.update(|cx| {
+                            h.update(cx, |_, window, _| {
+                                if let Err(e) = crate::sys::shoot_window(window, &path) {
+                                    eprintln!("emaki: EMAKI_SETTINGS_SHOTS: {e}");
+                                }
+                            })
                         });
                     }
                 }
-                let _ = cx.update(|_, cx| cx.quit());
+                let _ = cx.update(|cx| cx.quit());
             })
             .detach();
         }
-        let settings_open = std::env::var("EMAKI_SETTINGS").is_ok();
-        // `EMAKI_SETTINGS=<section>` opens the panel on that section.
+        // The settings window goes with the window whose settings it draws.
+        cx.on_release(|this: &mut Self, cx| this.close_settings(cx)).detach();
+        // `EMAKI_SETTINGS=<section>` opens the settings on that section.
+        if std::env::var_os("EMAKI_SETTINGS").is_some() {
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |this, cx| this.open_settings(None, cx));
+            })
+            .detach();
+        }
         let settings_section = std::env::var("EMAKI_SETTINGS").ok().and_then(|v| SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == v).map(|(k, _, _)| *k)).unwrap_or("appearance");
         let page = match std::env::var("EMAKI_PAGE").as_deref() {
             Ok("sessions") => Page::Sessions,
@@ -3507,7 +3521,7 @@ impl Workbench {
             rename_at: RenameAt::Sheet,
             rename_drawn: Default::default(),
             rename_input,
-            name_input,
+            name_input: None,
             // A name still in our record is one its transcript does not
             // say yet: asked for again at launch.
             renames: load_renames(),
@@ -3517,7 +3531,9 @@ impl Workbench {
             lightbox: None,
             search_input,
             search_open: false,
-            settings_open,
+            settings_window: None,
+            settings_focus: cx.focus_handle(),
+            settings_pick_scroll: ScrollHandle::new(),
             settings_section,
             settings_agent: ui.new_agent.as_deref().and_then(AgentId::parse).unwrap_or(AgentId::ClaudeCode),
             search_results: None,
@@ -3629,7 +3645,8 @@ impl Workbench {
             conv_min: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
             composer_row_w: Rc::new(Cell::new(px(0.))),
             conv_need: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
-            term_folded: false,
+            room_held: px(0.),
+            side_rank: crate::panels::Side::RANK,
             pending_panes: false,
             pending_term_focus: false,
             settings_scroll: ScrollHandle::new(),
@@ -3749,7 +3766,9 @@ impl Workbench {
             file_peek_serial: 0,
             pending_revert: false,
             file_drafts: crate::panels::load_drafts(),
-            drafts_kept: crate::panels::load_drafts(),
+            // Nothing written yet: the drafts taken up are written again
+            // at the first keep, as this Emaki's.
+            drafts_kept: HashMap::new(),
             file_conflict: None,
             pending_edit: None,
             pending_save: false,
@@ -5071,6 +5090,21 @@ impl Workbench {
             Some("pick:model") => self.pick_toggle(PickFor::Model, cx),
             Some("pick:folder") => self.pick_toggle(PickFor::Folder, cx),
             Some("pick:default-mode") => self.pick_toggle(PickFor::DefaultMode, cx),
+            // The settings window on a section, and the list of one of
+            // New sessions' fields opened there.
+            Some(t) if t.starts_with("settings:") => self.open_settings(SETTINGS_SECTIONS.iter().map(|(k, _, _)| *k).find(|k| *k == &t["settings:".len()..]), cx),
+            Some(t) if t.starts_with("setpick:") => {
+                let codex = self.settings_agent == AgentId::Codex;
+                let what = match &t["setpick:".len()..] {
+                    "model" if codex => PickFor::CodexModel,
+                    "model" => PickFor::DefaultModel,
+                    "effort" if codex => PickFor::CodexEffort,
+                    "effort" => PickFor::DefaultEffort,
+                    _ if codex => PickFor::CodexMode,
+                    _ => PickFor::DefaultMode,
+                };
+                self.pick_toggle_in(what, true, cx);
+            }
             Some("pick:off") => self.close_pick(cx),
             Some("pick:mode") => self.pick_toggle(PickFor::Mode, cx),
             Some(t) if t.starts_with("pickmode:") => self.pill_picked(Pill::Mode, &t["pickmode:".len()..], cx),
@@ -5236,7 +5270,6 @@ impl Workbench {
     /// view is not gpui's and would be drawn over every one of them.
     pub(crate) fn over_page(&self) -> bool {
         self.search_open
-            || self.settings_open
             || self.changes.is_some()
             || self.lightbox.is_some()
             || (self.renaming.is_some() && self.rename_at == RenameAt::Sheet)
@@ -6306,7 +6339,7 @@ impl Workbench {
     /// terminal's to answer (`via_terminal`). Before a session exists
     /// there is no terminal to open: the pills show what a new session
     /// starts in, and a click opens Settings where that is chosen.
-    fn pill_clicked(&mut self, pill: Pill, window: &mut Window, cx: &mut Context<Self>) {
+    fn pill_clicked(&mut self, pill: Pill, cx: &mut Context<Self>) {
         // A session with no message sent has no terminal to ask: its
         // pills are the home page's.
         let draft = self.selected_ref().is_some_and(|r| self.is_draft(&r.session_id));
@@ -6330,11 +6363,8 @@ impl Workbench {
             }
             return self.via_terminal(TerminalAction::Pick(pill), cx);
         }
-        self.settings_section = "sessions";
         self.settings_agent = self.agent_now();
-        self.settings_open = true;
-        window.focus(&self.focus_handle, cx);
-        cx.notify();
+        self.open_settings(Some("sessions"), cx);
     }
 
     /// A pill that opens a list of choices (`PickFor`). Where it is drawn
@@ -6356,7 +6386,7 @@ impl Workbench {
     /// muted shade, which stands on a card in both appearances.
     fn settings_pick_h(&self, what: PickFor, id: &'static str, icon: &'static str, label: PillText, h: Pixels, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let open = self.pick.as_ref().is_some_and(|p| p.what == what);
+        let open = self.pick.as_ref().is_some_and(|p| p.what == what && p.in_settings);
         let well = theme.muted;
         let over = theme.muted_foreground.opacity(0.16);
         div()
@@ -6377,7 +6407,7 @@ impl Workbench {
                     .hover(move |s| s.bg(over))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         swallow_click(window, cx);
-                        this.pick_toggle(what, cx);
+                        this.pick_toggle_in(what, true, cx);
                     }))
                     .relative()
                     .map(|d| {
@@ -6388,12 +6418,18 @@ impl Workbench {
                         d.child(mark).child(words.flex_1()).child(list)
                     }),
             )
-            .child(self.pick_mark(what, cx))
+            .child(self.pick_mark_in(what, true, cx))
             .into_any_element()
     }
 
     /// Laid over whatever opens a list, it keeps where that is drawn.
     fn pick_mark(&self, what: PickFor, cx: &Context<Self>) -> impl IntoElement {
+        self.pick_mark_in(what, false, cx)
+    }
+
+    /// `pick_mark` for a field in the settings window (`in_settings`),
+    /// whose bounds are that window's.
+    fn pick_mark_in(&self, what: PickFor, in_settings: bool, cx: &Context<Self>) -> impl IntoElement {
         let at = self.pill_at.clone();
         let entity = cx.entity().downgrade();
         div()
@@ -6406,7 +6442,7 @@ impl Workbench {
                     // composer), and its list is drawn where the pill
                     // was a frame ago: a move asks for one more draw.
                     move |b, _, cx| {
-                        if at.borrow_mut().insert(what, b) != Some(b) {
+                        if at.borrow_mut().insert((what, in_settings), b) != Some(b) {
                             if let Some(e) = entity.upgrade() {
                                 cx.defer(move |cx| e.update(cx, |this, cx| {
                                     if this.pick.is_some() {
@@ -6582,24 +6618,34 @@ impl Workbench {
 
     /// A press on a pill with a list: the list opens, or, open, closes.
     fn pick_toggle(&mut self, what: PickFor, cx: &mut Context<Self>) {
-        if self.pick.as_ref().is_some_and(|p| p.what == what) {
+        self.pick_toggle_in(what, false, cx)
+    }
+
+    /// `pick_toggle` for a pill in the main window or, `in_settings`, a
+    /// field in the settings window: the same kind of list can be in both
+    /// (a new session's mode), each hanging off its own.
+    fn pick_toggle_in(&mut self, what: PickFor, in_settings: bool, cx: &mut Context<Self>) {
+        if self.pick.as_ref().is_some_and(|p| p.what == what && p.in_settings == in_settings) {
             return self.close_pick(cx);
         }
         let (rows, current) = self.pick_rows(what, cx);
-        let by = self.pill_at.borrow().get(&what).copied().unwrap_or_default();
+        let by = self.pill_at.borrow().get(&(what, in_settings)).copied().unwrap_or_default();
         if rows.is_empty() {
             return;
         }
+        if in_settings {
+            self.settings_pick_scroll.set_offset(point(px(0.), px(0.)));
+        }
         self.pick_serial += 1;
         self.pick_gone = None;
-        self.pick = Some(PickMenu { what, rows: Rc::new(rows), current, by, serial: self.pick_serial });
+        self.pick = Some(PickMenu { what, rows: Rc::new(rows), current, by, serial: self.pick_serial, in_settings });
         cx.notify();
     }
 
     /// The list is put away: it fades where it was, taking no click.
     fn close_pick(&mut self, cx: &mut Context<Self>) {
         if let Some(mut menu) = self.pick.take() {
-            menu.by = self.pill_at.borrow().get(&menu.what).copied().unwrap_or(menu.by);
+            menu.by = self.pill_at.borrow().get(&(menu.what, menu.in_settings)).copied().unwrap_or(menu.by);
             self.pick_gone = Some((menu, Instant::now()));
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(MENU_OUT + Duration::from_millis(20)).await;
@@ -6688,7 +6734,9 @@ impl Workbench {
         // The folders' list is seven rows and the way to another, and
         // shows them all where the window has the room; so do the taps.
         let what = menu.what;
-        let (scroll, _) = self.kept_scroll(format!("pick-{}", menu.serial).into(), Inner::Over);
+        // The settings window has no `route_scroll`: its list keeps a
+        // handle of its own, out of the main window's.
+        let scroll = if menu.in_settings { self.settings_pick_scroll.clone() } else { self.kept_scroll(format!("pick-{}", menu.serial).into(), Inner::Over).0 };
         // The room above and below the rows is the card's, not theirs, so a
         // row cut at an edge stays inside its corner: a clip is a rectangle.
         let mut rows = v_flex().id(("pick-rows", menu.serial as usize)).max_h(room.min(px(if what == PickFor::Folder { 440. } else { 360. })) - px(10.)).overflow_y_scroll().track_scroll(&scroll).px(px(5.)).gap(px(2.));
@@ -8518,7 +8566,7 @@ impl Workbench {
             cx.notify();
         } else if self.pick.is_some() {
             self.close_pick(cx);
-        } else if self.dialog_seen.is_some() && self.term_open.is_none() && !self.settings_open && !self.search_open && self.lightbox.is_none() && self.menu.is_none() {
+        } else if self.dialog_seen.is_some() && self.term_open.is_none() && !self.search_open && self.lightbox.is_none() && self.menu.is_none() {
             // The card's own Cancel: Escape in the terminal's dialog.
             self.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx);
         } else if self.menu.is_some() {
@@ -8537,9 +8585,6 @@ impl Workbench {
             self.close_file_prompt(window, cx);
         } else if self.renaming.is_some() {
             self.close_rename(window, cx);
-        } else if self.settings_open {
-            self.settings_open = false;
-            cx.notify();
         } else if self.lightbox.is_some() {
             self.lightbox = None;
             cx.notify();
@@ -10099,10 +10144,7 @@ impl Workbench {
                     .managed_tooltip(|window, cx| crate::workbench::tip("Your picture and name", window, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
-                        this.settings_section = "appearance";
-                        this.settings_open = true;
-                        window.focus(&this.focus_handle, cx);
-                        cx.notify();
+                        this.open_settings(Some("appearance"), cx);
                     })),
             )
             .child(
@@ -10141,9 +10183,7 @@ impl Workbench {
                     .child(Icon::new(IconName::Settings).with_size(px(16.)).text_color(theme.muted_foreground))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
-                        this.settings_open = true;
-                        window.focus(&this.focus_handle, cx);
-                        cx.notify();
+                        this.open_settings(None, cx);
                     })),
             );
 
@@ -10838,7 +10878,7 @@ impl Workbench {
     pub(crate) fn open_menu(&mut self, at: Point<Pixels>, items: Vec<(&'static str, MenuDo)>, cx: &mut Context<Self>) {
         self.menu_serial += 1;
         self.menu_gone = None;
-        self.menu = Some(Menu { at, items, serial: self.menu_serial });
+        self.menu = Some(Menu { at, items, serial: self.menu_serial, in_settings: false });
         cx.notify();
     }
 
@@ -14402,6 +14442,7 @@ impl Workbench {
     pub(crate) fn input_menu<M: gpui_base::input::InputModeKind>(&self, input: &Entity<gpui_base::input::InputBaseState<M>>, composer: bool, cx: &mut Context<Self>) -> impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static {
         let (this, input) = (cx.entity().downgrade(), input.clone());
         move |at, window, cx| {
+            let in_settings = this.upgrade().is_some_and(|w| w.read(cx).is_settings_window(window));
             // The input calls this from inside its own update, where it
             // cannot be read: reading it there aborts the app. So the
             // menu is made once that update is over.
@@ -14427,6 +14468,9 @@ impl Workbench {
                         items.push(("Select All", MenuDo::Edit(EditDo::SelectAll, focus.clone())));
                     }
                     this.open_menu(at, items, cx);
+                    if let Some(m) = this.menu.as_mut() {
+                        m.in_settings = in_settings;
+                    }
                 });
             });
         }
@@ -14926,7 +14970,7 @@ impl Workbench {
                         // the key to itself otherwise.
                         if this.slash_key(SlashKey::Close, window, cx) {
                             cx.stop_propagation();
-                        } else if this.pick.is_some() || this.dialog_seen.is_some() || this.settings_open || this.lightbox.is_some() || this.search_open || this.find_open || this.term_open.is_some() {
+                        } else if this.pick.is_some() || this.dialog_seen.is_some() || this.lightbox.is_some() || this.search_open || this.find_open || this.term_open.is_some() {
                             this.escape(window, cx);
                             cx.stop_propagation();
                         } else if this.escape_stops(cx) {
@@ -14976,7 +15020,7 @@ impl Workbench {
                     // exists they say what a new one starts in, set in
                     // Settings (`pill_clicked`).
                     .when(settable, |d| {
-                        let to = |pill: Pill| cx.listener(move |this, _: &ClickEvent, window, cx| this.pill_clicked(pill, window, cx));
+                        let to = |pill: Pill| cx.listener(move |this, _: &ClickEvent, _, cx| this.pill_clicked(pill, cx));
                         // A mode changed in a terminal that cannot be read
                         // is not known until the next turn.
                         let mode_text = if mode.is_empty() { PillText { value: String::new(), tint: Tint::Plain, tail: "Mode" } } else { mode_pill(&options, &mode, &theme) };
@@ -16253,6 +16297,8 @@ pub(crate) struct PickMenu {
     current: String,
     by: Bounds<Pixels>,
     serial: u32,
+    /// Opened from a field in the settings window, and drawn there.
+    in_settings: bool,
 }
 
 /// One choice on a pill's list: its key, its name with the colour the
@@ -16393,44 +16439,32 @@ impl Render for Workbench {
         if let Some(w) = self.pending_win_w.take() {
             window.resize(size(px(w), window.viewport_size().height));
         }
-        let on_session = self.page == Page::Session && self.detail.is_some();
         // What the content has of the window: up to the frame at the right.
         let vw = window.viewport_size().width - FRAME;
-        // The window narrowed past where the panel at the left and the
-        // terminal both fit: the terminal is put away, always the
-        // terminal, so it is known beforehand which goes. Through
-        // `term_go`, as its button does it, or the button stayed lit.
-        let both_fit = vw >= self.conv_need.get() + crate::panels::PANEL_MIN + crate::term_panel::TERM_MIN;
-        if on_session && (self.files_on || self.outline_on) && self.side_term && !both_fit {
+        // The side panels asked for that do not fit beside the
+        // conversation with the sidebar away go, the lowest in their rank
+        // first (`side_rank`): the panel at the left and the terminal
+        // through their buttons' own calls, or the buttons stayed lit,
+        // and the file shown is not drawn until there is room again.
+        // With the sidebar away the content has a frame at either side.
+        let (unfit, sides) = self.sides_fit(vw - FRAME);
+        if unfit.iter().any(|s| *s != crate::panels::Side::File) {
             let this = cx.entity();
-            window.defer(cx, move |_, cx| {
-                this.update(cx, |this, cx| {
-                    this.term_go(None, cx);
-                    this.term_folded = true;
-                })
-            });
+            window.defer(cx, move |_, cx| this.update(cx, |this, cx| this.fit_sides(true, cx)));
         }
-        // Well past where both fit, not at it: a hand that wavers at the
-        // width the terminal went at would bring the sidebar in and out.
-        if vw >= self.conv_need.get() + crate::panels::PANEL_MIN + crate::term_panel::TERM_MIN + FOLD_SLACK {
-            self.term_folded = false;
+        self.fold_file = unfit.contains(&crate::panels::Side::File);
+        // The agents page's shell is the one side panel off a conversation.
+        let sides = if self.page == Page::Agents && self.agent_open.is_some() && self.agents_shell { sides + crate::term_panel::TERM_MIN } else { sides };
+        // Well past where what stays fits, not at it: a hand that wavers
+        // at the width a panel went at would bring the sidebar in and out.
+        if vw >= self.conv_need.get() + sides + self.room_held + FOLD_SLACK {
+            self.room_held = px(0.);
         }
-        let want_left = on_session && (self.files_on || self.outline_on);
-        let want_term = (on_session && self.side_term) || (self.page == Page::Agents && self.agent_open.is_some() && self.agents_shell);
-        let want_file = on_session && self.file_view.is_some();
-        let (left_min, term_min, file_min) = (if want_left { crate::panels::PANEL_MIN } else { px(0.) }, if want_term { crate::term_panel::TERM_MIN } else { px(0.) }, if want_file { crate::panels::FILE_MIN } else { px(0.) });
-        let conv_min = self.conv_min.get();
-        let least = conv_min + left_min + term_min;
-        // The room of a terminal put away for the window's width still
-        // counts against the sidebar (`term_folded`).
-        let held = if self.term_folded && want_left { crate::term_panel::TERM_MIN } else { px(0.) };
-        self.narrow = vw < NARROW_W || ((want_left || want_term || want_file) && vw < self.sidebar_w + least + file_min + held);
-        // A window too narrow even so does not draw the file shown,
-        // until it is wide enough again. The panel at the left or the
-        // terminal always has room: the window is never narrower than
-        // the conversation and one of them (`main::MIN_W`).
-        let room = vw - if self.sidebar_open && !self.narrow { self.sidebar_w } else { FRAME };
-        self.fold_file = want_file && room < least + file_min;
+        // The sidebar leaves the row where the side panels that stay, and
+        // the room of those put away for the window's width
+        // (`room_held`), leave it no room.
+        let held = if sides > px(0.) { self.room_held } else { px(0.) };
+        self.narrow = vw < NARROW_W || (sides > px(0.) && vw < self.sidebar_w + self.conv_min.get() + sides + held);
         if !self.narrow {
             self.sidebar_peek = false;
         }
@@ -16561,10 +16595,11 @@ impl Render for Workbench {
             .track_focus(&self.focus_handle)
             // A press on anything the window draws: the keyboard is the
             // window's again, whatever a page in the web view had of it.
-            .capture_any_mouse_down(cx.listener(|this, _, window, _| {
+            .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, window, _| {
                 if this.html_web.is_some() {
                     crate::sys::keys_to_window(window);
                 }
+                this.side_pressed(e.position);
             }))
             .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, _, cx| this.modifiers_changed(&e.modifiers, cx)))
             // A raw wheel listener in the capture phase, registered at paint
@@ -16680,13 +16715,7 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &Tab7, window, cx| this.go_tab(7, window, cx)))
             .on_action(cx.listener(|this, _: &Tab8, window, cx| this.go_tab(8, window, cx)))
             .on_action(cx.listener(|this, _: &Tab9, window, cx| this.go_tab(9, window, cx)))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.settings_open = !this.settings_open;
-                if this.settings_open {
-                    window.focus(&this.focus_handle, cx);
-                }
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings(None, cx)))
             // ⌘F a second time puts the bar away, as Escape does.
             .on_action(cx.listener(|this, _: &FindInPage, window, cx| if this.find_open && this.find_input.read(cx).focus_handle(cx).is_focused(window) { this.close_find(window, cx) } else { this.open_find(window, cx) }))
             .on_action(cx.listener(|this, _: &SaveFile, window, cx| this.save_file(window, cx)))
@@ -16758,16 +16787,14 @@ impl Render for Workbench {
             .when(self.discard_ask.is_some(), |d| d.child(fade_in("discard-ask-in", self.render_discard_ask(cx))))
             .when(self.manage_ask.is_some(), |d| d.child(fade_in("manage-ask-in", self.render_manage_ask(cx))))
             .when(self.open_ask.is_some(), |d| d.child(fade_in("open-ask-in", self.render_open_ask(cx))))
-            // The settings are over every sheet and card there is: under
-            // one, they opened behind it. Only a menu or a list, which
-            // the settings open themselves, is over them.
-            .when(self.settings_open, |d| d.child(self.render_settings(cx)))
-            .when_some(self.menu_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
-            .when_some(self.menu.clone(), |d, m| d.child(self.render_menu(m, None, window, cx)))
-            .when_some(self.pick_gone.clone().filter(|(_, at)| at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))
+            // A menu or a list opened in the settings window is drawn
+            // there (`render_settings`).
+            .when_some(self.menu_gone.clone().filter(|(m, at)| !m.in_settings && at.elapsed() < MENU_OUT), |d, (m, at)| d.child(self.render_menu(m, Some(at.elapsed()), window, cx)))
+            .when_some(self.menu.clone().filter(|m| !m.in_settings), |d, m| d.child(self.render_menu(m, None, window, cx)))
+            .when_some(self.pick_gone.clone().filter(|(m, at)| !m.in_settings && at.elapsed() < MENU_OUT), |d, (m, _)| d.child(self.render_pick(m, true, window, cx)))
             // Where its pill is now, not where it was when the list opened.
-            .when_some(self.pick.clone(), |d, mut m| {
-                m.by = self.pill_at.borrow().get(&m.what).copied().unwrap_or(m.by);
+            .when_some(self.pick.clone().filter(|m| !m.in_settings), |d, mut m| {
+                m.by = self.pill_at.borrow().get(&(m.what, false)).copied().unwrap_or(m.by);
                 d.child(self.render_pick(m, false, window, cx))
             })
     }
