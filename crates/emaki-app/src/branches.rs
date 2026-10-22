@@ -271,6 +271,7 @@ impl Workbench {
             return;
         }
         let origin = b.origin.clone().unwrap_or_else(|| "origin".into());
+        let said = self.git_where();
         self.syncing = Some(pull);
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -279,9 +280,9 @@ impl Workbench {
             this.update(cx, |this, cx| {
                 this.syncing = None;
                 match (done, pull) {
-                    (Ok(()), true) => this.notice = Some(Notice::said(format!("pulled {name} from {origin}"))),
+                    (Ok(()), true) => this.notice = Some(Notice::said(format!("pulled {said} from {origin}"))),
                     (Ok(()), false) => {
-                        this.notice = Some(Notice::said(format!("pushed {name} to {origin}")));
+                        this.notice = Some(Notice::said(format!("pushed {said} to {origin}")));
                         // With nothing left to commit, the comparison has
                         // done what it was opened for.
                         if this.changed_files().is_empty() && this.changes.as_ref().is_some_and(|c| !c.history) {
@@ -745,7 +746,8 @@ impl Workbench {
         if self.committing || files.is_empty() || summary.is_empty() {
             return;
         }
-        let branch = self.branches().map(|b| b.label()).unwrap_or_default();
+        // Said with the checkout's name in a folder of them.
+        let branch = self.git_where();
         self.committing = true;
         cx.notify();
         let n = files.len();

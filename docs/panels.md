@@ -321,15 +321,27 @@ the first draw of a folder not asked about yet), into a state per path.
   each one's status and branches, the statuses merged
   (`Status::merge`), so the tree marks every checkout's files and the
   count is all of theirs. Its files are listed checkout by checkout.
-- Of such a folder one checkout is in use (`Tree::repo`, `git_dir`):
-  the one of the file last opened, or picked in the comparison, else
-  the first with a change. The branch pill names it ("emaki / main"),
-  and every git action goes to it: the list of branches, a switch and
-  its question, fetch, push, the comparison's commit and its history.
-  `read_git` always reads the whole folder, whichever checkout an
-  action was in, or the others' marks went with it. A switch asks of
-  the checkout's own changes (`repo_dirty`): the folder's status is
-  nobody's.
+- Of such a folder one checkout is in use (`Tree::repo`, `git_dir`),
+  and everything git is of it alone, as VS Code and GitHub Desktop
+  have it: the branch pill and its list, the count on the changes
+  pill, the strips under the head, a switch and its question, fetch,
+  push, the comparison and its commit and history. It is named on a
+  button of its own before the branch (`repo_pill`), whose list
+  (`render_repo_menu`, `repo_menu`) is VS Code's Repositories view:
+  each checkout's name, branch, how it stands against the remote and
+  how many of its files have a change, the one in use ticked; a click
+  takes git there (`repo_pick`). It follows the file worked in, as VS
+  Code's active editor does: opening a file in the tree, or a change
+  of another checkout from a file's menu; at launch it is the first
+  with a change. In a panel narrower than `NAMED_BRANCH_AT` the branch
+  pill is its icon, the name its hover label: the checkout's name is
+  the one that tells them apart. The tree marks every checkout's files
+  all the same, and `read_git` always reads the whole folder, whichever
+  checkout an action was in, or the others' marks went with it. A
+  switch asks of the checkout's own changes (`repo_dirty`): the
+  folder's status is nobody's. Tried and dropped: the branch pill
+  naming the checkout as a prefix ("emaki / main"), which a narrow
+  panel cut, while the count beside it was every checkout's.
 - A folder part way down a repository is asked about by itself (`git
   status -- .`): the marks, the count and the comparison are of what is
   under it. The branch is the repository's, and so is the question a
@@ -474,14 +486,18 @@ head is never under the window's three buttons. "Show changes" in a
 changed file's menu opens it on that file.
 
 - The file list is a `uniform_list`, since a commit of icons is a
-  thousand rows. Of a folder of checkouts, each checkout's files stand
-  under a head of their own (`ChangeRow::Repo`: its folder, its branch,
-  how many), the one the comparison is on in the accent; a row is one
-  height either way, so a rectangle still finds its rows by number. A
-  click on a head, or on a file of another checkout, takes the
-  comparison there (`pick_change`): the commit is of that checkout's
-  ticked files alone (`commit_files`), and its history and branch are
-  its own.
+  thousand rows; a row is one height, so a rectangle finds its rows by
+  number. Of a folder of checkouts it is one checkout's files
+  (`change_rows`, `repo_rows`), with the checkout on its button in the
+  head before the branch; its list is where the others are, each with
+  its count, and a click takes the comparison there (`change_repo`),
+  its files, commit, history and branch, and keeps the commit's words
+  typed here for the way back (`Changes::drafts`). After a commit
+  leaves nothing in the checkout the lines' side says so by name.
+  Tried and dropped: every checkout's files in one list under heads,
+  each ticked, while the commit was one checkout's (the button said
+  ten files under thirty ticks); and the other checkouts as buttons
+  under the list, which the list behind the head's button already is.
 - Files are chosen in it as rows are in the tree (`Changes::marked`,
   `change_click`, `changes_band_to`): a click is one, ⌘ and a click
   adds or takes one, ⇧ and a click reaches from the last one clicked,
@@ -897,6 +913,13 @@ far from the tree.
     answers at a keystroke in a file that does not parse yet. One step
     is the file's own (`indent::unit`: the smallest indent its lines
     show, a tab if they use tabs), else the language's habit.
+  - A pair closes as its open is typed, a close typed where the editor
+    put one steps over it, Backspace between the two takes both, and an
+    open typed over a selection goes around it, each as VS Code has it
+    (`AutoPairs`, UPSTREAM.md 38). Which pairs is the language's
+    (`emaki_core::pairs`): markdown closes brackets and no quote, since
+    most of its quotes are apostrophes, and surrounds with its own marks
+    (`*`, `_`, `` ` ``, `~`, `$`); code closes its quotes too.
   - Saving a file formats it first (`emaki_core::format`) when Settings,
     Files has the switch on (`app.format_saved_files`, off to begin with;
     the older `format_on_save` in a file is not read, having been R's

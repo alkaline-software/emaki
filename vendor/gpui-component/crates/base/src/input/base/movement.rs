@@ -63,7 +63,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.update_preferred_column();
         M::hide_context_menu(self, cx);
         M::clear_inline_completion(self, cx);
-        cx.notify()
+        cx.notify();
+        self.auto_closed_check();
     }
 
     /// Move the cursor vertically by one line (up or down) while preserving the column if possible.

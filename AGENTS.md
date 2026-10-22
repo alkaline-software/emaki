@@ -199,6 +199,7 @@ crates/emaki-core/        everything without a window
   src/office.rs              Word, PowerPoint and Excel files read for showing: a document or a deck as markdown, a workbook as sheets
   src/fsops.rs               what the files tree does to the disk, as moves to take back and do again; what is removed is held, not thrown away
   src/indent.rs              where a new line starts in the file's editor, by language, and what one step of indent is
+  src/pairs.rs               the pairs the file's editor closes as an open is typed and puts around a selection, by language
   src/format.rs              a file put in its language's form when saved: R, by Air built in
   src/update.rs              the newest release, its installer, and putting it in place
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
