@@ -465,7 +465,7 @@ impl Tree {
 
     /// Read `root` and every folder open under it again; whether anything
     /// differs from what was drawn.
-    fn refresh(&mut self, root: &Path) -> bool {
+    pub(crate) fn refresh(&mut self, root: &Path) -> bool {
         let mut changed = false;
         self.open.retain(|p| !p.starts_with(root) || p.is_dir());
         let dirs: Vec<PathBuf> = std::iter::once(root.to_path_buf()).chain(self.open.iter().filter(|p| p.starts_with(root)).cloned()).collect();
@@ -950,13 +950,13 @@ fn column_name(mut n: usize) -> String {
 pub(crate) struct FileEditor {
     /// A name for the file and what it held when the editor was made.
     key: String,
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     /// The language, as `render_md::lang_for_path` names it.
     lang: &'static str,
     pub(crate) state: Entity<gpui_component::input::EditorState>,
     /// What the file held when it was read or last saved here, and when
     /// it was written; None when the file is read only.
-    saved: Option<Rc<str>>,
+    pub(crate) saved: Option<Rc<str>>,
     mtime: Option<std::time::SystemTime>,
     /// What git has of the file (`git::base_text`), which the marks in
     /// the margin compare the editor's text with; none for a file git
@@ -968,6 +968,13 @@ pub(crate) struct FileEditor {
     /// The places the text differs from git's copy, as last worked out:
     /// a mark's `id` is its place here.
     hunks: Vec<git::Hunk>,
+    /// What is marked as misspelt or ungrammatical in a file of prose
+    /// (`spelling.rs`), the text it was found in, the count of checks
+    /// asked for, and whether the word at the caret is marked yet.
+    pub(crate) issues: Vec<emaki_core::check::Issue>,
+    pub(crate) issues_for: String,
+    pub(crate) check_serial: u64,
+    pub(crate) check_at_caret: bool,
 }
 
 /// One change in the file's editor, opened from its mark in the margin:
@@ -3108,17 +3115,19 @@ impl Workbench {
         // The head says "not saved" from the first letter, and the
         // margin's marks follow what is typed.
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        cx.subscribe(&state, |this, state, ev: &gpui_component::input::InputEvent, _| {
+        cx.subscribe(&state, |this, state, ev: &gpui_component::input::InputEvent, cx| {
             if let gpui_component::input::InputEvent::Change = ev {
                 for ed in this.file_editor.iter_mut().chain(this.file_parked.iter_mut()).filter(|ed| ed.state == state) {
                     ed.marks_due = true;
                 }
+                this.file_writing_changed(&state, cx);
             }
         })
         .detach();
         let path = want.path.clone();
-        self.file_editor = Some(FileEditor { key: want.key, path: want.path, lang, state, saved: want.saved, mtime, base: None, marks_due: false, marks_busy: false, hunks: Vec::new() });
+        self.file_editor = Some(FileEditor { key: want.key, path: want.path, lang, state, saved: want.saved, mtime, base: None, marks_due: false, marks_busy: false, hunks: Vec::new(), issues: Vec::new(), issues_for: String::new(), check_serial: 0, check_at_caret: true });
         self.read_file_base(path, cx);
+        self.file_check_soon(cx);
     }
 
     /// Ask git for its copy of a file an editor holds, off the main
@@ -4972,9 +4981,10 @@ impl Workbench {
     }
 
     /// A question on the window's own card over everything: a line, a
-    /// line under it, and its two buttons, which `labels` name.
+    /// line under it, `extra` when the question has a choice to make
+    /// (a tick), and its two buttons, which `labels` name.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, labels: [&str; 2], no: Stateful<Div>, yes: Stateful<Div>, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn ask_card(&self, id: &'static str, serial: u32, title: String, detail: String, labels: [&str; 2], extra: Option<AnyElement>, no: Stateful<Div>, yes: Stateful<Div>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let stack = Self::pills_stack(&labels, self.card_room(420.) - px(32.));
         div()
@@ -5003,6 +5013,7 @@ impl Workbench {
                     .shadow(float_shadow(&theme))
                     .child(div().w_full().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(title))
                     .when(!detail.is_empty(), |d| d.child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child(detail)))
+                    .children(extra)
                     .child(if stack {
                         v_flex().w_full().pt(px(2.)).gap(px(8.)).child(yes.w_full().justify_center()).child(no.w_full().justify_center()).into_any_element()
                     } else {
@@ -5105,7 +5116,7 @@ impl Workbench {
         });
         let no = choice_pill("discard-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
         let yes_el = choice_pill("discard-ask-yes", if new > 0 && new == paths.len() { "icons/trash.svg" } else { "icons/undo-2.svg" }, yes, Press::Danger, false, cx.theme()).on_click(go);
-        self.ask_card("discard-ask", serial, title, detail, ["Cancel", yes], no, yes_el, cx)
+        self.ask_card("discard-ask", serial, title, detail, ["Cancel", yes], None, no, yes_el, cx)
     }
 
     /// "@path" at the end of what is typed, as the composer's own "@"
@@ -5848,7 +5859,10 @@ impl Workbench {
                     MouseButton::Right,
                     cx.listener({
                         let name = b.label();
-                        move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![("Copy Branch Name", MenuDo::Copy(name.clone()))], cx)
+                        move |this, ev: &MouseDownEvent, _, cx| {
+                            let items = this.branch_menu_items(&name);
+                            this.open_menu(ev.position, items, cx)
+                        }
                     }),
                 )
                 .when(!named, |d| d.flex_shrink_0().managed_tooltip(move |window, cx| crate::workbench::tip(label.clone(), window, cx)))
@@ -6557,7 +6571,8 @@ impl Workbench {
                             move |this, ev: &MouseDownEvent, _, cx| {
                                 // Not the sheet's own right click, which puts the list away.
                                 cx.stop_propagation();
-                                this.open_menu(ev.position, vec![("Copy Branch Name", MenuDo::Copy(name.clone()))], cx);
+                                let items = this.branch_menu_items(&name);
+                                this.open_menu(ev.position, items, cx);
                             }
                         }),
                     )
@@ -7644,11 +7659,15 @@ impl Workbench {
                         let selection = state.update(cx, |s, cx| s.select_word_at(at, window, cx));
                         let focus = gpui::Focusable::focus_handle(state.read(cx), cx);
                         let _ = this.update(cx, |this, cx| {
-                            let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
-                            if selection {
-                                items.push(("Copy", MenuDo::Edit(crate::workbench::EditDo::Copy, focus.clone())));
+                            // A marked word's corrections and nothing
+                            // else, as in the composer.
+                            let mut items: Vec<(&'static str, MenuDo)> = this.file_corrections(at, cx);
+                            if items.is_empty() {
+                                if selection {
+                                    items.push(("Copy", MenuDo::Edit(crate::workbench::EditDo::Copy, focus.clone())));
+                                }
+                                items.push(("Select All", MenuDo::Edit(crate::workbench::EditDo::SelectAll, focus)));
                             }
-                            items.push(("Select All", MenuDo::Edit(crate::workbench::EditDo::SelectAll, focus)));
                             // The text's own two and no more: what is
                             // asked of the file is on its row's menu.
                             this.open_menu(at, items, cx);
@@ -8486,6 +8505,18 @@ impl Workbench {
                 self.branch_run(name.to_string(), false, if how == "leave" { git::Carry::Leave } else { git::Carry::Bring }, cx)
             }
             "branchrestore" => self.branch_restore(cx),
+            // A right click on a branch in the list; the question Delete
+            // asks of one, `branchdel:<name>:remote` with its tick on, and
+            // its Delete button.
+            t if t.starts_with("branchmenu:") => {
+                let items = self.branch_menu_items(&t["branchmenu:".len()..]);
+                self.open_menu(point(px(260.), px(230.)), items, cx);
+            }
+            t if t.starts_with("branchdel:") => {
+                let (name, tick) = t["branchdel:".len()..].rsplit_once(':').filter(|(_, t)| *t == "remote").map_or((&t["branchdel:".len()..], false), |(n, _)| (n, true));
+                self.branch_delete_probe = Some((name.to_string(), tick));
+            }
+            "branchdelgo" => self.branch_delete_go(cx),
             // The sheet a branch is made on, with a name in its field;
             // and the sheet that says how to sign in, as after a remote
             // that refused.
@@ -8663,6 +8694,16 @@ impl Workbench {
             // editor shows, which takes it as the mouse's (the window is
             // needed, so it is made at the next draw).
             "file:menu" if self.file_editor.is_some() => self.file_menu_probe = true,
+            // What the file's editor has marked as misspelt or
+            // ungrammatical, printed; and the first mark's menu.
+            "file:spell" => {
+                if let Some(ed) = &self.file_editor {
+                    let said: Vec<String> = ed.issues.iter().map(|i| format!("{:?} {:?} -> {:?}", ed.issues_for.get(i.range.clone()).unwrap_or(""), i.kind, i.fixes)).collect();
+                    eprintln!("emaki: spelling {said:?} (at caret {})", ed.check_at_caret);
+                }
+            }
+            "file:spellmenu" => self.file_spell_menu_probe = true,
+            "file:spellfix" => self.file_spell_fix_probe = true,
             // ⌘A in the files tree, and a rectangle dragged down it from
             // one height to another, in points from the tree's top.
             "treeall" => self.tree_key(&KeyDownEvent { keystroke: Keystroke::parse("secondary-a").unwrap(), is_held: false, prefer_character_input: false }, cx),

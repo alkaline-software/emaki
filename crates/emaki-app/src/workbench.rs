@@ -145,6 +145,8 @@ pub(crate) enum MenuDo {
     File(crate::panels::FileDo, PathBuf),
     /// The same asked of several chosen there at once.
     Files(crate::panels::FileDo, Vec<PathBuf>),
+    /// Ask whether this branch is deleted.
+    DeleteBranch(String),
     /// Put these words on the clipboard.
     Copy(String),
     /// Put this picture on the clipboard.
@@ -167,6 +169,8 @@ pub(crate) enum MenuDo {
     Edit(EditDo, gpui::FocusHandle),
     /// Put these words where the composer's bytes are: a correction.
     Fix(std::ops::Range<usize>, String),
+    /// The same in the file's editor.
+    FixFile(std::ops::Range<usize>, String),
     /// Never mark this word as misspelt again.
     Learn(String),
     /// Leave these marked words alone: the rule that marked them (none
@@ -215,6 +219,7 @@ impl MenuDo {
             MenuDo::Copy(_) if label.contains("Session ID") => "icons/hash.svg",
             MenuDo::Copy(_) if label.contains("Command") => "icons/terminal.svg",
             MenuDo::Copy(_) if label.contains("Branch") => "icons/git-branch.svg",
+            MenuDo::DeleteBranch(_) => "icons/trash.svg",
             MenuDo::Copy(_) => "icons/copy.svg",
             MenuDo::CopyImage(_) => "icons/image.svg",
             MenuDo::OpenTerminal(_) => "icons/square-terminal.svg",
@@ -231,15 +236,15 @@ impl MenuDo {
             MenuDo::Edit(EditDo::Cut, _) => "icons/scissors.svg",
             MenuDo::Edit(EditDo::Paste, _) => "icons/clipboard.svg",
             // A spelling's corrections are words only, as the system's are.
-            MenuDo::Fix(..) | MenuDo::Learn(_) | MenuDo::Ignore(..) | MenuDo::Note(_) | MenuDo::Rule => "",
+            MenuDo::Fix(..) | MenuDo::FixFile(..) | MenuDo::Learn(_) | MenuDo::Ignore(..) | MenuDo::Note(_) | MenuDo::Rule => "",
         }
     }
 
     /// The words of a choice, where they are not the same every time.
     fn words(&self, label: &'static str) -> SharedString {
         match self {
-            MenuDo::Fix(_, with) if with.is_empty() => "Remove".into(),
-            MenuDo::Fix(_, with) => with.clone().into(),
+            MenuDo::Fix(_, with) | MenuDo::FixFile(_, with) if with.is_empty() => "Remove".into(),
+            MenuDo::Fix(_, with) | MenuDo::FixFile(_, with) => with.clone().into(),
             MenuDo::Note(what) => what.clone().into(),
             _ => label.into(),
         }
@@ -304,8 +309,8 @@ fn load_renames() -> HashMap<String, Rename> {
 
 /// How long the typing has paused before the composer's text is checked,
 /// and how much longer before the word at the caret is marked too.
-const CHECK_AFTER: Duration = Duration::from_millis(300);
-const CHECK_WORD_AFTER: Duration = Duration::from_millis(1200);
+pub(crate) const CHECK_AFTER: Duration = Duration::from_millis(300);
+pub(crate) const CHECK_WORD_AFTER: Duration = Duration::from_millis(1200);
 
 /// How near the end of a conversation counts as at it, when more
 /// arrives; how long after a wheel the reader is taken to have stopped;
@@ -1525,7 +1530,7 @@ pub struct Workbench {
     /// A letter the person typed small on purpose.
     cap_refused: Option<usize>,
     /// The words never marked as misspelt.
-    learned: HashSet<String>,
+    pub(crate) learned: HashSet<String>,
     /// A turn was just stopped: put its prompt back in the composer at
     /// the next draw, which is where a window is at hand.
     restore_due: bool,
@@ -1841,6 +1846,10 @@ pub struct Workbench {
     pub(crate) tree_drop_hold: bool,
     /// `file:menu` asked for a right click in the editor at the next draw.
     pub(crate) file_menu_probe: bool,
+    /// `file:spellmenu`: the first mark's menu in the file's editor.
+    pub(crate) file_spell_menu_probe: bool,
+    /// `file:spellfix`: the first mark's first correction, taken.
+    pub(crate) file_spell_fix_probe: bool,
     /// The frame's colour as the native window last had it.
     window_ground: Cell<Option<Hsla>>,
     /// The window's height at the last draw.
@@ -2068,7 +2077,7 @@ pub struct Workbench {
     side_gone: std::cell::RefCell<Vec<SideGone>>,
     pub(crate) unread_y: Rc<std::cell::Cell<Option<Pixels>>>,
     /// The grammar marks the person has ignored (`check::ignore_key`).
-    ignored: HashSet<String>,
+    pub(crate) ignored: HashSet<String>,
     /// The rename field is asking for a file's name, not a session's.
     pub(crate) file_prompt: Option<crate::panels::FilePrompt>,
     /// The list of branches, open under where its button was clicked.
@@ -2089,6 +2098,8 @@ pub struct Workbench {
     /// A switch is waiting on a choice: what becomes of the changes not
     /// yet committed.
     pub(crate) branch_ask: Option<crate::panels::BranchAsk>,
+    /// A branch about to be deleted, on the card that asks.
+    pub(crate) branch_delete: Option<crate::branches::BranchDelete>,
     /// The sheet a branch is made on, and the field its name is typed
     /// in (`branches.rs`).
     pub(crate) branch_new: Option<crate::branches::BranchNew>,
@@ -2130,6 +2141,9 @@ pub struct Workbench {
     /// it is for looking at the question, and with no changes known the
     /// switch would go straight through.
     pub(crate) branch_ask_probe: Option<String>,
+    /// `branchdel:<name>`: the question Delete asks, and whether its
+    /// tick is on; asked at a draw, where there is a window to focus.
+    pub(crate) branch_delete_probe: Option<(String, bool)>,
     /// The comparison of the folder's files against the last commit,
     /// while it shows.
     pub(crate) changes: Option<crate::panels::Changes>,
@@ -3359,7 +3373,7 @@ impl Workbench {
                             let _ = this.update(cx, |w, cx| {
                                 let at = w.composer.read(cx).input_bounds().origin;
                                 if let Some(issue) = w.issues.first() {
-                                    let items = w.issue_items(issue);
+                                    let items = Self::issue_items(issue, &w.issues_for, false);
                                     w.open_menu(at, items, cx);
                                 }
                             });
@@ -3748,6 +3762,8 @@ impl Workbench {
             view_w: px(1280.),
             window_ground: Cell::new(None),
             file_menu_probe: false,
+            file_spell_menu_probe: false,
+            file_spell_fix_probe: false,
             tree_band: None,
             tree_band_live: false,
             tree_drop: None,
@@ -3874,6 +3890,7 @@ impl Workbench {
             branch_busy: false,
             branch_by_name: ui.branches_by_name.unwrap_or(false),
             branch_ask: None,
+            branch_delete: None,
             branch_new: None,
             branch_name_input,
             branch_new_wait: None,
@@ -3894,6 +3911,7 @@ impl Workbench {
             git_gate: None,
             branch_probe: None,
             branch_ask_probe: None,
+            branch_delete_probe: None,
             changes: None,
             file_probe: None,
             side_drag: false,
@@ -5352,6 +5370,7 @@ impl Workbench {
             || self.repo_menu.is_some()
             || self.branch_new.is_some()
             || self.branch_ask.is_some()
+            || self.branch_delete.is_some()
             || self.git_gate.is_some()
             || self.file_peek.is_some()
             || self.file_ask.is_some()
@@ -8524,6 +8543,7 @@ impl Workbench {
     fn restore_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_draft(window, cx);
         self.writing_sync(cx);
+        self.file_writing_sync(cx);
         if !self.composer.read(cx).value().trim().is_empty() || !self.attachments.is_empty() {
             return;
         }
@@ -8686,6 +8706,9 @@ impl Workbench {
             cx.notify();
         } else if self.branch_ask.is_some() {
             self.branch_ask = None;
+            cx.notify();
+        } else if self.branch_delete.is_some() {
+            self.branch_delete = None;
             cx.notify();
         } else if self.branch_new.is_some() {
             self.branch_new_close(window, cx);
@@ -10890,6 +10913,7 @@ impl Workbench {
             format!("Open {} folders?", folders.len()),
             String::new(),
             ["Cancel", "Open"],
+            None,
             choice_pill("open-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel),
             choice_pill("open-ask-yes", "icons/folder-open.svg", "Open", Press::Primary, false, cx.theme()).on_click(go),
             cx,
@@ -11281,6 +11305,7 @@ impl Workbench {
             MenuDo::CloseTab(key) => self.close_tab(&key, window, cx),
             MenuDo::Discard(paths) => self.ask_discard(paths, cx),
             MenuDo::Commit(what, sha) => self.commit_do(what, sha, window, cx),
+            MenuDo::DeleteBranch(name) => self.branch_delete_ask(name, window, cx),
             MenuDo::Web(url) => cx.open_url(&url),
             MenuDo::Sessions(ManageDo::Unarchive, keys) => self.unarchive_sessions(keys, window, cx),
             MenuDo::Sessions(what @ ManageDo::PutBack, keys) => self.manage_straight(what, keys, window, cx),
@@ -11301,6 +11326,7 @@ impl Workbench {
                 }
             }
             MenuDo::Fix(range, with) => self.fix_writing(range, with, window, cx),
+            MenuDo::FixFile(range, with) => self.file_fix(range, with, window, cx),
             MenuDo::Pdf(what) => self.pdf_do(what, cx),
             MenuDo::Learn(word) => self.learn_word(word, cx),
             MenuDo::Ignore(rule, words) => self.ignore_writing(rule, words, cx),
@@ -12189,7 +12215,7 @@ impl Workbench {
         }
         .on_click(go);
         let no = choice_pill("manage-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
-        self.ask_card("manage-ask", serial, title, detail, ["Cancel", yes_label], no, yes, cx)
+        self.ask_card("manage-ask", serial, title, detail, ["Cancel", yes_label], None, no, yes, cx)
     }
 
     /// The question answered yes: it is done off the main thread, a
@@ -14916,13 +14942,17 @@ impl Workbench {
         if self.issues_for.as_str() != state.value().as_ref() {
             return Vec::new();
         }
-        self.issues.iter().find(|i| i.range.start <= offset && offset <= i.range.end).map(|issue| self.issue_items(issue)).unwrap_or_default()
+        self.issues.iter().find(|i| i.range.start <= offset && offset <= i.range.end).map(|issue| Self::issue_items(issue, &self.issues_for, false)).unwrap_or_default()
     }
 
-    fn issue_items(&self, issue: &emaki_core::check::Issue) -> Vec<(&'static str, MenuDo)> {
+    /// A mark's menu: its corrections, Learn Spelling for a spelling,
+    /// and Ignore. `text` is what the mark's bytes are of; `file` says
+    /// the correction goes in the file's editor, not the composer.
+    pub(crate) fn issue_items(issue: &emaki_core::check::Issue, text: &str, file: bool) -> Vec<(&'static str, MenuDo)> {
         use emaki_core::check::Kind;
-        let mut items: Vec<(&'static str, MenuDo)> = issue.fixes.iter().take(5).map(|fix| ("", MenuDo::Fix(issue.range.clone(), fix.clone()))).collect();
-        let words = self.issues_for[issue.range.clone()].to_string();
+        let fix = |with: &String| if file { MenuDo::FixFile(issue.range.clone(), with.clone()) } else { MenuDo::Fix(issue.range.clone(), with.clone()) };
+        let mut items: Vec<(&'static str, MenuDo)> = issue.fixes.iter().take(5).map(|with| ("", fix(with))).collect();
+        let words = text[issue.range.clone()].to_string();
         if issue.kind == Kind::Spelling && issue.fixes.is_empty() {
             items.push(("", MenuDo::Note("No spelling found".to_string())));
         }
@@ -14956,6 +14986,7 @@ impl Workbench {
         self.learned.insert(word.to_lowercase());
         self.issues.retain(|i| !(i.kind == emaki_core::check::Kind::Spelling && self.issues_for[i.range.clone()].eq_ignore_ascii_case(&word)));
         self.mark_slash(cx);
+        self.file_issues_keep(cx);
     }
 
     /// Ignore, at the foot of a mark's menu. A spelling is left alone
@@ -14977,6 +15008,7 @@ impl Workbench {
         self.issues = check::keep(&text, std::mem::take(&mut self.issues), learned, ignored);
         self.issues_for = text;
         self.mark_slash(cx);
+        self.file_issues_keep(cx);
     }
 
     /// A change to how the composer treats what is written in it.
@@ -14986,6 +15018,7 @@ impl Workbench {
         self.issues.clear();
         self.mark_slash(cx);
         self.check_soon(cx);
+        self.file_check_soon(cx);
         cx.notify();
     }
 
@@ -16777,6 +16810,7 @@ impl Render for Workbench {
         self.inner_kept.borrow_mut().retain(|_, kept| std::mem::take(&mut kept.1));
         self.sync_draft(window, cx);
         self.writing_sync(cx);
+        self.file_writing_sync(cx);
         self.sync_folders(cx);
         // What git already has stands in the fields, so the line under them
         // is what they say.
@@ -16840,9 +16874,28 @@ impl Render for Workbench {
                 ed.state.update(cx, |s, cx| s.secondary_click_at(at, window, cx));
             }
         }
+        if std::mem::take(&mut self.file_spell_fix_probe) {
+            if let Some((range, with)) = self.file_editor.as_ref().and_then(|ed| ed.issues.first()).and_then(|i| Some((i.range.clone(), i.fixes.first()?.clone()))) {
+                self.menu_pick(MenuDo::FixFile(range, with), window, cx);
+            }
+        }
+        if std::mem::take(&mut self.file_spell_menu_probe) {
+            let at = self.file_view_scroll.bounds().origin + point(px(86.), px(23.));
+            if let Some(items) = self.file_editor.as_ref().and_then(|ed| ed.issues.first().map(|i| Self::issue_items(i, &ed.issues_for, true))) {
+                self.open_menu(at, items, cx);
+            }
+        }
         if self.branch_ask_probe.is_some() && self.panel_changes() > 0 {
             if let Some(name) = self.branch_ask_probe.take() {
                 self.branch_go(name, false, window, cx);
+            }
+        }
+        if self.branches().is_some() {
+            if let Some((name, tick)) = self.branch_delete_probe.take() {
+                self.branch_delete_ask(name, window, cx);
+                if let Some(d) = self.branch_delete.as_mut() {
+                    d.remote_too = tick;
+                }
             }
         }
         // The sheet a branch is made on, asked for before git had said
@@ -17232,6 +17285,7 @@ impl Render for Workbench {
             .when_some(self.repo_menu, |d, at| d.child(fade_in("repo-menu-in", self.render_repo_menu(at, window, cx))))
             .when(self.branch_new.is_some(), |d| d.child(fade_in("branch-new-in", self.render_branch_new(cx))))
             .when(self.branch_ask.is_some(), |d| d.child(fade_in("branch-ask-in", self.render_branch_ask(cx))))
+            .when(self.branch_delete.is_some(), |d| d.child(fade_in("branch-delete-in", self.render_branch_delete(cx))))
             .when(self.git_gate.is_some(), |d| d.child(fade_in("git-gate-in", self.render_git_gate(cx))))
             .when(self.file_peek.is_some(), |d| d.child(self.render_file_peek(window, cx)))
             .when(self.file_ask.is_some(), |d| d.child(self.render_file_ask(window, cx)))

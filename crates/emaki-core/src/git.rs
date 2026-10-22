@@ -461,6 +461,9 @@ pub struct Branches {
     /// the remote has no such branch.
     pub ahead: usize,
     pub behind: usize,
+    /// The repository's page on the web (`repo_url`), where its remote
+    /// is on a host; read here so no button asks git on every draw.
+    pub web: Option<String>,
 }
 
 /// A name in pieces that order as a person reads it: a run of digits
@@ -561,6 +564,7 @@ pub fn branches(dir: &Path) -> Option<Branches> {
         }
     }
     b.origin = remote(dir);
+    b.web = b.origin.as_ref().and_then(|r| line(dir, &["remote", "get-url", r])).and_then(|url| web_of(&url));
     if b.origin.is_some() {
         b.unpublished = b.local.iter().filter(|l| !b.remote.contains(l)).cloned().collect();
     }
@@ -766,6 +770,28 @@ pub fn publish(dir: &Path, name: &str) -> Result<(), String> {
     net(dir, &["push", "--quiet", "--set-upstream", &r, &format!("refs/heads/{name}:refs/heads/{name}")])
 }
 
+/// Delete the branch `name` here. The branch checked out is left first
+/// for the default one by a plain switch, which git refuses when a
+/// change here would be written over: nothing is deleted then. Git is
+/// not asked whether the branch is merged (`-D`), as GitHub Desktop
+/// does not ask it either: the person was asked. The remote's copy,
+/// when there is one, is left alone.
+pub fn delete_branch(dir: &Path, name: &str) -> Result<(), String> {
+    if line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).as_deref() == Some(name) {
+        let default = branches(dir).and_then(|b| b.default).filter(|d| d != name).ok_or("there is no other branch to switch to first")?;
+        switch(dir, &default)?;
+    }
+    act(dir, &["branch", "-D", name])
+}
+
+/// Delete the remote's copy of the branch `name`, and with it what is
+/// known of it here (`refs/remotes/<r>/<name>`, which git lets go with
+/// the push). A local copy is left alone.
+pub fn delete_remote_branch(dir: &Path, name: &str) -> Result<(), String> {
+    let r = remote(dir).ok_or("this repository has no remote")?;
+    net(dir, &["push", "--quiet", &r, &format!(":refs/heads/{name}")])
+}
+
 /// Commit what is changed in `paths`, or with none named everything
 /// changed under `dir`, with `summary` as the message's first line and
 /// `description` after a blank one. New files are added and files gone
@@ -915,13 +941,40 @@ pub fn file_url(dir: &Path, sha: &str, path: &str) -> Option<String> {
 /// A commit's page on the host, where the remote is one of the hosts
 /// that have such pages at `/commit/<sha>` (GitHub, GitLab, Gitea).
 pub fn commit_url(dir: &Path, sha: &str) -> Option<String> {
-    let url = remote(dir).and_then(|r| line(dir, &["remote", "get-url", &r]))?;
-    let (host, _) = host_of(&url);
+    repo_url(dir).map(|url| format!("{url}/commit/{sha}"))
+}
+
+/// The repository's own page on its host: the remote's address as a
+/// web one. None for a remote that is a folder, or with no remote.
+pub fn repo_url(dir: &Path) -> Option<String> {
+    web_of(&remote(dir).and_then(|r| line(dir, &["remote", "get-url", &r]))?)
+}
+
+/// A remote's address as the page it is at on the web: `https://`,
+/// the host, the path with its `.git` taken off, whether it was given
+/// over https, ssh or in git's own `git@host:path` form.
+pub fn web_of(url: &str) -> Option<String> {
+    let (host, _) = host_of(url);
     if host.is_empty() {
         return None;
     }
-    let path = url.split_once(&host)?.1.trim_start_matches([':', '/']).trim_end_matches('/').trim_end_matches(".git");
-    (!path.is_empty()).then(|| format!("https://{host}/{path}/commit/{sha}"))
+    // After the host: a port with a scheme (`ssh://git@host:22/path`),
+    // else the colon of `git@host:path`.
+    let rest = url.split_once(&host)?.1;
+    let rest = if url.contains("://") { rest.trim_start_matches(|c: char| c == ':' || c.is_ascii_digit()) } else { rest.trim_start_matches(':') };
+    let path = rest.trim_start_matches('/').trim_end_matches('/').trim_end_matches(".git");
+    (!path.is_empty()).then(|| format!("https://{host}/{path}"))
+}
+
+/// What the host is called on a button that opens a page there.
+pub fn host_name(host: &str) -> &'static str {
+    match host {
+        "github.com" => "GitHub",
+        "gitlab.com" => "GitLab",
+        "bitbucket.org" => "Bitbucket",
+        "codeberg.org" => "Codeberg",
+        _ => "the Web",
+    }
 }
 
 /// Where the remote is, and how the machine would sign in to it: what
