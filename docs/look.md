@@ -241,7 +241,7 @@ Fonts, where each is a tile drawn in itself:
 
 ## The look settings
 
-Four settings in `config.json` under `app`, changed in the settings panel
+Four settings in `config.json` under `app`, changed in the settings window
 (the first two in Appearance, the others in Fonts with the monospace
 face):
 
@@ -260,8 +260,8 @@ face):
   from its stylesheet, which also sets bold to weight 600, matched through
   the vendored toolkit's `strong_font_weight`.
 
-The panel also sets `driver.default_mode` and `driver.default_model`.
-The terminal's own settings are under `terminal`, in the panel's Terminal
+The window also sets `driver.default_mode` and `driver.default_model`.
+The terminal's own settings are under `terminal`, in the window's Terminal
 section (`docs/channels.md`, The terminal panel).
 `driver.claude_path` names the `claude` binary when `PATH` does not.
 
@@ -293,7 +293,7 @@ Appearance: Avatar and Name.
 
 ## Probing
 
-- `EMAKI_SETTINGS=appearance` opens the panel on that section. A scratch
+- `EMAKI_SETTINGS=appearance` opens the settings window on that section. A scratch
   `config.json` under `EMAKI_HOME` sets a picture and a name.
 - A `mouseMoved` event posted to the pid moves gpui's hover, so a hover
   state (the Remove pill) is one event and an `EMAKI_SHOT` away.

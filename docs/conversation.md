@@ -26,6 +26,16 @@ About `crates/emaki-app/src/transcript.rs`, the conversation list in
   panics on some inputs ("Cannot push to non-parent"), and a panic inside
   an element's layout aborts the app.
 - Each place that draws the moving agent mark passes its own animation id.
+- A conversation is read as markdown through `chat_md_view`, never
+  `md_view`, which reads a file's or a page's as GitHub does. A sign
+  plain text uses for something else is taken out of what the
+  conversation reads, as a whole construct (`chat_parse_options`), never
+  as a fix for one text. (What markdown a conversation reads, below.)
+- The markdown extensions a view is given are made once
+  (`CHAT_MARKDOWN`), never at a draw. A set made anew takes a new
+  revision, and the view parses its text again at every new revision:
+  every text was parsed again every frame, and a selection was gone the
+  moment the mouse let go.
 
 ## The end, and what is new
 
@@ -219,12 +229,37 @@ a search of its own and, with none, passes it on (a change of ours in
   fills the bar and lands on the round once loaded (`find_pending`). The
   search index numbers rounds from one, the model from zero.
 
+## What markdown a conversation reads
+
+A prompt is typed as plain text (the composer is plain text) and a reply
+is read in the agent's terminal too, where markdown is not drawn. So
+the conversation reads GFM less what text sets off by accident
+(`chat_parse_options`, given to the toolkit's view through its
+`parse_options_with`):
+
+- No setext headings. A line of `-` or `=` under a line is a line of
+  its own: a person splitting a list with a dash turned the lines above
+  into headings. `---` after text is a rule, as a model writing it
+  means.
+- No indented code. Four spaces in is text; code is fenced.
+- No raw HTML. `<Input>` in a sentence was parsed as a tag and drawn
+  as nothing.
+- One tilde is a tilde. "~30% … ~40%" struck the words between;
+  strikethrough takes two.
+
+A construct is turned off here only where prose sets it off by
+accident and what was meant can still be written another way. Emphasis
+needs no rule: CommonMark already leaves an underscore inside a word or
+after a space unclosed.
+
 ## The markdown safety check
 
 The smallest panicking input found is a paragraph followed by two `---`
 lines, which YAML front matter quoted in a Codex tool result produces.
 `markdown_is_safe` runs the same parser under `catch_unwind`, once per
-distinct text, and `md_view` shows an unsafe text as a code block.
+distinct text and with the options the view parses with (a
+conversation's, or a document's), and `md_view` shows an unsafe text as
+a code block.
 `markdown` is a direct dependency of the app at the toolkit's version for
 this one call.
 

@@ -26,6 +26,12 @@ const MAX_INJECTION_LANGUAGE_BYTES: usize = 64;
 /// Parse attempts, not resulting layers: a failed parse still spends budget.
 /// Matches past it keep host highlighting but get no injected tokens.
 const MAX_NON_COMBINED_INJECTION_PARSES: usize = 512;
+/// Markdown's inline content is parsed one block at a time up to this
+/// many blocks, past which the rest are parsed as one combined layer.
+/// Parsed together, an emphasis opened in one paragraph closed in another
+/// (a Quarto `{{< include _a.html >}}` and a later `_b.html`), which
+/// CommonMark never allows: inline content belongs to its block.
+const MAX_INLINE_INJECTION_PARSES: usize = 2048;
 const INJECTION_PARSE_TIMEOUT: Duration = Duration::from_millis(20);
 
 /// A syntax highlighter that supports incremental parsing, multiline text,
@@ -718,6 +724,7 @@ impl SyntaxHighlighter {
             HashMap::new();
         let mut new_layers = Vec::new();
         let mut non_combined_parses = 0usize;
+        let mut inline_parses = 0usize;
         while let Some(query_match) = matches.next() {
             let mut language_name: Option<SharedString> = None;
             let mut combined = false;
@@ -780,6 +787,12 @@ impl SyntaxHighlighter {
             }
             sort_ranges(&mut ranges);
 
+            // Each block's inline content alone, while the budget lasts.
+            let inline = language_name.as_ref() == "markdown_inline";
+            if combined && inline && inline_parses < MAX_INLINE_INJECTION_PARSES {
+                combined = false;
+            }
+
             if combined {
                 combined_ranges
                     .entry(language_name.clone())
@@ -793,7 +806,11 @@ impl SyntaxHighlighter {
                     continue;
                 }
 
-                non_combined_parses += 1;
+                if inline {
+                    inline_parses += 1;
+                } else {
+                    non_combined_parses += 1;
+                }
                 let old_tree = old_layer_trees
                     .get(&(language_name.clone(), ranges_cache_key(&ranges)))
                     .copied();
@@ -1614,15 +1631,19 @@ $x = 1;
 
         assert!(highlighter.update(None, &rope, None));
         assert!(
-            highlighter.injection_layers.len() <= 1,
-            "markdown_inline should be combined instead of one layer per inline node"
+            highlighter.injection_layers.len() <= MAX_INLINE_INJECTION_PARSES + 1,
+            "markdown_inline should be a layer a block up to its budget, and one combined layer past it"
         );
 
-        if let Some(layer) = highlighter
+        // Past the budget the rest are one combined layer, when its parse
+        // finishes in time.
+        let combined = highlighter
             .injection_layers
             .iter()
-            .find(|layer| layer.language_name.as_ref() == "markdown_inline")
-        {
+            .filter(|layer| layer.language_name.as_ref() == "markdown_inline" && layer.ranges.len() > 1)
+            .collect::<Vec<_>>();
+        assert!(combined.len() <= 1, "the blocks past the budget should be one combined layer");
+        for layer in combined {
             assert!(layer.ranges.len() <= MAX_INJECTION_RANGES);
             assert!(injection_ranges_byte_count(&layer.ranges) <= MAX_INJECTION_BYTES);
         }
@@ -1641,6 +1662,104 @@ $x = 1;
                 .all(|layer| layer.language_name.as_ref() != "markdown_inline"),
             "plain inline ranges should not create markdown_inline injection layers"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-languages")]
+    fn test_markdown_emphasis_does_not_cross_blocks() {
+        // Two underscores in two paragraphs, each at a word's start (Quarto
+        // includes): in CommonMark neither closes, and emphasis never leaves
+        // its block. The page around them is the one that showed it.
+        let markdown = r#"---
+sidebar: false
+# No `title`: the hero sets the name itself, and a title here would put
+# Quarto's title block above it saying the same word again. `pagetitle` is
+# what the browser tab and the search index get instead.
+pagetitle: "Emaki"
+toc: false
+page-layout: full
+anchor-sections: false
+---
+
+::: {.hero}
+
+{{< include _hero.html >}}
+
+# Emaki [絵巻]{.hero-kanji}
+
+::: {.hero-lede}
+The agentic development environment.
+:::
+
+{{< include _download.html >}}
+
+:::
+
+::: {.hero-rule}
+:::
+
+::: {.shift .rise}
+## From the IDE to the ADE
+
+{{< include _shift-ide.html >}}
+
+::: {.shift-words}
+::: {.shift-label}
+**IDE** integrated development environment
+:::
+
+An IDE is built for writing code by hand: many panels, a steep learning
+curve, and real effort to set up. With agents, you write less code and run
+fewer commands yourself, yet the editor still takes the middle of the
+screen and most of your attention. The agent chat and git sit at the
+edges, and there is no way to manage the agent's sessions at all.
+:::
+
+{{< include _shift-ade.html >}}
+
+::: {.shift-words}
+::: {.shift-label}
+**ADE** agentic development environment
+:::
+
+Emaki, an agentic development environment, turns this around. The agent
+chat is the main panel, rendered with care, and four panels open beside it
+when you need them: files, outline, shell terminal and agent terminal.
+Sessions are listed under their projects, where you can manage them and
+keep them safe from automatic deletion.
+:::
+
+:::
+
+::: {.rule}
+:::
+
+::: {.band .rise}
+## Get started
+"#;
+        let rope = Rope::from_str(markdown);
+        let mut highlighter = SyntaxHighlighter::new("markdown");
+        highlighter.update(None, &rope, None);
+
+        let highlights = highlighter.match_styles(0..markdown.len());
+        let prose = markdown.find("An IDE").unwrap();
+        assert!(
+            !highlights.iter().any(|item| item.name.as_ref() == "emphasis" && item.range.start <= prose && item.range.end > prose),
+            "prose between two blocks' underscores should not be emphasis: {highlights:?}"
+        );
+        assert!(
+            has_highlight_covering(&highlights, markdown, "**IDE**", "emphasis.strong"),
+            "the strong text inside should still be strong: {highlights:?}"
+        );
+        let theme = HighlightTheme::default_light();
+        let styles = highlighter.styles(&(0..markdown.len()), theme.as_ref());
+        for word in ["IDE**", "ADE**"] {
+            let start = markdown.find(word).unwrap();
+            assert!(
+                styles.iter().any(|(range, style)| range.start <= start && range.end >= start + 3 && style.font_weight == Some(gpui::FontWeight::BOLD)),
+                "{word:?} should be drawn bold: {styles:?}"
+            );
+        }
     }
 
     #[test]

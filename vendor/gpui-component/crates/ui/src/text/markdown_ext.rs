@@ -172,10 +172,14 @@ impl PartialEq for MarkdownNode {
     }
 }
 
+/// A change to the parse options over GFM's (`MarkdownExtensions::parse_options_with`).
+type ParseOptionsFn = dyn Fn(&mut ParseOptions) + Send + Sync;
+
 /// Registry for custom Markdown parsing and rendering.
 #[derive(Clone, Default)]
 pub struct MarkdownExtensions {
     enable_mdx: bool,
+    parse_options_with: Option<Arc<ParseOptionsFn>>,
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     revision: u64,
@@ -188,6 +192,17 @@ impl MarkdownExtensions {
     /// priority over MDX when both are enabled.
     pub fn mdx(mut self) -> Self {
         self.enable_mdx = true;
+        self.bump_revision();
+        self
+    }
+
+    /// Change the parse options over GFM's (and MDX's, when enabled): turn
+    /// a construct off where the text it is drawn from does not mean it.
+    pub fn parse_options_with<F>(mut self, change: F) -> Self
+    where
+        F: Fn(&mut ParseOptions) + Send + Sync + 'static,
+    {
+        self.parse_options_with = Some(Arc::new(change));
         self.bump_revision();
         self
     }
@@ -271,6 +286,9 @@ impl MarkdownExtensions {
             options.constructs.mdx_expression_text = true;
             options.constructs.mdx_jsx_flow = true;
             options.constructs.mdx_jsx_text = true;
+        }
+        if let Some(change) = &self.parse_options_with {
+            change(&mut options);
         }
         options
     }

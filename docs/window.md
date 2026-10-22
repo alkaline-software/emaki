@@ -2,7 +2,7 @@
 
 About `crates/emaki-app/src/workbench.rs`, `main.rs` and `ui_state.rs`: the
 strip buttons, the sidebar, the sessions page, the layout, the
-settings panel, menus and rename, tabs, focus, scroll routing, what the
+settings window, menus and rename, tabs, focus, scroll routing, what the
 window remembers.
 
 ## Rules
@@ -18,7 +18,7 @@ window remembers.
   a press in the sheet let go outside it, or the other way, closed the
   sheet, as a selection dragged past a field's end does. Occluding, the
   sheet keeps the scrim from being under the pointer while the pointer
-  is over the sheet. Settings, rename, search, the comparison, the
+  is over the sheet. Rename, search, the comparison, the
   branch sheets, the sign-in sheet, the lightbox and the floating
   sidebar all do.
 - A hover style that changes the text's colour is set whatever state the
@@ -105,7 +105,7 @@ window remembers.
 - A name asked for is never drawn as the session's title before the
   transcript says it. The title stays the transcript's, with the mark
   beside it. Typed is not taken: only the index puts a name away.
-- The settings panel's page is a flex column inside a flex column. A
+- The settings window's page is a flex column inside a flex column. A
   block wrapper around it collapsed the panel to its top band.
 - A round in the conversation list is wrapped in an explicit centring
   parent. The list lays each item out alone, so an auto margin has nothing
@@ -432,8 +432,23 @@ The patterns, each in use and to be used again:
   of a session with a tab, the line under the pinned projects):
   `presence`, asked at every draw, which plays a change over
   `FOLD_ANIM` and not the first sight.
-- The settings are drawn over every sheet and card, the comparison
-  included; only a menu or a pill's list, which they open, is over them.
+- The settings window draws the workbench's own state (`SettingsView`
+  updates the workbench as it renders), so every listener on it is the
+  workbench's and a change shows in both windows at once. What belongs
+  to a window is made with it (`settings_attach`): the name's field,
+  whose input watches the window it was made in. A list or a menu
+  opened in it (`PickMenu::in_settings`, `Menu::in_settings`) is drawn
+  there and not in the main window, and a field's place is kept by
+  window (`pill_at`): New sessions' lists are the home page's pills'
+  too. Its list keeps a scroll handle of its own: `route_scroll` and
+  the scrollers it knows (`inner_scroller`) are the main window's, by
+  that window's coordinates.
+- What the settings window held goes when it closes (`settings_detach`,
+  on the view's release), never on a question first: ⌘W closes it from
+  code (`remove_window`), which asks nothing. It closes with the main
+  window. ⌘W or Close Window that reaches no view closes the window it
+  was pressed in: `with_workbench` hands the main window's workbench
+  only to the main window.
 - **Something that lies over the window and has no way out of its own**
   (the rename sheet, the lightbox, the comparison, the branch list and
   its question, the discard question): `fade_in`, on a static id, which
@@ -589,14 +604,22 @@ Laid out like the Claude desktop app.
   appearance, loaded by `install_theme` in `main.rs`. `assets.rs` wraps the
   toolkit's icon set and serves our own files; nothing draws `mark.svg` now.
 
-## The settings panel
+## The settings window
 
-A fixed sheet with a rail of sections on the left (`SETTINGS_SECTIONS`;
-`settings_section` is the one showing) and that section's groups on the
-right, its name in a band at the top, both fading in as the section
-changes (`workbench/settings.rs`). Its sizes, grounds and controls are
-in `docs/design.md`, The settings panel. The rows scroll under the band
-(`settings_scroll`), which a section that fits never needs.
+⌘, the app menu's Settings…, the gear in the sidebar's foot and a click
+on the avatar open the settings in a window of their own, as Kotoba's
+and the Mac's own are (`open_settings`): a rail of sections on the left
+(`SETTINGS_SECTIONS`; `settings_section` is the one showing) and that
+section's groups on the right, its name in the window's top, both
+fading in as the section changes (`workbench/settings.rs`). Opened
+again, the window comes forward on the section asked for. Its sizes,
+grounds and controls are in `docs/design.md`, The settings window. The
+rows scroll under the top (`settings_scroll`), which a section that fits
+never needs. The window's top and the rail's empty room drag it
+(`drag_region`); a press on a section does not. Escape puts away a
+list or a menu open in it, and one goes too when another window is
+used. A sheet over the main window, with a scrim and a close button,
+was the settings until v0.2.9: it covered the conversation it set.
 
 A group is a card of rows (`group`, `line`): a name at the left with a
 line under it where the name does not say it all, the control at the
@@ -859,19 +882,20 @@ scrolled the second.
 `Workbench::route_scroll` runs in the capture phase from a raw listener a
 zero-size `canvas` registers at paint, before any container. Of the
 scrollers that name themselves (`inner_live`), the one under the pointer
-drawn last is the one on top and takes the gesture: History's list over
-the settings', which scrolled the settings while it was first. The pane under
+drawn last is the one on top and takes the gesture: a pill's list over
+the page, which scrolled the page while it was first. The pane under
 the pointer at `Started`, or at the first event after `SCROLL_GAP` (a mouse
 wheel sends no phases), owns the gesture. An event that lands in another
 pane is applied to the owner's scroll position (`ListState::scroll_by` for
 the conversation, a `ScrollHandle` elsewhere) and stopped. With a single
-pane there is nothing to do.
+pane there is nothing to do. The settings window has none of this: it
+is one pane, and its list occludes the page under it.
 
 A pane is not the only thing that scrolls: a tool call's body, a box on
-the background commands' card, the settings' rows, a pill's list, the
-search results, a PDF's page list. Each names itself at every draw
-(`inner_live`), and `route_scroll` looks for one under the pointer before
-it looks at panes:
+the background commands' card, a pill's list, the search results, a
+PDF's page list. Each names itself at every draw (`inner_live`), and
+`route_scroll` looks for one under the pointer before it looks at
+panes:
 
 - A gesture that begins in one is that scroller's (`scroll_inner`). The
   router moves it itself and stops the event, on the scroller or off it,
@@ -1033,7 +1057,10 @@ to the workbench's own handle whenever the composer still holds it.
 
 ## Probing
 
-- `EMAKI_SETTINGS=<section>` opens the settings panel on that section.
+- `EMAKI_SETTINGS=<section>` opens the settings window on that section.
+  `EMAKI_GO` steps `settings:<section>` do the same, and `setpick:<mode|
+  model|effort>` opens that list of New sessions; with the window open
+  `EMAKI_SHOT` takes it in place of the main window.
 - `EMAKI_GO=folder:<name>` is the click on a sidebar folder. `side:<x>`
   drags the sidebar's edge to that x and lets go; `sidefit` is the double
   click on it.

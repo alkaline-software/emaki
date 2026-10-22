@@ -287,12 +287,7 @@ impl Workbench {
         if from == to {
             return;
         }
-        self.term_folded = false;
-        // With room for one of the two beside the conversation, the
-        // files or the outline give their place up.
-        if to.is_some() && !self.term_at_agents() && !self.room_for_both() {
-            self.panel_go(None, cx);
-        }
+        self.room_held = px(0.);
         // The agents page's shell is its own choice: it neither opens
         // the panel beside a conversation nor closes it.
         if self.term_at_agents() {
@@ -301,6 +296,7 @@ impl Workbench {
             self.side_term = to.is_some();
             if let Some(agent) = to {
                 self.side_term_agent = agent;
+                self.side_asked(crate::panels::Side::Term, cx);
             }
         }
         self.side_term_anim = Some((from, to, Instant::now(), self.side_term_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
@@ -341,6 +337,13 @@ impl Workbench {
             }
             "term:tab+" => self.shell_new(None, cx),
             "term:fit" => self.side_term_w = TERM_W,
+            // The panel's edge dragged to that width, as far as it goes.
+            _ if step.starts_with("term:w:") => {
+                if let Ok(w) = step["term:w:".len()..].parse::<f32>() {
+                    self.side_term_w = px(w).max(TERM_MIN);
+                    cx.notify();
+                }
+            }
             "term:copied" => self.side_copied = Some(Instant::now()),
             _ if step.starts_with("term:hover:") => {
                 // term:hover:<row>,<col>

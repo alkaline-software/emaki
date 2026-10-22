@@ -147,7 +147,7 @@ there, and what asked for that was not found.
   a headless driver behind the session a pick is the driver's to set.
   ⇧Tab in the composer is still one step (`cycle_mode`).
 - Model, effort: a list each, opening up from its pill (`pick_pill`,
-  `PickMenu`, the one the settings panel's two pills have): the agent's
+  `PickMenu`, the one the settings window's fields have): the agent's
   own choices with its line on each, an effort in its colour, the current
   one ticked. A row under the pointer and the current one are a wash
   of the ink in the dark appearance, whose own hover colour is a shade

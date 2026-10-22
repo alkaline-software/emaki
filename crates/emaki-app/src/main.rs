@@ -185,16 +185,17 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
     });
 }
 
-/// The window's workbench, for an action that reached no view.
-struct MainWorkbench(WeakEntity<Workbench>);
+/// The main window and its workbench, for an action that reached no view.
+struct MainWorkbench(WeakEntity<Workbench>, AnyWindowHandle);
 
 impl Global for MainWorkbench {}
 
 /// Run `f` on the workbench of the active window, or with none there
 /// close that window, which is what the action asked of a window bare.
+/// The settings window is one with none: what reaches it bare closes it.
 fn with_workbench(cx: &mut App, f: impl FnOnce(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static) {
     let Some(w) = cx.active_window() else { return };
-    let workbench = cx.try_global::<MainWorkbench>().and_then(|m| m.0.upgrade());
+    let workbench = cx.try_global::<MainWorkbench>().filter(|m| m.1 == w).and_then(|m| m.0.upgrade());
     cx.defer(move |cx| {
         w.update(cx, |_, window, cx| match workbench {
             Some(workbench) => workbench.update(cx, |w, cx| f(w, window, cx)),
@@ -283,12 +284,13 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
                         let go = w.file_guard(crate::panels::FileThen::CloseWindow, cx);
                         if go {
                             w.keep_composers(cx);
+                            w.close_settings(cx);
                         }
                         go
                     })
                     .unwrap_or(true)
             });
-            cx.set_global(MainWorkbench(workbench.downgrade()));
+            cx.set_global(MainWorkbench(workbench.downgrade(), window.window_handle()));
             cx.new(|cx| Root::new(workbench, window, cx))
         },
     )
@@ -307,8 +309,10 @@ fn main() {
     let app = gpui_platform::application().with_assets(assets::Assets);
     // A click on the Dock icon, or a second launch, after the window was
     // closed (⌘W on the last tab): open it again, or bring it forward.
+    // The settings window alone is no main window.
     app.on_reopen(|cx| {
-        if cx.windows().is_empty() {
+        let main = cx.try_global::<MainWorkbench>().map(|m| m.1);
+        if !main.is_some_and(|h| cx.windows().contains(&h)) {
             if let Err(e) = open_main_window(cx) {
                 eprintln!("emaki: could not open a window: {e}");
             }

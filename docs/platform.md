@@ -238,7 +238,7 @@ an SVG rasterised by Cocoa from one master.
   `HubEvent::Update`. `Workbench::check_updates_daily` runs from the clock
   tick when `app.check_updates` is on and speaks only when it finds a newer
   version. `state/update.json` keeps when the last check ran.
-- The settings panel shows as little as it can: the version, one button
+- The settings window shows as little as it can: the version, one button
   that reads *Check for updates* and then *Update to x* in the same place,
   a *Release notes* link only then, a tick for the daily check, and a
   detail line only when there is something to say. Tried and dropped:

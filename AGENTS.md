@@ -160,7 +160,7 @@ handed work on one of these files is told to read the doc too.
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
-| Anything a person sees, new or changed: a control, a colour, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings panel: `docs/window.md`) |
+| Anything a person sees, new or changed: a control, a colour, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
@@ -210,7 +210,7 @@ crates/emaki-core/        everything without a window
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
   src/workbench.rs           sidebar, session list, search, composer
-  src/workbench/settings.rs  the settings panel: its rail, groups, rows, switches
+  src/workbench/settings.rs  the settings window: its rail, groups, rows, switches
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/panels.rs              the files panel and the outline panel, at a conversation's left: the folder's files as a tree, and an entry a round
   src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions
@@ -255,10 +255,11 @@ installing it, and README.md how to use the app and how it is built.
 
 ## Running it
 
-**One Emaki at a time.** Two copies share `~/.emaki` and both write
-`state/ui.json`, the Dock shows two identical icons, and the one the person
-looks at is usually the old build, so the change "is not there". The
-exception is a probe copy with its own `EMAKI_HOME` (`docs/probing.md`).
+**One dev build at a time.** Two copies share `~/.emaki` and both write
+`state/ui.json`, and the Dock shows two identical icons. The person keeps
+the installed Emaki open beside the dev build on purpose; a second dev
+build is a mistake. A probe copy has its own `EMAKI_HOME`
+(`docs/probing.md`).
 
 **After a change to the app, relaunch it with `scripts/relaunch.sh`.** The
 person develops Emaki in Emaki, so at the end of any task that changed the
@@ -266,10 +267,12 @@ app, build it (`cargo build -p emaki-app`) and run `scripts/relaunch.sh` as
 the last command before the final reply, without being asked. A change to
 documents alone needs no relaunch. The script returns at once; fifteen
 seconds later, or when the turn is over if that is later, it quits the
-running Emaki and starts the new build (`scripts/dev-app.sh`). The agent's session is a
-child of the app, so quitting the app ends the session: the script waits
-while the session's registry record says `busy`. Never `pkill` by hand from
-inside the app, and look at a change before the relaunch with a probe copy.
+dev build and starts the new one (`scripts/dev-app.sh`). The installed
+Emaki is never quit: the person works in it beside the dev build. The
+agent's session is a child of the app, so quitting the app ends the
+session: the script waits while the session's registry record says
+`busy`. Never `pkill` by hand from inside the app, and look at a change
+before the relaunch with a probe copy.
 
 **"Clean up after the release" means `scripts/release-clean.sh`.** It is
 the last step of a release (WORKFLOW.md, step 8), run without being asked

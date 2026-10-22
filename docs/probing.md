@@ -78,8 +78,8 @@ cargo test -p emaki-core
 EMAKI_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launch
 EMAKI_PAGE=new|sessions|agents ./target/debug/Emaki     # land on a page
 EMAKI_FIND=<text> ./target/debug/Emaki                 # open the find bar on that query
-EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings panel (=updates: on that section)
-EMAKI_GO=x EMAKI_SETTINGS_SHOTS=<folder> ./target/debug/Emaki  # every settings section, light then dark, a picture each in that folder, then quit
+EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings window (=updates: on that section)
+EMAKI_GO=x EMAKI_SETTINGS_SHOTS=<folder> ./target/debug/Emaki  # every section of the settings window, light then dark, a picture each in that folder, then quit
 EMAKI_GO="x;unarchive:<id>" EMAKI_OPEN=<id> ./target/debug/Emaki  # Unarchive Session from that session's menu, as the sidebar does it (it asks nothing; Archive and Delete ask, and no step answers)
 EMAKI_GO="x;lightbox:<picture>" EMAKI_OPEN=<id> ./target/debug/Emaki  # that picture shown large, as a click on an attachment shows it; press:cmd-k opens the search palette
 EMAKI_TYPE=/co ./target/debug/Emaki                    # put that text in the composer
@@ -101,7 +101,7 @@ EMAKI_GO="x;tree:crates;file:README.md" EMAKI_OPEN=<id> ./target/debug/Emaki  # 
 EMAKI_GO="page:sessions;sessions:<folder>" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sessions page, then a project opened on it and the page brought to it
 EMAKI_GO="side:320;sidefit" EMAKI_OPEN=<id> ./target/debug/Emaki  # drag the sidebar's edge to that x; then the double click on it
 EMAKI_GO="x;scroll:-3000;x;unread" EMAKI_OPEN=<id> ./target/debug/Emaki  # scroll the conversation by points (less than none is up), then click "New messages"; append rows to a scratch transcript meanwhile to have something new
-EMAKI_GO="x;term:shell;winw:800" EMAKI_OPEN=<id> ./target/debug/Emaki  # make the window that wide, as a drag of its edge would: here with the files and a terminal both showing, to see which is put away
+EMAKI_GO="x;term:shell;term:w:300;winw:800" EMAKI_OPEN=<id> ./target/debug/Emaki  # term:w:<w> drags the terminal panel's edge to that width; winw makes the window that wide, as a drag of its edge would: here with the files and a terminal both showing, to see which is put away
 EMAKI_GO="x;term:shell;termfocus;panes;winw:970;panes" EMAKI_OPEN=<id> ./target/debug/Emaki  # panes prints the window's width, whether the sidebar, the panel at the left and the terminal panel show, and where the keyboard is; termfocus puts the keyboard in the terminal, as a click on it does
 EMAKI_GO=gitlicence EMAKI_OPEN=<id> ./target/debug/Emaki  # the Files panel's strip as a Mac with the Xcode licence not agreed to has it (the panel must be open: `files_on` in ui.json)
 EMAKI_GO=shells EMAKI_OPEN=<id> ./target/debug/Emaki  # open the card of commands running in the background; agents is the subagents' card

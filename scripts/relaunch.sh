@@ -1,8 +1,9 @@
 #!/bin/sh
-# Quit the running Emaki and start the build in target/debug, a few
-# seconds from now, and return at once. For an agent working inside
+# Quit the dev build of Emaki and start the build in target/debug again,
+# a few seconds from now, and return at once. For an agent working inside
 # Emaki: the session is a child of the app, so the app cannot be quit
-# while the turn is still being written.
+# while the turn is still being written. The installed Emaki is left
+# running: the person works in it beside the dev build.
 #
 #   scripts/relaunch.sh [seconds]     default 15
 #   scripts/relaunch.sh --installed [seconds]
@@ -33,6 +34,7 @@ while [ "${p:-1}" -gt 1 ]; do
     p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
 done
 
+DEV="$(pwd)/target/debug/dev.noindex/Emaki.app/Contents/MacOS/Emaki" \
 REC="$rec" DELAY="$delay" INSTALLED="$installed" nohup sh -c '
     sleep "$DELAY"
     if [ -n "$REC" ]; then
@@ -45,9 +47,13 @@ REC="$rec" DELAY="$delay" INSTALLED="$installed" nohup sh -c '
         # says idle.
         [ "$n" -gt 0 ] && sleep 2
     fi
+    if [ -z "$INSTALLED" ]; then
+        pkill -a -f "$DEV"
+        sleep 2
+        exec scripts/dev-app.sh
+    fi
     pkill -x Emaki
     sleep 2
-    [ -z "$INSTALLED" ] && exec scripts/dev-app.sh
     # As dev-app.sh opens the build: the environment a Dock launch has,
     # and none of the CLAUDE* variables of this session.
     exec env -i \
