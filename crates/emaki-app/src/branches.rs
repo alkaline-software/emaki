@@ -60,6 +60,22 @@ pub(crate) fn small_pill(id: impl Into<ElementId>, icon: &'static str, label: im
     choice_pill(id, icon, label, kind, off, theme).h(px(24.)).px(px(10.)).gap(px(5.)).text_size(px(12.))
 }
 
+/// A branch about to be deleted, on the card that asks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BranchDelete {
+    pub(crate) name: String,
+    /// Whether it is here, a local branch; and whether the remote has
+    /// it. One only the remote has is deleted there.
+    pub(crate) here: bool,
+    pub(crate) there: bool,
+    /// The tick: the remote's copy goes with it.
+    pub(crate) remote_too: bool,
+    /// While git is at it.
+    pub(crate) busy: bool,
+    /// Counts the times the card came up, so each comes up in motion.
+    pub(crate) serial: u32,
+}
+
 /// How the default branch here stands against the remote's, for a
 /// branch about to be made from it.
 #[derive(Clone, Debug, PartialEq)]
@@ -151,10 +167,12 @@ impl Workbench {
             }))
         });
         let pull = self.sync_pill(true, cx);
+        let web = self.repo_web_pill(cx);
         if self.branch_fetching {
             return Some(
                 row.child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0().with_animation("branch-fetching", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
                     .child(div().flex_1().min_w_0().truncate().child(format!("Asking {origin}…")))
+                    .children(web)
                     .children(pull)
                     .child(fetch)
                     .into_any_element(),
@@ -172,6 +190,7 @@ impl Workbench {
                 row.items_start()
                     .child(Icon::new(IconName::TriangleAlert).with_size(px(12.)).mt(px(3.)).text_color(theme.danger).flex_shrink_0())
                     .child(div().flex_1().min_w_0().line_height(px(17.)).text_color(theme.foreground).child(words))
+                    .children(web)
                     .when(sign_in, |d| {
                         d.child(small_pill("branch-sign-in", "icons/circle-user.svg", "Sign In…", Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
@@ -187,9 +206,9 @@ impl Workbench {
                     Some((said, _)) => format!("{said}. Fetched {when}"),
                     None => format!("Fetched from {origin} {when}"),
                 };
-                row.child(div().flex_1().min_w_0().truncate().child(words)).children(pull).child(fetch).into_any_element()
+                row.child(div().flex_1().min_w_0().truncate().child(words)).children(web).children(pull).child(fetch).into_any_element()
             }
-            None => row.child(div().flex_1().min_w_0().truncate().child(format!("Not fetched from {origin} yet"))).children(pull).child(fetch).into_any_element(),
+            None => row.child(div().flex_1().min_w_0().truncate().child(format!("Not fetched from {origin} yet"))).children(web).children(pull).child(fetch).into_any_element(),
         })
     }
 
@@ -856,6 +875,163 @@ impl Workbench {
             git::NetTrouble::Other => self.branch_ask = Some(BranchAsk::stop(title, format!("Nothing was changed. Git said: {why}."))),
         }
         cx.notify();
+    }
+
+    // -- deleting a branch ----------------------------------------------------
+
+    /// A right click on a branch, in the list or on the pill: its name
+    /// to copy, and Delete for any branch but the default one, which is
+    /// never deleted from here.
+    pub(crate) fn branch_menu_items(&self, name: &str) -> Vec<(&'static str, MenuDo)> {
+        let mut items = vec![("Copy Branch Name", MenuDo::Copy(name.to_string()))];
+        if self.branches().is_some_and(|b| b.default.as_deref() != Some(name) && b.has(name)) {
+            items.extend([("", MenuDo::Rule), ("Delete Branch", MenuDo::DeleteBranch(name.to_string()))]);
+        }
+        items
+    }
+
+    /// Delete, chosen for a branch: the question, over the list, which
+    /// goes. The tick for the remote's copy starts off, as in GitHub
+    /// Desktop.
+    pub(crate) fn branch_delete_ask(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(b) = self.branches() else { return };
+        if b.default.as_deref() == Some(name.as_str()) {
+            return;
+        }
+        let here = b.local.contains(&name);
+        let there = b.origin.is_some() && if here { !b.unpublished.contains(&name) } else { b.remote.contains(&name) };
+        if !here && !there {
+            return;
+        }
+        let serial = self.branch_delete.as_ref().map_or(0, |d| d.serial + 1);
+        self.branch_delete = Some(BranchDelete { name, here, there, remote_too: false, busy: false, serial });
+        if self.branch_menu.is_some() {
+            self.close_branch_menu(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Delete pressed: the branch here, then on the remote when ticked,
+    /// or there alone for one only the remote has. The branch checked
+    /// out is left for the default one first (`git::delete_branch`).
+    /// Git may refuse either, and says so; the local half done before
+    /// the remote refused is said as it is.
+    pub(crate) fn branch_delete_go(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.git_dir() else { return };
+        let Some(d) = self.branch_delete.as_mut() else { return };
+        if d.busy {
+            return;
+        }
+        d.busy = true;
+        let (name, here, there) = (d.name.clone(), d.here, d.there && (d.remote_too || !d.here));
+        let origin = self.branches().and_then(|b| b.origin.clone()).unwrap_or_else(|| "origin".into());
+        let leaves = self.branches().and_then(|b| b.current.clone().filter(|c| *c == name).and(b.default.clone()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (dir, branch) = (root.clone(), name.clone());
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    if here {
+                        git::delete_branch(&dir, &branch).map_err(|why| (false, why))?;
+                    }
+                    if there {
+                        git::delete_remote_branch(&dir, &branch).map_err(|why| (here, why))?;
+                    }
+                    Ok::<(), (bool, String)>(())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.branch_delete = None;
+                match done {
+                    Ok(()) => {
+                        let what = match (here, there) {
+                            (true, true) => format!("deleted {name} here and on {origin}"),
+                            (true, false) => format!("deleted {name}"),
+                            _ => format!("deleted {name} on {origin}"),
+                        };
+                        this.notice = Some(Notice::said(match &leaves {
+                            Some(default) => format!("switched to {default} and {what}"),
+                            None => what,
+                        }));
+                    }
+                    // Here it is gone; the remote kept its copy, and
+                    // the list still shows it as the remote's.
+                    Err((true, why)) => {
+                        this.notice = Some(Notice::error(format!("deleted {name} here, but not on {origin}: {why}")));
+                        match git::why_net(&why) {
+                            git::NetTrouble::SignIn => this.open_gate(format!("delete {name} on {origin}"), why, cx),
+                            _ => this.branch_ask = Some(BranchAsk::stop("Not deleted on the remote", format!("{name} is deleted here, but {origin} still has it. Git said: {why}."))),
+                        }
+                    }
+                    Err((false, why)) if here => {
+                        this.notice = Some(Notice::error(format!("{name} was not deleted: {why}")));
+                        this.branch_ask = Some(BranchAsk::stop("Not deleted", format!("Nothing was changed. {}{}.", why[..1].to_uppercase(), &why[1..])));
+                    }
+                    Err((false, why)) => {
+                        this.notice = Some(Notice::error(format!("{name} was not deleted on {origin}: {why}")));
+                        this.net_failed("Not deleted", format!("delete {name} on {origin}"), why, cx);
+                    }
+                }
+                if leaves.is_some() {
+                    // The files are the default branch's now.
+                    this.tree.refresh(&root);
+                }
+                this.read_git(root, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The question Delete asks: the branch by name, that it cannot be
+    /// undone, and, for a branch the remote has too, the tick that
+    /// deletes it there as well.
+    pub(crate) fn render_branch_delete(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(d) = self.branch_delete.clone() else { return div().into_any_element() };
+        let origin = self.branches().and_then(|b| b.origin.clone()).unwrap_or_else(|| "origin".into());
+        let title = if d.here { format!("Delete branch {}?", d.name) } else { format!("Delete branch {} on {origin}?", d.name) };
+        let tick = (d.here && d.there).then(|| {
+            Checkbox::new("branch-delete-remote")
+                .small()
+                .checked(d.remote_too)
+                .label(format!("Also delete it on {origin}"))
+                .on_click(cx.listener(|this, on: &bool, window, cx| {
+                    swallow_click(window, cx);
+                    if let Some(d) = this.branch_delete.as_mut().filter(|d| !d.busy) {
+                        d.remote_too = *on;
+                    }
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
+        let no = choice_pill("branch-delete-cancel", "icons/close.svg", "Cancel", Press::Quiet, d.busy, &theme).when(!d.busy, |p| {
+            p.on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.branch_delete = None;
+                cx.notify();
+            }))
+        });
+        let yes = choice_pill("branch-delete-yes", "icons/trash.svg", if d.busy { "Deleting…" } else { "Delete" }, Press::Danger, d.busy, &theme).when(!d.busy, |p| {
+            p.on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.branch_delete_go(cx);
+            }))
+        });
+        self.ask_card("branch-delete", d.serial, title, "This can't be undone.".into(), ["Cancel", "Delete"], tick, no, yes, cx)
+    }
+
+    /// At the list's foot: the repository's page on its host, named
+    /// for the host, in the accent. None where the remote is no host.
+    pub(crate) fn repo_web_pill(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let url = self.branches().and_then(|b| b.web.clone())?;
+        let label = format!("View on {}", git::host_name(&git::host_of(&url).0));
+        Some(small_pill("branch-web", "icons/globe.svg", label, Press::Primary, false, cx.theme()).on_click(cx.listener(move |_, _, window, cx| {
+            swallow_click(window, cx);
+            cx.open_url(&url);
+        })))
     }
 
     // -- publishing -----------------------------------------------------------

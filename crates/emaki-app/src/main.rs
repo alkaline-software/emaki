@@ -16,6 +16,7 @@ mod hub;
 mod look;
 mod panels;
 mod pictures;
+mod spelling;
 mod sys;
 mod term_panel;
 mod transcript;

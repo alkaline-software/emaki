@@ -137,10 +137,28 @@ pub fn english(text: &str, british: bool) -> Vec<Issue> {
 /// name out of code or a number. Sorted, not overlapping.
 pub fn not_prose(text: &str) -> Vec<Range<usize>> {
     let mut out: Vec<Range<usize>> = Vec::new();
+    // A file's front matter: `---` on its first line to the next `---`,
+    // keys and settings in YAML, as markdown and Quarto files have it.
+    let mut line_at = 0;
+    if text.starts_with("---\n") || text.starts_with("---\r\n") {
+        let mut end = None;
+        let mut at = 0;
+        for (n, line) in text.split_inclusive('\n').enumerate() {
+            if n > 0 && matches!(line.trim_end(), "---" | "...") {
+                end = Some(at + line.len());
+                break;
+            }
+            at += line.len();
+        }
+        if let Some(end) = end {
+            out.push(0..end);
+            line_at = end;
+        }
+    }
+    let text_after = line_at;
     // Fenced blocks, then spans on one line.
     let mut fence: Option<usize> = None;
-    let mut line_at = 0;
-    for line in text.split_inclusive('\n') {
+    for line in text[text_after..].split_inclusive('\n') {
         let is_fence = line.trim_start().starts_with("```");
         match (fence, is_fence) {
             (None, true) => fence = Some(line_at),

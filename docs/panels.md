@@ -392,6 +392,27 @@ that branch first, so what is checked out is what the remote has now;
 when the remote cannot be asked the branch is checked out as last
 fetched and the row under the composer says so.
 
+Before Fetch, in the accent, **View on GitHub** (`repo_web_pill`) opens
+the repository's page, named for its host (`git::host_name`; "View on
+the Web" for one the window has no name for) and there only where the
+remote is on a host (`Branches::web`, read with the rest so no draw
+asks git).
+
+**Deleting a branch** is on a right click, on a row or on the pill,
+under Copy Branch Name (`branch_menu_items`): every branch but the
+default one, which is never deleted from here, as the person has it.
+The question (`BranchDelete`, `render_branch_delete`, on `ask_card`)
+names the branch and that it cannot be undone; for a branch the remote
+has too it has a tick, off to begin with as GitHub Desktop has it,
+that deletes the remote's copy as well (`git::delete_remote_branch`,
+a push of nothing to the branch); a branch only the remote has is
+deleted there, and the title says so. The branch checked out is left
+for the default one first by a plain switch (`git::delete_branch`),
+so changes come along when they fit; where git refuses the switch
+nothing is deleted, and the refusal is on its card. The local half
+done before the remote refused is said as it is: deleted here, still
+on the remote, with the sign-in sheet when that is why.
+
 **Push and Pull** (`sync_go`, `sync_pill`) are offered wherever the
 count is said: the list's foot (Pull), a strip under the files' head
 when there are commits either way (`sync_strip`, there while the
@@ -920,6 +941,20 @@ far from the tree.
     (`emaki_core::pairs`): markdown closes brackets and no quote, since
     most of its quotes are apostrophes, and surrounds with its own marks
     (`*`, `_`, `` ` ``, `~`, `$`); code closes its quotes too.
+  - A file of prose (markdown, Quarto, R Markdown, plain text, by its
+    extension: `spelling::checked`) is checked as the composer is
+    (`spelling.rs`; `docs/composer.md` has the check itself): the same
+    switch and language under Settings, Composer, the same pause before
+    a check and the same later mark on the word at the caret. Its marks
+    are the editor's diagnostics, red for a spelling and blue for the
+    grammar, with Harper's words on hover; the right click on one is its
+    corrections, Learn Spelling and Ignore, as in the composer, and a
+    correction is one step of undo (`MenuDo::FixFile`). A file's front
+    matter is not prose (`check::not_prose`), nor is a fenced block, so
+    a Quarto chunk is left alone. The marks are set again from the
+    issues at every change, since the editor keeps them as bytes of one
+    text (`file_marks`). A file past `CHECK_MOST` bytes is not checked.
+    Code is not checked at all: a comment's prose is for another day.
   - Saving a file formats it first (`emaki_core::format`) when Settings,
     Files has the switch on (`app.format_saved_files`, off to begin with;
     the older `format_on_save` in a file is not read, having been R's
@@ -1286,7 +1321,12 @@ this the mark fell back to the last entry when the move ended.
   whose remote is a bare one beside it: these steps push for real.
 - `branchask:<name>` goes to that branch as a click does, held until git's
   status is in, so with changes it shows the question (or the refusal); `branchgo:<name>:leave`
-  or `:bring` answers it, and `branchrestore` is the strip's button. Put a
+  or `:bring` answers it, and `branchrestore` is the strip's button.
+  `file:spell` prints what the file's editor has marked, `file:spellmenu`
+  opens the first mark's menu and `file:spellfix` takes its first
+  correction. `branchmenu:<name>` is a right click on a branch, `branchdel:<name>`
+  the question Delete asks (`branchdel:<name>:remote` with its tick on)
+  and `branchdelgo` its Delete. Put a
   dummy step first (`x;branchgo:…`): the first step can run before the
   session's folder is known, and then does nothing.
 - `EMAKI_GO=file:big` is the pane's enlarge button.

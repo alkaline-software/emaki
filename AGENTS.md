@@ -158,7 +158,7 @@ handed work on one of these files is told to read the doc too.
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
-| `emaki-app/src/panels.rs`, `branches.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`; a table's cells in `files.rs` | `docs/panels.md` |
+| `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
 | Anything a person sees, new or changed: a control, a colour, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
@@ -218,6 +218,7 @@ crates/emaki-app/         the window
   src/branches.rs            the list of branches and its remote: fetching, making a branch on its sheet, publishing one, the sign-in sheet
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets
   src/pictures.rs            files drawn small: which are pictures, what a thumbnail is drawn from, the tile of any other kind
+  src/spelling.rs            a markdown, Quarto or text file checked in its editor as the composer is: the marks, the menu, the correction
   src/word.rs                a Word document written in: WordCraft's engine with the pane's own pages, caret, keys and strip
   src/html_web.rs            an HTML file in the system's web view, set in the file's pane; hidden while the window draws over it
   src/html_shot.rs           the same file as a picture by Blitz, where no web view can be set: Linux

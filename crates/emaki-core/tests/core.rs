@@ -2904,6 +2904,11 @@ fn only_prose_is_checked() {
     let code = "Run `cargo bild` in crates/emaki-app/src/workbench.rs with --relase, see /code-reviw and @AGENTS.md, then HashMap and snake_case in emaki.";
     assert_eq!(said(code, false, &["emaki"]), vec![]);
     assert_eq!(said("Open emaki.", false, &[]).len(), 1);
+    // A file's front matter is settings, not prose; the text after it is.
+    let fronted = "---\ntitle: Teh Report\nformat: html\n---\n\nTeh report begins here.\n";
+    assert_eq!(said(fronted, false, &[]), vec![("Teh".to_string(), Kind::Spelling)]);
+    assert_eq!(emaki_core::check::not_prose(fronted)[0], 0..fronted.find("\n\n").unwrap() + 1);
+    assert!(said("--- not front matter, teh line\n", false, &[]).iter().any(|(w, _)| w == "teh"), "no closing line");
     // One dialect's spelling is the other's mistake.
     assert!(said("The colour is fine.", false, &[]).iter().any(|(w, _)| w == "colour"));
     assert!(said("The colour is fine.", true, &[]).is_empty());
@@ -3678,6 +3683,68 @@ fn an_agent_is_found_by_its_program_and_asked_its_version() {
     assert_eq!(agents::version_from("codex-cli 0.162.0"), "0.162.0");
     assert_eq!(agents::version_from("v1.4"), "1.4");
     assert_eq!(agents::version_from("no number here"), "");
+}
+
+#[test]
+fn git_deletes_a_branch_here_and_on_the_remote() {
+    use emaki_core::git;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let run = |at: &std::path::Path, args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", "-c", "core.autocrlf=false"]).args(args).output().unwrap();
+        assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+    };
+    let commit = |at: &std::path::Path, file: &str, text: &str| {
+        std::fs::write(at.join(file), text).unwrap();
+        run(at, &["add", "."]);
+        run(at, &["commit", "-q", "-m", file]);
+    };
+    run(&root, &["init", "-q", "--bare", "origin.git"]);
+    let work = root.join("work");
+    run(&root, &["clone", "-q", "origin.git", "work"]);
+    run(&work, &["config", "core.autocrlf", "false"]);
+    commit(&work, "a.txt", "one\n");
+    run(&work, &["push", "-q", "-u", "origin", "main"]);
+
+    // A branch published, then deleted here: the checkout moves to the
+    // default branch first, and the remote still has it.
+    run(&work, &["switch", "-q", "-c", "mine"]);
+    commit(&work, "b.txt", "two\n");
+    git::publish(&work, "mine").unwrap();
+    assert_eq!(git::delete_branch(&work, "mine"), Ok(()));
+    let b = git::branches(&work).unwrap();
+    assert_eq!(b.current.as_deref(), Some("main"));
+    assert!(!b.local.iter().any(|n| n == "mine") && b.remote.iter().any(|n| n == "mine"));
+    // Then taken off the remote, and gone from the list.
+    assert_eq!(git::delete_remote_branch(&work, "mine"), Ok(()));
+    assert!(!git::branches(&work).unwrap().has("mine"));
+
+    // A change that would be written over stops the switch, and so the
+    // deletion: nothing is changed.
+    run(&work, &["switch", "-q", "-c", "other"]);
+    commit(&work, "a.txt", "other's\n");
+    std::fs::write(work.join("a.txt"), "typed\n").unwrap();
+    assert!(git::delete_branch(&work, "other").is_err());
+    let b = git::branches(&work).unwrap();
+    assert!(b.current.as_deref() == Some("other") && b.local.iter().any(|n| n == "other"));
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "typed\n");
+    // The default branch has nothing to switch to first.
+    run(&work, &["checkout", "-q", "--", "a.txt"]);
+    run(&work, &["switch", "-q", "main"]);
+    assert!(git::delete_branch(&work, "main").is_err());
+    assert!(git::branches(&work).unwrap().local.iter().any(|n| n == "main"));
+
+    // The repository's page on the web, from the remote's address in
+    // any of its forms; a folder has none.
+    assert_eq!(git::web_of("git@github.com:someone/thing.git").as_deref(), Some("https://github.com/someone/thing"));
+    assert_eq!(git::web_of("https://gitlab.com/a/b/").as_deref(), Some("https://gitlab.com/a/b"));
+    assert_eq!(git::web_of("ssh://git@example.org:22/a/b.git").as_deref(), Some("https://example.org/a/b"));
+    assert_eq!(git::web_of("/a/folder.git"), None);
+    assert_eq!(git::branches(&work).unwrap().web, None, "a folder is no host");
+    run(&work, &["remote", "set-url", "origin", "git@github.com:someone/thing.git"]);
+    assert_eq!(git::branches(&work).unwrap().web.as_deref(), Some("https://github.com/someone/thing"));
+    assert_eq!(git::commit_url(&work, "abc").as_deref(), Some("https://github.com/someone/thing/commit/abc"));
+    assert_eq!((git::host_name("github.com"), git::host_name("example.org")), ("GitHub", "the Web"));
 }
 
 #[test]
