@@ -43,6 +43,7 @@ use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
 mod settings;
+pub use settings::SETTINGS_CONTEXT;
 
 actions!(emaki, [ReopenTab, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
@@ -560,7 +561,7 @@ pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("updates", "Updates", "icons/redo-2.svg"), ("about", "About", "icons/info.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("text", "Text Size", "icons/a-large-small.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("updates", "Updates", "icons/redo-2.svg"), ("about", "About", "icons/info.svg")];
 /// What the composer says when empty: on the home page, and on a session.
 /// Drawn by `render_composer_hint`.
 pub const PLACEHOLDER_NEW: &str = "Start a session…";
@@ -1074,6 +1075,18 @@ pub(crate) fn keep_image(dir: &std::path::Path, mime: &str, bytes: &[u8]) -> Res
     Ok(path)
 }
 
+/// A picture of a kind the agent does not take, as a PNG, when it can be
+/// read: `None` for one it takes already, or one that does not read.
+fn as_png(mime: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+    if IMAGE_TYPES.contains(&mime) {
+        return None;
+    }
+    let picture = image::load_from_memory(bytes).ok()?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    picture.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
+}
+
 /// The box a thumbnail gets: the picture's own shape scaled to fit
 /// `max_w` by `max_h`, or `fallback` when its size is unknown.
 pub fn fit_thumb(size: Option<(u32, u32)>, max_w: f32, max_h: f32, fallback: (f32, f32)) -> (f32, f32) {
@@ -1087,12 +1100,11 @@ pub fn fit_thumb(size: Option<(u32, u32)>, max_w: f32, max_h: f32, fallback: (f3
 }
 
 fn mime_of(path: &std::path::Path) -> &'static str {
+    let picture = emaki_core::build::media_type_for(&path.to_string_lossy());
+    if !picture.is_empty() {
+        return picture;
+    }
     match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
         Some("pdf") => "application/pdf",
         Some("md") | Some("txt") => "text/plain",
         Some("json") => "application/json",
@@ -1261,6 +1273,8 @@ pub struct Workbench {
     pub(crate) rename_input: Entity<InputState>,
     /// The name's field in the settings, made with their window.
     name_input: Option<Entity<InputState>>,
+    /// Text Size's fields, a place each, made with the settings window.
+    size_inputs: Vec<(&'static str, Entity<InputState>)>,
     /// The names the person gave that the sessions' transcripts do not
     /// say, by session key (`state/titles.json`). One for a session that
     /// can be asked (`can_ask`) is still to be given to it and is shown
@@ -1544,13 +1558,14 @@ pub struct Workbench {
     /// puts a pane away for good goes by this one, which that does not
     /// move.
     pub(crate) conv_need: Rc<Cell<Pixels>>,
-    /// The terminal was put away because the window was dragged too
-    /// narrow for it and the panel at the left. Its room still counts
-    /// against the sidebar, or the sidebar came back into the room the
-    /// terminal left and went again a few points on. Until the window
-    /// is wide enough for both again, or a panel's button is pressed.
-    /// The least of the side panel put away for the window's width.
-    pub(crate) room_held: Pixels,
+    /// The side panels put away because the window was dragged too
+    /// narrow for them, each with what it showed: the files (`true`) or
+    /// the outline at the left, the agent terminal (`true`) or the shell
+    /// at the right. Each comes back when the window is wide enough
+    /// again, and until then its room counts against the sidebar, or the
+    /// sidebar came back into the room it left and went again a few
+    /// points on. A press of its button forgets it.
+    pub(crate) side_away: Vec<(crate::panels::Side, bool)>,
     /// The side panels by which keeps its room longest: the one opened
     /// or used last first (`panels::Side`).
     pub(crate) side_rank: [crate::panels::Side; 3],
@@ -1995,6 +2010,16 @@ pub struct Workbench {
     pub(crate) pdf_drag: Option<usize>,
     pub(crate) pdf_bounds: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
     pub(crate) pdf_find_open: bool,
+    /// A file as it reads (markdown, a notebook, a document): the words
+    /// found in it, painted by its view (`TextFind`), whether the find is
+    /// open, and whether the place it is on is still to be brought into
+    /// view. Its field is the PDF's, `pdf_find_input`.
+    pub(crate) text_find: gpui_component::text::TextFind,
+    pub(crate) text_find_open: bool,
+    pub(crate) text_find_due: std::cell::Cell<bool>,
+    /// A file was just opened, or turned to as it reads or as written:
+    /// the keyboard goes to the view now drawn, at the next draw.
+    pub(crate) file_focus_due: bool,
     pub(crate) pdf_find_input: Entity<InputState>,
     pub(crate) pdf_hits: Vec<(usize, usize)>,
     pub(crate) pdf_hit: usize,
@@ -2066,6 +2091,8 @@ pub struct Workbench {
     pub(crate) changes_focus_due: bool,
     /// `EMAKI_GO=commitsay:<words>`: words for the commit's comment.
     pub(crate) commit_probe: Option<String>,
+    /// `EMAKI_GO=sizetype:<place>:<words>`, at the settings window's next draw.
+    pub(crate) size_probe: Option<(String, String)>,
     /// A pull (true) or a push under way.
     pub(crate) syncing: Option<bool>,
     /// What the strip under the files' head last said of commits to
@@ -2201,8 +2228,8 @@ fn file_tail(path: &str, bytes: u64, lines: usize) -> Option<String> {
 /// Narrower than this, the sidebar no longer sits beside the content.
 const NARROW_W: Pixels = px(880.);
 /// How far past the width a side panel was put away at the window is
-/// dragged back before the sidebar may have its room (`room_held`).
-const FOLD_SLACK: Pixels = px(40.);
+/// dragged back before it comes back (`side_away`).
+pub(crate) const FOLD_SLACK: Pixels = px(40.);
 
 impl Workbench {
     /// Show the sidebar: beside the content when there is room, over it
@@ -2449,20 +2476,23 @@ impl Workbench {
             .left(Self::strip_left())
             .h(TITLEBAR_H)
             .items_center()
-            // No tooltip on this one: it would sit on the sidebar it floats.
+            // Its label on a wrapper: an element takes one hover listener,
+            // and the button's floats the sidebar.
             .child(
-                button("strip-sidebar", IconName::PanelLeft, "", self.sidebar_float)
-                    .on_hover(cx.listener(|this, over: &bool, _, cx| {
-                        if !*over {
-                            this.float_block = false;
-                        } else if !this.float_block {
-                            this.set_float(true, cx);
-                        }
-                    }))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        swallow_click(window, cx);
-                        this.toggle_sidebar(true, cx);
-                    })),
+                div().id("strip-sidebar-tip").managed_tooltip(|window, cx| crate::workbench::tip("Sidebar (⌘⇧B)", window, cx)).child(
+                    button("strip-sidebar", IconName::PanelLeft, "", self.sidebar_float)
+                        .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                            if !*over {
+                                this.float_block = false;
+                            } else if !this.float_block {
+                                this.set_float(true, cx);
+                            }
+                        }))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.toggle_sidebar(true, cx);
+                        })),
+                ),
             )
             .child(button("strip-search", IconName::Search, "Search (⌘K)", false).on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
@@ -2836,22 +2866,6 @@ pub(crate) fn plain_default(label: &str) -> String {
 }
 
 /// The file editor's text for the window's one size.
-pub(crate) fn editor_px(size: &str) -> f32 {
-    match size {
-        "small" => 11.5,
-        "large" => 14.,
-        _ => 12.5,
-    }
-}
-
-/// The terminal's text for the window's one size.
-fn term_px(size: &str) -> f32 {
-    match size {
-        "small" => 12.,
-        "large" => 15.,
-        _ => 13.,
-    }
-}
 
 pub(crate) fn model_name(options: &Options, name: &str) -> String {
     if let Some(m) = options.model(name) {
@@ -2999,12 +3013,12 @@ impl Workbench {
         // What Settings no longer asks is what it used to begin at:
         // explanations for the calls waiting on a card, the terminal's
         // rows and margins at their middle step, and its text the size
-        // the window's one size says (`set_chat_size`).
+        // the text sizes say (`set_text_sizes`).
         cfg.explain.enabled = true;
         cfg.explain.scope = "permission".into();
         cfg.terminal.spacing = "normal".into();
         cfg.terminal.padding = "medium".into();
-        cfg.terminal.size = term_px(&cfg.app.chat_size);
+        cfg.terminal.size = cfg.app.text_sizes().terminal;
         let (hub, mut rx) = Hub::start(cfg.clone());
 
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
@@ -3212,8 +3226,11 @@ impl Workbench {
         })
         .detach();
         let pdf_find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this file"));
+        // The file pane's find: a PDF's, or a file's as it reads.
         cx.subscribe_in(&pdf_find_input, window, |this, _, ev: &InputEvent, _window, cx| match ev {
+            InputEvent::Change if this.text_find_open => this.text_find_run(cx),
             InputEvent::Change => this.pdf_find(cx),
+            InputEvent::PressEnter { shift, .. } if this.text_find_open => this.text_find_step(if *shift { -1 } else { 1 }, cx),
             InputEvent::PressEnter { shift, .. } => this.pdf_find_step(if *shift { -1 } else { 1 }, cx),
             _ => {}
         })
@@ -3522,6 +3539,7 @@ impl Workbench {
             rename_drawn: Default::default(),
             rename_input,
             name_input: None,
+            size_inputs: Vec::new(),
             // A name still in our record is one its transcript does not
             // say yet: asked for again at launch.
             renames: load_renames(),
@@ -3645,7 +3663,7 @@ impl Workbench {
             conv_min: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
             composer_row_w: Rc::new(Cell::new(px(0.))),
             conv_need: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
-            room_held: px(0.),
+            side_away: Vec::new(),
             side_rank: crate::panels::Side::RANK,
             pending_panes: false,
             pending_term_focus: false,
@@ -3796,6 +3814,10 @@ impl Workbench {
             pdf_drag: None,
             pdf_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
             pdf_find_open: false,
+            text_find: gpui_component::text::TextFind::new(),
+            text_find_open: false,
+            text_find_due: std::cell::Cell::new(false),
+            file_focus_due: false,
             pdf_find_input,
             table_at: None,
             table_drag: false,
@@ -3838,6 +3860,7 @@ impl Workbench {
             changes_focus: cx.focus_handle(),
             changes_focus_due: false,
             commit_probe: None,
+            size_probe: None,
             syncing: None,
             sync_kept: Default::default(),
             git_gate: None,
@@ -5146,7 +5169,9 @@ impl Workbench {
                 cx.notify();
             }
             Some(t) if t.starts_with("winw:") => {
-                self.pending_win_w = t["winw:".len()..].parse().ok();
+                // No narrower than a hand can drag it (`main::MIN_W`):
+                // a resize from code is not held to the window's least.
+                self.pending_win_w = t["winw:".len()..].parse::<f32>().ok().map(|w| w.max(f32::from(crate::MIN_W)));
                 cx.notify();
             }
             Some("toolopen") => {
@@ -5795,13 +5820,33 @@ impl Workbench {
         crate::look::apply(&self.cfg.app.appearance, Some(window), cx);
     }
 
-    /// The window's one text size: the conversation's, and with it the
-    /// terminal's.
-    fn set_chat_size(&mut self, choice: &str, cx: &mut Context<Self>) {
+    /// A preset of text sizes, or `custom`: the person's own, kept while
+    /// a preset is chosen, and Medium's until they are first set.
+    pub(crate) fn set_chat_size(&mut self, choice: &str, cx: &mut Context<Self>) {
+        if choice == "custom" && self.cfg.app.sizes.is_none() {
+            self.cfg.app.sizes = Some(emaki_core::config::TextSizes::MEDIUM);
+        }
         self.cfg.app.chat_size = choice.to_string();
+        self.text_sizes_set(cx);
+    }
+
+    /// One place's own size changed, under Custom, where they are set.
+    pub(crate) fn set_text_size(&mut self, change: impl FnOnce(&mut emaki_core::config::TextSizes), cx: &mut Context<Self>) {
+        if self.cfg.app.chat_size != "custom" {
+            return;
+        }
+        let mut sizes = self.cfg.app.text_sizes();
+        change(&mut sizes);
+        self.cfg.app.sizes = Some(sizes.clamped());
+        self.text_sizes_set(cx);
+    }
+
+    /// The sizes are kept, and the terminal, which keeps its own, told.
+    fn text_sizes_set(&mut self, cx: &mut Context<Self>) {
         self.save_app_config();
-        let size = term_px(choice);
+        let size = self.cfg.app.text_sizes().terminal;
         self.set_terminal(|t| t.size = size, cx);
+        cx.notify();
     }
 
     fn set_send_key(&mut self, choice: &str, cx: &mut Context<Self>) {
@@ -6048,9 +6093,18 @@ impl Workbench {
         if self.page != Page::Session {
             return;
         }
-        // With the keyboard in a PDF shown beside it, the find is that
-        // file's.
-        if self.pdf_find_open(window, cx) {
+        // ⌘F in the file pane's find puts it away, as in the editor's.
+        if (self.pdf_find_open || self.text_find_open) && self.pdf_find_input.read(cx).focus_handle(cx).is_focused(window) {
+            if self.text_find_open {
+                self.text_find_close(window, cx);
+            } else {
+                self.pdf_find_close(window, cx);
+            }
+            return;
+        }
+        // With the keyboard in a file shown beside it, a PDF or a file as
+        // it reads, the find is that file's.
+        if self.pdf_find_open(window, cx) || self.text_find_open_here(window, cx) {
             return;
         }
         self.find_open = true;
@@ -8592,6 +8646,8 @@ impl Workbench {
             self.close_changes(cx);
         } else if self.pdf_find_open {
             self.pdf_find_close(window, cx);
+        } else if self.text_find_open {
+            self.text_find_close(window, cx);
         } else if self.pdf_sel.is_some() {
             self.pdf_sel = None;
             cx.notify();
@@ -8651,7 +8707,7 @@ impl Workbench {
             }
             let mime = mime_of(p);
             let image = IMAGE_TYPES.contains(&mime);
-            let size = if image { file_image_dims(p) } else { None };
+            let size = if crate::pictures::is_picture(&p.to_string_lossy()) { crate::pictures::dims(p) } else { None };
             self.attachments.push(Attachment { path: p.clone(), name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), mime: mime.into(), image, size });
         }
         cx.notify();
@@ -8660,6 +8716,12 @@ impl Workbench {
     /// Keep a pasted image as a file first, like an upload; the message then
     /// carries it as a block or a path depending on the channel.
     pub fn attach_image_bytes(&mut self, mime: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        // A picture the agent cannot take (a TIFF, as some apps copy a
+        // screenshot) is kept as a PNG, which it can: the same pixels.
+        let (mime, bytes) = match as_png(mime, &bytes) {
+            Some(png) => ("image/png", png),
+            None => (mime, bytes),
+        };
         let path = match keep_image(&self.upload_dir(), mime, &bytes) {
             Ok(path) => path,
             Err(e) => {
@@ -8773,7 +8835,7 @@ impl Workbench {
         if let Some(s) = d.sizes.get(&key) {
             return *s;
         }
-        let s = file_image_dims(path);
+        let s = crate::pictures::dims(path);
         d.sizes.insert(key, s);
         s
     }
@@ -12866,6 +12928,8 @@ impl Workbench {
         // A file from the tree, shown between the tree and the conversation.
         self.sync_file_root(cx);
         self.sync_file_editor(window, cx);
+        self.file_focus_land(window, cx);
+        self.text_find_show(window, cx);
         if let Some((state, words, caret)) = self.pending_edit.take() {
             state.update(cx, |s, cx| s.replace_bytes(0..0, &words, caret, window, cx));
             // With the keyboard, as typing there would leave it.
@@ -14812,7 +14876,12 @@ impl Workbench {
                 }
             });
 
+        let composer_px = self.cfg.app.text_sizes().composer;
+        let composer_line = (composer_px * 10. / 7.).round();
         let attachments = self.attachments.clone();
+        // What each chip's thumbnail is drawn from, when it is a picture
+        // that can be drawn (`pictures::picture_source`).
+        let pictures: Vec<Option<PathBuf>> = attachments.iter().map(|a| self.picture_source(&a.path, cx)).collect();
         // The toolkit's frame tracks a focus handle of its own and only asks
         // whether it *contains* the focus, so gpui never marks the editor as
         // the focused accessibility node and assistive apps are handed the
@@ -14847,7 +14916,9 @@ impl Workbench {
                 d.child(h_flex().flex_wrap().gap(px(6.)).pb(px(2.)).children(attachments.into_iter().enumerate().map(|(i, a)| {
                     let theme = cx.theme().clone();
                     let size = std::fs::metadata(&a.path).map(|m| m.len()).unwrap_or(0);
-                    let (a_title, a_path, a_image) = (a.name.clone(), a.path.clone(), a.image);
+                    let picture = pictures.get(i).cloned().flatten();
+                    let (a_title, a_path) = (a.name.clone(), a.path.clone());
+                    let dark = theme.mode.is_dark();
                     h_flex()
                         .id(SharedString::from(format!("att-{i}")))
                         .h(px(48.))
@@ -14865,20 +14936,25 @@ impl Workbench {
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener({
-                                let path = a.path.clone();
-                                move |this, ev: &MouseDownEvent, _, cx| this.attachment_menu(ev.position, Some(path.clone()), a_image.then(|| Pic::File(path.clone())), cx)
+                                let (path, picture) = (a.path.clone(), picture.clone());
+                                move |this, ev: &MouseDownEvent, _, cx| this.attachment_menu(ev.position, Some(path.clone()), picture.clone().map(Pic::File), cx)
                             }),
                         )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let image = a_image.then(|| ImageSource::from(a_path.clone()));
-                            this.preview_attachment(a_title.clone(), Some(a_path.clone()), image, window, cx);
-                        }))
-                        .child(if a.image {
+                        .on_click({
+                            let picture = picture.clone();
+                            cx.listener(move |this, _, window, cx| {
+                                let image = picture.clone().map(ImageSource::from);
+                                this.preview_attachment(a_title.clone(), Some(a_path.clone()), image, window, cx);
+                            })
+                        })
+                        .child(match picture {
                             // The whole picture, at its own shape, 40px tall.
-                            let (w, h) = fit_thumb(a.size, 96., 40., (40., 40.));
-                            img(a.path.clone()).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(ObjectFit::Contain).bg(theme.border).into_any_element()
-                        } else {
-                            div().size(px(40.)).rounded(px(8.)).bg(theme.popover).flex().items_center().justify_center().child(file_icon(&a.name, px(20.), theme.muted_foreground)).into_any_element()
+                            Some(from) => {
+                                let size = a.size.or_else(|| crate::pictures::dims(&from));
+                                let (w, h) = fit_thumb(size, 96., 40., (40., 40.));
+                                img(from).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(ObjectFit::Contain).bg(theme.border).into_any_element()
+                            }
+                            None => crate::pictures::kind_tile(&a.name, 40., dark).into_any_element(),
                         })
                         .child(
                             v_flex()
@@ -14983,9 +15059,14 @@ impl Workbench {
                     .aria_placeholder("Reply")
                     .aria_value(field_value)
                     .w_full()
-                    .text_size(px(14.))
+                    // The size on the field itself: the toolkit's field
+                    // sets its own over what it inherits. The line height
+                    // goes with it, 20 at 14, and the hint over the field
+                    // takes both from here.
+                    .text_size(px(composer_px))
+                    .line_height(px(composer_line))
                     .relative()
-                    .child(Textarea::new(&self.composer).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.composer, true, cx)))
+                    .child(Textarea::new(&self.composer).appearance(false).bordered(false).text_size(px(composer_px)).line_height(px(composer_line)).on_secondary_click(self.input_menu(&self.composer, true, cx)))
                     .children(self.render_composer_hint(cx)),
             )
             .child(
@@ -15662,10 +15743,6 @@ pub fn image_format(mime: &str) -> Option<ImageFormat> {
     }
 }
 
-/// An icon for a file with no picture to show.
-pub fn file_icon(name: &str, size: Pixels, color: Hsla) -> Icon {
-    Icon::default().path(crate::assets::file_icon_path(name)).with_size(size).text_color(color)
-}
 
 /// What to call a file in a chip: its extension, upper case, or "file".
 pub fn file_kind(name: &str) -> String {
@@ -16455,15 +16532,17 @@ impl Render for Workbench {
         self.fold_file = unfit.contains(&crate::panels::Side::File);
         // The agents page's shell is the one side panel off a conversation.
         let sides = if self.page == Page::Agents && self.agent_open.is_some() && self.agents_shell { sides + crate::term_panel::TERM_MIN } else { sides };
-        // Well past where what stays fits, not at it: a hand that wavers
-        // at the width a panel went at would bring the sidebar in and out.
-        if vw >= self.conv_need.get() + sides + self.room_held + FOLD_SLACK {
-            self.room_held = px(0.);
+        // A side panel put away for the window's width comes back where
+        // it fits again, well past that width, not at it: a hand that
+        // wavers at the width a panel went at would bring it in and out.
+        if self.sides_back(vw - FRAME) {
+            let this = cx.entity();
+            window.defer(cx, move |_, cx| this.update(cx, |this, cx| this.side_away_back(vw - FRAME, cx)));
         }
         // The sidebar leaves the row where the side panels that stay, and
         // the room of those put away for the window's width
-        // (`room_held`), leave it no room.
-        let held = if sides > px(0.) { self.room_held } else { px(0.) };
+        // (`side_away`), leave it no room.
+        let held = if sides > px(0.) { self.side_away.iter().fold(px(0.), |a, (s, _)| a + s.least()) } else { px(0.) };
         self.narrow = vw < NARROW_W || (sides > px(0.) && vw < self.sidebar_w + self.conv_min.get() + sides + held);
         if !self.narrow {
             self.sidebar_peek = false;

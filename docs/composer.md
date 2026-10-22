@@ -173,14 +173,31 @@ part without a window.
 - `fold_attachments` makes content blocks for a driver (images only) and
   `Attached file: <path>` lines for everything else, so the inbox channel,
   which the TUI reads as prose, still gets the path.
-- A chip is a thumbnail for a picture, else a typed icon
-  (`assets::file_icon_path`) with name and size.
-- `image_dims` reads the pixel size from the PNG, JPEG, GIF or WebP header
-  and `fit_thumb` gives the tile the picture's shape inside a maximum box
-  (`ObjectFit::Contain`). The size is kept in `Attachment::size` for a
-  chip, `Detail::sizes` for a session's file (`file_image_dims`), and in
-  `Thumb` beside a pasted block's bytes. A header that says nothing gets a
-  fixed box, letterboxed.
+- A chip is a thumbnail for a picture, else its kind's tile
+  (`pictures::kind_tile`): a glyph on a tint of the kind's colour, PDF
+  red, Word blue, a sheet green, slides orange, and so on, each colour
+  lighter in the dark appearance. The word under the name is the
+  extension.
+- A picture is any kind a person attaches, not only the four a model
+  takes (`build::media_type_for`; `driver::IMAGE_TYPES` still decides
+  what is sent as a picture). What gpui reads is drawn from the file;
+  HEIC, AVIF, a camera's raw file, PSD and the like from a PNG the
+  system makes of it once, off the main thread, kept in
+  `~/.emaki/cache/thumbs` (`pictures::picture_source`, macOS only;
+  elsewhere they wear the photo tile). The file pane draws them the same
+  way.
+- A pasted picture of a kind the agent cannot take (a TIFF, as some
+  apps copy a screenshot) is kept as a PNG (`as_png`), so the agent
+  sees it.
+- `pictures::dims` reads the pixel size from the header (PNG, JPEG, GIF
+  and WebP by hand, the rest through the `image` crate), and
+  `fit_thumb` gives a chip's thumbnail the picture's shape
+  (`ObjectFit::Contain`). In a transcript every picture of a prompt is
+  one height and as wide as its shape gives within a range
+  (`gallery_box`), so a row of them is even; past the range it is
+  letterboxed. The size is kept in `Attachment::size` for a chip,
+  `Detail::sizes` for a session's file, and in `Thumb` beside a pasted
+  block's bytes.
 - In a transcript, `render_attachment` draws a pasted image from the kept
   file when the prompt names one, else reads the block back out of the
   JSONL (`transcript::image_block_bytes`, cached in `Detail::thumbs`,

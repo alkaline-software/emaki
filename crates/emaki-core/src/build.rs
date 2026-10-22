@@ -71,6 +71,9 @@ pub const PAGE_SENDER: &str = "emaki";
 /// What the envelope said before the rename; rows from then are still ours.
 pub const PAGE_SENDER_LEGACY: &str = "scribe";
 
+/// A picture's media type by its name, "" for anything else: every kind
+/// a person attaches, not only the four a model takes
+/// (`driver::IMAGE_TYPES`, which is what decides what is sent as one).
 pub fn media_type_for(name: &str) -> &'static str {
     let ext = Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
@@ -78,6 +81,21 @@ pub fn media_type_for(name: &str) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "ico" => "image/x-icon",
+        "pbm" | "pgm" | "ppm" | "pnm" => "image/x-portable-anymap",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "avif" => "image/avif",
+        "jxl" => "image/jxl",
+        "jp2" => "image/jp2",
+        "psd" => "image/vnd.adobe.photoshop",
+        "tga" => "image/x-tga",
+        "exr" => "image/x-exr",
+        "hdr" => "image/vnd.radiance",
+        "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2" => "image/x-raw",
         _ => "",
     }
 }

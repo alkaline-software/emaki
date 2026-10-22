@@ -1,19 +1,34 @@
 use crate::input::InputModeKind;
-use aho_corasick::AhoCorasick;
 use gpui::{Context, Window};
+use regex::Regex;
 use ropey::Rope;
 use std::{ops::Range, rc::Rc};
 
 use super::{InputBaseState, Replace, RopeExt as _, Search, movement::MoveDirection};
 
 /// Stateful, presentation-independent search engine used by text inputs.
+///
+/// Emaki: a regular expression, with the query escaped unless `regex`,
+/// and whole words kept by the characters around a match, where upstream
+/// had one literal through AhoCorasick, case folded for ASCII only.
 #[derive(Debug, Clone)]
 pub struct SearchMatcher {
     text: Rope,
-    pub query: Option<AhoCorasick>,
+    pub query: Option<Regex>,
+    whole_word: bool,
+    regex: bool,
+    invalid: bool,
     matched_ranges: Rc<Vec<Range<usize>>>,
     current_match_ix: usize,
     replacing: bool,
+}
+
+/// How a query matches: case, whole words, a regular expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchOptions {
+    pub case_insensitive: bool,
+    pub whole_word: bool,
+    pub regex: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -21,11 +36,22 @@ pub struct SearchSession {
     pub open: bool,
     pub replace_mode: bool,
     pub case_insensitive: bool,
+    pub whole_word: bool,
+    pub regex: bool,
     pub query: String,
     pub replacement: String,
     pub anchor_offset: Option<usize>,
     pub matcher: SearchMatcher,
+    /// Emaki: counts the opens, so a panel shows the query anew at an
+    /// open and not at each change its own typing makes.
+    pub opened: u64,
+    /// Emaki: when it was closed, so the panel is drawn while it goes
+    /// (`closing`).
+    pub closed_at: Option<std::time::Instant>,
 }
+
+/// Emaki: how long the search panel takes to open or close.
+pub const SEARCH_ANIM: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl Default for SearchSession {
     fn default() -> Self {
@@ -33,10 +59,14 @@ impl Default for SearchSession {
             open: false,
             replace_mode: false,
             case_insensitive: true,
+            whole_word: false,
+            regex: false,
             query: String::new(),
             replacement: String::new(),
             anchor_offset: None,
             matcher: SearchMatcher::new(),
+            opened: 0,
+            closed_at: None,
         }
     }
 }
@@ -44,17 +74,31 @@ impl Default for SearchSession {
 impl SearchSession {
     pub(crate) fn open(&mut self, replace_mode: bool, replaceable: bool) {
         self.open = true;
+        self.opened += 1;
+        self.closed_at = None;
         self.replace_mode = replace_mode && replaceable;
     }
 
     pub(crate) fn close(&mut self) {
+        if self.open {
+            self.closed_at = Some(std::time::Instant::now());
+        }
         self.open = false;
+    }
+
+    /// Closed a moment ago: the panel is still drawn, going.
+    pub fn closing(&self) -> bool {
+        !self.open && self.closed_at.is_some_and(|at| at.elapsed() < SEARCH_ANIM)
     }
 
     pub(crate) fn update_query(&mut self, query: impl Into<String>, case_insensitive: bool) {
         self.query = query.into();
         self.case_insensitive = case_insensitive;
-        self.matcher.update_query(&self.query, case_insensitive);
+        self.matcher.set_query(&self.query, self.options());
+    }
+
+    pub fn options(&self) -> SearchOptions {
+        SearchOptions { case_insensitive: self.case_insensitive, whole_word: self.whole_word, regex: self.regex }
     }
 }
 
@@ -73,10 +117,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             .last_layout
             .as_ref()
             .map(|layout| layout.visible_range_offset.start);
-        self.search_session.matcher.update_query(
-            &self.search_session.query,
-            self.search_session.case_insensitive,
-        );
+        let options = self.search_session.options();
+        self.search_session.matcher.set_query(&self.search_session.query, options);
         self.search_session.matcher.update(&self.text);
         if let Some(anchor) = self.search_session.anchor_offset {
             self.search_session.matcher.update_cursor_by_offset(anchor);
@@ -111,6 +153,13 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.search_session.update_query(query, case_insensitive);
         self.search_session.matcher.update(&self.text);
         cx.notify();
+    }
+
+    /// Emaki: the query with every option, as the panel's toggles set them.
+    pub fn set_search_options(&mut self, query: impl Into<String>, options: SearchOptions, cx: &mut Context<Self>) {
+        self.search_session.whole_word = options.whole_word;
+        self.search_session.regex = options.regex;
+        self.set_search_query(query, options.case_insensitive, cx);
     }
 
     pub fn close_search(&mut self, cx: &mut Context<Self>) {
@@ -153,6 +202,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         else {
             return false;
         };
+        let replacement = matcher.replacement_for(&range, replacement);
         let next = matcher.peek().unwrap_or_else(|| range.clone());
         let direction = matcher
             .has_next_without_wrap()
@@ -163,7 +213,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         matcher.begin_replacement();
         let range_utf16 = self.range_to_utf16(&range);
         self.scroll_to(next.end, direction, cx);
-        self.replace_text_in_range_silent(Some(range_utf16), replacement, window, cx);
+        self.replace_text_in_range_silent(Some(range_utf16), &replacement, window, cx);
         true
     }
 
@@ -182,7 +232,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
         let mut text = self.text.clone();
         for range in ranges.iter().rev() {
-            text.replace(range.clone(), replacement);
+            let with = self.search_session.matcher.replacement_for(range, replacement);
+            text.replace(range.clone(), &with);
         }
         self.search_session.matcher.begin_replacement();
         let count = ranges.len();
@@ -214,6 +265,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         if !self.searchable {
+            // Emaki: passed on as ⌘F is, so the window's ⌘⇧F (the files
+            // panel) answers it with the keyboard in a field.
+            cx.propagate();
             return;
         }
         self.open_search(true, cx);
@@ -231,6 +285,9 @@ impl SearchMatcher {
         Self {
             text: "".into(),
             query: None,
+            whole_word: false,
+            regex: false,
+            invalid: false,
             matched_ranges: Rc::new(Vec::new()),
             current_match_ix: 0,
             replacing: false,
@@ -248,13 +305,42 @@ impl SearchMatcher {
     }
 
     pub fn update_query(&mut self, query: &str, case_insensitive: bool) {
-        self.query = (!query.is_empty()).then(|| {
-            AhoCorasick::builder()
-                .ascii_case_insensitive(case_insensitive)
-                .build([query])
-                .expect("failed to build input search query")
-        });
+        self.set_query(query, SearchOptions { case_insensitive, whole_word: false, regex: false });
+    }
+
+    /// The query as `options` read it. A regular expression that does not
+    /// parse matches nothing and says so (`is_invalid`).
+    pub fn set_query(&mut self, query: &str, options: SearchOptions) {
+        self.whole_word = options.whole_word;
+        self.regex = options.regex;
+        let pattern = if options.regex { query.to_string() } else { regex::escape(query) };
+        let built = (!query.is_empty()).then(|| regex::RegexBuilder::new(&pattern).case_insensitive(options.case_insensitive).multi_line(true).build());
+        self.invalid = matches!(built, Some(Err(_)));
+        self.query = built.and_then(Result::ok);
         self.update_matches();
+    }
+
+    /// The query is a regular expression that does not parse.
+    pub fn is_invalid(&self) -> bool {
+        self.invalid
+    }
+
+    /// What replaces the match at `range`: `replacement` as written, or,
+    /// for a regular expression, with `$1` and `${name}` filled from it.
+    pub fn replacement_for(&self, range: &Range<usize>, replacement: &str) -> String {
+        if !self.regex {
+            return replacement.to_string();
+        }
+        let Some(query) = &self.query else { return replacement.to_string() };
+        let text = self.text.to_string();
+        match query.captures_at(&text, range.start).filter(|c| c.get(0).is_some_and(|m| m.range() == *range)) {
+            Some(caps) => {
+                let mut out = String::new();
+                caps.expand(replacement, &mut out);
+                out
+            }
+            None => replacement.to_string(),
+        }
     }
 
     pub fn matched_ranges(&self) -> Rc<Vec<Range<usize>>> {
@@ -322,11 +408,10 @@ impl SearchMatcher {
         let mut ranges = Vec::new();
         if let Some(query) = &self.query {
             let text = self.text.to_string();
-            ranges.extend(
-                query
-                    .stream_find_iter(text.as_bytes())
-                    .map(|result| result.expect("input search match").range()),
-            );
+            let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            ranges.extend(query.find_iter(&text).map(|m| m.range()).filter(|r| {
+                !r.is_empty() && (!self.whole_word || (!word(text[..r.start].chars().next_back()) && !word(text[r.end..].chars().next())))
+            }));
         }
         self.matched_ranges = Rc::new(ranges);
         if !self.replacing || self.is_empty() {
@@ -378,6 +463,28 @@ mod tests {
         matcher.begin_replacement();
         matcher.update(&Rope::from("foo FOO bar"));
         assert_eq!(matcher.current_match_index(), 1);
+    }
+
+    #[test]
+    fn whole_words_regex_and_case() {
+        let opts = |case_insensitive, whole_word, regex| SearchOptions { case_insensitive, whole_word, regex };
+        let mut matcher = SearchMatcher::new();
+        matcher.update(&Rope::from("cat catalog Cat cat_x é É"));
+        matcher.set_query("cat", opts(true, true, false));
+        assert_eq!(&*matcher.matched_ranges(), &[0..3, 12..15]);
+        matcher.set_query("cat", opts(false, false, false));
+        assert_eq!(matcher.len(), 3);
+        matcher.set_query("é", opts(true, false, false));
+        assert_eq!(matcher.len(), 2);
+        matcher.set_query("c(a)t", opts(false, false, true));
+        assert_eq!(matcher.len(), 3);
+        assert_eq!(matcher.replacement_for(&(4..7), "[$1]"), "[a]");
+        matcher.set_query("c(", opts(false, false, true));
+        assert!(matcher.is_invalid() && matcher.is_empty());
+        matcher.set_query("c(", opts(false, false, false));
+        assert!(!matcher.is_invalid());
+        matcher.set_query("x*", opts(false, false, true));
+        assert_eq!(&*matcher.matched_ranges(), &[20..21]);
     }
 
     #[test]

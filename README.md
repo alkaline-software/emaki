@@ -49,8 +49,8 @@ Everything Emaki keeps is in `~/.emaki`, and `archive/` is the one folder that c
 | Choose a folder | `⌘ O` |
 | All Sessions | `⌘ L` |
 | Agents | `⌘ E` |
-| Sidebar | `⌘ B` |
-| Files panel | `⌘ ⇧ E` |
+| Sidebar | `⌘ ⇧ B` |
+| Files panel | `⌘ ⇧ F` |
 | Outline panel | `⌘ ⇧ O` |
 | Shell terminal | `⌘ ⇧ S` |
 | Agent terminal | `⌘ ⇧ A` |

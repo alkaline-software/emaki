@@ -240,8 +240,16 @@ pub struct Tree {
     git: Option<(PathBuf, Rc<git::Status>)>,
     /// Every file with a change, by path, as the status last had them.
     changed: Rc<Vec<(PathBuf, git::State)>>,
-    /// The folder's branches, none when it is in no repository.
-    branches: Option<(PathBuf, Rc<git::Branches>)>,
+    /// The branches of each repository by its folder: the folder's own,
+    /// or each one a folder of checkouts holds. None in no repository.
+    branches: Vec<(PathBuf, Rc<git::Branches>)>,
+    /// The repositories a folder that is in none holds (`git::repos_under`),
+    /// by name; empty for a folder in one.
+    pub(crate) repos: Rc<Vec<PathBuf>>,
+    /// Of those, the one git is asked of now (`git_dir`): the branch, the
+    /// comparison's commit, history and push. It follows the file opened
+    /// and the file picked in the comparison.
+    pub(crate) repo: Option<PathBuf>,
     /// Why git says nothing of a folder that is a checkout
     /// (`git::trouble`), and the folder.
     git_trouble: Option<(PathBuf, git::Trouble)>,
@@ -290,6 +298,47 @@ pub struct Changes {
     /// more, fading, and takes no click.
     pub(crate) closing: Option<std::time::Instant>,
 }
+
+/// What git says of a folder: its status, its branches, the checkouts
+/// it holds when it is in no repository (each one's status and branches
+/// then, its files after the one before's), the files with a change in
+/// that order, and why it says nothing of a checkout that is one.
+type GitRead = (git::Status, Vec<(PathBuf, git::Branches)>, Vec<PathBuf>, Vec<(PathBuf, git::State)>, Option<git::Trouble>);
+
+fn git_read(dir: &Path) -> GitRead {
+    let (status, branches) = (git::status(dir), git::branches(dir));
+    if status.is_some() || branches.is_some() {
+        let status = status.unwrap_or_default();
+        let changed = status.changed();
+        return (status, branches.map(|b| vec![(dir.to_path_buf(), b)]).unwrap_or_default(), Vec::new(), changed, None);
+    }
+    let repos = git::repos_under(dir);
+    let (mut all, mut each, mut changed) = (git::Status::default(), Vec::new(), Vec::new());
+    for repo in &repos {
+        if let Some(st) = git::status(repo) {
+            changed.extend(st.changed());
+            all.merge(st);
+        }
+        if let Some(b) = git::branches(repo) {
+            each.push((repo.clone(), b));
+        }
+    }
+    // Asked only of a folder git gave nothing for.
+    let trouble = if repos.is_empty() { git::trouble(dir) } else { None };
+    (all, each, repos, changed, trouble)
+}
+
+/// A row of the comparison's list: a changed file, by its place in
+/// `Tree::changed`, or, in a folder of checkouts, the head of one
+/// checkout's files: its folder, its branch and how many.
+#[derive(Clone)]
+pub(crate) enum ChangeRow {
+    Repo { dir: PathBuf, branch: Option<String>, count: usize },
+    File(usize),
+}
+
+/// The file pane's find: the card's own height and the room around it.
+const FIND_CARD_H: f32 = 6. + 4. + 40.;
 
 /// VS Code's colour for a git state, light then dark: the GitHub
 /// theme's where it names one, else VS Code's own default.
@@ -1018,7 +1067,7 @@ pub enum FilePrompt {
 }
 
 fn is_picture(path: &Path) -> bool {
-    matches!(path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "tiff"))
+    crate::pictures::can_draw(&path.to_string_lossy())
 }
 
 /// A compared picture's sides as gpui draws them: before, then after.
@@ -1116,7 +1165,7 @@ fn read_file(path: &Path, root: &Path) -> FileView {
         // and to edit.
         let text = (ext == "svg" && size as usize <= PREVIEW_BYTES).then(|| std::fs::read_to_string(path).ok()).flatten();
         let picture = text.as_ref().map(|t| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Svg, t.as_bytes().to_vec())));
-        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Picture(crate::workbench::file_image_dims(path), picture), source: text.map(Into::into), kinds: Vec::new(), rows_all: None };
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Picture(crate::pictures::dims(path), picture), source: text.map(Into::into), kinds: Vec::new(), rows_all: None };
     }
     if crate::word::opens(&ext).is_some() {
         return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Word, source: None, kinds: Vec::new(), rows_all: None };
@@ -1653,23 +1702,53 @@ impl Workbench {
     /// the left and the terminal are put away as their buttons put them
     /// away, and the file shown is only not drawn (`fold_file`), so what
     /// is not saved in it stays. `held`: put away for the window's width,
-    /// so their room still counts against the sidebar (`room_held`).
+    /// so they come back when it is wide enough again (`side_away`).
     pub(crate) fn fit_sides(&mut self, held: bool, cx: &mut Context<Self>) {
-        // Putting a panel away clears what is held, as a press of its
-        // button does; what this fit puts away is counted after.
-        let was_held = self.room_held;
-        let mut freed = px(0.);
         for side in self.sides_fit(self.view_w - crate::workbench::FRAME).0 {
+            let shown = match side {
+                Side::Left => self.panel_on(),
+                Side::Term => self.term_on(),
+                Side::File => continue,
+            };
             match side {
                 Side::Left => self.panel_go(None, cx),
-                Side::Term => self.term_go(None, cx),
-                Side::File => continue,
+                _ => self.term_go(None, cx),
             }
-            freed += side.least();
+            if let (true, Some(shown)) = (held, shown) {
+                self.side_away.push((side, shown));
+            }
         }
-        if held {
-            self.room_held = was_held + freed;
+    }
+
+    /// Whether a side panel put away for the window's width fits again in
+    /// `room`, `FOLD_SLACK` past its least: beside every side panel asked
+    /// for, the file not drawn too, so what comes back is not put away
+    /// again for one above it in the rank.
+    pub(crate) fn sides_back(&self, room: Pixels) -> bool {
+        if self.page != Page::Session || self.detail.is_none() {
+            return false;
         }
+        let wanted = self.side_rank.into_iter().filter(|s| self.side_wanted(*s)).fold(px(0.), |a, s| a + s.least());
+        self.side_away.iter().any(|(s, _)| self.conv_need.get() + wanted + s.least() + crate::workbench::FOLD_SLACK <= room)
+    }
+
+    /// The side panels put away for the window's width that fit again in
+    /// `room` come back, the highest in their rank first, showing what
+    /// they showed. Coming back is not a use: the rank stays as it was.
+    pub(crate) fn side_away_back(&mut self, room: Pixels, cx: &mut Context<Self>) {
+        let rank = self.side_rank;
+        for side in rank {
+            let Some(&(_, shown)) = self.side_away.iter().find(|(s, _)| *s == side) else { continue };
+            let wanted = rank.into_iter().filter(|s| self.side_wanted(*s)).fold(px(0.), |a, s| a + s.least());
+            if self.conv_need.get() + wanted + side.least() + crate::workbench::FOLD_SLACK > room {
+                continue;
+            }
+            match side {
+                Side::Left => self.panel_go(Some(shown), cx),
+                _ => self.term_go(Some(shown), cx),
+            }
+        }
+        self.side_rank = rank;
     }
 
     /// The panel goes to the files, to the outline, or away, and the
@@ -1679,7 +1758,7 @@ impl Workbench {
         if from == to {
             return;
         }
-        self.room_held = px(0.);
+        self.side_away.retain(|(s, _)| *s != Side::Left);
         self.files_on = to == Some(true);
         self.outline_on = to == Some(false);
         if to.is_some() {
@@ -1753,7 +1832,7 @@ impl Workbench {
             .rounded(px(9.))
             .bg(track_bg)
             .children(plate)
-            .child(segment("panel-files", "icons/tree-view.svg", "Files (⌘⇧E)", true, cx))
+            .child(segment("panel-files", "icons/tree-view.svg", "Files (⌘⇧F)", true, cx))
             .child(segment("panel-outline", "icons/list-bullets.svg", "Outline (⌘⇧O)", false, cx))
             .into_any_element()]
     }
@@ -2096,20 +2175,21 @@ impl Workbench {
     /// Ask git about the folder, off the main thread, one asking at a
     /// time; the tree is drawn again when the answer differs.
     pub(crate) fn read_git(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        // Asked after an action in one of a folder's checkouts: the
+        // folder's, every checkout's, or the others' marks went.
+        let root = match self.files_root() {
+            Some(folder) if root != folder && self.tree.repos.contains(&root) => folder,
+            _ => root,
+        };
         if self.tree.git_reading {
             return;
         }
         self.tree.git_reading = true;
         cx.spawn(async move |this, cx| {
             let dir = root.clone();
-            let (status, branches, trouble) = cx
+            let (status, branches, repos, changed, trouble) = cx
                 .background_executor()
-                .spawn(async move {
-                    let (status, branches) = (git::status(&dir), git::branches(&dir));
-                    // Asked only of a folder git gave nothing for.
-                    let trouble = if status.is_none() && branches.is_none() { git::trouble(&dir) } else { None };
-                    (status.unwrap_or_default(), branches, trouble)
-                })
+                .spawn(async move { git_read(&dir) })
                 .await;
             // `EMAKI_GO=gitlicence`: the strip as a Mac whose Xcode
             // licence has not been agreed to has it.
@@ -2120,8 +2200,12 @@ impl Workbench {
             };
             this.update(cx, |this, cx| {
                 this.tree.git_reading = false;
+                if *this.tree.repos != repos {
+                    this.tree.repos = Rc::new(repos);
+                    cx.notify();
+                }
                 if this.tree.git.as_ref().is_none_or(|(was, st)| *was != root || **st != status) {
-                    this.tree.changed = Rc::new(status.changed());
+                    this.tree.changed = Rc::new(changed);
                     this.tree.git = Some((root.clone(), Rc::new(status)));
                     cx.notify();
                     // The comparison opened before git had answered
@@ -2130,9 +2214,24 @@ impl Workbench {
                     // And one whose file is no longer changed (it was
                     // committed, or discarded) lets it go: its lines
                     // stood there after a commit, beside an empty list.
-                    let first = this.tree.changed.first().map(|(p, _)| p.clone());
+                    // Of a folder of checkouts, the first left in the one
+                    // the comparison is on, else the first; and the
+                    // comparison goes with it to its checkout.
+                    let on = this.changes.as_ref().map(|c| c.root.clone());
+                    let first = this.tree.changed.iter().find(|(p, _)| on.as_ref().is_some_and(|r| p.starts_with(r))).or(this.tree.changed.first()).map(|(p, _)| p.clone());
+                    let first_repo = first.as_ref().and_then(|p| this.repo_of(p));
                     let still: HashSet<PathBuf> = this.tree.changed.iter().map(|(p, _)| p.clone()).collect();
-                    if let Some(c) = this.changes.as_mut().filter(|c| c.root == root && c.picked.as_ref().is_none_or(|p| !still.contains(p))) {
+                    if let Some(c) = this.changes.as_mut().filter(|c| c.root.starts_with(&root) && c.picked.as_ref().is_none_or(|p| !still.contains(p))) {
+                        if let Some(repo) = first_repo.filter(|r| *r != c.root) {
+                            c.root = repo.clone();
+                            c.commits = None;
+                            c.commit = None;
+                            c.commit_files = None;
+                            c.commit_file = None;
+                            c.top = None;
+                            this.tree.repo = Some(repo);
+                        }
+                        let Some(c) = this.changes.as_mut() else { return };
                         c.marked.retain(|p| still.contains(p));
                         c.left_out.retain(|p| still.contains(p));
                         c.picked = first.clone();
@@ -2153,8 +2252,8 @@ impl Workbench {
                     this.tree.git_trouble = trouble;
                     cx.notify();
                 }
-                let branches = branches.map(|b| (root, Rc::new(b)));
-                if branches.is_none() && this.branch_new_wait.take().is_some() {
+                let branches: Vec<(PathBuf, Rc<git::Branches>)> = branches.into_iter().map(|(dir, b)| (dir, Rc::new(b))).collect();
+                if branches.is_empty() && this.branch_new_wait.take().is_some() {
                     this.notice = Some(Notice::error("this folder is not in a git repository"));
                     cx.notify();
                 }
@@ -2199,6 +2298,11 @@ impl Workbench {
     /// comes in motion when there was none; another file takes the place
     /// of the one showing.
     pub(crate) fn file_preview(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        // Of a folder of checkouts, the one the file is in is the one in use.
+        self.use_repo_of(path);
+        // A file opened has the keyboard (`file_focus_due`), so ⌘F finds
+        // in it with no click first.
+        self.file_focus_due = true;
         if self.files_root().is_none() {
             return;
         }
@@ -2569,6 +2673,8 @@ impl Workbench {
     /// Another file, or none: what was selected and found was the last one's.
     fn pdf_reset(&mut self) {
         (self.pdf_sel, self.pdf_drag, self.pdf_find_open, self.pdf_hit) = (None, None, false, 0);
+        self.text_find_open = false;
+        self.text_find.set_query("", false);
         self.pdf_hits.clear();
         self.pdf_bounds.borrow_mut().clear();
     }
@@ -2764,6 +2870,96 @@ impl Workbench {
         });
         self.pdf_find(cx);
         true
+    }
+
+    /// A file just opened or turned to has the keyboard
+    /// (`file_focus_due`): its editor when it is drawn as written, else
+    /// the pane as it reads.
+    pub(crate) fn file_focus_land(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.file_focus_due) || !self.file_pane_shown() {
+            return;
+        }
+        let written = self.file_view.as_ref().is_some_and(|v| matches!(v.body, FileBody::Code(..)) || (self.file_raw && matches!(v.body, FileBody::Markdown(_))));
+        match self.file_editor.as_ref().filter(|_| written) {
+            Some(ed) => {
+                let handle = ed.state.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            None => window.focus(&self.file_focus, cx),
+        }
+    }
+
+    /// Whether the pane shows a file as it reads, drawn by the markdown
+    /// view, which its find looks in.
+    pub(crate) fn text_find_here(&self) -> bool {
+        self.file_pane_shown()
+            && self.file_view.as_ref().is_some_and(|v| match &v.body {
+                FileBody::Markdown(_) => !self.file_raw,
+                FileBody::Notebook(_) | FileBody::Doc(_) => true,
+                _ => false,
+            })
+    }
+
+    /// ⌘F with the keyboard in a file as it reads: its own find, with the
+    /// caret in it. False when the keyboard is elsewhere or the file is
+    /// drawn another way, and the find is someone else's.
+    pub(crate) fn text_find_open_here(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let here = self.file_focus.contains_focused(window, cx) || self.pdf_find_input.read(cx).focus_handle(cx).is_focused(window);
+        if !self.text_find_here() || !here {
+            return false;
+        }
+        self.text_find_open = true;
+        self.pdf_find_input.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        self.text_find_run(cx);
+        true
+    }
+
+    pub(crate) fn text_find_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.text_find_open = false;
+        self.text_find.set_query("", false);
+        window.focus(&self.file_focus, cx);
+        cx.notify();
+    }
+
+    /// The field's words are what the view finds, from the first place.
+    pub(crate) fn text_find_run(&mut self, cx: &mut Context<Self>) {
+        let words = self.pdf_find_input.read(cx).value().to_string();
+        self.text_find.set_query(&words, false);
+        self.text_find_due.set(true);
+        cx.notify();
+    }
+
+    pub(crate) fn text_find_step(&mut self, by: i64, cx: &mut Context<Self>) {
+        self.text_find.step(by);
+        self.text_find_due.set(true);
+        cx.notify();
+    }
+
+    /// The place the find is on, brought into view a little under the
+    /// pane's top once the view has painted it there: the view says where
+    /// it painted the current match, a frame after it is asked for.
+    pub(crate) fn text_find_show(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.text_find_due.get() || !self.text_find_open {
+            return;
+        }
+        let Some(b) = self.text_find.current_bounds() else {
+            if self.text_find.count() > 0 || !self.text_find.query().is_empty() {
+                let entity = cx.entity();
+                window.on_next_frame(move |_, cx| entity.update(cx, |_, cx| cx.notify()));
+            }
+            return;
+        };
+        self.text_find_due.set(false);
+        let view = self.file_view_scroll.bounds();
+        if b.top() < view.top() + px(40.) || b.bottom() > view.bottom() - px(40.) {
+            let at = self.file_view_scroll.offset();
+            let to = at.y - (b.top() - view.top() - px(110.));
+            self.file_view_scroll.set_offset(point(at.x, to.clamp(-self.file_view_scroll.max_offset().y, px(0.))));
+            cx.notify();
+        }
     }
 
     pub(crate) fn pdf_find_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3940,6 +4136,8 @@ impl Workbench {
                 }
             }
             self.file_raw = raw;
+            // The keyboard to the view turned to.
+            self.file_focus_due = true;
             self.file_mode_serial += 1;
             self.file_serial += 1;
             self.file_view_scroll.set_offset(point(px(0.), px(0.)));
@@ -4824,7 +5022,7 @@ impl Workbench {
         let (mut said, mut failed, mut done) = (Vec::new(), Vec::new(), 0);
         for path in &paths {
             let name = named(path);
-            let did = git::discard(&root, path).and_then(|did| match did {
+            let did = git::discard(&self.repo_of(path).unwrap_or(root.clone()), path).and_then(|did| match did {
                 git::Discarded::New if path.exists() => crate::sys::trash_path(path).map(|_| format!("{name} is in the {}", crate::sys::TRASH_NAME)),
                 _ => Ok(format!("the changes to {name} are discarded")),
             });
@@ -4845,10 +5043,11 @@ impl Workbench {
         if done > 0 {
             // Git is asked again here and now, so the list is right
             // at the next draw.
-            let status = git::status(&root).unwrap_or_default();
-            self.tree.changed = Rc::new(status.changed());
-            self.tree.git = Some((root.clone(), Rc::new(status)));
-            self.tree.refresh(&root);
+            let folder = self.files_root().unwrap_or(root.clone());
+            let (status, _, _, changed, _) = git_read(&folder);
+            self.tree.changed = Rc::new(changed);
+            self.tree.git = Some((folder.clone(), Rc::new(status)));
+            self.tree.refresh(&folder);
             self.tree.read_at = 0.;
             if self.tree.changed.is_empty() {
                 self.changes = None;
@@ -5483,8 +5682,87 @@ impl Workbench {
     }
 
     pub(crate) fn branches(&self) -> Option<Rc<git::Branches>> {
+        let dir = self.git_dir()?;
+        self.tree.branches.iter().find(|(of, _)| *of == dir).map(|(_, b)| b.clone())
+    }
+
+    /// The repositories the session's folder holds, when it is in none
+    /// and holds them (`Tree::repos`); empty otherwise.
+    pub(crate) fn folder_repos(&self) -> Vec<PathBuf> {
+        let Some(root) = self.files_root() else { return Vec::new() };
+        self.tree.repos.iter().filter(|r| r.parent() == Some(root.as_path())).cloned().collect()
+    }
+
+    /// Which of the folder's checkouts `path` is in, when it holds them.
+    pub(crate) fn repo_of(&self, path: &Path) -> Option<PathBuf> {
+        self.folder_repos().into_iter().find(|r| path.starts_with(r))
+    }
+
+    /// The folder git is asked of: the session's folder, or of a folder
+    /// of checkouts the one in use (`Tree::repo`), else the first with a
+    /// change, else the first.
+    pub(crate) fn git_dir(&self) -> Option<PathBuf> {
         let root = self.files_root()?;
-        self.tree.branches.as_ref().filter(|(of, _)| *of == root).map(|(_, b)| b.clone())
+        let repos = self.folder_repos();
+        if repos.is_empty() {
+            return Some(root);
+        }
+        self.tree
+            .repo
+            .clone()
+            .filter(|r| repos.contains(r))
+            .or_else(|| self.tree.changed.first().and_then(|(p, _)| repos.iter().find(|r| p.starts_with(r)).cloned()))
+            .or_else(|| repos.first().cloned())
+    }
+
+    /// The comparison's rows: the changed files, under a head for each
+    /// checkout that has any in a folder of them.
+    pub(crate) fn change_rows(&self) -> Vec<ChangeRow> {
+        let changed = &self.tree.changed;
+        let repos = self.folder_repos();
+        if repos.is_empty() {
+            return (0..changed.len()).map(ChangeRow::File).collect();
+        }
+        let mut rows = Vec::new();
+        for dir in repos {
+            let files: Vec<usize> = changed.iter().enumerate().filter(|(_, (p, _))| p.starts_with(&dir)).map(|(i, _)| i).collect();
+            if files.is_empty() {
+                continue;
+            }
+            let branch = self.tree.branches.iter().find(|(of, _)| *of == dir).map(|(_, b)| b.label());
+            rows.push(ChangeRow::Repo { dir, branch, count: files.len() });
+            rows.extend(files.into_iter().map(ChangeRow::File));
+        }
+        rows
+    }
+
+    /// A click on a checkout's head: the comparison goes to it, on its
+    /// first file.
+    fn change_repo(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let Some(first) = self.tree.changed.iter().find(|(p, _)| p.starts_with(&dir)).map(|(p, _)| p.clone()) else { return };
+        if let Some(c) = &mut self.changes {
+            c.marked = vec![first.clone()];
+            c.anchor = Some(first.clone());
+        }
+        self.pick_change(first, cx);
+        cx.notify();
+    }
+
+    /// Whether anything in the repository at `root` is not committed: the
+    /// folder's status says, or for one of a folder's checkouts, its files.
+    pub(crate) fn repo_dirty(&self, root: &Path) -> bool {
+        match &self.tree.git {
+            Some((of, st)) if of == root => st.dirty,
+            Some(_) if self.repo_of(root).is_some() => self.tree.changed.iter().any(|(p, _)| p.starts_with(root)),
+            _ => false,
+        }
+    }
+
+    /// The checkout in use is the one `path` is in, in a folder of them.
+    pub(crate) fn use_repo_of(&mut self, path: &Path) {
+        if let Some(repo) = self.repo_of(path) {
+            self.tree.repo = Some(repo);
+        }
     }
 
     /// At the right of the files' head: the branch checked out, on a
@@ -5519,6 +5797,8 @@ impl Workbench {
                     }),
                 )
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
+                // Of a folder of checkouts, which one: the branch is its.
+                .when_some(self.git_dir().filter(|d| self.repo_of(d).is_some()).and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string())), |d, repo| d.child(div().flex_shrink_0().text_color(theme.muted_foreground).child(format!("{repo} /"))))
                 .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(b.label()))
                 .child(Icon::new(IconName::ChevronDown).with_size(px(9.)).text_color(theme.muted_foreground).flex_shrink_0())
                 .into_any_element(),
@@ -5588,7 +5868,7 @@ impl Workbench {
     /// remote's first when `update`.
     pub(crate) fn branch_begin(&mut self, name: String, create: bool, base: Option<String>, update: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.close_branch_menu(window, cx);
-        let Some(root) = self.files_root() else { return };
+        let Some(root) = self.git_dir() else { return };
         if self.branches().is_some_and(|b| b.current.as_deref() == Some(&name)) || self.branch_busy {
             return;
         }
@@ -5601,10 +5881,10 @@ impl Workbench {
         // leave them on.
         // The changes are the repository's, not only this folder's: a
         // switch moves all of them.
-        if self.tree.git.as_ref().is_some_and(|(of, st)| *of == root && st.dirty) {
+        if self.repo_dirty(&root) {
             // A conflict still open is resolved before anything else: git
             // switches nowhere with one, and a stash cannot hold it.
-            let open: Vec<String> = self.tree.changed.iter().filter(|(_, st)| *st == git::State::Conflict).map(|(p, _)| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string()).collect();
+            let open: Vec<String> = self.tree.changed.iter().filter(|(p, st)| *st == git::State::Conflict && p.starts_with(&root)).map(|(p, _)| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string()).collect();
             if !open.is_empty() {
                 self.branch_ask = Some(BranchAsk::stop("Resolve the conflicts first", format!("{} on this branch {} a conflict git is waiting to have resolved: {}. Resolve and commit, or undo the merge, then switch.", plural(open.len(), "file", "files"), if open.len() == 1 { "has" } else { "have" }, git::name_some(&open))));
                 cx.notify();
@@ -5645,7 +5925,7 @@ impl Workbench {
 
     fn branch_run_from(&mut self, name: String, create: bool, base: Option<String>, update: bool, carry: git::Carry, cx: &mut Context<Self>) {
         self.branch_ask = None;
-        let Some(root) = self.files_root() else { return };
+        let Some(root) = self.git_dir() else { return };
         if self.branch_busy {
             return;
         }
@@ -5728,7 +6008,7 @@ impl Workbench {
     /// Git refuses, and keeps them, when they would write over a change
     /// made here since.
     fn branch_restore(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.files_root() else { return };
+        let Some(root) = self.git_dir() else { return };
         if self.branch_busy {
             return;
         }
@@ -5927,8 +6207,8 @@ impl Workbench {
         let pick = |leave: bool| {
             cx.listener(move |this, _: &ClickEvent, window, cx| {
                 swallow_click(window, cx);
+                let can_leave = this.branches().is_some_and(|b| b.current.is_some());
                 if let Some(a) = this.branch_ask.as_mut() {
-                    let can_leave = this.tree.branches.as_ref().is_some_and(|(_, b)| b.current.is_some());
                     let fits = a.fit.as_ref().is_some_and(Vec::is_empty);
                     // A choice that is not on offer is not taken.
                     if (leave && can_leave) || (!leave && fits) {
@@ -6281,10 +6561,16 @@ impl Workbench {
 
     /// Show the comparison, on that file or on the first changed one.
     pub(crate) fn open_changes(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
-        let Some(root) = self.files_root() else { return };
-        let picked = path.or_else(|| self.tree.changed.first().map(|(p, _)| p.clone()));
+        let Some(folder) = self.files_root() else { return };
+        // Of a folder of checkouts, the one in use, and its first change.
+        let repo = self.git_dir().filter(|d| *d != folder);
+        let picked = path.or_else(|| self.tree.changed.iter().find(|(p, _)| repo.as_ref().is_none_or(|r| p.starts_with(r))).or(self.tree.changed.first()).map(|(p, _)| p.clone()));
+        let root = picked.as_ref().and_then(|p| self.repo_of(p)).or(repo).unwrap_or(folder);
+        if self.repo_of(&root).is_some() {
+            self.tree.repo = Some(root.clone());
+        }
         let files = UniformListScrollHandle::new();
-        if let Some(at) = picked.as_ref().and_then(|p| self.tree.changed.iter().position(|(c, _)| c == p)) {
+        if let Some(at) = picked.as_ref().and_then(|p| self.change_rows().iter().position(|r| matches!(r, ChangeRow::File(i) if self.tree.changed.get(*i).is_some_and(|(c, _)| c == p)))) {
             files.scroll_to_item(at, ScrollStrategy::Center);
         }
         let marked: Vec<PathBuf> = picked.iter().cloned().collect();
@@ -6304,7 +6590,7 @@ impl Workbench {
         if self.changes.as_ref().is_some_and(|c| c.closing.is_none()) {
             return self.close_changes(cx);
         }
-        let Some(root) = self.files_root().filter(|r| git::inside(r)) else {
+        let Some(root) = self.files_root().filter(|r| git::inside(r) || !git::repos_under(r).is_empty()) else {
             self.notice = Some(Notice::error("open a session in a git repository to see its changes"));
             cx.notify();
             return;
@@ -6333,6 +6619,20 @@ impl Workbench {
     }
 
     fn pick_change(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // Of a folder of checkouts, a file of another one takes the
+        // comparison there: its commit, its history and its branch.
+        let repo = self.repo_of(&path);
+        let Some(c) = &mut self.changes else { return };
+        if let Some(repo) = repo.filter(|r| *r != c.root) {
+            c.root = repo.clone();
+            c.commits = None;
+            c.commit = None;
+            c.commit_files = None;
+            c.commit_file = None;
+            c.top = None;
+            self.tree.repo = Some(repo);
+            self.branch_fetch(false, cx);
+        }
         let Some(c) = &mut self.changes else { return };
         if c.picked.as_ref() != Some(&path) {
             c.picked = Some(path);
@@ -6386,6 +6686,7 @@ impl Workbench {
     /// place is its number.
     fn changes_band_to(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let changed = self.tree.changed.clone();
+        let rows = self.change_rows();
         let Some(c) = &mut self.changes else { return };
         let Some((from, _)) = c.band else { return };
         if !c.band_live && (at.x - from.x).abs() < px(4.) && (at.y - from.y).abs() < px(4.) {
@@ -6398,14 +6699,17 @@ impl Workbench {
             handle.bounds().top() + handle.offset().y
         };
         let (first, last) = (from.y.min(at.y), from.y.max(at.y));
-        c.marked = changed
+        c.marked = rows
             .iter()
             .enumerate()
             .filter(|(ix, _)| {
                 let y = top + CHANGE_ROW_H * *ix as f32;
                 y < last && y + CHANGE_ROW_H > first
             })
-            .map(|(_, (p, _))| p.clone())
+            .filter_map(|(_, row)| match row {
+                ChangeRow::File(i) => changed.get(*i).map(|(p, _)| p.clone()),
+                ChangeRow::Repo { .. } => None,
+            })
             .collect();
         cx.notify();
     }
@@ -6524,21 +6828,67 @@ impl Workbench {
         let marked: Rc<HashSet<PathBuf>> = Rc::new(c.marked.iter().cloned().collect());
         let left_out: Rc<HashSet<PathBuf>> = Rc::new(c.left_out.clone());
         let (accent, on_accent) = (theme.primary, theme.primary_foreground);
-        let files = uniform_list("changes-files", changed.len(), {
-            let (changed, root, marked) = (changed.clone(), root.clone(), marked.clone());
+        let rows = Rc::new(self.change_rows());
+        let repos = Rc::new(self.folder_repos());
+        let files = uniform_list("changes-files", rows.len(), {
+            let (changed, root, marked, rows) = (changed.clone(), root.clone(), marked.clone(), rows.clone());
             move |range: std::ops::Range<usize>, _: &mut Window, _: &mut App| {
                 range
                     .map(|ix| {
-                        let (path, state) = changed[ix].clone();
-                        let rel = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+                        let fx = match &rows[ix] {
+                            ChangeRow::File(fx) => *fx,
+                            // A checkout's head, over its files: its
+                            // folder, its branch, how many; the one the
+                            // comparison is on in the accent. A click
+                            // takes the comparison to it.
+                            ChangeRow::Repo { dir, branch, count } => {
+                                let on = *dir == root;
+                                let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                                let (head_entity, to) = (entity.clone(), dir.clone());
+                                return div()
+                                    .w_full()
+                                    .h(CHANGE_ROW_H)
+                                    .px(px(6.))
+                                    .child(
+                                        h_flex()
+                                            .id(("change-repo", ix))
+                                            .w_full()
+                                            .h_full()
+                                            .px(px(8.))
+                                            .gap(px(6.))
+                                            .items_center()
+                                            .rounded(px(6.))
+                                            .cursor_pointer()
+                                            .text_size(px(12.))
+                                            .hover(move |s| s.bg(hover))
+                                            .on_click(move |_, window, cx| {
+                                                swallow_click(window, cx);
+                                                head_entity.update(cx, |this, cx| this.change_repo(to.clone(), cx)).ok();
+                                            })
+                                            .child(img(crate::file_icons::path(&name, true, true, dark)).size(px(16.)).flex_shrink_0())
+                                            .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(if on { accent } else { ink }).child(name))
+                                            .when_some(branch.clone(), |d, b| {
+                                                d.child(h_flex().min_w_0().gap(px(3.)).items_center().text_color(quiet).child(Icon::default().path("icons/git-branch.svg").with_size(px(11.)).flex_shrink_0()).child(div().min_w_0().truncate().child(b)))
+                                            })
+                                            .child(div().flex_1())
+                                            .child(div().flex_shrink_0().text_size(px(11.)).text_color(quiet).child(count.to_string())),
+                                    )
+                                    .into_any_element();
+                            }
+                        };
+                        let (path, state) = changed[fx].clone();
+                        let ix = fx;
+                        let base = repos.iter().find(|r| path.starts_with(r)).unwrap_or(&root);
+                        let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().replace('\\', "/");
                         let (folder, name) = match rel.rfind('/') {
                             Some(cut) => (rel[..=cut].to_string(), rel[cut + 1..].to_string()),
                             None => (String::new(), rel.clone()),
                         };
                         let tint = git_color(state, dark);
                         // Chosen rows one under another are one lit block.
-                        let is = |at: Option<usize>| at.and_then(|at| changed.get(at)).is_some_and(|(p, _)| marked.contains(p));
-                        let (chosen, above, below) = (marked.contains(&path), is(ix.checked_sub(1)), is(Some(ix + 1)));
+                        let row_at = rows.iter().position(|r| matches!(r, ChangeRow::File(i) if *i == fx)).unwrap_or(0);
+                        let is = |at: Option<usize>| at.and_then(|at| rows.get(at)).is_some_and(|r| matches!(r, ChangeRow::File(i) if changed.get(*i).is_some_and(|(p, _)| marked.contains(p))));
+                        let (chosen, above, below) = (marked.contains(&path), is(row_at.checked_sub(1)), is(Some(row_at + 1)));
                         let (entity, menu_entity, menu_path) = (entity.clone(), entity.clone(), path.clone());
                         // The box that says the file goes into the commit.
                         let taken = !left_out.contains(&path);
@@ -6591,7 +6941,7 @@ impl Workbench {
                             .child(h_flex().flex_1().min_w_0().child(div().min_w_0().truncate().text_color(quiet).child(folder)).child(div().flex_shrink_0().text_color(ink).child(name)))
                             .child(div().w(px(12.)).flex_shrink_0().flex().justify_center().text_size(px(11.)).text_color(tint).children(state.letter()));
                         // The list gives a row its whole width; the plate is inset from it.
-                        div().w_full().h(CHANGE_ROW_H).px(px(6.)).child(row)
+                        div().w_full().h(CHANGE_ROW_H).px(px(6.)).child(row).into_any_element()
                     })
                     .collect::<Vec<_>>()
             }
@@ -6671,7 +7021,13 @@ impl Workbench {
             div().absolute().left(left - room.left()).top(top - room.top()).w((right - left).max(px(0.))).h((bottom - top).max(px(0.))).rounded(px(3.)).border_1().border_color(theme.primary.opacity(0.7)).bg(theme.primary.opacity(0.12))
         });
         let counts = shown.as_ref().filter(|d| !d.binary).map(|d| (d.added, d.removed));
-        let branch = self.branches().map(|b| b.label());
+        // Of a folder of checkouts, the branch is the one of the checkout
+        // the comparison is on, named with it.
+        let repo_name = self.repo_of(&root).and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()));
+        let branch = self.branches().map(|b| match &repo_name {
+            Some(repo) => format!("{repo} / {}", b.label()),
+            None => b.label(),
+        });
         div()
             .id("changes-overlay")
             .absolute()
@@ -6914,9 +7270,9 @@ impl Workbench {
                     Some((fields, rest)) => format!("{}\n{rest}", emaki_core::files::front_matter_table(&fields)),
                     None => text.clone(),
                 };
-                div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), words, cx)).into_any_element()
+                div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), words, self.text_find_open.then(|| self.text_find.clone()), cx)).into_any_element()
             }
-            FileBody::Notebook(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
+            FileBody::Notebook(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), cx)).into_any_element(),
             // The web view stands over the pane's room; nothing of the
             // page is drawn under it.
             FileBody::Html(_) if self.html_web.is_some() => div().into_any_element(),
@@ -6946,10 +7302,17 @@ impl Workbench {
                     }
                     // Until it is drawn, its words as the toolkit reads
                     // them.
-                    None => div().text_size(px(14.)).line_height(relative(1.6)).child(gpui_component::text::TextView::html(SharedString::from(format!("file-html-{}-{}", v.rel, self.file_serial)), text.clone()).selectable(true)).into_any_element(),
+                    None => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(gpui_component::text::TextView::html(SharedString::from(format!("file-html-{}-{}", v.rel, self.file_serial)), text.clone()).selectable(true)).into_any_element(),
                 }
             }
             FileBody::Picture(size, drawn) => {
+                // A picture gpui does not read is drawn from the PNG made
+                // of it, once there is one (`pictures::picture_source`).
+                let from = if drawn.is_some() { None } else { self.picture_source(&v.path, cx) };
+                let size = &size.or_else(|| from.as_deref().and_then(crate::pictures::dims));
+                if drawn.is_none() && from.is_none() {
+                    return v_flex().py(px(60.)).items_center().child(quiet("Drawing the picture…".into())).into_any_element();
+                }
                 // At its own size when that fits, never larger.
                 let (pw, ph) = match size {
                     Some((iw, ih)) if *iw > 0 && *ih > 0 => {
@@ -6958,7 +7321,7 @@ impl Workbench {
                     }
                     _ => (room, room * 0.75),
                 };
-                v_flex().items_center().gap(px(8.)).child(match drawn { Some(picture) => img(picture.clone()), None => img(v.path.clone()) }.w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.))).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
+                v_flex().items_center().gap(px(8.)).child(match (drawn, from) { (Some(picture), _) => img(picture.clone()), (None, Some(from)) => img(from), (None, None) => img(v.path.clone()) }.w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.))).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
             }
             // The document's own pane stands in the body's place.
             FileBody::Word if self.word.is_some() => div().into_any_element(),
@@ -7064,7 +7427,7 @@ impl Workbench {
                 heads = Some(self.render_table_heads(v, rows.len(), widths, cx));
                 self.render_table(v, rows, widths, *more, cx)
             }
-            FileBody::Doc(text) => div().text_size(px(14.)).line_height(relative(1.6)).child(crate::transcript::md_view(format!("file-{}", v.rel), text.clone(), cx)).into_any_element(),
+            FileBody::Doc(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), cx)).into_any_element(),
             FileBody::Sheets(sheets) => match sheets.get(self.sheet_of(&v.path, sheets.len())) {
                 Some((_, rows, widths, more)) if !rows.is_empty() => {
                     wide = true;
@@ -7078,7 +7441,7 @@ impl Workbench {
                 .gap(px(12.))
                 .items_center()
                 .text_color(theme.muted_foreground)
-                .child(Icon::default().path(crate::assets::file_icon_path(&name)).with_size(px(36.)))
+                .child(crate::pictures::kind_tile(&name, 56., theme.mode.is_dark()))
                 .child(div().text_size(px(13.)).text_center().child(why.clone()))
                 .child(choice_pill("file-open-default", "icons/external-link.svg", "Open with default app", Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&open_too)))
                 .into_any_element(),
@@ -7119,7 +7482,7 @@ impl Workbench {
                     });
                 }
             };
-            gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(crate::workbench::editor_px(&self.cfg.app.chat_size))).on_secondary_click(menu).into_any_element()
+            gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(self.cfg.app.text_sizes().editor)).on_secondary_click(menu).into_any_element()
         });
         let word = self.word.as_ref().filter(|w| matches!(v.body, FileBody::Word) && !leaving && w.read(cx).path == v.path).map(|w| w.clone().into_any_element());
         let cut = match &v.body {
@@ -7269,29 +7632,76 @@ impl Workbench {
             }
             _ => None,
         };
-        // A PDF's own find, under the head while it is asked for.
-        let find = (pdf && self.pdf_find_open && !leaving).then(|| {
+        // The file's own find, under the head while it is asked for: a
+        // PDF's, or a file's as it reads. A card as the code editor's
+        // find is, without its replace, opening and closing in motion with
+        // its room around it inside what is cut (`FIND_CARD_H`).
+        let text_find = self.text_find_open && self.text_find_here();
+        let find_open = !leaving && ((pdf && self.pdf_find_open) || text_find);
+        let moving = self.presence("file-find", find_open, cx);
+        let find = (find_open || moving.is_some()).then(|| {
             let focus = self.pdf_find_input.read(cx).focus_handle(cx);
             let value = self.pdf_find_input.read(cx).value().to_string();
-            let n = self.pdf_hits.len();
-            let count = if value.trim().is_empty() { String::new() } else if n == 0 { "no matches".into() } else { format!("{} of {n}", self.pdf_hit + 1) };
-            h_flex()
+            let (n, at) = if text_find { (self.text_find.count(), self.text_find.current()) } else { (self.pdf_hits.len(), self.pdf_hit) };
+            let count = if value.trim().is_empty() { String::new() } else if n == 0 { "no matches".into() } else { format!("{} of {n}", at + 1) };
+            let hover = theme.foreground.opacity(0.07);
+            let tool = |id: &'static str, icon: Icon, tip: &'static str, able: bool| {
+                div()
+                    .id(id)
+                    .size(px(22.))
+                    .flex_shrink_0()
+                    .rounded(px(5.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(able, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
+                    .managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx))
+                    .child(icon.with_size(px(14.)).text_color(if able { theme.muted_foreground } else { theme.muted_foreground.opacity(0.45) }))
+            };
+            let dark = theme.mode.is_dark();
+            let card = h_flex()
                 .id("file-find")
                 .key_context(crate::workbench::FIND_CONTEXT)
-                .h(px(34.))
                 .flex_shrink_0()
-                .pl(px(12.))
-                .pr(px(6.))
-                .gap(px(6.))
+                .h(px(40.))
+                .px(px(6.))
+                .gap(px(4.))
                 .items_center()
-                .border_b_1()
+                .rounded(px(10.))
+                .border_1()
                 .border_color(theme.border)
-                .child(Icon::new(IconName::Search).with_size(px(13.)).text_color(theme.muted_foreground))
-                .child(div().id("file-find-field").track_focus(&focus).flex_1().min_w_0().text_size(px(12.5)).child(gpui_component::input::Input::new(&self.pdf_find_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.pdf_find_input, false, cx))))
-                .child(div().flex_shrink_0().text_size(px(11.)).text_color(if n == 0 && !value.trim().is_empty() { theme.danger } else { theme.muted_foreground }).child(count))
-                .child(tool("file-find-prev", Icon::new(IconName::ChevronUp), "Previous (⇧↩)").on_click(cx.listener(|this, _, _, cx| this.pdf_find_step(-1, cx))))
-                .child(tool("file-find-next", Icon::new(IconName::ChevronDown), "Next (↩)").on_click(cx.listener(|this, _, _, cx| this.pdf_find_step(1, cx))))
-                .child(tool("file-find-close", Icon::new(IconName::Close), "Close (esc)").on_click(cx.listener(|this, _, window, cx| this.pdf_find_close(window, cx))))
+                .bg(theme.popover)
+                .shadow_sm()
+                .child(
+                    div()
+                        .id("file-find-field")
+                        .track_focus(&focus)
+                        .flex_1()
+                        .min_w(px(64.))
+                        .h(px(28.))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .border_1()
+                        .map(|d| if dark { d.bg(theme.muted).border_color(theme.transparent) } else { d.bg(theme.background).border_color(theme.input) })
+                        .text_size(px(12.5))
+                        .child(gpui_component::input::Input::new(&self.pdf_find_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.pdf_find_input, false, cx))),
+                )
+                .when(!count.is_empty(), |d| d.child(div().flex_shrink_0().px(px(2.)).text_size(px(11.5)).text_color(if n == 0 { theme.danger } else { theme.muted_foreground }).child(count)))
+                .child(tool("file-find-prev", Icon::new(IconName::ChevronUp), "Previous (⇧↩)", n > 0).on_click(cx.listener(move |this, _, _, cx| if text_find { this.text_find_step(-1, cx) } else { this.pdf_find_step(-1, cx) })))
+                .child(tool("file-find-next", Icon::new(IconName::ChevronDown), "Next (↩)", n > 0).on_click(cx.listener(move |this, _, _, cx| if text_find { this.text_find_step(1, cx) } else { this.pdf_find_step(1, cx) })))
+                .child(tool("file-find-close", Icon::new(IconName::Close), "Close (esc)", true).on_click(cx.listener(move |this, _, window, cx| if text_find { this.text_find_close(window, cx) } else { this.pdf_find_close(window, cx) })));
+            let shell = div().w_full().flex_shrink_0().overflow_hidden().child(div().w_full().flex_shrink_0().px(px(8.)).pt(px(6.)).pb(px(4.)).child(card));
+            match moving {
+                Some((coming, serial)) => shell
+                    .with_animation(ElementId::Name(format!("file-find-{serial}").into()), Animation::new(crate::workbench::FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                        let k = if coming { t } else { 1. - t };
+                        d.max_h(px(FIND_CARD_H * k)).opacity(k)
+                    })
+                    .into_any_element(),
+                None => shell.into_any_element(),
+            }
         });
         // A workbook's sheets, by name, in a row over the grid: the one
         // showing on a plate, as a segment is.
@@ -7989,6 +8399,29 @@ impl Workbench {
             // A key pressed as the keyboard presses it, through every
             // listener and binding on the way: press:shift-up.
             t if t.starts_with("press:") => self.pending_press.push(t["press:".len()..].to_string()),
+            // Text Size's preset, or one place's size in points.
+            t if t.starts_with("size:") => self.set_chat_size(&t["size:".len()..], cx),
+            // Words typed in a place's field and ↩, as a hand types them.
+            t if t.starts_with("sizetype:") => self.size_probe = t["sizetype:".len()..].split_once(':').map(|(a, b)| (a.to_string(), b.to_string())),
+            t if t.starts_with("textsize:") => {
+                if let Some((place, pt)) = t["textsize:".len()..].split_once(':') {
+                    if let Ok(pt) = pt.parse::<f32>() {
+                        let place = place.to_string();
+                        self.set_text_size(
+                            |s| match place.as_str() {
+                                "conversation" => s.conversation = pt,
+                                "composer" => s.composer = pt,
+                                "preview" => s.preview = pt,
+                                "editor" => s.editor = pt,
+                                _ => s.terminal = pt,
+                            },
+                            cx,
+                        );
+                    }
+                }
+            }
+            // A file put in the composer, as a drop does.
+            t if t.starts_with("attach:") => self.attach_paths(&[PathBuf::from(&t["attach:".len()..])], cx),
             // The pointer moved there, in points from the window's top
             // left, as the mouse moves it: pointer:832:166; clickat: is
             // a press and a release there.

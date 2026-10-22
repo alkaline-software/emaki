@@ -188,7 +188,8 @@ upstream revision finds them.
 23. `crates/base/src/input/editor/search.rs`: a field that is not
     `searchable` passes ⌘F on (`cx.propagate()`), where upstream ended
     it there. The window's find is bound to the same key, and with the
-    keyboard in the composer it never heard it.
+    keyboard in the composer it never heard it. ⌘⇧F, Replace, likewise:
+    the window's files panel is bound to it.
 24. `crates/ui/src/highlighter/input_adapter.rs`: a text parsed for
     the first time gets 60 ms before the first draw (upstream: the 2 ms
     a keystroke gets) and, past that, a background parse with no wait
@@ -259,6 +260,36 @@ upstream revision finds them.
    (`MarkdownExtensions::parse_options_with`): a view's parse options
    can be changed over GFM's, for the conversation, which turns off what
    chat text sets off by accident (`docs/conversation.md`).
+34. The code editor's find. `crates/ui/src/input/overlay.rs`: the panel
+   is shown anew when it opens (`SearchSession::opened`), not whenever
+   the query changes; the panel's own typing changed it, the field was
+   selected again at each letter, and the next letter replaced it. It is
+   still drawn while it closes (`closing`, `closed_at`).
+   `crates/base/src/input/editor/search.rs`: the matcher is a regular
+   expression (`SearchOptions`: case, whole word, regex), escaped unless
+   regex is on, case folded beyond ASCII, and a replacement fills `$1`
+   from its match (`replacement_for`); upstream had one literal through
+   AhoCorasick. `crates/ui/src/input/search.rs`: the panel drawn as the
+   window's find bar, after VS Code's (a chevron for the replace row,
+   the toggles in the field, ↩ and ⌘↩ in the replace field, ⌥⌘C, ⌥⌘W,
+   ⌥⌘R), moving as it opens and closes over its measured height, two
+   rows in a narrow pane; ⌘F in it closes it. Its room around the card
+   is inside the box that closes: padding is the least a box shrinks
+   to, and the close stood still at it before the panel went. `crates/base/src/input/base/state.rs`: Replace is
+   ⌥⌘F, since ⌘⇧F is the window's.
+35. `crates/ui/src/tooltip.rs` (`set_label`, `label`): the application
+   says how a hover's label is drawn, so the toolkit's own labels (the
+   find panel's) draw their keys as the application's do.
+36. `crates/ui/src/text/node.rs` (a heading's size): a
+   `heading_base_font_size` of zero is the text's own size where the
+   view stands, so headings grow with the words under them; from a
+   fixed base they stayed as they were when the text was set larger.
+37. `crates/ui/src/text/find.rs` (`TextFind`), `text_view.rs`
+   (`TextView::find`), `inline.rs`: words found in a text view. The
+   application hands the view a shared `TextFind`; each run paints its
+   matches behind its letters as it paints (the current one in the
+   selection's colour, the others in a grey of it), numbered in the
+   order the view paints, and records where the current one stands.
 
 ## Updating
 

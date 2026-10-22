@@ -83,6 +83,8 @@ pub struct TextViewState {
     pub(super) is_selecting: bool,
     multi_click_selection: Option<TextViewMultiClickSelection>,
     selected_text_override: Option<String>,
+    /// Emaki: the words found in it, painted by each run (`find.rs`).
+    pub(crate) find: Option<super::TextFind>,
     select_all: bool,
     pub(super) auto_scroll: AutoScroll,
     pub(super) selection_adapter: TextViewSelectionAdapter,
@@ -160,6 +162,7 @@ impl TextViewState {
             bounds: Bounds::default(),
             multi_click_selection: None,
             selected_text_override: None,
+            find: None,
             select_all: false,
             selectable: false,
             selection_format: SelectionFormat::default(),

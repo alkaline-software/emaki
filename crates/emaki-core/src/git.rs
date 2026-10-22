@@ -258,6 +258,42 @@ pub fn inside(dir: &Path) -> bool {
     git(dir, &["rev-parse", "--git-dir"]).is_some() && git(dir, &["check-ignore", "-q", "."]).is_none()
 }
 
+/// The repositories a folder that is in none holds, one level down, as
+/// VS Code finds them (its `git.repositoryScanMaxDepth`, 1): a folder of
+/// checkouts side by side. Each is a folder with a `.git` of its own (a
+/// folder, or the file a worktree or a submodule has) that git answers
+/// for. By name, as the tree lists them. None for a folder in one.
+pub fn repos_under(dir: &Path) -> Vec<PathBuf> {
+    if inside(dir) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .filter(|p| p.join(".git").exists() && inside(p))
+        .collect();
+    found.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
+    found
+}
+
+/// `status` of a folder, or of a folder of checkouts every checkout's
+/// together (`repos_under`), each by its own paths.
+pub fn status_all(dir: &Path) -> Option<Status> {
+    if let Some(st) = status(dir) {
+        return Some(st);
+    }
+    let repos = repos_under(dir);
+    let mut all = None::<Status>;
+    for repo in &repos {
+        if let Some(st) = status(repo) {
+            all.get_or_insert_with(Status::default).merge(st);
+        }
+    }
+    all
+}
+
 /// The state of what is under `dir` in the repository it is in, or
 /// `None` when it is in none (`inside`). A folder part way down a
 /// repository is asked about by itself, as VS Code shows one: the
@@ -371,6 +407,21 @@ impl Status {
 
     pub fn changed_count(&self) -> usize {
         self.files.values().filter(|s| **s != State::Ignored).count()
+    }
+
+    /// Another repository's states with these, for a folder that holds
+    /// several: their paths are apart, and a folder over both takes the
+    /// more pressing.
+    pub fn merge(&mut self, other: Status) {
+        self.files.extend(other.files);
+        self.whole.extend(other.whole);
+        for (dir, state) in other.holding {
+            let held = self.holding.entry(dir).or_insert(state);
+            if state.rank() < held.rank() {
+                *held = state;
+            }
+        }
+        self.dirty |= other.dirty;
     }
 }
 

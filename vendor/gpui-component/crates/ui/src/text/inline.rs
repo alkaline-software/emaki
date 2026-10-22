@@ -361,6 +361,27 @@ impl Inline {
         line_bounds
     }
 
+    /// Emaki: a found range's ground, a box a line it is on; the first
+    /// line's box, where the range begins.
+    fn paint_range(range: &Range<usize>, color: Hsla, text_layout: &TextLayout, bounds: &Bounds<Pixels>, window: &mut Window) -> Option<Bounds<Pixels>> {
+        let start = text_layout.position_for_index(range.start)?;
+        let end = text_layout.position_for_index(range.end)?;
+        let line_height = text_layout.line_height();
+        let fill = |b: Bounds<Pixels>, window: &mut Window| window.paint_quad(quad(b, px(2.), color, Edges::default(), gpui::transparent_black(), BorderStyle::default()));
+        if start.y == end.y {
+            let b = Bounds::from_corners(start, point(end.x, end.y + line_height));
+            fill(b, window);
+            return Some(b);
+        }
+        let first = Bounds::from_corners(start, point(bounds.right(), start.y + line_height));
+        fill(first, window);
+        if end.y > start.y + line_height {
+            fill(Bounds::from_corners(point(bounds.left(), start.y + line_height), point(bounds.right(), end.y)), window);
+        }
+        fill(Bounds::from_corners(point(bounds.left(), end.y), point(end.x, end.y + line_height)), window);
+        Some(first)
+    }
+
     /// Paint the selection background.
     fn paint_selection(
         selection: &Selection,
@@ -528,6 +549,21 @@ impl Element for Inline {
 
         let text_layout = self.styled_text.layout().clone();
         self.paint_code_chips(&text_layout, &bounds, window);
+        // Emaki: words found in the view, behind the letters, as the
+        // code editor marks them: the current one in the selection's
+        // colour, the others in a grey of it.
+        let find = UiGlobalState::global(cx).text_view_state().and_then(|s| s.read(cx).find.clone());
+        if let Some(find) = find {
+            let selection = cx.theme().selection;
+            let other = Hsla { s: 0.1, ..selection };
+            for (range, ix, current) in find.take_matches(&self.text) {
+                if let Some(at) = Self::paint_range(&range, if current { selection } else { other }, &text_layout, &bounds, window) {
+                    if current {
+                        find.painted_current(ix, at);
+                    }
+                }
+            }
+        }
         self.styled_text
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 

@@ -176,6 +176,22 @@ impl Workbench {
         })
         .detach();
         self.name_input = Some(name_input);
+        // Text Size's fields: a number with a tenth at most, set at ↩ or
+        // when the field is left; anything else put back as it was.
+        self.size_inputs = SIZE_PLACES
+            .iter()
+            .map(|(key, _)| {
+                let key: &'static str = key;
+                let input = cx.new(|cx| InputState::new(window, cx).validate(|text, _| size_typable(text)));
+                cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, window, cx| {
+                    if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.size_commit(key, input, window, cx);
+                    }
+                })
+                .detach();
+                (key, input)
+            })
+            .collect();
         // A list or a menu open in the window goes when another window is
         // used, as the Mac's own do.
         cx.observe_window_activation(window, |this, window, cx| {
@@ -187,10 +203,23 @@ impl Workbench {
         window.focus(&self.settings_focus, cx);
     }
 
+    /// What was typed in a place's field is its size, to a tenth and in
+    /// range; anything that is no number leaves it, and the field says
+    /// the size it has.
+    fn size_commit(&mut self, key: &'static str, input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = input.read(cx).value().trim().parse::<f32>().ok().filter(|v| *v > 0.);
+        if let Some(v) = typed {
+            self.set_text_size(|s| *size_field(s, key) = emaki_core::config::TextSizes::typed(v), cx);
+        }
+        let now = size_words(*size_field(&mut self.cfg.app.text_sizes(), key));
+        input.update(cx, |s, cx| s.set_value(now, window, cx));
+    }
+
     /// The window is gone: its field, and a list or a menu it had open.
     fn settings_detach(&mut self, cx: &mut Context<Self>) {
         self.settings_window = None;
         self.name_input = None;
+        self.size_inputs.clear();
         if self.pick.as_ref().is_some_and(|p| p.in_settings) {
             self.pick = None;
         }
@@ -222,8 +251,26 @@ impl Workbench {
     pub(super) fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let section = self.settings_section;
+        // Text Size's fields say the sizes as they are, but for the one
+        // being typed in.
+        let sizes = self.cfg.app.text_sizes();
+        for (key, input) in self.size_inputs.clone() {
+            let now = size_words(*size_field(&mut sizes.clone(), key));
+            if !input.read(cx).focus_handle(cx).is_focused(window) && input.read(cx).value() != now.as_str() {
+                input.update(cx, |s, cx| s.set_value(now, window, cx));
+            }
+        }
+        if let Some((place, words)) = self.size_probe.take() {
+            if let Some((_, input)) = self.size_inputs.iter().find(|(k, _)| *k == place) {
+                let input = input.clone();
+                input.update(cx, |s, cx| s.set_value(words, window, cx));
+                let key = SIZE_PLACES.iter().map(|(k, _)| *k).find(|k| *k == place).unwrap_or("conversation");
+                self.size_commit(key, &input, window, cx);
+            }
+        }
         let rows = match section {
             "fonts" => self.fonts_rows(cx),
+            "text" => self.text_rows(cx),
             "composer" => self.composer_rows(cx),
             "sessions" => self.sessions_rows(cx),
             "terminal" => self.terminal_rows(cx),
@@ -235,6 +282,7 @@ impl Workbench {
         let title = SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == section).map(|(_, name, _)| *name).unwrap_or("Appearance");
         let (title_anim, page_anim): (&'static str, &'static str) = match section {
             "fonts" => ("title-fonts", "page-fonts"),
+            "text" => ("title-text", "page-text"),
             "composer" => ("title-composer", "page-composer"),
             "sessions" => ("title-sessions", "page-sessions"),
             "terminal" => ("title-terminal", "page-terminal"),
@@ -252,9 +300,16 @@ impl Workbench {
             .bg(theme.popover)
             .text_color(theme.foreground)
             .text_size(px(13.))
-            // Escape puts away a list or a menu opened here; the window
-            // itself closes as a Mac's settings window does, at ⌘W.
-            .on_action(cx.listener(|this, _: &Escape, _, cx| this.close_settings_lists(cx)))
+            // Escape puts away a list or a menu opened here, and with
+            // none open closes the window, as ⌘W does.
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                let open = this.pick.as_ref().is_some_and(|p| p.in_settings) || this.menu.as_ref().is_some_and(|m| m.in_settings);
+                if open {
+                    this.close_settings_lists(cx);
+                } else {
+                    window.remove_window();
+                }
+            }))
             .on_action(cx.listener(|_, _: &CloseTab, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &crate::CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &OpenSettings, window, _| window.activate_window()))
@@ -491,8 +546,8 @@ impl Workbench {
         ]
     }
 
-    /// Fonts: the conversation's face, the monospace face, and the size
-    /// of both. Each face is a tile drawn in itself.
+    /// Fonts: the conversation's face and the monospace face, each a
+    /// tile drawn in itself. Their sizes are Text Size's.
     fn fonts_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let app = self.cfg.app.clone();
@@ -534,17 +589,146 @@ impl Workbench {
             .child(tiles(crate::fonts::SANS, chat_now, "Ag", false, cx))
             .into_any_element();
         let mono = div().p(px(14.)).child(tiles(crate::fonts::monos(), mono_now, "fn(0) -> 1", true, cx)).into_any_element();
-        let size_key = match app.chat_size.as_str() {
+        vec![group(Some("Chat font"), None, vec![chat], &theme), group(Some("Monospace font"), None, vec![mono], &theme)]
+    }
+
+    /// Text Size: a preset for every place at once, and each place's
+    /// size under it, which a preset sets. Custom is the person's own,
+    /// set here by a step or by what is typed, and kept while a preset is
+    /// chosen; under a preset the sizes are its and are only shown.
+    fn text_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let mut sizes = self.cfg.app.text_sizes();
+        let now = match self.cfg.app.chat_size.as_str() {
             "small" => "small",
             "large" => "large",
+            "custom" => "custom",
             _ => "medium",
         };
-        let size = div().w(CONTROL_W).child(self.segmented("size", vec![("small", "Small".into(), None), ("medium", "Medium".into(), None), ("large", "Large".into(), None)], size_key, Rc::new(|this, key, _, cx| this.set_chat_size(key, cx)), cx)).into_any_element();
-        vec![
-            group(Some("Chat font"), None, vec![chat], &theme),
-            group(Some("Monospace font"), None, vec![mono], &theme),
-            group(None, None, vec![line("Font size", None, size, &theme)], &theme),
-        ]
+        let presets = div()
+            .w(CONTROL_W)
+            .child(self.segmented("size", vec![("small", "Small".into(), None), ("medium", "Medium".into(), None), ("large", "Large".into(), None), ("custom", "Custom".into(), None)], now, Rc::new(|this, key, _, cx| this.set_chat_size(key, cx)), cx))
+            .into_any_element();
+        let custom = now == "custom";
+        let rows = SIZE_PLACES
+            .iter()
+            .map(|(key, name)| {
+                let value = *size_field(&mut sizes, key);
+                let control = h_flex().gap(px(8.)).items_center().children(self.size_reset(key, value, custom, cx)).child(self.stepper(key, value, custom, cx)).into_any_element();
+                line(name, None, control, &theme)
+            })
+            .collect();
+        vec![group(None, None, vec![line("Size", None, presets, &theme)], &theme), group(None, None, rows, &theme)]
+    }
+
+    /// Under Custom, beside a size not Medium's: a button that puts it
+    /// back to Medium's, which is Custom's own until it is changed. It
+    /// comes and goes in motion (`presence`).
+    fn size_reset(&self, key: &'static str, value: f32, custom: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let medium = *size_field(&mut emaki_core::config::TextSizes::MEDIUM.clone(), key);
+        let shown = custom && value != medium;
+        let id = format!("size-reset-{key}");
+        let moving = self.presence(&id, shown, cx);
+        if !shown && moving.is_none() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let hover = theme.foreground.opacity(0.07);
+        let tip: SharedString = format!("Reset to {} pt", size_words(medium)).into();
+        let button = div()
+            .id(SharedString::from(id.clone()))
+            .size(px(26.))
+            .flex_shrink_0()
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(shown, |d| {
+                d.cursor_pointer().hover(move |s| s.bg(hover)).on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.set_text_size(|s| *size_field(s, key) = medium, cx);
+                }))
+            })
+            .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
+            .child(Icon::default().path("icons/rotate.svg").with_size(px(14.)).text_color(theme.muted_foreground));
+        Some(match moving {
+            Some((coming, n)) => button.with_animation(ElementId::Name(format!("{id}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t })).into_any_element(),
+            None => button.into_any_element(),
+        })
+    }
+
+    /// A size in points: a step down, the number in a field of its own
+    /// with "pt" after it, and a step up, on the track a choice has
+    /// (`segmented`). A step is a whole point; a tenth is only typed.
+    /// Not `live`, it shows a preset's size and nothing in it moves it.
+    fn stepper(&self, key: &'static str, value: f32, live: bool, cx: &mut Context<Self>) -> AnyElement {
+        use emaki_core::config::TextSizes;
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let track = if dark { theme.tab_bar_segmented } else { theme.muted };
+        let plate = if dark { theme.secondary_active } else { theme.popover };
+        let step = |up: bool, icon: &'static str| {
+            let to = TextSizes::step(value, up);
+            let able = live && to != value;
+            div()
+                .id(SharedString::from(format!("size-{key}-{}", if up { "up" } else { "down" })))
+                .size(px(22.))
+                .flex_shrink_0()
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(able, |d| {
+                    d.cursor_pointer().hover(move |s| s.bg(plate).shadow_sm()).on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.set_text_size(|s| *size_field(s, key) = to, cx);
+                    }))
+                })
+                .child(Icon::default().path(icon).with_size(px(13.)).text_color(if able { theme.foreground } else { theme.muted_foreground.opacity(0.5) }))
+        };
+        let down = step(false, "icons/minus.svg");
+        let up = step(true, "icons/plus.svg");
+        // The number in the window's face, a weight over the words, in
+        // the middle of its box and in full ink: under a preset only the
+        // steps are quiet, and the field has no plate to type on.
+        let face = theme.font_family.clone();
+        let number = match self.size_inputs.iter().find(|(k, _)| *k == key).filter(|_| live) {
+            Some((_, input)) => div()
+                .id(SharedString::from(format!("size-{key}-field")))
+                .track_focus(&input.read(cx).focus_handle(cx))
+                .role(Role::TextInput)
+                .aria_label(SIZE_PLACES.iter().find(|(k, _)| *k == key).map(|(_, n)| *n).unwrap_or(""))
+                .aria_value(input.read(cx).value().to_string())
+                .w(px(42.))
+                .h(px(22.))
+                .px(px(5.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .bg(plate)
+                .cursor_text()
+                .font_family(face.clone())
+                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(13.))
+                .text_color(theme.foreground)
+                // The field's own room at its sides is none here: in this
+                // width it cut the number.
+                .child(Input::new(input).appearance(false).bordered(false).px_0().font_family(face).text_center())
+                .into_any_element(),
+            None => div().w(px(42.)).text_center().font_family(face).font_weight(FontWeight::MEDIUM).text_size(px(13.)).text_color(theme.foreground).child(size_words(value)).into_any_element(),
+        };
+        h_flex()
+            .w(px(140.))
+            .h(CONTROL_H)
+            .p(px(3.))
+            .gap(px(4.))
+            .rounded(px(8.))
+            .bg(track)
+            .items_center()
+            .child(down)
+            .child(h_flex().flex_1().justify_center().items_center().gap(px(3.)).child(number).child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("pt")))
+            .child(up)
+            .into_any_element()
     }
 
     /// Composer: the key that sends, capitals, and spelling.
@@ -626,9 +810,18 @@ impl Workbench {
         let term_theme = div().w(CONTROL_W).child(self.segmented("term-theme", vec![("match", "Match window".into(), None), ("dark", "Dark".into(), None), ("light", "Light".into(), None)], pick(&["match", "dark", "light"], &term.theme), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.theme = key.into(), cx)), cx)).into_any_element();
         let term_cursor = div().w(CONTROL_W).child(self.segmented("term-cursor", vec![("bar", "Bar".into(), None), ("block", "Block".into(), None), ("underline", "Underline".into(), None)], pick(&["bar", "block", "underline"], &term.cursor), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.cursor = key.into(), cx)), cx)).into_any_element();
         let term_blink = self.switch("term-blink", term.cursor_blink, Rc::new(|this, on, _, cx| this.set_terminal(|t| t.cursor_blink = on, cx)), cx);
+        // The size is Text Size's terminal: shown here, set there.
+        let term_size = crate::branches::small_pill("term-size", "icons/a-large-small.svg", format!("{} pt", size_words(self.cfg.app.text_sizes().terminal)), Press::Quiet, false, &theme)
+            .h(CONTROL_H)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings_section = "text";
+                this.settings_scroll.set_offset(point(px(0.), px(0.)));
+                cx.notify();
+            }))
+            .into_any_element();
         let term_ligatures = self.switch("term-ligatures", term.ligatures, Rc::new(|this, on, _, cx| this.set_terminal(|t| t.ligatures = on, cx)), cx);
         let term_copy = self.switch("term-copy", term.copy_on_select, Rc::new(|this, on, _, cx| this.set_terminal(|t| t.copy_on_select = on, cx)), cx);
-        // The face and the size are the window's, set in Fonts.
+        // The face is the window's, set in Fonts.
         let fonts = crate::branches::small_pill("term-fonts", "icons/typography.svg", "Open Fonts", Press::Quiet, false, &theme)
             .h(CONTROL_H)
             .on_click(cx.listener(|this, _, _, cx| {
@@ -662,7 +855,7 @@ impl Workbench {
             .child(".")
             .into_any_element();
         vec![
-            group(Some("Look"), None, vec![line("Theme", None, term_theme, &theme), line("Cursor", None, term_cursor, &theme), line("Blinking cursor", None, term_blink, &theme), line("Font", Some(div().child("The window's monospace font and size.").into_any_element()), fonts, &theme)], &theme),
+            group(Some("Look"), None, vec![line("Theme", None, term_theme, &theme), line("Cursor", None, term_cursor, &theme), line("Blinking cursor", None, term_blink, &theme), line("Font", None, fonts, &theme), line("Size", None, term_size, &theme)], &theme),
             group(Some("Behavior"), None, vec![line("Ligatures", Some(joins), term_ligatures, &theme), line("Copy on select", None, term_copy, &theme)], &theme),
             credit,
         ]
@@ -847,6 +1040,32 @@ impl Workbench {
                 .into_any_element(),
         ]
     }
+}
+
+/// The places text is set in, as Text Size names them.
+const SIZE_PLACES: [(&str, &str); 5] = [("conversation", "Conversation"), ("composer", "Composer"), ("preview", "File preview"), ("editor", "File editor"), ("terminal", "Terminal")];
+
+/// A place's size in the sizes.
+fn size_field<'a>(s: &'a mut emaki_core::config::TextSizes, key: &str) -> &'a mut f32 {
+    match key {
+        "conversation" => &mut s.conversation,
+        "composer" => &mut s.composer,
+        "preview" => &mut s.preview,
+        "editor" => &mut s.editor,
+        _ => &mut s.terminal,
+    }
+}
+
+/// What a size's field takes as it is typed: two digits at most, and a
+/// tenth after a point.
+fn size_typable(text: &str) -> bool {
+    let (whole, tenth) = text.split_once('.').unwrap_or((text, ""));
+    whole.len() <= 2 && tenth.len() <= 1 && whole.chars().chain(tenth.chars()).all(|c| c.is_ascii_digit())
+}
+
+/// A size as its field says it: a whole point bare, a tenth after it.
+fn size_words(v: f32) -> String {
+    if v.fract() == 0. { format!("{v:.0}") } else { format!("{v:.1}") }
 }
 
 /// A group of the settings: its name over it and its rows on one card.

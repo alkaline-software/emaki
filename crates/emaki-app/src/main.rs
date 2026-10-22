@@ -15,6 +15,7 @@ mod word;
 mod hub;
 mod look;
 mod panels;
+mod pictures;
 mod sys;
 mod term_panel;
 mod transcript;
@@ -39,9 +40,12 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-n", NewBranch, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-l", GoSessions, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-e", GoAgents, Some(KEY_CONTEXT)),
-        // ⌘B, as an editor has it: ⌘⇧S is the shell terminal's.
+        // ⌘⇧B, with the panels' keys (⌘⇧S is the shell terminal's), and
+        // ⌘B, as an editor has it, named nowhere. The menu names the
+        // first binding of an action, so ⌘⇧B stays first.
+        KeyBinding::new("secondary-shift-b", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-b", ToggleSidebar, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-e", ToggleFiles, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-f", ToggleFiles, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-o", ToggleOutline, Some(KEY_CONTEXT)),
         // The two sides of the terminal at a conversation's right.
         KeyBinding::new("secondary-shift-s", ToggleShell, Some(KEY_CONTEXT)),
@@ -60,6 +64,7 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", Escape, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(SEARCH_CONTEXT)),
         KeyBinding::new("escape", Escape, Some(FIND_CONTEXT)),
+        KeyBinding::new("escape", Escape, Some(workbench::SETTINGS_CONTEXT)),
         // Find inside the conversation showing; ⌘G and ⌘⇧G step through
         // the hits from anywhere, Enter and ⇧Enter from the find field.
         KeyBinding::new("secondary-f", FindInPage, Some(KEY_CONTEXT)),
@@ -209,7 +214,7 @@ fn with_workbench(cx: &mut App, f: impl FnOnce(&mut Workbench, &mut Window, &mut
 /// The least the window is dragged to: the conversation at its least
 /// with one pane beside it, the wider of the two there are, so a pane
 /// asked for always has room, and the frame at both sides of them.
-const MIN_W: Pixels = px(794.);
+pub(crate) const MIN_W: Pixels = px(794.);
 
 fn remembered_bounds(cx: &App) -> Option<Bounds<Pixels>> {
     let r = ui_state::UiState::load().window?;
@@ -321,6 +326,9 @@ fn main() {
     });
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        // The toolkit's own hover labels (the editor's find) draw their
+        // keys as every label here does.
+        gpui_component::tooltip::set_label(|text, window, cx| workbench::tip(text, window, cx));
         sys::install_dock_icon();
         // The palette (cream and charcoal, one config per appearance) with
         // the accent from config painted in, then the appearance it asks for.

@@ -1439,6 +1439,43 @@ fn pasted_pictures_are_named_by_their_markers() {
 }
 
 #[test]
+fn text_sizes_are_a_preset_or_each_its_own() {
+    use emaki_core::config::{AppConfig, TextSizes};
+    // A config from before the sizes: its preset, Medium being the default.
+    let old: AppConfig = serde_json::from_str(r#"{"chat_size": "large"}"#).unwrap();
+    assert_eq!(old.text_sizes(), TextSizes::LARGE);
+    assert_eq!(AppConfig::default().text_sizes(), TextSizes::MEDIUM);
+    assert_eq!(AppConfig::default().chat_px(), 16.);
+    // Custom reads the sizes kept, put on the steps and in range.
+    let custom: AppConfig = serde_json::from_str(r#"{"chat_size": "custom", "sizes": {"conversation": 18.34, "terminal": 80}}"#).unwrap();
+    let s = custom.text_sizes();
+    assert_eq!((s.conversation, s.terminal, s.composer), (18.3, TextSizes::MOST, TextSizes::MEDIUM.composer));
+    assert_eq!(TextSizes::SMALL.preset_name(), Some("small"));
+    assert_eq!(s.preset_name(), None);
+    // A preset keeps the person's own sizes for Custom.
+    let back: AppConfig = serde_json::from_str(r#"{"chat_size": "small", "sizes": {"conversation": 21}}"#).unwrap();
+    assert_eq!((back.text_sizes(), back.sizes.unwrap().conversation), (TextSizes::SMALL, 21.));
+    // A step is a whole point; from a tenth, to the next whole one.
+    assert_eq!((TextSizes::step(14.5, true), TextSizes::step(14.5, false), TextSizes::step(16., true)), (15., 14., 17.));
+    assert_eq!((TextSizes::step(TextSizes::MOST, true), TextSizes::typed(13.26)), (TextSizes::MOST, 13.3));
+    for p in [TextSizes::SMALL, TextSizes::MEDIUM, TextSizes::LARGE] {
+        for v in [p.conversation, p.composer, p.preview, p.editor, p.terminal] {
+            assert_eq!(v.fract(), 0.);
+        }
+    }
+}
+
+#[test]
+fn every_attached_picture_kind_is_a_picture() {
+    use emaki_core::build::attachments_of;
+    let (_, found) = attachments_of("see\n\nAttached file: /x/shot.tiff\nAttached file: /x/phone.HEIC\nAttached file: /x/notes.pdf", &[], "u1");
+    let kinds: Vec<(&str, &str)> = found.iter().map(|a| (a.kind.as_str(), a.media_type.as_str())).collect();
+    assert_eq!(kinds, vec![("image", "image/tiff"), ("image", "image/heic"), ("file", "")]);
+    // What is sent to a model as a picture is still the four it takes.
+    assert!(!emaki_core::driver::IMAGE_TYPES.contains(&"image/tiff"));
+}
+
+#[test]
 fn the_newest_version_is_read_off_the_release_redirect() {
     use emaki_core::update::{asset_name, asset_url, is_newer, version_from_location};
     assert_eq!(version_from_location("https://github.com/alkaline-software/emaki/releases/tag/v0.1.1").as_deref(), Some("0.1.1"));
@@ -2489,6 +2526,41 @@ fn git_marks_files_and_the_folders_that_hold_them() {
     assert_eq!(at("/r/new.txt"), Some(State::Renamed));
     assert_eq!(at("/r/old.txt"), Some(State::Modified));
     assert_eq!(at("/r/both.txt"), Some(State::Conflict));
+}
+
+#[test]
+fn a_folder_of_checkouts_shows_each_ones_changes() {
+    use emaki_core::git::{self, State};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let run = |at: &std::path::Path, args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]).args(args).output().unwrap();
+        assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+    };
+    for name in ["Beta", "alpha"] {
+        let repo = root.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), "one").unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-q", "-m", "first"]);
+    }
+    std::fs::create_dir_all(root.join("plain")).unwrap();
+    std::fs::write(root.join("alpha/a.txt"), "two").unwrap();
+    std::fs::write(root.join("Beta/new.txt"), "new").unwrap();
+    // The folder is in no repository: its checkouts, by name, the plain
+    // folder left out.
+    assert!(git::status(&root).is_none());
+    let repos = git::repos_under(&root);
+    assert_eq!(repos, vec![root.join("alpha"), root.join("Beta")]);
+    let mut all = git::Status::default();
+    for repo in &repos {
+        all.merge(git::status(repo).unwrap());
+    }
+    assert_eq!(all.changed(), vec![(root.join("Beta/new.txt"), State::Untracked), (root.join("alpha/a.txt"), State::Modified)]);
+    assert_eq!(all.mark(&root.join("alpha"), true).map(|m| m.state), Some(State::Modified));
+    // A checkout itself holds none.
+    assert!(git::repos_under(&root.join("alpha")).is_empty());
 }
 
 #[test]

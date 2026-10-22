@@ -25,7 +25,7 @@ impl<M: OverlayMode> Global for InputOverlayRegistry<M> {}
 
 struct InputOverlayHost<M: OverlayMode> {
     search: Entity<SearchPanel<M>>,
-    search_signature: (bool, bool, String, Option<usize>),
+    search_signature: (bool, u64),
     /// The language-feature popovers. Only a code editor has them.
     lsp: Option<LspOverlays>,
 }
@@ -280,7 +280,7 @@ impl<M: OverlayMode> InputOverlayHost<M> {
     fn new(state: Entity<InputBaseState<M>>, window: &mut Window, cx: &mut App) -> Self {
         Self {
             search: SearchPanel::new(state.clone(), window, cx),
-            search_signature: (false, false, String::new(), None),
+            search_signature: (false, 0),
             lsp: M::build_lsp(&state, window, cx),
         }
     }
@@ -297,16 +297,15 @@ impl<M: OverlayMode> InputOverlayHost<M> {
             let search = state.search_session();
             (search.open, search.replace_mode, search.clone())
         };
+        let search_closing = search_session.closing();
 
         self.search
             .update(cx, |panel, _| panel.sync_session(&search_session));
 
-        let search_signature = (
-            search_open,
-            replace_mode,
-            search_session.query.clone(),
-            search_session.anchor_offset,
-        );
+        // Emaki: shown anew at an open, not at each change of the query:
+        // the panel's own typing changes it, and showing it again
+        // selected what was typed, so the next letter replaced it.
+        let search_signature = (search_open, search_session.opened);
         if search_signature != self.search_signature {
             self.search_signature = search_signature;
             self.search.update(cx, |panel, cx| {
@@ -331,7 +330,7 @@ impl<M: OverlayMode> InputOverlayHost<M> {
             M::sync_lsp(lsp, state, snapshot, window, cx);
         }
 
-        let search = search_open.then(|| self.search.clone().into_any_element());
+        let search = (search_open || search_closing).then(|| self.search.clone().into_any_element());
         let mut floating = Vec::with_capacity(4);
         if let (Some(lsp), Some(snapshot)) = (self.lsp.as_ref(), snapshot.as_ref()) {
             if snapshot.completion.open {
@@ -359,7 +358,7 @@ pub(super) fn render_overlays<M: OverlayMode>(
     M::install_action_handler(state, cx);
     let has_overlay = {
         let state = state.read(cx);
-        state.search_session().open
+        (state.search_session().open || state.search_session().closing())
             || M::lsp_snapshot(state, cx).is_some_and(|lsp| lsp.has_overlay())
     };
     if !has_overlay {
