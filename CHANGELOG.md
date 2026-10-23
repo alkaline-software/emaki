@@ -2,6 +2,19 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.3.0
+
+1. **Languages**: The window in eight languages, English, Simplified and Traditional Chinese, Japanese, Korean, French, German and Spanish, picked with flags in Settings; the AI era's terms (model, agent, token, prompt) stay as they are.
+2. **Windows and Linux on ARM**: Installers for ARM as well as x64, and the updater fetches the one for your machine; Windows installs in one step, needs no Visual C++ runtime and opens no console window beside the app.
+3. **Linux**: On Ubuntu and other GNOME desktops the window has its own minimize, maximize and close buttons and resizes by its edges, and the dock shows Emaki's icon.
+4. **Pictures in markdown**: Pictures from the web and from the file's own folder show in a markdown file as it reads, and GIFs move.
+5. **Video and audio**: Common video and audio files play in the file's pane on a Mac and Windows.
+6. **Structure**: The files panel has the shown file's headings at its foot, folded until opened; a click brings the heading into view a third of the way down.
+7. **Quarto**: .qmd files have an icon, and their R and Python chunks are colored in the editor and as the file reads.
+8. **Settings**: A Conversation section with switches for Explain, the outline panel and folding runs of tool calls; eight sections in all.
+9. **Spelling**: Marks in a file's editor are underlines as in the composer, with no card on hover, and the check finishes while the window is busy.
+10. **Fixes**: Text is no longer selected by moving the pointer after resizing a window; the Windows scrollbar is thin and steady at the ends; the monospace font tiles fit their samples; a fold arrow appears only where it hides something.
+
 ## v0.2.9
 
 1. **Settings**: A window of its own, with Text Size as a section of whole-point presets and a Custom size per place; Escape closes it.
