@@ -131,10 +131,10 @@
             "color": "@l-teal"
           },
           "comment": {
-            "color": "@l-grey"
+            "color": "@l-gray"
           },
           "comment_doc": {
-            "color": "@l-grey"
+            "color": "@l-gray"
           },
           "function": {
             "color": "@l-rose"
@@ -197,10 +197,10 @@
             "color": "#1F1F1F"
           },
           "punctuation.special": {
-            "color": "@l-grey"
+            "color": "@l-gray"
           },
           "punctuation.list_marker": {
-            "color": "@l-grey"
+            "color": "@l-gray"
           },
           "label": {
             "color": "#1F1F1F"
@@ -229,7 +229,7 @@
             "color": "@l-blue"
           },
           "link_uri": {
-            "color": "@l-grey"
+            "color": "@l-gray"
           },
           "text.literal": {
             "color": "@l-gold"
@@ -369,10 +369,10 @@
             "color": "@d-teal"
           },
           "comment": {
-            "color": "@d-grey"
+            "color": "@d-gray"
           },
           "comment_doc": {
-            "color": "@d-grey"
+            "color": "@d-gray"
           },
           "function": {
             "color": "@d-rose"
@@ -435,10 +435,10 @@
             "color": "#D4D4D4"
           },
           "punctuation.special": {
-            "color": "@d-grey"
+            "color": "@d-gray"
           },
           "punctuation.list_marker": {
-            "color": "@d-grey"
+            "color": "@d-gray"
           },
           "label": {
             "color": "#D4D4D4"
@@ -467,7 +467,7 @@
             "color": "@d-blue"
           },
           "link_uri": {
-            "color": "@d-grey"
+            "color": "@d-gray"
           },
           "text.literal": {
             "color": "@d-gold"

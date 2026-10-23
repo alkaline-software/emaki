@@ -60,7 +60,7 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 
 # The disk image. Finder lays the window out on a read-write image (the
 # layout lives in the volume's .DS_Store, and only Finder writes one Finder
-# will honour), then hdiutil compresses it read-only. The window is 660x420
+# will honor), then hdiutil compresses it read-only. The window is 660x420
 # points over scripts/dmg/background.png, which is that size at 2x.
 VOLNAME="Emaki v$VERSION"
 STAGE=dist/dmg-staging

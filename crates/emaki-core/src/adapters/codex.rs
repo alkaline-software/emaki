@@ -90,9 +90,9 @@ impl Adapter for CodexAdapter {
     }
 
     /// Asked of a Codex app server started for the question
-    /// (`codex::catalogue`): no model call, no session.
-    fn catalogue(&self, cwd: &str) -> crate::options::Catalogue {
-        crate::codex::catalogue(cwd).unwrap_or_default()
+    /// (`codex::catalog`): no model call, no session.
+    fn catalog(&self, cwd: &str) -> crate::options::Catalog {
+        crate::codex::catalog(cwd).unwrap_or_default()
     }
 
     /// A session in Codex's `archived_sessions` is archived: Codex does
@@ -963,7 +963,7 @@ impl Builder {
     fn compacted(&mut self, ts: &str) {
         let rnd = self.ensure_round(ts);
         if !matches!(rnd.items.last(), Some(Item::Notice { variant: NoticeVariant::Compact, .. })) {
-            rnd.items.push(Item::Notice { ts: ts.into(), text: "Context compacted, earlier messages summarised".into(), variant: NoticeVariant::Compact });
+            rnd.items.push(Item::Notice { ts: ts.into(), text: "Context compacted, earlier messages summarized".into(), variant: NoticeVariant::Compact });
         }
     }
 

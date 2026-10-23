@@ -416,7 +416,7 @@ impl Workbench {
                 move |d, t| d.left(px(a + (b - a) * t)).opacity(o_a + (o_b - o_a) * t),
             )
         });
-        // The agent's mark is in the agent's own colour under the pointer
+        // The agent's mark is in the agent's own color under the pointer
         // and while its side shows.
         let own = crate::workbench::agent_color(agent, &theme);
         let segment = |id: &'static str, icon: &'static str, tip: String, which: bool, cx: &mut Context<Self>| {
@@ -562,7 +562,7 @@ impl Workbench {
     }
 
     /// The terminal card's rows (`Workbench::render_terminal`), drawn as
-    /// the panel draws a screen: the same face, rows, shapes and colour
+    /// the panel draws a screen: the same face, rows, shapes and color
     /// rules. The scheme is the window's own appearance, light or dark,
     /// whatever the panel's is set to: the card sits in the conversation,
     /// over the composer.
@@ -719,7 +719,7 @@ impl Workbench {
             let group: SharedString = format!("shell-tab-{id}").into();
             let fresh = tab.born.elapsed() < TAB_ANIM;
             // Kaku's tabs: flat, the one showing on a raised ground in
-                // the bold weight, the others grey until the pointer is
+                // the bold weight, the others gray until the pointer is
                 // over them.
             let (hover_bg, press_bg, close_bg, lit) = (hsla(k.tab_hover), hsla(k.tab_on), hsla(k.split), hsla(k.fg));
             let el = h_flex()
@@ -1817,10 +1817,10 @@ fn mod_bits(m: &Modifiers) -> u8 {
     (if m.shift { 4 } else { 0 }) | (if m.alt { 8 } else { 0 }) | (if m.control { 16 } else { 0 })
 }
 
-/// One of Kaku's two colour schemes (tw93/kaku, MIT): the screen's
+/// One of Kaku's two color schemes (tw93/kaku, MIT): the screen's
 /// ground and ink, the cursor, the selection's ground (with how strong)
 /// and ink, the rule under the head, a tab's grounds and the ink of one
-/// not showing, the toast's ground and ink, the sixteen named colours,
+/// not showing, the toast's ground and ink, the sixteen named colors,
 /// and the grounds and inks it draws as others because Claude Code's
 /// screen reads badly with them as they are.
 struct Scheme {
@@ -1837,7 +1837,7 @@ struct Scheme {
     ansi: [u32; 16],
     grounds: &'static [(u32, u32)],
     inks: &'static [(u32, u32)],
-    /// The ground a grey from the other side of the scale is drawn as: a
+    /// The ground a gray from the other side of the scale is drawn as: a
     /// program's quiet band on a dark terminal is a quiet band here.
     wash: u32,
     /// The weights of plain and of bold letters: one step heavier on a
@@ -1905,13 +1905,13 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
-/// The colour a scheme draws in place of `c`, when it has one.
+/// The color a scheme draws in place of `c`, when it has one.
 fn swapped(table: &[(u32, u32)], c: u32) -> u32 {
     table.iter().find(|(from, _)| *from == c).map(|(_, to)| *to).unwrap_or(c)
 }
 
-/// Whether a colour is a grey, or near enough to one.
-fn grey(c: u32) -> bool {
+/// Whether a color is a gray, or near enough to one.
+fn gray(c: u32) -> bool {
     let ch = [c >> 16 & 0xff, c >> 8 & 0xff, c & 0xff];
     ch.iter().max().unwrap() - ch.iter().min().unwrap() < 28
 }
@@ -1928,7 +1928,7 @@ fn tint(c: u32, ground: u32, light: bool) -> u32 {
     mix(ground, vivid, if light { 0.14 + 0.5 * b } else { 0.2 + 0.2 * (1. - b) })
 }
 
-/// How bright a colour is to the eye, 0 to 1.
+/// How bright a color is to the eye, 0 to 1.
 fn brightness(c: u32) -> f32 {
     let ch = |sh: u32| {
         let v = (c >> sh & 0xff) as f32 / 255.;
@@ -1940,7 +1940,7 @@ fn brightness(c: u32) -> f32 {
 /// An ink that can be read on its ground: Kaku's `text_min_contrast_ratio`
 /// of 3. An ink too close to the ground is taken toward black or white,
 /// whichever is the farther from it, as far as it takes. This is what
-/// makes colours a program chose for a dark terminal readable on the
+/// makes colors a program chose for a dark terminal readable on the
 /// light scheme, and the other way round.
 fn legible(fg: u32, bg: u32) -> u32 {
     let ratio = |a: u32, b: u32| {
@@ -1973,7 +1973,7 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
         let mut under: Vec<AnyElement> = Vec::new();
         let mut col = 0usize;
         for s in row {
-            // The sixteen named colours are the scheme's own.
+            // The sixteen named colors are the scheme's own.
             let mut fg = match s.fg_ix {
                 Some(i) => k.ansi[i as usize],
                 None => s.fg.map(|c| swapped(k.inks, c)).unwrap_or(k.fg),
@@ -1982,24 +1982,24 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
                 Some(i) => Some(swapped(k.grounds, k.ansi[i as usize])),
                 None => s.bg.map(|c| swapped(k.grounds, c)),
             };
-            // A grey ground a program chose for the other kind of terminal
+            // A gray ground a program chose for the other kind of terminal
             // (Claude Code's band behind a prompt, near black for a dark
-            // one) is the scheme's own quiet ground, and a grey ink that
+            // one) is the scheme's own quiet ground, and a gray ink that
             // was to stand out on it is the scheme's ink. Kaku swaps the
-            // greys it knows by value; this is the same for any grey.
+            // grays it knows by value; this is the same for any gray.
             let light = brightness(k.bg) > 0.5;
-            if bg.is_some_and(|c| s.bg_ix.is_none() && grey(c) && if light { brightness(c) < 0.2 } else { brightness(c) > 0.5 }) {
+            if bg.is_some_and(|c| s.bg_ix.is_none() && gray(c) && if light { brightness(c) < 0.2 } else { brightness(c) > 0.5 }) {
                 bg = Some(k.wash);
-                if s.fg_ix.is_none() && grey(fg) && if light { brightness(fg) > 0.4 } else { brightness(fg) < 0.2 } {
+                if s.fg_ix.is_none() && gray(fg) && if light { brightness(fg) > 0.4 } else { brightness(fg) < 0.2 } {
                     fg = k.fg;
                 }
             }
-            // A coloured ground from the other side of the scale (Claude
+            // A colored ground from the other side of the scale (Claude
             // Code's diff, green and red, set for a dark terminal) is a
             // soft tint of its own hue on this one, and a light ink on it
             // the scheme's: as bars of deep green and red on the light
             // scheme they were the loudest thing on the screen.
-            else if let Some(c) = bg.filter(|c| s.bg_ix.is_none() && !grey(*c) && if light { brightness(*c) < 0.35 } else { brightness(*c) > 0.45 }) {
+            else if let Some(c) = bg.filter(|c| s.bg_ix.is_none() && !gray(*c) && if light { brightness(*c) < 0.35 } else { brightness(*c) > 0.45 }) {
                 bg = Some(tint(c, k.bg, light));
                 if s.fg_ix.is_none() && if light { brightness(fg) > 0.4 } else { brightness(fg) < 0.2 } {
                     fg = k.fg;
@@ -2011,7 +2011,7 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
             if s.dim {
                 fg = mix(fg, bg.unwrap_or(k.bg), 0.45);
             }
-            // Shapes keep the colour asked for; letters must be readable.
+            // Shapes keep the color asked for; letters must be readable.
             let shape = hsla(fg);
             let fg = legible(fg, bg.unwrap_or(k.bg));
             let look = |(picked, linked): (bool, bool)| HighlightStyle {

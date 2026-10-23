@@ -57,7 +57,7 @@ Read `docs/channels.md`, `docs/modes.md` and `docs/live-turn.md` first.
 - A driver that is a `driver::Drive`, and an arm in `driver::start`. The hub and the window hold `Arc<dyn Drive>` and nothing else, so Stop, the queue, the cards and the pills' setters come with it.
 - What the agent asks becomes the tool call the cards draw (`PermissionRequest`): leave for a command, leave for a patch with its diff, a question with its options. A request settled elsewhere takes its card away (`Event::PermissionSettled`).
 - A turn anyone begins is said to the window (`Event::Turn`), not only one the driver sent.
-- `Adapter::catalogue`: its modes, models, effort levels and slash commands, asked of the agent with no model call and no session. Models are named as the agent's own list names them (`driver::model_label`). The list is the agent's answer for the account signed in, less what it marks hidden; no model's name is written into the code.
+- `Adapter::catalog`: its modes, models, effort levels and slash commands, asked of the agent with no model call and no session. Models are named as the agent's own list names them (`driver::model_label`). The list is the agent's answer for the account signed in, less what it marks hidden; no model's name is written into the code.
 - Its modes as one key in `Session::mode` and on the pill (`docs/modes.md`). A mode that lets everything through is picked from a list, never stepped to.
 - The channel in `reply_via_for`, and when sending is refused.
 - A constant for the release it was checked against (`TESTED_CODEX_VERSION`), and a note when the one found is newer.

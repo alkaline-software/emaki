@@ -9,7 +9,7 @@ sheet shows, in four layers by how far off each is, so the window can
 wind it past at four speeds. Lines only, in the manner of hairline's
 figures (github.com/lucasmarkes/hairline): nothing is filled, there are
 no words, and what is far is dimmer, which the window does with each
-layer's colour. Every layer is the same strip, STRIP wide and SHEET
+layer's color. Every layer is the same strip, STRIP wide and SHEET
 high, drawn from its left.
 """
 import sys

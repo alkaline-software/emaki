@@ -2,7 +2,7 @@
 //! serifs and four sans serifs for a conversation, four monospace faces
 //! for code and the terminal (three built in, and the Mac's Monaco from
 //! the system). Each built in is under the SIL Open Font License,
-//! which lets an app carry it, with its licence beside its files. Nothing
+//! which lets an app carry it, with its license beside its files. Nothing
 //! is loaded from another app or fetched: the Claude desktop app's own
 //! faces were used when that app was installed, and are not, being
 //! Anthropic's and not ours to use.

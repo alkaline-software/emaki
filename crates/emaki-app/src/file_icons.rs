@@ -1,12 +1,12 @@
 //! The files panel's icons: Catppuccin's, as its VS Code icon theme
 //! chooses them.
 //!
-//! `assets/catppuccin/` holds the theme's icons in two flavours (Latte
+//! `assets/catppuccin/` holds the theme's icons in two flavors (Latte
 //! for a light window, Mocha for a dark one) and `theme.json`, its table
 //! of which icon a name gets, both copied from the extension
 //! (`catppuccin.catppuccin-vsc-icons` 1.26.0, MIT, `LICENSE` beside
-//! them). The icons carry their own colours, so they are drawn as
-//! pictures (`img`), not as the one-colour masks the window's other
+//! them). The icons carry their own colors, so they are drawn as
+//! pictures (`img`), not as the one-color masks the window's other
 //! icons are.
 
 use std::borrow::Cow;
@@ -93,12 +93,12 @@ mod tests {
         assert_eq!(folder_id("scripts", false), "folder_scripts");
         assert_eq!(folder_id("scripts", true), "folder_scripts_open");
         assert_eq!(folder_id("whatever", false), "_folder");
-        // Every icon the table names is there, in both flavours.
+        // Every icon the table names is there, in both flavors.
         let t = &*TABLE;
         let ids = t.file_extensions.values().chain(t.file_names.values()).chain(t.folder_names.values()).chain(t.folder_names_expanded.values()).chain([&t.file, &t.folder, &t.folder_expanded]);
         for id in ids {
-            for flavour in ["latte", "mocha"] {
-                assert!(load(&format!("{PREFIX}{flavour}/{id}.svg")).is_some(), "{flavour}/{id}");
+            for flavor in ["latte", "mocha"] {
+                assert!(load(&format!("{PREFIX}{flavor}/{id}.svg")).is_some(), "{flavor}/{id}");
             }
         }
     }

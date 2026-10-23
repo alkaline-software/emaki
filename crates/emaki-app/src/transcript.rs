@@ -147,7 +147,7 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, f
                     }
                 })),
                 paragraph_gap: rems(0.6),
-                // The window's own code colours, the same the file's
+                // The window's own code colors, the same the file's
                 // editor has (`look::Inks`).
                 highlight_theme: theme.highlight_theme.clone(),
                 // As the Claude app sets them: strong text at 600, not the
@@ -190,7 +190,7 @@ pub(crate) fn explain_card(id: String, text: String, pending: bool, size: Pixels
         .with_animation(ElementId::Name(anim), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-4. * (1. - t))))
 }
 
-/// The strip under a picture tile: its name, centred, in the mono face on
+/// The strip under a picture tile: its name, centerd, in the mono face on
 /// a muted ground, wrapping when it is long.
 /// The box a prompt's picture is drawn in: `GALLERY_H` tall, as wide as
 /// its shape gives within `GALLERY_W`, so pictures of every shape stand
@@ -222,7 +222,7 @@ pub(crate) fn tile_caption(w: f32, name: String, theme: &gpui_component::Theme) 
         .child(name)
 }
 
-/// Straight-line mix of two colours, for a state change drawn over a moment.
+/// Straight-line mix of two colors, for a state change drawn over a moment.
 fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     Hsla { h: a.h + (b.h - a.h) * t, s: a.s + (b.s - a.s) * t, l: a.l + (b.l - a.l) * t, a: a.a + (b.a - a.a) * t }
 }
@@ -282,11 +282,11 @@ fn tool_label(name: &str) -> String {
     name.rsplit("__").next().unwrap_or(name).to_lowercase()
 }
 
-/// A tool call's badge, in the colour of what the call does: running a
+/// A tool call's badge, in the color of what the call does: running a
 /// command, reading, searching, changing a file, writing one, the web, an
 /// agent. The inks are code's own (`look::Inks`), each on a wash of
-/// itself, so a run of calls reads by colour before it is read by word.
-/// What is none of those keeps the muted grey.
+/// itself, so a run of calls reads by color before it is read by word.
+/// What is none of those keeps the muted gray.
 fn tool_badge(call: &ToolCall, theme: &gpui_component::Theme) -> impl IntoElement {
     let k = if theme.mode.is_dark() { &crate::look::INKS_DARK } else { &crate::look::INKS_LIGHT };
     let ink: Option<Hsla> = match call.tool_kind {
@@ -356,7 +356,7 @@ impl Workbench {
                 .when(prompt_mark == 1, |d| d.border_1().border_color(theme.primary.opacity(0.45)))
                 .when(prompt_mark == 2, |d| d.border_2().border_color(theme.primary))
                 // The tail at its foot, which says the bubble is from the
-                // right: a drawing of the bubble's own colour, hanging
+                // right: a drawing of the bubble's own color, hanging
                 // past its edge.
                 .child(svg().path("icons/bubble-tail.svg").absolute().right(px(-7.)).bottom_0().w(px(20.)).h(px(25.)).text_color(theme.muted));
             let has_text = !rnd.prompt.is_empty();
@@ -844,7 +844,7 @@ impl Workbench {
         let theme = cx.theme().clone();
         let face = theme.font_family.clone();
         if let Some(what) = variant.setting() {
-            // The value in bold, and in the colour its pill has: the
+            // The value in bold, and in the color its pill has: the
             // agent's own for a mode, the level's place for an effort.
             let options = self.options();
             let color = match variant {
@@ -1335,7 +1335,7 @@ impl Workbench {
     }
 
     /// A subagent's round, drawn flat: prompt, then text and a one-line
-    /// summary per tool call. Deeper nesting is summarised, not expanded.
+    /// summary per tool call. Deeper nesting is summarized, not expanded.
     fn render_subround(&self, ix: usize, jx: usize, k: usize, sub: &Round, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mut v = v_flex().w_full().gap(px(6.));

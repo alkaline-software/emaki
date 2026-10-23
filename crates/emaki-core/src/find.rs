@@ -70,7 +70,7 @@ impl FindIndex {
 }
 
 /// What a tool call is searchable by: its name and subject, the arguments a
-/// person would recognise, what came back, and the subagent it ran.
+/// person would recognize, what came back, and the subagent it ran.
 fn tool_text(call: &ToolCall) -> String {
     let mut parts = vec![call.name.clone(), call.subject.clone()];
     for key in ["command", "pattern", "query", "url", "description", "prompt", "file_path", "content", "new_string", "old_string"] {

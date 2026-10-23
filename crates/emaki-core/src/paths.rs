@@ -67,7 +67,7 @@ pub fn root() -> PathBuf {
     new
 }
 
-/// Where the data lived before the rename. Only for recognising sessions
+/// Where the data lived before the rename. Only for recognizing sessions
 /// that ran under it (the explainer's) and paths written then, never for
 /// reading or writing.
 pub fn legacy_root() -> PathBuf {
@@ -247,7 +247,7 @@ static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 
 /// Stable, friendly directory name for a project.
 ///
-/// The basename is what a human recognises. Two checkouts sharing a basename
+/// The basename is what a human recognizes. Two checkouts sharing a basename
 /// would collide, so the first cwd to claim a slug keeps it and later ones get
 /// a short hash suffix. The claim is recorded in `state/projects.json` so the
 /// answer never changes underneath an existing log directory.
@@ -303,13 +303,13 @@ pub fn absolute(p: &str) -> PathBuf {
     let p = if p.is_empty() { "." } else { p };
     let path = expand_tilde(p);
     if path.is_absolute() {
-        normalise(&path)
+        normalize(&path)
     } else {
-        std::env::current_dir().map(|c| normalise(&c.join(&path))).unwrap_or(path)
+        std::env::current_dir().map(|c| normalize(&c.join(&path))).unwrap_or(path)
     }
 }
 
-fn normalise(p: &Path) -> PathBuf {
+fn normalize(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for c in p.components() {
@@ -403,8 +403,8 @@ mod tests {
     }
 
     #[test]
-    fn normalise_drops_dot_and_dotdot_on_any_separator() {
-        let p = normalise(Path::new("/a/b/../c/./d"));
+    fn normalize_drops_dot_and_dotdot_on_any_separator() {
+        let p = normalize(Path::new("/a/b/../c/./d"));
         assert_eq!(p, PathBuf::from("/a/c/d"));
     }
 }

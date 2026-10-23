@@ -87,7 +87,7 @@ fn current_command(settings: &Map<String, Value>) -> Option<String> {
 /// A path as a bash line spells it: forward slashes whatever the OS
 /// builds it with. On Windows `~\.emaki\bin\statusline.sh` would reach
 /// bash as escapes, and a setting written that way would not be
-/// recognised as ours afterwards.
+/// recognized as ours afterwards.
 fn slashed(path: &str) -> String {
     path.replace('\\', "/")
 }

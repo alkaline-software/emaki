@@ -179,7 +179,7 @@ fn main() {
             // levels each one takes.
             let cwd = args.get(1).cloned().unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
             for adapter in adapters::all() {
-                let options = adapter.catalogue(&cwd).options;
+                let options = adapter.catalog(&cwd).options;
                 // Kept for the app's next launch, as the app keeps it.
                 options.remember(adapter.id());
                 if options.is_empty() {
@@ -203,7 +203,7 @@ fn main() {
             }
         }
         "agents" => {
-            // Every agent the catalogue knows, and what looking for it
+            // Every agent the catalog knows, and what looking for it
             // here finds: where its program is, its version, and whether
             // a sign-in was seen.
             // `emaki-core agents --commands`: ask the network whether what
@@ -473,7 +473,7 @@ fn main() {
             match args.get(1).map(String::as_str) {
                 Some("options") => {
                     let cwd = args.get(2).cloned().unwrap_or_default();
-                    match emaki_core::codex::catalogue(&cwd) {
+                    match emaki_core::codex::catalog(&cwd) {
                         Ok(c) => {
                             println!("{}", serde_json::to_string_pretty(&c.options).unwrap());
                             for cmd in c.commands.iter().take(12) {

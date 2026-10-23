@@ -1,5 +1,5 @@
 //! The window's look, as `config.json` asks for it: which appearance to
-//! draw (the system's, or light or dark pinned) and which accent colour.
+//! draw (the system's, or light or dark pinned) and which accent color.
 //!
 //! The palette itself stays in `themes/emaki.json`, one config per
 //! appearance. An accent is a substitution over the handful of keys that
@@ -12,8 +12,8 @@
 use gpui::{App, Window};
 use gpui_component::theme::{Theme, ThemeConfig, ThemeMode, ThemeSet};
 
-/// One accent: its name, and the colour it paints in each appearance
-/// (base, hover, active) plus the link colour, which is darker in the light
+/// One accent: its name, and the color it paints in each appearance
+/// (base, hover, active) plus the link color, which is darker in the light
 /// palette and lighter in the dark one so text stays readable.
 pub struct Accent {
     pub key: &'static str,
@@ -44,7 +44,7 @@ pub const ACCENTS: &[Accent] = &[
 const ON_LIGHT: &str = "#FFFFFF";
 const ON_DARK: &str = "#1F1E1D";
 
-/// The accent by its key. A key from before the seven was a colour of
+/// The accent by its key. A key from before the seven was a color of
 /// its own; the nearest of these stands for it, and the rest (terracotta,
 /// graphite, blue) are the first.
 pub fn accent(key: &str) -> &'static Accent {
@@ -57,7 +57,7 @@ pub fn accent(key: &str) -> &'static Accent {
     ACCENTS.iter().find(|a| a.key == key).unwrap_or(&ACCENTS[0])
 }
 
-/// The accent's base colour in the appearance showing, for a swatch.
+/// The accent's base color in the appearance showing, for a swatch.
 pub fn accent_hex(key: &str, dark: bool) -> &'static str {
     let a = accent(key);
     if dark { a.dark[0] } else { a.light[0] }
@@ -75,7 +75,7 @@ pub fn on_frame() -> (&'static str, &'static str) {
     (a.dark[0], ON_DARK)
 }
 
-/// The colours of the agents' own marks, their makers': Claude's
+/// The colors of the agents' own marks, their makers': Claude's
 /// terracotta and Codex's green, whatever accent the window wears. Not
 /// accents: no window wears them.
 pub fn agent_hex(agent: emaki_core::model::AgentId, dark: bool) -> &'static str {
@@ -92,15 +92,15 @@ pub fn agent_hex(agent: emaki_core::model::AgentId, dark: bool) -> &'static str 
 }
 
 /// The inks code is written in, one set an appearance: every place that
-/// colours code or a terminal takes them from here. The editor in the
+/// colors code or a terminal takes them from here. The editor in the
 /// file's pane and a conversation's code blocks name them in
 /// `themes/emaki.json` ("@l-blue", "@d-rose"), and the terminals' named
-/// colours are these same ones (`term_panel::scheme`).
+/// colors are these same ones (`term_panel::scheme`).
 ///
 /// The hues are Rosé Pine's (pine, iris, gold, rose, foam, love), with a
 /// sage green beside them for a terminal's "added", each taken darker or
 /// lighter until it reads on the window's own grounds: 4.5 to 1 or more
-/// against the page, and the grey, for comments, a step quieter.
+/// against the page, and the gray, for comments, a step quieter.
 pub struct Inks {
     pub blue: u32,
     pub violet: u32,
@@ -109,17 +109,17 @@ pub struct Inks {
     pub teal: u32,
     pub green: u32,
     pub red: u32,
-    pub grey: u32,
+    pub gray: u32,
 }
 
-pub const INKS_LIGHT: Inks = Inks { blue: 0x286983, violet: 0x7A6398, gold: 0x8A6A1E, rose: 0xA3566F, teal: 0x357783, green: 0x4C7B58, red: 0xB0505F, grey: 0x85818F };
-pub const INKS_DARK: Inks = Inks { blue: 0x7FB4D0, violet: 0xC4A7E7, gold: 0xE9C083, rose: 0xE8B0AE, teal: 0x9CCFD8, green: 0xA3CCA4, red: 0xEB8FA6, grey: 0x8F8BA0 };
+pub const INKS_LIGHT: Inks = Inks { blue: 0x286983, violet: 0x7A6398, gold: 0x8A6A1E, rose: 0xA3566F, teal: 0x357783, green: 0x4C7B58, red: 0xB0505F, gray: 0x85818F };
+pub const INKS_DARK: Inks = Inks { blue: 0x7FB4D0, violet: 0xC4A7E7, gold: 0xE9C083, rose: 0xE8B0AE, teal: 0x9CCFD8, green: 0xA3CCA4, red: 0xEB8FA6, gray: 0x8F8BA0 };
 
-/// The theme file with each ink's name replaced by its colour.
+/// The theme file with each ink's name replaced by its color.
 fn inked(json: &str) -> String {
     let mut out = json.to_string();
     for (p, inks) in [("l", &INKS_LIGHT), ("d", &INKS_DARK)] {
-        for (name, c) in [("blue", inks.blue), ("violet", inks.violet), ("gold", inks.gold), ("rose", inks.rose), ("teal", inks.teal), ("green", inks.green), ("red", inks.red), ("grey", inks.grey)] {
+        for (name, c) in [("blue", inks.blue), ("violet", inks.violet), ("gold", inks.gold), ("rose", inks.rose), ("teal", inks.teal), ("green", inks.green), ("red", inks.red), ("gray", inks.gray)] {
             out = out.replace(&format!("\"@{p}-{name}\""), &format!("\"#{c:06X}\""));
         }
     }

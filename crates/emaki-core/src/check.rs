@@ -1,4 +1,4 @@
-//! Writing in the composer: what is misspelt or ungrammatical, and the
+//! Writing in the composer: what is misspelled or ungrammatical, and the
 //! capital a sentence starts with.
 //!
 //! English is Harper's (`harper-core`), which runs here and sends nothing
@@ -472,7 +472,7 @@ pub fn learned() -> HashSet<String> {
     std::fs::read_to_string(learned_file()).unwrap_or_default().lines().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty()).collect()
 }
 
-/// Adds a word to those never marked as misspelt.
+/// Adds a word to those never marked as misspelled.
 pub fn learn(word: &str) -> std::io::Result<()> {
     let mut words = learned();
     if !words.insert(word.trim().to_lowercase()) {

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::archive;
 use crate::build::{Phase, TurnState};
 use crate::model::{AgentId, CallStatus, Session};
-use crate::options::Catalogue;
+use crate::options::Catalog;
 use crate::paths;
 use crate::transcript::SessionRef;
 
@@ -48,8 +48,8 @@ pub trait Adapter: Send + Sync {
     /// slash commands, and the modes, models and effort levels it offers,
     /// asked of the agent itself. Blocking, so off the main thread. An
     /// agent the app cannot drive has nothing to offer here.
-    fn catalogue(&self, _cwd: &str) -> Catalogue {
-        Catalogue::default()
+    fn catalog(&self, _cwd: &str) -> Catalog {
+        Catalog::default()
     }
 
     /// Whether the agent archives sessions itself, into a folder of its

@@ -1,4 +1,4 @@
-//! The agents page: every coding agent the catalogue knows as a card
+//! The agents page: every coding agent the catalog knows as a card
 //! that says whether it is installed here, and inside one, how to
 //! install it and sign in, and the sessions kept of it
 //! (`docs/agents.md`).
@@ -79,7 +79,7 @@ pub(crate) fn choice_icon(control: &str, key: &str) -> Option<&'static str> {
 /// rest wear the first letter of their name.
 const MARKS: &[&str] = &["codex", "github"];
 
-/// The colour everything of an agent's wears on this page where the
+/// The color everything of an agent's wears on this page where the
 /// accent would stand: its own, or the accent for one with none.
 fn agent_ink(a: &Agent, theme: &gpui_component::Theme) -> Hsla {
     match a.reads {
@@ -89,14 +89,14 @@ fn agent_ink(a: &Agent, theme: &gpui_component::Theme) -> Hsla {
     }
 }
 
-/// An agent's mark at `size`: in the agent's own colour for one whose
+/// An agent's mark at `size`: in the agent's own color for one whose
 /// sessions are read, else in `color`.
 pub fn agent_mark(a: &Agent, size: Pixels, color: Hsla, theme: &gpui_component::Theme) -> AnyElement {
     if let Some(agent) = a.reads {
         return crate::workbench::agent_icon(agent, size, crate::workbench::agent_color(agent, theme)).into_any_element();
     }
     if MARKS.contains(&a.id) {
-        // One with a colour of its own wears it, as an agent's mark does.
+        // One with a color of its own wears it, as an agent's mark does.
         let color = if a.accent.is_empty() { color } else { agent_ink(a, theme) };
         return Icon::default().path(SharedString::from(format!("icons/agents/{}.svg", a.id))).with_size(size).text_color(color).into_any_element();
     }
@@ -336,7 +336,7 @@ impl Workbench {
         // source is gone.
         let stale = self.agents_stale.len();
         let warn = (stale > 0).then(|| div().text_size(px(12.5)).text_color(theme.danger).child(format!("{} may be out of date; the agent's page says which.", plural(stale, "install command", "install commands"))));
-        // One row in the catalogue's order, whatever is installed: a
+        // One row in the catalog's order, whatever is installed: a
         // card says so itself, and stays where it is when that changes.
         let cards: Vec<AnyElement> = agents::all().iter().map(|a| self.agent_card(a, cx)).collect();
         // Under the agents, what is worth having beside them: a card as
@@ -504,7 +504,7 @@ impl Workbench {
         let text_id = format!("command-{key}");
         let key = SharedString::from(key);
         let done = self.copied.as_ref() == Some(&key);
-        // Inside an agent's page the tick is in that agent's colour.
+        // Inside an agent's page the tick is in that agent's color.
         let tick = Some(self.page == Page::Agents).filter(|on| *on).and(self.agent_open).and_then(agents::by_id).map(|a| agent_ink(a, &theme)).unwrap_or(theme.green);
         let hover_bg = theme.foreground.opacity(0.08);
         let copy = div()
@@ -577,7 +577,7 @@ impl Workbench {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
             .children(fill)
             .child(Icon::default().path("icons/terminal.svg").with_size(px(15.)).relative());
-        // Centred on the box, however many lines the command takes.
+        // Centerd on the box, however many lines the command takes.
         h_flex().w_full().gap(px(8.)).items_center().child(boxed.flex_1().min_w_0()).child(shell).into_any_element()
     }
 
@@ -628,7 +628,7 @@ impl Workbench {
         let theme = cx.theme().clone();
         let display = crate::fonts::display_family(cx);
         let ink = agent_ink(a, &theme);
-        // The pills here light up in the agent's colour, not the accent.
+        // The pills here light up in the agent's color, not the accent.
         let mut tinted = theme.clone();
         tinted.primary = ink;
         let found = self.agent_found(a.id).cloned();

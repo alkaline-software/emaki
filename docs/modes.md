@@ -17,7 +17,7 @@ About `crates/emaki-core/src/options.rs` and `driver.rs` (the lists, their words
 
 ## The lists
 
-`options.rs` holds what an agent offers (`Options`: `modes`, `models` each with its `efforts`, and the key for the agent's default model). An adapter fills it (`Adapter::catalogue`, which also carries the slash commands); an agent the app cannot drive offers nothing.
+`options.rs` holds what an agent offers (`Options`: `modes`, `models` each with its `efforts`, and the key for the agent's default model). An adapter fills it (`Adapter::catalog`, which also carries the slash commands); an agent the app cannot drive offers nothing.
 
 Claude Code (`driver::options_from`, checked against 2.1.289):
 

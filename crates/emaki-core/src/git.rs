@@ -45,7 +45,7 @@ impl State {
     /// Which of two states a folder holding both wears; the lower wins.
     /// A conflict first, then what is new or gone, then what is changed,
     /// as the explorer has it: a folder with a new file and a changed
-    /// one is the new file's colour.
+    /// one is the new file's color.
     fn rank(self) -> u8 {
         match self {
             State::Conflict => 0,
@@ -87,12 +87,12 @@ pub struct Status {
 /// from the Finder or the Dock has the system's `PATH` and not the
 /// shell's, so a git from Homebrew is on no path it knows; and the Mac's
 /// own `/usr/bin/git` is a stand-in that only works with Xcode or its
-/// command line tools installed and their licence agreed to, and
+/// command line tools installed and their license agreed to, and
 /// otherwise fails every call, so being there is not enough. That one is
 /// not even asked without the tools: asking puts up the system's offer
 /// to install them. One found is kept for the process. With none it is
 /// plain `git`, which fails as it did (`trouble` says why), and the
-/// search is made again `SEARCH_AGAIN` later: a licence agreed to in a
+/// search is made again `SEARCH_AGAIN` later: a license agreed to in a
 /// terminal is seen without a relaunch.
 pub fn binary() -> PathBuf {
     static FOUND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -151,32 +151,32 @@ pub struct Trouble {
 }
 
 impl Trouble {
-    /// Xcode's licence not agreed to. Apple's message is three lines
+    /// Xcode's license not agreed to. Apple's message is three lines
     /// long and spells the command out; the command is offered beside
     /// these words, so they only say what is wrong and where to run it.
-    pub fn licence() -> Trouble {
-        Trouble { words: "The Xcode license has not been accepted. In Terminal, run:".to_string(), fix: Some(XCODE_LICENCE) }
+    pub fn license() -> Trouble {
+        Trouble { words: "The Xcode license has not been accepted. In Terminal, run:".to_string(), fix: Some(XCODE_LICENSE) }
     }
 }
 
-/// What Apple's stand-in says to run when Xcode's licence has not been
+/// What Apple's stand-in says to run when Xcode's license has not been
 /// agreed to, as its own message has it.
-pub const XCODE_LICENCE: &str = "sudo xcodebuild -license";
+pub const XCODE_LICENSE: &str = "sudo xcodebuild -license";
 
-/// Whether what a git on a Mac said is the Xcode licence's refusal, and
+/// Whether what a git on a Mac said is the Xcode license's refusal, and
 /// nothing else: Apple's message names the command, and no other
 /// failure does.
-pub fn xcode_licence(mac: bool, words: &str) -> bool {
+pub fn xcode_license(mac: bool, words: &str) -> bool {
     mac && words.contains("xcodebuild -license")
 }
 
 /// Why git says nothing of `dir` though it is a checkout by its own
 /// files (a `.git` in it or above it), in git's or the system's own
 /// words; `None` when it is no checkout, or git answers for it. No git
-/// that runs: none installed, or the Mac's with Xcode's licence not
+/// that runs: none installed, or the Mac's with Xcode's license not
 /// agreed to. Or a git that runs and refuses the folder: one owned by
 /// someone else ("dubious ownership"), a damaged repository. Only the
-/// licence comes with a command to run.
+/// license comes with a command to run.
 pub fn trouble(dir: &Path) -> Option<Trouble> {
     if !dir.ancestors().any(|a| a.join(".git").exists()) {
         return None;
@@ -185,8 +185,8 @@ pub fn trouble(dir: &Path) -> Option<Trouble> {
         let words = String::from_utf8_lossy(err).split_whitespace().collect::<Vec<_>>().join(" ");
         let words = words.strip_prefix("fatal: ").unwrap_or(&words).to_string();
         let words = if words.is_empty() { "Git did not run.".to_string() } else { words };
-        if xcode_licence(cfg!(target_os = "macos"), &words) {
-            return Trouble::licence();
+        if xcode_license(cfg!(target_os = "macos"), &words) {
+            return Trouble::license();
         }
         Trouble { words, fix: None }
     };

@@ -17,7 +17,7 @@
 //! - stdin stays open across turns. Each user frame is one turn ending in a
 //!   `result` frame.
 //! - `control_request` from us: `initialize` (answers with the command
-//!   catalogue, the `models` on offer with each one's effort levels, and
+//!   catalog, the `models` on offer with each one's effort levels, and
 //!   `current_permission_mode`), `set_permission_mode`, `set_model`,
 //!   `interrupt`.
 //! - `control_request` from the child: `can_use_tool` with `tool_name`,
@@ -47,7 +47,7 @@ use serde_json::{json, Map, Value};
 
 use crate::json::*;
 use crate::model::AgentId;
-use crate::options::{humanize, Catalogue, Choice, ModelChoice, Options};
+use crate::options::{humanize, Catalog, Choice, ModelChoice, Options};
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a permission card may sit unanswered before the child is told no.
@@ -150,12 +150,12 @@ pub fn effort_words(key: &str) -> (String, &'static str) {
     (if key == "xhigh" { "Extra high".into() } else { humanize(key) }, detail)
 }
 
-/// The colour Claude Code's terminal names a mode in, at the foot of its
-/// prompt: each mode has a theme colour (`inactive` for manual,
+/// The color Claude Code's terminal names a mode in, at the foot of its
+/// prompt: each mode has a theme color (`inactive` for manual,
 /// `planMode`, `autoAccept` for accept edits, `warning` for auto, `error`
 /// for bypass and don't ask; read out of the 2.1.289 binary with the
 /// light and dark themes' values). None for a mode not met, which the
-/// window colours by its place on the list.
+/// window colors by its place on the list.
 pub fn mode_color(key: &str) -> Option<[u32; 2]> {
     Some(match key {
         "default" | "manual" => [0x666666, 0x999999],
@@ -175,8 +175,8 @@ fn mode_choice(key: &str) -> Choice {
     Choice { key: key.into(), label, detail: detail.into(), color: mode_color(key), spectrum: Vec::new() }
 }
 
-/// The colour Claude Code's `/effort` slider names a level in: its table
-/// of levels gives each a theme colour (`warning` for low, `success` for
+/// The color Claude Code's `/effort` slider names a level in: its table
+/// of levels gives each a theme color (`warning` for low, `success` for
 /// medium, `permission` for high, `autoAccept` shimmering for xhigh;
 /// read out of the 2.1.289 binary with the light and dark themes'
 /// values). Max has none of its own: it is drawn as a moving rainbow
@@ -192,7 +192,7 @@ pub fn effort_color(key: &str) -> Option<[u32; 2]> {
 }
 
 /// Claude Code's light theme and its dark one, side by side: every named
-/// colour the two give different or equal shades of, light then dark,
+/// color the two give different or equal shades of, light then dark,
 /// read out of the 2.1.290 binary (the `light` and `dark` tables; the
 /// daltonized and ANSI themes are left out).
 const THEME_PAIRS: &[[u32; 2]] = &[
@@ -251,10 +251,10 @@ const THEME_PAIRS: &[[u32; 2]] = &[
     [0xE6B4D2, 0xE6B4D2], // rainbow_violet_shimmer
 ];
 
-/// A colour read off a terminal's screen, as Claude Code's two themes
+/// A color read off a terminal's screen, as Claude Code's two themes
 /// have it: light, then dark. The screen is in whichever theme that
 /// Claude Code is set to, which need not be the window's appearance, so
-/// a colour found on either side of a pair is answered with the pair and
+/// a color found on either side of a pair is answered with the pair and
 /// the window takes its own side. Where a shade is on more than one
 /// pair, the first listed wins.
 pub fn theme_pair(color: u32) -> Option<[u32; 2]> {
@@ -374,17 +374,17 @@ pub fn mode_on_screen(text: &str, modes: &[Choice]) -> Option<String> {
 
 /// What a terminal session says it is doing while a turn runs: Claude
 /// Code's line over its prompt, "✳ Embellishing… (13s · ↓ 1.0k tokens)",
-/// a mark that turns, a word in the agent's colour and the turn's
-/// figures in grey.
+/// a mark that turns, a word in the agent's color and the turn's
+/// figures in gray.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Working {
     /// The word, with its ellipsis: "Embellishing…".
     pub verb: String,
-    /// The colour the terminal draws the mark in, `0xRRGGBB`, when the
-    /// screen was read with its colours. The word itself shimmers a
+    /// The color the terminal draws the mark in, `0xRRGGBB`, when the
+    /// screen was read with its colors. The word itself shimmers a
     /// shade lighter and back, so the mark's is the steady one.
     pub color: Option<u32>,
-    /// What follows the word, as written, each stretch with its colour.
+    /// What follows the word, as written, each stretch with its color.
     pub detail: Vec<(String, Option<u32>)>,
 }
 
@@ -397,7 +397,7 @@ const SPINNER_MARKS: &[char] = &['·', '✢', '✳', '✶', '✻', '✽', '*'];
 /// A finished turn's line ("✻ Brewed for 11s") has no ellipsis, a tool
 /// call's line begins with another mark, and only the foot of the
 /// screen is read, so nothing the conversation quotes is taken for it.
-/// `text` may carry the terminal's colour sequences (`cli get-text
+/// `text` may carry the terminal's color sequences (`cli get-text
 /// --escapes`) or be plain.
 pub fn working_on_screen(text: &str) -> Option<Working> {
     text.lines().rev().filter(|l| !strip_sgr(l).trim().is_empty()).take(14).find_map(|line| {
@@ -416,8 +416,8 @@ pub fn working_on_screen(text: &str) -> Option<Working> {
         }
         // The stretches after the word, by the byte they start at.
         let from = mark.len_utf8() + 1 + end;
-        // The bracket's greys pulse a shade as the word does; one grey.
-        let grey = |c: Option<u32>| c.is_some_and(|v| (v >> 16) & 0xff == (v >> 8) & 0xff && (v >> 8) & 0xff == v & 0xff);
+        // The bracket's grays pulse a shade as the word does; one gray.
+        let gray = |c: Option<u32>| c.is_some_and(|v| (v >> 16) & 0xff == (v >> 8) & 0xff && (v >> 8) & 0xff == v & 0xff);
         let mut detail: Vec<(String, Option<u32>)> = Vec::new();
         let mut at = 0;
         for (t, c) in &spans {
@@ -429,7 +429,7 @@ pub fn working_on_screen(text: &str) -> Option<Working> {
             let t = &t[from.saturating_sub(start).min(t.len())..];
             let blank = t.trim().is_empty();
             match detail.last_mut() {
-                Some((last, lc)) if *lc == *c || blank || (grey(*lc) && grey(*c)) => last.push_str(t),
+                Some((last, lc)) if *lc == *c || blank || (gray(*lc) && gray(*c)) => last.push_str(t),
                 _ if blank => {}
                 _ => detail.push((t.to_string(), *c)),
             }
@@ -455,7 +455,7 @@ pub struct Dialog {
     /// The questions as tabs, when there are several: the header of each
     /// and whether it has an answer. The last, "Submit", is the review.
     pub tabs: Vec<(String, bool)>,
-    /// The tab showing, when the screen was read with its colours: the
+    /// The tab showing, when the screen was read with its colors: the
     /// terminal sets it on a ground of its own. The review is the last.
     pub current: Option<usize>,
     /// What is asked, as the lines over the choices. In the review an
@@ -495,7 +495,7 @@ pub struct DialogOption {
 /// the number is what a click in the window sends. None when the foot
 /// of the screen is the prompt, not a dialog.
 pub fn dialog_on_screen(text: &str) -> Option<Dialog> {
-    // The colours are read for one thing, the tab that is showing.
+    // The colors are read for one thing, the tab that is showing.
     let styled: Vec<&str> = text.lines().collect();
     let plain: Vec<String> = styled.iter().map(|l| strip_sgr(l)).collect();
     let lines: Vec<&str> = plain.iter().map(|l| l.trim_end()).collect();
@@ -665,7 +665,7 @@ fn escape_at(s: &str) -> (usize, Option<&str>) {
 }
 
 /// A line of terminal output as stretches of text, each with the
-/// foreground colour set for it: true colour only (`38:2::r:g:b` as
+/// foreground color set for it: true color only (`38:2::r:g:b` as
 /// WezTerm writes it, or `38;2;r;g;b`), which is what Claude Code uses.
 fn sgr_spans(line: &str) -> Vec<(String, Option<u32>)> {
     let mut out: Vec<(String, Option<u32>)> = Vec::new();
@@ -704,7 +704,7 @@ fn sgr_spans(line: &str) -> Vec<(String, Option<u32>)> {
 /// the prompt's line between its two rules, after "❯", written dim
 /// (`ESC [ 0;2 m`, read off 2.1.289 in Kaku: "❯\u{a0}" then the dim
 /// words), where typed words are not; so this needs the screen with its
-/// colours, and a line with anything not dim on it is the person's own
+/// colors, and a line with anything not dim on it is the person's own
 /// typing and no suggestion.
 pub fn suggestion_on_screen(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
@@ -749,7 +749,7 @@ fn is_rule(line: &str) -> bool {
 /// Whether Claude Code's prompt is on the screen and empty: the line
 /// between its two rules, after "❯", with nothing typed on it (a
 /// suggestion or a hint, written dim, is not typing). `text` is the
-/// screen with its colours. This is when keys sent there are words for
+/// screen with its colors. This is when keys sent there are words for
 /// the prompt, not answers to a dialog or a screen still being drawn.
 pub fn prompt_on_screen(text: &str) -> Option<bool> {
     let lines: Vec<&str> = text.lines().collect();
@@ -792,7 +792,7 @@ fn dim_text(line: &str) -> (String, String) {
 }
 
 /// The text of a line that the terminal set on a ground of its own (a
-/// background colour, or reversed), which is how a dialog marks the tab
+/// background color, or reversed), which is how a dialog marks the tab
 /// that is showing.
 fn lit_text(line: &str) -> String {
     let mut out = String::new();
@@ -805,7 +805,7 @@ fn lit_text(line: &str) -> String {
         let (len, sgr) = escape_at(&rest[i..]);
         {
             for p in sgr.unwrap_or("-").split(';') {
-                // A colour written with semicolons carries its numbers
+                // A color written with semicolons carries its numbers
                 // as parameters of their own: nothing after it is read.
                 if p == "38" {
                     break;
@@ -859,7 +859,7 @@ pub struct CommandInfo {
 /// `local` and `local-jsx` commands (`/compact`, `/model`, `/clear`), read
 /// out of the 2.1.288 binary, where each command declares its type. The
 /// other type, `prompt`, is a skill: text handed to the model, which a
-/// person as often names inside a sentence. The catalogue on the wire
+/// person as often names inside a sentence. The catalog on the wire
 /// marks `builtin` and nothing finer, and bundled skills are built in too
 /// (`/code-review`, `/loop`), so the type is kept here by name.
 const LOCAL_COMMANDS: &[&str] = &[
@@ -935,7 +935,7 @@ pub fn slash_token_at(text: &str, caret: usize) -> Option<(usize, usize, String)
 }
 
 /// `text` as markdown with each command `known` names set as inline code,
-/// which is how the conversation colours it. Code is left alone: fenced
+/// which is how the conversation colors it. Code is left alone: fenced
 /// blocks, and anything already between backticks on its line.
 pub fn mark_commands(text: &str, known: impl Fn(&str) -> bool) -> String {
     let mut out = String::with_capacity(text.len() + 16);
@@ -1846,13 +1846,13 @@ impl Driver {
 /// `initialize` reply, which costs no model call and leaves no transcript
 /// (checked against 2.1.288: nothing is written until a message is sent),
 /// about half a second. The child is stopped at once.
-pub fn catalogue(cwd: &str) -> Result<Catalogue, DriverError> {
+pub fn catalog(cwd: &str) -> Result<Catalog, DriverError> {
     let (tx, _rx) = mpsc::channel();
     let id = throwaway_session_id();
     let d = Driver::start(&id, cwd, false, "", "", tx)?;
     let caps = d.caps();
     d.stop();
-    Ok(Catalogue { commands: caps.commands, options: caps.options })
+    Ok(Catalog { commands: caps.commands, options: caps.options })
 }
 
 /// A fresh v4-shaped session id for a child that will never write a row.
@@ -1861,7 +1861,7 @@ fn throwaway_session_id() -> String {
     let mut h = sha1_smol::Sha1::new();
     h.update(nanos.to_string().as_bytes());
     h.update(std::process::id().to_string().as_bytes());
-    h.update(b"catalogue");
+    h.update(b"catalog");
     let x = h.digest().to_string();
     format!("{}-{}-4{}-a{}-{}", &x[..8], &x[8..12], &x[13..16], &x[17..20], &x[20..32])
 }

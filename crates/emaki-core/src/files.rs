@@ -246,7 +246,7 @@ pub fn written(path: &str) -> String {
 }
 
 /// `text` as markdown with each "@path" that names something under `cwd`
-/// set as inline code, which is how the conversation colours it. Code is
+/// set as inline code, which is how the conversation colors it. Code is
 /// left alone, as in `driver::mark_commands`.
 pub fn mark_mentions(text: &str, cwd: &str) -> String {
     let mut out = String::with_capacity(text.len() + 16);
