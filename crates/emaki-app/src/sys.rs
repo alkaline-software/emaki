@@ -5,6 +5,8 @@
 
 use std::path::Path;
 
+use crate::i18n::{phrase, t, tf};
+
 // Every function here that takes a session's pid answers for a hidden
 // terminal of our own (`emaki_core::pty`), whose screen is in memory and
 // whose keyboard is a write, on every platform. A session in a terminal
@@ -19,7 +21,7 @@ pub fn focus_terminal(pid: i32) -> Result<String, String> {
     if emaki_core::pty::for_pid(pid).is_some() {
         return Ok("Emaki".into());
     }
-    Err("this session runs in a terminal of yours, which Emaki does not reach into".into())
+    Err(t("this session runs in a terminal of yours, which Emaki does not reach into").into())
 }
 
 /// What the session's hidden terminal is showing.
@@ -39,7 +41,7 @@ pub fn type_in_terminal(pid: i32, text: &str) -> Result<String, String> {
         pty.write(format!("{text}\r").as_bytes());
         return Ok("Emaki".into());
     }
-    Err(format!("this session runs in a terminal of yours: type {text} there"))
+    Err(tf("this session runs in a terminal of yours: type {text} there", &[("text", &text)]))
 }
 
 /// A key Claude Code's terminal takes that is not text.
@@ -75,7 +77,7 @@ pub fn key_in_terminal(pid: i32, key: TerminalKey) -> Result<String, String> {
         pty.write(key.bytes());
         return Ok("Emaki".into());
     }
-    Err(format!("this session runs in a terminal of yours: press {} there", key.name()))
+    Err(tf("this session runs in a terminal of yours: press {key} there", &[("key", &key.name())]))
 }
 
 /// Send `text` to the session's hidden terminal as keys, with nothing
@@ -86,7 +88,7 @@ pub fn text_in_terminal(pid: i32, text: &str) -> Result<(), String> {
         pty.write(text.as_bytes());
         return Ok(());
     }
-    Err("this session runs in a terminal of yours: answer it there".into())
+    Err(t("this session runs in a terminal of yours: answer it there").into())
 }
 
 /// Open `path` with the application the system associates with it.
@@ -114,35 +116,35 @@ pub fn reveal_path(path: &Path) {
     }
 }
 
-/// What the reveal action is called where we are.
+/// What the reveal action is called where we are. These names are drawn
+/// through `t` where they are shown.
 pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
-    "Reveal in Finder"
+    phrase("Reveal in Finder")
 } else if cfg!(target_os = "windows") {
-    "Show in Explorer"
+    phrase("Show in Explorer")
 } else {
-    "Show in folder"
+    phrase("Show in folder")
 };
 
 /// The same two things on a session's menu, where each has to say what
 /// it shows: the folder the session ran in, and its transcript.
 pub const OPEN_SESSION_FOLDER_LABEL: &str = if cfg!(target_os = "macos") {
-    "Open Folder in Finder"
+    phrase("Open Folder in Finder")
 } else if cfg!(target_os = "windows") {
-    "Open Folder in Explorer"
+    phrase("Open Folder in Explorer")
 } else {
-    "Open Folder"
+    phrase("Open Folder")
 };
 pub const REVEAL_SESSION_LABEL: &str = if cfg!(target_os = "macos") {
-    "Reveal Transcript in Finder"
+    phrase("Reveal Transcript in Finder")
 } else if cfg!(target_os = "windows") {
-    "Show Transcript in Explorer"
+    phrase("Show Transcript in Explorer")
 } else {
-    "Show Transcript in Folder"
+    phrase("Show Transcript in Folder")
 };
 
-/// What moving a file to the trash is called where we are, and the trash.
-pub const TRASH_LABEL: &str = if cfg!(target_os = "windows") { "Move to Recycle Bin" } else { "Move to Trash" };
-pub const TRASH_NAME: &str = if cfg!(target_os = "windows") { "Recycle Bin" } else { "Trash" };
+/// What moving a file to the trash is called where we are.
+pub const TRASH_LABEL: &str = if cfg!(target_os = "windows") { phrase("Move to Recycle Bin") } else { phrase("Move to Trash") };
 
 /// Put a file on the clipboard as a file, so the file manager and any
 /// other app can paste it. False where that is not done (off a Mac, for
@@ -183,11 +185,11 @@ pub fn trash_path(path: &Path) -> Result<(), String> {
 
 /// What opening a folder in the file manager is called where we are.
 pub const OPEN_FOLDER_LABEL: &str = if cfg!(target_os = "macos") {
-    "Open in Finder"
+    phrase("Open in Finder")
 } else if cfg!(target_os = "windows") {
-    "Open in Explorer"
+    phrase("Open in Explorer")
 } else {
-    "Open folder"
+    phrase("Open folder")
 };
 
 /// The account's first name, else the login name, capitalised.
@@ -421,3 +423,85 @@ pub fn keep_on_top(window: &gpui::Window) {
 }
 #[cfg(not(target_os = "macos"))]
 pub fn keep_on_top(_window: &gpui::Window) {}
+
+// The window's language. On a Mac an app's language is its own
+// `AppleLanguages` in its defaults, which System Settings, Language &
+// Region, Applications writes. Emaki's setting is the same one, as
+// Kotoba's is.
+
+#[cfg(target_os = "macos")]
+mod languages {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSArray, NSBundle, NSString, NSUserDefaults};
+
+    const KEY: &str = "AppleLanguages";
+
+    /// `AppleLanguages` as one domain of the defaults has it, alone: not
+    /// the search list's, which falls back from the app's to the system's.
+    fn list(domain: &str) -> Vec<String> {
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let Some(dict) = defaults.persistentDomainForName(&NSString::from_str(domain)) else { return Vec::new() };
+        let Some(value) = dict.objectForKey(&NSString::from_str(KEY)) else { return Vec::new() };
+        let Ok(all) = value.downcast::<NSArray>() else { return Vec::new() };
+        all.iter().filter_map(|o| o.downcast::<NSString>().ok().map(|s| s.to_string())).collect()
+    }
+
+    pub fn system() -> Vec<String> {
+        list("NSGlobalDomain")
+    }
+
+    /// A bare executable (a probe, `cargo run`) has no bundle and so no
+    /// domain of its own: it follows the system's.
+    pub fn own() -> Option<String> {
+        let id = NSBundle::mainBundle().bundleIdentifier()?;
+        list(&id.to_string()).into_iter().next()
+    }
+
+    pub fn set_own(code: Option<&str>) {
+        if NSBundle::mainBundle().bundleIdentifier().is_none() {
+            return;
+        }
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let key = NSString::from_str(KEY);
+        match code {
+            Some(code) => {
+                let one = NSArray::from_retained_slice(&[NSString::from_str(code)]);
+                let one: &AnyObject = &one;
+                unsafe { defaults.setObject_forKey(Some(one), &key) };
+            }
+            None => defaults.removeObjectForKey(&key),
+        }
+    }
+}
+
+/// The system's preferred languages, in its order, apart from any the
+/// app was given of its own.
+#[cfg(target_os = "macos")]
+pub fn system_languages() -> Vec<String> {
+    let all = languages::system();
+    if all.is_empty() { sys_locale::get_locales().collect() } else { all }
+}
+#[cfg(not(target_os = "macos"))]
+pub fn system_languages() -> Vec<String> {
+    sys_locale::get_locales().collect()
+}
+
+/// The language the app was given of its own, if any: by Emaki's
+/// setting or by System Settings.
+#[cfg(target_os = "macos")]
+pub fn own_language() -> Option<String> {
+    languages::own()
+}
+#[cfg(not(target_os = "macos"))]
+pub fn own_language() -> Option<String> {
+    None
+}
+
+/// The app given a language of its own (a bundle's code, `zh-Hans`), or
+/// none, to follow the system's.
+#[cfg(target_os = "macos")]
+pub fn set_own_language(code: Option<&str>) {
+    languages::set_own(code);
+}
+#[cfg(not(target_os = "macos"))]
+pub fn set_own_language(_code: Option<&str>) {}

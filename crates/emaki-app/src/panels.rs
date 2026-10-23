@@ -27,7 +27,8 @@ use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable a
 use emaki_core::git;
 use emaki_core::outline::{self, Kind};
 
-use crate::format::{clock, plural};
+use crate::format::clock;
+use crate::i18n::{count, t, tf};
 use crate::workbench::{choice_pill, float_shadow, Press, swallow_click, MenuDo, Notice, Page, Workbench};
 
 /// How wide a panel is; both are, so one takes the other's place without
@@ -1137,7 +1138,7 @@ fn picture_compare(p: &git::Pictures, drawn: &[Option<Arc<gpui::Image>>; 2], the
                 ),
         )
     };
-    let (was, now) = if both { ("Before", "After") } else { ("Deleted", "Added") };
+    let (was, now) = if both { (t("Before"), t("After")) } else { (t("Deleted"), t("Added")) };
     h_flex()
         .size_full()
         .p(px(20.))
@@ -1182,10 +1183,10 @@ fn read_file(path: &Path, root: &Path) -> FileView {
     // sheets.
     if emaki_core::office::reads(&ext) {
         let body = if size as usize > OFFICE_BYTES {
-            FileBody::None("This file is too large to show here.".into())
+            FileBody::None(t("This file is too large to show here.").into())
         } else {
             match emaki_core::office::read(path, TABLE_ROWS) {
-                Ok(emaki_core::office::Office::Markdown(text)) if text.trim().is_empty() => FileBody::None("There is no text in this file to show.".into()),
+                Ok(emaki_core::office::Office::Markdown(text)) if text.trim().is_empty() => FileBody::None(t("There is no text in this file to show.").into()),
                 Ok(emaki_core::office::Office::Markdown(text)) => FileBody::Doc(text),
                 Ok(emaki_core::office::Office::Sheets(sheets)) => FileBody::Sheets(
                     sheets
@@ -1196,7 +1197,7 @@ fn read_file(path: &Path, root: &Path) -> FileView {
                         })
                         .collect(),
                 ),
-                Err(why) => FileBody::None(format!("Emaki cannot show this file: {why}.")),
+                Err(why) => FileBody::None(tf("Emaki cannot show this file: {why}.", &[("why", &why)])),
             }
         };
         return FileView { path: path.to_path_buf(), rel, size, mtime, body, source: None, kinds: Vec::new(), rows_all: None };
@@ -1214,13 +1215,13 @@ fn read_file(path: &Path, root: &Path) -> FileView {
                 }
                 FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Sheets(vec![(String::new(), rows, widths, more)]), source: None, kinds, rows_all: Some(table.total) }
             }
-            Err(why) => FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::None(format!("Emaki cannot show this file: {why}.")), source: None, kinds: Vec::new(), rows_all: None },
+            Err(why) => FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::None(tf("Emaki cannot show this file: {why}.", &[("why", &why)])), source: None, kinds: Vec::new(), rows_all: None },
         };
     }
     let mut bytes = Vec::new();
     let read = std::fs::File::open(path).and_then(|f| f.take(PREVIEW_BYTES as u64 + 1).read_to_end(&mut bytes));
     let (body, source) = match read {
-        Err(e) => (FileBody::None(format!("Could not read it: {e}")), None),
+        Err(e) => (FileBody::None(tf("Could not read it: {e}", &[("e", &e)])), None),
         Ok(_) => body_of(path, bytes),
     };
     FileView { path: path.to_path_buf(), rel, size, mtime, body, source, kinds: Vec::new(), rows_all: None }
@@ -1254,7 +1255,7 @@ fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Rc<str>>) {
     let whole = bytes.len() <= PREVIEW_BYTES && std::str::from_utf8(&bytes).is_ok();
     let mut source: Option<Rc<str>> = None;
     let body = match () {
-        () if bytes.iter().take(8192).any(|b| *b == 0) => FileBody::None("Emaki cannot show this kind of file.".into()),
+        () if bytes.iter().take(8192).any(|b| *b == 0) => FileBody::None(t("Emaki cannot show this kind of file.").into()),
         () if ext == "csv" || ext == "tsv" => {
             let cut = bytes.len() > PREVIEW_BYTES;
             bytes.truncate(PREVIEW_BYTES);
@@ -1413,14 +1414,19 @@ fn path_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
 }
 
-fn kind_word(kind: emaki_core::fsops::Kind) -> &'static str {
+/// What a move taken back or done again was, in words: of one file
+/// by its name, of more by how many.
+fn kind_words(kind: emaki_core::fsops::Kind, name: &str, n: usize) -> String {
     use emaki_core::fsops::Kind;
-    match kind {
-        Kind::Made => "making",
-        Kind::Renamed => "renaming",
-        Kind::Moved => "moving",
-        Kind::Copied => "copying",
-        Kind::Removed => "removing",
+    match (kind, n) {
+        (Kind::Made | Kind::Renamed, 1) => tf("making {name}", &[("name", &name)]),
+        (Kind::Moved, 1) => tf("moving {name}", &[("name", &name)]),
+        (Kind::Copied, 1) => tf("copying {name}", &[("name", &name)]),
+        (Kind::Removed, 1) => tf("removing {name}", &[("name", &name)]),
+        (Kind::Made | Kind::Renamed, n) => count(n, "making {n} item", "making {n} items"),
+        (Kind::Moved, n) => count(n, "moving {n} item", "moving {n} items"),
+        (Kind::Copied, n) => count(n, "copying {n} item", "copying {n} items"),
+        (Kind::Removed, n) => count(n, "removing {n} item", "removing {n} items"),
     }
 }
 
@@ -1451,9 +1457,9 @@ fn pptx_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
     use deckcraft_render::{render_slide, RenderOpts};
     let want_w = want_w.clamp(PDF_W_LEAST, PDF_W_MOST).round();
     if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > PDF_BYTES {
-        return Err("This deck is too large to show here.".into());
+        return Err(t("This deck is too large to show here.").into());
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("Could not read it: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| tf("Could not read it: {e}", &[("e", &e)]))?;
     let drawn = std::panic::catch_unwind(move || {
         let deck = deckcraft_pptx::import(&bytes).ok()?;
         let (w, h) = (deck.slide_size.width as f32, deck.slide_size.height as f32);
@@ -1468,7 +1474,7 @@ fn pptx_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
     });
     match drawn {
         Ok(Some(doc)) if !doc.pages.is_empty() => Ok(doc),
-        _ => Err("This deck could not be drawn.".into()),
+        _ => Err(t("This deck could not be drawn.").into()),
     }
 }
 
@@ -1482,9 +1488,9 @@ fn pdf_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
     use hayro::hayro_syntax::Pdf;
     use hayro::vello_cpu::color::palette::css::WHITE;
     if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > PDF_BYTES {
-        return Err("This PDF is too large to show here.".into());
+        return Err(t("This PDF is too large to show here.").into());
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("Could not read it: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| tf("Could not read it: {e}", &[("e", &e)]))?;
     let drawn = std::panic::catch_unwind(move || {
         let pdf = Pdf::new(bytes).ok()?;
         let cache = hayro::RenderCache::new();
@@ -1521,23 +1527,21 @@ fn pdf_pages(path: &Path, want_w: f32) -> Result<PdfDoc, String> {
     });
     match drawn {
         Ok(Some(doc)) if !doc.pages.is_empty() => Ok(doc),
-        _ => Err("This PDF could not be drawn.".into()),
+        _ => Err(t("This PDF could not be drawn.").into()),
     }
 }
 
 /// "Today", "Yesterday", or the date, for the outline's heads.
 fn day_label(ts: &str) -> String {
-    let Some(t) = emaki_core::build::parse_ts(ts) else { return String::new() };
-    let d = t.with_timezone(&chrono::Local).date_naive();
+    let Some(at) = emaki_core::build::parse_ts(ts) else { return String::new() };
+    let d = at.with_timezone(&chrono::Local).date_naive();
     let today = chrono::Local::now().date_naive();
     if d == today {
-        "Today".into()
+        t("Today").into()
     } else if Some(d) == today.pred_opt() {
-        "Yesterday".into()
-    } else if d.year() == today.year() {
-        d.format("%b %-d").to_string()
+        t("Yesterday").into()
     } else {
-        d.format("%b %-d, %Y").to_string()
+        crate::format::date(&d, d.year() != today.year())
     }
 }
 
@@ -1836,8 +1840,8 @@ impl Workbench {
             .rounded(px(9.))
             .bg(track_bg)
             .children(plate)
-            .child(segment("panel-files", "icons/tree-view.svg", "Files (⌘⇧F)", true, cx))
-            .child(segment("panel-outline", "icons/list-bullets.svg", "Outline (⌘⇧O)", false, cx))
+            .child(segment("panel-files", "icons/tree-view.svg", t("Files (⌘⇧F)"), true, cx))
+            .child(segment("panel-outline", "icons/list-bullets.svg", t("Outline (⌘⇧O)"), false, cx))
             .into_any_element()]
     }
 
@@ -2247,7 +2251,7 @@ impl Workbench {
                 }
                 let branches: Vec<(PathBuf, Rc<git::Branches>)> = branches.into_iter().map(|(dir, b)| (dir, Rc::new(b))).collect();
                 if branches.is_empty() && this.branch_new_wait.take().is_some() {
-                    this.notice = Some(Notice::error("this folder is not in a git repository"));
+                    this.notice = Some(Notice::error(t("this folder is not in a git repository")));
                     cx.notify();
                 }
                 if this.tree.branches != branches {
@@ -2367,7 +2371,7 @@ impl Workbench {
                     (Err(why), _) => {
                         this.word = None;
                         if let Some(v) = this.file_view.as_mut() {
-                            v.body = FileBody::None(format!("Emaki cannot show this file: {why}."));
+                            v.body = FileBody::None(tf("Emaki cannot show this file: {why}.", &[("why", &why)]));
                         }
                     }
                 }
@@ -2721,9 +2725,9 @@ impl Workbench {
         window.focus(&self.file_focus, cx);
         let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
         if self.pdf_sel.is_some() {
-            items.push(("Copy", MenuDo::Pdf(PdfDo::Copy)));
+            items.push((t("Copy"), MenuDo::Pdf(PdfDo::Copy)));
         }
-        items.push(("Select All", MenuDo::Pdf(PdfDo::SelectAll)));
+        items.push((t("Select All"), MenuDo::Pdf(PdfDo::SelectAll)));
         self.file_pane_menu(items, at, cx);
     }
 
@@ -2778,10 +2782,10 @@ impl Workbench {
             this.update(cx, |this, cx| {
                 let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
                 if !text.trim().is_empty() {
-                    items.push(("Copy", MenuDo::Copy(text)));
+                    items.push((t("Copy"), MenuDo::Copy(text)));
                 }
                 if let Some(path) = picture {
-                    items.push(("Copy Image", MenuDo::CopyImage(crate::workbench::Pic::File(path))));
+                    items.push((t("Copy Image"), MenuDo::CopyImage(crate::workbench::Pic::File(path))));
                 }
                 this.file_pane_menu(items, at, cx);
             });
@@ -3203,9 +3207,9 @@ impl Workbench {
             }))
         };
         let title = match (peek.old.is_empty(), peek.new.is_empty()) {
-            (true, _) => "Added",
-            (_, true) => "Removed",
-            _ => "Changed",
+            (true, _) => t("Added, against git's copy"),
+            (_, true) => t("Removed, against git's copy"),
+            _ => t("Changed, against git's copy"),
         };
         let card = v_flex()
             .id(("file-peek", self.file_peek_serial as usize))
@@ -3234,9 +3238,9 @@ impl Workbench {
                     // A clip is a rectangle: the head's ground is rounded
                     // as the card is, the card's less its border.
                     .rounded_t(px(9.))
-                    .child(div().flex_1().min_w_0().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(format!("{title}, against git's copy")))
+                    .child(div().flex_1().min_w_0().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(title))
                     .when(peek.can_revert, |d| {
-                        d.child(crate::branches::small_pill("file-peek-revert", "icons/undo-2.svg", "Revert", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                        d.child(crate::branches::small_pill("file-peek-revert", "icons/undo-2.svg", t("Revert"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.revert_file_peek(window, cx)
                         })))
@@ -3438,7 +3442,7 @@ impl Workbench {
                 let text = if self.cfg.app.format_on_save { emaki_core::format::format(lang, &ask.path, &text, &self.cfg.app.format_langs).ok().flatten().unwrap_or(text) } else { text };
                 if let Err(e) = std::fs::write(&ask.path, &text) {
                     let name = ask.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    self.notice = Some(Notice::error(format!("could not save {name}: {e}")));
+                    self.notice = Some(Notice::error(tf("could not save {name}: {e}", &[("name", &name), ("e", &e)])));
                     return;
                 }
                 self.file_parked.retain(|p| p.path != ask.path);
@@ -3505,7 +3509,7 @@ impl Workbench {
         // Three buttons in a row, or one under another where the card
         // is too narrow for the row: a row that wrapped put one alone
         // on a line of its own.
-        let stack = Self::pills_stack(&["Don't Save", "Cancel", "Save"], card_w.min(self.card_room(420.)) - px(32.));
+        let stack = Self::pills_stack(&[t("Don't Save"), t("Cancel"), t("Save")], card_w.min(self.card_room(420.)) - px(32.));
         let answer = |answer: FileAnswer| {
             cx.listener(move |this, _: &ClickEvent, window, cx| {
                 swallow_click(window, cx);
@@ -3544,12 +3548,12 @@ impl Workbench {
                     .border_1()
                     .border_color(theme.border)
                     .shadow(float_shadow(&theme))
-                    .child(div().w_full().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(format!("Do you want to save the changes you made to {name}?")))
-                    .child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child("Your changes will be lost if you don't save them."))
+                    .child(div().w_full().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(tf("Do you want to save the changes you made to {name}?", &[("name", &name)])))
+                    .child(div().w_full().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted_foreground).child(t("Your changes will be lost if you don't save them.")))
                     .child({
-                        let discard = choice_pill("file-ask-discard", "icons/trash.svg", "Don't Save", Press::Danger, false, &theme).on_click(answer(FileAnswer::Discard));
-                        let cancel = choice_pill("file-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(answer(FileAnswer::Cancel));
-                        let save = choice_pill("file-ask-save", "icons/check.svg", "Save", Press::Primary, false, &theme).on_click(answer(FileAnswer::Save));
+                        let discard = choice_pill("file-ask-discard", "icons/trash.svg", t("Don't Save"), Press::Danger, false, &theme).on_click(answer(FileAnswer::Discard));
+                        let cancel = choice_pill("file-ask-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, false, &theme).on_click(answer(FileAnswer::Cancel));
+                        let save = choice_pill("file-ask-save", "icons/check.svg", t("Save"), Press::Primary, false, &theme).on_click(answer(FileAnswer::Save));
                         if stack {
                             v_flex().w_full().pt(px(2.)).gap(px(8.)).child(save.w_full().justify_center()).child(discard.w_full().justify_center()).child(cancel.w_full().justify_center()).into_any_element()
                         } else {
@@ -3578,14 +3582,14 @@ impl Workbench {
         let on_disk = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         if on_disk != mtime && self.file_conflict != Some(on_disk) {
             self.file_conflict = Some(on_disk);
-            self.notice = Some(Notice::error(format!("{name} changed on disk since it was opened. Save again to write over it.")));
+            self.notice = Some(Notice::error(tf("{name} changed on disk since it was opened. Save again to write over it.", &[("name", &name)])));
             cx.notify();
             return false;
         }
         self.file_conflict = None;
         let saved = pane.update(cx, |pane, cx| pane.save(cx));
         if let Err(why) = &saved {
-            self.notice = Some(Notice::error(format!("could not save {name}: {why}")));
+            self.notice = Some(Notice::error(tf("could not save {name}: {e}", &[("name", &name), ("e", why)])));
         }
         self.tree.read_at = 0.;
         cx.notify();
@@ -3616,13 +3620,13 @@ impl Workbench {
         let on_disk = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         if on_disk != ed.mtime && self.file_conflict != Some(on_disk) {
             self.file_conflict = Some(on_disk);
-            self.notice = Some(Notice::error(format!("{name} changed on disk since it was opened. Save again to write over it.")));
+            self.notice = Some(Notice::error(tf("{name} changed on disk since it was opened. Save again to write over it.", &[("name", &name)])));
             cx.notify();
             return;
         }
         // Written in place, so the file keeps its permissions.
         if let Err(e) = std::fs::write(&path, &text) {
-            self.notice = Some(Notice::error(format!("could not save {name}: {e}")));
+            self.notice = Some(Notice::error(tf("could not save {name}: {e}", &[("name", &name), ("e", &e)])));
             cx.notify();
             return;
         }
@@ -3641,7 +3645,7 @@ impl Workbench {
         self.tree.read_at = 0.;
         self.read_file_base(path.clone(), cx);
         if let Some(why) = unformatted {
-            self.notice = Some(Notice::error(format!("{name} is saved but not formatted: {why}.")));
+            self.notice = Some(Notice::error(tf("{name} is saved but not formatted: {why}.", &[("name", &name), ("why", &why)])));
         }
         cx.notify();
     }
@@ -3774,7 +3778,7 @@ impl Workbench {
     pub(crate) fn table_edit(&mut self, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let Some((row, col)) = self.table_cell() else { return };
         let Some(ed) = self.table_editor() else {
-            self.notice = Some(Notice::error("this table cannot be changed here: it is a workbook, or a file shown in part".to_string()));
+            self.notice = Some(Notice::error(t("this table cannot be changed here: it is a workbook, or a file shown in part")));
             cx.notify();
             return;
         };
@@ -3989,7 +3993,7 @@ impl Workbench {
                                     .on_action(cx.listener(|this, _: &crate::workbench::Escape, window, cx| this.table_cancel(window, cx)))
                                     .track_focus(&field_focus)
                                     .role(Role::TextInput)
-                                    .aria_label("Cell")
+                                    .aria_label(t("Cell"))
                                     .absolute()
                                     .inset_0()
                                     .flex()
@@ -4062,8 +4066,8 @@ impl Workbench {
                                 }
                                 let Some((rows, _)) = this.grid_rows() else { return };
                                 let items = match this.table_range_text().filter(|_| several && inside) {
-                                    Some(cells) => vec![("Copy Cells", MenuDo::Copy(cells))],
-                                    None => vec![("Copy Cell", MenuDo::Copy(rows[ix][col].clone())), ("Copy Row", MenuDo::Copy(rows[ix].join("\t")))],
+                                    Some(cells) => vec![(t("Copy Cells"), MenuDo::Copy(cells))],
+                                    None => vec![(t("Copy Cell"), MenuDo::Copy(rows[ix][col].clone())), (t("Copy Row"), MenuDo::Copy(rows[ix].join("\t")))],
                                 };
                                 this.file_pane_menu(items, e.position, cx);
                             }),
@@ -4077,12 +4081,13 @@ impl Workbench {
             .w(px(total))
             .flex_shrink_0()
             .child(body)
-            .when(more && v.rows_all.is_none(), |d| d.child(div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(format!("Only the first {TABLE_ROWS} rows are shown. Open the file for the rest."))))
+            .when(more && v.rows_all.is_none(), |d| d.child(div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(tf("Only the first {n} rows are shown. Open the file for the rest.", &[("n", &TABLE_ROWS)]))))
             // A file that says how many rows it has: that, whether or
             // not all of them are here. The first row is the names.
             .children(v.rows_all.map(|all| {
-                let (rows, cols) = (plural(all, "row", "rows"), plural(widths.len(), "column", "columns"));
-                div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(if more { format!("{rows}, {cols}. The first {} are shown.", crate::format::thousands(TABLE_ROWS)) } else { format!("{rows}, {cols}.") })
+                let ncols = widths.len();
+                let (rows, cols) = (count(all, "{n} row", "{n} rows"), count(ncols, "{n} column", "{n} columns"));
+                div().p(px(12.)).text_size(px(12.)).text_color(theme.muted_foreground).child(if more { tf("{rows}, {cols}. The first {n} are shown.", &[("rows", &rows), ("cols", &cols), ("n", &crate::format::thousands(TABLE_ROWS))]) } else { tf("{rows}, {cols}.", &[("rows", &rows), ("cols", &cols)]) })
             }))
             .into_any_element()
     }
@@ -4162,57 +4167,57 @@ impl Workbench {
         // the message or the clipboard, and what changes it on disk.
         let mut items = match node {
             Some(n) if n.dir => vec![
-                item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &n.path),
+                item(t(crate::sys::OPEN_FOLDER_LABEL), FileDo::Open, &n.path),
                 rule(),
-                item("New File", FileDo::NewFile, &n.path),
-                item("New Folder", FileDo::NewFolder, &n.path),
+                item(t("New File"), FileDo::NewFile, &n.path),
+                item(t("New Folder"), FileDo::NewFolder, &n.path),
                 rule(),
-                item("Add to Message", FileDo::Mention, &n.path),
-                item("Copy Path", FileDo::CopyPath, &n.path),
-                item("Copy Relative Path", FileDo::CopyRel, &n.path),
+                item(t("Add to Message"), FileDo::Mention, &n.path),
+                item(t("Copy Path"), FileDo::CopyPath, &n.path),
+                item(t("Copy Relative Path"), FileDo::CopyRel, &n.path),
                 rule(),
-                item("Cut", FileDo::Cut, &n.path),
-                item("Copy", FileDo::Copy, &n.path),
-                item("Duplicate", FileDo::Duplicate, &n.path),
-                item("Rename", FileDo::Rename, &n.path),
-                item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
+                item(t("Cut"), FileDo::Cut, &n.path),
+                item(t("Copy"), FileDo::Copy, &n.path),
+                item(t("Duplicate"), FileDo::Duplicate, &n.path),
+                item(t("Rename"), FileDo::Rename, &n.path),
+                item(t(crate::sys::TRASH_LABEL), FileDo::Trash, &n.path),
             ],
             Some(n) => {
                 let mut items = Vec::new();
                 if self.tree.changed.iter().any(|(p, _)| *p == n.path) {
-                    items.push(item("Show Changes", FileDo::Changes, &n.path));
+                    items.push(item(t("Show Changes"), FileDo::Changes, &n.path));
                 }
                 items.extend([
-                    item("Open", FileDo::Open, &n.path),
-                    item(crate::sys::REVEAL_LABEL, FileDo::Reveal, &n.path),
+                    item(t("Open"), FileDo::Open, &n.path),
+                    item(t(crate::sys::REVEAL_LABEL), FileDo::Reveal, &n.path),
                     rule(),
-                    item("Add to Message", FileDo::Mention, &n.path),
-                    item("Copy Path", FileDo::CopyPath, &n.path),
-                    item("Copy Relative Path", FileDo::CopyRel, &n.path),
+                    item(t("Add to Message"), FileDo::Mention, &n.path),
+                    item(t("Copy Path"), FileDo::CopyPath, &n.path),
+                    item(t("Copy Relative Path"), FileDo::CopyRel, &n.path),
                     rule(),
-                    item("Cut", FileDo::Cut, &n.path),
-                    item("Copy", FileDo::Copy, &n.path),
-                    item("Duplicate", FileDo::Duplicate, &n.path),
-                    item("Rename", FileDo::Rename, &n.path),
-                    item(crate::sys::TRASH_LABEL, FileDo::Trash, &n.path),
+                    item(t("Cut"), FileDo::Cut, &n.path),
+                    item(t("Copy"), FileDo::Copy, &n.path),
+                    item(t("Duplicate"), FileDo::Duplicate, &n.path),
+                    item(t("Rename"), FileDo::Rename, &n.path),
+                    item(t(crate::sys::TRASH_LABEL), FileDo::Trash, &n.path),
                 ]);
                 items
             }
             None => vec![
-                item(crate::sys::OPEN_FOLDER_LABEL, FileDo::Open, &root),
+                item(t(crate::sys::OPEN_FOLDER_LABEL), FileDo::Open, &root),
                 rule(),
-                item("New File", FileDo::NewFile, &root),
-                item("New Folder", FileDo::NewFolder, &root),
+                item(t("New File"), FileDo::NewFile, &root),
+                item(t("New Folder"), FileDo::NewFolder, &root),
                 rule(),
-                item("Collapse All Folders", FileDo::Collapse, &root),
+                item(t("Collapse All Folders"), FileDo::Collapse, &root),
                 rule(),
-                item("Copy Path", FileDo::CopyPath, &root),
+                item(t("Copy Path"), FileDo::CopyPath, &root),
             ],
         };
         if paste {
             let target = node.map(|n| n.path.clone()).unwrap_or(root);
-            let after = items.iter().position(|(label, _)| *label == "Copy").map(|at| at + 1).unwrap_or(items.len());
-            items.insert(after, item("Paste", FileDo::Paste, &target));
+            let after = items.iter().position(|(label, _)| *label == t("Copy")).map(|at| at + 1).unwrap_or(items.len());
+            items.insert(after, item(t("Paste"), FileDo::Paste, &target));
         }
         self.open_menu(at, items, cx);
     }
@@ -4260,7 +4265,7 @@ impl Workbench {
     fn files_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let paths = self.tree.marked.clone();
         let item = |label: &'static str, what: FileDo| (label, MenuDo::Files(what, paths.clone()));
-        let items = vec![item("Add to Message", FileDo::Mention), item("Copy Paths", FileDo::CopyPath), item("Copy Relative Paths", FileDo::CopyRel), ("", MenuDo::Rule), item("Cut", FileDo::Cut), item("Duplicate", FileDo::Duplicate), item(crate::sys::TRASH_LABEL, FileDo::Trash)];
+        let items = vec![item(t("Add to Message"), FileDo::Mention), item(t("Copy Paths"), FileDo::CopyPath), item(t("Copy Relative Paths"), FileDo::CopyRel), ("", MenuDo::Rule), item(t("Cut"), FileDo::Cut), item(t("Duplicate"), FileDo::Duplicate), item(t(crate::sys::TRASH_LABEL), FileDo::Trash)];
         self.open_menu(at, items, cx);
     }
 
@@ -4272,7 +4277,7 @@ impl Workbench {
             FileDo::CopyPath | FileDo::CopyRel => {
                 let lines: Vec<String> = paths.iter().map(|p| if what == FileDo::CopyRel { p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string() } else { p.to_string_lossy().to_string() }).collect();
                 cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
-                self.notice = Some(Notice::said("copied"));
+                self.notice = Some(Notice::said(t("copied")));
             }
             FileDo::Mention => {
                 for path in tops_of(&paths) {
@@ -4292,7 +4297,7 @@ impl Workbench {
         let rel = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().to_string();
         let copy = |text: String, this: &mut Self, cx: &mut Context<Self>| {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            this.notice = Some(Notice::said("copied"));
+            this.notice = Some(Notice::said(t("copied")));
         };
         match what {
             FileDo::Changes => self.open_changes(Some(path), cx),
@@ -4368,7 +4373,7 @@ impl Workbench {
             cx.write_to_clipboard(ClipboardItem::new_string(path.to_string_lossy().to_string()));
         }
         self.file_clip = Some(path.to_path_buf());
-        self.notice = Some(Notice::said(format!("{} copied", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
+        self.notice = Some(Notice::said(tf("{name} copied", &[("name", &path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())])));
         cx.notify();
     }
 
@@ -4385,7 +4390,7 @@ impl Workbench {
         }
         let files = self.clipboard_files(cx);
         if files.is_empty() {
-            self.notice = Some(Notice::error("there is no file on the clipboard to paste".to_string()));
+            self.notice = Some(Notice::error(t("there is no file on the clipboard to paste")));
             cx.notify();
             return;
         }
@@ -4410,7 +4415,13 @@ impl Workbench {
                     last = Some(to)
                 }
                 Err(why) => {
-                    self.notice = Some(Notice::error(format!("{} was not {said}: {why}", file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
+                    let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let words = match said {
+                        "pasted" => tf("{name} was not pasted: {why}", &[("name", &name), ("why", &why)]),
+                        "copied in" => tf("{name} was not copied in: {why}", &[("name", &name), ("why", &why)]),
+                        _ => tf("{name} was not copied: {why}", &[("name", &name), ("why", &why)]),
+                    };
+                    self.notice = Some(Notice::error(words));
                     last = None;
                     break;
                 }
@@ -4429,7 +4440,13 @@ impl Workbench {
         self.tree.refresh(&root);
         self.tree.read_at = 0.;
         if let Some(to) = last {
-            self.notice = Some(Notice::said(format!("{said} as {}", to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())));
+            let name = to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let words = match said {
+                "pasted" => tf("pasted as {name}", &[("name", &name)]),
+                "copied in" => tf("copied in as {name}", &[("name", &name)]),
+                _ => tf("copied as {name}", &[("name", &name)]),
+            };
+            self.notice = Some(Notice::said(words));
             self.tree.picked = Some(to);
         }
         cx.notify();
@@ -4546,11 +4563,11 @@ impl Workbench {
     fn tree_drop_words(&self, dir: &Path) -> String {
         let root = self.files_root();
         let named = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let verb = if self.tree_drop_copy { "Copy" } else { "Move" };
-        match root.as_ref().and_then(|r| dir.strip_prefix(r).ok()).filter(|rel| !rel.as_os_str().is_empty()) {
-            Some(rel) => format!("{verb} into {}", rel.to_string_lossy().replace('\\', "/")),
-            None => format!("{verb} into {}", root.as_deref().map(named).unwrap_or_default()),
-        }
+        let folder = match root.as_ref().and_then(|r| dir.strip_prefix(r).ok()).filter(|rel| !rel.as_os_str().is_empty()) {
+            Some(rel) => rel.to_string_lossy().replace('\\', "/"),
+            None => root.as_deref().map(named).unwrap_or_default(),
+        };
+        if self.tree_drop_copy { tf("Copy into {folder}", &[("folder", &folder)]) } else { tf("Move into {folder}", &[("folder", &folder)]) }
     }
 
     /// The key that renames the row chosen, as the system's file manager
@@ -4828,12 +4845,16 @@ impl Workbench {
         self.tree.read_at = 0.;
         let what = match tops.as_slice() {
             [one] => path_name(one),
-            many => format!("{} items", many.len()),
+            many => {
+                let n = many.len();
+                count(n, "{n} item", "{n} items")
+            }
         };
         self.notice = Some(match failed {
-            Some(e) => Notice::error(format!("not removed: {e}")),
-            None if held == 0 && straight > 0 => Notice::said(format!("{what} moved to the {}", crate::sys::TRASH_NAME)),
-            None => Notice::said(format!("{what} removed. {} puts it back", if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" })),
+            Some(e) => Notice::error(tf("not removed: {e}", &[("e", &e)])),
+            None if held == 0 && straight > 0 && cfg!(target_os = "windows") => Notice::said(tf("{what} moved to the Recycle Bin", &[("what", &what)])),
+            None if held == 0 && straight > 0 => Notice::said(tf("{what} moved to the Trash", &[("what", &what)])),
+            None => Notice::said(tf("{what} removed. {key} puts it back", &[("what", &what), ("key", &if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" })])),
         });
         cx.notify();
     }
@@ -4854,7 +4875,7 @@ impl Workbench {
                 continue;
             }
             if dir.starts_with(&from) {
-                refused = Some(format!("{} cannot be moved into itself", path_name(&from)));
+                refused = Some(tf("{name} cannot be moved into itself", &[("name", &path_name(&from))]));
                 continue;
             }
             match emaki_core::fsops::move_path(&from, &to) {
@@ -4882,8 +4903,11 @@ impl Workbench {
         self.notice = match (refused, moved.as_slice()) {
             (Some(why), _) => Some(Notice::error(why)),
             (None, []) => None,
-            (None, [one]) => Some(Notice::said(format!("{} moved", path_name(one)))),
-            (None, many) => Some(Notice::said(format!("{} items moved", many.len()))),
+            (None, [one]) => Some(Notice::said(tf("{name} moved", &[("name", &path_name(one))]))),
+            (None, many) => {
+                let n = many.len();
+                Some(Notice::said(count(n, "{n} item moved", "{n} items moved")))
+            }
         };
         cx.notify();
     }
@@ -4894,7 +4918,7 @@ impl Workbench {
         let Some(root) = self.files_root() else { return };
         self.file_cut = tops_of(&paths).into_iter().filter(|p| *p != root).collect();
         if !self.file_cut.is_empty() {
-            self.notice = Some(Notice::said("cut. Paste moves it".to_string()));
+            self.notice = Some(Notice::said(t("cut. Paste moves it")));
         }
         cx.notify();
     }
@@ -4917,12 +4941,12 @@ impl Workbench {
         let ran = if redo { self.fs_journal.redo() } else { self.fs_journal.undo() };
         let op = match ran {
             None => {
-                self.notice = Some(Notice::said(if redo { "nothing to do again" } else { "nothing to take back" }.to_string()));
+                self.notice = Some(Notice::said(if redo { t("nothing to do again") } else { t("nothing to take back") }));
                 return cx.notify();
             }
             Some(Err((why, held))) => {
                 fs_flush(held);
-                self.notice = Some(Notice::error(format!("not {}: {why}", if redo { "done again" } else { "taken back" })));
+                self.notice = Some(Notice::error(if redo { tf("not done again: {why}", &[("why", &why)]) } else { tf("not taken back: {why}", &[("why", &why)]) }));
                 return cx.notify();
             }
             Some(Ok(op)) => op,
@@ -4958,11 +4982,11 @@ impl Workbench {
         let n = op.moves.len();
         let named = |ix: usize| op.moves.first().map(|(a, b)| path_name(if ix == 0 { a } else { b })).unwrap_or_default();
         let what = match (op.kind, n) {
-            (Kind::Renamed, _) => format!("renaming {} to {}", named(0), named(1)),
-            (kind, 1) => format!("{} {}", kind_word(kind), named(1 - (kind == Kind::Removed) as usize)),
-            (kind, n) => format!("{} {n} items", kind_word(kind)),
+            (Kind::Renamed, _) => tf("renaming {from} to {to}", &[("from", &named(0)), ("to", &named(1))]),
+            (kind, 1) => kind_words(kind, &named(1 - (kind == Kind::Removed) as usize), 1),
+            (kind, n) => kind_words(kind, "", n),
         };
-        self.notice = Some(Notice::said(format!("{}: {what}", if redo { "done again" } else { "taken back" })));
+        self.notice = Some(Notice::said(if redo { tf("done again: {what}", &[("what", &what)]) } else { tf("taken back: {what}", &[("what", &what)]) }));
         cx.notify();
     }
 
@@ -4971,7 +4995,9 @@ impl Workbench {
     /// window width. Stacked, the one that does the thing is first and
     /// Cancel last, as the Mac stacks them.
     pub(crate) fn pills_stack(labels: &[&str], room: Pixels) -> bool {
-        let row: f32 = labels.iter().map(|l| 43. + l.chars().count() as f32 * 7.).sum::<f32>() + 8. * labels.len().saturating_sub(1) as f32;
+        // A Chinese, Japanese or Korean character is about twice as wide
+        // as a Latin letter.
+        let row: f32 = labels.iter().map(|l| 43. + l.chars().map(|c| if c.len_utf8() >= 3 { 13. } else { 7. }).sum::<f32>()).sum::<f32>() + 8. * labels.len().saturating_sub(1) as f32;
         px(row) > room
     }
 
@@ -5046,8 +5072,8 @@ impl Workbench {
         for path in &paths {
             let name = named(path);
             let did = git::discard(&self.repo_of(path).unwrap_or(root.clone()), path).and_then(|did| match did {
-                git::Discarded::New if path.exists() => crate::sys::trash_path(path).map(|_| format!("{name} is in the {}", crate::sys::TRASH_NAME)),
-                _ => Ok(format!("the changes to {name} are discarded")),
+                git::Discarded::New if path.exists() => crate::sys::trash_path(path).map(|_| if cfg!(target_os = "windows") { tf("{name} is in the Recycle Bin", &[("name", &name)]) } else { tf("{name} is in the Trash", &[("name", &name)]) }),
+                _ => Ok(tf("the changes to {name} are discarded", &[("name", &name)])),
             });
             match did {
                 Ok(words) => {
@@ -5060,7 +5086,7 @@ impl Workbench {
                         if path.exists() { self.show_file(path, cx) } else { self.file_view = None }
                     }
                 }
-                Err(why) => failed.push(format!("{name} was not discarded: {why}")),
+                Err(why) => failed.push(tf("{name} was not discarded: {why}", &[("name", &name), ("why", &why)])),
             }
         }
         if done > 0 {
@@ -5078,11 +5104,12 @@ impl Workbench {
                 self.open_changes(None, cx);
             }
         }
+        let nfailed = failed.len();
         self.notice = Some(match (failed.first(), done) {
             (Some(why), _) if failed.len() == 1 => Notice::error(why.clone()),
-            (Some(_), _) => Notice::error(format!("{} were not discarded", plural(failed.len(), "file", "files"))),
+            (Some(_), _) => Notice::error(count(nfailed, "{n} file was not discarded", "{n} files were not discarded")),
             (None, 1) => Notice::said(said.remove(0)),
-            (None, n) => Notice::said(format!("the changes to {} are discarded", plural(n, "file", "files"))),
+            (None, n) => Notice::said(count(n, "the changes to {n} file are discarded", "the changes to {n} files are discarded")),
         });
         cx.notify();
     }
@@ -5093,17 +5120,22 @@ impl Workbench {
         let Some((paths, serial)) = self.discard_ask.clone() else { return div().into_any_element() };
         let name = paths.first().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let new = paths.iter().filter(|path| self.tree.changed.iter().any(|(p, s)| p == *path && matches!(s, git::State::Untracked | git::State::Added))).count();
+        let npaths = paths.len();
         let (title, detail, yes) = if paths.len() > 1 {
+            let win = cfg!(target_os = "windows");
             let detail = match new {
-                0 => "This can't be undone.".to_string(),
-                n if n == paths.len() => format!("They move to the {}.", crate::sys::TRASH_NAME),
-                _ => format!("New files move to the {}. The rest can't be undone.", crate::sys::TRASH_NAME),
+                0 => t("This can't be undone.").to_string(),
+                n if n == paths.len() && win => t("They move to the Recycle Bin.").to_string(),
+                n if n == paths.len() => t("They move to the Trash.").to_string(),
+                _ if win => t("New files move to the Recycle Bin. The rest can't be undone.").to_string(),
+                _ => t("New files move to the Trash. The rest can't be undone.").to_string(),
             };
-            (format!("Discard the changes to {} files?", paths.len()), detail, "Discard Changes")
+            (count(npaths, "Discard the changes to {n} file?", "Discard the changes to {n} files?"), detail, t("Discard Changes"))
         } else if new == 1 {
-            (format!("Move {name} to the {}?", crate::sys::TRASH_NAME), String::new(), crate::sys::TRASH_LABEL)
+            let title = if cfg!(target_os = "windows") { tf("Move {name} to the Recycle Bin?", &[("name", &name)]) } else { tf("Move {name} to the Trash?", &[("name", &name)]) };
+            (title, String::new(), t(crate::sys::TRASH_LABEL))
         } else {
-            (format!("Discard the changes to {name}?"), "This can't be undone.".to_string(), "Discard Changes")
+            (tf("Discard the changes to {name}?", &[("name", &name)]), t("This can't be undone.").to_string(), t("Discard Changes"))
         };
         let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
             swallow_click(window, cx);
@@ -5114,9 +5146,9 @@ impl Workbench {
             swallow_click(window, cx);
             this.discard_now(cx);
         });
-        let no = choice_pill("discard-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
+        let no = choice_pill("discard-ask-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, false, cx.theme()).on_click(cancel);
         let yes_el = choice_pill("discard-ask-yes", if new > 0 && new == paths.len() { "icons/trash.svg" } else { "icons/undo-2.svg" }, yes, Press::Danger, false, cx.theme()).on_click(go);
-        self.ask_card("discard-ask", serial, title, detail, ["Cancel", yes], None, no, yes_el, cx)
+        self.ask_card("discard-ask", serial, title, detail, [t("Cancel"), yes], None, no, yes_el, cx)
     }
 
     /// "@path" at the end of what is typed, as the composer's own "@"
@@ -5165,7 +5197,7 @@ impl Workbench {
             let nested = !matches!(prompt, FilePrompt::Rename(_));
             let parts: Vec<Component> = Path::new(&name).components().collect();
             if parts.iter().any(|c| !matches!(c, Component::Normal(_))) || (!nested && parts.len() != 1) {
-                return Err("that is not a name".into());
+                return Err(t("that is not a name").into());
             }
             match &prompt {
                 FilePrompt::Rename(from) => {
@@ -5174,7 +5206,7 @@ impl Workbench {
                         return Ok(Some(to));
                     }
                     if to.exists() {
-                        return Err(format!("{name} is already there"));
+                        return Err(tf("{name} is already there", &[("name", &name)]));
                     }
                     emaki_core::fsops::move_path(from, &to)?;
                     // What was open under the old name is open under the
@@ -5186,7 +5218,7 @@ impl Workbench {
                 FilePrompt::NewFile(dir) | FilePrompt::NewFolder(dir) => {
                     let to = dir.join(&name);
                     if to.exists() {
-                        return Err(format!("{name} is already there"));
+                        return Err(tf("{name} is already there", &[("name", &name)]));
                     }
                     let file = matches!(prompt, FilePrompt::NewFile(_));
                     let folder = if file { to.parent().unwrap_or(dir).to_path_buf() } else { to.clone() };
@@ -5263,7 +5295,7 @@ impl Workbench {
         // The field itself, made once: one row has it. Its icon is the
         // one the name typed so far would get.
         let typed = self.tree_input.read(cx).value().to_string();
-        let mut field = prompt.is_some().then(|| self.name_field("tree-field", &self.tree_input, 12.5, "Name", |this, window, cx| this.close_file_prompt(window, cx), cx).into_any_element());
+        let mut field = prompt.is_some().then(|| self.name_field("tree-field", &self.tree_input, 12.5, t("Name"), |this, window, cx| this.close_file_prompt(window, cx), cx).into_any_element());
         let pad = |depth: usize| px(8. + 12. * (depth + 1) as f32);
         let chevron = |open: bool| Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(10.)).text_color(theme.muted_foreground);
         // The row a name is typed in: the row's own shape, with the
@@ -5376,7 +5408,7 @@ impl Workbench {
                     }
                 }
                 Row::More(n, depth) => {
-                    list = list.child(h_flex().h(TREE_ROW_H).flex_shrink_0().pl(pad(depth) + px(15.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("{n} more")));
+                    list = list.child(h_flex().h(TREE_ROW_H).flex_shrink_0().pl(pad(depth) + px(15.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(count(n, "{n} more", "{n} more")));
                 }
                 Row::Node(node, depth, open) => {
                     let chosen = lit[ix];
@@ -5432,7 +5464,10 @@ impl Workbench {
                             .on_drag(dragged, |drag, _, _, cx| {
                                 let label = match drag.0.as_slice() {
                                     [one] => path_name(one),
-                                    many => format!("{} items", many.len()),
+                                    many => {
+                                        let n = many.len();
+                                        count(n, "{n} item", "{n} items")
+                                    }
                                 };
                                 cx.new(|_| TreeDragged(label))
                             })
@@ -5628,7 +5663,7 @@ impl Workbench {
                 .vertical_scrollbar(&self.files_scroll)
                 .into_any_element()
         } else {
-            div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("The session's folder is gone.").into_any_element()
+            div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child(t("The session's folder is gone.")).into_any_element()
         };
         // The session's folder heads the tree, open to begin with: a row
         // that does not scroll away, with what is asked of the whole
@@ -5669,15 +5704,15 @@ impl Workbench {
                 .child(div().w(px(10.)).flex_shrink_0().flex().justify_center().child(chevron(open)))
                 .child(img(crate::file_icons::path(&name, true, open, dark)).size(px(16.)).flex_shrink_0())
                 .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(name))
-                .child(tool("tree-new-file", "icons/file-plus.svg", "New File").on_click(cx.listener(|this, _, window, cx| {
+                .child(tool("tree-new-file", "icons/file-plus.svg", t("New File")).on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.tree_new(false, window, cx);
                 })))
-                .child(tool("tree-new-folder", "icons/folder-plus.svg", "New Folder").on_click(cx.listener(|this, _, window, cx| {
+                .child(tool("tree-new-folder", "icons/folder-plus.svg", t("New Folder")).on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.tree_new(true, window, cx);
                 })))
-                .child(tool("tree-collapse", "icons/copy-minus.svg", "Collapse All Folders").on_click(cx.listener(|this, _, window, cx| {
+                .child(tool("tree-collapse", "icons/copy-minus.svg", t("Collapse All Folders")).on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.tree_collapse(cx);
                 })))
@@ -5686,7 +5721,7 @@ impl Workbench {
             if !this.tree_rename_key(e, window, cx) {
                 this.tree_key(e, cx);
             }
-        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Files", self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body);
+        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head(t("Files"), self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body);
         self.panel_in(true, el)
     }
 
@@ -5897,7 +5932,7 @@ impl Workbench {
                 .cursor_pointer()
                 .text_size(px(11.5))
                 .text_color(theme.foreground)
-                .managed_tooltip(|window, cx| crate::workbench::tip("Switch repositories", window, cx))
+                .managed_tooltip(|window, cx| crate::workbench::tip(t("Switch repositories"), window, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| this.repo_menu_toggle(ev.position(), window, cx)))
                 .child(Icon::default().path("icons/folder.svg").with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
@@ -6025,7 +6060,7 @@ impl Workbench {
                     .pb(px(8.))
                     .items_center()
                     .justify_between()
-                    .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Repositories"))
+                    .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(t("Repositories")))
                     .child(Button::new("repo-close").ghost().xsmall().icon(IconName::Close).on_click(cx.listener(|this, _, _, cx| this.close_repo_menu(cx)))),
             )
             .child(
@@ -6111,7 +6146,7 @@ impl Workbench {
             return;
         }
         if create && !git::valid_name(&name) {
-            self.notice = Some(Notice::error(format!("\u{201c}{name}\u{201d} is not a name git takes for a branch")));
+            self.notice = Some(Notice::error(tf("“{name}” is not a name git takes for a branch", &[("name", &name)])));
             return;
         }
         // With changes not yet committed the person says where they go,
@@ -6124,7 +6159,8 @@ impl Workbench {
             // switches nowhere with one, and a stash cannot hold it.
             let open: Vec<String> = self.tree.changed.iter().filter(|(p, st)| *st == git::State::Conflict && p.starts_with(&root)).map(|(p, _)| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string()).collect();
             if !open.is_empty() {
-                self.branch_ask = Some(BranchAsk::stop("Resolve the conflicts first", format!("{} on this branch {} a conflict git is waiting to have resolved: {}. Resolve and commit, or undo the merge, then switch.", plural(open.len(), "file", "files"), if open.len() == 1 { "has" } else { "have" }, git::name_some(&open))));
+                let nopen = open.len();
+                self.branch_ask = Some(BranchAsk::stop(t("Resolve the conflicts first"), count(nopen, "{n} file on this branch has a conflict git is waiting to have resolved: {files}. Resolve and commit, or undo the merge, then switch.", "{n} files on this branch have a conflict git is waiting to have resolved: {files}. Resolve and commit, or undo the merge, then switch.").replace("{files}", &git::name_some(&open))));
                 cx.notify();
                 return;
             }
@@ -6198,16 +6234,27 @@ impl Workbench {
             this.update(cx, |this, cx| {
                 this.branch_busy = false;
                 let (was_dirty, went, stale, at_update) = done;
-                let made = match (create, &base) {
-                    (true, Some(b)) => format!("made {name} from {b} and switched to it"),
-                    (true, None) => format!("made {name} and switched to it"),
-                    _ => format!("switched to {name}"),
+                // 0: no changes to carry; 1: left on the branch left; 2: brought.
+                let carried = match (was_dirty, carry) {
+                    (false, _) => 0,
+                    (true, git::Carry::Leave) => 1,
+                    (true, _) => 2,
                 };
-                this.notice = Some(match (&went, was_dirty) {
-                    (Ok(()), false) => Notice::said(made),
-                    (Ok(()), true) if carry == git::Carry::Leave => Notice::said(format!("{made}; your changes stay on {from}")),
-                    (Ok(()), true) => Notice::said(format!("{made}, with your changes")),
-                    (Err(why), _) => Notice::error(format!("not switched: {why}")),
+                let start = base.clone().unwrap_or_default();
+                let v: &[(&str, &dyn std::fmt::Display)] = &[("name", &name), ("base", &start), ("from", &from)];
+                this.notice = Some(match &went {
+                    Err(why) => Notice::error(tf("not switched: {why}", &[("why", why)])),
+                    Ok(()) => Notice::said(match (create, base.is_some(), carried) {
+                        (true, true, 0) => tf("made {name} from {base} and switched to it", v),
+                        (true, true, 1) => tf("made {name} from {base} and switched to it; your changes stay on {from}", v),
+                        (true, true, _) => tf("made {name} from {base} and switched to it, with your changes", v),
+                        (true, false, 0) => tf("made {name} and switched to it", v),
+                        (true, false, 1) => tf("made {name} and switched to it; your changes stay on {from}", v),
+                        (true, false, _) => tf("made {name} and switched to it, with your changes", v),
+                        (false, _, 0) => tf("switched to {name}", v),
+                        (false, _, 1) => tf("switched to {name}; your changes stay on {from}", v),
+                        (false, _, _) => tf("switched to {name}, with your changes", v),
+                    }),
                 });
                 match went {
                     // The branch was checked out as last fetched, and the
@@ -6215,22 +6262,25 @@ impl Workbench {
                     // may be behind.
                     Ok(()) => {
                         if let Some(why) = stale {
-                            this.notice = Some(Notice::error(format!("switched to {name} as it was last fetched; {origin} could not be asked: {why}")));
+                            this.notice = Some(Notice::error(tf("switched to {name} as it was last fetched; {origin} could not be asked: {why}", &[("name", &name), ("origin", &origin), ("why", &why)])));
                             if git::why_net(&why) == git::NetTrouble::SignIn {
-                                this.open_gate(format!("fetch {name}"), why, cx);
+                                this.open_gate(tf("{host} did not take this machine's sign-in, so Emaki could not fetch {branch}. Nothing was changed.", &[("branch", &name)]), why, cx);
                             }
                         }
                     }
                     Err(why) if at_update => {
                         let b = base.clone().unwrap_or_default();
                         match git::why_net(&why) {
-                            git::NetTrouble::Other => this.branch_ask = Some(BranchAsk::stop("Not created", format!("{b} could not be brought up to {origin}, so no branch was made and nothing was changed. Git said: {why}."))),
-                            _ => this.net_failed("Not created", format!("update {b}"), why, cx),
+                            git::NetTrouble::Other => this.branch_ask = Some(BranchAsk::stop(t("Not created"), tf("{base} could not be brought up to {origin}, so no branch was made and nothing was changed. Git said: {why}.", &[("base", &b), ("origin", &origin), ("why", &why)]))),
+                            _ => this.net_failed(t("Not created"), tf("{host} did not take this machine's sign-in, so Emaki could not update {branch}. Nothing was changed.", &[("branch", &b)]), why, cx),
                         }
                     }
                     // A refusal is also said where it cannot be missed: the
                     // row under the composer may be under a sheet.
-                    Err(why) => this.branch_ask = Some(BranchAsk::stop(if create { "Not created" } else { "Not switched" }, format!("Nothing was changed. {}{}.", why[..1].to_uppercase(), &why[1..]))),
+                    Err(why) => {
+                        let why = format!("{}{}", why[..1].to_uppercase(), &why[1..]);
+                        this.branch_ask = Some(BranchAsk::stop(if create { t("Not created") } else { t("Not switched") }, tf("Nothing was changed. {why}.", &[("why", &why)])));
+                    }
                 }
                 // The files are another branch's now.
                 this.tree.refresh(&root);
@@ -6257,8 +6307,8 @@ impl Workbench {
             this.update(cx, |this, cx| {
                 this.branch_busy = false;
                 this.notice = Some(match done {
-                    Ok(()) => Notice::said("your changes are back"),
-                    Err(why) => Notice::error(format!("not put back: {why}")),
+                    Ok(()) => Notice::said(t("your changes are back")),
+                    Err(why) => Notice::error(tf("not put back: {why}", &[("why", &why)])),
                 });
                 this.tree.refresh(&root);
                 this.read_git(root, cx);
@@ -6307,7 +6357,7 @@ impl Workbench {
                         .justify_center()
                         .cursor_pointer()
                         .hover(move |s| s.bg(hover_bg))
-                        .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
+                        .managed_tooltip(move |window, cx| crate::workbench::tip(if done { t("Copied") } else { t("Copy") }, window, cx))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
                             this.copy_text(key.clone(), command.to_string(), cx);
@@ -6315,7 +6365,8 @@ impl Workbench {
                         .child(Icon::new(if done { IconName::Check } else { IconName::Copy }).with_size(px(12.)).text_color(theme.muted_foreground)),
                 )
         });
-        let words = trouble.words;
+        // Git's or the system's own words, but for the few the core writes.
+        let words = t(&trouble.words).to_string();
         Some(
             h_flex()
                 .w_full()
@@ -6330,7 +6381,7 @@ impl Workbench {
                 .text_size(px(11.5))
                 .line_height(px(16.))
                 .child(div().h(px(16.)).flex().items_center().flex_shrink_0().child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.warning)))
-                .child(v_flex().flex_1().min_w_0().child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child("Git did not answer for this folder")).child(div().text_color(theme.muted_foreground).child(words)).children(fix))
+                .child(v_flex().flex_1().min_w_0().child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(t("Git did not answer for this folder"))).child(div().text_color(theme.muted_foreground).child(words)).children(fix))
                 .with_animation("git-trouble-in", Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
                 .into_any_element(),
         )
@@ -6357,8 +6408,8 @@ impl Workbench {
                 .bg(theme.primary.opacity(0.07))
                 .text_size(px(11.5))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.link).flex_shrink_0())
-                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child("Changes you left on this branch"))
-                .child(crate::branches::small_pill("stash-restore", "icons/undo-2.svg", "Restore", Press::Quiet, self.branch_busy, &theme).when(!self.branch_busy, |d| {
+                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child(t("Changes you left on this branch")))
+                .child(crate::branches::small_pill("stash-restore", "icons/undo-2.svg", t("Restore"), Press::Quiet, self.branch_busy, &theme).when(!self.branch_busy, |d| {
                     d.on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.branch_restore(cx)
@@ -6408,7 +6459,7 @@ impl Workbench {
                         .shadow(float_shadow(&theme))
                         .child(h_flex().gap(px(8.)).items_center().child(Icon::new(IconName::TriangleAlert).with_size(px(15.)).text_color(theme.danger)).child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title)))
                         .child(div().text_size(px(12.5)).line_height(px(19.)).text_color(theme.foreground).child(words))
-                        .child(h_flex().w_full().justify_end().child(choice_pill("ask-close", "icons/close.svg", "Close", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                        .child(h_flex().w_full().justify_end().child(choice_pill("ask-close", "icons/close.svg", t("Close"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.branch_ask = None;
                             cx.notify();
@@ -6421,9 +6472,12 @@ impl Workbench {
         // An option says more than its name only when it cannot be
         // taken yet, or at all.
         let bring_line = match &ask.fit {
-            None => Some("Checking…".to_string()),
+            None => Some(t("Checking…").to_string()),
             Some(bad) if bad.is_empty() => None,
-            Some(bad) => Some(format!("{} would conflict there ({}).", plural(bad.len(), "file", "files"), git::name_some(bad))),
+            Some(bad) => {
+                let n = bad.len();
+                Some(count(n, "{n} file would conflict there ({files}).", "{n} files would conflict there ({files}).").replace("{files}", &git::name_some(bad)))
+            }
         };
         let option = |id: &'static str, on: bool, enabled: bool, title: String, line: Option<String>| {
             h_flex()
@@ -6461,8 +6515,8 @@ impl Workbench {
         // Leaving is the choice to begin with, as in GitHub Desktop, where
         // there is a branch to leave them on.
         let (name, create, leave) = (ask.name.clone(), ask.create, ask.leave && can_leave);
-        let go_label = if create { "Create branch" } else { "Switch branch" };
-        let stack = Self::pills_stack(&["Cancel", go_label], self.card_room(440.) - px(32.));
+        let go_label = if create { t("Create branch") } else { t("Switch branch") };
+        let stack = Self::pills_stack(&[t("Cancel"), go_label], self.card_room(440.) - px(32.));
         // With neither on offer (a detached head whose changes do not
         // fit) there is nothing to go ahead with.
         let ready = leave || fits;
@@ -6494,8 +6548,8 @@ impl Workbench {
                     .border_1()
                     .border_color(theme.border)
                     .shadow(float_shadow(&theme))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(if create { "Create branch" } else { "Switch branch" }))
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("You have uncommitted changes."))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(go_label))
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(t("You have uncommitted changes.")))
                     .child(
                         v_flex()
                             .w_full()
@@ -6503,12 +6557,12 @@ impl Workbench {
                             .border_1()
                             .border_color(theme.border)
                             .overflow_hidden()
-                            .child(option("ask-leave", leave, can_leave, format!("Leave my changes on {from}"), None).on_click(pick(true)))
+                            .child(option("ask-leave", leave, can_leave, tf("Leave my changes on {branch}", &[("branch", &from)]), None).on_click(pick(true)))
                             .child(div().h(px(1.)).w_full().bg(theme.border))
-                            .child(option("ask-bring", !leave && fits, fits, format!("Bring my changes to {name}"), bring_line).on_click(pick(false))),
+                            .child(option("ask-bring", !leave && fits, fits, tf("Bring my changes to {branch}", &[("branch", &name)]), bring_line).on_click(pick(false))),
                     )
                     .child({
-                        let cancel = choice_pill("ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                        let cancel = choice_pill("ask-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.branch_ask = None;
                             cx.notify();
@@ -6581,11 +6635,11 @@ impl Workbench {
                     // starting where the others do, and the time at the
                     // row's far end.
                     .child(div().flex_1().min_w_0().truncate().when(here, |d| d.font_weight(FontWeight::MEDIUM)).child(name.clone()))
-                    .child(h_flex().w(BRANCH_TAG_W).flex_shrink_0().map(|d| {
+                    .child(h_flex().min_w(BRANCH_TAG_W).flex_shrink_0().map(|d| {
                         if b.default.as_deref() == Some(name.as_str()) {
-                            d.child(chip("default"))
+                            d.child(chip(t("default")))
                         } else if *remote {
-                            d.child(chip("remote"))
+                            d.child(chip(t("remote")))
                         } else if b.unpublished.contains(name) {
                             // Made here and on no remote yet: a tag that
                             // says so, as the others say what a branch is,
@@ -6593,8 +6647,8 @@ impl Workbench {
                             // Both in the accent, since it is the one row
                             // with something left to do.
                             let busy = self.branch_publishing.as_deref() == Some(name.as_str());
-                            let (to, tip) = (name.clone(), if busy { format!("Publishing to {origin}…") } else { format!("Publish this branch to {origin}") });
-                            d.gap(px(4.)).child(div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.primary.opacity(0.6)).text_size(px(10.5)).text_color(theme.primary).child("local")).child(
+                            let (to, tip) = (name.clone(), if busy { tf("Publishing to {origin}…", &[("origin", &origin)]) } else { tf("Publish this branch to {origin}", &[("origin", &origin)]) });
+                            d.gap(px(4.)).child(div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.primary.opacity(0.6)).text_size(px(10.5)).text_color(theme.primary).child(t("local"))).child(
                                 div()
                                     .id(("branch-publish", ix))
                                     .size(px(18.))
@@ -6638,13 +6692,13 @@ impl Workbench {
                     .gap(px(6.))
                     .items_center()
                     .child(div().size(px(36.)).rounded_full().bg(theme.primary.opacity(0.10)).flex().items_center().justify_center().child(Icon::default().path("icons/git-branch.svg").with_size(px(17.)).text_color(theme.primary)))
-                    .child(div().pt(px(4.)).text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child("Sorry, I can't find that branch"))
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("Do you want to create a new branch instead?"))
-                    .child(div().pt(px(8.)).w_full().child(choice_pill("branch-make-new", "icons/git-branch.svg", "Create New Branch", Press::Primary, false, &theme).w_full().justify_center().on_click(cx.listener(move |this, _, window, cx| {
+                    .child(div().pt(px(4.)).text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child(t("Sorry, I can't find that branch")))
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(t("Do you want to create a new branch instead?")))
+                    .child(div().pt(px(8.)).w_full().child(choice_pill("branch-make-new", "icons/git-branch.svg", t("Create New Branch"), Press::Primary, false, &theme).w_full().justify_center().on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
                         this.branch_new_open(Some(typed.clone()).filter(|t| !t.is_empty()), window, cx);
                     }))))
-                    .child(div().pt(px(6.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(crate::workbench::key_text("Press ⌘⇧N to create a branch from anywhere in the app"))),
+                    .child(div().pt(px(6.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(crate::workbench::key_text_wrap(t("Press ⌘⇧N to create a branch from anywhere in the app")).w_full().justify_center())),
             );
         }
         let fresh = fresh.filter(|_| !rows.is_empty());
@@ -6652,6 +6706,8 @@ impl Workbench {
         // What is last in the card is rounded at its foot as the card is.
         let make_last = fetch_line.is_none();
         let list_last = fresh.is_none() && fetch_line.is_none();
+        // Where the name stands in the words, for its weight.
+        let make_at = t("Create branch {name}…").find("{name}").unwrap_or(0);
         let make = fresh.map(|name| {
             let to = name.clone();
             h_flex()
@@ -6669,13 +6725,13 @@ impl Workbench {
                 .hover(|s| s.bg(theme.sidebar_accent))
                 .on_click(cx.listener(move |this, _, window, cx| this.branch_new_open(Some(to.clone()), window, cx)))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
-                .child(div().min_w_0().child(StyledText::new(format!("Create branch {name}…")).with_highlights([(14..14 + name.len(), HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() })])))
+                .child(div().min_w_0().child(StyledText::new(tf("Create branch {name}…", &[("name", &name)])).with_highlights([(make_at..make_at + name.len(), HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() })])))
         });
         // How the list is ordered: the settings panel's segmented
         // control in a small size, its plate sliding to the choice.
         let sort = div().flex_shrink_0().mr(px(4.)).child(self.segmented_sized(
             "branch-sort",
-            vec![("recent", "Recent".to_string(), None), ("name", "Name".to_string(), None)],
+            vec![("recent", t("Recent").to_string(), None), ("name", t("Name").to_string(), None)],
             if self.branch_by_name { "name" } else { "recent" },
             Rc::new(|this: &mut Self, key, window, cx| {
                 swallow_click(window, cx);
@@ -6711,7 +6767,7 @@ impl Workbench {
                     .pb(px(8.))
                     .items_center()
                     .justify_between()
-                    .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Switch branches"))
+                    .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(t("Switch branches")))
                     .child(sort)
                     .child(Button::new("branch-close").ghost().xsmall().icon(IconName::Close).on_click(cx.listener(|this, _, window, cx| this.close_branch_menu(window, cx)))),
             )
@@ -6720,7 +6776,7 @@ impl Workbench {
                     .id("branch-field")
                     .track_focus(&focus)
                     .role(Role::TextInput)
-                    .aria_label("Find or create a branch")
+                    .aria_label(t("Find or create a branch"))
                     .aria_value(typed)
                     .flex_1()
                     .min_w_0()
@@ -6733,10 +6789,10 @@ impl Workbench {
                     .text_size(px(13.))
                     .child(Icon::new(IconName::Search).with_size(px(13.)).text_color(theme.muted_foreground).flex_shrink_0())
                     .child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.branch_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.branch_input, false, cx)))),
-            ).child(choice_pill("branch-new-button", "icons/plus.svg", "New Branch", Press::Quiet, false, &theme)
+            ).child(choice_pill("branch-new-button", "icons/plus.svg", t("New Branch"), Press::Quiet, false, &theme)
                 .role(Role::Button)
-                .aria_label("New Branch")
-                .managed_tooltip(|window, cx| crate::workbench::tip("New Branch (⌘⇧N)", window, cx))
+                .aria_label(t("New Branch"))
+                .managed_tooltip(|window, cx| crate::workbench::tip(t("New Branch (⌘⇧N)"), window, cx))
                 // As tall as the field it stands beside.
                 .h(px(32.))
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -6781,7 +6837,7 @@ impl Workbench {
         });
         // A button as the branch's is, lit while its sheet is up.
         let open = self.changes.is_some();
-        let tip = if n > 0 { format!("{} \u{b7} Changes and History (⌘⇧G)", plural(n, "changed file", "changed files")) } else { "Changes and History (⌘⇧G)".to_string() };
+        let tip = if n > 0 { format!("{} \u{b7} {}", count(n, "{n} changed file", "{n} changed files"), t("Changes and History (⌘⇧G)")) } else { t("Changes and History (⌘⇧G)").to_string() };
         Some(
             h_flex()
                 .id("changes-pill")
@@ -6840,7 +6896,7 @@ impl Workbench {
             return self.close_changes(cx);
         }
         let Some(root) = self.files_root().filter(|r| git::inside(r) || !git::repos_under(r).is_empty()) else {
-            self.notice = Some(Notice::error("open a session in a git repository to see its changes"));
+            self.notice = Some(Notice::error(t("open a session in a git repository to see its changes")));
             cx.notify();
             return;
         };
@@ -6986,7 +7042,7 @@ impl Workbench {
         let items = if several {
             let paths = c.marked.clone();
             let item = |label: &'static str, what: FileDo| (label, MenuDo::Files(what, paths.clone()));
-            vec![item("Add to Message", FileDo::Mention), item("Copy Paths", FileDo::CopyPath), item("Copy Relative Paths", FileDo::CopyRel), ("", MenuDo::Rule), ("Discard Changes", MenuDo::Discard(paths.clone()))]
+            vec![item(t("Add to Message"), FileDo::Mention), item(t("Copy Paths"), FileDo::CopyPath), item(t("Copy Relative Paths"), FileDo::CopyRel), ("", MenuDo::Rule), (t("Discard Changes"), MenuDo::Discard(paths.clone()))]
         } else {
             c.marked = vec![path.clone()];
             c.anchor = Some(path.clone());
@@ -6995,9 +7051,9 @@ impl Workbench {
             let mut items = Vec::new();
             // A file taken out has nothing to open or to show.
             if path.exists() {
-                items.extend([item("Open", FileDo::Open), item(crate::sys::REVEAL_LABEL, FileDo::Reveal), ("", MenuDo::Rule), item("Add to Message", FileDo::Mention)]);
+                items.extend([item(t("Open"), FileDo::Open), item(t(crate::sys::REVEAL_LABEL), FileDo::Reveal), ("", MenuDo::Rule), item(t("Add to Message"), FileDo::Mention)]);
             }
-            items.extend([item("Copy Path", FileDo::CopyPath), item("Copy Relative Path", FileDo::CopyRel), ("", MenuDo::Rule), ("Discard Changes", MenuDo::Discard(vec![path.clone()]))]);
+            items.extend([item(t("Copy Path"), FileDo::CopyPath), item(t("Copy Relative Path"), FileDo::CopyRel), ("", MenuDo::Rule), (t("Discard Changes"), MenuDo::Discard(vec![path.clone()]))]);
             items
         };
         self.open_menu(at, items, cx);
@@ -7061,6 +7117,7 @@ impl Workbench {
         let left_out: Rc<HashSet<PathBuf>> = Rc::new(c.left_out.clone());
         let (accent, on_accent) = (theme.primary, theme.primary_foreground);
         let rows = Rc::new(self.change_rows());
+        let nrows = rows.len();
         // Of a folder of checkouts, which one the comparison is on: its
         // name in what is said, and its button in the head.
         let repo_name = self.repo_of(&root).map(|d| Self::repo_name(&d));
@@ -7152,10 +7209,10 @@ impl Workbench {
         let rgba_of = |hex: u32, a: f32| Hsla::from(rgb(hex)).opacity(a);
         let (add, add_no, del, del_no) = if dark { (rgba_of(0x2ea043, 0.16), rgba_of(0x3fb950, 0.30), rgba_of(0xf85149, 0.14), rgba_of(0xf85149, 0.30)) } else { (Hsla::from(rgb(0xe6ffec)), Hsla::from(rgb(0xccffd8)), Hsla::from(rgb(0xffebe9)), Hsla::from(rgb(0xffd7d5))) };
         let body = match &shown {
-            None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { "Reading…".to_string() } else if c.history { String::new() } else { match &repo_name { Some(r) => format!("Nothing has changed in {r} since the last commit."), None => "Nothing has changed since the last commit.".to_string() } }).into_any_element(),
+            None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { t("Reading…").to_string() } else if c.history { String::new() } else { match &repo_name { Some(r) => tf("Nothing has changed in {repo} since the last commit.", &[("repo", r)]), None => t("Nothing has changed since the last commit.").to_string() } }).into_any_element(),
             Some(d) if d.pictures.is_some() => picture_compare(d.pictures.as_ref().unwrap(), &c.pictures, &theme),
-            Some(d) if d.binary => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child("This file is not text, so there are no lines to compare.").into_any_element(),
-            Some(d) if d.rows.is_empty() => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child("No lines differ (the file is empty, or only its mode changed).").into_any_element(),
+            Some(d) if d.binary => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(t("This file is not text, so there are no lines to compare.")).into_any_element(),
+            Some(d) if d.rows.is_empty() => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(t("No lines differ (the file is empty, or only its mode changed).")).into_any_element(),
             Some(d) => {
                 let rows = d.clone();
                 // A file that is all new, or all gone, has one side to
@@ -7198,14 +7255,14 @@ impl Workbench {
                     .size_full()
                     .when(!d.cut, |el| el.pb(px(15.)))
                     .child(div().relative().flex_1().min_h_0().child(lines).vertical_scrollbar(&c.list))
-                    .when(d.cut, |el| el.child(div().flex_shrink_0().px(px(14.)).py(px(8.)).border_t_1().border_color(theme.border).text_size(px(12.)).text_color(quiet).child("Only the beginning of this comparison is shown.")))
+                    .when(d.cut, |el| el.child(div().flex_shrink_0().px(px(14.)).py(px(8.)).border_t_1().border_color(theme.border).text_size(px(12.)).text_color(quiet).child(t("Only the beginning of this comparison is shown."))))
                     .into_any_element()
             }
         };
         // Discard is asked of every file chosen; Open and Reveal of the one shown.
         // With none chosen, all three are asked of the file shown.
         let (open, reveal, discard) = (picked.clone().filter(|_| c.marked.len() <= 1), picked.clone().filter(|_| c.marked.len() <= 1), if c.marked.is_empty() { picked.clone().map(|p| vec![p]) } else { Some(c.marked.clone()) });
-        let discard_label: SharedString = if c.marked.len() > 1 { format!("Discard {}", c.marked.len()).into() } else { "Discard".into() };
+        let discard_label: SharedString = if c.marked.len() > 1 { tf("Discard {n}", &[("n", &c.marked.len())]).into() } else { t("Discard").into() };
         // The rectangle, over the rows, cut to the list's room.
         let band = c.band.filter(|_| c.band_live).map(|(a, b)| {
             let room = c.files.0.borrow().base_handle.bounds();
@@ -7291,7 +7348,7 @@ impl Workbench {
                             // committed yet, and what has been.
                             .child(div().flex_shrink_0().child(self.segmented_sized(
                                 "changes-tab",
-                                vec![("changes", "Changes".to_string(), None), ("history", "History".to_string(), None)],
+                                vec![("changes", t("Changes").to_string(), None), ("history", t("History").to_string(), None)],
                                 if c.history { "history" } else { "changes" },
                                 Rc::new(|this: &mut Self, key, window, cx| {
                                     swallow_click(window, cx);
@@ -7300,10 +7357,16 @@ impl Workbench {
                                 true,
                                 cx,
                             )))
-                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(quiet).child(if c.history { c.commits.as_ref().map(|l| plural(l.len(), "commit", "commits")).unwrap_or_default() } else { plural(rows.len(), "file", "files") }))
+                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(quiet).child(if c.history { c.commits.as_ref().map(|l| {
+                                let n = l.len();
+                                count(n, "{n} commit", "{n} commits")
+                            }).unwrap_or_default() } else { count(nrows, "{n} file", "{n} files") }))
                             // Of a folder of checkouts, the one the sheet
                             // is on stands before the branch, a button.
-                            .when_some(branch, |el, b| el.child(h_flex().min_w_0().gap(px(6.)).items_center().text_size(px(12.)).text_color(quiet).child("on").children(repo_pill).child(h_flex().min_w_0().gap(px(4.)).items_center().child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).flex_shrink_0()).child(div().min_w_0().truncate().text_color(ink).child(b)))))
+                            .when_some(branch, |el, b| {
+                                let at = h_flex().min_w_0().gap(px(6.)).items_center().children(repo_pill).child(h_flex().min_w_0().gap(px(4.)).items_center().child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).flex_shrink_0()).child(div().min_w_0().truncate().text_color(ink).child(b)));
+                                el.child(crate::i18n::weave(t("on {branch}"), vec![("branch", at.into_any_element())], h_flex().min_w_0().gap(px(6.)).items_center().text_size(px(12.)).text_color(quiet)))
+                            })
                             .child(div().flex_1())
                             .child(Button::new("changes-close").ghost().small().icon(IconName::Close).on_click(cx.listener(|this, _, _, cx| this.close_changes(cx)))),
                     )
@@ -7374,8 +7437,8 @@ impl Workbench {
                                                     let _ = this.update(cx, |this, cx| this.ask_discard(p.clone(), cx));
                                                 }))
                                             })
-                                            .when_some(open, |el, p| el.child(crate::branches::small_pill("changes-open", "icons/external-link.svg", "Open", Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&p))))
-                                            .when_some(reveal, |el, p| el.child(crate::branches::small_pill("changes-reveal", "icons/folder-open.svg", crate::sys::REVEAL_LABEL, Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::reveal_path(&p)))),
+                                            .when_some(open, |el, p| el.child(crate::branches::small_pill("changes-open", "icons/external-link.svg", t("Open"), Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&p))))
+                                            .when_some(reveal, |el, p| el.child(crate::branches::small_pill("changes-reveal", "icons/folder-open.svg", t(crate::sys::REVEAL_LABEL), Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::reveal_path(&p)))),
                                     )
                                     .child(div().flex_1().min_h_0().child(body)),
                             )
@@ -7486,7 +7549,7 @@ impl Workbench {
                         v_flex()
                             .gap(px(10.))
                             .child(v_flex().relative().w(px(room)).bg(gpui::white()).border_1().border_color(theme.border).overflow_hidden().children(strips).children(links))
-                            .when(shot.more, |d| d.child(quiet("The page goes on past here.".into())))
+                            .when(shot.more, |d| d.child(quiet(t("The page goes on past here.").into())))
                             .into_any_element()
                     }
                     // Until it is drawn, its words as the toolkit reads
@@ -7500,7 +7563,7 @@ impl Workbench {
                 let from = if drawn.is_some() { None } else { self.picture_source(&v.path, cx) };
                 let size = &size.or_else(|| from.as_deref().and_then(crate::pictures::dims));
                 if drawn.is_none() && from.is_none() {
-                    return v_flex().py(px(60.)).items_center().child(quiet("Drawing the picture…".into())).into_any_element();
+                    return v_flex().py(px(60.)).items_center().child(quiet(t("Drawing the picture…").into())).into_any_element();
                 }
                 // At its own size when that fits, never larger.
                 let (pw, ph) = match size {
@@ -7514,8 +7577,8 @@ impl Workbench {
             }
             // The document's own pane stands in the body's place.
             FileBody::Word if self.word.is_some() => div().into_any_element(),
-            FileBody::Word => v_flex().py(px(60.)).items_center().child(quiet("Opening the document…".into())).into_any_element(),
-            FileBody::Pages(None) => v_flex().py(px(60.)).items_center().child(quiet("Drawing the pages…".into())).into_any_element(),
+            FileBody::Word => v_flex().py(px(60.)).items_center().child(quiet(t("Opening the document…").into())).into_any_element(),
+            FileBody::Pages(None) => v_flex().py(px(60.)).items_center().child(quiet(t("Drawing the pages…").into())).into_any_element(),
             FileBody::Pages(Some(doc)) => {
                 let (sel, hits, on) = (self.pdf_sel, std::rc::Rc::new(self.pdf_hits.clone()), self.pdf_hits.get(self.pdf_hit).copied());
                 let showing = self.pdf_find_open;
@@ -7608,7 +7671,7 @@ impl Workbench {
                                 }),
                             )
                     }))
-                    .child(quiet(if doc.total > doc.pages.len() { format!("The first {} of {} pages. Open the file for the rest.", doc.pages.len(), doc.total) } else { plural(doc.total, "page", "pages") }))
+                    .child(quiet(if doc.total > doc.pages.len() { tf("The first {n} of {total} pages. Open the file for the rest.", &[("n", &doc.pages.len()), ("total", &doc.total)]) } else { count(doc.total, "{n} page", "{n} pages") }))
                     .into_any_element()
             }
             FileBody::Table(rows, widths, more) => {
@@ -7623,7 +7686,7 @@ impl Workbench {
                     heads = Some(self.render_table_heads(v, rows.len(), widths, cx));
                     self.render_table(v, rows, widths, *more, cx)
                 }
-                _ => div().p(px(18.)).child(quiet("This sheet is empty.".into())).into_any_element(),
+                _ => div().p(px(18.)).child(quiet(t("This sheet is empty.").into())).into_any_element(),
             },
             FileBody::None(why) => v_flex()
                 .py(px(60.))
@@ -7632,7 +7695,7 @@ impl Workbench {
                 .text_color(theme.muted_foreground)
                 .child(crate::pictures::kind_tile(&name, 56., theme.mode.is_dark()))
                 .child(div().text_size(px(13.)).text_center().child(why.clone()))
-                .child(choice_pill("file-open-default", "icons/external-link.svg", "Open with default app", Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&open_too)))
+                .child(choice_pill("file-open-default", "icons/external-link.svg", t("Open with default app"), Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&open_too)))
                 .into_any_element(),
         };
         // Code, and markdown or a table as it is written: the toolkit's
@@ -7664,9 +7727,9 @@ impl Workbench {
                             let mut items: Vec<(&'static str, MenuDo)> = this.file_corrections(at, cx);
                             if items.is_empty() {
                                 if selection {
-                                    items.push(("Copy", MenuDo::Edit(crate::workbench::EditDo::Copy, focus.clone())));
+                                    items.push((t("Copy"), MenuDo::Edit(crate::workbench::EditDo::Copy, focus.clone())));
                                 }
-                                items.push(("Select All", MenuDo::Edit(crate::workbench::EditDo::SelectAll, focus)));
+                                items.push((t("Select All"), MenuDo::Edit(crate::workbench::EditDo::SelectAll, focus)));
                             }
                             // The text's own two and no more: what is
                             // asked of the file is on its row's menu.
@@ -7679,7 +7742,7 @@ impl Workbench {
         });
         let word = self.word.as_ref().filter(|w| matches!(v.body, FileBody::Word) && !leaving && w.read(cx).path == v.path).map(|w| w.clone().into_any_element());
         let cut = match &v.body {
-            FileBody::Code(_, _, dropped) if *dropped > 0 => Some(div().flex_shrink_0().px(px(pad_x)).py(px(8.)).border_t_1().border_color(theme.border).child(quiet(format!("Only the first {PREVIEW_LINES} lines are shown. Open the file for the rest.")))),
+            FileBody::Code(_, _, dropped) if *dropped > 0 => Some(div().flex_shrink_0().px(px(pad_x)).py(px(8.)).border_t_1().border_color(theme.border).child(quiet(tf("Only the first {n} lines are shown. Open the file for the rest.", &[("n", &PREVIEW_LINES)])))),
             _ => None,
         };
         // What the file is drawn again as, so a new one fades in.
@@ -7727,10 +7790,10 @@ impl Workbench {
         let modes = if leaving {
             None
         } else if two_ways {
-            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, if table { "Table" } else { "Rendered" }), ("icons/file-code.svg", "Raw"), |this, first, cx| this.set_file_raw(!first, cx), cx))
+            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, if table { t("Table") } else { t("Rendered") }), ("icons/file-code.svg", t("Raw")), |this, first, cx| this.set_file_raw(!first, cx), cx))
         } else if pdf {
             let (was, serial) = self.pdf_side_anim.map(|(was, _, n)| (was, n)).unwrap_or((self.pdf_side, 0));
-            Some(pair("pdf-side", self.pdf_side, was, serial, ("icons/gallery-vertical-end.svg", "Pages"), ("icons/list-bullets.svg", "Contents"), |this, first, cx| this.pdf_side_toggle(first, cx), cx))
+            Some(pair("pdf-side", self.pdf_side, was, serial, ("icons/gallery-vertical-end.svg", t("Pages")), ("icons/list-bullets.svg", t("Contents")), |this, first, cx| this.pdf_side_toggle(first, cx), cx))
         } else {
             None
         };
@@ -7747,7 +7810,7 @@ impl Workbench {
         // letters' at the head's sizes, a little over.
         let words_room = f32::from(w) - if compact { parts(24., 3.) } else { parts(68., 4.) };
         let size_text = match &v.body {
-            FileBody::Pages(Some(doc)) => format!("page {} of {}", self.pdf_page_now() + 1, doc.total),
+            FileBody::Pages(Some(doc)) => tf("page {n} of {total}", &[("n", &(self.pdf_page_now() + 1)), ("total", &doc.total)]),
             _ => human_size(v.size),
         };
         let size_said = words_room >= name.chars().count() as f32 * 7.4 + gap + size_text.chars().count() as f32 * 6.4;
@@ -7779,7 +7842,7 @@ impl Workbench {
                         }))
                         .into_any_element()
                 } else if doc.contents.is_empty() {
-                    div().px(px(10.)).py(px(14.)).text_size(px(11.5)).text_color(theme.muted_foreground).child("This file has no table of contents.").into_any_element()
+                    div().px(px(10.)).py(px(14.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(t("This file has no table of contents.")).into_any_element()
                 } else {
                     // The heading the page in view is under: the last one at or before it.
                     let here = doc.contents.iter().rposition(|(_, page, _)| page.is_some_and(|p| p <= now));
@@ -7836,7 +7899,7 @@ impl Workbench {
             let focus = self.pdf_find_input.read(cx).focus_handle(cx);
             let value = self.pdf_find_input.read(cx).value().to_string();
             let (n, at) = if text_find { (self.text_find.count(), self.text_find.current()) } else { (self.pdf_hits.len(), self.pdf_hit) };
-            let count = if value.trim().is_empty() { String::new() } else if n == 0 { "no matches".into() } else { format!("{} of {n}", at + 1) };
+            let count = if value.trim().is_empty() { String::new() } else if n == 0 { t("no matches").into() } else { tf("{n} of {total}", &[("n", &(at + 1)), ("total", &n)]) };
             let hover = theme.foreground.opacity(0.07);
             let tool = |id: &'static str, icon: Icon, tip: &'static str, able: bool| {
                 div()
@@ -7882,9 +7945,9 @@ impl Workbench {
                         .child(gpui_component::input::Input::new(&self.pdf_find_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.pdf_find_input, false, cx))),
                 )
                 .when(!count.is_empty(), |d| d.child(div().flex_shrink_0().px(px(2.)).text_size(px(11.5)).text_color(if n == 0 { theme.danger } else { theme.muted_foreground }).child(count)))
-                .child(tool("file-find-prev", Icon::new(IconName::ChevronUp), "Previous (⇧↩)", n > 0).on_click(cx.listener(move |this, _, _, cx| if text_find { this.text_find_step(-1, cx) } else { this.pdf_find_step(-1, cx) })))
-                .child(tool("file-find-next", Icon::new(IconName::ChevronDown), "Next (↩)", n > 0).on_click(cx.listener(move |this, _, _, cx| if text_find { this.text_find_step(1, cx) } else { this.pdf_find_step(1, cx) })))
-                .child(tool("file-find-close", Icon::new(IconName::Close), "Close (esc)", true).on_click(cx.listener(move |this, _, window, cx| if text_find { this.text_find_close(window, cx) } else { this.pdf_find_close(window, cx) })));
+                .child(tool("file-find-prev", Icon::new(IconName::ChevronUp), t("Previous (⇧↩)"), n > 0).on_click(cx.listener(move |this, _, _, cx| if text_find { this.text_find_step(-1, cx) } else { this.pdf_find_step(-1, cx) })))
+                .child(tool("file-find-next", Icon::new(IconName::ChevronDown), t("Next (↩)"), n > 0).on_click(cx.listener(move |this, _, _, cx| if text_find { this.text_find_step(1, cx) } else { this.pdf_find_step(1, cx) })))
+                .child(tool("file-find-close", Icon::new(IconName::Close), t("Close (esc)"), true).on_click(cx.listener(move |this, _, window, cx| if text_find { this.text_find_close(window, cx) } else { this.pdf_find_close(window, cx) })));
             let shell = div().w_full().flex_shrink_0().overflow_hidden().child(div().w_full().flex_shrink_0().px(px(8.)).pt(px(6.)).pb(px(4.)).child(card));
             match moving {
                 Some((coming, serial)) => shell
@@ -8003,10 +8066,10 @@ impl Workbench {
                         let button = if compact {
                             Button::new("file-save").ghost().small().icon(Icon::default().path("icons/device-floppy.svg")).on_click(cx.listener(save)).into_any_element()
                         } else {
-                            crate::branches::small_pill("file-save", "icons/device-floppy.svg", "Save", Press::Quiet, false, &theme).on_click(cx.listener(save)).into_any_element()
+                            crate::branches::small_pill("file-save", "icons/device-floppy.svg", t("Save"), Press::Quiet, false, &theme).on_click(cx.listener(save)).into_any_element()
                         };
                         d.child(
-                            div().id("file-save-tip").flex_shrink_0().managed_tooltip(|window, cx| crate::workbench::tip("Save (⌘S)", window, cx)).child(button)
+                            div().id("file-save-tip").flex_shrink_0().managed_tooltip(|window, cx| crate::workbench::tip(t("Save (⌘S)"), window, cx)).child(button)
                             .with_animation(if compact { "file-save-in-compact" } else { "file-save-in" }, Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
                         )
                     })
@@ -8017,18 +8080,18 @@ impl Workbench {
                         // tree has; they fade in as they change places.
                         let ways = if compact {
                             let path = more.clone();
-                            h_flex().child(tool("file-more", Icon::new(IconName::Ellipsis), "More").on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                            h_flex().child(tool("file-more", Icon::new(IconName::Ellipsis), t("More")).on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                                 swallow_click(window, cx);
-                                this.open_menu(e.position(), vec![("Open", MenuDo::File(FileDo::Open, path.clone())), (crate::sys::REVEAL_LABEL, MenuDo::File(FileDo::Reveal, path.clone()))], cx);
+                                this.open_menu(e.position(), vec![(t("Open"), MenuDo::File(FileDo::Open, path.clone())), (t(crate::sys::REVEAL_LABEL), MenuDo::File(FileDo::Reveal, path.clone()))], cx);
                             })))
                         } else {
                             h_flex()
                                 .gap(px(7.))
-                                .child(tool("file-open", Icon::default().path("icons/external-link.svg"), "Open with default app").on_click(move |_, _, _| crate::sys::open_path(&open)))
-                                .child(tool("file-reveal", Icon::default().path("icons/folder-open.svg"), crate::sys::REVEAL_LABEL).on_click(move |_, _, _| crate::sys::reveal_path(&reveal)))
+                                .child(tool("file-open", Icon::default().path("icons/external-link.svg"), t("Open with default app")).on_click(move |_, _, _| crate::sys::open_path(&open)))
+                                .child(tool("file-reveal", Icon::default().path("icons/folder-open.svg"), t(crate::sys::REVEAL_LABEL)).on_click(move |_, _, _| crate::sys::reveal_path(&reveal)))
                         };
                         d.child(ways.flex_shrink_0().with_animation(if compact { "file-ways-compact" } else { "file-ways" }, Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t)))
-                        .child(tool("file-enlarge", Icon::default().path(if big { "icons/minimize.svg" } else { "icons/maximize.svg" }), if big { "Restore" } else { "Enlarge" }).on_click(cx.listener(|this, _, window, cx| {
+                        .child(tool("file-enlarge", Icon::default().path(if big { "icons/minimize.svg" } else { "icons/maximize.svg" }), if big { t("Restore") } else { t("Enlarge") }).on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.file_enlarge(window, cx)
                         })))
@@ -8049,7 +8112,7 @@ impl Workbench {
                                 .justify_center()
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(hover_bg))
-                                .managed_tooltip(move |window, cx| crate::workbench::tip(if dirty { "Close (⌘W), not saved" } else { "Close (⌘W)" }, window, cx))
+                                .managed_tooltip(move |window, cx| crate::workbench::tip(if dirty { t("Close (⌘W), not saved") } else { t("Close (⌘W)") }, window, cx))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     swallow_click(window, cx);
                                     this.close_file_view(cx)
@@ -8211,17 +8274,18 @@ impl Workbench {
                 .justify_center()
                 .gap(px(12.))
                 .px(px(16.))
-                .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).text_center().child("The outline is turned off."))
-                .child(choice_pill("outline-settings", "icons/settings.svg", "Open Settings", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).text_center().child(t("The outline is turned off.")))
+                .child(choice_pill("outline-settings", "icons/settings.svg", t("Open Settings"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.open_settings(Some("conversation"), cx);
                 })))
                 .with_animation("outline-off", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t));
-            let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Outline", None, None, &theme)).child(note);
+            let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head(t("Outline"), None, None, &theme)).child(note);
             return self.panel_in(false, el);
         }
         let Some(d) = self.detail.as_mut() else { return div().into_any_element() };
         let entries = d.outline.get_or_insert_with(|| Rc::new(outline::of(&d.session))).clone();
+        let nentries = entries.len();
         let key = d.key.clone();
         // The round in view is the one at the top, or the last once the
         // conversation is at its end, where a short last round never
@@ -8317,7 +8381,7 @@ impl Workbench {
                     (_, Kind::Queued) => d.border_1().border_color(theme.muted_foreground.opacity(0.4)).text_color(theme.muted_foreground),
                     _ => d.bg(theme.muted_foreground.opacity(if dark { 0.16 } else { 0.11 })).text_color(theme.muted_foreground),
                 })
-                .child(if e.kind == Kind::Queued && when.is_empty() { "queued".to_string() } else { when });
+                .child(if e.kind == Kind::Queued && when.is_empty() { t("queued").to_string() } else { when });
             let round = e.round;
             rows.push(
                 h_flex()
@@ -8405,7 +8469,7 @@ impl Workbench {
             heads.iter().rev().find(|(child, lead, _)| self.outline_scroll.bounds_for_item(*child).is_some_and(|b| b.top() + off + px(*lead) < view.top() + PIN_LEAD - px(0.5))).map(|(_, _, day)| day.clone())
         };
         let body = if rows.is_empty() {
-            div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child("Nothing said yet.").into_any_element()
+            div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child(t("Nothing said yet.")).into_any_element()
         } else {
             v_flex()
                 .relative()
@@ -8435,17 +8499,20 @@ impl Workbench {
                 .with_animation("outline-on", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
                 .into_any_element()
         };
-        let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Outline", None, Some(if waiting > 0 {
+        let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head(t("Outline"), None, Some(if waiting > 0 {
             // The labels are on their way.
+            // Narrow, and in a long language, the words give way to the
+            // panel's name.
             h_flex()
+                .min_w_0()
                 .gap(px(6.))
                 .items_center()
                 .text_color(theme.muted_foreground)
                 .child(crate::workbench::agent_glyph(emaki_core::model::AgentId::ClaudeCode, px(11.), crate::workbench::agent_color(emaki_core::model::AgentId::ClaudeCode, &theme), true, "outline-summing"))
-                .child("Summarizing…")
+                .child(div().min_w_0().truncate().child(t("Summarizing…")))
                 .into_any_element()
         } else {
-            div().text_color(theme.muted_foreground.opacity(0.8)).child(plural(entries.len(), "prompt", "prompts")).into_any_element()
+            div().text_color(theme.muted_foreground.opacity(0.8)).child(crate::i18n::count(nentries, "{n} prompt", "{n} prompts")).into_any_element()
         }), &theme)).child(body);
         self.panel_in(false, el)
     }
@@ -8542,7 +8609,7 @@ impl Workbench {
             // that refused.
             "branchnew" => self.branch_new_probe = Some(String::new()),
             t if t.starts_with("branchnew:") => self.branch_new_probe = Some(t["branchnew:".len()..].to_string()),
-            "gitgate" => self.open_gate("publish this branch".into(), "could not read Username for 'https://github.com': terminal prompts disabled".into(), cx),
+            "gitgate" => self.open_gate(tf("{host} did not take this machine's sign-in, so Emaki could not publish {branch}. Nothing was changed.", &[("branch", &"v2")]), "could not read Username for 'https://github.com': terminal prompts disabled".into(), cx),
             "branchfetch" => self.branch_fetch(true, cx),
             // Create Branch on that sheet, and Publish on the branch
             // checked out.
@@ -8737,7 +8804,7 @@ impl Workbench {
             }
             "file:menu" => {
                 let at = self.file_view_scroll.bounds().origin + point(px(40.), px(40.));
-                self.file_pane_menu(vec![("Copy", MenuDo::Copy(String::new()))], at, cx);
+                self.file_pane_menu(vec![(t("Copy"), MenuDo::Copy(String::new()))], at, cx);
             }
             // Fold the section that line (from 1) of the file's editor heads.
             t if t.starts_with("file:fold:") => {

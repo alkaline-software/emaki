@@ -28,6 +28,8 @@ use emaki_core::transcript::SessionRef;
 use emaki_core::update::{self, UpdateState};
 use emaki_core::watcher::Watcher;
 
+use crate::i18n::{t, tf};
+
 /// A process behind a transcript is assumed for this long after its last write
 /// when nothing else says so.
 pub const LIVE_GRACE_S: f64 = 600.0;
@@ -624,8 +626,8 @@ impl Hub {
                 Some(Ok(pty)) => {
                     hub.attached.lock().unwrap().insert(sid.clone(), pty);
                 }
-                Some(Err(e)) => hub.send(HubEvent::Note(format!("could not start {}'s terminal: {e}", agent.display_name()))),
-                None => hub.send(HubEvent::Note(format!("{} has no terminal to show here", agent.display_name()))),
+                Some(Err(e)) => hub.send(HubEvent::Note(tf("could not start {agent}'s terminal: {error}", &[("agent", &agent.display_name()), ("error", &e)]))),
+                None => hub.send(HubEvent::Note(tf("{agent} has no terminal to show here", &[("agent", &agent.display_name())]))),
             }
             hub.attaching.lock().unwrap().remove(&sid);
             hub.send(HubEvent::Screen(sid));
@@ -766,13 +768,13 @@ impl Hub {
     }
 
     fn type_message_now(&self, sid: &str, text: &str, images: &[PathBuf], ask: bool) -> Result<(), String> {
-        let Some(pty) = self.terminal_for(sid) else { return Err("claude is not running; try again".into()) };
+        let Some(pty) = self.terminal_for(sid) else { return Err(t("claude is not running; try again").into()) };
         let look = Duration::from_millis(60);
         let started = Instant::now();
         let mut asked = false;
         loop {
             if !pty.alive() {
-                return Err("claude exited before it took the message".into());
+                return Err(t("claude exited before it took the message").into());
             }
             // Claude Code up and registered: its own record, or, for a
             // session its daemon runs as a job, the job's, since a
@@ -787,7 +789,7 @@ impl Hub {
                 self.send(HubEvent::TerminalNeeded(sid.to_string()));
             }
             if started.elapsed() > Duration::from_secs(600) {
-                return Err("claude never came to its prompt".into());
+                return Err(t("claude never came to its prompt").into());
             }
             thread::sleep(look);
         }
@@ -980,10 +982,10 @@ impl Hub {
             let failed = match &what {
                 Setting::Mode(m) => d.set_mode(m).err().map(|e| (options.mode(m).map(|c| c.label.clone()).unwrap_or_else(|| m.clone()), e)),
                 Setting::Model(m) => d.set_model(m).err().map(|e| (options.model(m).map(|c| c.label.clone()).unwrap_or_else(|| m.clone()), e)),
-                Setting::Effort(e) => d.set_effort(e).err().map(|err| (format!("{} effort", options.effort_label(&d.model(), e)), err)),
+                Setting::Effort(e) => d.set_effort(e).err().map(|err| (tf("{level} effort", &[("level", &options.effort_label(&d.model(), e))]), err)),
             };
             if let Some((name, e)) = failed {
-                hub.send(HubEvent::Note(format!("could not switch to {name}: {}", e.0)));
+                hub.send(HubEvent::Note(tf("could not switch to {name}: {error}", &[("name", &name), ("error", &e.0)])));
             }
             hub.send(HubEvent::Driver { session_id: sid.clone(), event: driver::Event::Mode(d.mode()) });
             hub.send(HubEvent::Driver { session_id: sid, event: driver::Event::Init(d.caps()) });
@@ -1013,7 +1015,7 @@ impl Hub {
         thread::spawn(move || {
             hub.refresh_peers();
             let error = match hub.peer_for(&sid) {
-                None => "this session has no inbox any more".to_string(),
+                None => t("this session has no inbox any more").to_string(),
                 Some(p) => {
                     let words = text.trim().to_string();
                     let again = hub.inbox_last.lock().unwrap().get(&sid).is_some_and(|(last, at)| *last == words && at.elapsed() < peer::REPEAT_WINDOW);
@@ -1039,7 +1041,8 @@ impl Hub {
             let now = match d.set_mode(&mode) {
                 Ok(now) => now,
                 Err(e) => {
-                    hub.send(HubEvent::Note(format!("could not switch to {}: {}", hub.options_for(d.agent(), &d.cwd()).mode(&mode).map(|m| m.label.clone()).unwrap_or_else(|| mode.clone()), e.0)));
+                    let name = hub.options_for(d.agent(), &d.cwd()).mode(&mode).map(|m| m.label.clone()).unwrap_or_else(|| mode.clone());
+                    hub.send(HubEvent::Note(tf("could not switch to {name}: {error}", &[("name", &name), ("error", &e.0)])));
                     d.mode()
                 }
             };
@@ -1056,7 +1059,8 @@ impl Hub {
         let sid = session_id.to_string();
         thread::spawn(move || {
             if let Err(e) = d.set_model(&model) {
-                hub.send(HubEvent::Note(format!("could not switch to {}: {}", hub.options_for(d.agent(), &d.cwd()).model(&model).map(|m| m.label.clone()).unwrap_or_else(|| driver::model_label(&model)), e.0)));
+                let name = hub.options_for(d.agent(), &d.cwd()).model(&model).map(|m| m.label.clone()).unwrap_or_else(|| t(&driver::model_label(&model)).to_string());
+                hub.send(HubEvent::Note(tf("could not switch to {name}: {error}", &[("name", &name), ("error", &e.0)])));
             }
             hub.send(HubEvent::Driver { session_id: sid, event: driver::Event::Init(d.caps()) });
         });

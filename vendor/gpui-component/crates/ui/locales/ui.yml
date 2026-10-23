@@ -267,21 +267,41 @@ Input:
     zh-CN: 剪切
     zh-HK: 剪切
     zh-TW: 剪下
+    ja: カット
+    ko: 잘라내기
+    fr: Couper
+    de: Ausschneiden
+    es: Cortar
   Copy:
     en: Copy
     zh-CN: 复制
     zh-HK: 複製
     zh-TW: 複製
+    ja: コピー
+    ko: 복사하기
+    fr: Copier
+    de: Kopieren
+    es: Copiar
   Paste:
     en: Paste
     zh-CN: 粘贴
     zh-HK: 貼上
     zh-TW: 貼上
+    ja: ペースト
+    ko: 붙여넣기
+    fr: Coller
+    de: Einsetzen
+    es: Pegar
   Select All:
     en: Select All
     zh-CN: 全选
     zh-HK: 全選
     zh-TW: 全選
+    ja: すべてを選択
+    ko: 전체 선택
+    fr: Tout sélectionner
+    de: Alles auswählen
+    es: Seleccionar todo
   Go to Definition:
     en: Go to Definition
     zh-CN: 跳转到定义

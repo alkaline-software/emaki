@@ -37,8 +37,9 @@ use emaki_core::options::{humanize, Choice, Options};
 use emaki_core::search::Results;
 use emaki_core::transcript::{Naming, SessionRef};
 
-use crate::format::{day, elapsed_since, now_secs, plural, stamp};
+use crate::format::{day, elapsed_since, now_secs, stamp};
 use crate::hub::{Hub, HubEvent, UpdateEvent};
+use crate::i18n::{count, phrase, t, tf};
 use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
@@ -131,16 +132,20 @@ pub(crate) enum MenuDo {
     /// Open this folder in the file manager; none when it is gone.
     OpenFolder(Option<String>),
     /// Pin the project to the head of the sidebar's list, or let it go
-    /// back to where it stands by itself.
+    /// back to where it stands by itself (`Unpin`, the same toggle with
+    /// its own icon).
     Pin(String),
+    Unpin(String),
     /// Something asked of the sidebar's projects, one or several chosen
     /// together.
     Projects(ProjectsDo, Vec<String>),
     /// Give the session, by its key, a name of the person's own,
     /// written where the menu was asked for.
     Rename(String, RenameAt),
-    /// Show the session's transcript in the file manager.
+    /// Show a file in the file manager; `RevealTranscript` is the same
+    /// for a session's transcript, with the icon of one.
     Reveal(PathBuf),
+    RevealTranscript(PathBuf),
     /// Something asked of a file or folder in the files panel.
     File(crate::panels::FileDo, PathBuf),
     /// The same asked of several chosen there at once.
@@ -149,6 +154,9 @@ pub(crate) enum MenuDo {
     DeleteBranch(String),
     /// Put these words on the clipboard.
     Copy(String),
+    /// The same, with an icon that says what the words are (a session's
+    /// id, a command, a branch's name).
+    CopyAs(&'static str, String),
     /// Put this picture on the clipboard.
     CopyImage(Pic),
     /// Show the session in the terminal at the conversation's right.
@@ -186,21 +194,23 @@ pub(crate) enum MenuDo {
 impl MenuDo {
     /// The icon in front of a choice: what it does, at a glance. Every
     /// choice of a menu has one or none has, so its words stand in one
-    /// column.
-    fn icon(&self, label: &str) -> &'static str {
+    /// column. It comes from what the choice is, never from its words,
+    /// which are in the person's language.
+    fn icon(&self) -> &'static str {
         use crate::panels::FileDo;
         match self {
             MenuDo::Rename(..) | MenuDo::File(FileDo::Rename, _) => "icons/pencil-simple.svg",
             MenuDo::OpenFolder(_) => "icons/folder-open.svg",
-            MenuDo::Pin(_) if label.starts_with("Unpin") => "icons/pinned-off.svg",
+            MenuDo::Unpin(_) => "icons/pinned-off.svg",
             MenuDo::Pin(_) => "icons/pin.svg",
             MenuDo::Projects(ProjectsDo::Open, _) => "icons/folder-open.svg",
             MenuDo::Projects(ProjectsDo::Hide, _) => "icons/eye-off.svg",
             MenuDo::Projects(ProjectsDo::Show, _) => "icons/eye.svg",
-            MenuDo::Reveal(_) if label.contains("Transcript") => "icons/file-text.svg",
+            MenuDo::RevealTranscript(_) => "icons/file-text.svg",
             MenuDo::Reveal(_) | MenuDo::File(FileDo::Reveal, _) => "icons/folder-open.svg",
             MenuDo::File(FileDo::Changes, _) => "icons/git-diff.svg",
-            MenuDo::File(FileDo::Open, _) if label.contains(" in ") || label.ends_with("folder") => "icons/folder-open.svg",
+            // A folder opens in the file manager; a file in its app.
+            MenuDo::File(FileDo::Open, path) if path.is_dir() => "icons/folder-open.svg",
             MenuDo::File(FileDo::Open, _) => "icons/external-link.svg",
             MenuDo::File(FileDo::Mention, _) | MenuDo::Files(FileDo::Mention, _) => "icons/at.svg",
             MenuDo::Files(FileDo::Trash, _) => "icons/trash.svg",
@@ -216,9 +226,7 @@ impl MenuDo {
             MenuDo::File(FileDo::CopyPath | FileDo::CopyRel | FileDo::Copy, _) => "icons/copy.svg",
             MenuDo::File(FileDo::Paste, _) => "icons/clipboard.svg",
             MenuDo::File(FileDo::Collapse, _) => "icons/copy-minus.svg",
-            MenuDo::Copy(_) if label.contains("Session ID") => "icons/hash.svg",
-            MenuDo::Copy(_) if label.contains("Command") => "icons/terminal.svg",
-            MenuDo::Copy(_) if label.contains("Branch") => "icons/git-branch.svg",
+            MenuDo::CopyAs(icon, _) => icon,
             MenuDo::DeleteBranch(_) => "icons/trash.svg",
             MenuDo::Copy(_) => "icons/copy.svg",
             MenuDo::CopyImage(_) => "icons/image.svg",
@@ -243,10 +251,12 @@ impl MenuDo {
     /// The words of a choice, where they are not the same every time.
     fn words(&self, label: &'static str) -> SharedString {
         match self {
-            MenuDo::Fix(_, with) | MenuDo::FixFile(_, with) if with.is_empty() => "Remove".into(),
+            MenuDo::Fix(_, with) | MenuDo::FixFile(_, with) if with.is_empty() => t("Remove").into(),
             MenuDo::Fix(_, with) | MenuDo::FixFile(_, with) => with.clone().into(),
             MenuDo::Note(what) => what.clone().into(),
-            _ => label.into(),
+            // A label is kept in English, which `icon` reads; it is put
+            // in the language in use here, as it is drawn.
+            _ => t(label).into(),
         }
     }
 }
@@ -573,13 +583,22 @@ pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("text", "Text Size", "icons/a-large-small.svg"), ("conversation", "Conversation", "icons/book-open.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("about", "About", "icons/info.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
+    ("appearance", phrase("Appearance"), "icons/palette.svg"),
+    ("fonts", phrase("Fonts"), "icons/typography.svg"),
+    ("text", phrase("Text Size"), "icons/a-large-small.svg"),
+    ("conversation", phrase("Conversation"), "icons/book-open.svg"),
+    ("sessions", phrase("New sessions"), "icons/square-terminal.svg"),
+    ("terminal", phrase("Terminal"), "icons/terminal.svg"),
+    ("files", phrase("Files"), "icons/tree-view.svg"),
+    ("about", phrase("About"), "icons/info.svg"),
+];
 /// What the composer says when empty: on the home page, and on a session.
 /// Drawn by `render_composer_hint`.
-pub const PLACEHOLDER_NEW: &str = "Start a session…";
-pub const PLACEHOLDER_REPLY: &str = "Reply…";
+pub const PLACEHOLDER_NEW: &str = phrase("Start a session…");
+pub const PLACEHOLDER_REPLY: &str = phrase("Reply…");
 /// While a question of Claude's is waiting, what is typed answers it.
-pub const PLACEHOLDER_ANSWER: &str = "Type an answer…";
+pub const PLACEHOLDER_ANSWER: &str = phrase("Type an answer…");
 /// How long the window waits to come back from the terminal on its own.
 const COME_BACK_SECS: f64 = 15. * 60.;
 
@@ -587,11 +606,11 @@ const COME_BACK_SECS: f64 = 15. * 60.;
 /// where no child has said what it knows: the ones that run headlessly
 /// and mean something on a fresh session. A running driver lists its own.
 const BUILTIN_COMMANDS: &[(&str, &str, &str)] = &[
-    ("compact", "Free up context by summarizing the conversation so far", "[instructions]"),
-    ("effort", "Set the effort level", "low | medium | high | max"),
-    ("context", "Show what is in the context window", ""),
-    ("cost", "Show what this session has cost", ""),
-    ("status", "Show the session's status", ""),
+    ("compact", phrase("Free up context by summarizing the conversation so far"), phrase("[instructions]")),
+    ("effort", phrase("Set the effort level"), "low | medium | high | max"),
+    ("context", phrase("Show what is in the context window"), ""),
+    ("cost", phrase("Show what this session has cost"), ""),
+    ("status", phrase("Show the session's status"), ""),
 ];
 /// How many recent folders the home page's folder list offers.
 pub const HOME_FOLDERS: usize = 4;
@@ -627,11 +646,11 @@ impl Column {
     pub const LIVE: [Column; 4] = [Column::NeedsYou, Column::Planning, Column::Working, Column::YourTurn];
     pub fn title(self) -> &'static str {
         match self {
-            Column::NeedsYou => "needs you",
-            Column::Planning => "planning",
-            Column::Working => "working",
-            Column::YourTurn => "your turn",
-            Column::Done => "done",
+            Column::NeedsYou => phrase("needs you"),
+            Column::Planning => phrase("planning"),
+            Column::Working => phrase("working"),
+            Column::YourTurn => phrase("your turn"),
+            Column::Done => phrase("done"),
         }
     }
 }
@@ -693,7 +712,7 @@ pub enum Inner {
 const SCROLL_GAP: Duration = Duration::from_millis(150);
 
 /// Why neither the terminal nor the project folder button can do anything.
-const FOLDER_GONE: &str = "The session's folder is gone";
+const FOLDER_GONE: &str = phrase("The session's folder is gone");
 
 /// `el`, which lies over the whole window, fading in over a moment when
 /// it first appears. The id is the element's own: it is forgotten once
@@ -760,7 +779,7 @@ const PLAN_BOX_H: Pixels = px(360.);
 
 /// The name a session begun from a folder's plus goes by until it has
 /// one of its own.
-const NEW_TITLE: &str = "New Session";
+const NEW_TITLE: &str = phrase("New Session");
 
 /// The round a message sent from here stands in until the transcript has
 /// it, by its `uuid`. No row has this one.
@@ -783,7 +802,7 @@ pub struct Outgoing {
 
 /// Why nothing that needs Claude Code is done on a session begun here
 /// and not yet sent to: there is none behind it until then.
-const DRAFT_WAITS: &str = "send a first message to start this session";
+const DRAFT_WAITS: &str = phrase("send a first message to start this session");
 
 /// How long the terminal's last word for what it is doing is kept once
 /// its screen stops showing one.
@@ -1072,7 +1091,7 @@ pub fn file_image_dims(path: &std::path::Path) -> Option<(u32, u32)> {
 /// A pasted picture kept as a file in `dir`, named for when it came, as
 /// the agent is handed a picture: a path it reads.
 pub(crate) fn keep_image(dir: &std::path::Path, mime: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|_| "could not create the uploads folder".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|_| t("could not create the uploads folder").to_string())?;
     let ext = match mime {
         "image/png" => "png",
         "image/jpeg" | "image/jpg" => "jpg",
@@ -1084,7 +1103,7 @@ pub(crate) fn keep_image(dir: &std::path::Path, mime: &str, bytes: &[u8]) -> Res
         _ => "img",
     };
     let path = dir.join(format!("{}-pasted.{ext}", chrono::Local::now().format("%Y%m%d-%H%M%S%.3f")));
-    emaki_core::paths::write_atomic(&path, bytes).map_err(|e| format!("could not keep the pasted image: {e}"))?;
+    emaki_core::paths::write_atomic(&path, bytes).map_err(|e| tf("could not keep the pasted image: {e}", &[("e", &e)]))?;
     Ok(path)
 }
 
@@ -1321,6 +1340,12 @@ pub struct Workbench {
     settings_pick_scroll: ScrollHandle,
     /// Which section of the settings is showing; see `SETTINGS_SECTIONS`.
     pub settings_section: &'static str,
+    /// How many times the window's language was changed, so the settings
+    /// window fades into a new one (`set_language`).
+    lang_serial: u32,
+    /// The `lang_serial` the fields' placeholders were last put in
+    /// (`word_inputs`).
+    worded: u32,
     /// Whose new sessions the New sessions section is showing.
     settings_agent: AgentId,
     pub search_results: Option<Results>,
@@ -2517,7 +2542,7 @@ impl Workbench {
             // Its label on a wrapper: an element takes one hover listener,
             // and the button's floats the sidebar.
             .child(
-                div().id("strip-sidebar-tip").managed_tooltip(|window, cx| crate::workbench::tip("Sidebar (⌘⇧B)", window, cx)).child(
+                div().id("strip-sidebar-tip").managed_tooltip(|window, cx| crate::workbench::tip(t("Sidebar (⌘⇧B)"), window, cx)).child(
                     button("strip-sidebar", IconName::PanelLeft, "", self.sidebar_float)
                         .on_hover(cx.listener(|this, over: &bool, _, cx| {
                             if !*over {
@@ -2532,7 +2557,7 @@ impl Workbench {
                         })),
                 ),
             )
-            .child(button("strip-search", IconName::Search, "Search (⌘K)", false).on_click(cx.listener(|this, _, window, cx| {
+            .child(button("strip-search", IconName::Search, t("Search (⌘K)"), false).on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.open_search(window, cx);
             })))
@@ -2885,8 +2910,8 @@ fn rect_of(b: Bounds<Pixels>) -> Rect {
 
 fn greeting(name: &str) -> String {
     let hour = chrono::Local::now().hour();
-    let part = if hour < 5 { "Still up" } else if hour < 12 { "Good morning" } else if hour < 18 { "Good afternoon" } else { "Good evening" };
-    if name.is_empty() { part.to_string() } else { format!("{part}, {name}") }
+    let part = if hour < 5 { t("Still up") } else if hour < 12 { t("Good morning") } else if hour < 18 { t("Good afternoon") } else { t("Good evening") };
+    if name.is_empty() { part.to_string() } else { tf("{part}, {name}", &[("part", &part), ("name", &name)]) }
 }
 
 /// What to call a mode: the agent's name for it, else its key made
@@ -2916,7 +2941,7 @@ pub(crate) fn model_name(options: &Options, name: &str) -> String {
     }
     match name.strip_suffix("[1m]").and_then(|base| options.model(base)) {
         Some(m) => format!("{} 1M", m.label),
-        None => model_label(name),
+        None => t(&model_label(name)).to_string(),
     }
 }
 
@@ -2944,7 +2969,9 @@ pub(crate) fn tinted(value: &str, tint: &Tint) -> Div {
 }
 
 /// What a pill says: the choice in bold, in its color when it has one,
-/// and a plain word after it ("**Plan** mode", "**High** effort").
+/// and a plain word around it ("**Plan** mode", "**High** effort").
+/// `tail` is the English of the whole (`"{value} mode"`), so each
+/// language puts the word on the side its order wants.
 #[derive(Clone)]
 pub(crate) struct PillText {
     value: String,
@@ -3033,16 +3060,16 @@ pub(crate) fn effort_color(options: &Options, model: &str, effort: &str, theme: 
 /// word, so "Plan" reads as "Plan mode" beside an effort and a model.
 fn mode_pill(options: &Options, mode: &str, theme: &gpui_component::Theme) -> PillText {
     let value = mode_name(options, mode);
-    let tail = if value.contains(' ') { "" } else { "mode" };
+    let tail = if value.contains(' ') { "" } else { phrase("{value} mode") };
     PillText { value, tint: mode_color(options, mode, theme), tail }
 }
 
 /// What the effort pill says; an empty level is the session's default.
 fn effort_pill(options: &Options, model: &str, effort: &str, theme: &gpui_component::Theme) -> PillText {
     if effort.is_empty() {
-        return PillText { value: "Default".into(), tint: Tint::Plain, tail: "effort" };
+        return PillText { value: t("Default").into(), tint: Tint::Plain, tail: phrase("{value} effort") };
     }
-    PillText { value: options.effort_label(model, effort), tint: effort_color(options, model, effort, theme), tail: "effort" }
+    PillText { value: options.effort_label(model, effort), tint: effort_color(options, model, effort, theme), tail: phrase("{value} effort") }
 }
 
 impl Workbench {
@@ -3060,8 +3087,8 @@ impl Workbench {
         let (hub, mut rx) = Hub::start(cfg.clone());
 
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search every conversation, live and archived"));
-        let find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this conversation"));
+        let search_input = cx.new(|cx| InputState::new(window, cx));
+        let find_input = cx.new(|cx| InputState::new(window, cx));
 
         // Which agents are installed: looked for once at launch, and
         // again whenever the person comes back to the window with the
@@ -3161,7 +3188,7 @@ impl Workbench {
             }
         }));
 
-        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("A name for this session"));
+        let rename_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(&rename_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { .. } => this.commit_rename(true, window, cx),
             // A name written in a row or on a tab is kept when the
@@ -3170,32 +3197,32 @@ impl Workbench {
             _ => {}
         })
         .detach();
-        let branch_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find or create a branch…"));
+        let branch_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(&branch_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { .. } => this.branch_enter(window, cx),
             InputEvent::Change => cx.notify(),
             _ => {}
         })
         .detach();
-        let branch_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("a-new-branch"));
+        let branch_name_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(&branch_name_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { .. } => this.branch_new_go(window, cx),
             InputEvent::Change => cx.notify(),
             _ => {}
         })
         .detach();
-        let commit_summary = cx.new(|cx| InputState::new(window, cx).placeholder("Comment"));
+        let commit_summary = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(&commit_summary, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { .. } => this.commit_go(window, cx),
             InputEvent::Change => cx.notify(),
             _ => {}
         })
         .detach();
-        let commit_body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 8).placeholder("Description"));
+        let commit_body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 8));
         // The GitHub page's two fields: what is typed is written into the
         // line it gives, as it is typed.
-        let git_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Your full name"));
-        let git_email_input = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
+        let git_name_input = cx.new(|cx| InputState::new(window, cx));
+        let git_email_input = cx.new(|cx| InputState::new(window, cx));
         for input in [&git_name_input, &git_email_input] {
             cx.subscribe_in(input, window, |_, _, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
@@ -3263,7 +3290,7 @@ impl Workbench {
             _ => {}
         })
         .detach();
-        let pdf_find_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this file"));
+        let pdf_find_input = cx.new(|cx| InputState::new(window, cx));
         // The file pane's find: a PDF's, or a file's as it reads.
         cx.subscribe_in(&pdf_find_input, window, |this, _, ev: &InputEvent, _window, cx| match ev {
             InputEvent::Change if this.text_find_open => this.text_find_run(cx),
@@ -3591,6 +3618,8 @@ impl Workbench {
             settings_focus: cx.focus_handle(),
             settings_pick_scroll: ScrollHandle::new(),
             settings_section,
+            lang_serial: 0,
+            worded: u32::MAX,
             settings_agent: ui.new_agent.as_deref().and_then(AgentId::parse).unwrap_or(AgentId::ClaudeCode),
             search_results: None,
             search_task: None,
@@ -4220,7 +4249,7 @@ impl Workbench {
                 view.state = "exited".into();
                 view.error = error.clone();
                 self.fail_outgoing(&session_id, &error);
-                self.notice = Some(Notice::error(format!("could not start the agent: {error}")));
+                self.notice = Some(Notice::error(tf("could not start the agent: {error}", &[("error", &error)])));
                 cx.notify();
             }
             HubEvent::Sent { session_id, queued, error } => {
@@ -4229,9 +4258,9 @@ impl Workbench {
                 // not go, or is waiting, is worth a line.
                 if !error.is_empty() {
                     self.fail_outgoing(&session_id, &error);
-                    self.notice = Some(Notice::error(format!("not sent: {error}")));
+                    self.notice = Some(Notice::error(tf("not sent: {error}", &[("error", &error)])));
                 } else if queued {
-                    self.notice = Some(Notice::said("queued behind the running turn"));
+                    self.notice = Some(Notice::said(t("queued behind the running turn")));
                 }
                 if let Some(v) = self.drivers.get_mut(&session_id) {
                     if error.is_empty() && !queued {
@@ -4331,7 +4360,7 @@ impl Workbench {
         self.cfg.explain.enabled = on;
         self.hub.explainer.set_cfg(self.cfg.explain.clone());
         if let Err(e) = Config::edit(move |c| c.explain.enabled = on) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         cx.notify();
     }
@@ -4341,7 +4370,56 @@ impl Workbench {
     fn set_outline(&mut self, on: bool, cx: &mut Context<Self>) {
         self.cfg.app.outline = on;
         if let Err(e) = Config::edit(move |c| c.app.outline = on) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
+        }
+        cx.notify();
+    }
+
+    /// The window's language set to `choice` (`system`, or a code of
+    /// `i18n::CHOICES`), at once: the words, the menus and, on a Mac,
+    /// the app's own language in the system's eyes. The settings window
+    /// fades into it (`lang_serial`).
+    /// The fields' placeholders in the language in use: put there at the
+    /// first draw, and again at the draw after the language changes.
+    fn word_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.worded = self.lang_serial;
+        let fields = [
+            (self.search_input.clone(), t("Search every conversation, live and archived")),
+            (self.find_input.clone(), t("Find in this conversation")),
+            (self.rename_input.clone(), t("A name for this session")),
+            (self.branch_input.clone(), t("Find or create a branch…")),
+            (self.branch_name_input.clone(), "a-new-branch"),
+            (self.commit_summary.clone(), t("Comment")),
+            (self.git_name_input.clone(), t("Your full name")),
+            (self.git_email_input.clone(), "you@example.com"),
+            (self.pdf_find_input.clone(), t("Find in this file")),
+        ];
+        for (field, words) in fields {
+            field.update(cx, |s, cx| s.set_placeholder(words, window, cx));
+        }
+        self.commit_body.update(cx, |s, cx| s.set_placeholder(t("Description"), window, cx));
+    }
+
+    pub(crate) fn set_language(&mut self, choice: &str, cx: &mut Context<Self>) {
+        let choice = if choice == "system" || crate::i18n::CHOICES.iter().any(|(c, _, _)| *c == choice) { choice.to_string() } else { "system".to_string() };
+        crate::sys::set_own_language((choice != "system").then_some(choice.as_str()));
+        crate::i18n::set(&choice);
+        cx.set_menus(crate::app_menus());
+        self.cfg.app.language = choice.clone();
+        self.lang_serial += 1;
+        if let Err(e) = Config::edit(move |c| c.app.language = choice) {
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
+        }
+        cx.notify();
+    }
+
+    /// The switch for folding runs of tool calls. The conversation's items
+    /// are drawn from the setting at every frame and measured again as
+    /// they draw, so nothing is spliced (`docs/conversation.md`).
+    fn set_fold_runs(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.cfg.app.fold_runs = on;
+        if let Err(e) = Config::edit(move |c| c.app.fold_runs = on) {
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         cx.notify();
     }
@@ -4349,7 +4427,7 @@ impl Workbench {
     fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
         self.cfg.app.check_updates = on;
         if let Err(e) = Config::edit(move |c| c.app.check_updates = on) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         cx.notify();
     }
@@ -4371,7 +4449,7 @@ impl Workbench {
                 self.update.latest = latest.clone();
                 self.update.available = Some(latest.clone());
                 if self.update.automatic {
-                    self.notice = Some(Notice::said(format!("Emaki {latest} is available. Update from Settings (⌘,).")));
+                    self.notice = Some(Notice::said(tf("Emaki {latest} is available. Update from Settings (⌘,).", &[("latest", &latest)])));
                 }
             }
             UpdateEvent::CheckFailed(e) => {
@@ -4654,7 +4732,7 @@ impl Workbench {
                 view.queued = r.queued;
                 view.state = if r.queued > 0 { "running".into() } else { "idle".into() };
                 if r.is_error {
-                    self.notice = Some(Notice::error(format!("turn ended: {}", r.subtype)));
+                    self.notice = Some(Notice::error(tf("turn ended: {why}", &[("why", &r.subtype)])));
                 }
                 if self.limits.absorb_model_usage(&r.model_usage) {
                     let _ = self.limits.save();
@@ -4674,7 +4752,7 @@ impl Workbench {
                 view.starting = false;
                 self.permissions.retain(|(s, _)| s != &session_id);
                 if !error.is_empty() {
-                    self.notice = Some(Notice::error(format!("the agent exited: {error}")));
+                    self.notice = Some(Notice::error(tf("the agent exited: {error}", &[("error", &error)])));
                 }
             }
         }
@@ -4744,7 +4822,7 @@ impl Workbench {
         }
         if let Some(left) = left.filter(|_| !begun && have.is_none_or(|i| self.refs[i].blank)) {
             let stamp = chrono::Utc::now().to_rfc3339();
-            let title = if left.named.is_empty() { NEW_TITLE.to_string() } else { left.title.clone() };
+            let title = if left.named.is_empty() { t(NEW_TITLE).to_string() } else { left.title.clone() };
             let draft = SessionRef {
                 agent,
                 session_id: to.to_string(),
@@ -4836,7 +4914,8 @@ impl Workbench {
     /// Whether the session still goes by the name it was begun under,
     /// which is ours and not one anybody gave it: drawn in italics.
     fn unnamed(&self, r: &SessionRef) -> bool {
-        r.title == NEW_TITLE && self.begun.iter().any(|d| d.session_id == r.session_id)
+        // Begun under the name in the language then in use.
+        (r.title == NEW_TITLE || r.title == t(NEW_TITLE)) && self.begun.iter().any(|d| d.session_id == r.session_id)
     }
 
     /// The plus on a folder: a new session in that folder, on a tab of
@@ -4848,7 +4927,7 @@ impl Workbench {
     /// back to, not made twice.
     pub(crate) fn new_session_in(&mut self, cwd: &str, window: &mut Window, cx: &mut Context<Self>) {
         if cwd.is_empty() || !std::path::Path::new(cwd).is_dir() {
-            self.notice = Some(Notice::error("that folder is gone"));
+            self.notice = Some(Notice::error(t("that folder is gone")));
             cx.notify();
             return;
         }
@@ -4857,7 +4936,7 @@ impl Workbench {
             None => {
                 let now = now_secs();
                 let stamp = chrono::Utc::now().to_rfc3339();
-                let draft = SessionRef { agent: self.new_agent, session_id: uuid::Uuid::new_v4().to_string(), cwd: cwd.to_string(), title: NEW_TITLE.into(), started: stamp.clone(), updated: stamp, mtime: now, blank: true, ..Default::default() };
+                let draft = SessionRef { agent: self.new_agent, session_id: uuid::Uuid::new_v4().to_string(), cwd: cwd.to_string(), title: t(NEW_TITLE).into(), started: stamp.clone(), updated: stamp, mtime: now, blank: true, ..Default::default() };
                 let key = key_of(&draft);
                 self.refs.insert(0, draft.clone());
                 self.begun.push(draft);
@@ -5265,9 +5344,10 @@ impl Workbench {
             }
             Some("toolopen") => {
                 self.pin_scroll();
+                let fold = self.cfg.app.fold_runs;
                 if let Some(d) = self.detail.as_mut() {
                     let last = d.session.rounds.iter().enumerate().rev().find_map(|(ix, r)| {
-                        (0..r.items.len()).rev().find(|jx| matches!(&r.items[*jx], Item::Tool(c) if c.name == "Bash" || c.name == "Write") && crate::transcript::run_start(r, *jx).is_none()).map(|jx| (ix, jx))
+                        (0..r.items.len()).rev().find(|jx| matches!(&r.items[*jx], Item::Tool(c) if c.name == "Bash" || c.name == "Write") && crate::transcript::run_start(r, *jx, fold).is_none()).map(|jx| (ix, jx))
                     });
                     if let Some((ix, jx)) = last {
                         d.open_tools.insert((ix, jx));
@@ -5842,7 +5922,7 @@ impl Workbench {
     /// copy has a name of its own each time, so the old picture is not
     /// what the image cache answers with.
     fn pick_avatar(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Choose".into()) });
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(t("Choose").into()) });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
             let Some(from) = paths.into_iter().next() else { return };
@@ -5850,7 +5930,7 @@ impl Workbench {
                 let dir = emaki_core::paths::root().join("avatar");
                 let to = dir.join(format!("{}.png", now_secs() as u64));
                 if let Err(e) = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|_| avatar_keep(&from, &to)) {
-                    this.notice = Some(Notice::error(format!("could not use that picture: {e}")));
+                    this.notice = Some(Notice::error(tf("could not use that picture: {e}", &[("e", &e)])));
                     cx.notify();
                     return;
                 }
@@ -5879,7 +5959,7 @@ impl Workbench {
     fn save_app_config(&mut self) {
         let app = self.cfg.app.clone();
         if let Err(e) = Config::edit(move |c| c.app = app) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
     }
 
@@ -5895,7 +5975,7 @@ impl Workbench {
         change(&mut self.cfg.terminal);
         let terminal = self.cfg.terminal.clone();
         if let Err(e) = Config::edit(move |c| c.terminal = terminal) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         self.side_sel = None;
         cx.notify();
@@ -5971,7 +6051,7 @@ impl Workbench {
         self.cfg.driver.default_mode = v.clone();
         self.next_mode = v.clone();
         if let Err(e) = Config::edit(move |c| c.driver.default_mode = v) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         cx.notify();
     }
@@ -5983,7 +6063,7 @@ impl Workbench {
         self.cfg.driver.default_effort = v.clone();
         self.next_effort = v.clone();
         if let Err(e) = Config::edit(move |c| c.driver.default_effort = v) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         cx.notify();
     }
@@ -6023,7 +6103,7 @@ impl Workbench {
         self.cfg.driver.default_model = v.clone();
         self.next_model = v.clone();
         if let Err(e) = Config::edit(move |c| c.driver.default_model = v) {
-            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         cx.notify();
     }
@@ -6152,7 +6232,7 @@ impl Workbench {
                     .when_some(family, |d, f| d.font_family(f))
                     .when(control == "writing-language", |d| {
                         let name = emaki_core::check::LANGUAGES.iter().find(|l| l.0 == key).map(|l| l.1).unwrap_or(key);
-                        d.managed_tooltip(move |window, cx| crate::workbench::tip(name, window, cx))
+                        d.managed_tooltip(move |window, cx| crate::workbench::tip(t(name), window, cx))
                     })
                     .on_click(cx.listener(move |this, _, window, cx| on(this, key, window, cx)))
                     // A choice of the agents page's install step has an
@@ -6297,7 +6377,7 @@ impl Workbench {
                         }
                         _ => {}
                     }
-                    if let Some(start) = crate::transcript::run_start(rnd, jx) {
+                    if let Some(start) = crate::transcript::run_start(rnd, jx, self.cfg.app.fold_runs) {
                         d.open_runs.insert((h.round, start));
                     }
                 }
@@ -6331,9 +6411,9 @@ impl Workbench {
         let count = if empty {
             String::new()
         } else if n == 0 {
-            "no matches".into()
+            t("no matches").into()
         } else {
-            format!("{} of {}", self.find_at + 1, n)
+            tf("{n} of {total}", &[("n", &(self.find_at + 1)), ("total", &n)])
         };
         h_flex().w_full().justify_center().px(px(24.)).py(px(8.)).child(
             h_flex()
@@ -6356,7 +6436,7 @@ impl Workbench {
                         .id("find-field")
                         .track_focus(&focus)
                         .role(Role::TextInput)
-                        .aria_label("Find in conversation")
+                        .aria_label(t("Find in conversation"))
                         .aria_value(value)
                         .flex_1()
                         .min_w_0()
@@ -6364,9 +6444,9 @@ impl Workbench {
                         .child(Input::new(&self.find_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.find_input, false, cx))),
                 )
                 .child(div().text_size(px(11.5)).flex_shrink_0().text_color(if n == 0 && !empty { theme.danger } else { theme.muted_foreground }).child(count))
-                .child(icon_button("find-prev", IconName::ChevronUp, "Previous (⇧↩, ⌘⇧G)", cx, |this, _, cx| this.find_step(-1, cx)))
-                .child(icon_button("find-next", IconName::ChevronDown, "Next (↩, ⌘G)", cx, |this, _, cx| this.find_step(1, cx)))
-                .child(icon_button("find-close", IconName::Close, "Close (esc)", cx, |this, window, cx| this.close_find(window, cx))),
+                .child(icon_button("find-prev", IconName::ChevronUp, t("Previous (⇧↩, ⌘⇧G)"), cx, |this, _, cx| this.find_step(-1, cx)))
+                .child(icon_button("find-next", IconName::ChevronDown, t("Next (↩, ⌘G)"), cx, |this, _, cx| this.find_step(1, cx)))
+                .child(icon_button("find-close", IconName::Close, t("Close (esc)"), cx, |this, window, cx| this.close_find(window, cx))),
         )
     }
 
@@ -6410,9 +6490,9 @@ impl Workbench {
     /// How a message typed here would reach the session, and why not.
     pub fn reply_via(&self) -> (&'static str, String) {
         if self.page == Page::New {
-            return if self.new_cwd.is_empty() { ("", "pick a folder first".into()) } else { ("spawn", String::new()) };
+            return if self.new_cwd.is_empty() { ("", t("pick a folder first").into()) } else { ("spawn", String::new()) };
         }
-        let Some(r) = self.selected_ref() else { return ("", "no session selected".into()) };
+        let Some(r) = self.selected_ref() else { return ("", t("no session selected").into()) };
         self.reply_via_for(r)
     }
 
@@ -6438,7 +6518,7 @@ impl Workbench {
         match crate::sys::focus_terminal(peer.pid) {
             Ok(app) => {
                 self.come_back = (!self.is_working(&r)).then(|| ComeBack::on_transcript(&r, self.now));
-                self.notice = Some(Notice::said(format!("in {app}; back here when that is done")));
+                self.notice = Some(Notice::said(tf("in {app}; back here when that is done", &[("app", &app)])));
             }
             Err(e) => self.notice = Some(Notice::error(e)),
         }
@@ -6473,10 +6553,10 @@ impl Workbench {
             return;
         }
         self.come_back = (!self.is_working(&r)).then(|| ComeBack::on_transcript(&r, self.now));
-        self.notice = Some(Notice::said(format!("sending {text} to the terminal…")));
+        self.notice = Some(Notice::said(tf("sending {text} to the terminal…", &[("text", &text)])));
         let hub = Arc::clone(&self.hub);
         std::thread::spawn(move || match crate::sys::type_in_terminal(peer.pid, &text) {
-            Ok(app) => hub.say(format!("sent to {app}; back here when it has run")),
+            Ok(app) => hub.say(tf("sent to {app}; back here when it has run", &[("app", &app)])),
             Err(e) => hub.say(e),
         });
         cx.notify();
@@ -6558,7 +6638,8 @@ impl Workbench {
                     }))
                     .relative()
                     .map(|d| {
-                        let mark = Icon::default().path(icon).with_size(px(14.)).text_color(theme.muted_foreground);
+                        // A flag keeps its colors: it is a picture, not an icon.
+                        let mark = if icon.starts_with("icons/flags/") { img(icon).w(px(17.)).h(px(12.)).flex_shrink_0().into_any_element() } else { Icon::default().path(icon).with_size(px(14.)).text_color(theme.muted_foreground).into_any_element() };
                         // The pills' color, in the fields' weight.
                         let words = div().min_w_0().truncate().child(tinted(&label.value, &label.tint).font_weight(FontWeight::NORMAL));
                         let list = Icon::default().path("icons/chevrons-up-down.svg").with_size(px(13.)).text_color(theme.muted_foreground);
@@ -6621,7 +6702,7 @@ impl Workbench {
         let settled = begun.is_some();
         let cwd = begun.as_ref().map(|r| r.cwd.clone()).unwrap_or_else(|| self.new_cwd.clone());
         let open = self.pick.as_ref().is_some_and(|p| p.what == PickFor::Folder);
-        let (name, parent) = if cwd.is_empty() { ("Choose a folder".to_string(), String::new()) } else { (folder_name(&cwd), folder_parent(&cwd)) };
+        let (name, parent) = if cwd.is_empty() { (t("Choose a folder").to_string(), String::new()) } else { (folder_name(&cwd), folder_parent(&cwd)) };
         let agent = self.agent_now();
         let agent_open = self.pick.as_ref().is_some_and(|p| p.what == PickFor::Agent);
         // The agent the session is begun with, at the strip's right: its
@@ -6689,7 +6770,7 @@ impl Workbench {
             let now = levels.iter().find(|e| e.key.eq_ignore_ascii_case(effort) || e.label.eq_ignore_ascii_case(effort)).map(|e| e.key.clone()).unwrap_or_else(|| if unset { "default".into() } else { String::new() });
             let mut rows: Vec<PickRow> = Vec::new();
             if unset {
-                rows.push(PickRow::plain("default".into(), "Default".into(), "The agent's own level; none is asked for.".into()));
+                rows.push(PickRow::plain("default".into(), t("Default").into(), t("The agent's own level; none is asked for.").into()));
             }
             rows.extend(levels.iter().enumerate().map(|(ix, e)| PickRow::tinted(e.key.clone(), e.label.clone(), e.detail.clone(), tint_of(&levels, ix, theme))));
             (rows, now)
@@ -6733,7 +6814,7 @@ impl Workbench {
                     .map(|a| {
                         let known = emaki_core::agents::by_id(a.as_str());
                         let here = self.agent_found(a.as_str()).is_none_or(|f| f.installed());
-                        let line = if here { known.map(|k| k.maker.to_string()).unwrap_or_default() } else { "Not installed; set it up on the Agents page".to_string() };
+                        let line = if here { known.map(|k| k.maker.to_string()).unwrap_or_default() } else { t("Not installed; set it up on the Agents page").to_string() };
                         PickRow { mark: Some(*a), ..PickRow::plain(a.as_str().to_string(), a.display_name().to_string(), line) }
                     })
                     .collect();
@@ -6752,8 +6833,17 @@ impl Workbench {
                     cwds.insert(0, self.new_cwd.clone());
                 }
                 let mut rows: Vec<PickRow> = cwds.into_iter().map(|c| PickRow::plain(c.clone(), folder_name(&c), folder_parent(&c))).collect();
-                rows.push(PickRow::plain(String::new(), "Choose a folder…".into(), String::new()));
+                rows.push(PickRow::plain(String::new(), t("Choose a folder…").into(), String::new()));
                 (rows, self.new_cwd.clone())
+            }
+            // The system's, then under a line each language by its flag
+            // and letters, as Kotoba's list has them.
+            PickFor::Language => {
+                let system = PickRow::plain("system".into(), crate::i18n::t("System").into(), String::new());
+                let rows = std::iter::once(system)
+                    .chain(crate::i18n::CHOICES.iter().enumerate().map(|(ix, (code, flag, letters))| PickRow { rule: ix == 0, flag: Some(*flag), ..PickRow::plain(code.to_string(), letters.to_string(), String::new()) }))
+                    .collect();
+                (rows, self.cfg.app.language.clone())
             }
             PickFor::DefaultModel => {
                 let model = if self.cfg.driver.default_model.is_empty() { options.default_model.clone() } else { self.cfg.driver.default_model.clone() };
@@ -6843,13 +6933,14 @@ impl Workbench {
                 self.new_cwd = key.to_string();
                 cx.notify();
             }
+            PickFor::Language => self.set_language(key, cx),
         }
     }
 
     /// Ask the system for a folder, any folder, for the new session to
     /// start in.
     fn choose_folder(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Choose".into()) });
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(t("Choose").into()) });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
             let Some(dir) = paths.into_iter().next() else { return };
@@ -6902,7 +6993,7 @@ impl Workbench {
             .map(|d| if right { d.right(view.width - menu.by.right()) } else { d.left(menu.by.left()) })
             .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
         let dark = theme.mode.is_dark();
-        for (ix, PickRow { key, name, detail, tint, mark, rule }) in menu.rows.iter().enumerate() {
+        for (ix, PickRow { key, name, detail, tint, mark, rule, flag }) in menu.rows.iter().enumerate() {
             let active = *key == menu.current && !key.is_empty();
             // A row with no key is not one of the choices but the way to
             // another: a line sets it apart, as it does another group.
@@ -6930,6 +7021,7 @@ impl Workbench {
                             .gap(px(6.))
                             .items_center()
                             .when_some(*mark, |d, agent| d.child(agent_icon(agent, px(13.), agent_color(agent, &theme)).flex_shrink_0()))
+                            .when_some(*flag, |d, flag| d.gap(px(8.)).child(img(flag).w(px(17.)).h(px(12.)).flex_shrink_0()))
                             // A choice the agent shows in a color wears it
                             // here too.
                             .child(match tint {
@@ -6999,7 +7091,7 @@ impl Workbench {
     pub fn via_terminal(&mut self, action: TerminalAction, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
         if self.is_draft(&r.session_id) {
-            self.notice = Some(Notice::said(DRAFT_WAITS));
+            self.notice = Some(Notice::said(t(DRAFT_WAITS)));
             cx.notify();
             return;
         }
@@ -7041,9 +7133,9 @@ impl Workbench {
         let opened = if r.agent == AgentId::ClaudeCode && self.hub.hidden_terminals() {
             self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "", "")
         } else if r.agent != AgentId::ClaudeCode {
-            Err(format!("that needs {}'s own terminal, which Emaki does not run yet", r.agent.display_name()))
+            Err(tf("that needs {agent}'s own terminal, which Emaki does not run yet", &[("agent", &r.agent.display_name())]))
         } else {
-            Err("the hidden terminal is off (driver.hidden_terminal in config.json)".to_string())
+            Err(t("the hidden terminal is off (driver.hidden_terminal in config.json)").to_string())
         };
         match opened {
             Ok(()) => {
@@ -7154,7 +7246,7 @@ impl Workbench {
     pub fn pick_in_terminal(&mut self, pill: Pill, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref().cloned() else { return };
         if pill == Pill::Mode {
-            self.notice = Some(Notice::said("Use ⇧Tab to change the mode"));
+            self.notice = Some(Notice::said(t("Use ⇧Tab to change the mode")));
             cx.notify();
             return;
         }
@@ -7190,9 +7282,9 @@ impl Workbench {
                     });
                     return self.show_terminal(&r.session_id, false, cx);
                 }
-                self.notice = Some(Notice::said(format!("opening {command} in the terminal…")));
+                self.notice = Some(Notice::said(tf("opening {command} in the terminal…", &[("command", &command)])));
                 std::thread::spawn(move || match crate::sys::type_in_terminal(peer.pid, command) {
-                    Ok(app) => hub.say(format!("choose in {app}; back here once it is set")),
+                    Ok(app) => hub.say(tf("choose in {app}; back here once it is set", &[("app", &app)])),
                     Err(e) => hub.say(e),
                 });
             }
@@ -7348,13 +7440,13 @@ impl Workbench {
         let ink = cx.theme().muted_foreground;
         let suggested = self.question_pending().is_none() && self.page != Page::New;
         let (words, accept) = if self.question_pending().is_some() {
-            (PLACEHOLDER_ANSWER.to_string(), false)
+            (t(PLACEHOLDER_ANSWER).to_string(), false)
         } else if self.page == Page::New || self.selected_ref().is_some_and(|r| self.is_draft(&r.session_id)) {
-            (PLACEHOLDER_NEW.to_string(), false)
+            (t(PLACEHOLDER_NEW).to_string(), false)
         } else {
             match self.suggested().filter(|_| suggested) {
                 Some(words) => (words.to_string(), true),
-                None => (PLACEHOLDER_REPLY.to_string(), false),
+                None => (t(PLACEHOLDER_REPLY).to_string(), false),
             }
         };
         Some(
@@ -7607,7 +7699,7 @@ impl Workbench {
                             }
                         }
                         if !shown {
-                            return Err("the terminal's dialog did not follow; finish the answer there".to_string());
+                            return Err(t("the terminal's dialog did not follow; finish the answer there").to_string());
                         }
                     }
                     Ok(())
@@ -7687,7 +7779,7 @@ impl Workbench {
     fn theirs_busy(&mut self, r: &SessionRef, cx: &mut Context<Self>) -> bool {
         let busy = self.hub.hidden_terminals() && self.reply_via_for(r).0 == "inbox" && self.hub.peer_for(&r.session_id).is_some_and(|p| p.status != "idle");
         if busy {
-            self.notice = Some(Notice::said("Claude is mid-turn in another terminal; this works here once the turn is over"));
+            self.notice = Some(Notice::said(t("Claude is mid-turn in another terminal; this works here once the turn is over")));
             cx.notify();
         }
         busy
@@ -7695,7 +7787,7 @@ impl Workbench {
 
     /// The line for the row under the composer while a terminal comes up.
     fn opening(&self, sid: &str) -> Notice {
-        Notice::said(if self.own_terminal(sid) { "one moment…" } else { "opening the terminal, one moment…" })
+        Notice::said(if self.own_terminal(sid) { t("one moment…") } else { t("opening the terminal, one moment…") })
     }
 
     /// The person has begun to say something on a session with no
@@ -7868,7 +7960,7 @@ impl Workbench {
             self.pending_terminal = None;
         }
         self.hide_terminal(cx);
-        self.notice = Some(Notice::error(if why.is_empty() { "claude exited".to_string() } else { format!("claude exited: {why}") }));
+        self.notice = Some(Notice::error(if why.is_empty() { t("claude exited").to_string() } else { tf("claude exited: {why}", &[("why", &why)]) }));
         cx.notify();
     }
 
@@ -7974,7 +8066,7 @@ impl Workbench {
         }
         match self.hub.start_terminal(&r.session_id, &r.cwd, true, "", "", "") {
             Ok(()) => self.hub.refresh(),
-            Err(e) => self.notice = Some(Notice::error(format!("could not start it: {e}"))),
+            Err(e) => self.notice = Some(Notice::error(tf("could not start it: {e}", &[("e", &e)]))),
         }
         cx.notify();
     }
@@ -7982,17 +8074,17 @@ impl Workbench {
     fn terminal_check(&self, r: &SessionRef) -> Result<(), &'static str> {
         // Resumed, Claude Code ends at once with "No conversation found".
         if self.is_draft(&r.session_id) {
-            return Err(DRAFT_WAITS);
+            return Err(t(DRAFT_WAITS));
         }
         if r.archived {
-            return Err("Archived. To continue it, unarchive it from its menu in the sidebar");
+            return Err(t("Archived. To continue it, unarchive it from its menu in the sidebar"));
         }
         if !Self::folder_exists(r) {
-            return Err(FOLDER_GONE);
+            return Err(t(FOLDER_GONE));
         }
         if let Some(v) = self.drivers.get(&r.session_id) {
             if v.starting || v.state == "running" {
-                return Err("Wait for the running reply, then open");
+                return Err(t("Wait for the running reply, then open"));
             }
         }
         Ok(())
@@ -8034,7 +8126,7 @@ impl Workbench {
     pub fn open_project_folder(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref() else { return };
         if !Self::folder_exists(r) {
-            self.notice = Some(Notice::error(FOLDER_GONE));
+            self.notice = Some(Notice::error(t(FOLDER_GONE)));
             cx.notify();
             return;
         }
@@ -8290,7 +8382,7 @@ impl Workbench {
 
     pub fn reply_via_for(&self, r: &SessionRef) -> (&'static str, String) {
         if self.drivers.get(&r.session_id).is_some_and(|v| v.starting) {
-            return ("driver", format!("starting {}…", r.agent.speaker().to_lowercase()));
+            return ("driver", tf("starting {agent}…", &[("agent", &r.agent.speaker().to_lowercase())]));
         }
         if self.driven(&r.session_id) {
             return ("driver", String::new());
@@ -8301,19 +8393,19 @@ impl Workbench {
         // which a second Codex must not join.
         if r.agent == AgentId::Codex {
             if r.archived {
-                return ("", "archived. To continue it, unarchive it from its menu in the sidebar".into());
+                return ("", t("archived. To continue it, unarchive it from its menu in the sidebar").into());
             }
             if !self.cfg.driver.enabled {
-                return ("", "the driver is off in config".into());
+                return ("", t("the driver is off in config").into());
             }
             if emaki_core::codex::codex_binary().is_none() {
-                return ("", "Codex is not installed".into());
+                return ("", t("Codex is not installed").into());
             }
             if !self.is_draft(&r.session_id) && self.is_working(r) {
-                return ("", "Codex is mid-turn somewhere else; this works here once the turn is over".into());
+                return ("", t("Codex is mid-turn somewhere else; this works here once the turn is over").into());
             }
             if r.cwd.is_empty() || !std::path::Path::new(&r.cwd).is_dir() {
-                return ("", "the session's folder is gone".into());
+                return ("", t("the session's folder is gone").into());
             }
             return ("spawn", String::new());
         }
@@ -8334,13 +8426,13 @@ impl Workbench {
             return ("inbox", String::new());
         }
         if r.archived {
-            return ("", "archived. To continue it, unarchive it from its menu in the sidebar".into());
+            return ("", t("archived. To continue it, unarchive it from its menu in the sidebar").into());
         }
         if !self.cfg.driver.enabled {
-            return ("", "the driver is off in config".into());
+            return ("", t("the driver is off in config").into());
         }
         if r.cwd.is_empty() || !std::path::Path::new(&r.cwd).is_dir() {
-            return ("", "the session's folder is gone".into());
+            return ("", t("the session's folder is gone").into());
         }
         // A fresh file with neither a driver nor an inbox: an interactive
         // Claude Code always registers an inbox, so this is a session that
@@ -8357,7 +8449,7 @@ impl Workbench {
         if empty && self.page == Page::New {
             let cwd = self.new_cwd.clone();
             if cwd.is_empty() {
-                self.notice = Some(Notice::said("pick a folder first"));
+                self.notice = Some(Notice::said(t("pick a folder first")));
                 cx.notify();
             } else {
                 self.new_session_in(&cwd, window, cx);
@@ -8383,7 +8475,7 @@ impl Workbench {
         // A mode picked and not yet reached: the one the terminal is in
         // now is one on the way, and a turn would run in it.
         if self.mode_walk.as_ref().is_some_and(|w| self.selected_ref().is_some_and(|r| r.session_id == w.sid)) {
-            self.notice = Some(Notice::said("the mode is still being set; send once the pill shows it"));
+            self.notice = Some(Notice::said(t("the mode is still being set; send once the pill shows it")));
             // Looked at again, in case the key's own look came too soon.
             if let Some(sid) = self.mode_walk.as_ref().map(|w| w.sid.clone()) {
                 self.read_terminal_mode(&sid, cx);
@@ -8451,7 +8543,7 @@ impl Workbench {
                 // A terminal waiting on an answer would take the words
                 // for its dialog.
                 if self.hub.peer_for(&sid).is_some_and(|p| p.status == "waiting") {
-                    self.notice = Some(Notice::error("Claude is waiting for an answer first"));
+                    self.notice = Some(Notice::error(t("Claude is waiting for an answer first")));
                     cx.notify();
                     return;
                 }
@@ -8473,14 +8565,14 @@ impl Workbench {
                 self.hub.send_to_terminal(&sid, words, pictures);
                 if !new_id.is_empty() {
                     self.show_begun(AgentId::ClaudeCode, &sid, cx);
-                    self.notice = Some(Notice::said("starting claude…"));
+                    self.notice = Some(Notice::said(tf("starting {agent}…", &[("agent", &"claude")])));
                 }
                 let _ = text;
             }
             "driver" => {
                 let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
                 if !self.hub.send_to_driver(&sid, text.clone(), images) {
-                    self.notice = Some(Notice::error("the driver is gone; try again"));
+                    self.notice = Some(Notice::error(t("the driver is gone; try again")));
                     cx.notify();
                     return;
                 }
@@ -8513,7 +8605,7 @@ impl Workbench {
                 if self.page == Page::New {
                     self.show_begun(agent, &sid, cx);
                 }
-                self.notice = Some(Notice::said(format!("starting {}…", agent.speaker().to_lowercase())));
+                self.notice = Some(Notice::said(tf("starting {agent}…", &[("agent", &agent.speaker().to_lowercase())])));
             }
             _ => {
                 self.notice = Some(Notice::error(why));
@@ -8524,7 +8616,7 @@ impl Workbench {
         // The first message to a session begun here: it is started now.
         if let Some(id) = self.selected_ref().map(|r| r.session_id.clone()).filter(|id| self.is_draft(id)) {
             self.begun_sent.insert(id);
-            self.notice = Some(Notice::said(format!("starting {}…", self.agent_now().speaker().to_lowercase())));
+            self.notice = Some(Notice::said(tf("starting {agent}…", &[("agent", &self.agent_now().speaker().to_lowercase())])));
         }
         self.last_sent = self.selected.clone().map(|key| (key, typed.trim().to_string(), self.attachments.clone()));
         self.show_outgoing(typed.trim().to_string(), self.attachments.clone());
@@ -8540,7 +8632,7 @@ impl Workbench {
     /// all, and the record stands until it says which it is (`adopt`).
     fn show_begun(&mut self, agent: AgentId, sid: &str, cx: &mut Context<Self>) {
         let stamp = chrono::Utc::now().to_rfc3339();
-        let draft = SessionRef { agent, session_id: sid.to_string(), cwd: self.new_cwd.clone(), title: NEW_TITLE.into(), started: stamp.clone(), updated: stamp, mtime: now_secs(), blank: true, ..Default::default() };
+        let draft = SessionRef { agent, session_id: sid.to_string(), cwd: self.new_cwd.clone(), title: t(NEW_TITLE).into(), started: stamp.clone(), updated: stamp, mtime: now_secs(), blank: true, ..Default::default() };
         let key = key_of(&draft);
         self.refs.insert(0, draft.clone());
         self.begun.push(draft);
@@ -8607,7 +8699,7 @@ impl Workbench {
             });
             self.mark_slash(cx);
         }
-        self.notice = Some(Notice::said("stopped; your message is back in the box"));
+        self.notice = Some(Notice::said(t("stopped; your message is back in the box")));
         if still_shown && !uuid.is_empty() {
             if let (Some(key), Some((path, session))) = (self.selected.clone(), self.detail.as_ref().map(|d| (d.path.clone(), (*d.session).clone()))) {
                 self.handed_back = Some((key.clone(), uuid));
@@ -8859,7 +8951,7 @@ impl Workbench {
     }
 
     fn pick_files(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Attach".into()) });
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(t("Attach").into()) });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
                 this.update(cx, |this, cx| this.attach_paths(&paths, cx)).ok();
@@ -9134,9 +9226,9 @@ impl Workbench {
         }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         if self.hub.set_driver_effort(&sid, effort.to_string()) {
-            self.notice = Some(Notice::said(format!("setting {}…", format!("{} effort", self.options().effort_label(&self.current_model(), effort)).to_lowercase())));
+            self.notice = Some(Notice::said(tf("setting {value} effort…", &[("value", &self.options().effort_label(&self.current_model(), effort).to_lowercase())])));
         } else {
-            self.notice = Some(Notice::error("no driver behind this session"));
+            self.notice = Some(Notice::error(t("no driver behind this session")));
         }
         cx.notify();
     }
@@ -9179,7 +9271,7 @@ impl Workbench {
         // of its context rather than a share of a guess.
         let ctx_known = s.agent == AgentId::ClaudeCode || window > 0;
         if ctx_known {
-            row = row.child(part("Context".into(), ctx_pct, ctx_color, String::new()));
+            row = row.child(part(t("Context").into(), ctx_pct, ctx_color, String::new()));
         }
         let usage_color = |pct: u64| if pct >= 90 { theme.danger } else if pct >= 70 { theme.magenta } else { theme.blue };
         let windows: Vec<(String, Option<emaki_core::limits::Window>)> = match s.agent {
@@ -9313,7 +9405,7 @@ impl Workbench {
         if mode == walk.from || walk.presses > modes + 1 || peer.is_none() {
             self.mode_walk = None;
             if peer.is_some() {
-                self.notice = Some(Notice::said("⇧Tab does not reach that mode in this session"));
+                self.notice = Some(Notice::said(t("⇧Tab does not reach that mode in this session")));
             }
             // Back where it began is no change to say.
             return mode == walk.from;
@@ -9355,7 +9447,7 @@ impl Workbench {
         let Some(walk) = self.mode_walk.as_mut().filter(|w| w.sid == sid) else { return };
         if walk.looks >= 12 {
             self.mode_walk = None;
-            self.notice = Some(Notice::said("the terminal's mode could not be read; ⇧Tab moves it a step"));
+            self.notice = Some(Notice::said(t("the terminal's mode could not be read; ⇧Tab moves it a step")));
             return;
         }
         walk.looks += 1;
@@ -9428,7 +9520,7 @@ impl Workbench {
             self.restore_due = true;
         } else if let Some(peer) = self.hub.peer_for(&sid) {
             let hub = Arc::clone(&self.hub);
-            self.notice = Some(Notice::said("stopping…"));
+            self.notice = Some(Notice::said(t("stopping…")));
             std::thread::spawn(move || match crate::sys::key_in_terminal(peer.pid, crate::sys::TerminalKey::Escape) {
                 Ok(_) => {
                     // The registry flips a moment after the key lands.
@@ -9440,7 +9532,7 @@ impl Workbench {
                 Err(e) => hub.say(e),
             });
         } else {
-            self.notice = Some(Notice::error(if self.agent_now() == AgentId::Codex { "stop it where it is running: this turn was not started here" } else { "nothing here can stop it: the session has no terminal and no driver" }));
+            self.notice = Some(Notice::error(if self.agent_now() == AgentId::Codex { t("stop it where it is running: this turn was not started here") } else { t("nothing here can stop it: the session has no terminal and no driver") }));
         }
         cx.notify();
     }
@@ -9608,7 +9700,7 @@ impl Workbench {
         if let Some(v) = drv {
             if (v.state == "running" || v.starting) && matches!(phase, Phase::YourTurn | Phase::Idle) {
                 phase = Phase::Working;
-                activity = "working on your message".into();
+                activity = t("working on your message").into();
                 tool = String::new();
             }
         }
@@ -9637,7 +9729,7 @@ impl Workbench {
                 card.column = Column::YourTurn;
                 card.chip_kind = "reply";
                 card.chip = "idle".into();
-                card.text = "waiting for the first prompt".into();
+                card.text = t("waiting for the first prompt").into();
             }
         }
         card
@@ -9762,7 +9854,7 @@ impl Workbench {
             .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
             .on_click(cx.listener(|this, _, window, cx| this.show_new(None, window, cx)))
             .child(div().size(px(22.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.primary_foreground)))
-            .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(NEW_TITLE))
+            .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(t(NEW_TITLE)))
             .child(kbd_hint("⌘N", &theme));
 
         let nav = |id: &'static str, icon: Icon, label: &'static str, hint: &'static str, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
@@ -9785,8 +9877,8 @@ impl Workbench {
         let sessions_active = page == Page::Sessions;
         let top = top
             .child(new_row)
-            .child(nav("nav-sessions", Icon::default().path("icons/scroll.svg"), "All Sessions", "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
-            .child(nav("nav-agents", Icon::default().path("icons/sparkles.svg"), "Agents", "⌘E", page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
+            .child(nav("nav-sessions", Icon::default().path("icons/scroll.svg"), t("All Sessions"), "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
+            .child(nav("nav-agents", Icon::default().path("icons/sparkles.svg"), t("Agents"), "⌘E", page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
 
         // The rows sit in a column of their own inside the scroller. As
         // the scroller's children they were flex items of a column too
@@ -10003,7 +10095,7 @@ impl Workbench {
                                     .when(!is_pinned, |d| d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)))
                                     .text_color(theme.muted_foreground)
                                     .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
-                                    .managed_tooltip(move |window, cx| crate::workbench::tip(if is_pinned { "Unpin project" } else { "Pin project" }, window, cx))
+                                    .managed_tooltip(move |window, cx| crate::workbench::tip(if is_pinned { t("Unpin project") } else { t("Pin project") }, window, cx))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         swallow_click(window, cx);
                                         cx.stop_propagation();
@@ -10030,7 +10122,7 @@ impl Workbench {
                                         // pointer: in the light theme the border's
                                         // color was that tint again.
                                         .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
-                                        .managed_tooltip(|window, cx| crate::workbench::tip("New session here (⌘T in its project)", window, cx))
+                                        .managed_tooltip(|window, cx| crate::workbench::tip(t("New session here (⌘T in its project)"), window, cx))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             swallow_click(window, cx);
                                             cx.stop_propagation();
@@ -10185,7 +10277,7 @@ impl Workbench {
                             if naming {
                                 // The name is written here, in the row.
                                 self.rename_drawn.set(true);
-                                d.child(self.name_field("side-name", &self.rename_input, 13., "Session name", |this, window, cx| this.close_rename(window, cx), cx).on_click(|_, window, cx| swallow_click(window, cx)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+                                d.child(self.name_field("side-name", &self.rename_input, 13., t("Session name"), |this, window, cx| this.close_rename(window, cx), cx).on_click(|_, window, cx| swallow_click(window, cx)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
                             } else {
                                 d.child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).when(self.unnamed(&r), |d| d.italic()).child(r.title.clone())).children(self.rename_mark(&r, "side", cx))
                             }
@@ -10221,7 +10313,7 @@ impl Workbench {
                         .text_color(theme.muted_foreground)
                         .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
                         .on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.show_sessions_in(Scope::All, Some(all.clone()), cx) }))
-                        .child(format!("{more} more")),
+                        .child(tf("{more} more", &[("more", &more)])),
                 );
                 body_h += f32::from(SIDE_SESSION_H);
             }
@@ -10251,7 +10343,7 @@ impl Workbench {
         // "Temporary" and then "Hidden", under the last project that
         // shows: each a heading with how many there are, and under it
         // its projects when it is open. Both are shut at every launch.
-        for (section, (label, id, count), block) in [("Temporary", "side-temp", temp_n), ("Hidden", "side-hidden", hidden_n)].into_iter().zip(section_box).enumerate().map(|(n, (said, block))| (n, said, block)) {
+        for (section, (label, id, count), block) in [(phrase("Temporary"), "side-temp", temp_n), (phrase("Hidden"), "side-hidden", hidden_n)].into_iter().zip(section_box).enumerate().map(|(n, (said, block))| (n, said, block)) {
             if count == 0 {
                 continue;
             }
@@ -10272,7 +10364,7 @@ impl Workbench {
                     .text_color(theme.muted_foreground)
                     .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
                     .on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.toggle_section(section, cx) }))
-                    .child(div().flex_1().child(label))
+                    .child(div().flex_1().child(t(label)))
                     .child(div().font_weight(FontWeight::NORMAL).child(count.to_string()))
                     .child(Icon::new(if section_open[section] { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground)),
             );
@@ -10316,7 +10408,7 @@ impl Workbench {
                 .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
                 .on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(2, cx) }))
                 .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)))
-                .child(div().flex_1().child("Trash"))
+                .child(div().flex_1().child(t("Trash")))
                 .child(div().font_weight(FontWeight::NORMAL).child(count.to_string()))
                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground));
             scroll = scroll.child(match trash_head {
@@ -10360,7 +10452,7 @@ impl Workbench {
                                 .flex()
                                 .items_center()
                                 .justify_end()
-                                .child(div().text_size(px(11.)).text_color(theme.muted_foreground).group_hover(group.clone(), |s| s.opacity(0.)).child(plural(days as usize, "day", "days")))
+                                .child(div().text_size(px(11.)).text_color(theme.muted_foreground).group_hover(group.clone(), |s| s.opacity(0.)).child(crate::i18n::count(days as usize, "{n} day", "{n} days")))
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("trash-back-{key}")))
@@ -10376,7 +10468,7 @@ impl Workbench {
                                         .group_hover(group.clone(), |s| s.opacity(1.))
                                         .text_color(theme.muted_foreground)
                                         .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
-                                        .managed_tooltip(|window, cx| crate::workbench::tip("Put Back", window, cx))
+                                        .managed_tooltip(|window, cx| crate::workbench::tip(t("Put Back"), window, cx))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             swallow_click(window, cx);
                                             cx.stop_propagation();
@@ -10447,7 +10539,7 @@ impl Workbench {
                     .id("side-avatar")
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.85))
-                    .managed_tooltip(|window, cx| crate::workbench::tip("Your picture and name", window, cx))
+                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Your picture and name"), window, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.open_settings(Some("appearance"), cx);
@@ -10485,7 +10577,7 @@ impl Workbench {
                     .justify_center()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.sidebar_accent))
-                    .managed_tooltip(|window, cx| crate::workbench::tip("Settings (⌘,)", window, cx))
+                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Settings (⌘,)"), window, cx))
                     .child(Icon::new(IconName::Settings).with_size(px(16.)).text_color(theme.muted_foreground))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
@@ -10516,7 +10608,7 @@ impl Workbench {
             div().absolute().left(left - room.left()).top(top - room.top()).w((right - left).max(px(0.))).h((bottom - top).max(px(0.))).rounded(px(3.)).border_1().border_color(theme.primary.opacity(0.7)).bg(theme.primary.opacity(0.12))
         });
         let room = self.side_room.clone();
-        let folders_card = card("Projects").flex_1().min_h_0().mt(px(10.)).mb(px(8.)).child(
+        let folders_card = card(t("Projects")).flex_1().min_h_0().mt(px(10.)).mb(px(8.)).child(
             v_flex()
                 .id("side-card")
                 .relative()
@@ -10789,11 +10881,11 @@ impl Workbench {
         let several = self.side_sessions.len() > 1 && self.side_sessions.iter().any(|k| k == key);
         let items = if several {
             let keys = self.side_sessions.clone();
-            let mut items = vec![("Archive Sessions", MenuDo::Sessions(ManageDo::Archive, keys.clone()))];
+            let mut items = vec![(phrase("Archive Sessions"), MenuDo::Sessions(ManageDo::Archive, keys.clone()))];
             if self.refs.iter().any(|r| r.archived && keys.iter().any(|k| *k == key_of(r))) {
-                items.push(("Unarchive Sessions", MenuDo::Sessions(ManageDo::Unarchive, keys.clone())));
+                items.push((phrase("Unarchive Sessions"), MenuDo::Sessions(ManageDo::Unarchive, keys.clone())));
             }
-            items.push(("Delete Sessions", MenuDo::Sessions(ManageDo::Delete, keys)));
+            items.push((phrase("Delete Sessions"), MenuDo::Sessions(ManageDo::Delete, keys)));
             items
         } else {
             self.side_sessions.clear();
@@ -10803,11 +10895,11 @@ impl Workbench {
                 items.push(("", MenuDo::Rule));
                 if r.archived {
                     // Back to its agent, to be continued.
-                    items.push(("Unarchive Session", MenuDo::Sessions(ManageDo::Unarchive, vec![key.to_string()])));
+                    items.push((phrase("Unarchive Session"), MenuDo::Sessions(ManageDo::Unarchive, vec![key.to_string()])));
                 } else {
-                    items.push(("Archive Session", MenuDo::Sessions(ManageDo::Archive, vec![key.to_string()])));
+                    items.push((phrase("Archive Session"), MenuDo::Sessions(ManageDo::Archive, vec![key.to_string()])));
                 }
-                items.push(("Delete Session", MenuDo::Sessions(ManageDo::Delete, vec![key.to_string()])));
+                items.push((phrase("Delete Session"), MenuDo::Sessions(ManageDo::Delete, vec![key.to_string()])));
             }
             items
         };
@@ -10818,8 +10910,8 @@ impl Workbench {
     /// Now; on its heading, Empty Trash.
     fn trash_menu(&mut self, key: Option<&str>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let items = match key {
-            Some(key) => vec![("Put Back", MenuDo::Sessions(ManageDo::PutBack, vec![key.to_string()])), ("Delete Now", MenuDo::Sessions(ManageDo::Purge, vec![key.to_string()]))],
-            None => vec![("Empty Trash", MenuDo::Sessions(ManageDo::Purge, self.trashed.iter().map(key_of).collect()))],
+            Some(key) => vec![(phrase("Put Back"), MenuDo::Sessions(ManageDo::PutBack, vec![key.to_string()])), (phrase("Delete Now"), MenuDo::Sessions(ManageDo::Purge, vec![key.to_string()]))],
+            None => vec![(phrase("Empty Trash"), MenuDo::Sessions(ManageDo::Purge, self.trashed.iter().map(key_of).collect()))],
         };
         self.open_menu(at, items, cx);
     }
@@ -10847,25 +10939,25 @@ impl Workbench {
         let hidden = of.iter().all(|p| self.hidden.contains(p));
         let mut items = Vec::new();
         if !several && !hidden {
-            items.push((if self.pinned.iter().any(|p| p == project) { "Unpin Project" } else { "Pin Project" }, MenuDo::Pin(project.to_string())));
+            items.push(if self.pinned.iter().any(|p| p == project) { (phrase("Unpin Project"), MenuDo::Unpin(project.to_string())) } else { (phrase("Pin Project"), MenuDo::Pin(project.to_string())) });
         }
         items.push((crate::sys::OPEN_FOLDER_LABEL, MenuDo::Projects(ProjectsDo::Open, of.clone())));
         let keys: Vec<String> = self.refs.iter().filter(|r| of.iter().any(|p| *p == r.project())).map(key_of).collect();
         items.push(match (hidden, several) {
-            (true, true) => ("Show Projects", MenuDo::Projects(ProjectsDo::Show, of)),
-            (true, false) => ("Show Project", MenuDo::Projects(ProjectsDo::Show, of)),
-            (false, true) => ("Hide Projects", MenuDo::Projects(ProjectsDo::Hide, of)),
-            (false, false) => ("Hide Project", MenuDo::Projects(ProjectsDo::Hide, of.clone())),
+            (true, true) => (phrase("Show Projects"), MenuDo::Projects(ProjectsDo::Show, of)),
+            (true, false) => (phrase("Show Project"), MenuDo::Projects(ProjectsDo::Show, of)),
+            (false, true) => (phrase("Hide Projects"), MenuDo::Projects(ProjectsDo::Hide, of)),
+            (false, false) => (phrase("Hide Project"), MenuDo::Projects(ProjectsDo::Hide, of.clone())),
         });
         // Its sessions, archived now or deleted: the sessions, and
         // nothing in the project's folder.
         if !keys.is_empty() {
             items.push(("", MenuDo::Rule));
-            items.push(("Archive Sessions", MenuDo::Sessions(ManageDo::Archive, keys.clone())));
+            items.push((phrase("Archive Sessions"), MenuDo::Sessions(ManageDo::Archive, keys.clone())));
             if self.refs.iter().any(|r| r.archived && keys.iter().any(|k| *k == key_of(r))) {
-                items.push(("Unarchive Sessions", MenuDo::Sessions(ManageDo::Unarchive, keys.clone())));
+                items.push((phrase("Unarchive Sessions"), MenuDo::Sessions(ManageDo::Unarchive, keys.clone())));
             }
-            items.push(("Delete Sessions", MenuDo::Sessions(ManageDo::Delete, keys)));
+            items.push((phrase("Delete Sessions"), MenuDo::Sessions(ManageDo::Delete, keys)));
         }
         self.open_menu(at, items, cx);
     }
@@ -10884,7 +10976,7 @@ impl Workbench {
             ProjectsDo::Open => {
                 let folders: Vec<String> = projects.iter().filter_map(|p| self.project_folder(p)).collect();
                 if folders.is_empty() {
-                    self.notice = Some(Notice::error(FOLDER_GONE));
+                    self.notice = Some(Notice::error(t(FOLDER_GONE)));
                 } else if folders.len() > OPEN_MANY {
                     let serial = self.open_ask.as_ref().map(|(_, n)| n + 1).unwrap_or(0);
                     self.open_ask = Some((folders, serial));
@@ -10928,15 +11020,16 @@ impl Workbench {
             }
             cx.notify();
         });
+        let folders_n = folders.len();
         self.ask_card(
             "open-ask",
             serial,
-            format!("Open {} folders?", folders.len()),
+            count(folders_n, "Open {n} folder?", "Open {n} folders?"),
             String::new(),
-            ["Cancel", "Open"],
+            [t("Cancel"), t("Open")],
             None,
-            choice_pill("open-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel),
-            choice_pill("open-ask-yes", "icons/folder-open.svg", "Open", Press::Primary, false, cx.theme()).on_click(go),
+            choice_pill("open-ask-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, false, cx.theme()).on_click(cancel),
+            choice_pill("open-ask-yes", "icons/folder-open.svg", t("Open"), Press::Primary, false, cx.theme()).on_click(go),
             cx,
         )
     }
@@ -11092,6 +11185,7 @@ impl Workbench {
         let open = self.artifacts_open.as_deref() == Some(r.session_id.as_str());
         let sid = r.session_id.clone();
         let one = (list.len() == 1).then(|| newest.url.clone());
+        let list_n = list.len();
         let row = h_flex()
             .id("artifacts-row")
             .w_full()
@@ -11113,10 +11207,10 @@ impl Workbench {
                 cx.notify();
             }))
             .child(Icon::default().path("icons/app-window.svg").with_size(px(14.)).text_color(theme.muted_foreground).flex_shrink_0())
-            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(plural(list.len(), "artifact", "artifacts")))
+            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(count(list_n, "{n} artifact", "{n} artifacts")))
             .child(div().flex_1().min_w_0().truncate().child(newest.title.clone()))
             .when_some(one, |d, url| {
-                d.child(crate::branches::small_pill("artifact-open", "icons/external-link.svg", "Open", Press::Quiet, false, &theme).h(px(22.)).flex_shrink_0().on_click(move |_, window, cx| {
+                d.child(crate::branches::small_pill("artifact-open", "icons/external-link.svg", t("Open"), Press::Quiet, false, &theme).h(px(22.)).flex_shrink_0().on_click(move |_, window, cx| {
                     swallow_click(window, cx);
                     cx.open_url(&url);
                 }))
@@ -11143,7 +11237,7 @@ impl Workbench {
             let url = a.url.clone();
             let open = url.clone();
             let place = a.url.trim_start_matches("https://").to_string();
-            let when = if a.times > 1 { format!("{} · published {} times", stamp(&a.last), a.times) } else { stamp(&a.last) };
+            let when = if a.times > 1 { tf("{date} · published {n} times", &[("date", &stamp(&a.last)), ("n", &a.times)]) } else { stamp(&a.last) };
             rows = rows.child(
                 h_flex()
                     .id(("artifact", ix))
@@ -11168,7 +11262,7 @@ impl Workbench {
                             .child(div().truncate().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(if a.title.is_empty() { place.clone() } else { a.title.clone() }))
                             .child(h_flex().gap(px(6.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(div().min_w_0().truncate().child(place)).child(div().flex_shrink_0().child("·")).child(div().flex_shrink_0().child(when))),
                     )
-                    .child(crate::branches::small_pill(SharedString::from(format!("artifact-open-{ix}")), "icons/external-link.svg", "Open", Press::Quiet, false, &theme).flex_shrink_0().on_click(move |_, window, cx| {
+                    .child(crate::branches::small_pill(SharedString::from(format!("artifact-open-{ix}")), "icons/external-link.svg", t("Open"), Press::Quiet, false, &theme).flex_shrink_0().on_click(move |_, window, cx| {
                         swallow_click(window, cx);
                         cx.open_url(&url);
                     })),
@@ -11224,13 +11318,13 @@ impl Workbench {
     pub(crate) fn attachment_menu(&mut self, at: Point<Pixels>, path: Option<PathBuf>, pic: Option<Pic>, cx: &mut Context<Self>) {
         let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
         if let Some(pic) = pic {
-            items.push(("Copy Image", MenuDo::CopyImage(pic)));
+            items.push((phrase("Copy Image"), MenuDo::CopyImage(pic)));
         }
         if let Some(path) = path {
             if !items.is_empty() {
                 items.push(("", MenuDo::Rule));
             }
-            items.push(("Copy Path", MenuDo::Copy(path.to_string_lossy().to_string())));
+            items.push((phrase("Copy Path"), MenuDo::Copy(path.to_string_lossy().to_string())));
             items.push((crate::sys::REVEAL_LABEL, MenuDo::Reveal(path)));
         }
         // The conversation's own menu is not for this press.
@@ -11260,7 +11354,7 @@ impl Workbench {
         };
         match image {
             Some(image) => cx.write_to_clipboard(ClipboardItem::new_image(&image)),
-            None => self.notice = Some(Notice::error("could not read that picture")),
+            None => self.notice = Some(Notice::error(t("could not read that picture"))),
         }
     }
 
@@ -11272,20 +11366,20 @@ impl Workbench {
         let resume = emaki_core::terminal::resume_argv(r.agent, &r.session_id).iter().map(|a| emaki_core::terminal::shell_quote(a)).collect::<Vec<_>>().join(" ");
         let resume = if r.cwd.is_empty() { resume } else { format!("cd {} && {resume}", emaki_core::terminal::shell_quote(&r.cwd)) };
         let mut items = vec![
-            ("Rename", MenuDo::Rename(key.to_string(), at)),
+            (phrase("Rename"), MenuDo::Rename(key.to_string(), at)),
             ("", MenuDo::Rule),
-            ("Copy Session ID", MenuDo::Copy(r.session_id.clone())),
-            ("Copy Resume Command", MenuDo::Copy(resume)),
+            (phrase("Copy Session ID"), MenuDo::CopyAs("icons/hash.svg", r.session_id.clone())),
+            (phrase("Copy Resume Command"), MenuDo::CopyAs("icons/terminal.svg", resume)),
             ("", MenuDo::Rule),
-            ("Open in Terminal", MenuDo::OpenTerminal(key.to_string())),
+            (phrase("Open in Terminal"), MenuDo::OpenTerminal(key.to_string())),
             (crate::sys::OPEN_SESSION_FOLDER_LABEL, MenuDo::OpenFolder(Self::folder_exists(r).then(|| r.cwd.clone()))),
-            (crate::sys::REVEAL_SESSION_LABEL, MenuDo::Reveal(r.path.clone())),
+            (crate::sys::REVEAL_SESSION_LABEL, MenuDo::RevealTranscript(r.path.clone())),
         ];
         if self.tabs.iter().any(|t| t == key) {
             items.push(("", MenuDo::Rule));
-            items.push(("Close Tab", MenuDo::CloseTab(key.to_string())));
+            items.push((phrase("Close Tab"), MenuDo::CloseTab(key.to_string())));
             if self.tabs.len() > 1 {
-                items.push(("Close Other Tabs", MenuDo::CloseOthers(key.to_string())));
+                items.push((phrase("Close Other Tabs"), MenuDo::CloseOthers(key.to_string())));
             }
         }
         items
@@ -11300,7 +11394,7 @@ impl Workbench {
         window.defer(cx, move |window, cx| {
             let text = gpui_base::TextSelection::selected_text(window, cx);
             if !text.trim().is_empty() {
-                this.update(cx, |this, cx| this.open_menu(at, vec![("Copy", MenuDo::Copy(text))], cx));
+                this.update(cx, |this, cx| this.open_menu(at, vec![(phrase("Copy"), MenuDo::Copy(text))], cx));
             }
         });
     }
@@ -11309,13 +11403,13 @@ impl Workbench {
         self.close_menu(cx);
         match what {
             MenuDo::OpenFolder(Some(cwd)) => crate::sys::open_path(std::path::Path::new(&cwd)),
-            MenuDo::OpenFolder(None) => self.notice = Some(Notice::error(FOLDER_GONE)),
-            MenuDo::Pin(project) => self.toggle_pin(&project, cx),
+            MenuDo::OpenFolder(None) => self.notice = Some(Notice::error(t(FOLDER_GONE))),
+            MenuDo::Pin(project) | MenuDo::Unpin(project) => self.toggle_pin(&project, cx),
             MenuDo::Projects(what, projects) => self.projects_do(what, projects, cx),
-            MenuDo::Reveal(path) => crate::sys::reveal_path(&path),
+            MenuDo::Reveal(path) | MenuDo::RevealTranscript(path) => crate::sys::reveal_path(&path),
             MenuDo::File(what, path) => self.file_do(what, path, window, cx),
             MenuDo::Files(what, paths) => self.files_do(what, paths, window, cx),
-            MenuDo::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            MenuDo::Copy(text) | MenuDo::CopyAs(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuDo::CopyImage(pic) => self.copy_image(pic, cx),
             MenuDo::OpenTerminal(key) => {
                 if self.selected.as_deref() != Some(key.as_str()) {
@@ -11522,8 +11616,8 @@ impl Workbench {
             if want.asked >= RENAME_TRIES {
                 self.renames.remove(&key);
                 self.save_titles();
-                let why = if want.error.is_empty() { "Claude Code did not take the name".to_string() } else { want.error.clone() };
-                self.notice = Some(Notice::error(format!("not renamed to \u{201c}{}\u{201d}: {why}", want.name)));
+                let why = if want.error.is_empty() { t("Claude Code did not take the name").to_string() } else { want.error.clone() };
+                self.notice = Some(Notice::error(tf("not renamed to “{name}”: {why}", &[("name", &want.name), ("why", &why)])));
                 cx.notify();
                 continue;
             }
@@ -11578,9 +11672,9 @@ impl Workbench {
         let pencil = || Icon::default().path("icons/pencil-simple.svg").with_size(px(12.)).text_color(color);
         if let Some(name) = self.renaming_to(r) {
             let tip: SharedString = if self.is_working(r) {
-                format!("Renaming to \u{201c}{name}\u{201d} when this turn is over").into()
+                tf("Renaming to “{name}” when this turn is over", &[("name", &name)]).into()
             } else {
-                format!("Renaming to \u{201c}{name}\u{201d}").into()
+                tf("Renaming to “{name}”", &[("name", &name)]).into()
             };
             return Some(
                 div()
@@ -11636,7 +11730,7 @@ impl Workbench {
             .fold(0f32, f32::max);
         // A menu over text has no icons, and its words start where they
         // end: the same room both sides.
-        let bare = menu.items.iter().all(|(label, what)| what.icon(label).is_empty());
+        let bare = menu.items.iter().all(|(_, what)| what.icon().is_empty());
         let (row_pl, icon_w, icon_gap) = if bare { (row_pr, 0., 0.) } else { (row_pl, icon_w, icon_gap) };
         let w = px((longest + icon_w + icon_gap + row_pl + row_pr + 2. * card_p + 2.).ceil());
         let rules = menu.items.iter().filter(|(_, what)| matches!(what, MenuDo::Rule)).count();
@@ -11673,7 +11767,7 @@ impl Workbench {
                         .text_size(px(13.))
                         .whitespace_nowrap()
                         .text_color(theme.muted_foreground)
-                        .when(!bare, |d| d.child(Icon::default().path(what.icon(label)).with_size(px(icon_w)).text_color(theme.muted_foreground).flex_shrink_0()))
+                        .when(!bare, |d| d.child(Icon::default().path(what.icon()).with_size(px(icon_w)).text_color(theme.muted_foreground).flex_shrink_0()))
                         .child(words),
                 );
                 continue;
@@ -11693,7 +11787,7 @@ impl Workbench {
                     // card and cannot be seen on it: a wash of the ink,
                     // as a list's rows have.
                     .hover(|s| s.bg(if theme.mode.is_dark() { theme.foreground.opacity(0.11) } else { theme.sidebar_accent }))
-                    .when(!bare, |d| d.child(Icon::default().path(what.icon(label)).with_size(px(icon_w)).text_color(theme.foreground).flex_shrink_0()))
+                    .when(!bare, |d| d.child(Icon::default().path(what.icon()).with_size(px(icon_w)).text_color(theme.foreground).flex_shrink_0()))
                     .on_click(cx.listener(move |this, _, window, cx| this.menu_pick(what.clone(), window, cx)))
                     .child(words),
             );
@@ -11741,13 +11835,13 @@ impl Workbench {
                     .border_1()
                     .border_color(theme.border)
                     .shadow(float_shadow(&theme))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Rename session"))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(t("Rename session")))
                     .child(
                         div()
                             .id("rename-field")
                             .track_focus(&focus)
                             .role(Role::TextInput)
-                            .aria_label("Session name")
+                            .aria_label(t("Session name"))
                             .aria_value(value)
                             .px(px(10.))
                             .h(px(36.))
@@ -11758,7 +11852,7 @@ impl Workbench {
                             .text_size(px(14.))
                             .child(Input::new(&self.rename_input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.rename_input, false, cx))),
                     )
-                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(key_text("↩ to save · Esc to cancel"))),
+                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(key_text(t("↩ to save · Esc to cancel")))),
             )
     }
 
@@ -11886,7 +11980,7 @@ impl Workbench {
                 .child(handle);
         for ((key, width), shift) in keys.into_iter().zip(widths.iter().copied()).zip(shifts.iter().copied()) {
             let r = self.refs.iter().find(|r| key_of(r) == key).cloned();
-            let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "untitled".into());
+            let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| t("untitled").into());
             let agent = r.as_ref().map(|r| r.agent).unwrap_or(AgentId::ClaudeCode);
             let unnamed = r.as_ref().is_some_and(|r| self.unnamed(r));
             let working = r.as_ref().map(|r| self.is_working(r)).unwrap_or(false);
@@ -11938,7 +12032,7 @@ impl Workbench {
                         // a drag of the tab, nor of the window.
                         self.rename_drawn.set(true);
                         d.child(
-                            self.name_field("tab-name", &self.rename_input, 12.5, "Session name", |this, window, cx| this.close_rename(window, cx), cx).on_click(|_, window, cx| swallow_click(window, cx)).on_mouse_down(
+                            self.name_field("tab-name", &self.rename_input, 12.5, t("Session name"), |this, window, cx| this.close_rename(window, cx), cx).on_click(|_, window, cx| swallow_click(window, cx)).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
                                     this.press_taken = true;
@@ -11972,7 +12066,7 @@ impl Workbench {
                         .justify_center()
                         .cursor_pointer()
                         .hover(move |s| s.bg(close_bg))
-                        .managed_tooltip(|window, cx| crate::workbench::tip("Close Tab (⌘W)", window, cx))
+                        .managed_tooltip(|window, cx| crate::workbench::tip(t("Close Tab (⌘W)"), window, cx))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
                             this.close_tab(&close_key, window, cx);
@@ -12181,11 +12275,11 @@ impl Workbench {
         let (go, running) = self.manage_targets(what);
         if go.is_empty() {
             let said = match (what, running) {
-                (_, n) if n > 0 => format!("{} still running; nothing was done.", plural(n, "session is", "sessions are")),
-                (ManageDo::Archive, _) => "Already archived.".to_string(),
-                (ManageDo::Delete | ManageDo::Purge, _) => "Nothing to delete.".to_string(),
-                (ManageDo::Unarchive, _) => "Nothing to unarchive.".to_string(),
-                (ManageDo::PutBack, _) => "Nothing to put back.".to_string(),
+                (_, n) if n > 0 => count(n, "{n} session is still running; nothing was done.", "{n} sessions are still running; nothing was done."),
+                (ManageDo::Archive, _) => t("Already archived.").to_string(),
+                (ManageDo::Delete | ManageDo::Purge, _) => t("Nothing to delete.").to_string(),
+                (ManageDo::Unarchive, _) => t("Nothing to unarchive.").to_string(),
+                (ManageDo::PutBack, _) => t("Nothing to put back.").to_string(),
             };
             if side {
                 self.notice = Some(Notice::said(said));
@@ -12202,22 +12296,18 @@ impl Workbench {
     fn render_manage_ask(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some((what, serial)) = self.manage_ask else { return div().into_any_element() };
         let (go, running) = self.manage_targets(what);
-        let n = plural(go.len(), "session", "sessions");
-        let one = go.len() == 1;
+        let n = go.len();
+        let one = n == 1;
         let (title, detail, yes) = match what {
-            ManageDo::Archive => (format!("Archive {n}?"), if running > 0 { format!("{} skipped.", plural(running, "running session is", "running sessions are")) } else { String::new() }, "Archive"),
-            ManageDo::Unarchive | ManageDo::PutBack => (format!("Unarchive {n}?"), String::new(), "Unarchive"),
-            ManageDo::Delete => (
-                format!("Delete {n}?"),
-                format!(
-                    "{} will be moved to Trash and stay for {} days until permanently deleted.{}",
-                    if one { "It" } else { "They" },
-                    emaki_core::trash::KEEP_DAYS as u32,
-                    if running > 0 { format!(" {} will be stopped.", plural(running, "running session", "running sessions")) } else { String::new() }
-                ),
-                "Delete",
-            ),
-            ManageDo::Purge => (format!("Delete {n} permanently?"), "This can't be undone.".to_string(), "Delete"),
+            ManageDo::Archive => (count(n, "Archive {n} session?", "Archive {n} sessions?"), if running > 0 { count(running, "{n} running session is skipped.", "{n} running sessions are skipped.") } else { String::new() }, t("Archive")),
+            ManageDo::Unarchive | ManageDo::PutBack => (count(n, "Unarchive {n} session?", "Unarchive {n} sessions?"), String::new(), t("Unarchive")),
+            ManageDo::Delete => {
+                let days = emaki_core::trash::KEEP_DAYS as u32;
+                let kept = if one { tf("It will be moved to Trash and stay for {days} days until permanently deleted.", &[("days", &days)]) } else { tf("They will be moved to Trash and stay for {days} days until permanently deleted.", &[("days", &days)]) };
+                let stopped = if running > 0 { count(running, "{n} running session will be stopped.", "{n} running sessions will be stopped.") } else { String::new() };
+                (count(n, "Delete {n} session?", "Delete {n} sessions?"), if stopped.is_empty() { kept } else { format!("{kept} {stopped}") }, t("Delete"))
+            }
+            ManageDo::Purge => (count(n, "Delete {n} session permanently?", "Delete {n} sessions permanently?"), t("This can't be undone.").to_string(), t("Delete")),
         };
         let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
             swallow_click(window, cx);
@@ -12235,8 +12325,8 @@ impl Workbench {
             ManageDo::Unarchive | ManageDo::PutBack => choice_pill("manage-ask-yes", "icons/undo-2.svg", yes, Press::Primary, false, cx.theme()),
         }
         .on_click(go);
-        let no = choice_pill("manage-ask-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, cx.theme()).on_click(cancel);
-        self.ask_card("manage-ask", serial, title, detail, ["Cancel", yes_label], None, no, yes, cx)
+        let no = choice_pill("manage-ask-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, false, cx.theme()).on_click(cancel);
+        self.ask_card("manage-ask", serial, title, detail, [t("Cancel"), yes_label], None, no, yes, cx)
     }
 
     /// The question answered yes: it is done off the main thread, a
@@ -12301,18 +12391,21 @@ impl Workbench {
                 this.side_marked.clear();
                 this.trash = emaki_core::trash::load();
                 let done: Vec<&SessionRef> = go.iter().filter(|r| !failed.iter().any(|(k, _)| *k == key_of(r))).collect();
+                let done_n = done.len();
                 let mut said = match what {
-                    ManageDo::Archive => format!("{} archived.", plural(done.len(), "session", "sessions")),
-                    ManageDo::Delete => format!("{} moved to the Trash.", plural(done.len(), "session", "sessions")),
-                    ManageDo::Unarchive => format!("{} unarchived.", plural(done.len(), "session", "sessions")),
-                    ManageDo::PutBack => format!("{} put back.", plural(done.len(), "session", "sessions")),
-                    ManageDo::Purge => format!("{} deleted.", plural(done.len(), "session", "sessions")),
+                    ManageDo::Archive => count(done_n, "{n} session archived.", "{n} sessions archived."),
+                    ManageDo::Delete => count(done_n, "{n} session moved to the Trash.", "{n} sessions moved to the Trash."),
+                    ManageDo::Unarchive => count(done_n, "{n} session unarchived.", "{n} sessions unarchived."),
+                    ManageDo::PutBack => count(done_n, "{n} session put back.", "{n} sessions put back."),
+                    ManageDo::Purge => count(done_n, "{n} session deleted.", "{n} sessions deleted."),
                 };
                 if running > 0 && what == ManageDo::Archive {
-                    said.push_str(&format!(" {} still running, left.", running));
+                    said.push(' ');
+                    said.push_str(&tf("{n} still running, left.", &[("n", &running)]));
                 }
                 if let Some((_, why)) = failed.first() {
-                    said.push_str(&format!(" {} not done: {why}.", failed.len()));
+                    said.push(' ');
+                    said.push_str(&tf("{n} not done: {why}.", &[("n", &failed.len()), ("why", why)]));
                 }
                 if this.manage_side {
                     this.notice = Some(if failed.is_empty() { Notice::said(said) } else { Notice::error(said) });
@@ -12393,7 +12486,7 @@ impl Workbench {
                 .on_click(cx.listener(move |this, _, _, cx| this.show_sessions(to.clone(), cx)))
                 .child(label)
         };
-        let mut filters = h_flex().gap(px(6.)).flex_wrap().child(filter("f-all".into(), format!("All · {}", self.refs.len()), Scope::All, cx));
+        let mut filters = h_flex().gap(px(6.)).flex_wrap().child(filter("f-all".into(), tf("All · {n}", &[("n", &self.refs.len())]), Scope::All, cx));
         for a in AgentId::ALL {
             let n = self.refs.iter().filter(|r| r.agent == a).count();
             if n > 0 || scope == Scope::Agent(a) {
@@ -12461,7 +12554,7 @@ impl Workbench {
         let mut rows: Vec<AnyElement> = Vec::new();
         for (section, list) in [(false, kept), (true, archived)] {
             if section && !list.is_empty() {
-                rows.push(div().pt(if rows.is_empty() { px(4.) } else { px(18.) }).pb(px(6.)).px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("Archived").into_any_element());
+                rows.push(div().pt(if rows.is_empty() { px(4.) } else { px(18.) }).pb(px(6.)).px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(t("Archived")).into_any_element());
             }
             for (p, list) in list {
                 // A project wears what the sidebar's does: its icon in
@@ -12473,7 +12566,8 @@ impl Workbench {
                 let chip = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| (*c, self.column_color(*c, cx)));
                 let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
                 let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
-                let mut sub = vec![plural(list.len(), "session", "sessions")];
+                let list_n = list.len();
+                let mut sub = vec![crate::i18n::count(list_n, "{n} session", "{n} sessions")];
                 if let Some(c) = list.iter().map(|r| r.cwd.as_str()).find(|c| !c.is_empty()) {
                     sub.push(match c.strip_prefix(home.as_str()) {
                         Some(rest) if !home.is_empty() => format!("~{rest}"),
@@ -12601,7 +12695,7 @@ impl Workbench {
                                             .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).when(self.unnamed(&r), |d| d.italic()).child(r.title.clone()))
                                             .children(self.rename_mark(&r, "page", cx))
                                             // Under "Archived" every row is.
-                                            .when(r.archived && !section, |d| d.child(badge("archived", theme.muted, theme.muted_foreground)))
+                                            .when(r.archived && !section, |d| d.child(badge(t("archived"), theme.muted, theme.muted_foreground)))
                                             .when(r.agent != AgentId::ClaudeCode, |d| d.child(badge(r.agent.display_name(), theme.muted, theme.muted_foreground))),
                                     )
                                     .when(!r.git_branch.is_empty(), |d| d.child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(format!("⎇ {}", r.git_branch)))),
@@ -12646,7 +12740,7 @@ impl Workbench {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)))
-                    .child("Trash")
+                    .child(t("Trash"))
                     .into_any_element(),
             );
             let now = emaki_core::trash::now();
@@ -12692,7 +12786,7 @@ impl Workbench {
                                 .flex()
                                 .items_center()
                                 .justify_end()
-                                .child(div().text_size(px(12.)).text_color(theme.muted_foreground).group_hover(group.clone(), |s| s.opacity(0.)).child(plural(days as usize, "day", "days")))
+                                .child(div().text_size(px(12.)).text_color(theme.muted_foreground).group_hover(group.clone(), |s| s.opacity(0.)).child(crate::i18n::count(days as usize, "{n} day", "{n} days")))
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("trash-page-back-{key}")))
@@ -12709,7 +12803,7 @@ impl Workbench {
                                         .group_hover(group.clone(), |s| s.opacity(1.))
                                         .text_color(theme.muted_foreground)
                                         .hover(|s| s.bg(theme.border).text_color(theme.foreground))
-                                        .managed_tooltip(|window, cx| crate::workbench::tip("Put Back", window, cx))
+                                        .managed_tooltip(|window, cx| crate::workbench::tip(t("Put Back"), window, cx))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             swallow_click(window, cx);
                                             this.manage_straight(ManageDo::PutBack, vec![back_key.clone()], window, cx);
@@ -12723,18 +12817,18 @@ impl Workbench {
             }
         }
         if rows.is_empty() {
-            rows.push(div().px(px(12.)).py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child("Nothing here.").into_any_element());
+            rows.push(div().px(px(12.)).py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child(t("Nothing here.")).into_any_element());
         }
 
         let title = match &scope {
-            Scope::All => "All Sessions".to_string(),
-            Scope::Agent(a) => format!("{} sessions", a.display_name()),
+            Scope::All => t("All Sessions").to_string(),
+            Scope::Agent(a) => tf("{agent} sessions", &[("agent", &a.display_name())]),
         };
         // A figure a kind: the count in the page's ink, then its word in
         // the muted one. Archived and the Trash are said only when there
         // are some. The projects each kind is in are the list's to show:
         // counted here too, the line ran past a narrow page.
-        let figures: Vec<(usize, &'static str)> = [(count - gone_n, "active"), (gone_n, "archived"), (trash_n, "in Trash")].into_iter().enumerate().filter(|(at, (n, _))| *at == 0 || *n > 0).map(|(_, f)| f).collect();
+        let figures: Vec<(usize, &'static str)> = [(count - gone_n, t("active")), (gone_n, t("archived")), (trash_n, t("in Trash"))].into_iter().enumerate().filter(|(at, (n, _))| *at == 0 || *n > 0).map(|(_, f)| f).collect();
         let display = crate::fonts::display_family(cx);
         // The line over the first project: what is here, and "Select"
         // at its right. Choosing, it is a plate with a box for every
@@ -12744,7 +12838,7 @@ impl Workbench {
         // so what is chosen far down can still be acted on.
         let n = self.picked.len();
         let none = n == 0 || self.manage_busy;
-        let said = if self.manage_busy { Some("Working…".to_string()) } else { self.manage_said.clone() };
+        let said = if self.manage_busy { Some(t("Working…").to_string()) } else { self.manage_said.clone() };
         // A pill as the page's filters are: quiet, the danger's, or solid.
         let pill = |id: &'static str, icon: Option<&'static str>, label: &'static str, kind: u8, off: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>, on: fn(&mut Self, &mut Context<Self>)| {
             let kind = match kind {
@@ -12788,7 +12882,7 @@ impl Workbench {
                             // at its end; with room it fades nothing.
                             .child(div().absolute().top_0().bottom_0().right_0().w(px(24.)).bg(linear_gradient(90., linear_color_stop(theme.background.opacity(0.), 0.), linear_color_stop(theme.background, 1.)))),
                     )
-                    .child(pill("sessions-select", Some("icons/select-all.svg"), "Select", 0, false, &theme, cx, |this, cx| this.manage_toggle(cx)));
+                    .child(pill("sessions-select", Some("icons/select-all.svg"), t("Select"), 0, false, &theme, cx, |this, cx| this.manage_toggle(cx)));
             }
             let all = all_keys.clone();
             let ids: [&'static str; 4] = if suffix.is_empty() { ["manage-all", "manage-archive", "manage-delete", "manage-done"] } else { ["manage-all-f", "manage-archive-f", "manage-delete-f", "manage-done-f"] };
@@ -12807,13 +12901,13 @@ impl Workbench {
                         .font_weight(FontWeight::MEDIUM)
                         .on_click(cx.listener(move |this, _, _, cx| this.pick(&all, cx)))
                         .children(pick_box(format!("all{suffix}"), state_of(&all_keys), &theme))
-                        .child(if n == 0 { "Select all".to_string() } else { format!("{n} selected") }),
+                        .child(if n == 0 { t("Select all").to_string() } else { tf("{n} selected", &[("n", &n)]) }),
                 )
                 .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).children(said.clone()))
-                .child(pill(ids[1], Some("icons/archive.svg"), "Archive", 0, none, &theme, cx, |this, cx| this.manage_asked(ManageDo::Archive, cx)))
-                .child(pill(ids[2], Some("icons/trash.svg"), "Delete", 1, none, &theme, cx, |this, cx| this.manage_asked(ManageDo::Delete, cx)))
+                .child(pill(ids[1], Some("icons/archive.svg"), t("Archive"), 0, none, &theme, cx, |this, cx| this.manage_asked(ManageDo::Archive, cx)))
+                .child(pill(ids[2], Some("icons/trash.svg"), t("Delete"), 1, none, &theme, cx, |this, cx| this.manage_asked(ManageDo::Delete, cx)))
                 .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(theme.border))
-                .child(pill(ids[3], None, "Done", 2, false, &theme, cx, |this, cx| this.manage_toggle(cx)))
+                .child(pill(ids[3], None, t("Done"), 2, false, &theme, cx, |this, cx| this.manage_toggle(cx)))
         };
         // The plate comes and goes under the line's words: its ground,
         // and the room at its sides.
@@ -12928,7 +13022,7 @@ impl Workbench {
             .cursor_pointer()
             .hover(|s| s.border_color(theme.primary))
             .child(Icon::default().path("icons/arrow-down.svg").with_size(px(13.)).text_color(theme.primary))
-            .child("New messages")
+            .child(t("New messages"))
             .when(now, |d| {
                 d.on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
@@ -13058,7 +13152,7 @@ impl Workbench {
                 .flex_1()
                 .h_full()
                 .child(self.render_topbar(String::new(), Vec::new(), cx))
-                .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child(key_text("Pick a session, or press ⌘K to search everything.")))
+                .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child(key_text(t("Pick a session, or press ⌘K to search everything."))))
                 .into_any_element();
         };
         self.glide_step(window);
@@ -13081,12 +13175,12 @@ impl Workbench {
 
         let mut right: Vec<AnyElement> = Vec::new();
         if r.archived {
-            right.push(badge("archived", theme.muted, theme.muted_foreground).into_any_element());
+            right.push(badge(t("archived"), theme.muted, theme.muted_foreground).into_any_element());
         }
         // The terminal is the panel at the right (`term_panel.rs`); the
         // person's own terminal app is on the session's menu.
         right.push(self.term_buttons(r.agent, cx));
-        let folder_tip = if Self::folder_exists(&r) { "Open the project folder" } else { FOLDER_GONE };
+        let folder_tip = if Self::folder_exists(&r) { t("Open the project folder") } else { t(FOLDER_GONE) };
         let tabs = self.render_tabs(cx);
         let topbar = self.render_topbar_ends(self.panel_buttons(cx), tabs, right, cx);
 
@@ -13160,7 +13254,7 @@ impl Workbench {
             let st = &r.state;
             let from = if !st.turn_started.is_empty() { &st.turn_started } else if !st.since.is_empty() { &st.since } else { &r.updated };
             let card = self.card_for(&r);
-            let what = if card.text.is_empty() { "working".to_string() } else { card.text.clone() };
+            let what = if card.text.is_empty() { t("working").to_string() } else { card.text.clone() };
             // The terminal's own line when it could be read, in the
             // terminal's colors as the window's appearance has them:
             // the screen is in whichever theme Claude Code is set to, so
@@ -13200,7 +13294,7 @@ impl Workbench {
                         .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(word(w.color)).child(w.verb))
                         .child(h_flex().flex_1().min_w_0().overflow_hidden().gap(px(4.)).children(w.detail.into_iter().map(|(t, c)| div().flex_shrink_0().text_color(ink(c)).child(t)))),
                     None => d
-                        .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} is working…", r.agent.speaker())))
+                        .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(tf("{agent} is working…", &[("agent", &r.agent.speaker())])))
                         .child(div().flex_1().min_w_0().truncate().child(what))
                         .child(div().child(elapsed_since(from, self.now))),
                 })
@@ -13224,13 +13318,13 @@ impl Workbench {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)).text_color(theme.danger))
                         .active(|s| s.bg(theme.danger.opacity(0.18)))
-                        .managed_tooltip(|window, cx| crate::workbench::tip("Stop this turn (Esc)", window, cx))
+                        .managed_tooltip(|window, cx| crate::workbench::tip(t("Stop this turn (Esc)"), window, cx))
                         .on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.interrupt(cx);
                         }))
                         .child(div().size(px(7.)).rounded(px(1.5)).bg(theme.danger))
-                        .child("Stop"),
+                        .child(t("Stop")),
                 )
         });
         let status = status.map(|row| foot_line(status_moving, &status_key, row));
@@ -13253,16 +13347,16 @@ impl Workbench {
             let in_terminal = card.pending.is_none();
             let question = card.pending.as_ref().map(|p| p.is_question()).unwrap_or(card.chip_kind == "ask");
             let what = if question {
-                "your answer"
+                phrase("{agent} is waiting for your answer")
             } else if card.chip_kind == "plan" {
-                "your go-ahead on the plan"
+                phrase("{agent} is waiting for your go-ahead on the plan")
             } else {
-                "your approval"
+                phrase("{agent} is waiting for your approval")
             };
             let from = if !r.state.since.is_empty() { r.state.since.clone() } else { r.updated.clone() };
             let own = self.own_terminal(&r.session_id);
-            let where_ = if in_terminal && own { "in its terminal".to_string() } else if in_terminal { "in your terminal".to_string() } else { "below".to_string() };
-            (format!("{} is waiting for {what}", r.agent.speaker()), where_, in_terminal, own, from)
+            let where_ = if in_terminal && own { t("in its terminal").to_string() } else if in_terminal { t("in your terminal").to_string() } else { t("below").to_string() };
+            (tf(what, &[("agent", &r.agent.speaker())]), where_, in_terminal, own, from)
         });
         let waiting_on = waiting_now.is_some();
         if waiting_on {
@@ -13282,14 +13376,14 @@ impl Workbench {
                 .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "waiting-glyph"))
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said))
                 .child(div().flex_1().min_w_0().truncate().child(where_))
-                .when(in_terminal && waiting_on, |d| d.child(crate::branches::small_pill("waiting-terminal", "icons/terminal.svg", if own { "Show the terminal" } else { "Open the terminal" }, Press::Primary, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                .when(in_terminal && waiting_on, |d| d.child(crate::branches::small_pill("waiting-terminal", "icons/terminal.svg", if own { t("Show the terminal") } else { t("Open the terminal") }, Press::Primary, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.go_to_terminal(cx)
                 }))))
                 // The card that takes the answer, when the reader has
                 // gone up the conversation and left it behind.
                 .when(asked && !at_end && waiting_on, |d| {
-                    d.child(choice_pill("waiting-show", "icons/arrow-down.svg", "Show", Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).on_click(cx.listener(|this, _, window, cx| {
+                    d.child(choice_pill("waiting-show", "icons/arrow-down.svg", t("Show"), Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.cards_show();
                         cx.notify();
@@ -13307,7 +13401,7 @@ impl Workbench {
         // goes to it.
         let behind_on = card_up && !at_end;
         if behind_on {
-            *self.behind_said.borrow_mut() = if self.dialog_seen.as_ref().is_some_and(|(sid, _)| *sid == r.session_id) { format!("{} is waiting for your answer", r.agent.speaker()) } else { format!("{}'s terminal is waiting", r.agent.speaker()) };
+            *self.behind_said.borrow_mut() = if self.dialog_seen.as_ref().is_some_and(|(sid, _)| *sid == r.session_id) { tf("{agent} is waiting for your answer", &[("agent", &r.agent.speaker())]) } else { tf("{agent}'s terminal is waiting", &[("agent", &r.agent.speaker())]) };
         }
         let behind_moving = self.presence("behind-line", behind_on, cx);
         let behind = (behind_on || behind_moving.is_some()).then(|| {
@@ -13320,8 +13414,8 @@ impl Workbench {
                 .text_color(theme.muted_foreground)
                 .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "behind-glyph"))
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(self.behind_said.borrow().clone()))
-                .child(div().flex_1().min_w_0().truncate().child("below"))
-                .child(choice_pill("behind-show", "icons/arrow-down.svg", "Show", Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).when(behind_on, |d| {
+                .child(div().flex_1().min_w_0().truncate().child(t("below")))
+                .child(choice_pill("behind-show", "icons/arrow-down.svg", t("Show"), Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).when(behind_on, |d| {
                     d.on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.cards_show();
@@ -13472,6 +13566,7 @@ impl Workbench {
         let open = if agents { &self.agents_open } else { &self.shells_open }.as_deref() == Some(r.session_id.as_str());
         let label = |sh: &emaki_core::model::Shell| if sh.description.is_empty() { sh.command.lines().next().unwrap_or("").to_string() } else { sh.description.clone() };
         let first = &shells[0];
+        let shells_n = shells.len();
         let sid = r.session_id.clone();
         let row = h_flex()
             .id(if agents { "agents-row" } else { "shells-row" })
@@ -13503,7 +13598,7 @@ impl Workbench {
                 cx.notify();
             }))
             .child(div().size(px(7.)).rounded_full().bg(theme.blue).flex_shrink_0().with_animation(if agents { "agents-dot" } else { "shells-dot" }, Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.opacity(0.35 + 0.65 * (1. - (2. * t - 1.).abs()))))
-            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(format!("{} running in the background", if agents { plural(shells.len(), "agent", "agents") } else { plural(shells.len(), "command", "commands") })))
+            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(if agents { count(shells_n, "{n} agent running in the background", "{n} agents running in the background") } else { count(shells_n, "{n} command running in the background", "{n} commands running in the background") }))
             .child(div().flex_1().min_w_0().truncate().child(if shells.len() == 1 { label(first) } else { String::new() }))
             .when(shells.len() == 1, |d| d.child(div().flex_shrink_0().child(elapsed_since(&first.started, self.now))))
             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronUp }).with_size(px(13.)).flex_shrink_0());
@@ -13555,7 +13650,7 @@ impl Workbench {
                                     .font_family(theme.mono_font_family.clone())
                                     .text_size(px(11.))
                                     .text_color(theme.muted_foreground.opacity(if step.is_empty() { 0.7 } else { 1. }))
-                                    .child(if step.is_empty() { "starting…".to_string() } else { step }),
+                                    .child(if step.is_empty() { t("starting…").to_string() } else { step }),
                             ),
                     );
                     continue;
@@ -13574,8 +13669,8 @@ impl Workbench {
                                 .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(label(sh)))
                                 .child(div().flex_shrink_0().text_size(px(11.5)).text_color(theme.muted_foreground).child(elapsed_since(&sh.started, self.now))),
                         )
-                        .child(self.shell_box(format!("shell-cmd-{}", sh.id).into(), "Command", &sh.command, "", false, cx))
-                        .child(self.shell_box(format!("shell-out-{}", sh.id).into(), "Output", tail.trim_end(), "nothing printed yet", true, cx)),
+                        .child(self.shell_box(format!("shell-cmd-{}", sh.id).into(), t("Command"), &sh.command, "", false, cx))
+                        .child(self.shell_box(format!("shell-out-{}", sh.id).into(), t("Output"), tail.trim_end(), t("nothing printed yet"), true, cx)),
                 );
             }
             let list = self.card_scroll(if agents { "card-agents" } else { "card-shells" }, None, false, list);
@@ -13725,7 +13820,7 @@ impl Workbench {
                 .opacity(0.)
                 .group_hover(key.clone(), |s| s.opacity(1.))
                 .hover(move |s| s.bg(hover_bg))
-                .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(if done { t("Copied") } else { t("Copy") }, window, cx))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
                     this.copy_text(key.clone(), text.clone(), cx);
@@ -14026,8 +14121,8 @@ impl Workbench {
         }
         let typed = !d.multi && d.options.iter().any(|o| o.label.starts_with("Type something"));
         let busy = self.dialog_sending || leaving;
-        let head = if plan_at.is_some() { "plan" } else if approval { "approval" } else if review { "review" } else { "question" };
-        let says = if plan_at.is_some() { format!("{} has a plan", r.agent.speaker()) } else if approval { format!("{} asks to go ahead", r.agent.speaker()) } else { format!("{} asks", r.agent.speaker()) };
+        let head = if plan_at.is_some() { t("plan") } else if approval { t("approval") } else if review { t("review") } else { t("question") };
+        let says = if plan_at.is_some() { tf("{agent} has a plan", &[("agent", &r.agent.speaker())]) } else if approval { tf("{agent} asks to go ahead", &[("agent", &r.agent.speaker())]) } else { tf("{agent} asks", &[("agent", &r.agent.speaker())]) };
         // The plan scrolls in a box of its own, so the choices under it
         // stay in view however long it is.
         let plan_box = plan.map(|text| {
@@ -14065,7 +14160,7 @@ impl Workbench {
                     if own {
                         let handle = this.composer.read(cx).focus_handle(cx);
                         window.focus(&handle, cx);
-                        this.notice = Some(Notice::said("type your answer in the box and send it"));
+                        this.notice = Some(Notice::said(t("type your answer in the box and send it")));
                         cx.notify();
                     } else {
                         this.dialog_send(vec![DialogStep { keys: if pointed { "\r".into() } else { n.to_string() }, until: None }], cx);
@@ -14089,7 +14184,7 @@ impl Workbench {
                     v_flex()
                         .min_w_0()
                         .gap(px(1.))
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).when(aside, |d| d.text_color(theme.muted_foreground)).child(if own { "Type your own answer".to_string() } else { o.label.clone() }))
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).when(aside, |d| d.text_color(theme.muted_foreground)).child(if own { t("Type your own answer").to_string() } else { o.label.clone() }))
                         .when(!o.detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(o.detail.clone()))),
                 )
         });
@@ -14275,7 +14370,7 @@ impl Workbench {
                                     }))
                                 })
                                 .when(*done, |d| d.child(Icon::new(IconName::Check).with_size(px(10.))))
-                                .child(if name == "Submit" { "Review".to_string() } else { name.clone() })
+                                .child(if name == "Submit" { t("Review").to_string() } else { name.clone() })
                         }))).children(fade_left).children(fade_right))
                         .children(tabs_right),
                 )
@@ -14299,23 +14394,23 @@ impl Workbench {
                         .gap(px(10.))
                         .items_center()
                         .when(d.multi, |el| {
-                            el.child(choice_pill("dialog-next", "icons/arrow-right.svg", "Next", Press::Primary, busy, &theme).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
+                            el.child(choice_pill("dialog-next", "icons/arrow-right.svg", t("Next"), Press::Primary, busy, &theme).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
                                 swallow_click(window, cx);
                                 this.dialog_send(vec![DialogStep { keys: "\t".into(), until: None }], cx)
                             }))))
                         })
                         .when(previews, |el| {
-                            el.child(choice_pill("dialog-choose", "icons/check.svg", "Choose", Press::Primary, busy, &theme).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
+                            el.child(choice_pill("dialog-choose", "icons/check.svg", t("Choose"), Press::Primary, busy, &theme).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
                                 swallow_click(window, cx);
                                 this.dialog_send(vec![DialogStep { keys: "\r".into(), until: None }], cx)
                             }))))
                         })
-                        .child(choice_pill("dialog-cancel", "icons/close.svg", "Cancel", Press::Quiet, busy, &theme).child(key_text("Esc")).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
+                        .child(choice_pill("dialog-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, busy, &theme).child(key_text("Esc")).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx)
                         }))))
                         .child(div().flex_1())
-                        .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if typed { "or type an answer below" } else { "" })),
+                        .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if typed { t("or type an answer below") } else { "" })),
                 ));
         // Held by its foot, it opens up from the conversation's end and
         // closes back down to it; the gap under it is part of what moves (see
@@ -14370,9 +14465,9 @@ impl Workbench {
                 return self.render_plan_ask(&p, first, cx);
             }
             let heading = match p.tool_name.as_str() {
-                "apply_patch" => format!("{who} wants to change files"),
-                "request_permissions" => format!("{who} asks for more access"),
-                tool => format!("{who} wants to run {tool}"),
+                "apply_patch" => tf("{who} wants to change files", &[("who", &who)]),
+                "request_permissions" => tf("{who} asks for more access", &[("who", &who)]),
+                tool => tf("{who} wants to run {tool}", &[("who", &who), ("tool", &tool)]),
             };
             let id_allow = p.request_id.clone();
             let id_deny = p.request_id.clone();
@@ -14422,15 +14517,15 @@ impl Workbench {
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(choice_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", "Allow", Press::Primary, false, &theme).when(first, |d| d.child(key_text("↩"))).on_click(cx.listener(move |this, _, window, cx| {
+                        .child(choice_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", t("Allow"), Press::Primary, false, &theme).when(first, |d| d.child(key_text("↩"))).on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
                             this.answer_permission(id_allow.clone(), true, cx)
                         })))
-                        .child(choice_pill(SharedString::from(format!("deny-{}", p.request_id)), "icons/close.svg", "Deny", Press::Quiet, false, &theme).when(first, |d| d.child(key_text("⇧↩"))).on_click(cx.listener(move |this, _, window, cx| {
+                        .child(choice_pill(SharedString::from(format!("deny-{}", p.request_id)), "icons/close.svg", t("Deny"), Press::Quiet, false, &theme).when(first, |d| d.child(key_text("⇧↩"))).on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
                             this.answer_permission(id_deny.clone(), false, cx)
                         })))
-                        .when(first && several, |d| d.child(div().flex_1()).child(choice_pill("allow-all", "icons/circle-check.svg", "Allow all", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                        .when(first && several, |d| d.child(div().flex_1()).child(choice_pill("allow-all", "icons/circle-check.svg", t("Allow all"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.allow_all_pending(cx)
                         })))),
@@ -14481,18 +14576,18 @@ impl Workbench {
                     .gap(px(8.))
                     .items_center()
                     .child(Icon::default().path("icons/shield.svg").with_size(px(14.)).text_color(theme.primary))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Implement this plan?"))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child("Yes leaves Plan mode and starts the work")),
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(t("Implement this plan?")))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(t("Yes leaves Plan mode and starts the work"))),
             )
             .child(
                 h_flex()
                     .gap(px(8.))
                     .items_center()
-                    .child(choice_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", "Yes, implement", Press::Primary, false, &theme).when(first, |d| d.child(key_text("↩"))).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(choice_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", t("Yes, implement"), Press::Primary, false, &theme).when(first, |d| d.child(key_text("↩"))).on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
                         this.answer_permission(yes.clone(), true, cx)
                     })))
-                    .child(choice_pill(SharedString::from(format!("deny-{}", p.request_id)), "icons/close.svg", "No, keep planning", Press::Quiet, false, &theme).when(first, |d| d.child(key_text("⇧↩"))).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(choice_pill(SharedString::from(format!("deny-{}", p.request_id)), "icons/close.svg", t("No, keep planning"), Press::Quiet, false, &theme).when(first, |d| d.child(key_text("⇧↩"))).on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
                         this.answer_permission(no.clone(), false, cx)
                     }))),
@@ -14527,8 +14622,8 @@ impl Workbench {
                 h_flex()
                     .gap(px(8.))
                     .items_center()
-                    .child(badge_str("question".into(), theme.primary.opacity(0.14), theme.primary))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(format!("{} asks", self.agent_now().speaker()))),
+                    .child(badge_str(t("question").into(), theme.primary.opacity(0.14), theme.primary))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(tf("{agent} asks", &[("agent", &self.agent_now().speaker())]))),
             )
             .child(self.card_scroll(format!("card-ask-{}", p.request_id), None, false, v_flex().w_full().gap(px(12.)).children(qs.iter().enumerate().map(|(qi, q)| {
                 let chosen = picks.get(&q.question).cloned().unwrap_or_default();
@@ -14591,14 +14686,14 @@ impl Workbench {
                     .items_center()
                     .when(by_button, |d| {
                         let rid = p.request_id.clone();
-                        d.child(choice_pill(SharedString::from(format!("answer-{}", p.request_id)), "icons/check.svg", "Answer", Press::Primary, !ready, &theme).when(ready, |b| {
+                        d.child(choice_pill(SharedString::from(format!("answer-{}", p.request_id)), "icons/check.svg", t("Answer"), Press::Primary, !ready, &theme).when(ready, |b| {
                             b.on_click(cx.listener(move |this, _, window, cx| {
                                 swallow_click(window, cx);
                                 this.submit_question(rid.clone(), cx)
                             }))
                         }))
                     })
-                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child("or type an answer below")),
+                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(t("or type an answer below"))),
             )
             .into_any_element()
     }
@@ -14619,7 +14714,7 @@ impl Workbench {
                     // Claude Code's own stand in until its list is read;
                     // another agent's list is its own or nothing.
                     None if agent != AgentId::ClaudeCode => (Vec::new(), !cwd.is_empty()),
-                    None => (BUILTIN_COMMANDS.iter().map(|(n, d, a)| (n.to_string(), d.to_string(), a.to_string())).collect(), !cwd.is_empty()),
+                    None => (BUILTIN_COMMANDS.iter().map(|(n, d, a)| (n.to_string(), t(d).to_string(), t(a).to_string())).collect(), !cwd.is_empty()),
                 }
             }
         };
@@ -14936,16 +15031,16 @@ impl Workbench {
                     let mut items = if composer { this.corrections(at, cx) } else { Vec::new() };
                     if items.is_empty() {
                         if selection {
-                            items.push(("Cut", MenuDo::Edit(EditDo::Cut, focus.clone())));
-                            items.push(("Copy", MenuDo::Edit(EditDo::Copy, focus.clone())));
+                            items.push((phrase("Cut"), MenuDo::Edit(EditDo::Cut, focus.clone())));
+                            items.push((phrase("Copy"), MenuDo::Edit(EditDo::Copy, focus.clone())));
                         }
                         if cx.read_from_clipboard().is_some() {
-                            items.push(("Paste", MenuDo::Edit(EditDo::Paste, focus.clone())));
+                            items.push((phrase("Paste"), MenuDo::Edit(EditDo::Paste, focus.clone())));
                         }
                         if !items.is_empty() {
                             items.push(("", MenuDo::Rule));
                         }
-                        items.push(("Select All", MenuDo::Edit(EditDo::SelectAll, focus.clone())));
+                        items.push((phrase("Select All"), MenuDo::Edit(EditDo::SelectAll, focus.clone())));
                     }
                     this.open_menu(at, items, cx);
                     if let Some(m) = this.menu.as_mut() {
@@ -14977,13 +15072,13 @@ impl Workbench {
         let mut items: Vec<(&'static str, MenuDo)> = issue.fixes.iter().take(5).map(|with| ("", fix(with))).collect();
         let words = text[issue.range.clone()].to_string();
         if issue.kind == Kind::Spelling && issue.fixes.is_empty() {
-            items.push(("", MenuDo::Note("No spelling found".to_string())));
+            items.push(("", MenuDo::Note(t("No spelling found").to_string())));
         }
         items.push(("", MenuDo::Rule));
         if issue.kind == Kind::Spelling {
-            items.push(("Learn Spelling", MenuDo::Learn(words.clone())));
+            items.push((phrase("Learn Spelling"), MenuDo::Learn(words.clone())));
         }
-        items.push(("Ignore", MenuDo::Ignore(issue.rule.clone(), words)));
+        items.push((phrase("Ignore"), MenuDo::Ignore(issue.rule.clone(), words)));
         items
     }
 
@@ -15004,7 +15099,7 @@ impl Workbench {
 
     fn learn_word(&mut self, word: String, cx: &mut Context<Self>) {
         if let Err(e) = emaki_core::check::learn(&word) {
-            self.notice = Some(Notice::error(format!("could not keep the word: {e}")));
+            self.notice = Some(Notice::error(tf("could not keep the word: {e}", &[("e", &e)])));
         }
         self.learned.insert(word.to_lowercase());
         self.issues.retain(|i| !(i.kind == emaki_core::check::Kind::Spelling && self.issues_for[i.range.clone()].eq_ignore_ascii_case(&word)));
@@ -15023,7 +15118,7 @@ impl Workbench {
             self.learned.insert(words.to_lowercase());
         } else {
             if let Err(e) = check::ignore(&rule, &words) {
-                self.notice = Some(Notice::error(format!("could not keep that: {e}")));
+                self.notice = Some(Notice::error(tf("could not keep that: {e}", &[("e", &e)])));
             }
             self.ignored.insert(check::ignore_key(&rule, &words));
         }
@@ -15195,15 +15290,15 @@ impl Workbench {
             .border_color(theme.border)
             .text_size(px(11.))
             .text_color(theme.muted_foreground)
-            .child(h_flex().flex_shrink_0().gap(px(3.)).items_center().child(keycap("↑")).child(keycap("↓")).child(div().pl(px(2.)).child("choose")))
-            .child(key("↩", if runs { "run" } else { "insert" }))
-            .when(runs, |d| d.child(key("⇥", "insert")))
-            .child(key("esc", "close"))
+            .child(h_flex().flex_shrink_0().gap(px(3.)).items_center().child(keycap("↑")).child(keycap("↓")).child(div().pl(px(2.)).child(t("choose"))))
+            .child(key("↩", if runs { t("run") } else { t("insert") }))
+            .when(runs, |d| d.child(key("⇥", t("insert"))))
+            .child(key("esc", t("close")))
             .child(div().flex_1())
             .child(div().min_w_0().truncate().child(if loading {
-                if file { "reading this folder's files…" } else { "reading this folder's commands…" }.to_string()
+                if file { t("reading this folder's files…") } else { t("reading this folder's commands…") }.to_string()
             } else if total > SLASH_ROWS {
-                format!("{} of {total}", sel + 1)
+                tf("{n} of {total}", &[("n", &(sel + 1)), ("total", &total)])
             } else {
                 String::new()
             }))
@@ -15221,7 +15316,7 @@ impl Workbench {
                             this.go_to_terminal(cx);
                         }))
                         .child(Icon::new(IconName::SquareTerminal).with_size(px(12.)))
-                        .child("runs in the terminal"),
+                        .child(t("runs in the terminal")),
                 )
             });
         v_flex()
@@ -15275,7 +15370,7 @@ impl Workbench {
             (w, theme.muted_foreground)
         };
         // What the button does now, with its key.
-        let send_tip = if running { "Stop (Esc)" } else if self.cfg.app.send_key == "enter" { "Send (↩)" } else { "Send (⌘↩)" };
+        let send_tip = if running { t("Stop (Esc)") } else if self.cfg.app.send_key == "enter" { t("Send (↩)") } else { t("Send (⌘↩)") };
         let send = div()
             .id("send")
             .size(px(32.))
@@ -15478,8 +15573,8 @@ impl Workbench {
                     }))
                     .role(Role::MultilineTextInput)
                     .track_focus(&field_focus)
-                    .aria_label("Message")
-                    .aria_placeholder("Reply")
+                    .aria_label(t("Message"))
+                    .aria_placeholder(t("Reply"))
                     .aria_value(field_value)
                     .w_full()
                     // The size on the field itself: the toolkit's field
@@ -15527,7 +15622,7 @@ impl Workbench {
                         let to = |pill: Pill| cx.listener(move |this, _: &ClickEvent, _, cx| this.pill_clicked(pill, cx));
                         // A mode changed in a terminal that cannot be read
                         // is not known until the next turn.
-                        let mode_text = if mode.is_empty() { PillText { value: String::new(), tint: Tint::Plain, tail: "Mode" } } else { mode_pill(&options, &mode, &theme) };
+                        let mode_text = if mode.is_empty() { PillText { value: String::new(), tint: Tint::Plain, tail: phrase("Mode") } } else { mode_pill(&options, &mode, &theme) };
                         // On a session the effort and the model are a
                         // list each, the agent's own, opening up from its
                         // pill (`pick_pill`); a pick is the agent's
@@ -15673,10 +15768,10 @@ impl Workbench {
                     .flex_1()
                     .min_w_0()
                     .gap(px(1.))
-                    .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child("No coding agent is installed"))
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("A session needs Claude Code or Codex. Install either one to begin.")),
+                    .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(t("No coding agent is installed")))
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(t("A session needs Claude Code or Codex. Install either one to begin."))),
             )
-            .child(choice_pill("home-agents", "icons/sparkles.svg", "Set up an agent", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+            .child(choice_pill("home-agents", "icons/sparkles.svg", t("Set up an agent"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.show_agents(None, cx);
             })));
@@ -15767,9 +15862,9 @@ impl Workbench {
                             .flex_shrink_0()
                             .gap(px(4.))
                             .items_center()
-                            .when_some(path_open, |d, p| d.child(choice_pill("lb-open", "icons/external-link.svg", "Open", Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&p))))
-                            .when_some(path_reveal, |d, p| d.child(choice_pill("lb-reveal", "icons/folder-open.svg", crate::sys::REVEAL_LABEL, Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::reveal_path(&p))))
-                            .child(Button::new("lb-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip("Close (esc)").on_click(cx.listener(|this, _, _, cx| {
+                            .when_some(path_open, |d, p| d.child(choice_pill("lb-open", "icons/external-link.svg", t("Open"), Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::open_path(&p))))
+                            .when_some(path_reveal, |d, p| d.child(choice_pill("lb-reveal", "icons/folder-open.svg", t(crate::sys::REVEAL_LABEL), Press::Quiet, false, &theme).on_click(move |_, _, _| crate::sys::reveal_path(&p))))
+                            .child(Button::new("lb-close").ghost().small().icon(Icon::new(IconName::Close)).tooltip(t("Close (esc)")).on_click(cx.listener(|this, _, _, cx| {
                                 this.lightbox = None;
                                 cx.notify();
                             }))),
@@ -15831,7 +15926,7 @@ impl Workbench {
                                     .id("search-field")
                                     .track_focus(&search_focus)
                                     .role(Role::TextInput)
-                                    .aria_label("Search")
+                                    .aria_label(t("Search"))
                                     .aria_value(search_value)
                                     .flex_1()
                                     .min_w_0()
@@ -15840,9 +15935,9 @@ impl Workbench {
                             ),
                     )
                     .child(v_flex().relative().flex_1().min_h_0().pb(px(8.)).vertical_scrollbar(&search_scroll).child(v_flex().id("search-results").flex_1().min_h_0().overflow_y_scroll().track_scroll(&search_scroll).px(px(8.)).pt(px(8.)).map(|d| match results {
-                        None => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Type to search prompts, replies, thoughts and tool calls across every session.")),
+                        None => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(t("Type to search prompts, replies, thoughts and tool calls across every session."))),
                         Some(res) if !res.error.is_empty() => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.danger).child(res.error)),
-                        Some(res) if res.sessions.is_empty() => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("No matches.")),
+                        Some(res) if res.sessions.is_empty() => d.child(div().p(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(t("No matches."))),
                         Some(res) => d.children(res.sessions.into_iter().take(40).map(|s| {
                             let key = format!("{}:{}", s.agent, s.id);
                             let query = res.query.clone();
@@ -15864,8 +15959,8 @@ impl Workbench {
                                     h_flex()
                                         .gap(px(8.))
                                         .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(s.title.clone()))
-                                        .when(s.archived, |d| d.child(badge("archived", theme.muted, theme.muted_foreground)))
-                                        .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(format!("{} · {}", s.project, plural(s.hits, "hit", "hits")))),
+                                        .when(s.archived, |d| d.child(badge(t("archived"), theme.muted, theme.muted_foreground)))
+                                        .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(format!("{} · {}", s.project, count(s.hits, "{n} hit", "{n} hits")))),
                                 )
                                 .children(s.matches.into_iter().take(3).map(|m| {
                                     let theme = cx.theme().clone();
@@ -16141,7 +16236,7 @@ pub fn state_chip(column: Column, color: Hsla, theme: &gpui_component::Theme) ->
         .rounded_full()
         .bg(color.opacity(if theme.mode.is_dark() { 0.16 } else { 0.10 }))
         .child(div().size(px(6.)).rounded_full().bg(color))
-        .child(div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(color).child(column.title()))
+        .child(div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(color).child(t(column.title())))
 }
 
 pub fn badge(text: &'static str, bg: Hsla, fg: Hsla) -> impl IntoElement {
@@ -16171,7 +16266,7 @@ pub fn image_format(mime: &str) -> Option<ImageFormat> {
 pub fn file_kind(name: &str) -> String {
     match std::path::Path::new(name).extension().and_then(|e| e.to_str()) {
         Some(e) if !e.is_empty() => e.to_ascii_uppercase(),
-        _ => "file".into(),
+        _ => t("file").into(),
     }
 }
 
@@ -16727,10 +16822,13 @@ fn composer_pill(id: &'static str, icon: &'static str, label: PillText, cx: &App
     Button::new(SharedString::from(format!("{id}-trigger"))).custom(look).small().rounded(ButtonRounded::Size(px(999.)))
         .icon(Icon::default().path(icon))
         .child(
-            h_flex()
-                .gap(px(4.))
-                .when(!label.value.is_empty(), |d| d.child(tinted(&label.value, &label.tint)))
-                .when(!label.tail.is_empty(), |d| d.child(label.tail)),
+            // The sentence's own spaces part the words; a language
+            // that has none sets them together.
+            if label.tail.is_empty() {
+                h_flex().child(tinted(&label.value, &label.tint))
+            } else {
+                crate::i18n::weave(t(label.tail), vec![("value", tinted(&label.value, &label.tint).into_any_element())], h_flex().whitespace_nowrap())
+            },
         )
 }
 
@@ -16786,6 +16884,8 @@ pub(crate) enum PickFor {
     CodexEffort,
     /// On the home page, the folder a new session starts in.
     Folder,
+    /// The window's language, in Settings at Appearance's title.
+    Language,
 }
 
 /// A pill's list while it is open: every choice with a line on what it
@@ -16813,20 +16913,25 @@ pub(crate) struct PickRow {
     mark: Option<AgentId>,
     /// A line above it, the first of another group.
     rule: bool,
+    /// The flag before the name, on the languages' list.
+    flag: Option<&'static str>,
 }
 
 impl PickRow {
     fn plain(key: String, name: String, detail: String) -> Self {
-        PickRow { key, name, detail, tint: Tint::Plain, mark: None, rule: false }
+        PickRow { key, name, detail, tint: Tint::Plain, mark: None, rule: false, flag: None }
     }
 
     fn tinted(key: String, name: String, detail: String, tint: Tint) -> Self {
-        PickRow { key, name, detail, tint, mark: None, rule: false }
+        PickRow { key, name, detail, tint, mark: None, rule: false, flag: None }
     }
 }
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.worded != self.lang_serial {
+            self.word_inputs(window, cx);
+        }
         // The scrollers inside panes name themselves again as they are
         // drawn; a kept handle the last draw did not use goes.
         self.inner_live.borrow_mut().clear();

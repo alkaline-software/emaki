@@ -963,7 +963,7 @@ impl Builder {
     fn compacted(&mut self, ts: &str) {
         let rnd = self.ensure_round(ts);
         if !matches!(rnd.items.last(), Some(Item::Notice { variant: NoticeVariant::Compact, .. })) {
-            rnd.items.push(Item::Notice { ts: ts.into(), text: "Context compacted, earlier messages summarized".into(), variant: NoticeVariant::Compact });
+            rnd.items.push(Item::Notice { ts: ts.into(), text: crate::model::COMPACTED.into(), variant: NoticeVariant::Compact });
         }
     }
 

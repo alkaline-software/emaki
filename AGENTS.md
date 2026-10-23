@@ -54,6 +54,7 @@ Each is here because breaking it loses data or reintroduces a bug that was alrea
 - **Never splice a list item the reader may be inside.** gpui moves the scroll anchor to the start of the spliced range. (`docs/conversation.md`)
 - **A click the window swallows goes through `swallow_click`,** or the toolkit's text drag never ends. (`docs/window.md`)
 - **Every input the window owns sits in a focus wrapper, and the focused element must be one the page draws,** or key bindings go nowhere. (`docs/window.md`)
+- **Every word the window shows goes through `i18n::t`** (or `tf`, `count`, `phrase` for a constant) and is in `crates/emaki-app/locales/words.json` in every language; `cargo test -p emaki-app` fails otherwise. An agent's, git's or the system's own words are not ours and stay as they are, and so do the AI era's terms (model, agent, token, prompt, context, mode, effort…) in every language. (`docs/window.md`, Languages)
 - **Every text passes `markdown_is_safe` before the markdown view gets it.** The parser panics on some inputs, and a panic in layout aborts the app. (`docs/conversation.md`)
 - **A field's keys are the toolkit's, never a field's own.** Every place words are typed is the toolkit's `Input`, and what a key does in one (up to the start and down to the end of one line, ⇧ with either to select there) is fixed in `vendor/gpui-component`, where every field now and later has it. Do not handle a caret key in one field. (`docs/window.md`)
 - **The composer is plain text.** Live markdown in it was tried three ways and dropped. (`docs/composer.md`)
@@ -77,7 +78,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`; a table's cells in `files.rs` | `docs/panels.md` |
-| The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
+| The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs`; `i18n.rs`, `locales/words.json`, any word the window shows | `docs/window.md` |
 | Anything a person sees, new or changed: a control, a color, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
@@ -143,6 +144,7 @@ crates/emaki-app/         the window
   src/main.rs                menus, key bindings, the window
   src/sys.rs                 open, reveal, the person's name: per OS; a session's hidden terminal by its pid
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers
+  src/i18n.rs                the window's words in the person's language; locales/words.json holds them
   assets/icon/               the icon in every size, drawn by scripts/icon/icon.html
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
 scripts/make-icon.sh       remakes assets/icon from scripts/icon/icon.html

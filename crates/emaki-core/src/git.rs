@@ -150,6 +150,9 @@ pub struct Trouble {
     pub fix: Option<&'static str>,
 }
 
+/// What the strip says on a machine without git.
+pub const NO_GIT: &str = "Git is not installed.";
+
 impl Trouble {
     /// Xcode's license not agreed to. Apple's message is three lines
     /// long and spells the command out; the command is offered beside
@@ -190,7 +193,7 @@ pub fn trouble(dir: &Path) -> Option<Trouble> {
         }
         Trouble { words, fix: None }
     };
-    let none = || Trouble { words: "Git is not installed.".to_string(), fix: None };
+    let none = || Trouble { words: NO_GIT.to_string(), fix: None };
     let bin = binary();
     if bin.is_absolute() {
         let out = Command::new(&bin).arg("-C").arg(dir).args(["rev-parse", "--git-dir"]).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;

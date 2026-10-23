@@ -56,6 +56,10 @@ pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(600);
 /// The Claude Code release this wire was last checked against.
 pub const TESTED_CLAUDE_VERSION: &str = "2.1.283";
 
+/// What a session with no model asked for is said to run, in the window's
+/// language where it draws it.
+pub const DEFAULT_MODEL: &str = "Default model";
+
 /// What to call a model that is not on the list Claude Code hands out
 /// (`Options::model`), from its name alone. Claude Code reports the full id in
 /// `system/init` (`claude-opus-5-5`, `claude-haiku-4-5-20251001`,
@@ -66,7 +70,7 @@ pub const TESTED_CLAUDE_VERSION: &str = "2.1.283";
 pub fn model_label(model: &str) -> String {
     let m = model.trim();
     if m.is_empty() || m == "default" {
-        return "Default model".into();
+        return DEFAULT_MODEL.into();
     }
     let (m, long_context) = match m.strip_suffix("[1m]") {
         Some(base) => (base, true),

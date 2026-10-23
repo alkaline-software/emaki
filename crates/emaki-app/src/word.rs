@@ -30,6 +30,8 @@ use serde_json::{json, Value};
 use wordcraft_engine::{EditSnapshot, Session};
 use wordcraft_layout::DocLayout;
 
+use crate::i18n::{count, phrase, t};
+
 actions!(word, [Bold, AlignLeft, AlignCenter, AlignRight]);
 
 /// The key context of a document being written in. The keys bound in it
@@ -118,7 +120,7 @@ impl Focusable for WordPane {
 /// A document read from the disk, off the main thread.
 pub fn read(path: &Path) -> Result<wordcraft_doc::Document, String> {
     let path = path.to_path_buf();
-    std::panic::catch_unwind(move || wordcraft_engine::io::open_path(&path)).unwrap_or_else(|_| Err("This document could not be read.".into()))
+    std::panic::catch_unwind(move || wordcraft_engine::io::open_path(&path)).unwrap_or_else(|_| Err(t("This document could not be read.").into()))
 }
 
 impl WordPane {
@@ -170,7 +172,7 @@ impl WordPane {
     /// Written to its file. What went wrong, when something did.
     pub fn save(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         if !self.writes {
-            return Err("this kind of file is read and not written; it is not saved".into());
+            return Err(t("this kind of file is read and not written; it is not saved").into());
         }
         self.session.run("file.save", &json!({})).map_err(|e| e.to_string())?;
         self.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
@@ -203,7 +205,7 @@ impl WordPane {
     fn run(&mut self, id: &str, params: Value, cx: &mut Context<Self>) -> bool {
         let changes = self.session.registry.get(id).is_some_and(|spec| spec.mutates);
         if changes && !self.writes {
-            cx.emit(WordEvent::Said("This kind of file is shown and not written in. Save it as .docx in Word to change it.".into()));
+            cx.emit(WordEvent::Said(t("This kind of file is shown and not written in. Save it as .docx in Word to change it.").into()));
             return false;
         }
         let done = self.session.run(id, &params);
@@ -431,7 +433,7 @@ impl WordPane {
     fn typed(&mut self, text: &str, composing: bool, cx: &mut Context<Self>) {
         if !self.writes {
             if !text.is_empty() {
-                cx.emit(WordEvent::Said("This kind of file is shown and not written in. Save it as .docx in Word to change it.".into()));
+                cx.emit(WordEvent::Said(t("This kind of file is shown and not written in. Save it as .docx in Word to change it.").into()));
             }
             return;
         }
@@ -555,7 +557,7 @@ impl WordPane {
                 .hover(|d| d.bg(theme.muted))
                 .cursor_pointer()
                 .child(inner)
-                .managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(t(tip), window, cx))
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     crate::workbench::swallow_click(window, cx);
@@ -603,27 +605,27 @@ impl WordPane {
             .flex_wrap()
             .border_b_1()
             .border_color(theme.border)
-            .child(button("word-undo", "Undo (⌘Z)", false, icon("undo"), ("edit.undo", json!({}))).when(!self.session.can_undo(), |d| d.opacity(0.4)))
-            .child(button("word-redo", "Redo (⌘⇧Z)", false, icon("redo"), ("edit.redo", json!({}))).when(!self.session.can_redo(), |d| d.opacity(0.4)))
+            .child(button("word-undo", phrase("Undo (⌘Z)"), false, icon("undo"), ("edit.undo", json!({}))).when(!self.session.can_undo(), |d| d.opacity(0.4)))
+            .child(button("word-redo", phrase("Redo (⌘⇧Z)"), false, icon("redo"), ("edit.redo", json!({}))).when(!self.session.can_redo(), |d| d.opacity(0.4)))
             .child(sep())
             .child(chosen("word-style", style, 132., Pick::Style))
             .child(div().w(px(4.)))
             .child(chosen("word-size", size, 58., Pick::Size))
             .child(sep())
-            .child(button("word-bold", "Bold (⌘B)", on("bold"), letter("B").font_weight(FontWeight::BOLD).into_any_element(), ("format.bold", json!({}))))
-            .child(button("word-italic", "Italic (⌘I)", on("italic"), letter("I").italic().into_any_element(), ("format.italic", json!({}))))
-            .child(button("word-underline", "Underline (⌘U)", on("underline"), letter("U").underline().into_any_element(), ("format.underline", json!({}))))
-            .child(button("word-strike", "Strikethrough", on("strike"), letter("S").line_through().into_any_element(), ("format.strikethrough", json!({}))))
+            .child(button("word-bold", phrase("Bold (⌘B)"), on("bold"), letter("B").font_weight(FontWeight::BOLD).into_any_element(), ("format.bold", json!({}))))
+            .child(button("word-italic", phrase("Italic (⌘I)"), on("italic"), letter("I").italic().into_any_element(), ("format.italic", json!({}))))
+            .child(button("word-underline", phrase("Underline (⌘U)"), on("underline"), letter("U").underline().into_any_element(), ("format.underline", json!({}))))
+            .child(button("word-strike", phrase("Strikethrough"), on("strike"), letter("S").line_through().into_any_element(), ("format.strikethrough", json!({}))))
             .child(sep())
-            .child(button("word-left", "Align left (⌘L)", matches!(align, None | Some(wordcraft_doc::props::Align::Left)), icon("align-left"), ("para.align", json!({"value": "left"}))))
-            .child(button("word-center", "Center (⌘E)", align == Some(wordcraft_doc::props::Align::Center), icon("align-center"), ("para.align", json!({"value": "center"}))))
-            .child(button("word-right", "Align right (⌘R)", align == Some(wordcraft_doc::props::Align::Right), icon("align-right"), ("para.align", json!({"value": "right"}))))
-            .child(button("word-justify", "Justify (⌘J)", align == Some(wordcraft_doc::props::Align::Justify), icon("align-justified"), ("para.align", json!({"value": "justify"}))))
+            .child(button("word-left", phrase("Align left (⌘L)"), matches!(align, None | Some(wordcraft_doc::props::Align::Left)), icon("align-left"), ("para.align", json!({"value": "left"}))))
+            .child(button("word-center", phrase("Center (⌘E)"), align == Some(wordcraft_doc::props::Align::Center), icon("align-center"), ("para.align", json!({"value": "center"}))))
+            .child(button("word-right", phrase("Align right (⌘R)"), align == Some(wordcraft_doc::props::Align::Right), icon("align-right"), ("para.align", json!({"value": "right"}))))
+            .child(button("word-justify", phrase("Justify (⌘J)"), align == Some(wordcraft_doc::props::Align::Justify), icon("align-justified"), ("para.align", json!({"value": "justify"}))))
             .child(sep())
-            .child(button("word-bullets", "Bullets", false, icon("list-bullets"), ("para.bullets", json!({}))))
-            .child(button("word-numbers", "Numbering", false, icon("list-numbers"), ("para.numbering", json!({}))))
-            .child(button("word-outdent", "Decrease indent", false, icon("indent-decrease"), ("para.outdent", json!({}))))
-            .child(button("word-indent", "Increase indent", false, icon("indent-increase"), ("para.indent", json!({}))))
+            .child(button("word-bullets", phrase("Bullets"), false, icon("list-bullets"), ("para.bullets", json!({}))))
+            .child(button("word-numbers", phrase("Numbering"), false, icon("list-numbers"), ("para.numbering", json!({}))))
+            .child(button("word-outdent", phrase("Decrease indent"), false, icon("indent-decrease"), ("para.outdent", json!({}))))
+            .child(button("word-indent", phrase("Increase indent"), false, icon("indent-increase"), ("para.indent", json!({}))))
             .into_any_element()
     }
 
@@ -739,7 +741,8 @@ impl Render for WordPane {
         let pages: Vec<_> = pages.collect();
         let room = self.room.clone();
         let words = self.session.word_count();
-        let foot = h_flex().flex_shrink_0().h(px(24.)).px(px(12.)).gap(px(12.)).border_t_1().border_color(theme.border).text_size(px(11.)).text_color(theme.muted_foreground).child(crate::format::plural(layout.pages.len(), "page", "pages")).child(crate::format::plural(words, "word", "words")).when(!self.writes, |d| d.child("Shown, not written in"));
+        let page_count = layout.pages.len();
+        let foot = h_flex().flex_shrink_0().h(px(24.)).px(px(12.)).gap(px(12.)).border_t_1().border_color(theme.border).text_size(px(11.)).text_color(theme.muted_foreground).child(count(page_count, "{n} page", "{n} pages")).child(count(words, "{n} word", "{n} words")).when(!self.writes, |d| d.child(t("Shown, not written in")));
         v_flex()
             .id("word-pane")
             .key_context(WORD_CONTEXT)

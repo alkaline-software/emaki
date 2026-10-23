@@ -21,6 +21,7 @@ use emaki_core::model::AgentId;
 use emaki_core::transcript::SessionRef;
 use emaki_core::pty::{self, Pty};
 
+use crate::i18n::{phrase, t, tf};
 use crate::workbench::{swallow_click, Press, term_bytes, MenuDo, Page, TabGhost, CloseTab, TermBackTab, TermClear, TermNewTab, TermTab, Workbench, TERMINAL_CONTEXT};
 
 /// How wide the panel is to begin with, and the least it is dragged to.
@@ -447,9 +448,9 @@ impl Workbench {
             .rounded(px(9.))
             .bg(track_bg)
             .children(plate)
-            .child(segment("term-shell", "icons/terminal.svg", "Shell Terminal (⌘⇧S)".to_string(), false, cx))
+            .child(segment("term-shell", "icons/terminal.svg", t("Shell Terminal (⌘⇧S)").to_string(), false, cx))
             // The agent's side wears the agent's own mark.
-            .child(segment("term-agent", crate::workbench::agent_icon_path(agent), "Agent Terminal (⌘⇧A)".to_string(), true, cx))
+            .child(segment("term-agent", crate::workbench::agent_icon_path(agent), t("Agent Terminal (⌘⇧A)").to_string(), true, cx))
             .into_any_element()
     }
 
@@ -491,7 +492,7 @@ impl Workbench {
                     .cursor_pointer()
                     .text_color(if on { lit } else { theme.muted_foreground })
                     .hover(move |s| s.text_color(lit))
-                    .managed_tooltip(|window, cx| crate::workbench::tip("Shell Terminal in your home folder (⌘⇧S)", window, cx))
+                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Shell Terminal in your home folder (⌘⇧S)"), window, cx))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
                     .child(Icon::default().path("icons/terminal.svg").with_size(px(15.))),
@@ -789,7 +790,7 @@ impl Workbench {
             .text_color(hsla(k.tab_off))
             .hover(move |s| s.bg(hover_bg).text_color(lit))
             .active(move |s| s.bg(press_bg))
-            .managed_tooltip(|window, cx| crate::workbench::tip("New shell (⌘T)", window, cx))
+            .managed_tooltip(|window, cx| crate::workbench::tip(t("New shell (⌘T)"), window, cx))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
             .on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
@@ -938,15 +939,15 @@ impl Workbench {
             MouseButton::Right => {
                 let mut items = Vec::new();
                 if !self.term_sel_text().is_empty() {
-                    items.push(("Copy", MenuDo::Term(TermDo::Copy)));
+                    items.push((phrase("Copy"), MenuDo::Term(TermDo::Copy)));
                 }
-                items.push(("Paste", MenuDo::Term(TermDo::Paste)));
-                items.push(("Clear", MenuDo::Term(TermDo::Clear)));
+                items.push((phrase("Paste"), MenuDo::Term(TermDo::Paste)));
+                items.push((phrase("Clear"), MenuDo::Term(TermDo::Clear)));
                 if !self.term_side_agent() {
                     items.push(("", MenuDo::Rule));
-                    items.push(("New Tab", MenuDo::Term(TermDo::NewTab)));
+                    items.push((phrase("New Tab"), MenuDo::Term(TermDo::NewTab)));
                     if self.term_panel_pty().is_some() {
-                        items.push(("Close Tab", MenuDo::Term(TermDo::CloseTab)));
+                        items.push((phrase("Close Tab"), MenuDo::Term(TermDo::CloseTab)));
                     }
                 }
                 self.open_menu(e.position, items, cx);
@@ -1363,8 +1364,8 @@ impl Workbench {
                     .text_size(px(12.5))
                     .text_center()
                     .map(|d| match failed {
-                        Some(e) => d.text_color(hsla(k.ansi[1])).child(format!("Could not start a shell: {e}")),
-                        None => d.text_color(hsla(k.tab_off)).child("No shell open. Press + for a new one."),
+                        Some(e) => d.text_color(hsla(k.ansi[1])).child(tf("Could not start a shell: {error}", &[("error", &e)])),
+                        None => d.text_color(hsla(k.tab_off)).child(t("No shell open. Press + for a new one.")),
                     })
                     .into_any_element()
             })
@@ -1413,7 +1414,7 @@ impl Workbench {
                         .text_color(hsla(k.toast.1))
                         .font(face.clone())
                         .text_size(px(text))
-                        .child("Copied")
+                        .child(t("Copied"))
                         .with_animation("term-copied", Animation::new(COPIED_FOR), |d, t| d.opacity(if t > 0.8 { (1. - t) / 0.2 } else { 1. }))
                 });
                 // The cursor, where the next letter goes: Kaku's bar, two
@@ -1456,7 +1457,7 @@ impl Workbench {
                         .text_size(px(12.5))
                         .text_color(hsla(mix(ink, ground, 0.35)))
                         .child(crate::workbench::agent_glyph(r.agent, px(13.), crate::workbench::agent_color(r.agent, &theme), true, "term-panel-starting"))
-                        .child(format!("Starting {}, one moment…", r.agent.display_name()))
+                        .child(tf("Starting {agent}, one moment…", &[("agent", &r.agent.display_name())]))
                 });
                 let ended = (!pty.alive()).then(|| {
                     let sid = r.session_id.clone();
@@ -1470,9 +1471,9 @@ impl Workbench {
                         .items_center()
                         .text_size(px(12.))
                         .text_color(hsla(mix(ink, ground, 0.4)))
-                        .child(if agent { "The agent's terminal has ended." } else { "The shell has ended." })
+                        .child(if agent { t("The agent's terminal has ended.") } else { t("The shell has ended.") })
                         .when(!agent, |d| {
-                            d.child(crate::branches::small_pill("term-again", "icons/terminal.svg", "New shell", Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
+                            d.child(crate::branches::small_pill("term-again", "icons/terminal.svg", t("New shell"), Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
                                 swallow_click(window, cx);
                                 // A new one in the ended one's tab's place.
                                 if let Some((ix, id)) = this.shells.get(&sid).and_then(|s| s.tabs.iter().position(|t| t.id == s.on).map(|ix| (ix, s.on))) {
@@ -1511,7 +1512,7 @@ impl Workbench {
             }
         };
 
-        let back = (self.side_back > 0).then(|| div().flex_shrink_0().pr(px(10.)).font(face.clone()).text_size(px(11.)).text_color(hsla(k.tab_off)).child(format!("{} lines back", self.side_back)));
+        let back = (self.side_back > 0).then(|| div().flex_shrink_0().pr(px(10.)).font(face.clone()).text_size(px(11.)).text_color(hsla(k.tab_off)).child(crate::i18n::count(self.side_back as usize, "{n} line back", "{n} lines back")));
         // Both heads are a row of tabs: the agent's is its one screen,
         // the shell's a tab a shell.
         let head_row: AnyElement = if agent {
@@ -1661,10 +1662,10 @@ impl Workbench {
     /// bar when the driver is ours: the terminal joins it and shows it.
     fn codex_terminal_ok(&self, r: &SessionRef) -> Result<(), String> {
         if !cfg!(unix) {
-            return Err("Codex's terminal is not shown on Windows yet. It is driven from the composer, and what it does is in the conversation.".into());
+            return Err(t("Codex's terminal is not shown on Windows yet. It is driven from the composer, and what it does is in the conversation.").into());
         }
         if self.is_draft(&r.session_id) {
-            return Err("Codex starts with your first message.".into());
+            return Err(t("Codex starts with your first message.").into());
         }
         if self.hub.driver_for(&r.session_id).is_some() {
             return Ok(());
@@ -1675,7 +1676,7 @@ impl Workbench {
                 if let Some(first) = why.get(..1).map(str::to_uppercase) {
                     why.replace_range(..1, &first);
                 }
-                Err(format!("{why}."))
+                Err(tf("{why}.", &[("why", &why)]))
             }
             _ => Ok(()),
         }
@@ -1689,28 +1690,28 @@ impl Workbench {
         let (line, can): (String, bool) = if adrift {
             // Its terminal went with the Emaki that started it, and a
             // terminal cannot be joined again: the turn runs on unseen.
-            (format!("This turn began before Emaki was last quit. {name} is still running it, with no terminal left to show, and its work appears in the conversation. When the turn is over, {name} can be started here. Stopping it now ends the turn."), true)
+            (tf("This turn began before Emaki was last quit. {agent} is still running it, with no terminal left to show, and its work appears in the conversation. When the turn is over, {agent} can be started here. Stopping it now ends the turn.", &[("agent", &name)]), true)
         } else if r.agent == AgentId::Codex {
             // Codex's own terminal, joined to the app server its driver
             // runs: one session, one writer.
             if self.hub.attaching(&r.session_id) {
-                ("Starting Codex…".to_string(), false)
+                (t("Starting Codex…").to_string(), false)
             } else {
                 match self.codex_terminal_ok(r) {
                     Err(why) => (why, false),
-                    Ok(()) => ("Codex's terminal is closed for this session.".to_string(), true),
+                    Ok(()) => (t("Codex's terminal is closed for this session.").to_string(), true),
                 }
             }
         } else if r.agent != AgentId::ClaudeCode || !self.hub.hidden_terminals() {
-            (format!("{name} runs here only for Claude Code sessions, with the hidden terminal on."), false)
+            (tf("{agent} runs here only for Claude Code sessions, with the hidden terminal on.", &[("agent", &name)]), false)
         } else if self.in_own_terminal(r) {
-            (format!("A turn is running in a terminal of yours. When it is over, {name} can be started here."), false)
+            (tf("A turn is running in a terminal of yours. When it is over, {agent} can be started here.", &[("agent", &name)]), false)
         } else if self.is_draft(&r.session_id) {
-            (format!("{name} starts with your first message."), false)
+            (tf("{agent} starts with your first message.", &[("agent", &name)]), false)
         } else if let Err(why) = self.terminal_ok(r) {
-            (why.to_string(), false)
+            (t(why).to_string(), false)
         } else {
-            (format!("{name} has stopped for this session."), true)
+            (tf("{agent} has stopped for this session.", &[("agent", &name)]), true)
         };
         v_flex()
             .absolute()
@@ -1721,7 +1722,7 @@ impl Workbench {
             .px(px(28.))
             .child(div().text_size(px(12.5)).text_center().text_color(hsla(k.tab_off)).child(line))
             .when(can, |d| {
-                let start = if adrift { crate::branches::small_pill("term-agent-start", "icons/circle-x.svg", "Stop and Start Here", crate::workbench::Press::Danger, false, &theme) } else { crate::branches::small_pill("term-agent-start", "icons/play.svg", format!("Start {name}"), crate::workbench::Press::Quiet, false, &theme) };
+                let start = if adrift { crate::branches::small_pill("term-agent-start", "icons/circle-x.svg", t("Stop and Start Here"), crate::workbench::Press::Danger, false, &theme) } else { crate::branches::small_pill("term-agent-start", "icons/play.svg", tf("Start {agent}", &[("agent", &name)]), crate::workbench::Press::Quiet, false, &theme) };
                 d.child(start.on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.start_hidden_terminal(cx);

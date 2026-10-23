@@ -241,6 +241,10 @@ pub enum NoticeVariant {
     Interrupted,
 }
 
+/// The words of a compaction's notice, Claude Code's and Codex's alike.
+/// The window draws them in its own language.
+pub const COMPACTED: &str = "Context compacted, earlier messages summarized";
+
 impl NoticeVariant {
     /// What a setting's notice is a change of, or none for the others.
     pub fn setting(self) -> Option<&'static str> {

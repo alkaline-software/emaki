@@ -28,10 +28,14 @@ const TOP_H: Pixels = px(52.);
 const CONTROL_W: Pixels = px(336.);
 /// Every field, button and choice in a row is this tall.
 const CONTROL_H: Pixels = px(28.);
-/// The update's button, set once so its words can change in place.
+/// The update's button at its least, so its words change in place; a
+/// language whose words run longer widens it.
 const UPDATE_W: Pixels = px(190.);
 /// A card's corner.
 const CARD_R: Pixels = px(12.);
+/// The language list at Appearance's title: as wide as its longest
+/// choice, "ZH-CN" by its flag, or the system's name in any language.
+const LANGUAGE_W: Pixels = px(136.);
 /// The key context of the settings window, where Escape puts a list away.
 pub const SETTINGS_CONTEXT: &str = "Settings";
 
@@ -73,9 +77,9 @@ impl Render for SettingsView {
 fn open_settings_window(workbench: WeakEntity<Workbench>, cx: &mut App) {
     let bounds = Bounds::centered(None, size(SETTINGS_W, SETTINGS_H), cx);
     let titlebar = if cfg!(target_os = "macos") {
-        TitlebarOptions { title: Some("Settings".into()), appears_transparent: true, traffic_light_position: Some(point(px(17.), px(19.))) }
+        TitlebarOptions { title: Some(t("Settings").into()), appears_transparent: true, traffic_light_position: Some(point(px(17.), px(19.))) }
     } else {
-        TitlebarOptions { title: Some("Settings".into()), appears_transparent: false, traffic_light_position: None }
+        TitlebarOptions { title: Some(t("Settings").into()), appears_transparent: false, traffic_light_position: None }
     };
     let opened = cx.open_window(
         WindowOptions {
@@ -159,7 +163,7 @@ impl Workbench {
         let machine = crate::sys::user_first_name();
         let saved = self.cfg.app.user_name.clone();
         let name_input = cx.new(|cx| {
-            let mut s = InputState::new(window, cx).placeholder(if machine.is_empty() { "Your name".to_string() } else { machine });
+            let mut s = InputState::new(window, cx).placeholder(if machine.is_empty() { t("Your name").to_string() } else { machine });
             s.set_value(saved, window, cx);
             s
         });
@@ -278,7 +282,19 @@ impl Workbench {
             "about" => self.about_rows(cx),
             _ => self.appearance_rows(cx),
         };
-        let title = SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == section).map(|(_, name, _)| *name).unwrap_or("Appearance");
+        let title = SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == section).map(|(_, name, _)| t(name)).unwrap_or(t("Appearance"));
+        // The window's language, at the right of Appearance's name in the
+        // window's top, as Kotoba has it at General's: the system's, or a
+        // language by its flag and letters, in a list that drops down. A
+        // press on it is not a drag of the top.
+        let (lang_icon, lang_label) = match crate::i18n::CHOICES.iter().find(|(c, _, _)| *c == self.cfg.app.language) {
+            Some((_, flag, letters)) => (*flag, letters.to_string()),
+            None => ("icons/globe.svg", t("System").to_string()),
+        };
+        let language = page_in(
+            "language-pick",
+            div().w(LANGUAGE_W).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.settings_pick_h(PickFor::Language, "language", lang_icon, PillText::plain(lang_label), CONTROL_H, cx)),
+        );
         let (title_anim, page_anim): (&'static str, &'static str) = match section {
             "fonts" => ("title-fonts", "page-fonts"),
             "text" => ("title-text", "page-text"),
@@ -315,6 +331,8 @@ impl Workbench {
                 h_flex()
                     .size_full()
                     .items_stretch()
+                    // A new language is faded into, rail and page alike.
+                    .with_animation(ElementId::NamedInteger("settings-lang".into(), self.lang_serial as u64), Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
                     .child(self.settings_rail(cx))
                     .child(
                         v_flex()
@@ -325,7 +343,11 @@ impl Workbench {
                             // section's name level with the traffic lights,
                             // as the Mac's own settings do. It fades in with
                             // the page.
-                            .child(Self::drag_region(h_flex().h(TOP_H).flex_shrink_0().w_full().px(PAGE_X).items_center(), cx).child(page_in(title_anim, div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title))))
+                            .child(
+                                Self::drag_region(h_flex().h(TOP_H).flex_shrink_0().w_full().px(PAGE_X).items_center(), cx)
+                                    .child(page_in(title_anim, div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title)))
+                                    .when(section == "appearance", |d| d.child(div().flex_1()).child(language)),
+                            )
                             // The rows scroll under the top with the
                             // toolkit's scrollbar at their edge (it fades a
                             // second after the last scroll, as every
@@ -410,7 +432,7 @@ impl Workbench {
                     cx.notify();
                 }))
                 .child(Icon::default().path(*icon).with_size(px(15.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
-                .child(div().flex_1().text_size(px(13.)).when(active, |d| d.font_weight(FontWeight::MEDIUM)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(*label))
+                .child(div().flex_1().text_size(px(13.)).when(active, |d| d.font_weight(FontWeight::MEDIUM)).text_color(if active { theme.foreground } else { theme.sidebar_foreground }).child(t(label)))
                 .when(dot, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.primary)))
         }))
         .into_any_element()
@@ -466,7 +488,7 @@ impl Workbench {
             .id("name-field")
             .track_focus(&input.read(cx).focus_handle(cx))
             .role(Role::TextInput)
-            .aria_label("Your name")
+            .aria_label(t("Your name"))
             .aria_value(input.read(cx).value().to_string())
             .w(CONTROL_W)
             .h(CONTROL_H)
@@ -495,7 +517,7 @@ impl Workbench {
             "dark" => "dark",
             _ => "system",
         };
-        let appearance = div().w(CONTROL_W).child(self.segmented("appearance", vec![("system", "System".into(), None), ("light", "Light".into(), None), ("dark", "Dark".into(), None)], appearance_key, Rc::new(|this, key, window, cx| this.set_appearance(key, window, cx)), cx)).into_any_element();
+        let appearance = div().w(CONTROL_W).child(self.segmented("appearance", vec![("system", t("System").into(), None), ("light", t("Light").into(), None), ("dark", t("Dark").into(), None)], appearance_key, Rc::new(|this, key, window, cx| this.set_appearance(key, window, cx)), cx)).into_any_element();
 
         // The picture at the start of the controls, what is done with it
         // after: a click on the picture chooses one too.
@@ -503,8 +525,8 @@ impl Workbench {
             .gap(px(8.))
             .items_center()
             .child(self.avatar(28., cx).id("settings-avatar").cursor_pointer().hover(|s| s.opacity(0.85)).on_click(cx.listener(|this, _, _, cx| this.pick_avatar(cx))))
-            .child(crate::branches::small_pill("avatar-choose", "icons/image.svg", "Choose…", Press::Quiet, false, &theme).h(CONTROL_H).on_click(cx.listener(|this, _, _, cx| this.pick_avatar(cx))))
-            .when(!app.avatar.is_empty(), |d| d.child(crate::branches::small_pill("avatar-remove", "icons/trash.svg", "Remove", Press::Danger, false, &theme).h(CONTROL_H).on_click(cx.listener(|this, _, _, cx| this.set_avatar(String::new(), cx)))))
+            .child(crate::branches::small_pill("avatar-choose", "icons/image.svg", t("Choose…"), Press::Quiet, false, &theme).h(CONTROL_H).on_click(cx.listener(|this, _, _, cx| this.pick_avatar(cx))))
+            .when(!app.avatar.is_empty(), |d| d.child(crate::branches::small_pill("avatar-remove", "icons/trash.svg", t("Remove"), Press::Danger, false, &theme).h(CONTROL_H).on_click(cx.listener(|this, _, _, cx| this.set_avatar(String::new(), cx)))))
             .into_any_element();
 
         // Accents are swatches: a disc of the color, the chosen one with
@@ -519,7 +541,7 @@ impl Workbench {
                 let active = crate::look::accent(&app.accent).key == a.key;
                 let color: Hsla = gpui::Rgba::try_from(crate::look::accent_hex(a.key, dark)).map(Hsla::from).unwrap_or(theme.primary);
                 let key = a.key;
-                let name = a.name;
+                let name = t(a.name);
                 div()
                     .id(SharedString::from(format!("accent-{key}")))
                     .group("accent")
@@ -536,11 +558,11 @@ impl Workbench {
                     .child(div().size(px(16.)).rounded_full().border_2().border_color(if active { ring } else { ring.opacity(0.) }).when(!active, |d| d.group_hover("accent", |s| s.border_color(ring.opacity(0.55)))))
             }))
             .into_any_element();
-        let accent_name = crate::look::accent(&app.accent).name;
+        let accent_name = t(crate::look::accent(&app.accent).name);
 
         vec![
-            group(Some("You"), None, vec![line("Avatar", None, avatar, &theme), line("Name", None, self.your_name_field(cx), &theme)], &theme),
-            group(Some("Window"), None, vec![line("Theme", None, appearance, &theme), line("Accent", Some(div().child(accent_name).into_any_element()), accents, &theme)], &theme),
+            group(Some(t("You")), None, vec![line(t("Avatar"), None, avatar, &theme), line(t("Name"), None, self.your_name_field(cx), &theme)], &theme),
+            group(Some(t("Window")), None, vec![line(t("Theme"), None, appearance, &theme), line(t("Accent"), Some(div().child(accent_name).into_any_element()), accents, &theme)], &theme),
         ]
     }
 
@@ -580,14 +602,14 @@ impl Workbench {
         let chat = v_flex()
             .p(px(14.))
             .gap(px(8.))
-            .child(kind("Serif"))
+            .child(kind(t("Serif")))
             .child(tiles(crate::fonts::SERIFS, chat_now, "Ag", false, cx))
             .child(div().h(px(4.)))
-            .child(kind("Sans serif"))
+            .child(kind(t("Sans serif")))
             .child(tiles(crate::fonts::SANS, chat_now, "Ag", false, cx))
             .into_any_element();
         let mono = div().p(px(14.)).child(tiles(crate::fonts::monos(), mono_now, "fn(0) -> 1", true, cx)).into_any_element();
-        vec![group(Some("Chat font"), None, vec![chat], &theme), group(Some("Monospace font"), None, vec![mono], &theme)]
+        vec![group(Some(t("Chat font")), None, vec![chat], &theme), group(Some(t("Monospace font")), None, vec![mono], &theme)]
     }
 
     /// Text Size: a preset for every place at once, and each place's
@@ -605,7 +627,7 @@ impl Workbench {
         };
         let presets = div()
             .w(CONTROL_W)
-            .child(self.segmented("size", vec![("small", "Small".into(), None), ("medium", "Medium".into(), None), ("large", "Large".into(), None), ("custom", "Custom".into(), None)], now, Rc::new(|this, key, _, cx| this.set_chat_size(key, cx)), cx))
+            .child(self.segmented("size", vec![("small", t("Small").into(), None), ("medium", t("Medium").into(), None), ("large", t("Large").into(), None), ("custom", t("Custom").into(), None)], now, Rc::new(|this, key, _, cx| this.set_chat_size(key, cx)), cx))
             .into_any_element();
         let custom = now == "custom";
         let rows = SIZE_PLACES
@@ -613,10 +635,10 @@ impl Workbench {
             .map(|(key, name)| {
                 let value = *size_field(&mut sizes, key);
                 let control = h_flex().gap(px(8.)).items_center().children(self.size_reset(key, value, custom, cx)).child(self.stepper(key, value, custom, cx)).into_any_element();
-                line(name, None, control, &theme)
+                line(t(name), None, control, &theme)
             })
             .collect();
-        vec![group(None, None, vec![line("Size", None, presets, &theme)], &theme), group(None, None, rows, &theme)]
+        vec![group(None, None, vec![line(t("Size"), None, presets, &theme)], &theme), group(None, None, rows, &theme)]
     }
 
     /// Under Custom, beside a size not Medium's: a button that puts it
@@ -632,7 +654,7 @@ impl Workbench {
         }
         let theme = cx.theme().clone();
         let hover = theme.foreground.opacity(0.07);
-        let tip: SharedString = format!("Reset to {} pt", size_words(medium)).into();
+        let tip: SharedString = tf("Reset to {size} pt", &[("size", &size_words(medium))]).into();
         let button = div()
             .id(SharedString::from(id.clone()))
             .size(px(26.))
@@ -695,7 +717,7 @@ impl Workbench {
                 .id(SharedString::from(format!("size-{key}-field")))
                 .track_focus(&input.read(cx).focus_handle(cx))
                 .role(Role::TextInput)
-                .aria_label(SIZE_PLACES.iter().find(|(k, _)| *k == key).map(|(_, n)| *n).unwrap_or(""))
+                .aria_label(SIZE_PLACES.iter().find(|(k, _)| *k == key).map(|(_, n)| t(n)).unwrap_or(""))
                 .aria_value(input.read(cx).value().to_string())
                 .w(px(42.))
                 .h(px(22.))
@@ -729,21 +751,20 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// Conversation: what is typed (the composer's rows), and the two
-    /// helpers a small model writes for, each a call on the person's
-    /// account, so each can be turned off.
+    /// Conversation: how its tool calls are drawn, what is typed (the
+    /// composer's rows), and the two helpers a small model writes for,
+    /// each a call on the person's account, so each can be turned off.
     fn conversation_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
-        let mut groups = self.composer_rows(cx);
+        let fold = self.switch("fold-runs", self.cfg.app.fold_runs, Rc::new(|this, on, _, cx| this.set_fold_runs(on, cx)), cx);
+        let mut groups = vec![group(Some(t("Agent")), None, vec![line(t("Fold runs of tool calls"), Some(div().child(t("Three or more in a row show as one row that opens.")).into_any_element()), fold, &theme)], &theme)];
+        groups.extend(self.composer_rows(cx));
         let explain = self.switch("explain-on", self.cfg.explain.enabled, Rc::new(|this, on, _, cx| this.set_explain(on, cx)), cx);
         let outline = self.switch("outline-on", self.cfg.app.outline, Rc::new(|this, on, _, cx| this.set_outline(on, cx)), cx);
         groups.push(group(
-            Some("Small model calls on your account"),
+            Some(t("On-demand model calls")),
             None,
-            vec![
-                line("Explain", Some(div().child("A button on a tool call that says what it does.").into_any_element()), explain, &theme),
-                line("Outline", Some(div().child("Each message as a short label, in the outline panel.").into_any_element()), outline, &theme),
-            ],
+            vec![line(t("Explain tool calls"), None, explain, &theme), line(t("Outline panel"), None, outline, &theme)],
             &theme,
         ));
         groups
@@ -759,7 +780,7 @@ impl Workbench {
         // makes a new line under its name.
         let enter_sends = app.send_key == "enter";
         let send = div().w(CONTROL_W).child(self.segmented("send-key", vec![("cmd-enter", "⌘↩".into(), None), ("enter", "↩".into(), None)], if enter_sends { "enter" } else { "cmd-enter" }, Rc::new(|this, key, _, cx| this.set_send_key(key, cx)), cx)).into_any_element();
-        let send_note = key_text_wrap(if enter_sends { "⇧↩ for a new line" } else { "↩ or ⇧↩ for a new line" }).into_any_element();
+        let send_note = key_text_wrap(if enter_sends { t("⇧↩ for a new line") } else { t("↩ or ⇧↩ for a new line") }).into_any_element();
         let auto_cap = self.switch("auto-capitalize", app.auto_capitalize, Rc::new(|this, on, _, cx| this.set_writing(|a| a.auto_capitalize = on, cx)), cx);
         let spelling = app.check_writing;
         let check_writing = self.switch("check-writing", spelling, Rc::new(|this, on, _, cx| this.set_writing(|a| a.check_writing = on, cx)), cx);
@@ -771,10 +792,10 @@ impl Workbench {
         let writing_language = self.segmented("writing-language", emaki_core::check::LANGUAGES.iter().map(|(key, _)| (*key, language_code(key).to_string(), None)).collect(), pick(&languages, &app.writing_language), Rc::new(|this, key, _, cx| this.set_writing(|a| a.writing_language = key.into(), cx)), cx);
         let writing_language = div().relative().w(CONTROL_W).when(!spelling, |d| d.opacity(0.45)).child(writing_language).when(!spelling, |d| d.child(div().absolute().inset_0().occlude())).into_any_element();
         // Said only where a choice does nothing: off a Mac.
-        let language_note = (!crate::sys::SYSTEM_SPELLING).then(|| div().child("Spanish, French and German are checked on a Mac only.").into_any_element());
+        let language_note = (!crate::sys::SYSTEM_SPELLING).then(|| div().child(t("Spanish, French and German are checked on a Mac only.")).into_any_element());
         vec![
-            group(Some("Composer"), None, vec![line("Send with", Some(send_note), send, &theme), line("Auto-capitalization", None, auto_cap, &theme)], &theme),
-            group(Some("Spelling and grammar"), None, vec![line("Check as you type", None, check_writing, &theme), line("Language", language_note, writing_language, &theme)], &theme),
+            group(Some(t("Composer")), None, vec![line(t("Send with"), Some(send_note), send, &theme), line(t("Auto-capitalization"), None, auto_cap, &theme)], &theme),
+            group(Some(t("Spelling and grammar")), None, vec![line(t("Check as you type"), None, check_writing, &theme), line(t("Language"), language_note, writing_language, &theme)], &theme),
         ]
     }
 
@@ -818,7 +839,7 @@ impl Workbench {
             true,
             cx,
         );
-        vec![group_with(Some(head), Some(pick), vec![line("Permission mode", None, mode, &theme), line("Model", None, model, &theme), line("Effort", None, effort, &theme)], &theme)]
+        vec![group_with(Some(head), Some(pick), vec![line(t("Permission mode"), None, mode, &theme), line(t("Model"), None, model, &theme), line(t("Effort"), None, effort, &theme)], &theme)]
     }
 
     /// Terminal: how it looks, then how it acts, and whose design it is.
@@ -826,8 +847,8 @@ impl Workbench {
         let theme = cx.theme().clone();
         let term = self.cfg.terminal.clone();
         let pick = |list: &[&'static str], now: &str| list.iter().copied().find(|k| *k == now).unwrap_or(list[0]);
-        let term_theme = div().w(CONTROL_W).child(self.segmented("term-theme", vec![("match", "Match window".into(), None), ("dark", "Dark".into(), None), ("light", "Light".into(), None)], pick(&["match", "dark", "light"], &term.theme), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.theme = key.into(), cx)), cx)).into_any_element();
-        let term_cursor = div().w(CONTROL_W).child(self.segmented("term-cursor", vec![("bar", "Bar".into(), None), ("block", "Block".into(), None), ("underline", "Underline".into(), None)], pick(&["bar", "block", "underline"], &term.cursor), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.cursor = key.into(), cx)), cx)).into_any_element();
+        let term_theme = div().w(CONTROL_W).child(self.segmented("term-theme", vec![("match", t("Match window").into(), None), ("dark", t("Dark").into(), None), ("light", t("Light").into(), None)], pick(&["match", "dark", "light"], &term.theme), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.theme = key.into(), cx)), cx)).into_any_element();
+        let term_cursor = div().w(CONTROL_W).child(self.segmented("term-cursor", vec![("bar", t("Bar").into(), None), ("block", t("Block").into(), None), ("underline", t("Underline").into(), None)], pick(&["bar", "block", "underline"], &term.cursor), Rc::new(|this, key, _, cx| this.set_terminal(|t| t.cursor = key.into(), cx)), cx)).into_any_element();
         let term_blink = self.switch("term-blink", term.cursor_blink, Rc::new(|this, on, _, cx| this.set_terminal(|t| t.cursor_blink = on, cx)), cx);
         // The size is Text Size's terminal: shown here, set there.
         let term_size = crate::branches::small_pill("term-size", "icons/a-large-small.svg", format!("{} pt", size_words(self.cfg.app.text_sizes().terminal)), Press::Quiet, false, &theme)
@@ -841,7 +862,7 @@ impl Workbench {
         let term_ligatures = self.switch("term-ligatures", term.ligatures, Rc::new(|this, on, _, cx| this.set_terminal(|t| t.ligatures = on, cx)), cx);
         let term_copy = self.switch("term-copy", term.copy_on_select, Rc::new(|this, on, _, cx| this.set_terminal(|t| t.copy_on_select = on, cx)), cx);
         // The face is the window's, set in Fonts.
-        let fonts = crate::branches::small_pill("term-fonts", "icons/typography.svg", "Open Fonts", Press::Quiet, false, &theme)
+        let fonts = crate::branches::small_pill("term-fonts", "icons/typography.svg", t("Open Fonts"), Press::Quiet, false, &theme)
             .h(CONTROL_H)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.settings_section = "fonts";
@@ -851,7 +872,8 @@ impl Workbench {
             .into_any_element();
         // The marks it joins, with a zero-width mark between the two
         // letters of each, or the window's own face would join them here.
-        let joins = div().child("Joins -\u{200C}> and !\u{200C}= into one mark.").into_any_element();
+        // They are blanks of the sentence, so its words are kept whole.
+        let joins = div().child(tf("Joins {arrow} and {unequal} into one mark.", &[("arrow", &"-\u{200C}>"), ("unequal", &"!\u{200C}=")])).into_any_element();
         let (link_color, link_hover) = (theme.muted_foreground, theme.primary);
         let credit_link = |id: &'static str, name: &'static str, url: &'static str| {
             div()
@@ -863,19 +885,17 @@ impl Workbench {
                 .on_click(move |_, _, cx| cx.open_url(url))
                 .child(name)
         };
-        let credit = h_flex()
-            .px(px(14.))
-            .text_size(px(11.5))
-            .text_color(theme.muted_foreground)
-            .child("The styling and UI design are from ")
-            .child(credit_link("term-credit", "Kaku", "https://kaku.fun"))
-            .child(", made by ")
-            .child(credit_link("term-credit-author", "tw93", "https://github.com/tw93"))
-            .child(".")
-            .into_any_element();
+        // The two names are links, set where each language's order puts
+        // them.
+        let credit = crate::i18n::weave(
+            t("The styling and UI design are from {kaku}, made by {tw93}."),
+            vec![("kaku", credit_link("term-credit", "Kaku", "https://kaku.fun").into_any_element()), ("tw93", credit_link("term-credit-author", "tw93", "https://github.com/tw93").into_any_element())],
+            h_flex().flex_wrap().px(px(14.)).text_size(px(11.5)).text_color(theme.muted_foreground),
+        )
+        .into_any_element();
         vec![
-            group(Some("Look"), None, vec![line("Theme", None, term_theme, &theme), line("Cursor", None, term_cursor, &theme), line("Blinking cursor", None, term_blink, &theme), line("Font", None, fonts, &theme), line("Size", None, term_size, &theme)], &theme),
-            group(Some("Behavior"), None, vec![line("Ligatures", Some(joins), term_ligatures, &theme), line("Copy on select", None, term_copy, &theme)], &theme),
+            group(Some(t("Look")), None, vec![line(t("Theme"), None, term_theme, &theme), line(t("Cursor"), None, term_cursor, &theme), line(t("Blinking cursor"), None, term_blink, &theme), line(t("Font"), None, fonts, &theme), line(t("Size"), None, term_size, &theme)], &theme),
+            group(Some(t("Behavior")), None, vec![line(t("Ligatures"), Some(joins), term_ligatures, &theme), line(t("Copy on select"), None, term_copy, &theme)], &theme),
             credit,
         ]
     }
@@ -918,10 +938,10 @@ impl Workbench {
                     .child(img(crate::file_icons::path(l.file, false, false, dark)).size(px(16.)).flex_shrink_0())
                     // The names in a column of one width, so what follows
                     // them starts at one place down the list.
-                    .child(div().w(px(84.)).flex_shrink_0().text_size(px(13.)).child(l.name))
+                    .child(div().w(px(84.)).flex_shrink_0().text_size(px(13.)).child(t(l.name)))
                     .child(div().min_w_0().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(match needs {
-                        Some(_) => format!("by {}, not installed", l.by),
-                        None => format!("by {}", l.by),
+                        Some(_) => tf("by {tool}, not installed", &[("tool", &l.by)]),
+                        None => tf("by {tool}", &[("tool", &l.by)]),
                     }))
             });
             v_flex().flex_1().min_w_0().child(div().pb(px(4.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(title)).children(rows.collect::<Vec<_>>())
@@ -931,10 +951,10 @@ impl Workbench {
             .items_start()
             .gap(px(16.))
             .when(!formatting, |d| d.opacity(0.45))
-            .child(column("Code", true, cx))
-            .child(column("Documents and data", false, cx))
+            .child(column(t("Code"), true, cx))
+            .child(column(t("Documents and data"), false, cx))
             .into_any_element();
-        vec![group(None, None, vec![line("Format on save", Some(div().child("A file saved from its pane is put in its language's form.").into_any_element()), format_on_save, &theme)], &theme), group(Some("Languages"), None, vec![lists], &theme)]
+        vec![group(None, None, vec![line(t("Format on save"), Some(div().child(t("A file saved from its pane is put in its language's form.")).into_any_element()), format_on_save, &theme)], &theme), group(Some(t("Languages")), None, vec![lists], &theme)]
     }
 
     /// Updates, at About's foot, as little as possible:
@@ -946,29 +966,32 @@ impl Workbench {
         let u = &self.update;
         let update_line = if u.installing {
             match u.progress {
-                Some((done, Some(total))) if total > 0 => format!("Downloading… {}%", done * 100 / total),
-                Some(_) => "Downloading…".to_string(),
-                None => "Installing… Emaki restarts by itself.".to_string(),
+                Some((done, Some(total))) if total > 0 => tf("Downloading… {percent}%", &[("percent", &(done * 100 / total))]),
+                Some(_) => t("Downloading…").to_string(),
+                None => t("Installing… Emaki restarts by itself.").to_string(),
             }
         } else if !u.install_error.is_empty() {
-            format!("The update did not go through: {}", u.install_error)
+            tf("The update did not go through: {e}", &[("e", &u.install_error)])
         } else if !u.error.is_empty() {
-            "Could not reach GitHub.".to_string()
+            t("Could not reach GitHub.").to_string()
         } else if u.available.is_none() && u.answered && !u.automatic {
-            "Up to date.".to_string()
+            t("Up to date.").to_string()
         } else {
             String::new()
         };
         let can_install = u.available.is_some() && !u.installing && update::asset_name().is_some();
         let (checking, installing) = (u.checking, u.installing);
         let notes_url = u.available.as_deref().map(update::release_page);
-        let press = |id: &'static str, label: SharedString, kind: Press, off: bool| crate::branches::small_pill(id, "icons/redo-2.svg", label, kind, off, &theme).h(CONTROL_H).w(UPDATE_W).justify_center();
+        // At least `UPDATE_W`, so the words change in place; a language
+        // whose words run longer widens it to them, its right edge where
+        // the other controls end.
+        let press = |id: &'static str, label: SharedString, kind: Press, off: bool| crate::branches::small_pill(id, "icons/redo-2.svg", label, kind, off, &theme).h(CONTROL_H).min_w(UPDATE_W).justify_center();
         let button = if can_install {
-            press("update-now", format!("Update to {}", u.available.as_deref().unwrap_or("")).into(), Press::Primary, false).on_click(cx.listener(|this, _, _, cx| this.install_update_now(cx))).into_any_element()
+            press("update-now", tf("Update to {version}", &[("version", &u.available.as_deref().unwrap_or(""))]).into(), Press::Primary, false).on_click(cx.listener(|this, _, _, cx| this.install_update_now(cx))).into_any_element()
         } else if installing {
-            press("update-busy", "Updating…".into(), Press::Quiet, true).into_any_element()
+            press("update-busy", t("Updating…").into(), Press::Quiet, true).into_any_element()
         } else {
-            press("update-check", if checking { "Checking…" } else { "Check for updates" }.into(), Press::Quiet, checking).on_click(cx.listener(|this, _, _, cx| this.check_updates_now(cx))).into_any_element()
+            press("update-check", if checking { t("Checking…") } else { t("Check for updates") }.into(), Press::Quiet, checking).on_click(cx.listener(|this, _, _, cx| this.check_updates_now(cx))).into_any_element()
         };
         let (link_color, link_hover) = (theme.muted_foreground, theme.primary);
         // The version is on the title card above; the line says only what
@@ -985,11 +1008,11 @@ impl Workbench {
                     .text_decoration_color(link_color.opacity(0.6))
                     .hover(move |s| s.text_color(link_hover).text_decoration_color(link_hover))
                     .on_click(move |_, _, cx| cx.open_url(&url))
-                    .child("Release notes"),
+                    .child(t("Release notes")),
             )
         });
         let auto_check = self.switch("update-auto", self.cfg.app.check_updates, Rc::new(|this, on, _, cx| this.set_check_updates(on, cx)), cx);
-        group(None, None, vec![line("Updates", has_note.then(|| version_note.into_any_element()), button, &theme), line("Check automatically", Some(div().child("Once a day. Nothing is installed without you.").into_any_element()), auto_check, &theme)], &theme)
+        group(None, None, vec![line(t("Updates"), has_note.then(|| version_note.into_any_element()), button, &theme), line(t("Check automatically"), Some(div().child(t("Once a day. Nothing is installed without you.")).into_any_element()), auto_check, &theme)], &theme)
     }
 
     /// Who makes Emaki: the app on a title card, a sentence naming the
@@ -1028,7 +1051,7 @@ impl Workbench {
                 .border_1()
                 .border_color(theme.border)
                 .bg(card_ground(&theme))
-                .child(prose().text_size(px(12.5)).child(link("about-studio", "Alkaline Software", "https://github.com/alkaline-software")).child(" presents"))
+                .child(crate::i18n::weave(t("{studio} presents"), vec![("studio", link("about-studio", "Alkaline Software", "https://github.com/alkaline-software").into_any_element())], prose().text_size(px(12.5))))
                 .child(div().id("about-icon").mt(px(18.)).cursor_pointer().hover(|s| s.opacity(0.82)).on_click(|_, _, cx| cx.open_url("https://emaki.lol")).child(img("icon/app-large.png").size(px(88.)).flex_shrink_0()))
                 .child(
                     div()
@@ -1043,20 +1066,20 @@ impl Workbench {
                         .when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f))
                         .child("Emaki"),
                 )
-                .child(div().mt(px(4.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(format!("Version {current}")))
+                .child(div().mt(px(4.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(tf("Version {version}", &[("version", &current)])))
                 .into_any_element(),
             v_flex()
                 .w_full()
                 .items_center()
                 .gap(px(16.))
                 .pt(px(4.))
-                .child(prose().child("A studio by ").child(link("about-jp", "Dr. John Paul Helveston", "https://www.jhelvy.com")).child(" and ").child(link("about-pingfan", "Dr. Pingfan Hu", "https://pingfan.org")).child("."))
+                .child(crate::i18n::weave(t("A studio by {jp} and {pingfan}."), vec![("jp", link("about-jp", "Dr. John Paul Helveston", "https://www.jhelvy.com").into_any_element()), ("pingfan", link("about-pingfan", "Dr. Pingfan Hu", "https://pingfan.org").into_any_element())], prose()))
                 .child(
                     h_flex()
                         .gap(px(8.))
-                        .child(go("about-site", "icons/globe.svg", "Website", "https://emaki.lol".into()))
+                        .child(go("about-site", "icons/globe.svg", t("Website"), "https://emaki.lol".into()))
                         .child(go("about-source", "icons/github.svg", "GitHub", update::repo_page()))
-                        .child(go("about-notes", "icons/file-text.svg", "Release Notes", update::release_page(&current))),
+                        .child(go("about-notes", "icons/file-text.svg", t("Release Notes"), update::release_page(&current))),
                 )
                 .into_any_element(),
             // More room over it than the page's gap, so the pills close
@@ -1067,7 +1090,7 @@ impl Workbench {
 }
 
 /// The places text is set in, as Text Size names them.
-const SIZE_PLACES: [(&str, &str); 5] = [("conversation", "Conversation"), ("composer", "Composer"), ("preview", "File preview"), ("editor", "File editor"), ("terminal", "Terminal")];
+const SIZE_PLACES: [(&str, &str); 5] = [("conversation", phrase("Conversation")), ("composer", phrase("Composer")), ("preview", phrase("File preview")), ("editor", phrase("File editor")), ("terminal", phrase("Terminal"))];
 
 /// A place's size in the sizes.
 fn size_field<'a>(s: &'a mut emaki_core::config::TextSizes, key: &str) -> &'a mut f32 {

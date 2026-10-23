@@ -12,6 +12,7 @@ use emaki_core::model::*;
 use emaki_core::render_md::{clip, code_block, command_text, human_duration, patch_stat, pretty_args, render_patch};
 
 use crate::format::stamp;
+use crate::i18n::{count, t, tf};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -185,7 +186,7 @@ pub(crate) fn explain_card(id: String, text: String, pending: bool, size: Pixels
         .py(px(10.))
         .rounded(px(10.))
         .bg(theme.primary.opacity(if theme.mode.is_dark() { 0.10 } else { 0.07 }))
-        .when(pending && text.is_empty(), |d| d.child(div().italic().text_size(size - px(1.)).text_color(theme.muted_foreground).child("Explaining…")))
+        .when(pending && text.is_empty(), |d| d.child(div().italic().text_size(size - px(1.)).text_color(theme.muted_foreground).child(t("Explaining…"))))
         .when(!(pending && text.is_empty()), |d| d.child(div().text_size(size).text_color(theme.foreground).line_height(relative(1.6)).child(chat_md_view(id, text, cx))))
         .with_animation(ElementId::Name(anim), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-4. * (1. - t))))
 }
@@ -231,7 +232,7 @@ fn mono_block(id: String, text: &str, lang: &str, cx: &App) -> impl IntoElement 
     let (body, dropped) = clip(text, MAX_BODY);
     let mut md = code_block(&body, lang);
     if dropped > 0 {
-        md.push_str(&format!("\n\n*… {dropped} more lines*"));
+        md.push_str(&format!("\n\n*{}*", count(dropped, "… {n} more line", "… {n} more lines")));
     }
     chat_md_view(id, md, cx)
 }
@@ -254,11 +255,12 @@ fn is_run_item(it: &Item) -> bool {
 
 /// Where the folded run of tool calls holding item `jx` begins, when there
 /// is one: three or more tool calls in a row, thoughts between them
-/// included, fold into one row (see `render_round`), and the find bar has
-/// to open that row to show a hit inside it.
-pub(crate) fn run_start(rnd: &Round, jx: usize) -> Option<usize> {
+/// included, fold into one row (see `render_round`) while runs fold
+/// (`fold`, the setting), and the find bar has to open that row to show
+/// a hit inside it.
+pub(crate) fn run_start(rnd: &Round, jx: usize, fold: bool) -> Option<usize> {
     let is_run_item = |it: &Item| is_run_item(it);
-    if !rnd.items.get(jx).map(is_run_item).unwrap_or(false) {
+    if !fold || !rnd.items.get(jx).map(is_run_item).unwrap_or(false) {
         return None;
     }
     let mut start = jx;
@@ -326,8 +328,8 @@ impl Workbench {
         // not the person's own. The duration, the tool calls and the tokens
         // used to follow; nobody read them there.
         let who = match rnd.source {
-            Source::Peer => Some("Another session"),
-            Source::System => Some("Session"),
+            Source::Peer => Some(t("Another session")),
+            Source::System => Some(t("Session")),
             _ => None,
         };
         let sent = stamp(&rnd.ts);
@@ -377,7 +379,7 @@ impl Workbench {
                     bubble = bubble.child(row);
                 }
             } else if rnd.images > 0 {
-                bubble = bubble.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("+ {} pasted image{}", rnd.images, if rnd.images == 1 { "" } else { "s" })));
+                bubble = bubble.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(count(rnd.images as usize, "+ {n} pasted image", "+ {n} pasted images")));
             }
             if has_text {
                 // A command the prompt names (`/compact`, or a skill in a
@@ -420,11 +422,11 @@ impl Workbench {
                                     .items_center()
                                     .text_color(theme.danger)
                                     .child(Icon::default().path("icons/circle-x.svg").with_size(px(14.)).text_color(theme.danger))
-                                    .child("Not delivered")
+                                    .child(t("Not delivered"))
                                     .managed_tooltip(move |window, cx| crate::workbench::tip(why.clone(), window, cx)),
                             )
                         })
-                        .when(rnd.queued, |d| d.child(div().child(format!("Queued, {} will read it at its next step", session.agent.speaker()))))
+                        .when(rnd.queued, |d| d.child(div().child(tf("Queued, {agent} will read it at its next step", &[("agent", &session.agent.speaker())]))))
                         .children(who.map(|w| div().child(w)))
                         .child(div().child(sent))
                         .children(copy),
@@ -500,7 +502,7 @@ impl Workbench {
                 }
                 e += 1;
             }
-            if is_run_item(&rnd.items[jx]) {
+            if self.cfg.app.fold_runs && is_run_item(&rnd.items[jx]) {
                 let mut end = jx;
                 while end < n && is_run_item(&rnd.items[end]) {
                     end += 1;
@@ -585,7 +587,7 @@ impl Workbench {
             .justify_center()
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
-            .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
+            .managed_tooltip(move |window, cx| crate::workbench::tip(if done { t("Copied") } else { t("Copy") }, window, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let text = this.detail.as_ref().and_then(|d| d.session.rounds.get(ix)).map(|r| if reply { r.reply_markdown() } else { r.prompt.clone() }).unwrap_or_default();
                 this.copy_text(key.clone(), text, cx);
@@ -627,10 +629,10 @@ impl Workbench {
         let mut said: Option<String> = None;
         let mut running = false;
         let mut errors = 0;
-        let mut count = 0;
+        let mut calls = 0;
         for it in items {
             if let Item::Tool(c) = it {
-                count += 1;
+                calls += 1;
                 total_ms += c.duration_ms;
                 let k = tool_label(&c.name);
                 match kinds.iter_mut().find(|(n, _)| *n == k) {
@@ -685,14 +687,14 @@ impl Workbench {
             } else {
                 Icon::new(IconName::SquareTerminal).with_size(px(13.)).text_color(theme.muted_foreground).into_any_element()
             })
-            .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).flex_shrink_0().child(format!("{count} tool calls")))
+            .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).flex_shrink_0().child(count(calls, "{n} tool call", "{n} tool calls")))
             .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).flex_shrink_0().child(tally))
             .child(match said {
                 Some(said) => div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.foreground).child(said),
                 None => div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(last_subject),
             })
-            .when(errors > 0, |d| d.child(div().text_size(px(11.5)).text_color(theme.danger).flex_shrink_0().child(format!("{errors} failed"))))
-            .when(running, |d| d.child(div().text_size(px(11.5)).text_color(agent_color(session.agent, &theme)).flex_shrink_0().child("running…")))
+            .when(errors > 0, |d| d.child(div().text_size(px(11.5)).text_color(theme.danger).flex_shrink_0().child(tf("{n} failed", &[("n", &errors)]))))
+            .when(running, |d| d.child(div().text_size(px(11.5)).text_color(agent_color(session.agent, &theme)).flex_shrink_0().child(t("running…"))))
             .when(!running && total_ms > 1500, |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).flex_shrink_0().child(human_duration(total_ms))));
         let mut v = v_flex().w_full().relative().child(head).children(self.reveal_mark((1, ix, start), cx));
         if let Some(fold) = self.fold_state((1, ix, start), open, cx) {
@@ -713,7 +715,7 @@ impl Workbench {
     /// typed icon with name and size for anything else.
     fn render_attachment(&mut self, ix: usize, a: &Attachment, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let title = if a.name.is_empty() { "image".to_string() } else { a.name.clone() };
+        let title = if a.name.is_empty() { t("image").to_string() } else { a.name.clone() };
         let path = (!a.path.is_empty()).then(|| PathBuf::from(&a.path));
         let thumb_key = format!("{}:{}", a.uuid, a.index);
         let is_image = a.kind == "image";
@@ -792,7 +794,7 @@ impl Workbench {
             // shape makes it within a range, so a row of them lines up;
             // past the range the picture is letterboxed, never cropped.
             let (w, h) = gallery_box(size);
-            let caption = if a.name.is_empty() { "image".to_string() } else { a.name.clone() };
+            let caption = if a.name.is_empty() { t("image").to_string() } else { a.name.clone() };
             return frame(
                 v_flex()
                     .child(img(src).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain).bg(theme.muted))
@@ -863,18 +865,20 @@ impl Workbench {
                 .font_family(face)
                 .text_size(px(12.5))
                 .child(Icon::default().path(icon).with_size(px(13.)).text_color(theme.muted_foreground))
-                .child(div().text_color(theme.muted_foreground).child(what))
+                .child(div().text_color(theme.muted_foreground).child(t(what).to_string()))
                 .child(div().text_color(theme.foreground).child(crate::workbench::tinted(text, &color)))
                 .into_any_element();
         }
-        let plate = |bg: Hsla, fg: Hsla| h_flex().child(div().px(px(9.)).py(px(3.)).rounded(px(7.)).bg(bg).text_color(fg).font_family(face.clone()).text_size(px(12.)).child(text.to_string())).into_any_element();
+        let plate = |bg: Hsla, fg: Hsla, words: &str| h_flex().child(div().px(px(9.)).py(px(3.)).rounded(px(7.)).bg(bg).text_color(fg).font_family(face.clone()).text_size(px(12.)).child(words.to_string())).into_any_element();
         match variant {
             NoticeVariant::Command => h_flex()
                 .child(div().px(px(8.)).py(px(2.)).rounded(px(6.)).bg(theme.muted).text_color(theme.foreground).font_family(theme.mono_font_family.clone()).text_size(px(12.)).child(text.to_string()))
                 .into_any_element(),
-            NoticeVariant::Compact => plate(theme.info.opacity(0.13), theme.foreground),
-            NoticeVariant::Error => plate(theme.danger.opacity(0.13), theme.danger),
-            NoticeVariant::Interrupted => plate(theme.warning.opacity(0.16), theme.foreground),
+            // The line of this kind the core writes itself is in the
+            // person's language; an agent's own words stay as they are.
+            NoticeVariant::Compact => plate(theme.info.opacity(0.13), theme.foreground, t(text)),
+            NoticeVariant::Error => plate(theme.danger.opacity(0.13), theme.danger, text),
+            NoticeVariant::Interrupted => plate(theme.warning.opacity(0.16), theme.foreground, text),
             _ => div()
                 .w_full()
                 .min_w_0()
@@ -893,7 +897,7 @@ impl Workbench {
     fn render_thought(&self, ix: usize, jx: usize, md: &str, seconds: f64, open: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let body_px = self.cfg.app.chat_px();
-        let label = if seconds >= 2.0 { format!("Thought for {}", human_duration((seconds * 1000.0) as u64)) } else { "Thinking".to_string() };
+        let label = if seconds >= 2.0 { tf("Thought for {time}", &[("time", &human_duration((seconds * 1000.0) as u64))]) } else { t("Thinking").to_string() };
         v_flex()
             .w_full()
             .relative()
@@ -943,10 +947,10 @@ impl Workbench {
         let theme = cx.theme().clone();
         let (status_text, status_color) = match call.status {
             CallStatus::Ok => ("", theme.muted_foreground),
-            CallStatus::Error => ("error", theme.danger),
-            CallStatus::Interrupted => ("interrupted", theme.warning),
-            CallStatus::NoResult => ("not run", theme.muted_foreground),
-            CallStatus::Pending => ("running…", theme.primary),
+            CallStatus::Error => (t("error"), theme.danger),
+            CallStatus::Interrupted => (t("interrupted"), theme.warning),
+            CallStatus::NoResult => (t("not run"), theme.muted_foreground),
+            CallStatus::Pending => (t("running…"), theme.primary),
         };
         let stat = if call.tool_kind == ToolKind::Edit { patch_stat(&call.patch) } else { String::new() };
         let duration = if call.duration_ms > 1500 { human_duration(call.duration_ms) } else { String::new() };
@@ -984,7 +988,7 @@ impl Workbench {
                     swallow_click(window, cx);
                     this.toggle_explain(&id, &cname, &input, has_text, cx);
                 }))
-                .child(if ex_open && explaining && !has_text { "Explaining…" } else { "Explain" });
+                .child(if ex_open && explaining && !has_text { t("Explaining…") } else { t("Explain") });
             if flipped {
                 button
                     .with_animation(ElementId::Name(anim), Animation::new(EXPLAIN_FLIP).with_easing(ease_out_quint()), move |d, t| {
@@ -1042,7 +1046,7 @@ impl Workbench {
                 .when(can_explain, |d| d.child(pill)),
         );
         if ex_open && can_explain {
-            let text = if explanation.is_empty() && !explaining { "Nothing came back from the model. Click Explain again to retry.".to_string() } else { explanation };
+            let text = if explanation.is_empty() && !explaining { t("Nothing came back from the model. Click Explain again to retry.").to_string() } else { explanation };
             let size = px(self.cfg.app.chat_px());
             card = card.child(div().w_full().px(px(10.)).pb(px(8.)).child(explain_card(format!("ex-{ix}-{jx}"), text, explaining, size, cx)));
         }
@@ -1091,9 +1095,9 @@ impl Workbench {
         let pending = call.status == CallStatus::Pending;
         let held_here = self.permissions.iter().any(|(_, p)| p.tool_use_id == call.id);
         let state = if pending {
-            if held_here { "waiting for your answer below" } else { "waiting for your answer in your terminal" }
+            if held_here { t("waiting for your answer below") } else { t("waiting for your answer in your terminal") }
         } else if call.answers.is_empty() {
-            "not answered"
+            t("not answered")
         } else {
             ""
         };
@@ -1110,7 +1114,7 @@ impl Workbench {
                 h_flex()
                     .gap(px(8.))
                     .items_center()
-                    .child(badge_str("question".into(), theme.primary.opacity(0.14), theme.primary))
+                    .child(badge_str(t("question").into(), theme.primary.opacity(0.14), theme.primary))
                     .when(!state.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(if pending { theme.primary } else { theme.muted_foreground }).child(state))),
             )
             .children(qs.iter().map(|q| {
@@ -1164,9 +1168,9 @@ impl Workbench {
         let theme = cx.theme().clone();
         let pending = call.status == CallStatus::Pending;
         let state = match call.status {
-            CallStatus::Pending => "waiting for your go-ahead",
-            CallStatus::Ok => "approved",
-            _ => "not approved",
+            CallStatus::Pending => t("waiting for your go-ahead"),
+            CallStatus::Ok => t("approved"),
+            _ => t("not approved"),
         };
         v_flex()
             .w_full()
@@ -1181,7 +1185,7 @@ impl Workbench {
                 h_flex()
                     .gap(px(8.))
                     .items_center()
-                    .child(badge_str("plan".into(), theme.primary.opacity(0.14), theme.primary))
+                    .child(badge_str(t("plan").into(), theme.primary.opacity(0.14), theme.primary))
                     .child(div().text_size(px(11.5)).text_color(if pending { theme.primary } else { theme.muted_foreground }).child(state)),
             )
             .child(div().w_full().text_size(px(self.cfg.app.chat_px())).line_height(relative(1.5)).child(chat_md_view(format!("plan-{ix}-{jx}"), plan.to_string(), cx)))
@@ -1237,7 +1241,7 @@ impl Workbench {
                                     .child(tile_caption(w, caption, &theme)),
                             );
                         }
-                        None => parts = parts.child(div().text_color(theme.muted_foreground).italic().child("loading the picture…")),
+                        None => parts = parts.child(div().text_color(theme.muted_foreground).italic().child(t("loading the picture…"))),
                     }
                 } else if !call.result_text.trim().is_empty() {
                     let lang = emaki_core::render_md::lang_for_path(data.get("file_path").and_then(|v| v.as_str()).unwrap_or(""));
@@ -1253,7 +1257,7 @@ impl Workbench {
                 if !out.trim().is_empty() {
                     parts = parts.child(mono_block(format!("out-{ix}-{jx}"), &out, "text", cx));
                 } else if call.status == CallStatus::Ok {
-                    parts = parts.child(div().text_color(theme.muted_foreground).italic().child("no output"));
+                    parts = parts.child(div().text_color(theme.muted_foreground).italic().child(t("no output")));
                 }
                 if !call.stderr.trim().is_empty() {
                     parts = parts.child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("stderr"));
@@ -1305,7 +1309,7 @@ impl Workbench {
                                 cx.notify();
                             }))
                             .child(Icon::new(if sub_open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)))
-                            .child(div().child(format!("{}{} · {} round{}", if call.agent_name.is_empty() { "subagent" } else { &call.agent_name }, "", n, if n == 1 { "" } else { "s" }))),
+                            .child(div().child(format!("{} · {}", if call.agent_name.is_empty() { t("subagent") } else { &call.agent_name }, count(n, "{n} round", "{n} rounds")))),
                     );
                     if let Some(fold) = self.fold_state((3, ix, jx), sub_open, cx) {
                         let mut nested = v_flex().w_full().gap(px(10.)).pl(px(10.)).border_l_2().border_color(theme.border);
@@ -1327,7 +1331,7 @@ impl Workbench {
                 if !call.result_text.trim().is_empty() {
                     parts = parts.child(mono_block(format!("res-{ix}-{jx}"), &call.result_text, "text", cx));
                 } else if call.result_images > 0 {
-                    parts = parts.child(div().text_color(theme.muted_foreground).italic().child(format!("{} image{} returned", call.result_images, if call.result_images == 1 { "" } else { "s" })));
+                    parts = parts.child(div().text_color(theme.muted_foreground).italic().child(count(call.result_images as usize, "{n} image returned", "{n} images returned")));
                 }
             }
         }
@@ -1359,10 +1363,14 @@ impl Workbench {
                     );
                 }
                 Item::Thinking { seconds, .. } => {
-                    v = v.child(div().text_size(px(11.5)).italic().text_color(theme.muted_foreground).child(if *seconds >= 2.0 { format!("thought for {}", human_duration((seconds * 1000.0) as u64)) } else { "thinking".into() }));
+                    v = v.child(div().text_size(px(11.5)).italic().text_color(theme.muted_foreground).child(if *seconds >= 2.0 { tf("thought for {time}", &[("time", &human_duration((seconds * 1000.0) as u64))]) } else { t("thinking").to_string() }));
                 }
                 Item::Notice { text, variant, .. } => {
-                    v = v.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(variant.said(text)));
+                    v = v.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(match variant.setting() {
+                        Some(what) => format!("{} {text}", t(what)),
+                        None if *variant == NoticeVariant::Compact => t(text).to_string(),
+                        None => text.clone(),
+                    }));
                 }
             }
         }

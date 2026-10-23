@@ -61,6 +61,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 deckcraft-pptx = { git = "https://github.com/storytold/deckcraft", rev = "0ec0cc5e815caea982a7deec51bc437f3ba187ad" }
 deckcraft-render = { git = "https://github.com/storytold/deckcraft", rev = "0ec0cc5e815caea982a7deec51bc437f3ba187ad" }
 
+# The system's preferred languages, for the window's (`i18n::pick`):
+# off a Mac, and on one when the defaults have none.
+sys-locale = "0.3"
+
 # The .exe carries the icon as a resource; nothing to do elsewhere.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
@@ -70,7 +74,7 @@ objc2 = "0.6"
 # The handler of an AppKit event monitor (`sys::key_events`).
 block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSResponder", "NSApplication", "NSImage", "NSRunningApplication", "NSWorkspace", "NSSpellChecker", "NSPasteboard", "NSColor", "NSSound"] }
-objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSURL", "NSArray", "NSRange"] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSURL", "NSArray", "NSRange", "NSDictionary", "NSUserDefaults", "NSBundle"] }
 raw-window-handle = "0.6"
 
 # An HTML file as a browser shows it: the system's own web view set in
@@ -108,6 +112,10 @@ binaries = [{ path = "Emaki", main = true }]
 
 [package.metadata.packager.macos]
 minimumSystemVersion = "14.0"
+# Merged into the bundle's Info.plist: the languages the window speaks
+# (`i18n::LANGS`), so System Settings, Language & Region, Applications
+# can give Emaki its own.
+infoPlistPath = "macos/Info.plist"
 
 [package.metadata.packager.nsis]
 installMode = "currentUser"
