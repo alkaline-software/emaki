@@ -801,7 +801,7 @@ fn row_is_live_other(row: &serde_json::Value, own: u32, alive: &dyn Fn(u32) -> b
 /// out its own ancestors, this Emaki among them. Off Unix none is known.
 fn other_emaki_running() -> bool {
     if cfg!(unix) {
-        std::process::Command::new("pgrep").args(["-x", "Emaki"]).output().is_ok_and(|o| o.status.success())
+        emaki_core::process::command("pgrep").args(["-x", "Emaki"]).output().is_ok_and(|o| o.status.success())
     } else {
         false
     }

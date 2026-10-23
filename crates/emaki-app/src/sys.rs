@@ -102,11 +102,11 @@ pub fn open_path(path: &Path) {
 pub fn reveal_path(path: &Path) {
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+        let _ = emaki_core::process::command("open").arg("-R").arg(path).spawn();
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+        let _ = emaki_core::process::command("explorer").arg(format!("/select,{}", path.display())).spawn();
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

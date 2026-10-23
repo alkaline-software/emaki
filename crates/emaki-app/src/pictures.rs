@@ -58,7 +58,7 @@ fn make(path: &Path, to: &Path) -> bool {
         return false;
     }
     let tmp = to.with_extension("tmp.png");
-    let made = std::process::Command::new("/usr/bin/sips")
+    let made = emaki_core::process::command("/usr/bin/sips")
         .args(["-s", "format", "png", "-Z", "1600"])
         .arg(path)
         .arg("--out")

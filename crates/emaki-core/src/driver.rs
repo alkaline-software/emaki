@@ -36,7 +36,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -311,7 +311,7 @@ fn claude_help() -> &'static str {
     static HELP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     HELP.get_or_init(|| {
         let Some(binary) = claude_binary() else { return String::new() };
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::process::command(binary);
         cmd.arg("--help").env_clear();
         for (k, v) in child_env() {
             cmd.env(k, v);
@@ -1103,7 +1103,7 @@ pub fn claude_version() -> String {
     VERSION
         .get_or_init(|| {
             claude_binary()
-                .and_then(|b| Command::new(b).arg("--version").output().ok())
+                .and_then(|b| crate::process::command(b).arg("--version").output().ok())
                 .filter(|o| o.status.success())
                 .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("").to_string())
                 .unwrap_or_default()
@@ -1155,7 +1155,7 @@ pub fn login_shell_path() -> Option<String> {
         return None;
     }
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
-    let mut child = Command::new(shell)
+    let mut child = crate::process::command(shell)
         .args(["-l", "-i", "-c", "printf '\\n__EMAKI_PATH__%s__EMAKI_END__\\n' \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1339,7 +1339,7 @@ impl Driver {
         if !version.is_empty() && version_cmp(&version, TESTED_CLAUDE_VERSION) == std::cmp::Ordering::Greater {
             eprintln!("emaki: Claude Code {version} is newer than {TESTED_CLAUDE_VERSION}, the release this driver was checked against; if turns stop arriving, that is the first suspect");
         }
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::process::command(binary);
         cmd.args(["-p", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--permission-prompt-tool", "stdio"]);
         if resume {
             cmd.args(["--resume", session_id]);

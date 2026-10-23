@@ -753,7 +753,7 @@ fn pack_file(path: &Path) -> bool {
         let tmp = path.with_file_name(format!(".{}.packing", name.to_string_lossy()));
         let _ = fs::remove_file(&tmp);
         // Without `--noclone` the copy is a clone and nothing is packed.
-        let made = std::process::Command::new("/usr/bin/ditto").arg("--hfsCompression").arg("--noclone").arg(path).arg(&tmp).output().is_ok_and(|o| o.status.success());
+        let made = crate::process::command("/usr/bin/ditto").arg("--hfsCompression").arg("--noclone").arg(path).arg(&tmp).output().is_ok_and(|o| o.status.success());
         let good = made && fs::metadata(&tmp).is_ok_and(|t| is_packed(&t)) && same_bytes(path, &tmp);
         if !good || fs::rename(&tmp, path).is_err() {
             let _ = fs::remove_file(&tmp);
@@ -763,7 +763,7 @@ fn pack_file(path: &Path) -> bool {
     }
     #[cfg(windows)]
     {
-        std::process::Command::new("compact").arg("/c").arg("/q").arg(path).output().is_ok_and(|o| o.status.success())
+        crate::process::command("compact").arg("/c").arg("/q").arg(path).output().is_ok_and(|o| o.status.success())
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {

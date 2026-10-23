@@ -1,0 +1,5 @@
+# The C runtime linked into Emaki.exe, as zed does: a dynamic one wants
+# VCRUNTIME140.dll, which a fresh Windows does not have, and the app would
+# not start (docs/platform.md, Windows and Linux).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

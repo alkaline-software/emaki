@@ -20,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-24.04]
+        # ARM as well as x64 off a Mac: a Windows or Linux VM on Apple
+        # silicon is ARM, and both have their own installer.
+        os: [macos-latest, windows-latest, windows-11-arm, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

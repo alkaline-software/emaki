@@ -20,7 +20,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// A language Settings lists, in one of its two lists.
@@ -148,7 +148,7 @@ const TOOL_TIME: Duration = Duration::from_secs(8);
 /// it wrote. One that fails says why on its standard error, and the
 /// first line of that is the reason.
 fn run(bin: &Path, args: &[String], source: &str) -> Result<Option<String>, String> {
-    let mut child = Command::new(bin).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let mut child = crate::process::command(bin).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     let mut stdin = child.stdin.take().ok_or_else(String::new)?;
     let text = source.to_string();
     // Written and read on threads: a formatter that writes before it has

@@ -9,6 +9,10 @@ About `vendor/`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/`, `scripts/`, `
 - Never put a `rev` on our own gpui dependency. gpui-component depends on the unpinned zed git source, and a `rev` makes a second copy of gpui it does not build against. The pin is in `Cargo.lock`: `cargo update -p gpui --precise <rev>` moves it.
 - Every change under `vendor/gpui-component/` is marked `(Emaki addition.)` in the source and listed in `vendor/gpui-component/UPSTREAM.md`, or it is lost at the next move to a newer upstream.
 - Everything Unix-only is gated with a stated fallback. No macOS command is shelled out from the window; per-OS work goes in `sys.rs`.
+- Windows links the C runtime in (`.cargo/config.toml`, `+crt-static`, as zed does). Linked as a DLL, it is `VCRUNTIME140.dll`, which a fresh Windows does not have, and Emaki.exe stopped at launch with a system error. A C dependency built another way than through the `cc` crate has to follow the same flag.
+- Every program the app starts goes through `emaki_core::process::command`, never `Command::new`. A release build has no console on Windows (`windows_subsystem` in `main.rs`; until v0.2.9 a console window stood beside the app), and a console program started from it (git, claude, cmd) opens a console window of its own unless it is started with `CREATE_NO_WINDOW`, which `command` sets.
+- The Windows installer is one step: no wizard, a progress bar, then Emaki opens. It is cargo-packager's NSIS template with its passive mode always on (`crates/emaki-app/windows/installer.nsi`, each change marked). A newer cargo-packager means taking its template again and re-applying the marked changes.
+- Windows and Linux ship for ARM as well as x64, and the updater asks for its own architecture's file. Every Windows or Linux VM on an Apple silicon Mac is ARM: there the x64 AppImage does not run at all, and the x64 Windows build only under emulation.
 - The `.icns` is the full square, opaque to its corners. macOS 26 masks every app icon to its own rounded square over a gray backing, and anything transparent (a margin, rounder corners) shows as a gray border in Finder, the switcher and Spotlight.
 - Upload the notarized Mac images after CI's release job, which replaces same-named assets.
 - Leave no second `Emaki.app` where Spotlight indexes, or Launchpad lists two. The dev build's bundle is in a folder named `.noindex` for this, and `scripts/release-clean.sh` after a release takes the rest (WORKFLOW.md).
@@ -68,8 +72,8 @@ The MSVC target cannot be checked from a Mac (bundled SQLite wants the Windows h
 
 WORKFLOW.md is the procedure, scripts included. The shape behind it:
 
-- `rust.yml`, every push: the core tests, an app build and the CLI on all three OSes, with `Swatinem/rust-cache` because a cold GPUI build is long.
-- `release.yml`, on a `v*` tag: four package jobs build with `cargo-packager`, then one `release` job makes the GitHub Release with the tag's section of `CHANGELOG.md` as its notes and the installers under stable names.
+- `rust.yml`, every push: the core tests, an app build and the CLI on all three OSes, Windows and Linux on ARM too, with `Swatinem/rust-cache` because a cold GPUI build is long.
+- `release.yml`, on a `v*` tag: six package jobs build with `cargo-packager`, then one `release` job makes the GitHub Release with the tag's section of `CHANGELOG.md` as its notes and the installers under stable names.
 - Until the signing secrets are in the repository, CI's Mac images are ad-hoc. The notarized ones are built on this machine (`scripts/release-mac.sh`) and uploaded over them (`scripts/release-publish.sh`), which is why CI leaves the release a draft.
 
 ## The old name
@@ -99,7 +103,7 @@ Tried and dropped: an icon cut out of a generated picture, which read as a rende
 
 - The newest version is the tag `releases/latest` redirects to: no API, no rate limit. The installer is `releases/download/v<version>/<asset>` under the stable names WORKFLOW.md fixes, fetched with `ureq` on rustls.
 - macOS: the disk image is mounted, `Emaki.app` copied beside the running bundle with `ditto` (signature and attributes kept) and swapped in with two renames. The old process quits, and a shell of its own waiting on that pid opens the new app once it is gone (`open_once_gone`). Opened beside the old one with `open -n`, the new app was a second Emaki to the Dock: an icon of its own at the Dock's end, and the one the person keeps there left without a running app. A bare `target/debug/Emaki` refuses, having no bundle to replace.
-- Windows starts the installer and quits. Linux replaces the running AppImage (`APPIMAGE`) and restarts it.
+- Windows starts the installer and quits; the installer closes an Emaki still running, puts the new one in place and opens it. Linux replaces the running AppImage (`APPIMAGE`) and restarts it. Both fetch their own architecture's file.
 - `Hub::check_updates` and `install_update` run on threads and report as `HubEvent::Update`. `Workbench::check_updates_daily` runs from the clock tick when `app.check_updates` is on and speaks only when it finds a newer version. `state/update.json` keeps when the last check ran.
 - The settings window shows as little as it can: the version, one button that reads *Check for updates* and then *Update to x* in the same place, a *Release notes* link only then, a tick for the daily check, and a detail line only when there is something to say. Tried and dropped: three pills and two sentences of explanation.
 

@@ -52,7 +52,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -470,7 +470,7 @@ impl CodexDriver {
     /// does not come up.
     fn spawn(cwd: &str, events: Sender<Event>, listen: bool) -> Result<Arc<CodexDriver>, DriverError> {
         let binary = codex_binary().ok_or_else(|| DriverError("codex is not installed".into()))?;
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::process::command(binary);
         cmd.arg("app-server");
         let asked = listen.then(socket_path);
         if let Some(path) = &asked {

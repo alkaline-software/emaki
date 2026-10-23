@@ -116,7 +116,7 @@ pub fn binary() -> PathBuf {
         dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].map(PathBuf::from));
     }
     let name = if cfg!(windows) { "git.exe" } else { "git" };
-    let answers = |p: &Path| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success());
+    let answers = |p: &Path| crate::process::command(p).arg("--version").output().is_ok_and(|o| o.status.success());
     let found = dirs.into_iter().map(|dir| dir.join(name)).find(|p| p.is_file() && (p.as_path() != Path::new(MAC_GIT) || mac_tools()) && answers(p));
     match found {
         Some(found) => FOUND.get_or_init(|| found).clone(),
@@ -136,7 +136,7 @@ const MAC_GIT: &str = "/usr/bin/git";
 /// Whether the Mac's stand-in has something to stand in for: Xcode or
 /// its command line tools. True off the Mac, where there is none.
 fn mac_tools() -> bool {
-    !cfg!(target_os = "macos") || Command::new("/usr/bin/xcode-select").arg("-p").output().is_ok_and(|o| o.status.success())
+    !cfg!(target_os = "macos") || crate::process::command("/usr/bin/xcode-select").arg("-p").output().is_ok_and(|o| o.status.success())
 }
 
 /// Why git says nothing of a checkout (`trouble`).
@@ -196,13 +196,13 @@ pub fn trouble(dir: &Path) -> Option<Trouble> {
     let none = || Trouble { words: NO_GIT.to_string(), fix: None };
     let bin = binary();
     if bin.is_absolute() {
-        let out = Command::new(&bin).arg("-C").arg(dir).args(["rev-parse", "--git-dir"]).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
+        let out = crate::process::command(&bin).arg("-C").arg(dir).args(["rev-parse", "--git-dir"]).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
         return (!out.status.success()).then(|| said(&out.stderr));
     }
     if !mac_tools() {
         return Some(none());
     }
-    match Command::new(&bin).arg("--version").output() {
+    match crate::process::command(&bin).arg("--version").output() {
         Err(_) => Some(none()),
         Ok(out) if out.status.success() => None,
         Ok(out) => Some(said(&out.stderr)),
@@ -211,7 +211,7 @@ pub fn trouble(dir: &Path) -> Option<Trouble> {
 
 /// A call of that git.
 pub fn command() -> Command {
-    Command::new(binary())
+    crate::process::command(binary())
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
@@ -1028,7 +1028,7 @@ pub fn account(dir: &Path) -> Account {
     let helpers = git(dir, &["config", "--get-all", "credential.helper"]).map(|o| String::from_utf8_lossy(&o).lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default();
     let gh = gh_binary();
     let gh_signed = gh.as_ref().is_some_and(|g| {
-        let mut c = Command::new(g);
+        let mut c = crate::process::command(g);
         c.args(["auth", "status"]);
         if !host.is_empty() {
             c.args(["--hostname", &host]);

@@ -34,10 +34,20 @@ jobs:
             target: x86_64-pc-windows-msvc
             formats: nsis
             asset: Emaki-windows-x64-setup.exe
+          # Windows on ARM runs the x64 build only under emulation, and a
+          # Linux on ARM (any VM on an Apple silicon Mac) not at all.
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            formats: nsis
+            asset: Emaki-windows-arm64-setup.exe
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             formats: appimage,deb
             asset: Emaki-linux-x64.AppImage
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            formats: appimage,deb
+            asset: Emaki-linux-arm64.AppImage
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -71,8 +81,10 @@ jobs:
         with:
           shared-key: release-${{ matrix.target }}
 
+      # Pinned: the Windows installer is this version's NSIS template, made
+      # one step (crates/emaki-app/windows/installer.nsi).
       - name: cargo-packager
-        run: cargo install cargo-packager --locked
+        run: cargo install cargo-packager --version 0.11.8 --locked
 
       - name: Build
         run: cargo build --release --locked -p emaki-app --target ${{ matrix.target }}
@@ -130,7 +142,7 @@ jobs:
             nsis)  mv dist/*-setup.exe "upload/${{ matrix.asset }}" ;;
             appimage,deb)
                    mv dist/*.AppImage "upload/${{ matrix.asset }}"
-                   mv dist/*.deb upload/Emaki-linux-x64.deb ;;
+                   mv dist/*.deb "upload/$(basename "${{ matrix.asset }}" .AppImage).deb" ;;
           esac
           ls -la upload
 
@@ -139,7 +151,7 @@ jobs:
           name: ${{ matrix.asset }}
           path: upload/*
 
-  # One release, made once the four builds are in, with the tag's section of
+  # One release, made once the six builds are in, with the tag's section of
   # CHANGELOG.md as its notes. (Each package job making the release itself
   # left four copies of an auto-generated changelog on the page.)
   release:

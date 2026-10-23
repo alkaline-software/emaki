@@ -2,6 +2,10 @@
 //! window you can also talk to. (The crates and `~/.emaki` keep the old
 //! name until the repository moves.)
 
+// No console window beside the app on Windows. A debug build keeps one
+// for its log; children are started without one (`emaki_core::process`).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod a11y;
 mod agents_page;
 mod assets;
@@ -266,7 +270,9 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             // Narrow enough for the sidebar to fold away (see NARROW_W) and
             // the conversation to run edge to edge, like the Claude app.
             window_min_size: Some(size(MIN_W, px(480.))),
-            app_id: Some("emaki".into()),
+            // The Linux packages' desktop file is `Emaki.desktop`: the shell
+            // finds the window's icon by this name, else a blank one.
+            app_id: Some("Emaki".into()),
             // The top strip holds tabs, which are dragged along it, so the
             // app says which presses move the window (`drag_region`).
             app_owns_titlebar_drag: true,

@@ -59,6 +59,7 @@ Each is here because breaking it loses data or reintroduces a bug that was alrea
 - **A field's keys are the toolkit's, never a field's own.** Every place words are typed is the toolkit's `Input`, and what a key does in one (up to the start and down to the end of one line, ⇧ with either to select there) is fixed in `vendor/gpui-component`, where every field now and later has it. Do not handle a caret key in one field. (`docs/window.md`)
 - **The composer is plain text.** Live markdown in it was tried three ways and dropped. (`docs/composer.md`)
 - **One copy of gpui.** The pin is in `Cargo.lock`, not a `rev` of our own. Changes to the toolkit go in `vendor/gpui-component/`, marked and listed in its `UPSTREAM.md`. (`docs/platform.md`)
+- **A child process is started with `emaki_core::process::command`, never `Command::new`,** or on Windows each one opens a console window. (`docs/platform.md`)
 - **Everything Unix-only is gated with a stated fallback.** Windows and Linux are build targets. (`docs/platform.md`)
 - **A card that comes up while a session runs stands at the conversation's end and scrolls with it,** never over the composer. It goes in `render_cards`, its body through `card_scroll`, which caps its height and scrolls both ways. (`docs/live-turn.md`, The cards)
 - **A button is `choice_pill`,** a pill with an icon before its word, and a menu's choice has an icon. A new button is not the toolkit's `Button`. (`docs/look.md`)
