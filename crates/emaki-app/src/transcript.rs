@@ -1041,7 +1041,7 @@ impl Workbench {
                 .when(!duration.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(duration)))
                 .when(can_explain, |d| d.child(pill)),
         );
-        if ex_open {
+        if ex_open && can_explain {
             let text = if explanation.is_empty() && !explaining { "Nothing came back from the model. Click Explain again to retry.".to_string() } else { explanation };
             let size = px(self.cfg.app.chat_px());
             card = card.child(div().w_full().px(px(10.)).pb(px(8.)).child(explain_card(format!("ex-{ix}-{jx}"), text, explaining, size, cx)));

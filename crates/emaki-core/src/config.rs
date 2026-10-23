@@ -95,11 +95,15 @@ pub struct AppConfig {
     /// The languages a save formats, by `format::LANGS`' keys, while
     /// `format_on_save` is on.
     pub format_langs: Vec<String>,
+    /// The outline panel lists a conversation's messages, a long one by a
+    /// label a small model writes on the person's account. Off, the panel
+    /// says so and asks nothing.
+    pub outline: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys() }
+        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true }
     }
 }
 
@@ -235,6 +239,8 @@ impl Terminal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Explain {
+    /// The switch in Settings, Conversation: off, no call is explained by
+    /// a model, and tool cards have no Explain button.
     pub enabled: bool,
     pub model: String,
     /// `off`, `permission` (calls waiting on a card) or `all` (every new

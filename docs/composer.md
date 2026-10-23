@@ -86,7 +86,7 @@ What was learned is kept in `state/limits.json` with its time; the row says "lim
 
 What the empty composer says is drawn by the window over the textarea's first line (`render_composer_hint`), and the textarea has no placeholder of its own: a suggested prompt is in italics, so it reads as offered and not yet written, and a placeholder cannot be. Nothing says that → or Tab takes it, or that ⌘↩ sends.
 
-⌘↩ sends. Settings, Composer, "Send with" makes a bare ↩ send as well (`AppConfig::send_key`, `cmd-enter` or `enter`); ⇧↩ is a new line either way, and the slash list takes ↩ before sending does.
+⌘↩ sends. Settings, Conversation, "Send with" makes a bare ↩ send as well (`AppConfig::send_key`, `cmd-enter` or `enter`); ⇧↩ is a new line either way, and the slash list takes ↩ before sending does.
 
 After a turn Claude Code sets dim, untyped words in its input. The composer shows them in that place. → or Tab in the empty box makes them the text (`Workbench::accept_suggestion`, captured before the textarea's own `MoveRight` and `IndentInline`); ⌘↩ on the empty box sends them. `read_suggestion` reads the screen on the clock while the session showing is idle in its terminal and the box is empty. `driver::suggestion_on_screen` takes the line between the prompt's two rules, after "❯", when all of it is written dim (`ESC [ 0;2 m`), which typed words are not. A path in the words is a link (`ESC ] 8 ;; url ESC \`), whose sequences once ran into the rule below and hid it. Taking the words here leaves the terminal's own suggestion in place.
 
