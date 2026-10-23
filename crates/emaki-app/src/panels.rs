@@ -337,7 +337,7 @@ fn git_read(dir: &Path) -> GitRead {
 /// The file pane's find: the card's own height and the room around it.
 const FIND_CARD_H: f32 = 6. + 4. + 40.;
 
-/// VS Code's colour for a git state, light then dark: the GitHub
+/// VS Code's color for a git state, light then dark: the GitHub
 /// theme's where it names one, else VS Code's own default.
 fn git_rgb(state: git::State) -> (u32, u32) {
     use git::State::*;
@@ -968,7 +968,7 @@ pub(crate) struct FileEditor {
     /// The places the text differs from git's copy, as last worked out:
     /// a mark's `id` is its place here.
     hunks: Vec<git::Hunk>,
-    /// What is marked as misspelt or ungrammatical in a file of prose
+    /// What is marked as misspelled or ungrammatical in a file of prose
     /// (`spelling.rs`), the text it was found in, the count of checks
     /// asked for, and whether the word at the caret is marked yet.
     pub(crate) issues: Vec<emaki_core::check::Issue>,
@@ -1571,8 +1571,8 @@ impl BranchAsk {
 }
 
 /// The ground of a panel's row under the pointer. A panel is on the
-/// sidebar's ground, and in a light window the theme's muted grey is all
-/// but that same colour, so the row takes a wash of the ink there.
+/// sidebar's ground, and in a light window the theme's muted gray is all
+/// but that same color, so the row takes a wash of the ink there.
 pub(crate) fn row_hover(theme: &gpui_component::Theme, dark: bool) -> Hsla {
     if dark {
         theme.foreground.opacity(0.08)
@@ -1818,7 +1818,7 @@ impl Workbench {
                 .cursor_pointer()
                 .text_color(if active { theme.foreground } else { theme.muted_foreground })
                 // On the active one too, where it changes nothing: gpui
-                // keeps "the pointer is over this" for the text's colour
+                // keeps "the pointer is over this" for the text's color
                 // and only hears the pointer leave while a hover style is
                 // set. Without one the mark stayed lit when its segment
                 // went back to rest with the pointer elsewhere.
@@ -2195,10 +2195,10 @@ impl Workbench {
                 .background_executor()
                 .spawn(async move { git_read(&dir) })
                 .await;
-            // `EMAKI_GO=gitlicence`: the strip as a Mac whose Xcode
-            // licence has not been agreed to has it.
-            let trouble = if std::env::var("EMAKI_GO").is_ok_and(|go| go == "gitlicence") {
-                Some(git::Trouble::licence())
+            // `EMAKI_GO=gitlicense`: the strip as a Mac whose Xcode
+            // license has not been agreed to has it.
+            let trouble = if std::env::var("EMAKI_GO").is_ok_and(|go| go == "gitlicense") {
+                Some(git::Trouble::license())
             } else {
                 trouble
             };
@@ -5285,7 +5285,7 @@ impl Workbench {
                 .child(field)
         };
         // Git's word on the folder; asked for at once when there is none
-        // for it yet, so the colours do not wait for the clock.
+        // for it yet, so the colors do not wait for the clock.
         let status = self.tree.git.as_ref().filter(|(of, _)| Some(of) == root.as_ref()).map(|(_, st)| st.clone());
         if status.is_none() && exists {
             if let Some(r) = root.clone() {
@@ -6279,7 +6279,7 @@ impl Workbench {
         let trouble = self.tree.git_trouble.as_ref().filter(|(of, _)| *of == root).map(|(_, trouble)| trouble.clone())?;
         // The command that puts it right, on a line of its own with a
         // copy button: only for a trouble known for certain
-        // (`git::xcode_licence`).
+        // (`git::xcode_license`).
         let fix = trouble.fix.map(|command| {
             let key = SharedString::from("git-trouble-fix");
             let done = self.copied.as_ref() == Some(&key);
@@ -6543,7 +6543,7 @@ impl Workbench {
         let w = px(420.).min(view.width - px(16.));
         let x = (at.x - px(40.)).min(view.width - w - px(8.)).max(px(8.));
         let y = (at.y + px(16.)).min(view.height - px(200.)).max(px(8.));
-        // The outline is a thinned ink, not the border colour: that is the
+        // The outline is a thinned ink, not the border color: that is the
         // row's own ground under the pointer, and the pill went with it.
         let chip = |word: &'static str| div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.muted_foreground.opacity(0.4)).text_size(px(10.5)).text_color(theme.muted_foreground).child(word);
         let origin = b.origin.clone().unwrap_or_else(|| "origin".into());
@@ -7147,7 +7147,7 @@ impl Workbench {
         let showing = if c.history { crate::branches::history_key(c) } else { picked.clone() };
         let shown = c.diff.as_ref().filter(|(of, _)| Some(of) == showing.as_ref()).map(|(_, d)| d.clone());
         let rel = picked.as_ref().map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\', "/")).unwrap_or_default();
-        // GitHub's own colours for a line put in and a line taken out:
+        // GitHub's own colors for a line put in and a line taken out:
         // the line's ground, and a stronger one behind its number.
         let rgba_of = |hex: u32, a: f32| Hsla::from(rgb(hex)).opacity(a);
         let (add, add_no, del, del_no) = if dark { (rgba_of(0x2ea043, 0.16), rgba_of(0x3fb950, 0.30), rgba_of(0xf85149, 0.14), rgba_of(0xf85149, 0.30)) } else { (Hsla::from(rgb(0xe6ffec)), Hsla::from(rgb(0xccffd8)), Hsla::from(rgb(0xffebe9)), Hsla::from(rgb(0xffd7d5))) };
@@ -7636,7 +7636,7 @@ impl Workbench {
                 .into_any_element(),
         };
         // Code, and markdown or a table as it is written: the toolkit's
-        // editor, with line numbers and the language's colours. It
+        // editor, with line numbers and the language's colors. It
         // finds (⌘F), selects and copies by itself, and a file the pane
         // holds whole can be changed in it and saved (⌘S, `save_file`).
         // What shows two ways, as it reads and as it is written: markdown
@@ -8221,7 +8221,7 @@ impl Workbench {
         let waiting = self.outline_asking.len();
         // The entries with no label yet, and which child of the scroller
         // each is, for asking about the ones in sight.
-        let mut unlabelled: Vec<(usize, usize, String, String)> = Vec::new();
+        let mut unlabeled: Vec<(usize, usize, String, String)> = Vec::new();
         // The day heads, and which child of the scroller each is.
         // with the room over its words.
         let mut heads: Vec<(usize, f32, String)> = Vec::new();
@@ -8251,7 +8251,7 @@ impl Workbench {
             let label = e.wants_summary().then(|| self.outline_labels.get(&e.key).and_then(|v| v.as_str()).map(str::to_string)).flatten();
             let pending = e.wants_summary() && label.is_none() && !self.outline_failed.contains(&e.key);
             if pending && !self.outline_asking.contains(&e.key) {
-                unlabelled.push((rows.len(), e.round, e.key.clone(), e.prompt.clone()));
+                unlabeled.push((rows.len(), e.round, e.key.clone(), e.prompt.clone()));
             }
             let fresh = label.is_some() && self.outline_fresh.get(&e.key).is_some_and(|at| at.elapsed() < LABEL_FADE);
             let words = label.unwrap_or_else(|| e.title.clone());
@@ -8341,7 +8341,7 @@ impl Workbench {
         // above and below it, once the scroller has rested `LABEL_REST`
         // and nothing is being asked already, so a scroll through a long
         // conversation asks about where it stops and not what it passes.
-        if !unlabelled.is_empty() && !leaving {
+        if !unlabeled.is_empty() && !leaving {
             let y = f32::from(self.outline_scroll.offset().y);
             let rested = match &self.outline_rest {
                 Some((k, at, since)) if *k == key && (*at - y).abs() < 0.5 => since.elapsed() >= LABEL_REST,
@@ -8362,7 +8362,7 @@ impl Workbench {
                 // scroller's offset is taken: the offset is added here.
                 let (view, off) = (self.outline_scroll.bounds(), self.outline_scroll.offset().y);
                 let (top, bottom) = (view.top() - LABEL_AHEAD, view.bottom() + LABEL_AHEAD);
-                let wanted: Vec<(String, String)> = unlabelled
+                let wanted: Vec<(String, String)> = unlabeled
                     .into_iter()
                     .filter(|(child, round, _, _)| match self.outline_scroll.bounds_for_item(*child) {
                         Some(b) => b.bottom() + off >= top && b.top() + off <= bottom,
@@ -8694,7 +8694,7 @@ impl Workbench {
             // editor shows, which takes it as the mouse's (the window is
             // needed, so it is made at the next draw).
             "file:menu" if self.file_editor.is_some() => self.file_menu_probe = true,
-            // What the file's editor has marked as misspelt or
+            // What the file's editor has marked as misspelled or
             // ungrammatical, printed; and the first mark's menu.
             "file:spell" => {
                 if let Some(ed) = &self.file_editor {

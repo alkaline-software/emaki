@@ -126,7 +126,7 @@ mod blitz {
             rgba.fill(0);
             renderer.reset();
             renderer.render(|scene| blitz_paint::paint_scene(scene, &mut doc, scale as f64, px_w, strip, 0, 0), &mut rgba);
-            // What is drawn has its colour already multiplied by how solid
+            // What is drawn has its color already multiplied by how solid
             // it is; laid over white it is a picture with nothing clear.
             let mut rgb = Vec::with_capacity((px_w * rows * 3) as usize);
             for s in rgba[..(px_w * rows * 4) as usize].chunks_exact(4) {

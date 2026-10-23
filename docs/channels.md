@@ -53,7 +53,7 @@ On `spawn`, `send_message` starts a hidden terminal and the channel is `pty`. Th
 - **What Codex asks** arrives as a request of its own and is put as the tool call the cards already draw: leave to run a command as `Bash`, to change files as `apply_patch` with the diff, a question (`request_user_input`) as `AskUserQuestion`.
 - **A plan.** A turn in plan mode that ends on a `plan` item is followed by "Implement this plan?", which Codex's terminal asks itself and the wire does not: the driver makes the card (`ExitPlanMode`). Yes leaves plan mode for the profile the session had and sends "Implement the plan.", Codex's own words. The card is the driver's and goes with it: after a relaunch the plan is in the conversation and the mode is still Plan, to be changed on the pill.
 - **A new session names its model.** The pill shows Codex's first listed model when none is chosen, and that is what is sent: the person's config may name one their account cannot use (`gpt-5` on a ChatGPT account, 0.162), and the turn then fails at once.
-- **The catalog** (`codex::catalogue`) is a child started for the question: `model/list`, `permissionProfile/list`, `collaborationMode/list`, `skills/list`. No model call, no session. The slash list is `/compact`, which the driver runs itself (`thread/compact/start`), and the folder's skills, sent as skill items.
+- **The catalog** (`codex::catalog`) is a child started for the question: `model/list`, `permissionProfile/list`, `collaborationMode/list`, `skills/list`. No model call, no session. The slash list is `/compact`, which the driver runs itself (`thread/compact/start`), and the folder's skills, sent as skill items.
 - Not done: a rename from the window. Its other commands (`/rename`, `/status`, `/review`) are typed in its terminal on the panel.
 
 ## A session that went on
@@ -73,7 +73,7 @@ Claude Code can move a conversation into a background session of its daemon (`cl
 
 `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio`, kept alive between turns. `--resume` appends to the same transcript, and the window shows the reply by reading the file. Permission prompts arrive as `can_use_tool` control requests and are answered from a card; ten minutes of silence is a deny. `Hub::reap_drivers` stops one idle past `driver.idle_min` or whose child is gone. The docstring at the top of `driver.rs` records what each Claude Code release does on the wire.
 
-The slash catalog is read once per folder from a headless child's `initialize` reply (`driver::catalogue`, `Hub::commands_for`): no model call, no transcript; the built-ins stand in until it is in.
+The slash catalog is read once per folder from a headless child's `initialize` reply (`driver::catalog`, `Hub::commands_for`): no model call, no transcript; the built-ins stand in until it is in.
 
 ## The entry point name
 

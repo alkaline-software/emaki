@@ -8,7 +8,7 @@
 //! and a screen model with no renderer keeps what it draws: `text` and
 //! `styled` are that screen as the readers in `driver` take it
 //! (`mode_on_screen`, `working_on_screen`, `dialog_on_screen`,
-//! `suggestion_on_screen`), `rows` is the same screen as coloured
+//! `suggestion_on_screen`), `rows` is the same screen as colored
 //! stretches for the window to draw when the person has to see it, and
 //! `write` is the keyboard.
 //!
@@ -47,7 +47,7 @@ pub struct Span {
     /// `0xRRGGBB`; None is the terminal's own ink or ground.
     pub fg: Option<u32>,
     pub bg: Option<u32>,
-    /// Which of the sixteen named colours the ink or the ground is, when
+    /// Which of the sixteen named colors the ink or the ground is, when
     /// the program named one: a terminal draws those in its own palette.
     pub fg_ix: Option<u8>,
     pub bg_ix: Option<u8>,
@@ -474,14 +474,14 @@ impl Pty {
         plain(&self.rows())
     }
 
-    /// The screen with its colours written out as a terminal writes them,
+    /// The screen with its colors written out as a terminal writes them,
     /// which is what `driver`'s readers take.
     pub fn styled(&self) -> String {
         styled(&self.rows())
     }
 }
 
-/// xterm's 256 colours.
+/// xterm's 256 colors.
 fn indexed(i: u8) -> u32 {
     const BASE: [u32; 16] = [
         0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5, 0x666666, 0xf14c4c, 0x23d18b, 0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
@@ -715,8 +715,8 @@ pub fn hits(rows: &[Vec<Span>]) -> Vec<Hit> {
                 }
             }
             let levels: Vec<(usize, usize)> = words.into_iter().filter(|(a, b)| *a + 1 >= from && *b <= to + 2).collect();
-            let centre = |(a, b): &(usize, usize)| (a + b) as i64;
-            if let Some(on) = levels.iter().enumerate().min_by_key(|(_, l)| (centre(l) - 2 * mark as i64 - 1).abs()).map(|(ix, _)| ix) {
+            let center = |(a, b): &(usize, usize)| (a + b) as i64;
+            if let Some(on) = levels.iter().enumerate().min_by_key(|(_, l)| (center(l) - 2 * mark as i64 - 1).abs()).map(|(ix, _)| ix) {
                 for (ix, (a, b)) in levels.iter().enumerate() {
                     out.push(Hit { row, start: *a, end: *b, keys: arrows(ix as i64 - on as i64, "\x1b[D", "\x1b[C") });
                 }

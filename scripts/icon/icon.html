@@ -69,7 +69,7 @@ function sheet(ctx) {
   stroke(ctx, [[22, 70], [78, 70]], NAVY, 2.6, 'butt');
 }
 
-// A roll of paper on its axle, centred on x. The axle shows as a knob above
+// A roll of paper on its axle, centerd on x. The axle shows as a knob above
 // and below the roll.
 function paperRoll(ctx, x) {
   ctx.fillStyle = NAVY; rr(ctx, x - 2.5, 19.5, 5, 61, 2.2); ctx.fill();
@@ -90,7 +90,7 @@ function dialogue(ctx) {
 const ICONS = [
   {
     id: 'emaki', name: 'Handscroll',
-    desc: 'An emaki is a picture scroll, and this is one seen from the front: a sheet held between two rolls of paper on their axles. On the sheet is a conversation, the agent on the left with its spark and your reply on the right. The ground and the line colours are those of the Alkaline Software icon; the periwinkle of the rolls is the accent emaki.lol and the window wear, in the place of the terracotta the first icon had.',
+    desc: 'An emaki is a picture scroll, and this is one seen from the front: a sheet held between two rolls of paper on their axles. On the sheet is a conversation, the agent on the left with its spark and your reply on the right. The ground and the line colors are those of the Alkaline Software icon; the periwinkle of the rolls is the accent emaki.lol and the window wear, in the place of the terracotta the first icon had.',
     bg: ['#fdf8ee', '#f1e4d0'],   // top left to bottom right
     glyph(ctx) {
       sheet(ctx);
@@ -101,7 +101,7 @@ const ICONS = [
   }
 ];
 
-// four-point AI spark centred on (cx, cy)
+// four-point AI spark centerd on (cx, cy)
 function sparkle(ctx, cx, cy, r) {
   const k = r * 0.2;
   ctx.beginPath();

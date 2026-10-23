@@ -1,6 +1,6 @@
 //! Files drawn small: which are pictures, what a picture's thumbnail is
 //! drawn from, and the tile any other file wears, its kind's glyph on its
-//! kind's colour (`docs/composer.md`, Attachments).
+//! kind's color (`docs/composer.md`, Attachments).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -129,7 +129,7 @@ impl Workbench {
     }
 }
 
-/// The kind a file is, for the tile it wears: a glyph, and a colour for
+/// The kind a file is, for the tile it wears: a glyph, and a color for
 /// each appearance, the dark one lighter as the accents' are.
 #[derive(Clone, Copy)]
 pub struct Kind {
@@ -168,7 +168,7 @@ pub fn kind(name: &str) -> Kind {
 }
 
 /// The tile a file that is no picture wears: its kind's glyph on a tint
-/// of its kind's colour.
+/// of its kind's color.
 pub fn kind_tile(name: &str, size: f32, dark: bool) -> impl IntoElement {
     let kind = kind(name);
     let color = kind.color(dark);

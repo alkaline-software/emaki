@@ -22,7 +22,7 @@ regex = "1"
 unicode-normalization = "0.1"
 
 [profile.dev]
-# gpui's dependency tree is huge; a little optimisation keeps the UI usable in dev.
+# gpui's dependency tree is huge; a little optimization keeps the UI usable in dev.
 opt-level = 1
 
 [profile.dev.package."*"]

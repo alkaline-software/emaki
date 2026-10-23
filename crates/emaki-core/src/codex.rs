@@ -64,7 +64,7 @@ use crate::agents;
 use crate::driver::{child_env, effort_color, Caps, CommandInfo, Drive, DriverError, Event, PermissionRequest, State, TurnResult, REQUEST_TIMEOUT};
 use crate::json::*;
 use crate::model::AgentId;
-use crate::options::{humanize, Catalogue, Choice, ModelChoice, Options};
+use crate::options::{humanize, Catalog, Choice, ModelChoice, Options};
 
 /// The Codex release this wire was last checked against.
 pub const TESTED_CODEX_VERSION: &str = "0.162.1";
@@ -167,7 +167,7 @@ pub fn options_from(models: &Value, profiles: &Value, collab: &Value) -> Options
 /// The slash commands a Codex session takes from the window: the few the
 /// driver runs itself, then the folder's skills.
 fn commands_from(skills: &Value) -> Vec<CommandInfo> {
-    let mut out = vec![CommandInfo { name: "compact".into(), description: "Summarise the conversation so far to free its context".into(), argument_hint: String::new(), builtin: true }];
+    let mut out = vec![CommandInfo { name: "compact".into(), description: "Summarize the conversation so far to free its context".into(), argument_hint: String::new(), builtin: true }];
     for group in arr_of(skills, "data") {
         for s in arr_of(group, "skills") {
             if s.get("enabled").and_then(Value::as_bool) == Some(false) {
@@ -1352,14 +1352,14 @@ impl Drop for CodexDriver {
 /// What a Codex session in `cwd` can be set to and which commands it
 /// takes, asked of a child started for the question and let go after.
 /// No model is called and no session is made.
-pub fn catalogue(cwd: &str) -> Result<Catalogue, DriverError> {
+pub fn catalog(cwd: &str) -> Result<Catalog, DriverError> {
     let (tx, _rx) = mpsc::channel();
     let dir = if Path::new(cwd).is_dir() { cwd } else { "" };
     let driver = CodexDriver::spawn(dir, tx, false)?;
     let got = driver.handshake().map(|_| {
         driver.learn(dir);
         let caps = driver.caps();
-        Catalogue { commands: caps.commands, options: caps.options }
+        Catalog { commands: caps.commands, options: caps.options }
     });
     Drive::stop(&*driver);
     got

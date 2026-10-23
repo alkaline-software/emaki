@@ -60,7 +60,7 @@ pub fn script(cwd: &str, argv: &[String]) -> String {
 
 /// Where the script for `session_id` lives: `~/.emaki/run/terminal/`, one
 /// file per session, rewritten on every open. The `.command` extension is
-/// what macOS recognises as "run me in a terminal".
+/// what macOS recognizes as "run me in a terminal".
 pub fn script_path(session_id: &str) -> PathBuf {
     paths::run_dir().join("terminal").join(format!("{}.command", paths::safe_component(session_id)))
 }

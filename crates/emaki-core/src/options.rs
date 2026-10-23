@@ -2,7 +2,7 @@
 //! effort levels, as the agent itself lists them.
 //!
 //! Nothing here names a mode, a model or a level. An adapter asks its agent
-//! (`Adapter::catalogue`) and fills these in; the window draws whatever came
+//! (`Adapter::catalog`) and fills these in; the window draws whatever came
 //! back, so a release that adds a model or a mode shows it with no change
 //! here, and another agent brings its own. What was last heard is kept in
 //! `cache/options.json`, so the pills have their lists at launch, before any
@@ -24,11 +24,11 @@ pub struct Choice {
     pub label: String,
     #[serde(default)]
     pub detail: String,
-    /// The colour the agent itself shows this choice in, when it has one:
+    /// The color the agent itself shows this choice in, when it has one:
     /// `0xRRGGBB` on a light ground, then on a dark one.
     #[serde(default)]
     pub color: Option<[u32; 2]>,
-    /// The colours the agent runs through this choice's name, letter by
+    /// The colors the agent runs through this choice's name, letter by
     /// letter, when it shows it in more than one.
     #[serde(default)]
     pub spectrum: Vec<u32>,
@@ -66,7 +66,7 @@ pub struct Options {
 
 /// What a folder's sessions know: the slash commands, and the choices.
 #[derive(Debug, Clone, Default)]
-pub struct Catalogue {
+pub struct Catalog {
     pub commands: Vec<CommandInfo>,
     pub options: Options,
 }

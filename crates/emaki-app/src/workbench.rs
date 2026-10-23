@@ -5,7 +5,7 @@
 //!
 //! The layout follows the Claude desktop app: one collapsible sidebar with a
 //! "new" entry, a few destinations and a list of recents; one content column
-//! centred in the rest of the window; a floating composer card at the foot
+//! centerd in the rest of the window; a floating composer card at the foot
 //! of a conversation and in the middle of the home page.
 
 use std::collections::{HashMap, HashSet};
@@ -171,7 +171,7 @@ pub(crate) enum MenuDo {
     Fix(std::ops::Range<usize>, String),
     /// The same in the file's editor.
     FixFile(std::ops::Range<usize>, String),
-    /// Never mark this word as misspelt again.
+    /// Never mark this word as misspelled again.
     Learn(String),
     /// Leave these marked words alone: the rule that marked them (none
     /// for a spelling) and the words.
@@ -587,7 +587,7 @@ const COME_BACK_SECS: f64 = 15. * 60.;
 /// where no child has said what it knows: the ones that run headlessly
 /// and mean something on a fresh session. A running driver lists its own.
 const BUILTIN_COMMANDS: &[(&str, &str, &str)] = &[
-    ("compact", "Free up context by summarising the conversation so far", "[instructions]"),
+    ("compact", "Free up context by summarizing the conversation so far", "[instructions]"),
     ("effort", "Set the effort level", "low | medium | high | max"),
     ("context", "Show what is in the context window", ""),
     ("cost", "Show what this session has cost", ""),
@@ -1168,7 +1168,7 @@ pub struct Workbench {
     /// Where the header was last drawn, to know when it has been
     /// scrolled out of view.
     manage_y: Rc<std::cell::Cell<Option<Pixels>>>,
-    /// What looking for each agent of the catalogue found, by its id;
+    /// What looking for each agent of the catalog found, by its id;
     /// empty until the first look is in (`check_agents`).
     pub(crate) agents_found: HashMap<&'static str, emaki_core::agents::Found>,
     pub(crate) agents_checking: bool,
@@ -1511,7 +1511,7 @@ pub struct Workbench {
     /// The prompt handed back to the composer while it was still a round
     /// in the transcript: the session's key and the round's `uuid`.
     handed_back: Option<(String, String)>,
-    /// What is marked in the composer as misspelt or ungrammatical, and
+    /// What is marked in the composer as misspelled or ungrammatical, and
     /// the text it was found in: marks are bytes of that text and no
     /// other.
     issues: Vec<emaki_core::check::Issue>,
@@ -1529,7 +1529,7 @@ pub struct Workbench {
     cap_skip: Option<usize>,
     /// A letter the person typed small on purpose.
     cap_refused: Option<usize>,
-    /// The words never marked as misspelt.
+    /// The words never marked as misspelled.
     pub(crate) learned: HashSet<String>,
     /// A turn was just stopped: put its prompt back in the composer at
     /// the next draw, which is where a window is at hand.
@@ -1850,7 +1850,7 @@ pub struct Workbench {
     pub(crate) file_spell_menu_probe: bool,
     /// `file:spellfix`: the first mark's first correction, taken.
     pub(crate) file_spell_fix_probe: bool,
-    /// The frame's colour as the native window last had it.
+    /// The frame's color as the native window last had it.
     window_ground: Cell<Option<Hsla>>,
     /// The window's height at the last draw.
     view_h: Pixels,
@@ -1938,7 +1938,7 @@ pub struct Workbench {
     pub(crate) file_for: HashMap<PathBuf, PathBuf>,
     /// Code in the pane: its editor, under a name for the file and what
     /// it held when the editor was made, and whether the editor shows
-    /// line numbers and the language's colours.
+    /// line numbers and the language's colors.
     pub(crate) file_editor: Option<crate::panels::FileEditor>,
     /// The editors of files not showing now, kept whole: what was typed
     /// in them and not saved, and their undo histories. Newest last.
@@ -2230,7 +2230,7 @@ const SHELL_TAIL_LINES: usize = 10;
 const SHELL_BOX_H: Pixels = px(160.);
 
 /// The last `lines` lines of a file, reading no more than its last
-/// `bytes`, with terminal colour sequences taken out.
+/// `bytes`, with terminal color sequences taken out.
 fn file_tail(path: &str, bytes: u64, lines: usize) -> Option<String> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
@@ -2508,7 +2508,7 @@ impl Workbench {
         };
         h_flex()
             .absolute()
-            // The lights' centres are at 26.25: the middle of
+            // The lights' centers are at 26.25: the middle of
             // the card's strip, which starts a frame down.
             .top(px(1.) + FRAME / 2.)
             .left(Self::strip_left())
@@ -2690,7 +2690,7 @@ impl Workbench {
         let w = self.tabs.first().and_then(|k| self.tab_widths.get(k)).map(|w| w.to).unwrap_or(TAB_MAX);
         let widths: Vec<f32> = self.tab_groups.iter().map(|(_, keys)| pill_chrome(keys.len()) + w * keys.len() as f32).collect();
         let total = widths.iter().sum::<f32>() + PILL_GAP * (widths.len() as f32 - 1.).max(0.);
-        // Centred while they fit, else from the row's left, moved by how
+        // Centerd while they fit, else from the row's left, moved by how
         // far the row is scrolled.
         let mut x = f32::from(row.left()) + ((f32::from(row.size.width) - total) / 2.).max(0.) + f32::from(self.tabs_scroll.offset().x);
         widths
@@ -2920,7 +2920,7 @@ pub(crate) fn model_name(options: &Options, name: &str) -> String {
     }
 }
 
-/// The colour of a choice's name: none, one, or several run through
+/// The color of a choice's name: none, one, or several run through
 /// its letters.
 #[derive(Clone)]
 pub(crate) enum Tint {
@@ -2929,7 +2929,7 @@ pub(crate) enum Tint {
     Spectrum(Vec<Hsla>),
 }
 
-/// A choice's name in bold, in its colour.
+/// A choice's name in bold, in its color.
 pub(crate) fn tinted(value: &str, tint: &Tint) -> Div {
     let bold = div().font_weight(FontWeight::SEMIBOLD);
     match tint {
@@ -2943,7 +2943,7 @@ pub(crate) fn tinted(value: &str, tint: &Tint) -> Div {
     }
 }
 
-/// What a pill says: the choice in bold, in its colour when it has one,
+/// What a pill says: the choice in bold, in its color when it has one,
 /// and a plain word after it ("**Plan** mode", "**High** effort").
 #[derive(Clone)]
 pub(crate) struct PillText {
@@ -2970,13 +2970,13 @@ fn language_code(key: &str) -> &'static str {
     }
 }
 
-/// The colours of a choice with none of its own, from low to high,
+/// The colors of a choice with none of its own, from low to high,
 /// each on a light ground and then on a dark one: blue, green, amber,
 /// purple, red, in the shades Claude Code's two themes use, so a choice
-/// it has no colour for sits beside the ones it has.
+/// it has no color for sits beside the ones it has.
 const RAMP: [[u32; 2]; 5] = [[0x3A68B0, 0x8FB2EA], [0x2C7A39, 0x4EBA65], [0x966C1E, 0xFFC107], [0x8700FF, 0xAF87FF], [0xAB2B3F, 0xFF6B80]];
 
-/// The rainbow on a light ground: Claude Code's seven colours are
+/// The rainbow on a light ground: Claude Code's seven colors are
 /// pastels made for a dark one, and its yellow and green all but
 /// vanish on cream, so each is taken down to a shade that reads there.
 const SPECTRUM_LIGHT: [u32; 7] = [0xC8372D, 0xC8611F, 0x9A7411, 0x3F8A3A, 0x356FB5, 0x6A4FB0, 0xA8418A];
@@ -2986,20 +2986,20 @@ fn shade(pair: [u32; 2], theme: &gpui_component::Theme) -> Hsla {
     rgb(if theme.mode.is_dark() { pair[1] } else { pair[0] }).into()
 }
 
-/// The colour of a choice with none of its own, by its place on a list
+/// The color of a choice with none of its own, by its place on a list
 /// of `len`.
 fn ramp(ix: usize, len: usize, theme: &gpui_component::Theme) -> Hsla {
     let t = if len > 1 { ix as f32 / (len - 1) as f32 } else { 0. };
     shade(RAMP[(t * (RAMP.len() - 1) as f32).round() as usize], theme)
 }
 
-/// The colour of the choice at `ix` of `list`: the agent's own when it
+/// The color of the choice at `ix` of `list`: the agent's own when it
 /// shows that choice in one (or in several), else one by its place.
 fn tint_of(list: &[Choice], ix: usize, theme: &gpui_component::Theme) -> Tint {
     let c = &list[ix];
     if !c.spectrum.is_empty() {
         // The agent's rainbow as it lists it on a dark ground, ours
-        // for a light one when it is the seven colours we know.
+        // for a light one when it is the seven colors we know.
         if !theme.mode.is_dark() && c.spectrum.len() == SPECTRUM_LIGHT.len() {
             return Tint::Spectrum(SPECTRUM_LIGHT.iter().map(|v| rgb(*v).into()).collect());
         }
@@ -3011,8 +3011,8 @@ fn tint_of(list: &[Choice], ix: usize, theme: &gpui_component::Theme) -> Tint {
     })
 }
 
-/// The colour of a mode, by its key or its name: the agent's own for it
-/// (Claude Code names each mode in a colour at the foot of its prompt),
+/// The color of a mode, by its key or its name: the agent's own for it
+/// (Claude Code names each mode in a color at the foot of its prompt),
 /// else one by its place on the list.
 pub(crate) fn mode_color(options: &Options, mode: &str, theme: &gpui_component::Theme) -> Tint {
     match options.modes.iter().position(|m| m.key == mode || m.label == mode) {
@@ -3021,7 +3021,7 @@ pub(crate) fn mode_color(options: &Options, mode: &str, theme: &gpui_component::
     }
 }
 
-/// The colour of an effort level, by its key or its name: the agent's
+/// The color of an effort level, by its key or its name: the agent's
 /// own for it (Claude Code's `/effort` slider has one per level), else
 /// where it sits between the lowest and the highest.
 pub(crate) fn effort_color(options: &Options, model: &str, effort: &str, theme: &gpui_component::Theme) -> Tint {
@@ -5122,7 +5122,7 @@ impl Workbench {
                 }
             }
             // The way of installing an agent's page shows, by its name
-            // as the catalogue has it, or "Download".
+            // as the catalog has it, or "Download".
             Some(t) if t.starts_with("agentway:") => {
                 let want = &t["agentway:".len()..];
                 let all = emaki_core::agents::all().iter().chain(emaki_core::agents::tools());
@@ -5356,7 +5356,7 @@ impl Workbench {
 
     /// Close a tab. The session goes on without it: a driver behind it
     /// keeps running until its idle timeout, and the transcript is on disk.
-    /// Closing the showing tab moves to its neighbour, or to the new-session
+    /// Closing the showing tab moves to its neighbor, or to the new-session
     /// page when it was the last one, with the caret in its composer.
     /// Whether the window is drawing something of its own over its
     /// pages: a sheet, a menu, a list, the sidebar floated. The web
@@ -6098,7 +6098,7 @@ impl Workbench {
                 let active = key == current;
                 let on = on.clone();
                 // A segment with no word is an agent's, by its mark: in
-                // the agent's colour while it is the one chosen or under
+                // the agent's color while it is the one chosen or under
                 // the pointer, as its mark on the terminal's button is.
                 if let Some(agent) = AgentId::parse(key).filter(|_| label.is_empty()) {
                     let own = agent_color(agent, &theme);
@@ -6138,7 +6138,7 @@ impl Workbench {
                     // icon before its word, in the word's ink.
                     .when_some(crate::agents_page::choice_icon(control, key), |d, icon| d.gap(px(4.)).child(Icon::default().path(icon).with_size(seg_text + px(1.5))))
                     // A language has its flag before its name, in its
-                    // own colours.
+                    // own colors.
                     .when_some(flag_of(control, key), |d, flag| d.gap(px(6.)).child(img(flag).w(px(17.)).h(px(12.)).flex_shrink_0()))
                     // Keys are drawn on their caps.
                     .map(|d| if control == "send-key" { d.child(key_text(&label)) } else { d.child(label) })
@@ -6538,7 +6538,7 @@ impl Workbench {
                     .relative()
                     .map(|d| {
                         let mark = Icon::default().path(icon).with_size(px(14.)).text_color(theme.muted_foreground);
-                        // The pills' colour, in the fields' weight.
+                        // The pills' color, in the fields' weight.
                         let words = div().min_w_0().truncate().child(tinted(&label.value, &label.tint).font_weight(FontWeight::NORMAL));
                         let list = Icon::default().path("icons/chevrons-up-down.svg").with_size(px(13.)).text_color(theme.muted_foreground);
                         d.child(mark).child(words.flex_1()).child(list)
@@ -6693,7 +6693,7 @@ impl Workbench {
                 let now = options.model(&self.current_model()).map(|m| m.key.clone()).unwrap_or_default();
                 (options.models.iter().map(|m| PickRow::plain(m.key.clone(), plain_default(&m.label), m.detail.clone())).collect(), now)
             }
-            // Each in the colour its pill wears. On a session whose mode
+            // Each in the color its pill wears. On a session whose mode
             // only ⇧Tab moves, the ones that key has been seen to reach.
             PickFor::Mode => {
                 let now = self.current_mode();
@@ -6909,7 +6909,7 @@ impl Workbench {
                             .gap(px(6.))
                             .items_center()
                             .when_some(*mark, |d, agent| d.child(agent_icon(agent, px(13.), agent_color(agent, &theme)).flex_shrink_0()))
-                            // A choice the agent shows in a colour wears it
+                            // A choice the agent shows in a color wears it
                             // here too.
                             .child(match tint {
                                 Tint::Plain => div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name.clone()),
@@ -7183,7 +7183,7 @@ impl Workbench {
     /// come back when the pick is made, and not before. The sign is
     /// Claude Code's own: its registry record says `waiting` while the
     /// picker is up and something else once it is closed, chosen or
-    /// cancelled, with the time of each change. So the pick is over when
+    /// canceled, with the time of each change. So the pick is over when
     /// the record was seen `waiting` after the command was typed and no
     /// longer is, or, for a picker opened and closed between two looks,
     /// when it says `idle` as of a time after the typing. A change alone
@@ -7279,7 +7279,7 @@ impl Workbench {
     /// takes there. The composer offers the same words the same way
     /// (`suggested`): as its placeholder, taken with → or Tab while the
     /// box is empty, sent as they are with ⌘↩. Read off the screen
-    /// (`driver::suggestion_on_screen`, which needs its colours, so
+    /// (`driver::suggestion_on_screen`, which needs its colors, so
     /// WezTerm and Kaku only) once a second while the session is idle in
     /// its terminal and the box is empty, one read at a time.
     fn read_suggestion(&mut self, cx: &mut Context<Self>) {
@@ -7763,7 +7763,7 @@ impl Workbench {
         }
     }
 
-    /// The card's close button: what the terminal shows is cancelled as
+    /// The card's close button: what the terminal shows is canceled as
     /// Escape cancels it there, and the card is not brought back for the
     /// same wait.
     fn dismiss_terminal(&mut self, cx: &mut Context<Self>) {
@@ -9134,7 +9134,7 @@ impl Workbench {
         let now = self.now;
         let muted = theme.muted_foreground;
         // The terminal's line, word for word: `Context 32% | 5h: 5% (4h45m)
-        // | 7d: 11% (6d2h)`, the same colours at the same thresholds as
+        // | 7d: 11% (6d2h)`, the same colors at the same thresholds as
         // scripts/statusline.sh. No tooltip: the line is the whole story.
         let part = |label: String, pct: u64, color: Hsla, tail: String| {
             h_flex()
@@ -9656,7 +9656,7 @@ impl Workbench {
         matches!(self.card_for(r).column, Column::Working | Column::Planning)
     }
 
-    /// The colour a live session's dot takes, or none when nothing is behind it.
+    /// The color a live session's dot takes, or none when nothing is behind it.
     pub(crate) fn live_color(&self, r: &SessionRef, cx: &App) -> Option<Hsla> {
         // A session begun here with nothing sent is new, not live.
         if self.is_draft(&r.session_id) || !self.hub.is_live(r, self.now) {
@@ -9710,7 +9710,7 @@ impl Workbench {
             .items_center()
             .child(img("icon/app.png").size(px(31.)).flex_shrink_0())
             // Optima has a regular and a bold and nothing between: the
-            // regular read as thin in the accent's colour and the bold as
+            // regular read as thin in the accent's color and the bold as
             // thick. The name is drawn twice, half a pixel apart, which
             // lands between the two.
             .child(
@@ -9724,7 +9724,7 @@ impl Workbench {
             );
 
         // The window's buttons (`render_strip`) are drawn over the left of
-        // this strip, and the name takes the room to their right, centred
+        // this strip, and the name takes the room to their right, centerd
         // on the traffic lights as they are. No line under it: the
         // content's card is what the sidebar ends against.
         let header = Self::drag_region(h_flex().h(TITLEBAR_H).flex_shrink_0().pt(px(2.) + FRAME).pr(px(16.)).justify_end().items_center().child(brand), cx);
@@ -9776,12 +9776,12 @@ impl Workbench {
         // Folders: every project as a row that opens onto its sessions,
         // newest folder first, the sessions under each headed by when
         // (today, yesterday, this week, this month, earlier). A folder
-        // wears what its sessions wear: its icon takes the agent's colour
+        // wears what its sessions wear: its icon takes the agent's color
         // while one of them is live, and the dot at its right is the most
         // pressing of theirs (needs you, then working, then your turn).
         // A session's mark is in the muted ink unless it is live, so a
         // column of rows does not read as so many accents; a live one
-        // wears its agent's colour and turns while it works.
+        // wears its agent's color and turns while it works.
         let mut folders: Vec<(String, Vec<SessionRef>)> = Vec::new();
         for r in &self.refs {
             let p = r.project();
@@ -10007,7 +10007,7 @@ impl Workbench {
                                         .text_color(theme.muted_foreground)
                                         // The row under it is already tinted by the
                                         // pointer: in the light theme the border's
-                                        // colour was that tint again.
+                                        // color was that tint again.
                                         .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
                                         .managed_tooltip(|window, cx| crate::workbench::tip("New session here (⌘T in its project)", window, cx))
                                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -11746,8 +11746,8 @@ impl Workbench {
     /// the right.
     pub(crate) fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let centre = div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title).into_any_element();
-        self.render_topbar_with(centre, right, cx)
+        let center = div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title).into_any_element();
+        self.render_topbar_with(center, right, cx)
     }
 
     /// One tab per open session in the top strip: the agent's mark (turning
@@ -12026,17 +12026,17 @@ impl Workbench {
     /// The left end is room for the window's buttons (`render_strip`, and
     /// the traffic lights) when the sidebar is not beside the content;
     /// `right` is the page's actions. Both ends are at least 120px so the
-    /// centre stays centred when they are short.
-    fn render_topbar_with(&self, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_topbar_ends(Vec::new(), centre, right, cx)
+    /// center stays centerd when they are short.
+    fn render_topbar_with(&self, center: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_topbar_ends(Vec::new(), center, right, cx)
     }
 
     /// The strip with something at its left end too: the buttons there
     /// stand after the room kept for the traffic lights when the sidebar
     /// is away.
-    fn render_topbar_ends(&self, left: Vec<AnyElement>, centre: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
-        // An end with nothing at it keeps 120px so the centre stays
-        // centred; one with buttons is as wide as they are, so the tabs
+    fn render_topbar_ends(&self, left: Vec<AnyElement>, center: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+        // An end with nothing at it keeps 120px so the center stays
+        // centerd; one with buttons is as wide as they are, so the tabs
         // stand the same way off both.
         let mut left_end = h_flex().when(left.is_empty(), |d| d.min_w(px(120.))).flex_shrink_0().items_center().gap(px(6.));
         // The room goes as the sidebar comes, so the strip does not
@@ -12055,7 +12055,7 @@ impl Workbench {
             .px(STRIP_PAD)
             .items_center()
             .child(left_end)
-            .child(centre)
+            .child(center)
             .child(h_flex().when(right.is_empty(), |d| d.min_w(px(120.))).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
     }
 
@@ -13141,14 +13141,14 @@ impl Workbench {
             let card = self.card_for(&r);
             let what = if card.text.is_empty() { "working".to_string() } else { card.text.clone() };
             // The terminal's own line when it could be read, in the
-            // terminal's colours as the window's appearance has them:
+            // terminal's colors as the window's appearance has them:
             // the screen is in whichever theme Claude Code is set to, so
-            // each colour is looked up in its two themes
+            // each color is looked up in its two themes
             // (`driver::theme_pair`) and the window takes its own side.
-            // The word is in the colour of the terminal's mark, which is
-            // one colour while the agent writes and another while it
+            // The word is in the color of the terminal's mark, which is
+            // one color while the agent writes and another while it
             // thinks. Read as written, a dark theme's bright yellow sat
-            // on a light window. Grey is the muted ink, and a colour in
+            // on a light window. Gray is the muted ink, and a color in
             // neither theme is only kept readable. The bracket carries
             // the turn's time, so ours is left out.
             let seen = self.working_seen.as_ref().filter(|(sid, _, _)| *sid == r.session_id).map(|(_, w, _)| w.clone());
@@ -13185,7 +13185,7 @@ impl Workbench {
                 })
                 .child(
                     // Stop, as Escape is in the terminal: a square on a
-                    // pill that fills with the danger colour under the
+                    // pill that fills with the danger color under the
                     // pointer, so it is found without shouting.
                     h_flex()
                         .id("stop-turn")
@@ -13731,7 +13731,7 @@ impl Workbench {
     /// The hidden terminal's screen, drawn where the cards sit, when the
     /// person has to see it: Claude Code's own `/model` list or `/effort`
     /// slider, or a screen no card stands for. It is the screen as the
-    /// terminal has it, in its colours, on the ground Claude Code's
+    /// terminal has it, in its colors, on the ground Claude Code's
     /// theme was made for; the keys pressed on it go to Claude Code, and
     /// it leaves when what it showed is done (`back_from_terminal`).
     fn render_terminal(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -13753,7 +13753,7 @@ impl Workbench {
             Some(emaki_core::pty::panel_rows(screen))
         });
         // `EMAKI_GO=termdemo`: what `/model fable` asks on a warm cache,
-        // in Claude Code's own colours (2.1.293).
+        // in Claude Code's own colors (2.1.293).
         let live = live.or_else(|| {
             self.term_demo.then(|| {
                 if self.term_demo_tall {
@@ -14581,8 +14581,8 @@ impl Workbench {
     }
 
     /// The commands the list over the composer offers for what is typed
-    /// so far, best match first, and whether the folder's own catalogue is
-    /// still being read. A driver's own list, else the folder's catalogue
+    /// so far, best match first, and whether the folder's own catalog is
+    /// still being read. A driver's own list, else the folder's catalog
     /// read from a headless child, else the built-ins until that is in.
     fn slash_rows(&self, prefix: &str, via: &str, whole: bool) -> (Vec<(String, String, String)>, bool) {
         let (sid, cwd) = self.selected_ref().map(|r| (r.session_id.clone(), r.cwd.clone())).unwrap_or_default();
@@ -14621,7 +14621,7 @@ impl Workbench {
             known.into_iter().filter(|row| whole || !acts_alone(&row.0)).filter_map(|row| rank(&row.0, &row.1).map(|r| (r, row))).collect();
         // Within a rank the shorter name is the nearer match ("/co" is
         // /color and /config before a plugin's long name); with nothing
-        // typed the catalogue's own order stands.
+        // typed the catalog's own order stands.
         ranked.sort_by_key(|(r, row)| (*r, if needle.is_empty() { 0 } else { row.0.len() }));
         (ranked.into_iter().map(|(_, row)| row).collect(), loading)
     }
@@ -15022,7 +15022,7 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Colours every command the composer's text names (`/ph-image` in a
+    /// Colors every command the composer's text names (`/ph-image` in a
     /// sentence, `/compact` alone) in the accent, as the conversation does
     /// once it is sent. Set again on every change: the ranges are not
     /// tracked across edits.
@@ -15055,7 +15055,7 @@ impl Workbench {
                 }
             }
         }
-        // And what is misspelt or ungrammatical, underlined as a word
+        // And what is misspelled or ungrammatical, underlined as a word
         // processor does: red for a spelling, blue for the grammar.
         if self.cfg.app.check_writing && self.issues_for == text {
             let caret = self.composer.read(cx).cursor();
@@ -16096,7 +16096,7 @@ pub fn page_in(id: &'static str, el: Div) -> AnyElement {
 
 /// The shadow under a floating card (the composer, a palette): a wide soft
 /// drop in the ink's own hue and a hairline of contact under it, so the
-/// card lifts off the page rather than sitting in a grey halo.
+/// card lifts off the page rather than sitting in a gray halo.
 pub fn float_shadow(theme: &gpui_component::Theme) -> Vec<BoxShadow> {
     let dark = theme.mode.is_dark();
     let ink = if dark { gpui::black() } else { theme.foreground };
@@ -16106,7 +16106,7 @@ pub fn float_shadow(theme: &gpui_component::Theme) -> Vec<BoxShadow> {
     ]
 }
 
-/// A session's state as a small chip: a dot in the column's colour and
+/// A session's state as a small chip: a dot in the column's color and
 /// the column's name, for rows that are live.
 pub fn state_chip(column: Column, color: Hsla, theme: &gpui_component::Theme) -> impl IntoElement {
     h_flex()
@@ -16171,13 +16171,13 @@ pub(crate) fn agent_icon_path(agent: AgentId) -> &'static str {
     }
 }
 
-/// The glyph that says which agent a session belongs to. Its colour is
+/// The glyph that says which agent a session belongs to. Its color is
 /// the agent's own (`agent_color`), or the muted ink where it is quiet.
 pub fn agent_icon(agent: AgentId, size: Pixels, color: Hsla) -> Icon {
     Icon::default().path(agent_icon_path(agent)).with_size(size).text_color(color)
 }
 
-/// An agent's own colour, its maker's (`look::agent_hex`), in its shade
+/// An agent's own color, its maker's (`look::agent_hex`), in its shade
 /// for the appearance showing.
 pub fn agent_color(agent: AgentId, theme: &gpui_component::Theme) -> Hsla {
     gpui::Rgba::try_from(crate::look::agent_hex(agent, theme.mode.is_dark())).map(Hsla::from).unwrap_or(theme.primary)
@@ -16241,7 +16241,7 @@ pub(crate) fn choice_pill(id: impl Into<ElementId>, icon: &'static str, label: i
         Press::Danger => (None, theme.danger.opacity(0.35), theme.danger.opacity(0.1)),
         Press::Primary => (Some(theme.primary), theme.primary, theme.primary.opacity(0.85)),
         Press::Solid => (Some(theme.foreground), theme.foreground, theme.foreground.opacity(0.85)),
-        // An edge of the ink, not the border's colour: on a card the
+        // An edge of the ink, not the border's color: on a card the
         // border is the card's own shade and the pill had no outline.
         Press::Quiet => (None, theme.foreground.opacity(0.16), theme.foreground.opacity(0.06)),
     };
@@ -16393,7 +16393,7 @@ const KEY_CAP: f32 = 17.;
 /// with each shortcut drawn as its keys on caps (`key_cap`) after the
 /// words. **Every place the window shows a key goes through this**
 /// (`kbd_hint`, `tip`, or this itself for a line of words). The words
-/// take the size and colour of where they stand. It does not wrap.
+/// take the size and color of where they stand. It does not wrap.
 pub(crate) fn key_text(text: &str) -> Div {
     let mut row = h_flex().flex_shrink_0().items_center();
     for piece in key_pieces(text) {
@@ -16694,10 +16694,10 @@ fn folder_parent(cwd: &str) -> String {
 /// a little air so the send button does not touch the card's edge.
 const COMPOSER_AROUND: Pixels = px(84.);
 
-/// The pill itself: light grey with its icon in front, darker under the
+/// The pill itself: light gray with its icon in front, darker under the
 /// pointer, darker again while pressed or open. No tooltip and no caret.
-/// (The toolkit draws a custom colour at a fifth of its strength, so the
-/// resting grey is the ink's own, thinned.)
+/// (The toolkit draws a custom color at a fifth of its strength, so the
+/// resting gray is the ink's own, thinned.)
 fn composer_pill(id: &'static str, icon: &'static str, label: PillText, cx: &App) -> Button {
     let theme = cx.theme();
     let look = ButtonCustomVariant::new(cx).color(theme.muted_foreground.opacity(0.65)).foreground(theme.muted_foreground).hover(theme.muted_foreground.opacity(0.22)).active(theme.muted_foreground.opacity(0.34));
@@ -16778,7 +16778,7 @@ pub(crate) struct PickMenu {
     in_settings: bool,
 }
 
-/// One choice on a pill's list: its key, its name with the colour the
+/// One choice on a pill's list: its key, its name with the color the
 /// agent shows it in, and a line on what it does.
 #[derive(Clone)]
 pub(crate) struct PickRow {

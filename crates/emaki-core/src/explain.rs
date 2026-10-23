@@ -16,7 +16,7 @@
 //! --model claude-haiku-4-5`), so it runs on the person's own subscription
 //! with no key and no HTTP client of ours. The child is a real Claude Code
 //! session: it runs with `cwd` under `~/.emaki/run/explain` so the index
-//! recognises and drops its transcripts (`paths::is_explainer_cwd`), with no
+//! recognizes and drops its transcripts (`paths::is_explainer_cwd`), with no
 //! settings, no MCP servers and no tools, and never with `--bare`, which
 //! reads auth only from `ANTHROPIC_API_KEY` and breaks subscription users.
 
@@ -93,7 +93,7 @@ pub fn cache_file() -> PathBuf {
 }
 
 /// Where explainer children run: a scratch directory inside our own root,
-/// so the indexer recognises the path and drops the child's transcripts,
+/// so the indexer recognizes the path and drops the child's transcripts,
 /// and `prune_transcripts` knows exactly which directory to sweep.
 pub fn workdir() -> PathBuf {
     let path = paths::run_dir().join("explain");
@@ -207,7 +207,7 @@ fn truncate(text: &str, limit: usize) -> String {
     out
 }
 
-/// Normalise the model's reply, or "" if it is not an explanation.
+/// Normalize the model's reply, or "" if it is not an explanation.
 pub fn clean(text: &str) -> String {
     let mut out = text.trim().to_string();
     if out.is_empty() {

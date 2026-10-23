@@ -485,14 +485,14 @@ impl Hub {
         let hub = Arc::clone(self);
         let cwd = cwd.to_string();
         thread::spawn(move || {
-            let catalogue = adapters::for_agent(agent).catalogue(&cwd);
-            hub.learn_options(agent, &cwd, catalogue.options);
-            if catalogue.commands.is_empty() {
+            let catalog = adapters::for_agent(agent).catalog(&cwd);
+            hub.learn_options(agent, &cwd, catalog.options);
+            if catalog.commands.is_empty() {
                 // Ask again next time rather than remember a failure.
                 hub.commands.lock().unwrap().remove(&key);
                 return;
             }
-            hub.commands.lock().unwrap().insert(key, catalogue.commands);
+            hub.commands.lock().unwrap().insert(key, catalog.commands);
             hub.send(HubEvent::Commands);
         });
         None
@@ -525,7 +525,7 @@ impl Hub {
     }
 
     /// Whether `/name` is a command: one that acts by itself, or one the
-    /// folder's catalogue lists, when it has been read. Never starts a
+    /// folder's catalog lists, when it has been read. Never starts a
     /// read, so the conversation can ask on every draw.
     pub fn knows_command(&self, agent: AgentId, cwd: &str, name: &str) -> bool {
         (agent == AgentId::ClaudeCode && driver::acts_alone(name)) || self.commands.lock().unwrap().get(&(agent, cwd.to_string())).is_some_and(|list| list.iter().any(|c| c.name == name))
@@ -888,7 +888,7 @@ impl Hub {
 
     // -- drivers ----------------------------------------------------------
 
-    /// Start a driver on a thread (initialisation blocks for up to 15s), then
+    /// Start a driver on a thread (initialization blocks for up to 15s), then
     /// deliver `first` through it. Events arrive as `HubEvent::Driver`.
     pub fn spawn_driver_and_send(
         self: &Arc<Self>,

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use super::Adapter;
 use crate::build::build_from_path;
 use crate::model::{AgentId, Session};
-use crate::options::Catalogue;
+use crate::options::Catalog;
 use crate::paths;
 use crate::transcript::{index_claude, peek, SessionRef};
 
@@ -61,7 +61,7 @@ impl Adapter for ClaudeAdapter {
         build_from_path(path, cwd_hint)
     }
 
-    fn catalogue(&self, cwd: &str) -> Catalogue {
-        crate::driver::catalogue(cwd).unwrap_or_default()
+    fn catalog(&self, cwd: &str) -> Catalog {
+        crate::driver::catalog(cwd).unwrap_or_default()
     }
 }

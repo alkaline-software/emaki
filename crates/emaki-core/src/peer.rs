@@ -115,7 +115,7 @@ pub struct Delivery {
 }
 
 /// Wrap `text` exactly as Claude Code's own sender would. The receiver
-/// re-serialises what it parsed and compares byte for byte, so the attribute
+/// re-serializes what it parsed and compares byte for byte, so the attribute
 /// order and the newlines are not negotiable. A closing tag inside the body
 /// is defused the same way Claude Code does it.
 pub fn envelope(text: &str) -> String {

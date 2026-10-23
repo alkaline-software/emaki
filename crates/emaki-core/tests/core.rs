@@ -1,4 +1,4 @@
-//! Behavioural tests over the core, on temp directories.
+//! Behavioral tests over the core, on temp directories.
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ struct Home {
 }
 
 /// Point EMAKI_HOME and CLAUDE_CONFIG_DIR at a temp tree. Tests that touch
-/// disk run one at a time (`--test-threads=1` is set in CI; here we serialise
+/// disk run one at a time (`--test-threads=1` is set in CI; here we serialize
 /// with a lock).
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -209,7 +209,7 @@ fn compact_summary_is_not_a_prompt() {
     assert_eq!(s.rounds.len(), 2);
     assert_eq!(s.rounds[1].prompt, "/compact");
     let notices: Vec<&str> = s.rounds[1].items.iter().filter_map(|i| if let Item::Notice { text, .. } = i { Some(text.as_str()) } else { None }).collect();
-    assert_eq!(notices, vec!["Context compacted, earlier messages summarised"], "no chip repeating the prompt, no terminal instruction");
+    assert_eq!(notices, vec!["Context compacted, earlier messages summarized"], "no chip repeating the prompt, no terminal instruction");
     assert!(!s.rounds.iter().any(|r| r.prompt.starts_with("This session is being continued")));
     assert_eq!(first_prompt_title(&rows[2..], 72), "/compact");
     assert_eq!(s.context_tokens, 11752, "the context in use is the summary's size until the next turn");
@@ -219,7 +219,7 @@ fn compact_summary_is_not_a_prompt() {
     rows.push(user("<local-command-stdout>Set model to `Opus 5.5`</local-command-stdout>", "2026-01-01T10:01:00Z"));
     let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
     let notices: Vec<&str> = s.rounds[1].items.iter().filter_map(|i| if let Item::Notice { text, .. } = i { Some(text.as_str()) } else { None }).collect();
-    assert_eq!(notices, vec!["Context compacted, earlier messages summarised", "Opus 5.5"]);
+    assert_eq!(notices, vec!["Context compacted, earlier messages summarized", "Opus 5.5"]);
 
     let mut rows = vec![user("go", "2026-01-01T10:00:00Z"), assistant(vec![json!({"type": "text", "text": "Done."})], "end_turn", "2026-01-01T10:00:01Z")];
     rows.push(user("/effort high", "2026-01-01T10:00:02Z"));
@@ -530,7 +530,7 @@ fn options_are_what_the_agent_lists() {
     // A mode this build has never met is offered under its own name.
     assert_eq!(o.mode("sprint").unwrap().label, "Sprint");
     assert_eq!(o.mode("sprint").unwrap().detail, "");
-    // Claude Code's own colour for a mode it has one for, light then dark.
+    // Claude Code's own color for a mode it has one for, light then dark.
     assert_eq!(o.mode("plan").unwrap().color, Some([0x006666, 0x48968C]));
     assert_eq!(o.mode("sprint").unwrap().color, None);
 
@@ -548,7 +548,7 @@ fn options_are_what_the_agent_lists() {
     assert!(keys("haiku").is_empty());
     assert_eq!(keys("gpt-9"), ["low", "medium", "high", "xhigh", "max"]);
     assert_eq!(o.effort_label("opus", "xhigh"), "Extra high");
-    // Claude Code's slider colours: one per level, and a rainbow for max.
+    // Claude Code's slider colors: one per level, and a rainbow for max.
     let level = |key: &str| o.efforts.iter().find(|e| e.key == key).unwrap();
     assert_eq!(level("low").color, Some([0x966C1E, 0xFFC107]));
     assert_eq!(level("high").color, Some([0x5769F7, 0xB1B9F9]));
@@ -573,12 +573,12 @@ fn options_are_kept_for_the_next_launch() {
 }
 
 #[test]
-fn a_terminal_colour_is_answered_in_both_themes() {
+fn a_terminal_color_is_answered_in_both_themes() {
     use emaki_core::driver::theme_pair;
     // The thinking yellow of the dark theme, and the light theme's own.
     assert_eq!(theme_pair(0xFFC107), Some([0x966C1E, 0xFFC107]));
     assert_eq!(theme_pair(0x966C1E), Some([0x966C1E, 0xFFC107]));
-    // The mark's colour is one shade in both.
+    // The mark's color is one shade in both.
     assert_eq!(theme_pair(0xD77757), Some([0xD77757, 0xD77757]));
     assert_eq!(theme_pair(0x123456), None);
 }
@@ -587,7 +587,7 @@ fn a_terminal_colour_is_answered_in_both_themes() {
 fn working_on_screen_is_the_line_over_the_prompt() {
     use emaki_core::driver::working_on_screen;
     let foot = "\n\n────\n❯ \n────\n  Context 16% | 5h: 8% (3h33m)\n  ⏵⏵ auto mode on (shift+tab to cycle)\n";
-    // As Kaku hands it over with colours, 2.1.289.
+    // As Kaku hands it over with colors, 2.1.289.
     let line = "\x1b[38:2::215:119:87m✽\x1b[39m \x1b[38:2::223:134:102mEmbellishing…\x1b[38:2::215:119:87m \x1b[38:2::153:153:153m(26s · ↓\x1b[39m \x1b[38:2::153:153:153m1.5k tokens)\r";
     let w = working_on_screen(&format!("⏺ Reading… the file\n\n{line}\n  ⎿  Tip: Connect Claude to your IDE · /ide{foot}")).unwrap();
     assert_eq!(w.verb, "Embellishing…");
@@ -596,7 +596,7 @@ fn working_on_screen_is_the_line_over_the_prompt() {
     let pulsing = "\x1b[38:2::215:119:87m✶\x1b[39m \x1b[38:2::215:119:87mBillowing… \x1b[38:2::153:153:153m(2m 50s · \x1b[38:2::185:185:185mthinking\x1b[38:2::153:153:153m)\r";
     assert_eq!(working_on_screen(&format!("{pulsing}{foot}")).unwrap().detail, vec![("(2m 50s · thinking)".to_string(), Some(0x999999))]);
     // A turn gone quiet: the mark in bold behind a character-set
-    // sequence, the colours turning warm.
+    // sequence, the colors turning warm.
     let quiet = "\x1b(B\x1b[0;1m\x1b[38:2::235:156:47m✻\x1b(B\x1b[0m \x1b[38:2::235:156:47mBillowing… \x1b[38:2::153:153:153m(3m 5s)\r";
     let w = working_on_screen(&format!("{quiet}{foot}")).unwrap();
     assert_eq!((w.verb.as_str(), w.color), ("Billowing…", Some(0xEB9C2F)));
@@ -621,7 +621,7 @@ fn dialog_on_screen_is_the_question_and_its_choices() {
     assert_eq!(d.tabs, vec![("Fruit".to_string(), false), ("Colors".to_string(), true), ("Submit".to_string(), false)]);
     assert_eq!(d.body, vec!["Which fruit?"]);
     assert_eq!(d.current, None);
-    // With its colours, the tab showing is the one on a ground of its own.
+    // With its colors, the tab showing is the one on a ground of its own.
     let lit = screen.replace("☒ Colors", "\x1b[48:2::177:185:249m\x1b[38:2::0:0:0m ☒ Colors \x1b[49m\x1b[39m");
     assert_eq!(dialog_on_screen(&lit).unwrap().current, Some(1));
     assert_eq!(d.options.iter().map(|o| (o.n, o.label.as_str())).collect::<Vec<_>>(), vec![(1, "Apple"), (2, "Banana"), (3, "Type something."), (4, "Chat about this")]);
@@ -1932,7 +1932,7 @@ fn terminal_script_quotes_and_resumes() {
 
 /// The hidden terminal's screen, written out, is what the screen readers
 /// take: the mode's footer, an empty prompt, a suggestion in dim, the
-/// working line with its colour, and a picker cut out for the card.
+/// working line with its color, and a picker cut out for the card.
 #[test]
 fn hidden_terminal_screen_feeds_the_readers() {
     use emaki_core::{driver, pty};
@@ -2433,13 +2433,13 @@ fn git_marks_files_and_the_folders_that_hold_them() {
     std::fs::create_dir(root.join(".git")).unwrap();
     assert!(git::status(&root).is_none());
     assert!(git::trouble(&root).is_some_and(|t| t.words.contains("not a git repository") && t.fix.is_none()), "{:?}", git::trouble(&root));
-    // A command is offered for the Xcode licence alone: Apple's own
-    // message on a Mac, and nothing that only mentions Xcode or a licence.
+    // A command is offered for the Xcode license alone: Apple's own
+    // message on a Mac, and nothing that only mentions Xcode or a license.
     let apple = "You have not agreed to the Xcode license agreements. Please run 'sudo xcodebuild -license' from within a Terminal window to review and agree to the Xcode and Apple SDKs license.";
-    assert!(git::xcode_licence(true, apple));
-    assert!(!git::xcode_licence(false, apple));
-    assert!(!git::xcode_licence(true, "xcrun: error: invalid active developer path, missing xcrun"));
-    assert!(!git::xcode_licence(true, "detected dubious ownership in repository at '/x/license'"));
+    assert!(git::xcode_license(true, apple));
+    assert!(!git::xcode_license(false, apple));
+    assert!(!git::xcode_license(true, "xcrun: error: invalid active developer path, missing xcrun"));
+    assert!(!git::xcode_license(true, "detected dubious ownership in repository at '/x/license'"));
     std::fs::remove_dir(root.join(".git")).unwrap();
     run(&["init", "-q"]);
     assert_eq!(git::trouble(&root), None);
@@ -3591,7 +3591,7 @@ fn a_plans_dialog_names_its_file() {
 }
 
 #[test]
-fn the_catalogue_of_agents_holds_together() {
+fn the_catalog_of_agents_holds_together() {
     use emaki_core::agents::{self, Os};
     let all = agents::all();
     let mut ids = std::collections::HashSet::new();
@@ -3618,7 +3618,7 @@ fn the_catalogue_of_agents_holds_together() {
     assert_eq!(agents::source_of(&way("pipx install aider-chat")).as_deref(), Some("https://pypi.org/pypi/aider-chat/json"));
     assert_eq!(agents::source_of(&way("winget install GitHub.Copilot")), None);
 
-    // Every agent whose sessions are read is in the catalogue.
+    // Every agent whose sessions are read is in the catalog.
     for id in emaki_core::model::AgentId::ALL {
         assert!(agents::of(id).is_some(), "{}", id.as_str());
     }

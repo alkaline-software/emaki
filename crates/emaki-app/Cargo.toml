@@ -20,7 +20,7 @@ chrono.workspace = true
 # produce a second copy of gpui that it does not build against.
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-# The grammars colour code: in the file shown beside a conversation and
+# The grammars color code: in the file shown beside a conversation and
 # in a conversation's code blocks. R has none in the toolkit's set, so
 # its grammar is our own to register (`look::install_languages`).
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c", features = ["tree-sitter-languages"] }

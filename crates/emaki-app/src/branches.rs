@@ -808,7 +808,7 @@ impl Workbench {
         let branch = self.branches().map(|b| b.label()).filter(|_| !self.committing && !files.is_empty());
         let label = if self.committing { "Committing…".to_string() } else if files.is_empty() { "No files to commit".to_string() } else if branch.is_some() { format!("Commit {} to", plural(files.len(), "file", "files")) } else { format!("Commit {}", plural(files.len(), "file", "files")) };
         // A field is a hollow in the panel, as the list of branches' is.
-        // In the light appearance the hollow's grey is the panel's own,
+        // In the light appearance the hollow's gray is the panel's own,
         // so there it is the page's ground inside a line.
         let dark = theme.mode.is_dark();
         let field = |id: &'static str, focus: FocusHandle| h_flex().id(id).track_focus(&focus).w_full().px(px(8.)).rounded(px(8.)).text_size(px(13.)).border_1().map(|d| if dark { d.bg(theme.muted).border_color(theme.transparent) } else { d.bg(theme.background).border_color(theme.input) });

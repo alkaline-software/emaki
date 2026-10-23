@@ -115,7 +115,7 @@ pub struct Agent {
     /// agent; empty for an agent, whose page says what is read of it.
     pub with_emaki: &'static str,
     /// The accent of `look::ACCENTS` it wears where it has no agent's
-    /// colour; empty for the window's own.
+    /// color; empty for the window's own.
     pub accent: &'static str,
 }
 
@@ -146,7 +146,7 @@ pub fn tools() -> &'static [Agent] {
     TOOLS
 }
 
-/// The catalogue's entry for an agent whose sessions are read.
+/// The catalog's entry for an agent whose sessions are read.
 pub fn of(agent: AgentId) -> Option<&'static Agent> {
     ALL.iter().find(|a| a.reads == Some(agent))
 }
@@ -357,7 +357,7 @@ pub fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// A path of the catalogue's with what stands for a folder filled in:
+/// A path of the catalog's with what stands for a folder filled in:
 /// "~", and on Windows a variable between percent signs. None when the
 /// variable is not set, as on a system the path is not for.
 fn app_path(path: &str) -> Option<PathBuf> {
@@ -465,8 +465,8 @@ pub fn detect_in(agent: &Agent, dirs: &[PathBuf]) -> Found {
     Found { path, version, home, signed }
 }
 
-/// Every agent in the catalogue looked for, each on a thread of its own
-/// since each waits on a program: in the catalogue's order. Blocking for
+/// Every agent in the catalog looked for, each on a thread of its own
+/// since each waits on a program: in the catalog's order. Blocking for
 /// as long as the slowest takes to say its version.
 pub fn detect_all() -> Vec<(&'static str, Found)> {
     let dirs = search_dirs();
@@ -509,11 +509,11 @@ fn published(url: &str) -> Option<bool> {
     }
 }
 
-/// The commands of the catalogue whose source is gone: the ones a maker
+/// The commands of the catalog whose source is gone: the ones a maker
 /// has since renamed or withdrawn. Blocking on the network, each
 /// address on a thread of its own. This says a command no longer works;
 /// it cannot say a maker now recommends another, which only a new
-/// release of the catalogue does.
+/// release of the catalog does.
 pub fn stale_commands() -> Vec<&'static str> {
     let asked: Vec<(&'static str, String)> = ALL.iter().chain(TOOLS).flat_map(|a| a.install.iter()).filter_map(|w| source_of(w).map(|u| (w.command, u))).collect();
     std::thread::scope(|s| {

@@ -68,7 +68,7 @@ impl Render for SettingsView {
     }
 }
 
-/// Open the settings window, centred on the screen, as a Mac's settings
+/// Open the settings window, centerd on the screen, as a Mac's settings
 /// window opens.
 fn open_settings_window(workbench: WeakEntity<Workbench>, cx: &mut App) {
     let bounds = Bounds::centered(None, size(SETTINGS_W, SETTINGS_H), cx);
@@ -509,7 +509,7 @@ impl Workbench {
             .when(!app.avatar.is_empty(), |d| d.child(crate::branches::small_pill("avatar-remove", "icons/trash.svg", "Remove", Press::Danger, false, &theme).h(CONTROL_H).on_click(cx.listener(|this, _, _, cx| this.set_avatar(String::new(), cx)))))
             .into_any_element();
 
-        // Accents are swatches: a disc of the colour, the chosen one with
+        // Accents are swatches: a disc of the color, the chosen one with
         // a ring inside it in the card's ground. The ring is inside so
         // every disc is one size, and the first and the last end where the
         // controls do. The chosen one's name is the row's line.

@@ -4,7 +4,7 @@
 //! (markdown for files, the model the app draws) consume its output, which is
 //! what keeps them from drifting apart. The function is pure and total: it
 //! takes the rows it is given and returns a model, skipping anything it does
-//! not recognise rather than failing.
+//! not recognize rather than failing.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1311,7 +1311,7 @@ fn queued_prompt(row: &Value) -> Option<Value> {
 fn handle_system(b: &mut RoundBuilder, row: &Value, ts: &str, session: &mut Session) {
     match str_of(row, "subtype") {
         "compact_boundary" => {
-            b.add_notice("Context compacted, earlier messages summarised".into(), ts, NoticeVariant::Compact);
+            b.add_notice("Context compacted, earlier messages summarized".into(), ts, NoticeVariant::Compact);
             // The context in use drops to the summary's size, and no
             // assistant row says so until the next turn: the boundary's
             // own count holds the row under the composer until then.

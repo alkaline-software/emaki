@@ -60,7 +60,7 @@ EMAKI_GO="side:320;sidefit" EMAKI_OPEN=<id> ./target/debug/Emaki  # drag the sid
 EMAKI_GO="x;scroll:-3000;x;unread" EMAKI_OPEN=<id> ./target/debug/Emaki  # scroll the conversation by points (less than none is up), then click "New messages"; append rows to a scratch transcript meanwhile to have something new
 EMAKI_GO="x;term:shell;term:w:300;winw:800" EMAKI_OPEN=<id> ./target/debug/Emaki  # term:w:<w> drags the terminal panel's edge to that width; winw makes the window that wide, as a drag of its edge would: here with the files and a terminal both showing, to see which is put away
 EMAKI_GO="x;term:shell;termfocus;panes;winw:970;panes" EMAKI_OPEN=<id> ./target/debug/Emaki  # panes prints the window's width, whether the sidebar, the panel at the left and the terminal panel show, and where the keyboard is; termfocus puts the keyboard in the terminal, as a click on it does
-EMAKI_GO=gitlicence EMAKI_OPEN=<id> ./target/debug/Emaki  # the Files panel's strip as a Mac with the Xcode license not agreed to has it (the panel must be open: `files_on` in ui.json)
+EMAKI_GO=gitlicense EMAKI_OPEN=<id> ./target/debug/Emaki  # the Files panel's strip as a Mac with the Xcode license not agreed to has it (the panel must be open: `files_on` in ui.json)
 EMAKI_GO=shells EMAKI_OPEN=<id> ./target/debug/Emaki  # open the card of commands running in the background; agents is the subagents' card
 EMAKI_GO=menu EMAKI_OPEN=<id> ./target/debug/Emaki  # the session's right-click menu; renaming shows the rename field, name:<words> names it
 EMAKI_GO=dialog:2 EMAKI_OPEN=<id> ./target/debug/Emaki  # press that in the terminal's dialog (a digit, or tab); answer:<words> types an answer, goto:<n> goes to that tab

@@ -27,7 +27,7 @@ pub fn terminal_text(pid: i32) -> Option<String> {
     emaki_core::pty::for_pid(pid).map(|pty| pty.text())
 }
 
-/// The same screen with its colours.
+/// The same screen with its colors.
 pub fn terminal_styled(pid: i32) -> Option<String> {
     emaki_core::pty::for_pid(pid).map(|pty| pty.styled())
 }
@@ -274,7 +274,7 @@ pub fn install_dock_icon() {}
 /// leaves it the system's, near white in the light appearance, and the
 /// drawing can stop a fraction of a point short of the window's foot: a
 /// window as tall as the screen showed a light line under a dark frame.
-/// Set to the frame's colour, whatever shows there is the frame.
+/// Set to the frame's color, whatever shows there is the frame.
 #[cfg(target_os = "macos")]
 pub fn set_window_ground(window: &gpui::Window, ground: gpui::Rgba) {
     use objc2_app_kit::{NSColor, NSView};
@@ -284,8 +284,8 @@ pub fn set_window_ground(window: &gpui::Window, ground: gpui::Rgba) {
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
     let Some(view) = (unsafe { (handle.ns_view.as_ptr() as *const NSView).as_ref() }) else { return };
     if let Some(native) = view.window() {
-        let colour = NSColor::colorWithSRGBRed_green_blue_alpha(ground.r as f64, ground.g as f64, ground.b as f64, 1.);
-        native.setBackgroundColor(Some(&colour));
+        let color = NSColor::colorWithSRGBRed_green_blue_alpha(ground.r as f64, ground.g as f64, ground.b as f64, 1.);
+        native.setBackgroundColor(Some(&color));
     }
 }
 #[cfg(not(target_os = "macos"))]

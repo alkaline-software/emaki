@@ -68,7 +68,7 @@ pub struct AppConfig {
     pub send_key: String,
     /// `system` follows the OS; `light` and `dark` pin one look.
     pub appearance: String,
-    /// The accent colour, by name; see `ACCENTS`.
+    /// The accent color, by name; see `ACCENTS`.
     pub accent: String,
     /// Ask GitHub for the newest release once a day and say so in the
     /// settings panel when there is one. Nothing is installed unasked.
