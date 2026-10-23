@@ -271,11 +271,10 @@ impl Workbench {
         let rows = match section {
             "fonts" => self.fonts_rows(cx),
             "text" => self.text_rows(cx),
-            "composer" => self.composer_rows(cx),
+            "conversation" => self.conversation_rows(cx),
             "sessions" => self.sessions_rows(cx),
             "terminal" => self.terminal_rows(cx),
             "files" => self.files_rows(cx),
-            "updates" => self.updates_rows(cx),
             "about" => self.about_rows(cx),
             _ => self.appearance_rows(cx),
         };
@@ -283,11 +282,10 @@ impl Workbench {
         let (title_anim, page_anim): (&'static str, &'static str) = match section {
             "fonts" => ("title-fonts", "page-fonts"),
             "text" => ("title-text", "page-text"),
-            "composer" => ("title-composer", "page-composer"),
+            "conversation" => ("title-conversation", "page-conversation"),
             "sessions" => ("title-sessions", "page-sessions"),
             "terminal" => ("title-terminal", "page-terminal"),
             "files" => ("title-files", "page-files"),
-            "updates" => ("title-updates", "page-updates"),
             "about" => ("title-about", "page-about"),
             _ => ("title-appearance", "page-appearance"),
         };
@@ -390,7 +388,7 @@ impl Workbench {
         .children(SETTINGS_SECTIONS.iter().map(|(key, label, icon)| {
             let active = *key == current;
             let key: &'static str = key;
-            let dot = key == "updates" && update_waiting;
+            let dot = key == "about" && update_waiting;
             h_flex()
                 .id(SharedString::from(format!("settings-nav-{key}")))
                 .h(px(30.))
@@ -731,7 +729,28 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// Composer: the key that sends, capitals, and spelling.
+    /// Conversation: what is typed (the composer's rows), and the two
+    /// helpers a small model writes for, each a call on the person's
+    /// account, so each can be turned off.
+    fn conversation_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let mut groups = self.composer_rows(cx);
+        let explain = self.switch("explain-on", self.cfg.explain.enabled, Rc::new(|this, on, _, cx| this.set_explain(on, cx)), cx);
+        let outline = self.switch("outline-on", self.cfg.app.outline, Rc::new(|this, on, _, cx| this.set_outline(on, cx)), cx);
+        groups.push(group(
+            Some("Small model calls on your account"),
+            None,
+            vec![
+                line("Explain", Some(div().child("A button on a tool call that says what it does.").into_any_element()), explain, &theme),
+                line("Outline", Some(div().child("Each message as a short label, in the outline panel.").into_any_element()), outline, &theme),
+            ],
+            &theme,
+        ));
+        groups
+    }
+
+    /// The composer's groups, at the top of Conversation: the key that
+    /// sends, capitals, and spelling.
     fn composer_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let app = self.cfg.app.clone();
@@ -754,7 +773,7 @@ impl Workbench {
         // Said only where a choice does nothing: off a Mac.
         let language_note = (!crate::sys::SYSTEM_SPELLING).then(|| div().child("Spanish, French and German are checked on a Mac only.").into_any_element());
         vec![
-            group(None, None, vec![line("Send with", Some(send_note), send, &theme), line("Auto-capitalization", None, auto_cap, &theme)], &theme),
+            group(Some("Composer"), None, vec![line("Send with", Some(send_note), send, &theme), line("Auto-capitalization", None, auto_cap, &theme)], &theme),
             group(Some("Spelling and grammar"), None, vec![line("Check as you type", None, check_writing, &theme), line("Language", language_note, writing_language, &theme)], &theme),
         ]
     }
@@ -918,14 +937,13 @@ impl Workbench {
         vec![group(None, None, vec![line("Format on save", Some(div().child("A file saved from its pane is put in its language's form.").into_any_element()), format_on_save, &theme)], &theme), group(Some("Languages"), None, vec![lists], &theme)]
     }
 
-    /// Updates, as little as possible: the version, with what a check
-    /// found, and one button that is "Check for updates" until a check
-    /// finds something and "Update to x" after, in the same place, with
-    /// "Release notes" under the version then.
-    fn updates_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// Updates, at About's foot, as little as possible:
+    /// what a check found, and one button that is "Check for updates"
+    /// until a check finds something and "Update to x" after, in the
+    /// same place, with the new release's notes under the name then.
+    fn updates_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let u = &self.update;
-        let current = update::current_version();
         let update_line = if u.installing {
             match u.progress {
                 Some((done, Some(total))) if total > 0 => format!("Downloading… {}%", done * 100 / total),
@@ -953,8 +971,10 @@ impl Workbench {
             press("update-check", if checking { "Checking…" } else { "Check for updates" }.into(), Press::Quiet, checking).on_click(cx.listener(|this, _, _, cx| this.check_updates_now(cx))).into_any_element()
         };
         let (link_color, link_hover) = (theme.muted_foreground, theme.primary);
-        let version_detail: SharedString = if update_line.is_empty() { format!("Emaki {current}") } else { format!("Emaki {current} · {update_line}") }.into();
-        let version_note = v_flex().gap(px(1.)).child(div().child(version_detail)).when_some(notes_url, |d, url| {
+        // The version is on the title card above; the line says only what
+        // a check found, and links the new release's notes.
+        let has_note = !update_line.is_empty() || notes_url.is_some();
+        let version_note = v_flex().gap(px(1.)).when(!update_line.is_empty(), |d| d.child(div().child(update_line))).when_some(notes_url, |d, url| {
             d.child(
                 div()
                     .id("update-notes")
@@ -969,14 +989,15 @@ impl Workbench {
             )
         });
         let auto_check = self.switch("update-auto", self.cfg.app.check_updates, Rc::new(|this, on, _, cx| this.set_check_updates(on, cx)), cx);
-        vec![group(None, None, vec![line("Version", Some(version_note.into_any_element()), button, &theme), line("Check automatically", Some(div().child("Once a day. Nothing is installed without you.").into_any_element()), auto_check, &theme)], &theme)]
+        group(None, None, vec![line("Updates", has_note.then(|| version_note.into_any_element()), button, &theme), line("Check automatically", Some(div().child("Once a day. Nothing is installed without you.").into_any_element()), auto_check, &theme)], &theme)
     }
 
-    /// Who makes Emaki: the app on a title card, and a sentence naming
-    /// the studio and its two owners, each name a link to where they are
-    /// found.
+    /// Who makes Emaki: the app on a title card, a sentence naming the
+    /// studio and its two owners, each name a link to where they are
+    /// found, and the updates last, so the credits stay with the card.
     fn about_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
+        let updates = self.updates_group(cx);
         let current = update::current_version();
         let link_hover = theme.primary;
         let link = |id: &'static str, name: &'static str, url: &'static str| {
@@ -1038,6 +1059,9 @@ impl Workbench {
                         .child(go("about-notes", "icons/file-text.svg", "Release Notes", update::release_page(&current))),
                 )
                 .into_any_element(),
+            // More room over it than the page's gap, so the pills close
+            // the credits and the card starts something else.
+            div().w_full().pt(px(12.)).child(updates).into_any_element(),
         ]
     }
 }

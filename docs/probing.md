@@ -35,7 +35,7 @@ cargo test -p emaki-core
 EMAKI_OPEN=<session-id prefix> ./target/debug/Emaki    # open a session on launch
 EMAKI_PAGE=new|sessions|agents ./target/debug/Emaki     # land on a page
 EMAKI_FIND=<text> ./target/debug/Emaki                 # open the find bar on that query
-EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings window (=updates: on that section)
+EMAKI_SETTINGS=1 ./target/debug/Emaki                  # open the settings window (=about: on that section)
 EMAKI_GO=x EMAKI_SETTINGS_SHOTS=<folder> ./target/debug/Emaki  # every section of the settings window, light then dark, a picture each in that folder, then quit
 EMAKI_GO="x;unarchive:<id>" EMAKI_OPEN=<id> ./target/debug/Emaki  # Unarchive Session from that session's menu, as the sidebar does it (it asks nothing; Archive and Delete ask, and no step answers)
 EMAKI_GO="x;lightbox:<picture>" EMAKI_OPEN=<id> ./target/debug/Emaki  # that picture shown large, as a click on an attachment shows it; press:cmd-k opens the search palette

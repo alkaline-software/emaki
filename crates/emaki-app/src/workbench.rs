@@ -573,7 +573,7 @@ pub const TRAFFIC_W: Pixels = px(85.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// The settings panel's sections, in rail order: key, label, icon.
-pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("text", "Text Size", "icons/a-large-small.svg"), ("composer", "Composer", "icons/keyboard.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("updates", "Updates", "icons/redo-2.svg"), ("about", "About", "icons/info.svg")];
+pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[("appearance", "Appearance", "icons/palette.svg"), ("fonts", "Fonts", "icons/typography.svg"), ("text", "Text Size", "icons/a-large-small.svg"), ("conversation", "Conversation", "icons/book-open.svg"), ("sessions", "New sessions", "icons/square-terminal.svg"), ("terminal", "Terminal", "icons/terminal.svg"), ("files", "Files", "icons/tree-view.svg"), ("about", "About", "icons/info.svg")];
 /// What the composer says when empty: on the home page, and on a session.
 /// Drawn by `render_composer_hint`.
 pub const PLACEHOLDER_NEW: &str = "Start a session…";
@@ -3051,8 +3051,8 @@ impl Workbench {
         // What Settings no longer asks is what it used to begin at:
         // explanations for the calls waiting on a card, the terminal's
         // rows and margins at their middle step, and its text the size
-        // the text sizes say (`set_text_sizes`).
-        cfg.explain.enabled = true;
+        // the text sizes say (`set_text_sizes`). Whether there are
+        // explanations at all is its switch's (`set_explain`).
         cfg.explain.scope = "permission".into();
         cfg.terminal.spacing = "normal".into();
         cfg.terminal.padding = "medium".into();
@@ -4322,6 +4322,27 @@ impl Workbench {
         self.update.install_error.clear();
         self.update.progress = Some((0, None));
         self.hub.install_update(v);
+        cx.notify();
+    }
+
+    /// The Explain switch: off, no call is explained by a model, on a
+    /// tool card or a permission card, and tool cards have no button.
+    fn set_explain(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.cfg.explain.enabled = on;
+        self.hub.explainer.set_cfg(self.cfg.explain.clone());
+        if let Err(e) = Config::edit(move |c| c.explain.enabled = on) {
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+        }
+        cx.notify();
+    }
+
+    /// The Outline switch: off, the outline panel says so and asks the
+    /// model for no label.
+    fn set_outline(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.cfg.app.outline = on;
+        if let Err(e) = Config::edit(move |c| c.app.outline = on) {
+            self.notice = Some(Notice::error(format!("could not save settings: {e}")));
+        }
         cx.notify();
     }
 
@@ -14357,16 +14378,18 @@ impl Workbench {
             let id_deny = p.request_id.clone();
             // What it does, in words: the model's answer when one has
             // landed, else the free line a simple call carries in its
-            // arguments; "Explaining…" while a model is on it.
+            // arguments; "Explaining…" while a model is on it. With
+            // Explain off, only the free line.
             let call_id = if p.tool_use_id.is_empty() { p.request_id.clone() } else { p.tool_use_id.clone() };
-            let mut explanation = self.explanations.get(&call_id).cloned().unwrap_or_default();
-            if explanation.is_empty() {
+            let explain_on = self.cfg.explain.enabled;
+            let mut explanation = if explain_on { self.explanations.get(&call_id).cloned().unwrap_or_default() } else { String::new() };
+            if explanation.is_empty() && explain_on {
                 explanation = self.hub.explainer.lookup(&p.tool_name, &p.input);
             }
             if explanation.is_empty() {
                 explanation = emaki_core::explain::canned(&p.tool_name, &p.input, &cwd);
             }
-            let explaining = explanation.is_empty() && self.hub.explainer.in_flight(&p.tool_name, &p.input);
+            let explaining = explain_on && explanation.is_empty() && self.hub.explainer.in_flight(&p.tool_name, &p.input);
             v_flex()
                 .p(px(14.))
                 .gap(px(8.))

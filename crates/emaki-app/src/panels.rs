@@ -8201,6 +8201,25 @@ impl Workbench {
 
     pub(crate) fn render_outline_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        // Turned off in Settings: no entries and no label asked for, and a
+        // way to where it is turned on. Each state fades in as it comes.
+        if !self.cfg.app.outline {
+            let note = v_flex()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .gap(px(12.))
+                .px(px(16.))
+                .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).text_center().child("The outline is turned off."))
+                .child(choice_pill("outline-settings", "icons/settings.svg", "Open Settings", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.open_settings(Some("conversation"), cx);
+                })))
+                .with_animation("outline-off", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t));
+            let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Outline", None, None, &theme)).child(note);
+            return self.panel_in(false, el);
+        }
         let Some(d) = self.detail.as_mut() else { return div().into_any_element() };
         let entries = d.outline.get_or_insert_with(|| Rc::new(outline::of(&d.session))).clone();
         let key = d.key.clone();
@@ -8413,6 +8432,7 @@ impl Workbench {
                             .child(day),
                     )
                 })
+                .with_animation("outline-on", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
                 .into_any_element()
         };
         let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head("Outline", None, Some(if waiting > 0 {
