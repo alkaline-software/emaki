@@ -1,10 +1,6 @@
 # Changelog
 
-Each release has a section here, and `release.yml` puts that section on the
-GitHub Release as its notes. Write it for the person installing the app, as
-a numbered list: a topic in bold, then one sentence on what changed for
-them, with small fixes gathered under **Fixes**. Ten items at most. The
-reasoning belongs in AGENTS.md and `docs/`.
+Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
 ## v0.2.9
 
@@ -36,7 +32,7 @@ reasoning belongs in AGENTS.md and `docs/`.
 4. **Post-processing**: Numbers said in words become digits, and lists become lists, when asked.
 5. **History**: The folder is a click away, and a shorter time trims it at once.
 6. **Performance**: Long sessions open about four times faster.
-7. **Fixes**: Settings, Composer shows the send keys as keys, and Esc cancelling dictation no longer plays the stop sound.
+7. **Fixes**: Settings, Composer shows the send keys as keys, and Esc canceling dictation no longer plays the stop sound.
 
 ## v0.2.6
 

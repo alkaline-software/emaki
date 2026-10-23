@@ -2,153 +2,71 @@
 
 ## What this is
 
-**Emaki** is a desktop app (Rust + GPUI, `crates/`) that keeps every
-coding-agent session on this machine byte for byte, renders each to markdown,
-searches all of them, and lets you continue a Claude Code or Codex session from the
-window. Nothing here enters a session's context window, and nothing ever
-writes to a transcript. It grew out of a Python CLI and web daemon, removed
-on 2026-09-29; git before that date has them.
+**Emaki** is a desktop app (Rust + GPUI, `crates/`) that keeps every coding-agent session on this machine byte for byte, renders each to markdown, searches all of them, and lets you continue a Claude Code or Codex session from the window. Nothing here enters a session's context window, and nothing ever writes to a transcript. It grew out of a Python CLI and web daemon, removed on 2026-09-29; git before that date has them.
 
 ## The one idea
 
-**Copy first, render second.** Claude Code deletes transcripts after
-`cleanupPeriodDays` (default 30) with no warning. Every other tool in this space
-reads `~/.claude/projects` and stops there, so they all inherit that expiry.
-`archive::sweep` runs before anything else touches a session for exactly this
-reason: if rendering fails, the bytes are already safe.
+**Copy first, render second.** Claude Code deletes transcripts after `cleanupPeriodDays` (default 30) with no warning. Every other tool in this space reads `~/.claude/projects` and stops there, so they all inherit that expiry. `archive::sweep` runs before anything else touches a session for exactly this reason: if rendering fails, the bytes are already safe.
 
-Compaction is *not* a threat: it appends a boundary and keeps writing to the
-same file, leaving earlier rows intact. Verified against a real session that
-dropped 460k tokens from context and kept all 440 pre-boundary rows.
+Compaction is *not* a threat: it appends a boundary and keeps writing to the same file, leaving earlier rows intact. Verified against a real session that dropped 460k tokens from context and kept all 440 pre-boundary rows.
 
-**The JSONL transcript is the source of truth.** Claude Code writes a complete
-record of every session to `~/.claude/projects/<mangled-cwd>/<session>.jsonl`.
-Emaki parses that; a file watcher and a rescan only say *when* to look.
+**The JSONL transcript is the source of truth.** Claude Code writes a complete record of every session to `~/.claude/projects/<mangled-cwd>/<session>.jsonl`. Emaki parses that; a file watcher and a rescan only say *when* to look.
 
-**A session is four files, not one.** Missing any of them makes "fully
-reproducible" untrue::
+**A session is four files, not one.** Missing any of them makes "fully reproducible" untrue::
 
     <project>/<session>.jsonl
     <project>/<session>/subagents/agent-*.jsonl
     <project>/<session>/subagents/agent-*.meta.json
     <project>/<session>/tool-results/<id>.txt
 
-**The archive is a peer source, not a backup.** `index_sessions` unions live and
-archived transcripts, so a session Claude Code has deleted stays listed,
-searchable, renderable and exportable. It is flagged `archived` and shown as
-"archived", under its own agent.
+**The archive is a peer source, not a backup.** `index_sessions` unions live and archived transcripts, so a session Claude Code has deleted stays listed, searchable, renderable and exportable. It is flagged `archived` and shown as "archived", under its own agent.
 
 Everything else follows:
 
-- The model is a **pure function** of the transcript, so the markdown is
-  **regenerable**. There is no append-only bookkeeping, no reserved call
-  numbers, no supersede-by-appending-a-duplicate, no `flock` between writers.
-  Writes are `tmp` + `os.replace`.
-- Capture **does not depend on the app running**. Every launch backfills
-  every session ever run.
+- The model is a **pure function** of the transcript, so the markdown is **regenerable**. There is no append-only bookkeeping, no reserved call numbers, no supersede-by-appending-a-duplicate, no `flock` between writers. Writes are `tmp` + `os.replace`.
+- Capture **does not depend on the app running**. Every launch backfills every session ever run.
 
-The first version of this project (then called scribe) reconstructed
-conversations from Claude Code hook stdin instead, and its README conceded
-the result was "not a full audit trail". Do not reintroduce that. If you need
-something the model lacks, get it from the transcript.
+The first version of this project (then called scribe) reconstructed conversations from Claude Code hook stdin instead, and its README conceded the result was "not a full audit trail". Do not reintroduce that. If you need something the model lacks, get it from the transcript.
 
 ## The standard
 
-Emaki is an elegant app, held to the bar of the work that wins Awwwards,
-the Webbys and the FWA (`docs/design.md`; read it before changing anything
-a person sees): a considered layout, and motion wherever anything
-changes. Every change meets this unasked. The person has asked many times.
+Emaki is an elegant app, held to the bar of the work that wins Awwwards, the Webbys and the FWA (`docs/design.md`; read it before changing anything a person sees): a considered layout, and motion wherever anything changes. Every change meets this unasked. The person has asked many times.
 
-- **Nothing changes from one frame to the next.** What appears, goes,
-  opens, closes, grows or moves does so over a moment, with what is
-  around it: a card, a line, an arrow, a scroll a click starts. A jump is
-  a bug. Use the pattern its neighbours use. (`docs/window.md`, Motion)
+- **Nothing changes from one frame to the next.** What appears, goes, opens, closes, grows or moves does so over a moment, with what is around it: a card, a line, an arrow, a scroll a click starts. A jump is a bug. Use the pattern its neighbors use. (`docs/window.md`, Motion)
 - **What is cut says so:** it fades out at that edge and can be reached.
-- **Words are few.** Say what to do once, to someone who can use a
-  computer: no line on how to paste or type a password, and no note
-  that repeats what the control above it already shows.
-- **Look before saying it is done:** at all the change shows, hides or
-  moves, and at the layout in a narrow window.
+- **Words are few.** Say what to do once, to someone who can use a computer: no line on how to paste or type a password, and no note that repeats what the control above it already shows.
+- **Look before saying it is done:** at all the change shows, hides or moves, and at the layout in a narrow window.
 
 ## Rules that hold everywhere
 
-Each is here because breaking it loses data or reintroduces a bug that was
-already fixed once. The doc named after a rule has the full story.
+Each is here because breaking it loses data or reintroduces a bug that was already fixed once. The doc named after a rule has the full story.
 
-- **Nothing writes to a transcript, and nothing enters a session's
-  context.** A rename, a mode, a command: Claude Code makes the change, by
-  its own command typed in its terminal. (`docs/window.md` on rename,
-  `docs/channels.md`)
-- **Copy first.** `archive::sweep` runs before anything renders, and the
-  archive is never fed its own file as a source. (`docs/transcript-format.md`)
-- **No hooks, ever.** A hook at a path that moved exits 2, and Claude Code
-  reads exit 2 as "block every prompt". The one write to Claude Code's
-  settings is the status line, whose script never exits non-zero.
-  (`docs/core.md`)
-- **One writer per transcript where we can choose.** Never start a second
-  Claude Code on a running turn. (`docs/channels.md`)
-- **Nothing is sent to, typed in or ended in a terminal of the person's,
-  and no terminal app is asked anything.** The window uses its own hidden
-  terminal: no `kaku cli`, no AppleScript, no System Events keys.
-  (`docs/channels.md`)
-- **Never `--bare` on a `claude` child** (it skips the keychain and breaks
-  subscription users), and strip every `CLAUDE*` variable but
-  `CLAUDE_CONFIG_DIR` from a child's environment. (`docs/channels.md`)
+- **Nothing writes to a transcript, and nothing enters a session's context.** A rename, a mode, a command: Claude Code makes the change, by its own command typed in its terminal. (`docs/window.md` on rename, `docs/channels.md`)
+- **Copy first.** `archive::sweep` runs before anything renders, and the archive is never fed its own file as a source. (`docs/transcript-format.md`)
+- **No hooks, ever.** A hook at a path that moved exits 2, and Claude Code reads exit 2 as "block every prompt". The one write to Claude Code's settings is the status line, whose script never exits non-zero. (`docs/core.md`)
+- **One writer per transcript where we can choose.** Never start a second Claude Code on a running turn. (`docs/channels.md`)
+- **Nothing is sent to, typed in or ended in a terminal of the person's, and no terminal app is asked anything.** The window uses its own hidden terminal: no `kaku cli`, no AppleScript, no System Events keys. (`docs/channels.md`)
+- **Never `--bare` on a `claude` child** (it skips the keychain and breaks subscription users), and strip every `CLAUDE*` variable but `CLAUDE_CONFIG_DIR` from a child's environment. (`docs/channels.md`)
 - **Never assert `from-mode` on an inbox message.** (`docs/transcript-format.md`)
-- **Never press ⇧Tab a counted number of times to reach a mode.** One of
-  the modes on the way can be bypass. One press for one press.
-  (`docs/modes.md`)
-- **Waiting on the terminal is waiting on a state, never a length of
-  time.** The registry's status and what is on the screen say when.
-  (`docs/channels.md`, `docs/modes.md`)
-- **Whatever an agent asks is shown.** A question with a card of its own
-  gets the card; anything else the hidden terminal stops on is drawn as
-  it is, on the terminal card. A new kind of question is never a reason
-  for the window to wait in silence. (`docs/channels.md`, The terminal card)
-- **Never splice a list item the reader may be inside.** gpui moves the
-  scroll anchor to the start of the spliced range. (`docs/conversation.md`)
-- **A click the window swallows goes through `swallow_click`,** or the
-  toolkit's text drag never ends. (`docs/window.md`)
-- **Every input the window owns sits in a focus wrapper, and the focused
-  element must be one the page draws,** or key bindings go nowhere.
-  (`docs/window.md`)
-- **Every text passes `markdown_is_safe` before the markdown view gets
-  it.** The parser panics on some inputs, and a panic in layout aborts the
-  app. (`docs/conversation.md`)
-- **A field's keys are the toolkit's, never a field's own.** Every place
-  words are typed is the toolkit's `Input`, and what a key does in one
-  (up to the start and down to the end of one line, ⇧ with either to
-  select there) is fixed in `vendor/gpui-component`, where every field
-  now and later has it. Do not handle a caret key in one field.
-  (`docs/window.md`)
-- **The composer is plain text.** Live markdown in it was tried three ways
-  and dropped. (`docs/composer.md`)
-- **One copy of gpui.** The pin is in `Cargo.lock`, not a `rev` of our own.
-  Changes to the toolkit go in `vendor/gpui-component/`, marked and listed
-  in its `UPSTREAM.md`. (`docs/platform.md`)
-- **Everything Unix-only is gated with a stated fallback.** Windows and
-  Linux are build targets. (`docs/platform.md`)
-- **A card that comes up while a session runs stands at the
-  conversation's end and scrolls with it,** never over the composer. It
-  goes in `render_cards`, its body through `card_scroll`, which caps its
-  height and scrolls both ways. (`docs/live-turn.md`, The cards)
-- **A button is `choice_pill`,** a pill with an icon before its word, and
-  a menu's choice has an icon. A new button is not the toolkit's
-  `Button`. (`docs/look.md`)
-- **A shortcut is named as the Mac has it,** and its signs are drawn.
-  For ⌘ and a key bind `secondary-<key>` (Ctrl off a Mac) and write ⌘ in
-  the docs. Wherever the window shows a key, it goes through `key_text`
-  (`kbd_hint`, `tip`), never as characters. (`main.rs`, `docs/look.md`)
-- **The explainer's and the outline's model calls are real Claude Code
-  calls on the person's account.** Cache the answer, ask for no more than
-  is looked at, and never call one from a test. (`docs/core.md`,
-  `docs/panels.md`)
+- **Never press ⇧Tab a counted number of times to reach a mode.** One of the modes on the way can be bypass. One press for one press. (`docs/modes.md`)
+- **Waiting on the terminal is waiting on a state, never a length of time.** The registry's status and what is on the screen say when. (`docs/channels.md`, `docs/modes.md`)
+- **Whatever an agent asks is shown.** A question with a card of its own gets the card; anything else the hidden terminal stops on is drawn as it is, on the terminal card. A new kind of question is never a reason for the window to wait in silence. (`docs/channels.md`, The terminal card)
+- **Never splice a list item the reader may be inside.** gpui moves the scroll anchor to the start of the spliced range. (`docs/conversation.md`)
+- **A click the window swallows goes through `swallow_click`,** or the toolkit's text drag never ends. (`docs/window.md`)
+- **Every input the window owns sits in a focus wrapper, and the focused element must be one the page draws,** or key bindings go nowhere. (`docs/window.md`)
+- **Every text passes `markdown_is_safe` before the markdown view gets it.** The parser panics on some inputs, and a panic in layout aborts the app. (`docs/conversation.md`)
+- **A field's keys are the toolkit's, never a field's own.** Every place words are typed is the toolkit's `Input`, and what a key does in one (up to the start and down to the end of one line, ⇧ with either to select there) is fixed in `vendor/gpui-component`, where every field now and later has it. Do not handle a caret key in one field. (`docs/window.md`)
+- **The composer is plain text.** Live markdown in it was tried three ways and dropped. (`docs/composer.md`)
+- **One copy of gpui.** The pin is in `Cargo.lock`, not a `rev` of our own. Changes to the toolkit go in `vendor/gpui-component/`, marked and listed in its `UPSTREAM.md`. (`docs/platform.md`)
+- **Everything Unix-only is gated with a stated fallback.** Windows and Linux are build targets. (`docs/platform.md`)
+- **A card that comes up while a session runs stands at the conversation's end and scrolls with it,** never over the composer. It goes in `render_cards`, its body through `card_scroll`, which caps its height and scrolls both ways. (`docs/live-turn.md`, The cards)
+- **A button is `choice_pill`,** a pill with an icon before its word, and a menu's choice has an icon. A new button is not the toolkit's `Button`. (`docs/look.md`)
+- **A shortcut is named as the Mac has it,** and its signs are drawn. For ⌘ and a key bind `secondary-<key>` (Ctrl off a Mac) and write ⌘ in the docs. Wherever the window shows a key, it goes through `key_text` (`kbd_hint`, `tip`), never as characters. (`main.rs`, `docs/look.md`)
+- **The explainer's and the outline's model calls are real Claude Code calls on the person's account.** Cache the answer, ask for no more than is looked at, and never call one from a test. (`docs/core.md`, `docs/panels.md`)
 
 ## Before you edit, read
 
-Open the doc for a file before changing that file. This is not optional
-for a small change: the traps are in the docs and nowhere else. A subagent
-handed work on one of these files is told to read the doc too.
+Open the doc for a file before changing that file. This is not optional for a small change: the traps are in the docs and nowhere else. A subagent handed work on one of these files is told to read the doc too.
 
 | You are about to touch | Read first |
 |---|---|
@@ -160,7 +78,7 @@ handed work on one of these files is told to read the doc too.
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs` | `docs/window.md` |
-| Anything a person sees, new or changed: a control, a colour, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
+| Anything a person sees, new or changed: a control, a color, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
@@ -169,8 +87,7 @@ handed work on one of these files is told to read the doc too.
 | `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, any `cfg` for an OS | `docs/platform.md` |
 | Checking a change in the window from a script | `docs/probing.md` |
 
-A change that crosses two rows reads both docs. `workbench.rs` is in most
-rows: go by what the code you are changing does.
+A change that crosses two rows reads both docs. `workbench.rs` is in most rows: go by what the code you are changing does.
 
 ## Layout
 
@@ -248,55 +165,22 @@ PLAN.md                    the detailed plan: tasks, decisions, what has landed
 .github/workflows/release.yml  installers on a v* tag, via cargo-packager
 ```
 
-**Each document has one job.** This file is what Emaki is, the rules that
-hold in every session, and where to read next. `docs/` is how each part
-works and why. STAGES.md is where the app is going, in three stages; a
-change of direction goes there. PLAN.md is the detailed plan under it:
-phases, tasks with checkmarks, decisions and their dates. WORKFLOW.md is
-how to cut a release, CHANGELOG.md what each release changed for the person
-installing it, and README.md how to use the app and how it is built.
+**Each document has one job.** This file is what Emaki is, the rules that hold in every session, and where to read next. `docs/` is how each part works and why. STAGES.md is where the app is going, in three stages; a change of direction goes there. PLAN.md is the detailed plan under it: phases, tasks with checkmarks, decisions and their dates. WORKFLOW.md is how to cut a release, CHANGELOG.md what each release changed for the person installing it, and README.md how to use the app and how it is built.
 
 ## Running it
 
-**One dev build at a time.** Two copies share `~/.emaki` and both write
-`state/ui.json`, and the Dock shows two identical icons. The person keeps
-the installed Emaki open beside the dev build on purpose; a second dev
-build is a mistake. A probe copy has its own `EMAKI_HOME`
-(`docs/probing.md`).
+**One dev build at a time.** Two copies share `~/.emaki` and both write `state/ui.json`, and the Dock shows two identical icons. The person keeps the installed Emaki open beside the dev build on purpose; a second dev build is a mistake. A probe copy has its own `EMAKI_HOME` (`docs/probing.md`).
 
-**After a change to the app, relaunch it with `scripts/relaunch.sh`.** The
-person develops Emaki in Emaki, so at the end of any task that changed the
-app, build it (`cargo build -p emaki-app`) and run `scripts/relaunch.sh` as
-the last command before the final reply, without being asked. A change to
-documents alone needs no relaunch. The script returns at once; fifteen
-seconds later, or when the turn is over if that is later, it quits the
-dev build and starts the new one (`scripts/dev-app.sh`). The installed
-Emaki is never quit: the person works in it beside the dev build. The
-agent's session is a child of the app, so quitting the app ends the
-session: the script waits while the session's registry record says
-`busy`. Never `pkill` by hand from inside the app, and look at a change
-before the relaunch with a probe copy.
+**After a change to the app, relaunch it with `scripts/relaunch.sh`.** The person develops Emaki in Emaki, so at the end of any task that changed the app, build it (`cargo build -p emaki-app`) and run `scripts/relaunch.sh` as the last command before the final reply, without being asked. A change to documents alone needs no relaunch. The script returns at once; fifteen seconds later, or when the turn is over if that is later, it quits the dev build and starts the new one (`scripts/dev-app.sh`). The installed Emaki is never quit: the person works in it beside the dev build. The agent's session is a child of the app, so quitting the app ends the session: the script waits while the session's registry record says `busy`. Never `pkill` by hand from inside the app, and look at a change before the relaunch with a probe copy.
 
-**"Clean up after the release" means `scripts/release-clean.sh`.** It is
-the last step of a release (WORKFLOW.md, step 8), run without being asked
-and as the last command, from whichever Emaki the session is in. Run that
-script and nothing by hand: it deletes `target/` and `dist/`, and when the
-dev build is the one running it quits it after the turn and opens the
-installed app.
+**"Clean up after the release" means `scripts/release-clean.sh`.** It is the last step of a release (WORKFLOW.md, step 8), run without being asked and as the last command, from whichever Emaki the session is in. Run that script and nothing by hand: it deletes `target/` and `dist/`, and when the dev build is the one running it quits it after the turn and opens the installed app.
 
 ## Writing things down
 
-- A note on how a feature works, a trap, or a fact learned about Claude
-  Code or gpui goes in that feature's file under `docs/`, in its `## Rules`
-  when it is something that must not be broken.
-- This file gets a line only for a rule every session must follow whatever
-  it is working on, or a new row in the table above. Keep it under 300
-  lines.
-- Write what is so now and why. An approach that was tried and dropped gets
-  one sentence, and only when someone might try it again. What was checked
-  and how belongs in the reply to the person, not in a doc.
-- Do not record what the code says by itself: a constant's value, a pixel
-  size, a list of function names.
+- A note on how a feature works, a trap, or a fact learned about Claude Code or gpui goes in that feature's file under `docs/`, in its `## Rules` when it is something that must not be broken.
+- This file gets a line only for a rule every session must follow whatever it is working on, or a new row in the table above. Keep it under 300 lines.
+- Write what is so now and why. An approach that was tried and dropped gets one sentence, and only when someone might try it again. What was checked and how belongs in the reply to the person, not in a doc.
+- Do not record what the code says by itself: a constant's value, a pixel size, a list of function names.
 
 ## Testing
 
@@ -305,6 +189,4 @@ cargo test -p emaki-core
 cargo build -p emaki-app
 ```
 
-`tests/core.rs` points `EMAKI_HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` at
-a temp tree (`isolated()`); inherit that for anything touching disk. The
-suite must pass before committing, and `rust.yml` runs it on all three OSes.
+`tests/core.rs` points `EMAKI_HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` at a temp tree (`isolated()`); inherit that for anything touching disk. The suite must pass before committing, and `rust.yml` runs it on all three OSes.
