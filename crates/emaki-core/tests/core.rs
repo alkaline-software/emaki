@@ -647,9 +647,9 @@ fn dialog_on_screen_is_the_question_and_its_choices() {
     // A named session has a rule under the dialog with its name on it,
     // which is not the dialog's; under the prompt it is still no dialog.
     let named = format!("{rule} v0.1.7 - File system ─");
-    let screen = format!("❯ ask me\n{rule}\n←  ☒ Fruit  ☐ Colors  ✔ Submit  →\nWhich colour?\n❯ 1. Red\n  2. Type something.\n{rule}\n  3. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n{named}\n");
+    let screen = format!("❯ ask me\n{rule}\n←  ☒ Fruit  ☐ Colors  ✔ Submit  →\nWhich color?\n❯ 1. Red\n  2. Type something.\n{rule}\n  3. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n{named}\n");
     let d = dialog_on_screen(&screen).unwrap();
-    assert_eq!((d.body, d.options.len(), d.tabs.len()), (vec!["Which colour?".to_string()], 3, 3));
+    assert_eq!((d.body, d.options.len(), d.tabs.len()), (vec!["Which color?".to_string()], 3, 3));
     assert_eq!(dialog_on_screen(&format!("{rule}\n⏺ 1. one\n  2. two\n{rule}\n❯ 3. typed\n{named}\n")), None);
 }
 
@@ -2910,8 +2910,7 @@ fn only_prose_is_checked() {
     assert_eq!(emaki_core::check::not_prose(fronted)[0], 0..fronted.find("\n\n").unwrap() + 1);
     assert!(said("--- not front matter, teh line\n", false, &[]).iter().any(|(w, _)| w == "teh"), "no closing line");
     // One dialect's spelling is the other's mistake.
-    assert!(said("The colour is fine.", false, &[]).iter().any(|(w, _)| w == "colour"));
-    assert!(said("The colour is fine.", true, &[]).is_empty());
+    assert!(said("The color is fine.", false, &[]).is_empty());
     assert!(said("The color is fine.", true, &[]).iter().any(|(w, _)| w == "color"));
     // A fix replaces the range it names.
     let issue = keep(text, english(text, false), &Default::default(), &Default::default()).into_iter().find(|i| &text[i.range.clone()] == "recieve").unwrap();
@@ -3060,7 +3059,7 @@ fn an_r_file_is_formatted_as_air_formats_it() {
     // The parser is Air's on a newer grammar than Air pins
     // (vendor/air_r_parser): a file with most of the language in it
     // still parses, formats, and formats to itself.
-    let wide = "library(dplyr)\n# a comment\ndf%>%filter(a>1,b%in%c('x',\"y\"))%>%mutate(z=a^2,w=-a)|>summarise(n=n())\nm<-lm(y~x+I(x^2),data=df)\ng<-function(x=1L,...,na.rm=TRUE)x[[1]]$name@slot\nfor(i in 1:10){if(i%%2==0)next else print(i)}\nwhile(TRUE){break}\nh<-\\(x)x+1\nl<-list(a=1,`b c`=NULL,d=1e-3,e=0x1F,f=2i,g=r\"(raw)\")\nrepeat{break}\nx[1,,drop=FALSE]\nif(is.na(x)||!ok&&TRUE)stop('no')else NULL\n";
+    let wide = "library(dplyr)\n# a comment\ndf%>%filter(a>1,b%in%c('x',\"y\"))%>%mutate(z=a^2,w=-a)|>summarize(n=n())\nm<-lm(y~x+I(x^2),data=df)\ng<-function(x=1L,...,na.rm=TRUE)x[[1]]$name@slot\nfor(i in 1:10){if(i%%2==0)next else print(i)}\nwhile(TRUE){break}\nh<-\\(x)x+1\nl<-list(a=1,`b c`=NULL,d=1e-3,e=0x1F,f=2i,g=r\"(raw)\")\nrepeat{break}\nx[1,,drop=FALSE]\nif(is.na(x)||!ok&&TRUE)stop('no')else NULL\n";
     let once = format("r", wide).unwrap().expect("it changes");
     assert!(once.contains("df %>%\n  filter(a > 1, b %in% c('x', \"y\")) %>%"), "{once}");
     assert_eq!(format("r", &once), Ok(None), "{once}");
