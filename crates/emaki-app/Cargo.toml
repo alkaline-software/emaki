@@ -101,6 +101,11 @@ anyrender_vello_cpu = "=0.17.0"
 # and Windows is unsigned, which the docs' SmartScreen steps cover.
 [package.metadata.packager]
 productName = "Emaki"
+# The `.deb`'s Maintainer, which dpkg warns of when missing, and the
+# publisher Windows lists the app under (else "pingfanhu", from the
+# identifier).
+authors = ["Alkaline Software"]
+publisher = "Alkaline Software"
 identifier = "com.pingfanhu.emaki"
 description = "Every coding-agent session on this machine, kept for good, in one window you can also talk to."
 homepage = "https://github.com/alkaline-software/emaki"
@@ -119,6 +124,9 @@ infoPlistPath = "macos/Info.plist"
 
 [package.metadata.packager.nsis]
 installMode = "currentUser"
+# One step, no wizard: the progress, then Emaki opens (the file says what
+# changed from cargo-packager's own).
+template = "windows/installer.nsi"
 
 [package.metadata.packager.deb]
 depends = ["libxkbcommon0", "libxkbcommon-x11-0", "libwayland-client0", "libvulkan1", "libfontconfig1", "libfreetype6", "libx11-xcb1", "libxcb1"]

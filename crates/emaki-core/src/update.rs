@@ -23,7 +23,6 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -43,9 +42,9 @@ pub fn asset_name() -> Option<&'static str> {
     if cfg!(target_os = "macos") {
         Some(if cfg!(target_arch = "aarch64") { "Emaki-mac-arm64.dmg" } else { "Emaki-mac-x64.dmg" })
     } else if cfg!(target_os = "windows") {
-        Some("Emaki-windows-x64-setup.exe")
+        Some(if cfg!(target_arch = "aarch64") { "Emaki-windows-arm64-setup.exe" } else { "Emaki-windows-x64-setup.exe" })
     } else if cfg!(target_os = "linux") {
-        Some("Emaki-linux-x64.AppImage")
+        Some(if cfg!(target_arch = "aarch64") { "Emaki-linux-arm64.AppImage" } else { "Emaki-linux-x64.AppImage" })
     } else {
         None
     }
@@ -201,7 +200,7 @@ pub fn install_into(installer: &Path, bundle: Option<&Path>) -> Result<(), Strin
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new(installer).spawn().map(|_| ()).map_err(|e| format!("could not start the installer: {e}"))
+        crate::process::command(installer).spawn().map(|_| ()).map_err(|e| format!("could not start the installer: {e}"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -223,14 +222,14 @@ fn install_macos(dmg: &Path, bundle: Option<&Path>) -> Result<(), String> {
     };
     let parent = bundle.parent().ok_or("the bundle has no parent folder")?;
     let mount = downloads_dir().join("mnt");
-    let _ = Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mount).output();
+    let _ = crate::process::command("hdiutil").args(["detach", "-quiet"]).arg(&mount).output();
     std::fs::create_dir_all(&mount).map_err(|e| e.to_string())?;
-    let out = Command::new("hdiutil").args(["attach", "-nobrowse", "-readonly", "-quiet", "-mountpoint"]).arg(&mount).arg(dmg).output().map_err(|e| e.to_string())?;
+    let out = crate::process::command("hdiutil").args(["attach", "-nobrowse", "-readonly", "-quiet", "-mountpoint"]).arg(&mount).arg(dmg).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!("the disk image would not mount: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     let detach = || {
-        let _ = Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mount).output();
+        let _ = crate::process::command("hdiutil").args(["detach", "-quiet"]).arg(&mount).output();
     };
     let fresh = mount.join("Emaki.app");
     if !fresh.is_dir() {
@@ -241,7 +240,7 @@ fn install_macos(dmg: &Path, bundle: Option<&Path>) -> Result<(), String> {
     let old = parent.join("Emaki.app.old");
     let _ = std::fs::remove_dir_all(&staged);
     let _ = std::fs::remove_dir_all(&old);
-    let out = Command::new("ditto").arg(&fresh).arg(&staged).output().map_err(|e| e.to_string())?;
+    let out = crate::process::command("ditto").arg(&fresh).arg(&staged).output().map_err(|e| e.to_string())?;
     detach();
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(&staged);
@@ -267,7 +266,7 @@ fn install_macos(dmg: &Path, bundle: Option<&Path>) -> Result<(), String> {
 fn open_once_gone(pid: u32, bundle: &Path) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
-    Command::new("/bin/sh")
+    crate::process::command("/bin/sh")
         .args(["-c", r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#, "sh"])
         .arg(pid.to_string())
         .arg(bundle)
@@ -287,5 +286,5 @@ fn install_linux(image: &Path) -> Result<(), String> {
     std::fs::copy(image, &staged).map_err(|e| e.to_string())?;
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     std::fs::rename(&staged, &running).map_err(|e| format!("could not replace the AppImage: {e}"))?;
-    Command::new(&running).spawn().map(|_| ()).map_err(|e| format!("the new AppImage is in place but did not start: {e}"))
+    crate::process::command(&running).spawn().map(|_| ()).map_err(|e| format!("the new AppImage is in place but did not start: {e}"))
 }

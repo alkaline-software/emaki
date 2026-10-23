@@ -30,6 +30,7 @@ pub mod pairs;
 pub mod parquet_file;
 pub mod paths;
 pub mod peer;
+pub mod process;
 pub mod pty;
 pub mod redact;
 pub mod render_md;

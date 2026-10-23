@@ -292,7 +292,7 @@ pub struct Git {
 pub fn git_here() -> Git {
     let quiet = |cmd: &mut Command| cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).output().ok();
     let ready = if cfg!(target_os = "macos") {
-        quiet(Command::new("xcode-select").arg("-p")).is_some_and(|o| o.status.success())
+        quiet(crate::process::command("xcode-select").arg("-p")).is_some_and(|o| o.status.success())
     } else {
         let suffix = if cfg!(windows) { ".exe" } else { "" };
         search_dirs().iter().any(|d| d.join(format!("git{suffix}")).is_file())
@@ -300,7 +300,7 @@ pub fn git_here() -> Git {
     if !ready {
         return Git::default();
     }
-    let get = |key: &str| quiet(Command::new("git").args(["config", "--global", key])).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let get = |key: &str| quiet(crate::process::command("git").args(["config", "--global", key])).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
     Git { ready, name: get("user.name"), email: get("user.email") }
 }
 
@@ -402,7 +402,7 @@ const VERSION_WAIT: Duration = Duration::from_secs(6);
 /// with a `node` first line needs to find one). Empty when it does not
 /// answer in time.
 pub fn version_of(program: &Path, arg: &str, dirs: &[PathBuf]) -> String {
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::process::command(program);
     cmd.arg(arg).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     // An agent asked from inside a session of another must not take
     // itself for that session's child.
@@ -439,7 +439,7 @@ fn in_keychain(service: &str) -> bool {
     if !cfg!(target_os = "macos") || service.is_empty() {
         return false;
     }
-    Command::new("/usr/bin/security")
+    crate::process::command("/usr/bin/security")
         .args(["find-generic-password", "-s", service])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

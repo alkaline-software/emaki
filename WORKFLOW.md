@@ -4,22 +4,25 @@ Everything about cutting a release: bumping the version, the changelog, the tag,
 
 ## What a release is
 
-A `v*` tag pushed to `alkaline-software/emaki` runs `release.yml`. Four package jobs build the app on macOS (both architectures, from the Apple Silicon runner), Windows and Linux, then one `release` job creates the GitHub Release, as a draft, with the tag's section of `CHANGELOG.md` as its notes and attaches the installers under stable names:
+A `v*` tag pushed to `alkaline-software/emaki` runs `release.yml`. Six package jobs build the app on macOS (both architectures, from the Apple Silicon runner), Windows and Linux (x64 and ARM each, on runners of their own), then one `release` job creates the GitHub Release, as a draft, with the tag's section of `CHANGELOG.md` as its notes and attaches the installers under stable names:
 
 | asset | built by | signed |
 |---|---|---|
 | `Emaki-mac-arm64.dmg` | CI, then replaced from this machine | Developer ID, notarized, stapled |
 | `Emaki-mac-x64.dmg` | CI, then replaced from this machine | Developer ID, notarized, stapled |
 | `Emaki-windows-x64-setup.exe` | CI | unsigned (SmartScreen asks once) |
+| `Emaki-windows-arm64-setup.exe` | CI | unsigned (SmartScreen asks once) |
 | `Emaki-linux-x64.AppImage` | CI | n/a |
 | `Emaki-linux-x64.deb` | CI | n/a |
+| `Emaki-linux-arm64.AppImage` | CI | n/a |
+| `Emaki-linux-arm64.deb` | CI | n/a |
 
 The names never change, so `releases/latest/download/<name>` links stay valid. CI's own Mac images are ad-hoc signed because the signing secrets are not in the repository (see "Signing in CI" below); the notarized ones are built here by `scripts/release-mac.sh` and uploaded over them.
 
 ## One-time setup on a Mac
 
 - Rust via rustup, plus the Intel target: `rustup target add x86_64-apple-darwin`.
-- `cargo install cargo-packager --locked`.
+- `cargo install cargo-packager --version 0.11.8 --locked`, the version `release.yml` pins (the Windows installer is its template).
 - Xcode or its command line tools (`codesign`, `hdiutil`, `notarytool`, `stapler`).
 - The certificate `Developer ID Application: Pingfan Hu (XC2WL5WN7J)` in the login keychain (`security find-identity -v -p codesigning` lists it).
 - The notarytool keychain profile `notarytool-profile` (`xcrun notarytool store-credentials notarytool-profile` once, with the Apple ID, an app-specific password and team `XC2WL5WN7J`).
@@ -186,7 +189,7 @@ Every failure met while cutting a release gets a line here once it is solved, wi
 
 - **A git test fails on Windows only, on a remote that is a folder**: a test's remote is a temp folder, `C:/Users/...` there, and a parser of remotes that takes `x:y` for `host:path` reads it as a host "C". One letter before the colon is a drive (`git::host_of`), as git has it. v0.2.5's first push to `main` went red on it before the tag.
 
-- **One Mac package job in `release.yml` fails right after "satisfies its Designated Requirement", with no message, while the other passes**: `hdiutil create` on the runner ("Resource busy"). `release-mac.sh` now tries it five times and says why. If it still fails, re-run only that job, which keeps the tag and the images built here: `gh run rerun <run-id> --failed --repo alkaline-software/emaki`. The `release` job waits for all four. v0.1.9's Intel job did this.
+- **One Mac package job in `release.yml` fails right after "satisfies its Designated Requirement", with no message, while the other passes**: `hdiutil create` on the runner ("Resource busy"). `release-mac.sh` now tries it five times and says why. If it still fails, re-run only that job, which keeps the tag and the images built here: `gh run rerun <run-id> --failed --repo alkaline-software/emaki`. The `release` job waits for all six. v0.1.9's Intel job did this.
 - **`release-mac.sh` stops with "Finder ... AppleEvent timed out (-1712)"**: macOS asked whether the terminal may control Finder and nobody answered. Allow it (System Settings, Privacy & Security, Automation) and run the script again. Check the script's exit code and that both images are in `dist/`: piped into `tail`, a failed first image went unnoticed for v0.1.9 until the second was done.
 
 - **`release-mac.sh --notarize` stops with "No Keychain password item found for profile: notarytool-profile"**, run by an agent in Emaki, while the same two commands work in the person's own terminal: the credential is in place and could not be reached from the session at that moment. Why is not known; an hour later the same session reached it. Run the two commands of step 5 in a terminal of your own, then go on from step 6. `release-check.sh` now asks the notary service before anything is built, so step 3 says so. In v0.2.3 it was found after the tag was out.

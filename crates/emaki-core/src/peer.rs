@@ -165,7 +165,7 @@ pub fn registry() -> HashMap<String, Peer> {
 /// terminal's becomes when Emaki ends without ending it.
 #[cfg(unix)]
 pub fn adrift(pid: i32) -> bool {
-    std::process::Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().ok().is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+    crate::process::command("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().ok().is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
 }
 
 #[cfg(not(unix))]

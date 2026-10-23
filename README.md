@@ -20,10 +20,14 @@ Download the [latest release](https://github.com/alkaline-software/emaki/release
 | :--- | :--- |
 | `Emaki-mac-arm64.dmg` | Mac, Apple silicon |
 | `Emaki-mac-x64.dmg` | Mac, Intel |
-| `Emaki-windows-x64-setup.exe` | Windows |
-| `Emaki-linux-x64.AppImage`, `Emaki-linux-x64.deb` | Linux |
+| `Emaki-windows-x64-setup.exe` | Windows, Intel or AMD |
+| `Emaki-windows-arm64-setup.exe` | Windows on ARM |
+| `Emaki-linux-x64.deb`, `Emaki-linux-x64.AppImage` | Linux, Intel or AMD |
+| `Emaki-linux-arm64.deb`, `Emaki-linux-arm64.AppImage` | Linux on ARM |
 
-On a Mac, open the image and drag Emaki into Applications. The Mac image is signed and notarized. Windows is unsigned, so SmartScreen asks once: *More info*, then *Run anyway*.
+A Windows or Linux virtual machine on an Apple silicon Mac is ARM.
+
+On a Mac, open the image and drag Emaki into Applications. The Mac image is signed and notarized. Windows is unsigned, so SmartScreen asks once: *More info*, then *Run anyway*. On Ubuntu or Debian, open the `.deb` to install it. An AppImage has to be made executable first (*Properties*, *Executable as Program*, or `chmod +x`); until then the file manager offers to mount it as a disk.
 
 Open the app. The first launch copies every Claude Code session on the machine into `~/.emaki/archive` and lists it beside your Codex sessions; every later launch catches up, so Emaki does not have to stay running. It needs at least one agent installed: the Agents page (⌘E) walks through installing Claude Code or Codex and signing in. The app updates itself from Settings.
 

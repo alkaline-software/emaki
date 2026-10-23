@@ -22,7 +22,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -319,7 +319,7 @@ fn run_codex(argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let codex = crate::codex::codex_binary()?;
     let out = workdir().join(format!("codex-{}-{}.txt", std::process::id(), SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-    let mut cmd = Command::new(codex);
+    let mut cmd = crate::process::command(codex);
     cmd.args(codex_argv(argv, codex_light_model().as_deref(), &out)).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     cmd.env_clear();
     cmd.envs(driver::child_env());
@@ -354,7 +354,7 @@ pub fn run_child(agent: crate::model::AgentId, argv: &[String], env: &[(&str, &s
         Helper::Claude => driver::claude_binary()?,
         Helper::Codex => return run_codex(argv, env, timeout),
     };
-    let mut cmd = Command::new(claude);
+    let mut cmd = crate::process::command(claude);
     cmd.args(argv).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     cmd.env_clear();
     cmd.envs(driver::child_env());
