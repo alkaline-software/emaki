@@ -12,6 +12,9 @@
 //! page reads the session's folder and nothing else on the disk. What it
 //! asks of the network it gets, as in a browser.
 //!
+//! A video or a sound is shown the same way, by a page of ours holding
+//! the system's own player (`Media`), its file read a range at a time.
+//!
 //! Linux has no web view that can be set in a gpui window (WebKitGTK
 //! wants a GTK one), so there `open` gives none and the page is drawn by
 //! Blitz (`html_shot.rs`).
@@ -85,10 +88,18 @@ fn mime_of(file: &Path) -> &'static str {
         "woff2" => "font/woff2",
         "ttf" => "font/ttf",
         "otf" => "font/otf",
-        "mp4" => "video/mp4",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
         "webm" => "video/webm",
+        "ogv" => "video/ogg",
+        "mkv" => "video/x-matroska",
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "aif" | "aiff" => "audio/aiff",
         "pdf" => "application/pdf",
         "wasm" => "application/wasm",
         "txt" | "md" | "csv" => "text/plain; charset=utf-8",
@@ -97,11 +108,73 @@ fn mime_of(file: &Path) -> &'static str {
     }
 }
 
-/// The web view with a page in it: which file, and as of when.
+/// Whether a file is a video (`Some(true)`) or a sound (`Some(false)`)
+/// the system's player is given: what WKWebView and WebView2 both play.
+pub fn media_kind(file: &Path) -> Option<bool> {
+    match file.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "mp4" | "m4v" | "mov" | "webm" | "ogv" => Some(true),
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "oga" | "opus" | "aif" | "aiff" => Some(false),
+        _ => None,
+    }
+}
+
+/// How a file is shown: as its own page, or as a video or a sound in a
+/// page of ours with the player on the pane's own ground (as hex).
+#[derive(Clone, PartialEq)]
+pub enum Page {
+    File,
+    Media { video: bool, ground: String },
+}
+
+/// The address the view is given for a file shown as `page`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn page_url(file: &Path, page: &Page) -> String {
+    match page {
+        Page::File => url_of(file),
+        Page::Media { video, ground } => format!("{}?play={}&ground={ground}", url_of(file), if *video { "video" } else { "audio" }),
+    }
+}
+
+/// The page that holds the player: the file in the middle, as large as
+/// the pane lets it be, on the pane's ground.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn player_page(src: &str, video: bool, ground: &str) -> Vec<u8> {
+    let ground: String = ground.chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
+    // A video shows its first frame before it plays: WebKit paints none
+    // for a video only its metadata is read of, and the pane was a play
+    // button on the ground.
+    let player = if video { format!(r#"<video src="{src}#t=0.001" controls playsinline preload="auto"></video>"#) } else { format!(r#"<audio src="{src}" controls preload="metadata"></audio>"#) };
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><style>html,body{{margin:0;height:100%;background:#{ground};}}body{{display:flex;align-items:center;justify-content:center;}}video{{max-width:100%;max-height:100%;}}audio{{width:min(520px,88%);}}</style></head><body>{player}</body></html>"#
+    )
+    .into_bytes()
+}
+
+/// The bytes a `Range` header asks for (`bytes=a-b`, `bytes=a-`,
+/// `bytes=-n`), held to the file's length; None for the whole file.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn range_of(header: Option<&str>, len: u64) -> Option<(u64, u64)> {
+    /// The most one answer holds of a range left open at its end: a player
+    /// asks again for what follows.
+    const STEP: u64 = 4 << 20;
+    let spec = header?.trim().strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (a, b) = spec.split_once('-')?;
+    let (from, to) = match (a.trim().parse::<u64>().ok(), b.trim().parse::<u64>().ok()) {
+        (Some(a), Some(b)) => (a, b.min(len.saturating_sub(1))),
+        (Some(a), None) => (a, (a + STEP - 1).min(len.saturating_sub(1))),
+        (None, Some(n)) => (len.saturating_sub(n), len.saturating_sub(1)),
+        (None, None) => return None,
+    };
+    (from <= to && from < len).then_some((from, to))
+}
+
+/// The web view with a page in it: which file, how it is shown, and as
+/// of when.
 pub struct Web {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     view: std::rc::Rc<wry::WebView>,
     pub file: PathBuf,
+    pub page: Page,
     pub mtime: Option<std::time::SystemTime>,
     placed: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     shown: bool,
@@ -112,8 +185,9 @@ impl Web {
     /// A web view in `window` showing `file`, which reads files under
     /// `root` and no others. None where the system has none to give.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub fn open(window: &Window, file: &Path, mtime: Option<std::time::SystemTime>, root: &Path) -> Option<Web> {
+    pub fn open(window: &Window, file: &Path, page: Page, mtime: Option<std::time::SystemTime>, root: &Path) -> Option<Web> {
         use std::borrow::Cow;
+        use std::io::{Read as _, Seek as _};
         use wry::http::Response;
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let answer = |status: u16, kind: &str, body: Vec<u8>| Response::builder().status(status).header("Content-Type", kind).header("Cache-Control", "no-store").body(Cow::Owned(body)).unwrap_or_else(|_| Response::new(Cow::Owned(Vec::new())));
@@ -123,9 +197,41 @@ impl Web {
                 let file = file_of(request.uri().path());
                 // Under the session's folder, links followed: a page is
                 // not handed the rest of the disk.
-                match file.canonicalize().ok().filter(|real| real.starts_with(&root)).and_then(|real| std::fs::read(&real).ok().map(|bytes| (real, bytes))) {
-                    Some((real, bytes)) => answer(200, mime_of(&real), bytes),
-                    None => answer(404, "text/plain", Vec::new()),
+                let Some(real) = file.canonicalize().ok().filter(|real| real.starts_with(&root)) else { return answer(404, "text/plain", Vec::new()) };
+                // A video or a sound: the page that plays it.
+                let query = request.uri().query().unwrap_or("");
+                let field = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(name).and_then(|v| v.strip_prefix('=')));
+                if let Some(kind) = field("play") {
+                    return answer(200, "text/html; charset=utf-8", player_page(&url_of(&file), kind == "video", field("ground").unwrap_or("000000")));
+                }
+                // A range of it, as a player asks: what it asks for and no
+                // more is read, so a long video is never read whole.
+                let Ok(mut f) = std::fs::File::open(&real) else { return answer(404, "text/plain", Vec::new()) };
+                let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                let asked = request.headers().get("Range").and_then(|v| v.to_str().ok());
+                match range_of(asked, len) {
+                    Some((from, to)) => {
+                        let mut bytes = vec![0; (to - from + 1) as usize];
+                        if f.seek(std::io::SeekFrom::Start(from)).is_err() || f.read_exact(&mut bytes).is_err() {
+                            return answer(416, "text/plain", Vec::new());
+                        }
+                        Response::builder()
+                            .status(206)
+                            .header("Content-Type", mime_of(&real))
+                            .header("Accept-Ranges", "bytes")
+                            .header("Content-Range", format!("bytes {from}-{to}/{len}"))
+                            .header("Content-Length", bytes.len().to_string())
+                            .header("Cache-Control", "no-store")
+                            .body(Cow::Owned(bytes))
+                            .unwrap_or_else(|_| Response::new(Cow::Owned(Vec::new())))
+                    }
+                    None => {
+                        let mut bytes = Vec::new();
+                        match f.read_to_end(&mut bytes) {
+                            Ok(_) => answer(200, mime_of(&real), bytes),
+                            Err(_) => answer(404, "text/plain", Vec::new()),
+                        }
+                    }
                 }
             })
             // A link out of the page's own files is the system
@@ -150,22 +256,24 @@ impl Web {
             })
             .with_focused(false)
             .with_visible(false)
-            .with_url(url_of(file))
+            .with_url(page_url(file, &page))
             .build_as_child(window)
             .ok()?;
-        Some(Web { view: std::rc::Rc::new(view), file: file.to_path_buf(), mtime, placed: Default::default(), shown: false, round: None })
+        Some(Web { view: std::rc::Rc::new(view), file: file.to_path_buf(), page, mtime, placed: Default::default(), shown: false, round: None })
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    pub fn open(_: &Window, _: &Path, _: Option<std::time::SystemTime>, _: &Path) -> Option<Web> {
+    pub fn open(_: &Window, _: &Path, _: Page, _: Option<std::time::SystemTime>, _: &Path) -> Option<Web> {
         None
     }
 
-    /// Another file, or the same one as it is now on the disk.
-    pub fn load(&mut self, file: &Path, mtime: Option<std::time::SystemTime>) {
+    /// Another file, the same one shown another way, or as it is now on
+    /// the disk.
+    pub fn load(&mut self, file: &Path, page: Page, mtime: Option<std::time::SystemTime>) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let _ = self.view.load_url(&url_of(file));
+        let _ = self.view.load_url(&page_url(file, &page));
         self.file = file.to_path_buf();
+        self.page = page;
         self.mtime = mtime;
     }
 
@@ -225,6 +333,16 @@ impl Web {
                 }
             }
         }
+    }
+
+    /// Prints how far the page's player has read its file: its ready
+    /// state, its picture's size, its length and any error. For probes.
+    pub fn print_media(&self) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.view.evaluate_script_with_callback(
+            "(() => { const m = document.querySelector('video, audio'); return m ? [m.readyState, m.videoWidth || 0, m.videoHeight || 0, m.duration, m.error ? m.error.code : 0].join(',') : 'no player'; })()",
+            |answer| eprintln!("emaki: media {answer}"),
+        );
     }
 
     /// The keyboard to the page, as a click in it gives it. For probes.

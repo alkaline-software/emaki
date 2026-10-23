@@ -15,7 +15,7 @@ mod utils;
 mod window_selection;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
-pub use find::TextFind;
+pub use find::{HeadingSpots, TextFind};
 pub use markdown_ext::*;
 pub use state::*;
 pub use style::*;

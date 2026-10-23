@@ -489,6 +489,7 @@
 "pyc":"python-compiled",
 "pyd":"python-compiled",
 "pyo":"python-compiled",
+"qmd":"quarto",
 "qt":"video",
 "r":"r",
 "raku":"perl",

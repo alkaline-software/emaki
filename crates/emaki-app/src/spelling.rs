@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use gpui::*;
-use gpui_base::input::{Diagnostic, DiagnosticSeverity, RopeExt as _};
-use gpui_component::input::EditorState;
+use gpui_component::input::{EditorState, TextDecoration};
+use gpui_component::ActiveTheme as _;
 
 use emaki_core::check::{self, Kind};
 
@@ -52,10 +52,16 @@ impl Workbench {
             return;
         }
         let Some(ed) = self.file_editor.as_mut() else { return };
-        if ed.issues_for.as_str() == ed.state.read(cx).value().as_ref() {
+        let now = ed.state.read(cx).value().to_string();
+        if ed.issues_for == now {
             return;
         }
+        // This text has no marks until its check answers. Left as the old
+        // text's, every draw till then began the check again and dropped
+        // the one waiting: a window that drew on (a GIF, a turn at work)
+        // was never checked.
         ed.issues.clear();
+        ed.issues_for = now;
         self.file_check_soon(cx);
     }
 
@@ -118,34 +124,36 @@ impl Workbench {
         .detach();
     }
 
-    /// The marks are the editor's diagnostics: a wavy underline, red
-    /// for a spelling and blue for the grammar, with the message on
-    /// hover. They are set again from the issues at every change, since
-    /// the editor keeps them as bytes of the text they were set on.
+    /// The marks are the composer's: a wavy underline, red for a
+    /// spelling and blue for the grammar, with nothing on hover, and the
+    /// corrections on the right click. They are the editor's decorations,
+    /// not its diagnostics: a diagnostic brought up a card at the pointer
+    /// that said Harper's words, went as the pointer moved to it, and
+    /// narrowed the editor while it was up. They are set again from the
+    /// issues at every change, since the editor keeps them as bytes of
+    /// the text they were set on.
     fn file_marks(&mut self, cx: &mut Context<Self>) {
-        let Some(ed) = self.file_editor.as_ref() else { return };
-        let issues: Vec<(std::ops::Range<usize>, bool, String)> = if ed.issues_for.as_str() == ed.state.read(cx).value().as_ref() {
+        let (danger, info) = (cx.theme().danger, cx.theme().info);
+        let Some(ed) = self.file_editor.as_mut() else { return };
+        let marks: Vec<TextDecoration> = if ed.issues_for.as_str() == ed.state.read(cx).value().as_ref() {
             let caret = ed.state.read(cx).cursor();
             ed.issues
                 .iter()
                 .filter(|i| i.kind == Kind::Grammar || ed.check_at_caret || i.range.end != caret)
                 .filter(|i| i.kind == Kind::Spelling || !i.fixes.is_empty())
-                .map(|i| (i.range.clone(), i.kind == Kind::Spelling, i.message.clone()))
+                .map(|i| {
+                    let color = if i.kind == Kind::Spelling { danger } else { info };
+                    TextDecoration::new(i.range.clone(), HighlightStyle { underline: Some(UnderlineStyle { thickness: px(1.), color: Some(color), wavy: true }), ..Default::default() })
+                })
                 .collect()
         } else {
             Vec::new()
         };
-        ed.state.update(cx, |s, cx| {
-            let text = s.text().clone();
-            if let Some(set) = s.diagnostics_mut() {
-                set.reset(&text);
-                for (range, spelling, message) in issues {
-                    let (a, b) = (text.offset_to_position(range.start), text.offset_to_position(range.end));
-                    set.push(Diagnostic::new(a..b, message).with_severity(if spelling { DiagnosticSeverity::Error } else { DiagnosticSeverity::Info }));
-                }
-            }
-            cx.notify();
-        });
+        match &ed.spell_marks {
+            Some(set) => set.set(marks, cx),
+            None if marks.is_empty() => {}
+            None => ed.spell_marks = Some(ed.state.update(cx, |s, cx| s.create_decorations_collection(marks, cx))),
+        }
     }
 
     /// What could stand in place of the marked words under a point of

@@ -103,22 +103,23 @@ static CHAT_MARKDOWN: std::sync::LazyLock<gpui_component::text::MarkdownExtensio
 /// smaller cut of the monospace face (`fonts::inline_mono_family`), so
 /// it stands no taller than they do.
 pub(crate) fn chat_md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, None, cx)
 }
 
 /// Markdown as a document draws it, a file's or a page's: all of GFM,
 /// as GitHub reads the file.
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, None, cx)
 }
 
 /// `md_view`, with words found in it painted (`TextFind`): a file as it
-/// reads, with its find open.
-pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component::text::TextFind>, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, find, cx)
+/// reads, with its find open; and with where its headings are painted
+/// kept, for the outline at the files panel's foot (`HeadingSpots`).
+pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, cx: &App) -> impl IntoElement {
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, find, headings, cx)
 }
 
-fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, find: Option<gpui_component::text::TextFind>, cx: &App) -> impl IntoElement {
+fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown as it is, in a code block,
     // rather than taking the window down.
@@ -129,6 +130,7 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, f
     TextView::markdown(SharedString::from(format!("{id}-{}", if dark { "d" } else { "l" })), text)
         .selectable(true)
         .find(find)
+        .headings(headings)
         .when(chat, |v| v.markdown_extensions(CHAT_MARKDOWN.clone()))
         .style(
             TextViewStyle {

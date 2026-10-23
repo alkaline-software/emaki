@@ -2362,6 +2362,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.last_layout.as_ref().map(|l| l.line_height)
     }
 
+    /// (Emaki addition.) How far down the text buffer line `row` begins,
+    /// soft wraps and folds counted as scrolling to the caret counts them,
+    /// and the view's height: for a caller that scrolls a line to a place
+    /// of its own choosing. `None` before the first layout.
+    pub fn line_top(&self, row: usize) -> Option<(gpui::Pixels, gpui::Pixels)> {
+        let layout = self.last_layout.as_ref()?;
+        let bounds = self.last_bounds.as_ref()?;
+        Some((layout.line_height * self.display_map.buffer_line_to_display_row(row), bounds.size.height))
+    }
+
     /// Returns the current selection as a byte range into the text.
     ///
     /// The range is empty (`start == end`) when no text is selected; in
