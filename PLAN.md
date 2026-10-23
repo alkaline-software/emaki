@@ -67,7 +67,7 @@ The conversation view already uses GPUI's virtualized `list`, so only visible me
 
 ## Phase 5: Multiple sessions and restore on reopen
 
-- [x] **Save window state** to `~/.emaki/state/ui.json`: open sessions, the active one, scroll positions, sidebar state, window size and position. Restore it on launch. *`ui_state.rs`; written on change and at quit; the bounds are reused only when their centre is still on a screen. Verified: move, quit, relaunch brought back position, tabs, the active tab and its scroll position.*
+- [x] **Save window state** to `~/.emaki/state/ui.json`: open sessions, the active one, scroll positions, sidebar state, window size and position. Restore it on launch. *`ui_state.rs`; written on change and at quit; the bounds are reused only when their center is still on a screen. Verified: move, quit, relaunch brought back position, tabs, the active tab and its scroll position.*
 - [x] **Tabs for open sessions.** The backend already runs one `claude -p` child per session; this is UI work. *One tab per open session in the top strip, with the agent's mark turning while it works; ⌘W closes the showing tab, then the last tab, then the window.*
 - [x] **Clean shutdown and lazy resume.** Close driver processes cleanly on quit; on reopen, restart each with `--resume` only when the user sends it a message.
 
