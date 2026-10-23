@@ -2437,13 +2437,34 @@ impl BlockNode {
                     text_size = (f)(*level, base);
                 }
 
+                // Emaki: where it is painted, for an outline of the
+                // document (`HeadingSpots`).
+                let level = *level;
                 div()
                     .id(SharedString::from(format!("h{}-{}", level, ix)))
+                    .relative()
                     .pb(rems(0.3))
                     .whitespace_normal()
                     .text_size(text_size)
                     .font_weight(font_weight)
                     .child(children.render(node_cx, window, cx))
+                    .child(
+                        gpui::canvas(
+                            |_, _, _| {},
+                            move |bounds, _, _, cx| {
+                                let spots = crate::global_state::UiGlobalState::global(cx)
+                                    .text_view_state()
+                                    .and_then(|state| state.read(cx).headings.clone());
+                                if let Some(spots) = spots {
+                                    spots.painted(level, bounds);
+                                }
+                            },
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
                     .into_any_element()
             }
             BlockNode::Blockquote { children, .. } => div()

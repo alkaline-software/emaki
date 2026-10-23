@@ -1875,6 +1875,9 @@ pub struct Workbench {
     pub(crate) file_spell_menu_probe: bool,
     /// `file:spellfix`: the first mark's first correction, taken.
     pub(crate) file_spell_fix_probe: bool,
+    /// `filehead:<n>`: a click on the structure's nth heading, at the next
+    /// draw.
+    pub(crate) file_head_probe: Option<usize>,
     /// The frame's color as the native window last had it.
     window_ground: Cell<Option<Hsla>>,
     /// The window's height at the last draw.
@@ -1952,6 +1955,29 @@ pub struct Workbench {
     /// whether the window is too narrow to draw it.
     pub(crate) file_w: Pixels,
     pub(crate) file_drag: bool,
+    /// The room the window's own buttons take at the strip's left and
+    /// right ends where the system draws none (`csd.rs`), as of the last
+    /// draw.
+    pub(crate) csd_room: std::cell::Cell<(Pixels, Pixels)>,
+    /// The structure at the files panel's foot: open (folded to begin
+    /// with) or folded to its head and the count of clicks that changed which
+    /// (its motion's name), its height and the drag of its edge, where
+    /// the file as it reads painted its headings, its scroller, the
+    /// headings of the text last listed by the text's hash, the heading
+    /// last marked as where one is, and the count of glides the file has
+    /// been given (a newer one takes over).
+    pub(crate) file_structure_open: bool,
+    pub(crate) file_structure_flip: u64,
+    pub(crate) file_glide: u64,
+    pub(crate) file_structure_h: Pixels,
+    pub(crate) file_structure_drag: Option<(Pixels, Pixels)>,
+    pub(crate) file_heads_spots: gpui_component::text::HeadingSpots,
+    pub(crate) file_structure_scroll: ScrollHandle,
+    pub(crate) file_heads: Option<(u64, std::rc::Rc<Vec<crate::panels::FileHead>>)>,
+    pub(crate) file_structure_at: Option<usize>,
+    /// The heading last clicked in the file as it reads, its file and
+    /// the glide it began: lit while no wheel has moved the file since.
+    pub(crate) file_structure_pick: Option<(PathBuf, usize, u64)>,
     pub(crate) fold_file: bool,
     /// Markdown shown as it is written, not as it reads; and a count of
     /// the presses that changed it, for the plate's slide.
@@ -2497,14 +2523,25 @@ impl Workbench {
     }
 
     /// Where the strip of buttons starts: past the traffic lights on
-    /// macOS, at the edge elsewhere.
-    fn strip_left() -> Pixels {
-        if cfg!(target_os = "macos") { TRAFFIC_W + px(2.) } else { px(10.) }
+    /// macOS, at the edge elsewhere, past the window's own buttons where
+    /// the system puts them at the left (`csd.rs`).
+    fn strip_left(&self) -> Pixels {
+        if cfg!(target_os = "macos") { TRAFFIC_W + px(2.) } else { px(10.) + self.csd_room.get().0 }
     }
 
     /// Where the strip ends: the sidebar button and search.
-    fn strip_right() -> Pixels {
-        Self::strip_left() + STRIP_BTN * 2.
+    fn strip_right(&self) -> Pixels {
+        self.strip_left() + STRIP_BTN * 2.
+    }
+
+    /// The window's own buttons and edges, where the system draws none
+    /// (`csd.rs`): at the middle of the card's strip, its close the
+    /// window's own, which asks about what is not saved.
+    fn csd_chrome(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let this = cx.entity().downgrade();
+        crate::csd::chrome(window, px(1.) + FRAME / 2. + TITLEBAR_H / 2. - px(12.), move |window, cx| {
+            let _ = this.update(cx, |w, cx| w.close_window(window, cx));
+        }, cx)
     }
 
     /// The buttons at the window's top left, over the sidebar when it is
@@ -2536,7 +2573,7 @@ impl Workbench {
             // The lights' centers are at 26.25: the middle of
             // the card's strip, which starts a frame down.
             .top(px(1.) + FRAME / 2.)
-            .left(Self::strip_left())
+            .left(self.strip_left())
             .h(TITLEBAR_H)
             .items_center()
             // Its label on a wrapper: an element takes one hover listener,
@@ -3793,6 +3830,7 @@ impl Workbench {
             file_menu_probe: false,
             file_spell_menu_probe: false,
             file_spell_fix_probe: false,
+            file_head_probe: None,
             tree_band: None,
             tree_band_live: false,
             tree_drop: None,
@@ -3835,6 +3873,17 @@ impl Workbench {
             file_serial: 0,
             file_w: px(ui.file_w.unwrap_or(f32::from(crate::panels::FILE_W))),
             file_drag: false,
+            csd_room: Default::default(),
+            file_structure_open: ui.file_structure_open.unwrap_or(false),
+            file_structure_flip: 0,
+            file_glide: 0,
+            file_structure_h: px(ui.file_structure_h.unwrap_or(f32::from(crate::panels::STRUCTURE_H))),
+            file_structure_drag: None,
+            file_heads_spots: gpui_component::text::HeadingSpots::new(),
+            file_structure_scroll: ScrollHandle::new(),
+            file_heads: None,
+            file_structure_at: None,
+            file_structure_pick: None,
             fold_file: false,
             file_raw: false,
             file_editor: None,
@@ -5602,6 +5651,8 @@ impl Workbench {
             panel_w: Some(f32::from(self.panel_w)),
             term_w: Some(f32::from(self.side_term_w)),
             file_w: Some(f32::from(self.file_w)),
+            file_structure_open: Some(self.file_structure_open),
+            file_structure_h: Some(f32::from(self.file_structure_h)),
             pdf_side: Some(match self.pdf_side {
                 Some(true) => "pages",
                 Some(false) => "contents",
@@ -8342,6 +8393,10 @@ impl Workbench {
             // A handle takes any offset it is given, so each is held to
             // what its list has.
             Pane::Sidebar | Pane::Files | Pane::Outline | Pane::File => {
+                // A wheel in the file ends a glide the structure began.
+                if owner == Pane::File {
+                    self.file_glide += 1;
+                }
                 let handle = match owner {
                     Pane::Files => &self.files_scroll,
                     Pane::File => &self.file_view_scroll,
@@ -12158,7 +12213,7 @@ impl Workbench {
         // jump at either end of it.
         let away = 1. - self.side_t();
         if away > 0. {
-            let room = (Self::strip_right() - px(4.) - FRAME + px(12.) - STRIP_PAD) * away;
+            let room = (self.strip_right() - px(4.) - FRAME + px(12.) - STRIP_PAD) * away;
             left_end = if left.is_empty() { left_end.w(room.max(px(120.))) } else { left_end.pl(room) };
         }
         let left_end = left_end.children(left);
@@ -12167,7 +12222,10 @@ impl Workbench {
         Self::drag_region(h_flex(), cx)
             .h(TITLEBAR_H - FRAME)
             .flex_shrink_0()
-            .px(STRIP_PAD)
+            .pl(STRIP_PAD)
+            // The window's own buttons stand at the right where the
+            // system draws none (`csd.rs`).
+            .pr(STRIP_PAD + self.csd_room.get().1)
             .items_center()
             .child(left_end)
             .child(center)
@@ -16929,6 +16987,7 @@ impl PickRow {
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.csd_room.set(crate::csd::room(window, cx));
         if self.worded != self.lang_serial {
             self.word_inputs(window, cx);
         }
@@ -17001,6 +17060,9 @@ impl Render for Workbench {
                 let at = self.file_view_scroll.bounds().origin + point(px(86.), px(23.));
                 ed.state.update(cx, |s, cx| s.secondary_click_at(at, window, cx));
             }
+        }
+        if let Some(ix) = self.file_head_probe.take() {
+            self.file_head_go(ix, window, cx);
         }
         if std::mem::take(&mut self.file_spell_fix_probe) {
             if let Some((range, with)) = self.file_editor.as_ref().and_then(|ed| ed.issues.first()).and_then(|i| Some((i.range.clone(), i.fixes.first()?.clone()))) {
@@ -17403,6 +17465,7 @@ impl Render for Workbench {
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
             .children(self.render_sidebar_float(cx))
             .child(self.render_strip(cx))
+            .children(self.csd_chrome(window, cx))
             .when(search_open, |d| d.child(self.render_search(cx)))
             .when(self.changes.is_some(), |d| d.child(fade_in("changes-in", self.render_changes(cx))))
             .when_some(self.lightbox.clone(), |d, lb| d.child(fade_in("lightbox-in", self.render_lightbox(lb, cx))))

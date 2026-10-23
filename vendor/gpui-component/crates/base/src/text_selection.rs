@@ -1838,6 +1838,20 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
         if phase.bubble()
             && let Some(state) = mouse_move_state.upgrade()
         {
+            // (Emaki addition.) A move with the left button up ends the
+            // drag: its release went somewhere else (the system's own
+            // resize of the window, a compositor's grab, a handler that
+            // stopped it), and every later move went on selecting.
+            if event.pressed_button != Some(MouseButton::Left) {
+                let open = {
+                    let state = state.read(cx);
+                    state.is_selecting || state.mouse_down_prepared
+                };
+                if open {
+                    state.update(cx, |state, cx| state.end(cx));
+                }
+                return;
+            }
             state.update(cx, |state, cx| {
                 state.update_in_window(event.position, window, cx)
             });
@@ -3367,6 +3381,28 @@ mod tests {
         );
         cx.update(|window, cx| assert!(TextSelection::has_selection(window, cx)));
         assert_eq!(clear_count.get(), 3);
+    }
+
+    #[gpui::test]
+    fn a_move_with_the_button_up_ends_a_drag_whose_release_was_lost(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| DoubleSelectionElementView {
+            selection: TextSelectionHandle::new("once", cx),
+        });
+        cx.update(|window, cx| {
+            WindowSelectionState::ensure(window, cx);
+            let _ = window.draw(cx);
+        });
+        let modifiers = gpui::Modifiers::default();
+        cx.simulate_mouse_down(point(px(10.), px(10.)), MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(point(px(40.), px(10.)), Some(MouseButton::Left), modifiers);
+        let selecting = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| WindowSelectionState::ensure(window, cx).read(cx).is_selecting)
+        };
+        assert!(selecting(cx));
+        // No mouse-up: the system took the release.
+        cx.simulate_mouse_move(point(px(70.), px(10.)), None, modifiers);
+        assert!(!selecting(cx));
+        cx.update(|window, cx| assert!(TextSelection::has_selection(window, cx)));
     }
 
     #[gpui::test]

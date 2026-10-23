@@ -10,6 +10,8 @@ mod a11y;
 mod agents_page;
 mod assets;
 mod branches;
+mod csd;
+mod fetch;
 mod file_icons;
 mod fonts;
 mod format;
@@ -337,6 +339,7 @@ fn main() {
     });
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        cx.set_http_client(std::sync::Arc::new(fetch::Fetcher));
         // The toolkit's own hover labels (the editor's find) draw their
         // keys as every label here does.
         gpui_component::tooltip::set_label(|text, window, cx| workbench::tip(text, window, cx));

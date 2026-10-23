@@ -309,6 +309,18 @@ upstream revision finds them.
 
 39. `crates/ui/locales/ui.yml` (`Input`): Cut, Copy, Paste and Select All in Japanese, Korean, French, German and Spanish, the words of a field's menu, so it speaks every language Emaki's window does (`emaki-app/src/i18n.rs`). Upstream has English and Chinese. Kotoba's copy has the same words (its change 31).
 
+40. `crates/ui/src/highlighter/input_adapter.rs` (`hides_words`): a fold is offered only where it hides a line with something on it. A fold keeps its first and last lines and hides those between, and a node that ends at the start of a line (markdown's HTML block, a paragraph) takes the blank line after it along, so a one-line HTML block's chevron hid that blank line and nothing else.
+
+41. `crates/base/src/scrollbar.rs` (prepaint): off a Mac the thumb's place and length come from the offset held to the scroll range, so the thumb stands at its end with its length while the content runs past (it shrank and grew there at every step, and shook); on Windows the thumb is a thin line until the pointer is on the bar or it is dragged, as Windows 11's own bar is.
+
+42. `crates/ui/src/highlighter/registry.rs` (`LanguageRegistry::language`): a name in braces is a Quarto or R Markdown chunk's (`{r setup, echo=FALSE}`, `{python}`, `{=html}`), and its language is the first word inside, lowercased. Looked up as written, a chunk had no colors in the editor or in the markdown view.
+
+43. `crates/ui/src/text/find.rs` (`HeadingSpots`), `text_view.rs` (`TextView::headings`), `state.rs`, `node.rs` (the heading's paint): a view handed a `HeadingSpots` keeps where each heading was painted, in the order the document paints them, as `TextFind` keeps where its match was; an outline goes to a heading by it.
+
+44. `crates/base/src/text_selection.rs` (the mouse-move listener in `paint_text_selection`): a move with the left button up ends the drag, as a release would. The release does not always come: on Windows a press on the window's frame is handed to the window as a mouse-down and the system's resize or move keeps the release, and every later move went on selecting until a click. A test (`a_move_with_the_button_up_ends_a_drag_whose_release_was_lost`) holds it.
+
+45. `crates/base/src/input/base/state.rs` (`InputState::line_top`): how far down the text a buffer line begins, soft wraps and folds counted as scrolling to the caret counts them, and the view's height, so a caller can scroll a line to a place of its own choosing. Emaki's structure glides a heading to a third of the way down the file's editor with it.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

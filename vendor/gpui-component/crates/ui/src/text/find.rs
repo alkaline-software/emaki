@@ -102,6 +102,44 @@ impl TextFind {
     }
 }
 
+/// Emaki: where a text view's headings were painted, in the order the
+/// document paints them, each with its level. The application holds one
+/// (`TextView::headings`) and reads it after a frame: an outline of the
+/// document goes to a heading by where it stands.
+#[derive(Clone, Default)]
+pub struct HeadingSpots(Rc<SpotsInner>);
+
+#[derive(Default)]
+struct SpotsInner {
+    now: RefCell<Vec<(u8, Bounds<Pixels>)>>,
+    last: RefCell<Vec<(u8, Bounds<Pixels>)>>,
+}
+
+impl HeadingSpots {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Each heading's level and bounds, as the last whole frame painted
+    /// them.
+    pub fn spots(&self) -> Vec<(u8, Bounds<Pixels>)> {
+        self.0.last.borrow().clone()
+    }
+
+    pub(crate) fn begin_frame(&self) {
+        self.0.now.borrow_mut().clear();
+    }
+
+    pub(crate) fn painted(&self, level: u8, bounds: Bounds<Pixels>) {
+        self.0.now.borrow_mut().push((level, bounds));
+    }
+
+    pub(crate) fn end_frame(&self) {
+        let now = std::mem::take(&mut *self.0.now.borrow_mut());
+        *self.0.last.borrow_mut() = now;
+    }
+}
+
 /// Where `query` stands in `text`, case folded unless `case_sensitive`.
 /// Folding that changes a text's length in bytes falls back to the case
 /// as written, so the ranges stay the text's own.

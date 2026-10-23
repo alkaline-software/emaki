@@ -85,6 +85,8 @@ pub struct TextViewState {
     selected_text_override: Option<String>,
     /// Emaki: the words found in it, painted by each run (`find.rs`).
     pub(crate) find: Option<super::TextFind>,
+    /// Emaki: where its headings are painted (`find.rs`).
+    pub(crate) headings: Option<super::HeadingSpots>,
     select_all: bool,
     pub(super) auto_scroll: AutoScroll,
     pub(super) selection_adapter: TextViewSelectionAdapter,
@@ -163,6 +165,7 @@ impl TextViewState {
             multi_click_selection: None,
             selected_text_override: None,
             find: None,
+            headings: None,
             select_all: false,
             selectable: false,
             selection_format: SelectionFormat::default(),

@@ -12,7 +12,7 @@ use std::{
 use gpui::{HighlightStyle, SharedString, Task};
 use gpui_base::input::{
     EditorState, FoldRange, HighlightStyleResolver, InputEdit as BaseInputEdit, InputHighlighter,
-    InputHighlighterFactory,
+    InputHighlighterFactory, RopeExt as _,
 };
 use ropey::Rope;
 use tree_sitter::{InputEdit, ParseOptions, Parser, Point};
@@ -155,7 +155,7 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                         SyntaxHighlighter::compute_injection_layers(data, &tree, &text)
                     });
                     let folds = if folding {
-                        extract_fold_ranges(&tree)
+                        extract_fold_ranges(&tree, &text)
                     } else {
                         Vec::new()
                     };
@@ -182,19 +182,19 @@ impl InputHighlighter for TreeSitterInputHighlighter {
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         self.inner.borrow().styles(range, resolver)
     }
-    fn fold_ranges(&self, _: &Rope) -> Vec<FoldRange> {
+    fn fold_ranges(&self, text: &Rope) -> Vec<FoldRange> {
         self.inner
             .borrow()
             .tree()
-            .map(extract_fold_ranges)
+            .map(|tree| extract_fold_ranges(tree, text))
             .unwrap_or_default()
     }
 
-    fn fold_ranges_for_edit(&self, range: Range<usize>, _: &Rope) -> Vec<FoldRange> {
+    fn fold_ranges_for_edit(&self, range: Range<usize>, text: &Rope) -> Vec<FoldRange> {
         self.inner
             .borrow()
             .tree()
-            .map(|tree| extract_fold_ranges_in_range(tree, range))
+            .map(|tree| extract_fold_ranges_in_range(tree, range, text))
             .unwrap_or_default()
     }
 }
@@ -210,15 +210,25 @@ fn to_tree_sitter_edit(edit: BaseInputEdit) -> InputEdit {
     }
 }
 
-fn extract_fold_ranges(tree: &tree_sitter::Tree) -> Vec<FoldRange> {
-    extract_fold_ranges_in_range(tree, 0..usize::MAX)
+fn extract_fold_ranges(tree: &tree_sitter::Tree, text: &Rope) -> Vec<FoldRange> {
+    extract_fold_ranges_in_range(tree, 0..usize::MAX, text)
+}
+
+/// Whether folding `start..=end` hides anything to read: the rows a fold
+/// hides are the ones between its first and last, and a node that ends
+/// at the start of a line (an HTML block, a paragraph) takes the blank
+/// line after it along. One such fold hid a blank line and nothing else.
+/// (Emaki addition.)
+fn hides_words(text: &Rope, start: usize, end: usize) -> bool {
+    (start + 1..end.min(text.lines_len())).any(|row| text.slice_line(row).chars().any(|c| !c.is_whitespace()))
 }
 
 fn extract_fold_ranges_in_range(
     tree: &tree_sitter::Tree,
     byte_range: Range<usize>,
+    text: &Rope,
 ) -> Vec<FoldRange> {
-    fn collect(node: tree_sitter::Node, bytes: &Range<usize>, ranges: &mut Vec<FoldRange>) {
+    fn collect(node: tree_sitter::Node, bytes: &Range<usize>, text: &Rope, ranges: &mut Vec<FoldRange>) {
         if node.end_byte() <= bytes.start || node.start_byte() >= bytes.end {
             return;
         }
@@ -232,12 +242,12 @@ fn extract_fold_ranges_in_range(
         // mark is the item's, as every other item's is. With the list
         // kept, the first item's mark folded every item. (Emaki
         // addition.)
-        if node.kind() != "list" {
+        if node.kind() != "list" && hides_words(text, start, end) {
             ranges.push(FoldRange::new(start, end));
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            collect(child, bytes, ranges);
+            collect(child, bytes, text, ranges);
         }
     }
 
@@ -245,7 +255,7 @@ fn extract_fold_ranges_in_range(
     let mut ranges = Vec::new();
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
-        collect(child, &byte_range, &mut ranges);
+        collect(child, &byte_range, text, &mut ranges);
     }
     ranges.sort_by_key(|range| range.start_line);
     ranges.dedup_by_key(|range| range.start_line);

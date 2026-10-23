@@ -1027,6 +1027,28 @@ impl Element for Scrollbar {
                     idle_state
                 };
 
+            // Off a Mac the thumb stands at the end of its track while the
+            // content runs past its end, and keeps its length: there is no
+            // rubber band to show. Measured from the offset as it is, it
+            // shrank and grew at every step there, and shook. (Emaki
+            // addition.)
+            let scroll_position = if cfg!(target_os = "macos") {
+                scroll_position
+            } else {
+                scroll_position.max(container_size - scroll_area_size).min(px(0.))
+            };
+            // On Windows the bar is a thin line until the pointer is on it,
+            // as Windows 11's own is. (Emaki addition.)
+            let (thumb_width, radius) = if cfg!(target_os = "windows")
+                && !is_hovered_on_bar
+                && !is_hovered_on_thumb
+                && state.get().dragged_axis != Some(axis)
+            {
+                (px(2.), px(1.))
+            } else {
+                (thumb_width, radius)
+            };
+
             let thumb_size = (container_size / scroll_area_size * container_size).max(min_length);
             let thumb_start = -(scroll_position / (scroll_area_size - container_size)
                 * (container_size - margin_end - thumb_size));

@@ -503,6 +503,50 @@ pub(crate) const FILE_ANIM: Duration = Duration::from_millis(200);
 const TREE_SPRING: Duration = Duration::from_millis(650);
 /// How wide the pane is to begin with, and the least it is dragged to.
 pub(crate) const FILE_W: Pixels = px(460.);
+/// The structure at the files panel's foot: how tall it stands open to
+/// begin with, the least it is dragged to, and how long it takes to open
+/// or fold to its head.
+pub(crate) const STRUCTURE_H: Pixels = px(220.);
+const STRUCTURE_MIN: Pixels = px(72.);
+const STRUCTURE_FLIP: Duration = Duration::from_millis(200);
+/// How long the file as it reads takes to glide to a heading chosen in
+/// the structure.
+const HEAD_GLIDE: Duration = Duration::from_millis(280);
+
+/// A heading of the file shown, for the structure at the files panel's
+/// foot: its level, its words, and its line in the file (from 0).
+pub(crate) struct FileHead {
+    pub(crate) level: u8,
+    pub(crate) title: String,
+    pub(crate) line: usize,
+}
+
+/// The headings of a markdown text, in order, as the view draws them: a
+/// YAML header is a table there and no heading, and a heading inside a
+/// block of code is code.
+fn heads_of(text: &str) -> Vec<FileHead> {
+    use markdown::mdast::Node;
+    let (rest, before) = match emaki_core::files::front_matter(text) {
+        Some((_, rest)) => (rest, text[..text.len() - rest.len()].matches('\n').count()),
+        None => (text, 0),
+    };
+    // The parser panics on some inputs (`transcript::markdown_is_safe`).
+    let opts = markdown::ParseOptions::gfm();
+    let Ok(Ok(tree)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(rest, &opts))) else { return Vec::new() };
+    let mut heads = Vec::new();
+    let mut stack = vec![&tree];
+    while let Some(node) = stack.pop() {
+        if let Node::Heading(h) = node {
+            let line = h.position.as_ref().map_or(0, |p| p.start.line.saturating_sub(1)) + before;
+            heads.push(FileHead { level: h.depth, title: node.to_string(), line });
+            continue;
+        }
+        if let Some(children) = node.children() {
+            stack.extend(children.iter().rev());
+        }
+    }
+    heads
+}
 pub(crate) const FILE_MIN: Pixels = px(280.);
 /// What the file pane's head keeps for the file's name before it folds
 /// Open and Reveal into one More button, and Save into its icon.
@@ -976,6 +1020,9 @@ pub(crate) struct FileEditor {
     pub(crate) issues_for: String,
     pub(crate) check_serial: u64,
     pub(crate) check_at_caret: bool,
+    /// The marks drawn under those, a collection of the editor's
+    /// decorations, made at the first marks.
+    pub(crate) spell_marks: Option<gpui_component::input::TextDecorationCollection>,
 }
 
 /// One change in the file's editor, opened from its mark in the margin:
@@ -1029,6 +1076,10 @@ enum FileBody {
     Doc(String),
     /// A Word document, written in by its own pane (`word.rs`).
     Word,
+    /// A video (true) or a sound, played by the system's web view in a
+    /// page of ours (`html_web::Page::Media`). Linux has none, and there
+    /// such a file is one Emaki cannot show.
+    Media(bool),
     /// An Excel workbook: each sheet's name and what a table has.
     Sheets(Vec<(String, Vec<Vec<String>>, Vec<usize>, bool)>),
     /// Not something the window shows, or not readable: why.
@@ -1175,6 +1226,9 @@ fn read_file(path: &Path, root: &Path) -> FileView {
     if crate::word::opens(&ext).is_some() {
         return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Word, source: None, kinds: Vec::new(), rows_all: None };
     }
+    if let Some(video) = crate::html_web::media_kind(path).filter(|_| cfg!(any(target_os = "macos", target_os = "windows"))) {
+        return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Media(video), source: None, kinds: Vec::new(), rows_all: None };
+    }
     if ext == "pdf" || ext == "pptx" {
         return FileView { path: path.to_path_buf(), rel, size, mtime, body: FileBody::Pages(None), source: None, kinds: Vec::new(), rows_all: None };
     }
@@ -1246,6 +1300,61 @@ fn table_shape(mut rows: Vec<Vec<String>>) -> (Vec<Vec<String>>, Vec<usize>) {
     (rows, widths)
 }
 
+/// `text` with each picture it shows by a path relative to the file
+/// given the whole path from `dir`, the file's folder, as GitHub reads a
+/// README: the view reads a relative path from the app's own folder, and
+/// found nothing. Pictures written as markdown (`![](docs/a.png)`) and as
+/// HTML (`<img src="docs/a.png">`); a block of code is code, and keeps
+/// its words. An address (`https://…`) is fetched as it is (`fetch.rs`).
+fn pictures_from(text: &str, dir: &Path) -> String {
+    use markdown::mdast::Node;
+    static SRC: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)<img\b[^>]*?\ssrc\s*=\s*["']([^"']+)["']"#).unwrap());
+    let relative = |url: &str| !url.is_empty() && !url.starts_with(['/', '#', '\\']) && !url.contains("://") && !url.starts_with("data:") && !url.starts_with("mailto:");
+    let whole = |url: &str| format!("file://{}", dir.join(url).display());
+    // The parser panics on some inputs (`transcript::markdown_is_safe`).
+    let opts = markdown::ParseOptions::gfm();
+    let Ok(Ok(tree)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(text, &opts))) else { return text.to_string() };
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut stack = vec![&tree];
+    while let Some(node) = stack.pop() {
+        let span = node.position().map(|p| p.start.offset..p.end.offset).filter(|r| r.end <= text.len());
+        match (node, span) {
+            (Node::Image(image), Some(span)) if relative(&image.url) => {
+                // The address as written, the last of the node's words:
+                // the words before it are the picture's alt text.
+                if let Some(at) = text[span.clone()].rfind(image.url.as_str()) {
+                    let at = span.start + at;
+                    let bracketed = text[..at].ends_with('<');
+                    let url = whole(&image.url);
+                    let url = if url.contains(' ') && !bracketed { format!("<{url}>") } else { url };
+                    edits.push((at..at + image.url.len(), url));
+                }
+            }
+            (Node::Html(_), Some(span)) => {
+                for cap in SRC.captures_iter(&text[span.clone()]) {
+                    let m = cap.get(1).unwrap();
+                    if relative(m.as_str()) {
+                        edits.push((span.start + m.start()..span.start + m.end(), whole(m.as_str())));
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(children) = node.children() {
+            stack.extend(children.iter());
+        }
+    }
+    if edits.is_empty() {
+        return text.to_string();
+    }
+    edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+    let mut out = text.to_string();
+    for (range, with) in edits {
+        out.replace_range(range, &with);
+    }
+    out
+}
+
 /// What the pane shows for a file that holds `bytes`, and its source
 /// when it can be edited. The bytes are the file's, or what its editor
 /// holds when that is to be read before it is saved (`edited_body`).
@@ -1279,7 +1388,10 @@ fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Rc<str>>) {
                 if whole {
                     source = Some(text.as_str().into());
                 }
-                FileBody::Markdown(text)
+                FileBody::Markdown(match path.parent() {
+                    Some(dir) => pictures_from(&text, dir),
+                    None => text,
+                })
             } else if lang == "html" && !cut {
                 if whole {
                     source = Some(text.as_str().into());
@@ -2427,9 +2539,20 @@ impl Workbench {
     /// It shows the file as saved, not as its editor has it. Called at
     /// every draw. Where the system has no web view to give, the page
     /// is `html_fit`'s to draw.
-    pub(crate) fn html_web_sync(&mut self, window: &mut Window, _: &mut Context<Self>) {
-        let shows = self.file_pane_shown() && !self.file_raw;
-        let Some((path, mtime)) = self.file_view.as_ref().filter(|v| shows && matches!(v.body, FileBody::Html(_))).map(|v| (v.path.clone(), v.mtime)) else {
+    pub(crate) fn html_web_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A page as it reads, or a video or a sound, which has no other
+        // way to show.
+        let ground = {
+            let c = gpui::Rgba::from(cx.theme().background);
+            format!("{:02x}{:02x}{:02x}", (c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8)
+        };
+        let shown_as = |v: &FileView, raw: bool| match v.body {
+            FileBody::Html(_) if !raw => Some(crate::html_web::Page::File),
+            FileBody::Media(video) => Some(crate::html_web::Page::Media { video, ground: ground.clone() }),
+            _ => None,
+        };
+        let shows = self.file_pane_shown();
+        let Some((path, page, mtime)) = self.file_view.as_ref().filter(|_| shows).and_then(|v| shown_as(v, self.file_raw).map(|page| (v.path.clone(), page, v.mtime))) else {
             // Let go, and the keyboard with it back to the window: a
             // click in the page had given it to the page.
             if self.html_web.take().is_some() {
@@ -2439,7 +2562,7 @@ impl Workbench {
         };
         if self.html_web.is_none() && !self.html_web_none {
             let Some(root) = self.files_root() else { return };
-            self.html_web = crate::html_web::Web::open(window, &path, mtime, &root);
+            self.html_web = crate::html_web::Web::open(window, &path, page.clone(), mtime, &root);
             self.html_web_none = self.html_web.is_none();
         }
         let over = self.over_page();
@@ -2447,8 +2570,8 @@ impl Workbench {
         let (files, outline) = self.panels_shown();
         let (left, right) = (!files && !outline, self.file_over() && !self.term_panel_shown());
         let Some(web) = self.html_web.as_mut() else { return };
-        if web.file != path || web.mtime != mtime {
-            web.load(&path, mtime);
+        if web.file != path || web.page != page || web.mtime != mtime {
+            web.load(&path, page, mtime);
         }
         web.round(left, right, f32::from(crate::workbench::CARD_R));
         // Where it stands is the pane's to say as it is laid out
@@ -3129,7 +3252,7 @@ impl Workbench {
         })
         .detach();
         let path = want.path.clone();
-        self.file_editor = Some(FileEditor { key: want.key, path: want.path, lang, state, saved: want.saved, mtime, base: None, marks_due: false, marks_busy: false, hunks: Vec::new(), issues: Vec::new(), issues_for: String::new(), check_serial: 0, check_at_caret: true });
+        self.file_editor = Some(FileEditor { key: want.key, path: want.path, lang, state, saved: want.saved, mtime, base: None, marks_due: false, marks_busy: false, hunks: Vec::new(), issues: Vec::new(), issues_for: String::new(), check_serial: 0, check_at_caret: true, spell_marks: None });
         self.read_file_base(path, cx);
         self.file_check_soon(cx);
     }
@@ -5721,8 +5844,294 @@ impl Workbench {
             if !this.tree_rename_key(e, window, cx) {
                 this.tree_key(e, cx);
             }
-        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head(t("Files"), self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body);
+        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head(t("Files"), self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body).children(exists.then(|| self.render_file_structure(cx)).flatten());
+        // The structure's edge, held: the pointer anywhere over the panel
+        // sets its height, and a release anywhere lets it go.
+        let el = el
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if let Some((y, h)) = this.file_structure_drag {
+                    if ev.pressed_button != Some(MouseButton::Left) {
+                        this.file_structure_let_go();
+                        return;
+                    }
+                    let most = (this.files_scroll.bounds().size.height + this.file_structure_h - px(120.)).max(STRUCTURE_MIN);
+                    this.file_structure_h = (h + y - ev.position.y).clamp(STRUCTURE_MIN, most);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.file_structure_let_go()))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.file_structure_let_go()));
         self.panel_in(true, el)
+    }
+
+    fn file_structure_let_go(&mut self) {
+        if self.file_structure_drag.take().is_some() {
+            self.save_ui(true);
+        }
+    }
+
+    /// The headings of the file shown, when it is markdown: of what its
+    /// editor holds when there is one for it (as written, or with changes
+    /// not saved), else of the file as read. Made once a text.
+    fn file_heads_now(&mut self, cx: &App) -> Option<Rc<Vec<FileHead>>> {
+        use std::hash::{Hash, Hasher};
+        let v = self.file_view.as_ref()?;
+        let FileBody::Markdown(read) = &v.body else { return None };
+        let text = match self.file_editor.as_ref().filter(|ed| ed.path == v.path) {
+            Some(ed) => ed.state.read(cx).value().to_string(),
+            None => read.clone(),
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        let key = h.finish();
+        if let Some((k, heads)) = &self.file_heads {
+            if *k == key {
+                return Some(heads.clone());
+            }
+        }
+        let heads = Rc::new(heads_of(&text));
+        self.file_heads = Some((key, heads.clone()));
+        Some(heads)
+    }
+
+    /// Where the reader is in the file, as the structure marks it: the last
+    /// heading at or above the caret in the file as written, or above the
+    /// top of the pane as it reads. None before the first.
+    fn file_head_at(&self, heads: &[FileHead], cx: &App) -> Option<usize> {
+        if self.file_raw {
+            let state = self.file_editor.as_ref()?.state.read(cx);
+            let value = state.value();
+            let line = value.get(..state.cursor().min(value.len()))?.matches('\n').count();
+            heads.iter().rposition(|h| h.line <= line)
+        } else {
+            // A heading just clicked, while the file is where the click
+            // put it.
+            if let (Some((path, ix, glide)), Some(v)) = (&self.file_structure_pick, &self.file_view) {
+                if *path == v.path && *glide == self.file_glide && *ix < heads.len() {
+                    return Some(*ix);
+                }
+            }
+            let spots = self.file_heads_spots.spots();
+            if spots.len() != heads.len() {
+                return None;
+            }
+            let top = self.file_view_scroll.bounds().top() + px(24.);
+            spots.iter().rposition(|(_, b)| b.top() <= top)
+        }
+    }
+
+    /// Goes to a heading chosen in the structure: the caret to its line in
+    /// the file as written, or the heading marked as it reads. A heading
+    /// out of view glides to a third of the way down the pane, as VS Code
+    /// shows a symbol picked in its outline: on the page with the start of
+    /// its section under it, not on the pane's last line. One in view
+    /// stays where it is.
+    pub(crate) fn file_head_go(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, heads)) = self.file_heads.clone() else { return };
+        let Some(head) = heads.get(ix) else { return };
+        if self.file_raw {
+            let Some(state) = self.file_editor.as_ref().map(|ed| ed.state.clone()) else { return };
+            let (at, to) = {
+                let s = state.read(cx);
+                let at = s.scroll_offset();
+                let to = s.line_top(head.line).zip(s.line_height()).and_then(|((top, view), line)| {
+                    let shown = top + at.y >= px(0.) && top + at.y + line <= view;
+                    (!shown).then(|| (view / 3. - top).min(px(0.)))
+                });
+                (at, to)
+            };
+            let line = head.line as u32;
+            state.update(cx, |s, cx| {
+                s.set_cursor_position(gpui_component::input::Position::new(line, 0), window, cx);
+                // The caret's own scroll would show the line at the
+                // pane's foot at once; the glide below takes it instead.
+                if to.is_some() {
+                    s.set_scroll_offset(at, cx);
+                }
+            });
+            if let Some(to) = to {
+                self.file_glide_to(at.y, to, |this, y, cx| {
+                    if let Some(state) = this.file_editor.as_ref().map(|ed| ed.state.clone()) {
+                        state.update(cx, |s, cx| {
+                            let x = s.scroll_offset().x;
+                            s.set_scroll_offset(point(x, y), cx);
+                        });
+                    }
+                }, cx);
+            }
+        } else {
+            self.file_head_glide(ix, cx);
+        }
+        cx.notify();
+    }
+
+    /// The file as it reads glides till that heading stands a third of the
+    /// way down, when it is out of view; the heading is lit either way.
+    fn file_head_glide(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.file_view.as_ref().map(|v| v.path.clone()) else { return };
+        if let Some((_, b)) = self.file_heads_spots.spots().get(ix) {
+            let (view, at) = (self.file_view_scroll.bounds(), self.file_view_scroll.offset());
+            if b.top() < view.top() || b.bottom() > view.bottom() {
+                let to = (at.y - (b.top() - view.top() - view.size.height / 3.)).clamp(-self.file_view_scroll.max_offset().y, px(0.));
+                self.file_view_glide(to, cx);
+            }
+            self.file_structure_pick = Some((path, ix, self.file_glide));
+        }
+    }
+
+    /// The file's pane scrolled to `to` over `HEAD_GLIDE`, easing out, a
+    /// frame at a time: a scroll a click starts is drawn. A newer glide
+    /// takes over, and a wheel in the pane ends it.
+    pub(crate) fn file_view_glide(&mut self, to: Pixels, cx: &mut Context<Self>) {
+        let from = self.file_view_scroll.offset().y;
+        self.file_glide_to(from, to, |this, y, _| {
+            let x = this.file_view_scroll.offset().x;
+            this.file_view_scroll.set_offset(point(x, y));
+        }, cx);
+    }
+
+    /// A glide of the file's pane from `from` to `to`, `set` putting each
+    /// frame's offset where it goes: the file as it reads or as written.
+    fn file_glide_to(&mut self, from: Pixels, to: Pixels, set: fn(&mut Self, Pixels, &mut Context<Self>), cx: &mut Context<Self>) {
+        self.file_glide += 1;
+        let serial = self.file_glide;
+        cx.spawn(async move |this, cx| {
+            let start = std::time::Instant::now();
+            loop {
+                cx.background_executor().timer(Duration::from_millis(8)).await;
+                let t = (start.elapsed().as_secs_f32() / HEAD_GLIDE.as_secs_f32()).min(1.);
+                let eased = 1. - (1. - t).powi(3);
+                let going = this.update(cx, |this, cx| {
+                    if this.file_glide != serial {
+                        return false;
+                    }
+                    set(this, from + (to - from) * eased, cx);
+                    cx.notify();
+                    t < 1.
+                });
+                if !going.unwrap_or(false) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The structure at the files panel's foot, as VS Code's explorer has
+    /// one: a head that folds it to itself, and under it the headings of
+    /// the file shown, each a click to go to, the one where the reader is
+    /// lit. Its top edge is dragged to make it taller. Always there, folded
+    /// to its head to begin with.
+    fn render_file_structure(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let (open, h) = (self.file_structure_open, self.file_structure_h);
+        let quiet = |words: &'static str| div().px(px(16.)).py(px(8.)).text_size(px(12.)).text_color(theme.muted_foreground).child(words).into_any_element();
+        let heads = self.file_heads_now(cx);
+        let body: AnyElement = match (&self.file_view, heads) {
+            (None, _) => quiet(t("No file is open.")),
+            (Some(_), None) => quiet(t("No structure for this kind of file.")),
+            (Some(_), Some(heads)) if heads.is_empty() => quiet(t("No headings in this file.")),
+            (Some(_), Some(heads)) => {
+                let at = self.file_head_at(&heads, cx);
+                // The heading marked stays in the list's view as the
+                // reader goes on.
+                if at != self.file_structure_at {
+                    self.file_structure_at = at;
+                    if let Some(ix) = at {
+                        self.file_structure_scroll.scroll_to_item(ix);
+                    }
+                }
+                let least = heads.iter().map(|h| h.level).min().unwrap_or(1);
+                let rows = heads.iter().enumerate().map(|(ix, head)| {
+                    let lit = at == Some(ix);
+                    h_flex()
+                        .id(("file-head", ix))
+                        .h(TREE_ROW_H)
+                        .flex_shrink_0()
+                        .mx(px(6.))
+                        .pl(px(8. + 12. * f32::from(head.level - least)))
+                        .pr(px(8.))
+                        .gap(px(6.))
+                        .items_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .when(lit, |d| d.bg(theme.primary.opacity(0.12)))
+                        .when(!lit, |d| d.hover(|s| s.bg(row_hover(&theme, dark))))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.file_head_go(ix, window, cx);
+                        }))
+                        // As many signs as the heading has in markdown.
+                        .child(div().flex_shrink_0().text_size(px(12.)).text_color(theme.muted_foreground).child("#".repeat(head.level as usize)))
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.foreground).child(head.title.clone()))
+                });
+                self.inner_scroller(&self.file_structure_scroll, crate::workbench::Inner::Held);
+                v_flex()
+                    .id("file-structure-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.file_structure_scroll)
+                    .py(px(4.))
+                    .children(rows)
+                    .vertical_scrollbar(&self.file_structure_scroll)
+                    .into_any_element()
+            }
+        };
+        let chevron = Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(10.)).text_color(theme.muted_foreground);
+        let head = h_flex()
+            .id("file-structure-head")
+            .relative()
+            .h(HEAD_H)
+            .flex_shrink_0()
+            .px(px(14.))
+            .gap(px(6.))
+            .items_center()
+            .bg(theme.muted.opacity(0.3))
+            .border_t_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(px(11.))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.file_structure_open = !this.file_structure_open;
+                this.file_structure_flip += 1;
+                this.save_ui(true);
+                cx.notify();
+            }))
+            .child(chevron)
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(t("Structure")))
+            // Its top edge, held to make the structure taller or shorter.
+            .when(open, |d| {
+                d.child(
+                    div()
+                        .id("file-structure-edge")
+                        .absolute()
+                        .top(px(-3.))
+                        .left_0()
+                        .right_0()
+                        .h(px(6.))
+                        .cursor(CursorStyle::ResizeRow)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.file_structure_drag = Some((ev.position.y, this.file_structure_h));
+                            }),
+                        )
+                        .on_click(|_, window, cx| swallow_click(window, cx)),
+                )
+            });
+        // The list opens and folds over a moment, from and to the head.
+        let list = div().overflow_hidden().flex_shrink_0().child(div().h(h).child(body));
+        let list = if self.file_structure_flip == 0 {
+            list.h(if open { h } else { px(0.) }).into_any_element()
+        } else {
+            list.with_animation(ElementId::Name(format!("file-structure-{}", self.file_structure_flip).into()), Animation::new(STRUCTURE_FLIP).with_easing(ease_out_quint()), move |d, t| d.h(h * if open { t } else { 1. - t }))
+                .into_any_element()
+        };
+        Some(v_flex().flex_shrink_0().child(head).child(list).into_any_element())
     }
 
     // -- branches -------------------------------------------------------------
@@ -7522,12 +7931,14 @@ impl Workbench {
                     Some((fields, rest)) => format!("{}\n{rest}", emaki_core::files::front_matter_table(&fields)),
                     None => text.clone(),
                 };
-                div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), words, self.text_find_open.then(|| self.text_find.clone()), cx)).into_any_element()
+                div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), words, self.text_find_open.then(|| self.text_find.clone()), Some(self.file_heads_spots.clone()), cx)).into_any_element()
             }
-            FileBody::Notebook(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), cx)).into_any_element(),
+            FileBody::Notebook(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), None, cx)).into_any_element(),
             // The web view stands over the pane's room; nothing of the
             // page is drawn under it.
             FileBody::Html(_) if self.html_web.is_some() => div().into_any_element(),
+            // So does a video or a sound, on the pane's whole room.
+            FileBody::Media(_) => div().into_any_element(),
             FileBody::Html(text) => {
                 if !leaving {
                     self.html_want.set(room);
@@ -7679,7 +8090,7 @@ impl Workbench {
                 heads = Some(self.render_table_heads(v, rows.len(), widths, cx));
                 self.render_table(v, rows, widths, *more, cx)
             }
-            FileBody::Doc(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), cx)).into_any_element(),
+            FileBody::Doc(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), None, cx)).into_any_element(),
             FileBody::Sheets(sheets) => match sheets.get(self.sheet_of(&v.path, sheets.len())) {
                 Some((_, rows, widths, more)) if !rows.is_empty() => {
                     wide = true;
@@ -8138,7 +8549,7 @@ impl Workbench {
                         // The web view is put over this room as the room
                         // is laid out, so it moves in the frame the pane
                         // does.
-                        .when_some(self.html_web.as_ref().filter(|_| !leaving && matches!(v.body, FileBody::Html(_)) && !self.file_raw).map(|web| web.placer()), |d, place| {
+                        .when_some(self.html_web.as_ref().filter(|_| !leaving && ((matches!(v.body, FileBody::Html(_)) && !self.file_raw) || matches!(v.body, FileBody::Media(_)))).map(|web| web.placer()), |d, place| {
                             d.child(canvas(move |bounds, _, _| place(bounds), |_, _, _, _| {}).absolute().inset_0())
                         })
                         .map(|d| match (word, editor) {
@@ -8662,6 +9073,12 @@ impl Workbench {
                     web.take_keys();
                 }
             }
+            // How far the player in the page has read its file, printed.
+            "web:media" => {
+                if let Some(web) = &self.html_web {
+                    web.print_media();
+                }
+            }
             // The pane's enlarge button.
             // In a Word document: word:type:<words> types, word:run:<id>
             // runs one of the engine's commands, word:end and word:all
@@ -8791,6 +9208,17 @@ impl Workbench {
             }
             "file:spellmenu" => self.file_spell_menu_probe = true,
             "file:spellfix" => self.file_spell_fix_probe = true,
+            // The structure at the files panel's foot: its head's click, and
+            // a click on its nth heading in a file as it reads.
+            "filehead:fold" => {
+                self.file_structure_open = !self.file_structure_open;
+                self.file_structure_flip += 1;
+            }
+            t if t.starts_with("filehead:") => {
+                if let Ok(ix) = t["filehead:".len()..].parse::<usize>() {
+                    self.file_head_probe = Some(ix);
+                }
+            }
             // ⌘A in the files tree, and a rectangle dragged down it from
             // one height to another, in points from the tree's top.
             "treeall" => self.tree_key(&KeyDownEvent { keystroke: Keystroke::parse("secondary-a").unwrap(), is_held: false, prefer_character_input: false }, cx),
@@ -8951,5 +9379,19 @@ mod draft_tests {
         assert!(!keys.contains(&(Some(GONE as u64), Some("/c".into()))), "a row taken up leaves under its old writer");
         assert!(keys.contains(&(Some(OWN as u64), Some("/c".into()))), "and is written as this Emaki's");
         assert!(!keys.contains(&(Some(OWN as u64), Some("/d".into()))), "this Emaki's old rows are replaced by what it has now");
+    }
+
+    /// A picture by a relative path is read from the markdown file's
+    /// folder, written as markdown or as HTML; code and addresses keep
+    /// their words.
+    #[test]
+    fn pictures_are_read_from_the_files_folder() {
+        let dir = std::path::Path::new("/home/a b/repo");
+        let text = "![shot](docs/shot.png)\n\n<p><img src=\"assets/x.gif\" width=\"100%\"></p>\n\n```md\n![code](docs/shot.png)\n```\n\n![web](https://emaki.lol/a.gif) ![top](/abs/a.png)\n";
+        let out = super::pictures_from(text, dir);
+        assert!(out.contains("![shot](<file:///home/a b/repo/docs/shot.png>)"), "{out}");
+        assert!(out.contains("<img src=\"file:///home/a b/repo/assets/x.gif\""), "{out}");
+        assert!(out.contains("![code](docs/shot.png)"), "a block of code keeps its words: {out}");
+        assert!(out.contains("![web](https://emaki.lol/a.gif)") && out.contains("![top](/abs/a.png)"), "{out}");
     }
 }

@@ -86,7 +86,7 @@ fn open_settings_window(workbench: WeakEntity<Workbench>, cx: &mut App) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(titlebar),
             window_min_size: Some(SETTINGS_MIN),
-            app_id: Some("emaki".into()),
+            app_id: Some("Emaki".into()),
             // The top is the app's to drag by (`drag_region`): left to
             // AppKit, a press on a control there moved the window.
             app_owns_titlebar_drag: true,
@@ -344,7 +344,9 @@ impl Workbench {
                             // as the Mac's own settings do. It fades in with
                             // the page.
                             .child(
-                                Self::drag_region(h_flex().h(TOP_H).flex_shrink_0().w_full().px(PAGE_X).items_center(), cx)
+                                // The window's own buttons stand at its right
+                                // where the system draws none (`csd.rs`).
+                                Self::drag_region(h_flex().h(TOP_H).flex_shrink_0().w_full().pl(PAGE_X).pr(PAGE_X + crate::csd::room(window, cx).1).items_center(), cx)
                                     .child(page_in(title_anim, div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title)))
                                     .when(section == "appearance", |d| d.child(div().flex_1()).child(language)),
                             )
@@ -383,6 +385,7 @@ impl Workbench {
                 m.by = self.pill_at.borrow().get(&(m.what, true)).copied().unwrap_or(m.by);
                 d.child(self.render_pick(m, false, window, cx))
             })
+            .children(crate::csd::chrome(window, TOP_H / 2. - px(12.), |window, _| window.remove_window(), cx))
             .into_any_element()
     }
 
@@ -593,7 +596,11 @@ impl Workbench {
                     .when(active, |d| d.bg(theme.primary.opacity(0.08)))
                     .when(!active, |d| d.hover(|s| s.border_color(theme.muted_foreground)))
                     .on_click(cx.listener(move |this, _, window, cx| if mono { this.set_mono_font(key, window, cx) } else { this.set_chat_font(key, cx) }))
-                    .child(div().text_size(px(if mono { 16. } else { 20. })).line_height(px(25.)).font_family(face.family).child(sample))
+                    // One line, at a size that fits the narrowest tile:
+                    // wrapped in a narrow tile, or in a wider face drawn
+                    // while its own loads, the sample pushed the face's
+                    // name out of the tile.
+                    .child(div().whitespace_nowrap().overflow_hidden().text_size(px(if mono { 14. } else { 20. })).line_height(px(25.)).font_family(face.family).child(sample))
                     .child(div().truncate().text_size(px(11.5)).text_color(if active { theme.foreground } else { theme.muted_foreground }).child(face.name))
             }))
         };
@@ -954,7 +961,10 @@ impl Workbench {
             .child(column(t("Code"), true, cx))
             .child(column(t("Documents and data"), false, cx))
             .into_any_element();
-        vec![group(None, None, vec![line(t("Format on save"), Some(div().child(t("A file saved from its pane is put in its language's form.")).into_any_element()), format_on_save, &theme)], &theme), group(Some(t("Languages")), None, vec![lists], &theme)]
+        vec![
+            group(None, None, vec![line(t("Format on save"), Some(div().child(t("A file saved from its pane is put in its language's form.")).into_any_element()), format_on_save, &theme)], &theme),
+            group(Some(t("Languages")), None, vec![lists], &theme),
+        ]
     }
 
     /// Updates, at About's foot, as little as possible:

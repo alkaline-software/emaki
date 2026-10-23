@@ -35,6 +35,10 @@ pub struct UiState {
     pub term_w: Option<f32>,
     /// How wide the file shown beside the conversation was dragged to.
     pub file_w: Option<f32>,
+    /// The structure at the files panel's foot: open or folded to its
+    /// head, and how tall it was dragged to.
+    pub file_structure_open: Option<bool>,
+    pub file_structure_h: Option<f32>,
     /// What stands beside a PDF's pages: `pages`, `contents` or nothing.
     pub pdf_side: Option<String>,
     pub term_agent: Option<bool>,

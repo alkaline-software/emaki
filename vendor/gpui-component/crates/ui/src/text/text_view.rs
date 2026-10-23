@@ -74,6 +74,8 @@ pub struct TextView {
     markdown_extensions: Arc<MarkdownExtensions>,
     /// Emaki: the words found in it (`TextFind`).
     find: Option<super::TextFind>,
+    /// Emaki: where its headings are painted (`HeadingSpots`).
+    headings: Option<super::HeadingSpots>,
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -116,6 +118,7 @@ impl TextView {
             link_click_handler: None,
             markdown_extensions: Arc::default(),
             find: None,
+            headings: None,
         }
     }
 
@@ -135,6 +138,7 @@ impl TextView {
             link_click_handler: None,
             markdown_extensions: Arc::default(),
             find: None,
+            headings: None,
         }
     }
 
@@ -154,6 +158,7 @@ impl TextView {
             link_click_handler: None,
             markdown_extensions: Arc::default(),
             find: None,
+            headings: None,
         }
     }
 
@@ -168,6 +173,13 @@ impl TextView {
     /// letters and the current one stronger (`TextFind`).
     pub fn find(mut self, find: Option<super::TextFind>) -> Self {
         self.find = find;
+        self
+    }
+
+    /// Emaki: keep where its headings are painted, for an outline that
+    /// goes to one (`HeadingSpots`).
+    pub fn headings(mut self, headings: Option<super::HeadingSpots>) -> Self {
+        self.headings = headings;
         self
     }
 
@@ -348,6 +360,7 @@ impl Element for TextView {
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;
             state.find = self.find.clone();
+            state.headings = self.headings.clone();
             if state.text_view_style != self.text_view_style {
                 state.selection_revision = state.selection_revision.wrapping_add(1);
             }
@@ -425,6 +438,10 @@ impl Element for TextView {
         if let Some(find) = &find {
             find.begin_frame();
         }
+        let headings = state.read(cx).headings.clone();
+        if let Some(headings) = &headings {
+            headings.begin_frame();
+        }
         UiGlobalState::global_mut(cx)
             .text_view_state_stack
             .push(state.clone());
@@ -432,6 +449,9 @@ impl Element for TextView {
         UiGlobalState::global_mut(cx).text_view_state_stack.pop();
         if let Some(find) = &find {
             find.end_frame();
+        }
+        if let Some(headings) = &headings {
+            headings.end_frame();
         }
 
         if self.selectable {

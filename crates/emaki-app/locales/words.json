@@ -2852,6 +2852,15 @@
     "de": "Noch keine Commits.",
     "es": "Aún no hay commits."
   },
+  "No file is open.": {
+    "zh-Hans": "没有打开的文件。",
+    "zh-Hant": "沒有開啟的檔案。",
+    "ja": "開いているファイルはありません。",
+    "ko": "열린 파일이 없습니다.",
+    "fr": "Aucun fichier n’est ouvert.",
+    "de": "Keine Datei geöffnet.",
+    "es": "No hay ningún archivo abierto."
+  },
   "No files to commit": {
     "zh-Hans": "没有要提交的文件",
     "zh-Hant": "沒有要提交的檔案",
@@ -2869,6 +2878,15 @@
     "fr": "Pas de git",
     "de": "Kein git",
     "es": "Sin git"
+  },
+  "No headings in this file.": {
+    "zh-Hans": "此文件没有标题。",
+    "zh-Hant": "此檔案沒有標題。",
+    "ja": "このファイルには見出しがありません。",
+    "ko": "이 파일에는 제목이 없습니다.",
+    "fr": "Aucun titre dans ce fichier.",
+    "de": "Keine Überschriften in dieser Datei.",
+    "es": "No hay encabezados en este archivo."
   },
   "No installer for {os} is listed here. See {agent}'s documentation.": {
     "zh-Hans": "这里没有列出适用于 {os} 的安装程序。请参阅 {agent} 的文档。",
@@ -2932,6 +2950,15 @@
     "fr": "Aucune suggestion trouvée",
     "de": "Keine Vorschläge gefunden",
     "es": "No se han encontrado sugerencias"
+  },
+  "No structure for this kind of file.": {
+    "zh-Hans": "此类文件没有结构。",
+    "zh-Hant": "此類檔案沒有結構。",
+    "ja": "この種類のファイルには構造がありません。",
+    "ko": "이 종류의 파일에는 구조가 없습니다.",
+    "fr": "Pas de structure pour ce type de fichier.",
+    "de": "Keine Struktur für diese Art von Datei.",
+    "es": "No hay estructura para este tipo de archivo."
   },
   "No, keep planning": {
     "zh-Hans": "不，继续规划",
@@ -4660,6 +4687,15 @@
     "fr": "Barré",
     "de": "Durchgestrichen",
     "es": "Tachado"
+  },
+  "Structure": {
+    "zh-Hans": "结构",
+    "zh-Hant": "結構",
+    "ja": "構造",
+    "ko": "구조",
+    "fr": "Structure",
+    "de": "Struktur",
+    "es": "Estructura"
   },
   "Summarizing…": {
     "zh-Hans": "正在总结…",

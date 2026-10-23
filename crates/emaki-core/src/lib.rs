@@ -42,6 +42,7 @@ pub mod transcript;
 pub mod trash;
 pub mod update;
 pub mod watcher;
+pub mod web;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

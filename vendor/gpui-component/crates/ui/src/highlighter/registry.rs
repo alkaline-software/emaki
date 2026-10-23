@@ -524,6 +524,24 @@ impl LanguageRegistry {
 
     /// Returns the language configuration for the given language name.
     pub fn language(&self, name: &str) -> Option<LanguageConfig> {
+        // A Quarto or R Markdown chunk names its language inside braces,
+        // with its label and options after it (`{r setup, echo=FALSE}`,
+        // `{python}`, `{=html}` for raw HTML): the language is the first
+        // word there. Looked up as written, the chunk had no colors, in a
+        // file's editor and as it reads. (Emaki addition.)
+        let chunk;
+        let name = match name.strip_prefix('{') {
+            Some(inner) => {
+                chunk = inner
+                    .trim_start_matches('=')
+                    .split(|c: char| c == '}' || c == ',' || c.is_whitespace())
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                chunk.as_str()
+            }
+            None => name,
+        };
         // Try to get by name first, there may have a custom language registered
         // Then try to get built-in language to support short language names, e.g. "js" for "javascript"
         let languages = self.languages.lock().unwrap();

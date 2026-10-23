@@ -5,7 +5,9 @@
 //! for a light window, Mocha for a dark one) and `theme.json`, its table
 //! of which icon a name gets, both copied from the extension
 //! (`catppuccin.catppuccin-vsc-icons` 1.26.0, MIT, `LICENSE` beside
-//! them). The icons carry their own colors, so they are drawn as
+//! them). One is ours: `quarto.svg`, Quarto's quartered circle drawn in
+//! the theme's line and blue, since the theme has no icon for `.qmd`.
+//! The icons carry their own colors, so they are drawn as
 //! pictures (`img`), not as the one-color masks the window's other
 //! icons are.
 

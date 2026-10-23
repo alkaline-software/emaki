@@ -78,7 +78,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
-| `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`; a table's cells in `files.rs` | `docs/panels.md` |
+| `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs`; `i18n.rs`, `locales/words.json`, any word the window shows | `docs/window.md` |
 | Anything a person sees, new or changed: a control, a color, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
@@ -86,7 +86,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
 | Bringing in a new agent: a variant of `AgentId`, an adapter, a driver | `docs/new-agent.md`, then the docs it names |
 | `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs` | `docs/core.md` |
-| `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, any `cfg` for an OS | `docs/platform.md` |
+| `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, `process.rs`, `csd.rs`, any `cfg` for an OS | `docs/platform.md` |
 | Checking a change in the window from a script | `docs/probing.md` |
 
 A change that crosses two rows reads both docs. `workbench.rs` is in most rows: go by what the code you are changing does.
@@ -121,6 +121,8 @@ crates/emaki-core/        everything without a window
   src/pairs.rs               the pairs the file's editor closes as an open is typed and puts around a selection, by language
   src/format.rs              a file put in its language's form when saved: R, by Air built in
   src/update.rs              the newest release, its installer, and putting it in place
+  src/process.rs             every child process started, with no console window on Windows
+  src/web.rs                 a picture a markdown file shows from an address, fetched
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
   src/terminal.rs            the agent's resume command as a script a terminal can be handed
   src/pty.rs                 a terminal of our own with no window: an interactive `claude` on a pty, its screen kept in memory
@@ -139,7 +141,9 @@ crates/emaki-app/         the window
   src/pictures.rs            files drawn small: which are pictures, what a thumbnail is drawn from, the tile of any other kind
   src/spelling.rs            a markdown, Quarto or text file checked in its editor as the composer is: the marks, the menu, the correction
   src/word.rs                a Word document written in: WordCraft's engine with the pane's own pages, caret, keys and strip
-  src/html_web.rs            an HTML file in the system's web view, set in the file's pane; hidden while the window draws over it
+  src/html_web.rs            an HTML file, a video or a sound in the system's web view, set in the file's pane; hidden while the window draws over it
+  src/fetch.rs               gpui's HTTP client, for a picture a markdown file shows from an address
+  src/csd.rs                 the window's own buttons and edges where the system draws none (GNOME on Wayland)
   src/html_shot.rs           the same file as a picture by Blitz, where no web view can be set: Linux
   src/term_panel.rs          the terminal panel at a conversation's right: the shell terminal, and the agent terminal, the agent's hidden terminal drawn whole
   src/main.rs                menus, key bindings, the window
@@ -168,7 +172,7 @@ PLAN.md                    the detailed plan: tasks, decisions, what has landed
 .github/workflows/release.yml  installers on a v* tag, via cargo-packager
 ```
 
-**Each document has one job.** This file is what Emaki is, the rules that hold in every session, and where to read next. `docs/` is how each part works and why. STAGES.md is where the app is going, in three stages; a change of direction goes there. PLAN.md is the detailed plan under it: phases, tasks with checkmarks, decisions and their dates. WORKFLOW.md is how to cut a release, CHANGELOG.md what each release changed for the person installing it, and README.md how to use the app and how it is built.
+**Each document has one job.** This file is what Emaki is, the rules that hold in every session, and where to read next. `docs/` is how each part works and why. STAGES.md is where the app is going, in three stages; a change of direction goes there. PLAN.md is the detailed plan under it: phases, tasks with checkmarks, decisions and their dates. WORKFLOW.md is how to cut a release, CHANGELOG.md what each release changed for the person installing it, and README.md a short introduction for GitHub that sends the reader to emaki.lol, whose pages say how each part works.
 
 ## Running it
 
