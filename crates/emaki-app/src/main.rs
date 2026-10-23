@@ -13,6 +13,7 @@ mod html_shot;
 mod html_web;
 mod word;
 mod hub;
+mod i18n;
 mod look;
 mod panels;
 mod pictures;
@@ -25,6 +26,7 @@ mod workbench;
 
 use gpui::*;
 use gpui_component::Root;
+use i18n::t;
 use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_CONTEXT, TERMINAL_CONTEXT};
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
@@ -111,75 +113,77 @@ fn key_bindings() -> Vec<KeyBinding> {
     keys
 }
 
-fn app_menus() -> Vec<Menu> {
+/// The menus, in the window's language: made again when it changes
+/// (`Workbench::set_language`).
+pub(crate) fn app_menus() -> Vec<Menu> {
     let mac = cfg!(target_os = "macos");
-    let mut app_items = vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator()];
+    let mut app_items = vec![MenuItem::action(t("Settings…"), OpenSettings), MenuItem::separator()];
     if mac {
         app_items.extend([
-            MenuItem::action("Hide Emaki", Hide),
-            MenuItem::action("Hide Others", HideOthers),
-            MenuItem::action("Show All", ShowAll),
+            MenuItem::action(t("Hide Emaki"), Hide),
+            MenuItem::action(t("Hide Others"), HideOthers),
+            MenuItem::action(t("Show All"), ShowAll),
             MenuItem::separator(),
         ]);
     }
-    app_items.push(MenuItem::action("Quit Emaki", Quit));
+    app_items.push(MenuItem::action(t("Quit Emaki"), Quit));
     let mut menus = vec![
         Menu { name: "Emaki".into(), items: app_items, disabled: false },
         Menu {
-            name: "File".into(),
+            name: t("File").into(),
             disabled: false,
             items: vec![
-                MenuItem::action("New Session", NewSession),
-                MenuItem::action("New Session in This Project", NewSessionHere),
-                MenuItem::action("Choose Folder…", ChooseFolder),
-                MenuItem::action("New Branch…", NewBranch),
-                MenuItem::action("Refresh", Refresh),
+                MenuItem::action(t("New Session"), NewSession),
+                MenuItem::action(t("New Session in This Project"), NewSessionHere),
+                MenuItem::action(t("Choose Folder…"), ChooseFolder),
+                MenuItem::action(t("New Branch…"), NewBranch),
+                MenuItem::action(t("Refresh"), Refresh),
                 MenuItem::separator(),
-                MenuItem::action("Save File", SaveFile),
+                MenuItem::action(t("Save File"), SaveFile),
                 MenuItem::separator(),
-                MenuItem::action("Reopen Closed Tab", ReopenTab),
-                MenuItem::action("Close Window", CloseWindow),
+                MenuItem::action(t("Reopen Closed Tab"), ReopenTab),
+                MenuItem::action(t("Close Window"), CloseWindow),
             ],
         },
     ];
     if mac {
         menus.push(Menu {
-            name: "Edit".into(),
+            name: t("Edit").into(),
             disabled: false,
             items: vec![
-                MenuItem::os_action("Undo", gpui_component::input::Undo, OsAction::Undo),
-                MenuItem::os_action("Redo", gpui_component::input::Redo, OsAction::Redo),
+                MenuItem::os_action(t("Undo"), gpui_component::input::Undo, OsAction::Undo),
+                MenuItem::os_action(t("Redo"), gpui_component::input::Redo, OsAction::Redo),
                 MenuItem::separator(),
-                MenuItem::os_action("Cut", gpui_component::input::Cut, OsAction::Cut),
-                MenuItem::os_action("Copy", gpui_component::input::Copy, OsAction::Copy),
-                MenuItem::os_action("Paste", gpui_component::input::Paste, OsAction::Paste),
-                MenuItem::os_action("Select All", gpui_component::input::SelectAll, OsAction::SelectAll),
+                MenuItem::os_action(t("Cut"), gpui_component::input::Cut, OsAction::Cut),
+                MenuItem::os_action(t("Copy"), gpui_component::input::Copy, OsAction::Copy),
+                MenuItem::os_action(t("Paste"), gpui_component::input::Paste, OsAction::Paste),
+                MenuItem::os_action(t("Select All"), gpui_component::input::SelectAll, OsAction::SelectAll),
             ],
         });
     }
     menus.push(Menu {
-        name: "View".into(),
+        name: t("View").into(),
         disabled: false,
         items: vec![
-            MenuItem::action("All Sessions", GoSessions),
-            MenuItem::action("Agents", GoAgents),
-            MenuItem::action("Search", ToggleSearch),
+            MenuItem::action(t("All Sessions"), GoSessions),
+            MenuItem::action(t("Agents"), GoAgents),
+            MenuItem::action(t("Search"), ToggleSearch),
             MenuItem::separator(),
-            MenuItem::action("Find in Conversation", FindInPage),
-            MenuItem::action("Find Next", FindNext),
-            MenuItem::action("Find Previous", FindPrev),
+            MenuItem::action(t("Find in Conversation"), FindInPage),
+            MenuItem::action(t("Find Next"), FindNext),
+            MenuItem::action(t("Find Previous"), FindPrev),
             MenuItem::separator(),
-            MenuItem::action("Toggle Sidebar", ToggleSidebar),
-            MenuItem::action("Toggle Files", ToggleFiles),
-            MenuItem::action("Toggle Outline", ToggleOutline),
-            MenuItem::action("Toggle Shell Terminal", ToggleShell),
-            MenuItem::action("Toggle Agent Terminal", ToggleAgent),
+            MenuItem::action(t("Toggle Sidebar"), ToggleSidebar),
+            MenuItem::action(t("Toggle Files"), ToggleFiles),
+            MenuItem::action(t("Toggle Outline"), ToggleOutline),
+            MenuItem::action(t("Toggle Shell Terminal"), ToggleShell),
+            MenuItem::action(t("Toggle Agent Terminal"), ToggleAgent),
         ],
     });
     menus.push(Menu {
-        name: "Window".into(),
+        name: t("Window").into(),
         disabled: false,
-        items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom), MenuItem::action("Toggle Full Screen", ToggleFullScreen)],
+        items: vec![MenuItem::action(t("Minimize"), Minimize), MenuItem::action(t("Zoom"), Zoom), MenuItem::action(t("Toggle Full Screen"), ToggleFullScreen)],
     });
     menus
 }
@@ -334,6 +338,8 @@ fn main() {
         // The palette (cream and charcoal, one config per appearance) with
         // the accent from config painted in, then the appearance it asks for.
         let cfg = emaki_core::config::Config::load();
+        // The words first: the menus and the window are named in them.
+        i18n::set(&i18n::chosen(&cfg.app.language));
         let app_cfg = cfg.app;
         fonts::install(&app_cfg.chat_font, cx);
         look::install(&app_cfg.accent, &cfg.terminal.font, cx);

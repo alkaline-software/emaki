@@ -12,7 +12,9 @@
 use gpui::{App, Window};
 use gpui_component::theme::{Theme, ThemeConfig, ThemeMode, ThemeSet};
 
-/// One accent: its name, and the color it paints in each appearance
+use crate::i18n::phrase;
+
+/// One accent: its name (drawn through `t`), and the color it paints in each appearance
 /// (base, hover, active) plus the link color, which is darker in the light
 /// palette and lighter in the dark one so text stays readable.
 pub struct Accent {
@@ -30,13 +32,13 @@ pub struct Accent {
 /// go round the wheel in even steps and leave out Claude's red-orange
 /// and the other blues (`docs/design.md`, The accents).
 pub const ACCENTS: &[Accent] = &[
-    Accent { key: "periwinkle", name: "Periwinkle", light: ["#5061B3", "#4A5BAC", "#4050A0"], dark: ["#94A7ED", "#A0B3FB", "#879AE0"], link: ["#4A5BAC", "#94A7ED"] },
-    Accent { key: "orchid", name: "Orchid", light: ["#845293", "#7E4C8D", "#724181"], dark: ["#C498D2", "#D1A4DF", "#B78BC4"], link: ["#7E4C8D", "#C498D2"] },
-    Accent { key: "rose", name: "Rose", light: ["#9C4A66", "#954360", "#893856"], dark: ["#DA93A9", "#E79FB5", "#CC879C"], link: ["#954360", "#DA93A9"] },
-    Accent { key: "amber", name: "Amber", light: ["#A86003", "#A05B00", "#905203"], dark: ["#DD9B5F", "#EAA76B", "#CF8E52"], link: ["#A05B00", "#DD9B5F"] },
-    Accent { key: "moss", name: "Moss", light: ["#5A723A", "#556C34", "#4A6129"], dark: ["#9CB67C", "#A7C288", "#8FA86F"], link: ["#556C34", "#9CB67C"] },
-    Accent { key: "jade", name: "Jade", light: ["#327860", "#2B725A", "#1E6750"], dark: ["#77BCA1", "#83C8AD", "#6AAE95"], link: ["#2B725A", "#77BCA1"] },
-    Accent { key: "teal", name: "Teal", light: ["#277580", "#1F6F79", "#0E646E"], dark: ["#6FB9C4", "#7BC5D0", "#61ACB7"], link: ["#1F6F79", "#6FB9C4"] },
+    Accent { key: "periwinkle", name: phrase("Periwinkle"), light: ["#5061B3", "#4A5BAC", "#4050A0"], dark: ["#94A7ED", "#A0B3FB", "#879AE0"], link: ["#4A5BAC", "#94A7ED"] },
+    Accent { key: "orchid", name: phrase("Orchid"), light: ["#845293", "#7E4C8D", "#724181"], dark: ["#C498D2", "#D1A4DF", "#B78BC4"], link: ["#7E4C8D", "#C498D2"] },
+    Accent { key: "rose", name: phrase("Rose"), light: ["#9C4A66", "#954360", "#893856"], dark: ["#DA93A9", "#E79FB5", "#CC879C"], link: ["#954360", "#DA93A9"] },
+    Accent { key: "amber", name: phrase("Amber"), light: ["#A86003", "#A05B00", "#905203"], dark: ["#DD9B5F", "#EAA76B", "#CF8E52"], link: ["#A05B00", "#DD9B5F"] },
+    Accent { key: "moss", name: phrase("Moss"), light: ["#5A723A", "#556C34", "#4A6129"], dark: ["#9CB67C", "#A7C288", "#8FA86F"], link: ["#556C34", "#9CB67C"] },
+    Accent { key: "jade", name: phrase("Jade"), light: ["#327860", "#2B725A", "#1E6750"], dark: ["#77BCA1", "#83C8AD", "#6AAE95"], link: ["#2B725A", "#77BCA1"] },
+    Accent { key: "teal", name: phrase("Teal"), light: ["#277580", "#1F6F79", "#0E646E"], dark: ["#6FB9C4", "#7BC5D0", "#61ACB7"], link: ["#1F6F79", "#6FB9C4"] },
 ];
 
 /// What is drawn on an accent: white on the light appearance's shade,

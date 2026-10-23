@@ -13,7 +13,7 @@ use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable a
 
 use emaki_core::git;
 
-use crate::format::plural;
+use crate::i18n::{count, t, tf};
 use crate::panels::BranchAsk;
 use std::rc::Rc;
 
@@ -58,6 +58,20 @@ pub(crate) const STRIP_H: f32 = 38.;
 /// line takes.
 pub(crate) fn small_pill(id: impl Into<ElementId>, icon: &'static str, label: impl Into<SharedString>, kind: Press, off: bool, theme: &gpui_component::Theme) -> Stateful<Div> {
     choice_pill(id, icon, label, kind, off, theme).h(px(24.)).px(px(10.)).gap(px(5.)).text_size(px(12.))
+}
+
+/// A sentence's blanks that `count` left, its own `{n}` filled: the
+/// rest of a counted sentence's values.
+fn fill(mut s: String, values: &[(&str, &dyn std::fmt::Display)]) -> String {
+    for (name, value) in values {
+        s = s.replace(&format!("{{{name}}}"), &value.to_string());
+    }
+    s
+}
+
+/// What the commits counted are, as a sentence of these words names them.
+fn commits(n: usize) -> String {
+    count(n, "{n} commit", "{n} commits")
 }
 
 /// A branch about to be deleted, on the card that asks.
@@ -106,8 +120,10 @@ pub(crate) struct BranchNew {
 /// The sheet that says how to sign in to the remote.
 #[derive(Clone, Debug)]
 pub(crate) struct GitGate {
-    /// What was being done: "publish v2".
-    pub(crate) what: String,
+    /// What could not be done, as a whole sentence in the person's
+    /// language, with `{host}` left for the remote's name, which is known
+    /// once the account is.
+    pub(crate) said: String,
     /// What git said.
     pub(crate) why: String,
     /// How this machine would sign in; none until it has been asked.
@@ -160,7 +176,7 @@ impl Workbench {
         let root = self.git_dir()?;
         let last = self.branch_fetched.as_ref().filter(|(of, _)| *of == root).map(|(_, r)| r.clone());
         let row = h_flex().flex_shrink_0().min_h(px(44.)).px(px(12.)).py(px(8.)).gap(px(8.)).items_center().border_t_1().border_color(theme.border).text_size(px(11.5)).text_color(theme.muted_foreground);
-        let fetch = small_pill("branch-fetch-again", "icons/refresh.svg", if matches!(last, Some(Err(_))) { "Try Again" } else { "Fetch" }, Press::Quiet, self.branch_fetching, &theme).when(!self.branch_fetching, |d| {
+        let fetch = small_pill("branch-fetch-again", "icons/refresh.svg", if matches!(last, Some(Err(_))) { t("Try Again") } else { t("Fetch") }, Press::Quiet, self.branch_fetching, &theme).when(!self.branch_fetching, |d| {
             d.on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.branch_fetch(true, cx);
@@ -171,7 +187,7 @@ impl Workbench {
         if self.branch_fetching {
             return Some(
                 row.child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0().with_animation("branch-fetching", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
-                    .child(div().flex_1().min_w_0().truncate().child(format!("Asking {origin}…")))
+                    .child(div().flex_1().min_w_0().truncate().child(tf("Asking {origin}…", &[("origin", &origin)])))
                     .children(web)
                     .children(pull)
                     .child(fetch)
@@ -182,9 +198,9 @@ impl Workbench {
             Some(Err(why)) => {
                 let sign_in = git::why_net(&why) == git::NetTrouble::SignIn;
                 let words = match git::why_net(&why) {
-                    git::NetTrouble::Offline => format!("Could not reach {origin}. The list is as it was last fetched."),
-                    git::NetTrouble::SignIn => format!("{origin} did not take your sign-in. The list is as it was last fetched."),
-                    git::NetTrouble::Other => format!("Could not fetch from {origin}: {why}"),
+                    git::NetTrouble::Offline => tf("Could not reach {origin}. The list is as it was last fetched.", &[("origin", &origin)]),
+                    git::NetTrouble::SignIn => tf("{origin} did not take your sign-in. The list is as it was last fetched.", &[("origin", &origin)]),
+                    git::NetTrouble::Other => tf("Could not fetch from {origin}: {why}", &[("origin", &origin), ("why", &why)]),
                 };
                 let reason = why.clone();
                 row.items_start()
@@ -192,9 +208,9 @@ impl Workbench {
                     .child(div().flex_1().min_w_0().line_height(px(17.)).text_color(theme.foreground).child(words))
                     .children(web)
                     .when(sign_in, |d| {
-                        d.child(small_pill("branch-sign-in", "icons/circle-user.svg", "Sign In…", Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
+                        d.child(small_pill("branch-sign-in", "icons/circle-user.svg", t("Sign In…"), Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
-                            this.open_gate("fetch".into(), reason.clone(), cx);
+                            this.open_gate(t("{host} did not take this machine's sign-in, so Emaki could not fetch. Nothing was changed.").into(), reason.clone(), cx);
                         })))
                     })
                     .when(!sign_in, |d| d.child(fetch))
@@ -203,12 +219,12 @@ impl Workbench {
             Some(Ok(at)) => {
                 let when = crate::format::ago(crate::format::now_secs() - at.elapsed().as_secs_f64(), crate::format::now_secs());
                 let words = match self.sync_words() {
-                    Some((said, _)) => format!("{said}. Fetched {when}"),
-                    None => format!("Fetched from {origin} {when}"),
+                    Some((said, _)) => tf("{said}. Fetched {when}", &[("said", &said), ("when", &when)]),
+                    None => tf("Fetched from {origin} {when}", &[("origin", &origin), ("when", &when)]),
                 };
                 row.child(div().flex_1().min_w_0().truncate().child(words)).children(web).children(pull).child(fetch).into_any_element()
             }
-            None => row.child(div().flex_1().min_w_0().truncate().child(format!("Not fetched from {origin} yet"))).children(web).children(pull).child(fetch).into_any_element(),
+            None => row.child(div().flex_1().min_w_0().truncate().child(tf("Not fetched from {origin} yet", &[("origin", &origin)]))).children(web).children(pull).child(fetch).into_any_element(),
         })
     }
 
@@ -222,12 +238,11 @@ impl Workbench {
     pub(crate) fn sync_words(&self) -> Option<(String, Option<bool>)> {
         let b = self.branches()?;
         b.origin.as_ref()?;
-        let commits = |n: usize| plural(n, "commit", "commits");
         match (b.ahead, b.behind) {
             (0, 0) => None,
-            (ahead, 0) => Some((format!("{} to push", commits(ahead)), Some(false))),
-            (0, behind) => Some((format!("{} to pull", commits(behind)), Some(true))),
-            (ahead, behind) => Some((format!("{} to push and {} to pull: merge in a terminal", commits(ahead), behind), None)),
+            (ahead, 0) => Some((tf("{commits} to push", &[("commits", &commits(ahead))]), Some(false))),
+            (0, behind) => Some((tf("{commits} to pull", &[("commits", &commits(behind))]), Some(true))),
+            (ahead, behind) => Some((tf("{ahead} to push and {behind} to pull: merge in a terminal", &[("ahead", &commits(ahead)), ("behind", &behind)]), None)),
         }
     }
 
@@ -238,16 +253,16 @@ impl Workbench {
         self.sync_words().filter(|(_, what)| *what == Some(pull))?;
         let busy = self.syncing == Some(pull);
         let label = match (pull, busy) {
-            (true, true) => "Pulling…",
-            (true, false) => "Pull",
-            (false, true) => "Pushing…",
-            (false, false) => "Push",
+            (true, true) => t("Pulling…"),
+            (true, false) => t("Pull"),
+            (false, true) => t("Pushing…"),
+            (false, false) => t("Push"),
         };
         let off = self.syncing.is_some() || self.branch_busy;
         Some(
             small_pill(if pull { "sync-pull" } else { "sync-push" }, if pull { "icons/arrow-down.svg" } else { "icons/arrow-up.svg" }, label, Press::Primary, off, &theme)
                 // ⌘P is the comparison's key for it.
-                .when(!pull, |d| d.managed_tooltip(|window, cx| crate::workbench::tip("Push (⌘P in Changes)", window, cx)))
+                .when(!pull, |d| d.managed_tooltip(|window, cx| crate::workbench::tip(t("Push (⌘P in Changes)"), window, cx)))
                 .when(!off, |d| {
                     d.on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
@@ -267,8 +282,8 @@ impl Workbench {
         self.branches().filter(|b| b.ahead > 0)?;
         let off = self.committing || self.syncing.is_some() || self.branch_busy;
         Some(
-            small_pill("sync-undo", "icons/undo-2.svg", "Undo", Press::Quiet, off, &theme)
-                .managed_tooltip(|window, cx| crate::workbench::tip("Take the last commit back, keeping its changes", window, cx))
+            small_pill("sync-undo", "icons/undo-2.svg", t("Undo"), Press::Quiet, off, &theme)
+                .managed_tooltip(|window, cx| crate::workbench::tip(t("Take the last commit back, keeping its changes"), window, cx))
                 .when(!off, |d| {
                     d.on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
@@ -299,17 +314,17 @@ impl Workbench {
             this.update(cx, |this, cx| {
                 this.syncing = None;
                 match (done, pull) {
-                    (Ok(()), true) => this.notice = Some(Notice::said(format!("pulled {said} from {origin}"))),
+                    (Ok(()), true) => this.notice = Some(Notice::said(tf("pulled {branch} from {origin}", &[("branch", &said), ("origin", &origin)]))),
                     (Ok(()), false) => {
-                        this.notice = Some(Notice::said(format!("pushed {said} to {origin}")));
+                        this.notice = Some(Notice::said(tf("pushed {branch} to {origin}", &[("branch", &said), ("origin", &origin)])));
                         // With nothing left to commit, the comparison has
                         // done what it was opened for.
                         if this.changed_files().is_empty() && this.changes.as_ref().is_some_and(|c| !c.history) {
                             this.close_changes(cx);
                         }
                     }
-                    (Err(why), true) => this.branch_ask = Some(BranchAsk::stop("Not pulled", format!("Nothing was changed. Git said: {why}."))),
-                    (Err(why), false) => this.net_failed("Not pushed", format!("push {name}"), why, cx),
+                    (Err(why), true) => this.branch_ask = Some(BranchAsk::stop(t("Not pulled"), tf("Nothing was changed. Git said: {why}.", &[("why", &why)]))),
+                    (Err(why), false) => this.net_failed(t("Not pushed"), tf("{host} did not take this machine's sign-in, so Emaki could not push {branch}. Nothing was changed.", &[("branch", &name)]), why, cx),
                 }
                 this.read_git(root, cx);
                 cx.notify();
@@ -475,11 +490,11 @@ impl Workbench {
         let item = |label: &'static str, what: CommitDo| (label, MenuDo::Commit(what, sha.clone()));
         let mut items = Vec::new();
         if newest {
-            items.push(item("Undo Commit", CommitDo::Undo));
+            items.push(item(t("Undo Commit"), CommitDo::Undo));
         }
-        items.extend([item("Revert Changes in Commit", CommitDo::Revert), ("", MenuDo::Rule), item("Copy Commit Hash", CommitDo::CopySha)]);
+        items.extend([item(t("Revert Changes in Commit"), CommitDo::Revert), ("", MenuDo::Rule), item(t("Copy Commit Hash"), CommitDo::CopySha)]);
         if page {
-            items.push(item("View on the Web", CommitDo::View));
+            items.push(item(t("View on the Web"), CommitDo::View));
         }
         if self.changes.as_ref().is_some_and(|c| c.commit.as_ref() != Some(&sha)) {
             self.history_pick(sha.clone(), cx);
@@ -500,12 +515,12 @@ impl Workbench {
             let item = |label: &'static str, what: crate::panels::FileDo| (label, MenuDo::File(what, file.clone()));
             // A file since removed has nothing to open or to show.
             if file.exists() {
-                items.extend([item("Open", crate::panels::FileDo::Open), item(crate::sys::REVEAL_LABEL, crate::panels::FileDo::Reveal), ("", MenuDo::Rule)]);
+                items.extend([item(t("Open"), crate::panels::FileDo::Open), item(t(crate::sys::REVEAL_LABEL), crate::panels::FileDo::Reveal), ("", MenuDo::Rule)]);
             }
-            items.extend([item("Copy Path", crate::panels::FileDo::CopyPath), item("Copy Relative Path", crate::panels::FileDo::CopyRel)]);
+            items.extend([item(t("Copy Path"), crate::panels::FileDo::CopyPath), item(t("Copy Relative Path"), crate::panels::FileDo::CopyRel)]);
         }
         if let Some(url) = page {
-            items.extend([("", MenuDo::Rule), ("View on the Web", MenuDo::Web(url))]);
+            items.extend([("", MenuDo::Rule), (t("View on the Web"), MenuDo::Web(url))]);
         }
         if self.changes.as_ref().is_some_and(|c| c.commit_file.as_ref() != Some(&path)) {
             self.history_file(path, cx);
@@ -544,14 +559,14 @@ impl Workbench {
                     Ok(Some((summary, body))) => {
                         this.commit_summary.update(cx, |s, cx| s.set_value(summary, window, cx));
                         this.commit_body.update(cx, |s, cx| s.set_value(body, window, cx));
-                        this.notice = Some(Notice::said("took the last commit back; its changes are here to commit again"));
+                        this.notice = Some(Notice::said(t("took the last commit back; its changes are here to commit again")));
                         this.history_show(false, cx);
                     }
                     Ok(None) => {
-                        this.notice = Some(Notice::said("reverted the commit with a new one"));
+                        this.notice = Some(Notice::said(t("reverted the commit with a new one")));
                         this.history_load(cx);
                     }
-                    Err(why) => this.branch_ask = Some(BranchAsk::stop(if what == CommitDo::Undo { "Not undone" } else { "Not reverted" }, format!("Nothing was changed. Git said: {why}."))),
+                    Err(why) => this.branch_ask = Some(BranchAsk::stop(if what == CommitDo::Undo { t("Not undone") } else { t("Not reverted") }, tf("Nothing was changed. Git said: {why}.", &[("why", &why)]))),
                 }
                 this.read_git(root, cx);
                 cx.notify();
@@ -653,7 +668,7 @@ impl Workbench {
         // words over the last two. In a window too narrow to leave the
         // lines their room the files go under the commits instead.
         let wide = self.view_w >= px(HISTORY_WIDE);
-        let files_head = div().flex_shrink_0().px(px(14.)).pt(px(9.)).pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(quiet).child(if wide { plural(n_files, "changed file", "changed files") } else { format!("{} in this commit", plural(n_files, "file", "files")) });
+        let files_head = div().flex_shrink_0().px(px(14.)).pt(px(9.)).pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(quiet).child(if wide { count(n_files, "{n} changed file", "{n} changed files") } else { tf("{files} in this commit", &[("files", &count(n_files, "{n} file", "{n} files"))]) });
         // Both lists keep a little room under what scrolls, so a row cut
         // at the foot stays inside the sheet's corner.
         let files_list = div()
@@ -667,7 +682,7 @@ impl Workbench {
             .pb(px(4.))
             .flex_1()
             .min_h_0()
-            .child(v_flex().id("history-commits").size_full().overflow_y_scroll().track_scroll(&c.commits_scroll).p(px(6.)).gap(px(1.)).children(rows).when(empty, |d| d.child(div().p(px(12.)).text_size(px(12.5)).text_color(quiet).child("No commits yet."))))
+            .child(v_flex().id("history-commits").size_full().overflow_y_scroll().track_scroll(&c.commits_scroll).p(px(6.)).gap(px(1.)).children(rows).when(empty, |d| d.child(div().p(px(12.)).text_size(px(12.5)).text_color(quiet).child(t("No commits yet.")))))
             .vertical_scrollbar(&c.commits_scroll);
         let head = picked.map(|m| {
             v_flex()
@@ -687,7 +702,7 @@ impl Workbench {
                         .child(div().flex_shrink_0().child(m.author.clone()))
                         .child(div().flex_shrink_0().font_family(theme.mono_font_family.clone()).child(m.short.clone()))
                         .child(div().min_w_0().truncate().child(crate::format::ago(m.when as f64, now)))
-                        .when(m.local, |d| d.child(div().flex_shrink_0().text_color(theme.primary).child("not pushed yet"))),
+                        .when(m.local, |d| d.child(div().flex_shrink_0().text_color(theme.primary).child(t("not pushed yet")))),
                 )
                 .when(!m.body.is_empty(), |d| d.child(div().id("history-body").mt(px(4.)).max_h(px(72.)).overflow_y_scroll().text_size(px(12.5)).line_height(px(18.)).text_color(theme.foreground.opacity(0.85)).child(m.body.clone())))
         });
@@ -782,9 +797,9 @@ impl Workbench {
                         if let Some(c) = &mut this.changes {
                             c.left_out.clear();
                         }
-                        this.notice = Some(Notice::said(format!("committed {} to {branch}", plural(n, "file", "files"))));
+                        this.notice = Some(Notice::said(tf("committed {files} to {branch}", &[("files", &count(n, "{n} file", "{n} files")), ("branch", &branch)])));
                     }
-                    Err(why) => this.branch_ask = Some(BranchAsk::stop("Not committed", format!("Nothing was committed. Git said: {why}."))),
+                    Err(why) => this.branch_ask = Some(BranchAsk::stop(t("Not committed"), tf("Nothing was committed. Git said: {why}.", &[("why", &why)]))),
                 }
                 this.read_git(root, cx);
                 cx.notify();
@@ -806,7 +821,21 @@ impl Workbench {
         // words it: the name in a heavier face, and the part that gives
         // way when the two do not fit.
         let branch = self.branches().map(|b| b.label()).filter(|_| !self.committing && !files.is_empty());
-        let label = if self.committing { "Committing…".to_string() } else if files.is_empty() { "No files to commit".to_string() } else if branch.is_some() { format!("Commit {} to", plural(files.len(), "file", "files")) } else { format!("Commit {}", plural(files.len(), "file", "files")) };
+        let n = files.len();
+        // The sentence is whole in every language, the branch a blank in
+        // it: the words before the name are the pill's label, the name
+        // follows, and what a language puts after it comes last.
+        let (label, after) = if self.committing {
+            (t("Committing…").to_string(), String::new())
+        } else if files.is_empty() {
+            (t("No files to commit").to_string(), String::new())
+        } else if branch.is_some() {
+            let said = tf("Commit {files} to {branch}", &[("files", &count(n, "{n} file", "{n} files"))]);
+            let (before, after) = said.split_once("{branch}").unwrap_or((said.as_str(), ""));
+            (before.trim_end().to_string(), after.trim_start().to_string())
+        } else {
+            (tf("Commit {files}", &[("files", &count(n, "{n} file", "{n} files"))]), String::new())
+        };
         // A field is a hollow in the panel, as the list of branches' is.
         // In the light appearance the hollow's gray is the panel's own,
         // so there it is the page's ground inside a line.
@@ -855,7 +884,7 @@ impl Workbench {
             .on_click(|_, window, cx| swallow_click(window, cx))
             .child(field("commit-summary", summary_focus).h(px(32.)).items_center().child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.commit_summary).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_summary, false, cx)))).child(star))
             .child(field("commit-body", body_focus).py(px(4.)).items_start().child(gpui_component::input::Textarea::new(&self.commit_body).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_body, false, cx))))
-            .child(choice_pill("commit-go", "icons/check.svg", label, Press::Primary, off, &theme).w_full().min_w_0().justify_center().children(branch.map(|b| div().min_w_0().truncate().ml(px(-2.)).font_weight(FontWeight::SEMIBOLD).child(b))).managed_tooltip(|window, cx| crate::workbench::tip("Commit (⌘↩)", window, cx)).when(!off, |d| {
+            .child(choice_pill("commit-go", "icons/check.svg", label, Press::Primary, off, &theme).w_full().min_w_0().justify_center().children(branch.map(|b| div().min_w_0().truncate().ml(px(-2.)).font_weight(FontWeight::SEMIBOLD).child(b))).when(!after.is_empty(), |d| d.child(div().flex_shrink_0().ml(px(-2.)).child(after))).managed_tooltip(|window, cx| crate::workbench::tip(t("Commit (⌘↩)"), window, cx)).when(!off, |d| {
                 d.on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.commit_go(window, cx);
@@ -868,11 +897,14 @@ impl Workbench {
     /// A call to the remote failed while `what` was being done: the
     /// sheet that says how to sign in when that is why, else the
     /// refusal in git's words.
-    pub(crate) fn net_failed(&mut self, title: &str, what: String, why: String, cx: &mut Context<Self>) {
+    /// `title` is said in the person's language; `said` is the sign-in
+    /// sheet's sentence for what could not be done (`open_gate`).
+    pub(crate) fn net_failed(&mut self, title: &str, said: String, why: String, cx: &mut Context<Self>) {
+        let title = t(title);
         match git::why_net(&why) {
-            git::NetTrouble::SignIn => self.open_gate(what, why, cx),
-            git::NetTrouble::Offline => self.branch_ask = Some(BranchAsk::stop(title, format!("The remote could not be reached, so nothing was changed. Check the network and try again. Git said: {why}."))),
-            git::NetTrouble::Other => self.branch_ask = Some(BranchAsk::stop(title, format!("Nothing was changed. Git said: {why}."))),
+            git::NetTrouble::SignIn => self.open_gate(said, why, cx),
+            git::NetTrouble::Offline => self.branch_ask = Some(BranchAsk::stop(title, tf("The remote could not be reached, so nothing was changed. Check the network and try again. Git said: {why}.", &[("why", &why)]))),
+            git::NetTrouble::Other => self.branch_ask = Some(BranchAsk::stop(title, tf("Nothing was changed. Git said: {why}.", &[("why", &why)]))),
         }
         cx.notify();
     }
@@ -883,9 +915,9 @@ impl Workbench {
     /// to copy, and Delete for any branch but the default one, which is
     /// never deleted from here.
     pub(crate) fn branch_menu_items(&self, name: &str) -> Vec<(&'static str, MenuDo)> {
-        let mut items = vec![("Copy Branch Name", MenuDo::Copy(name.to_string()))];
+        let mut items = vec![(t("Copy Branch Name"), MenuDo::CopyAs("icons/git-branch.svg", name.to_string()))];
         if self.branches().is_some_and(|b| b.default.as_deref() != Some(name) && b.has(name)) {
-            items.extend([("", MenuDo::Rule), ("Delete Branch", MenuDo::DeleteBranch(name.to_string()))]);
+            items.extend([("", MenuDo::Rule), (t("Delete Branch"), MenuDo::DeleteBranch(name.to_string()))]);
         }
         items
     }
@@ -945,32 +977,35 @@ impl Workbench {
                 this.branch_delete = None;
                 match done {
                     Ok(()) => {
-                        let what = match (here, there) {
-                            (true, true) => format!("deleted {name} here and on {origin}"),
-                            (true, false) => format!("deleted {name}"),
-                            _ => format!("deleted {name} on {origin}"),
+                        // A sentence for each, whole, so each language
+                        // words it as it does.
+                        let said = match (&leaves, here, there) {
+                            (None, true, true) => tf("deleted {branch} here and on {origin}", &[("branch", &name), ("origin", &origin)]),
+                            (None, true, false) => tf("deleted {branch}", &[("branch", &name)]),
+                            (None, _, _) => tf("deleted {branch} on {origin}", &[("branch", &name), ("origin", &origin)]),
+                            (Some(default), true, true) => tf("switched to {default} and deleted {branch} here and on {origin}", &[("default", default), ("branch", &name), ("origin", &origin)]),
+                            (Some(default), true, false) => tf("switched to {default} and deleted {branch}", &[("default", default), ("branch", &name)]),
+                            (Some(default), _, _) => tf("switched to {default} and deleted {branch} on {origin}", &[("default", default), ("branch", &name), ("origin", &origin)]),
                         };
-                        this.notice = Some(Notice::said(match &leaves {
-                            Some(default) => format!("switched to {default} and {what}"),
-                            None => what,
-                        }));
+                        this.notice = Some(Notice::said(said));
                     }
                     // Here it is gone; the remote kept its copy, and
                     // the list still shows it as the remote's.
                     Err((true, why)) => {
-                        this.notice = Some(Notice::error(format!("deleted {name} here, but not on {origin}: {why}")));
+                        this.notice = Some(Notice::error(tf("deleted {branch} here, but not on {origin}: {why}", &[("branch", &name), ("origin", &origin), ("why", &why)])));
                         match git::why_net(&why) {
-                            git::NetTrouble::SignIn => this.open_gate(format!("delete {name} on {origin}"), why, cx),
-                            _ => this.branch_ask = Some(BranchAsk::stop("Not deleted on the remote", format!("{name} is deleted here, but {origin} still has it. Git said: {why}."))),
+                            git::NetTrouble::SignIn => this.open_gate(tf("{host} did not take this machine's sign-in, so Emaki could not delete {branch} on {origin}. Nothing was changed.", &[("branch", &name), ("origin", &origin)]), why, cx),
+                            _ => this.branch_ask = Some(BranchAsk::stop(t("Not deleted on the remote"), tf("{branch} is deleted here, but {origin} still has it. Git said: {why}.", &[("branch", &name), ("origin", &origin), ("why", &why)]))),
                         }
                     }
                     Err((false, why)) if here => {
-                        this.notice = Some(Notice::error(format!("{name} was not deleted: {why}")));
-                        this.branch_ask = Some(BranchAsk::stop("Not deleted", format!("Nothing was changed. {}{}.", why[..1].to_uppercase(), &why[1..])));
+                        this.notice = Some(Notice::error(tf("{branch} was not deleted: {why}", &[("branch", &name), ("why", &why)])));
+                        let said = format!("{}{}", why[..1].to_uppercase(), &why[1..]);
+                        this.branch_ask = Some(BranchAsk::stop(t("Not deleted"), tf("Nothing was changed. {why}.", &[("why", &said)])));
                     }
                     Err((false, why)) => {
-                        this.notice = Some(Notice::error(format!("{name} was not deleted on {origin}: {why}")));
-                        this.net_failed("Not deleted", format!("delete {name} on {origin}"), why, cx);
+                        this.notice = Some(Notice::error(tf("{branch} was not deleted on {origin}: {why}", &[("branch", &name), ("origin", &origin), ("why", &why)])));
+                        this.net_failed(t("Not deleted"), tf("{host} did not take this machine's sign-in, so Emaki could not delete {branch} on {origin}. Nothing was changed.", &[("branch", &name), ("origin", &origin)]), why, cx);
                     }
                 }
                 if leaves.is_some() {
@@ -992,12 +1027,12 @@ impl Workbench {
         let theme = cx.theme().clone();
         let Some(d) = self.branch_delete.clone() else { return div().into_any_element() };
         let origin = self.branches().and_then(|b| b.origin.clone()).unwrap_or_else(|| "origin".into());
-        let title = if d.here { format!("Delete branch {}?", d.name) } else { format!("Delete branch {} on {origin}?", d.name) };
+        let title = if d.here { tf("Delete branch {branch}?", &[("branch", &d.name)]) } else { tf("Delete branch {branch} on {origin}?", &[("branch", &d.name), ("origin", &origin)]) };
         let tick = (d.here && d.there).then(|| {
             Checkbox::new("branch-delete-remote")
                 .small()
                 .checked(d.remote_too)
-                .label(format!("Also delete it on {origin}"))
+                .label(tf("Also delete it on {origin}", &[("origin", &origin)]))
                 .on_click(cx.listener(|this, on: &bool, window, cx| {
                     swallow_click(window, cx);
                     if let Some(d) = this.branch_delete.as_mut().filter(|d| !d.busy) {
@@ -1007,27 +1042,27 @@ impl Workbench {
                 }))
                 .into_any_element()
         });
-        let no = choice_pill("branch-delete-cancel", "icons/close.svg", "Cancel", Press::Quiet, d.busy, &theme).when(!d.busy, |p| {
+        let no = choice_pill("branch-delete-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, d.busy, &theme).when(!d.busy, |p| {
             p.on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.branch_delete = None;
                 cx.notify();
             }))
         });
-        let yes = choice_pill("branch-delete-yes", "icons/trash.svg", if d.busy { "Deleting…" } else { "Delete" }, Press::Danger, d.busy, &theme).when(!d.busy, |p| {
+        let yes = choice_pill("branch-delete-yes", "icons/trash.svg", if d.busy { t("Deleting…") } else { t("Delete") }, Press::Danger, d.busy, &theme).when(!d.busy, |p| {
             p.on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.branch_delete_go(cx);
             }))
         });
-        self.ask_card("branch-delete", d.serial, title, "This can't be undone.".into(), ["Cancel", "Delete"], tick, no, yes, cx)
+        self.ask_card("branch-delete", d.serial, title, t("This can't be undone.").into(), [t("Cancel"), t("Delete")], tick, no, yes, cx)
     }
 
     /// At the list's foot: the repository's page on its host, named
     /// for the host, in the accent. None where the remote is no host.
     pub(crate) fn repo_web_pill(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let url = self.branches().and_then(|b| b.web.clone())?;
-        let label = format!("View on {}", git::host_name(&git::host_of(&url).0));
+        let label = tf("View on {host}", &[("host", &git::host_name(&git::host_of(&url).0))]);
         Some(small_pill("branch-web", "icons/globe.svg", label, Press::Primary, false, cx.theme()).on_click(cx.listener(move |_, _, window, cx| {
             swallow_click(window, cx);
             cx.open_url(&url);
@@ -1051,10 +1086,10 @@ impl Workbench {
             this.update(cx, |this, cx| {
                 this.branch_publishing = None;
                 match done {
-                    Ok(()) => this.notice = Some(Notice::said(format!("published {name} to {origin}"))),
+                    Ok(()) => this.notice = Some(Notice::said(tf("published {branch} to {origin}", &[("branch", &name), ("origin", &origin)]))),
                     Err(why) => {
-                        this.notice = Some(Notice::error(format!("{name} was not published: {why}")));
-                        this.net_failed("Not published", format!("publish {name}"), why, cx);
+                        this.notice = Some(Notice::error(tf("{branch} was not published: {why}", &[("branch", &name), ("why", &why)])));
+                        this.net_failed(t("Not published"), tf("{host} did not take this machine's sign-in, so Emaki could not publish {branch}. Nothing was changed.", &[("branch", &name)]), why, cx);
                     }
                 }
                 this.read_git(root, cx);
@@ -1085,8 +1120,8 @@ impl Workbench {
                 .bg(theme.primary.opacity(0.07))
                 .text_size(px(11.5))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.link).flex_shrink_0())
-                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child("Not published yet"))
-                .child(small_pill("branch-publish", "icons/arrow-up.svg", if busy { "Publishing…" } else { "Publish" }, Press::Primary, self.branch_publishing.is_some(), &theme).when(self.branch_publishing.is_none(), |d| {
+                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child(t("Not published yet")))
+                .child(small_pill("branch-publish", "icons/arrow-up.svg", if busy { t("Publishing…") } else { t("Publish") }, Press::Primary, self.branch_publishing.is_some(), &theme).when(self.branch_publishing.is_none(), |d| {
                     d.on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
                         this.branch_publish(cur.clone(), cx)
@@ -1103,7 +1138,7 @@ impl Workbench {
     /// ⌘⇧N anywhere.
     pub(crate) fn branch_new_open(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.git_dir() else {
-            self.notice = Some(Notice::error("open a session in a git repository to make a branch"));
+            self.notice = Some(Notice::error(t("open a session in a git repository to make a branch")));
             cx.notify();
             return;
         };
@@ -1114,7 +1149,7 @@ impl Workbench {
                 self.branch_new_wait = Some(name.unwrap_or_default());
                 self.read_git(root, cx);
             } else if self.branch_new_wait.is_none() {
-                self.notice = Some(Notice::error("this folder is not in a git repository"));
+                self.notice = Some(Notice::error(t("this folder is not in a git repository")));
                 cx.notify();
             }
             return;
@@ -1191,14 +1226,14 @@ impl Workbench {
             let done = cx.background_executor().spawn(async move { git::publish(&dir, &branch) }).await;
             this.update(cx, |this, cx| match done {
                 Ok(()) => {
-                    this.notice = Some(Notice::said(format!("pushed {default}")));
+                    this.notice = Some(Notice::said(tf("pushed {branch}", &[("branch", &default)])));
                     this.branch_new_sync(root, default, false, cx);
                 }
                 Err(why) => {
                     if let Some(n) = this.branch_new.as_mut() {
                         n.pushing = false;
                     }
-                    this.net_failed("Not pushed", format!("push {default}"), why, cx);
+                    this.net_failed(t("Not pushed"), tf("{host} did not take this machine's sign-in, so Emaki could not push {branch}. Nothing was changed.", &[("branch", &default)]), why, cx);
                 }
             })
             .ok();
@@ -1266,15 +1301,15 @@ impl Workbench {
                     .gap(px(7.))
                     .items_center()
                     .child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).with_animation("branch-new-checking", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
-                    .child(quiet(format!("Asking {origin} whether {default} is up to date…")))
+                    .child(quiet(tf("Asking {origin} whether {branch} is up to date…", &[("origin", &origin), ("branch", &default)])))
                     .into_any_element(),
             ),
-            BaseSync::Known { ahead: 0, behind: 0 } => Some(h_flex().gap(px(7.)).items_center().child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.green)).child(quiet(format!("{default} is up to date with {origin}."))).into_any_element()),
+            BaseSync::Known { ahead: 0, behind: 0 } => Some(h_flex().gap(px(7.)).items_center().child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.green)).child(quiet(tf("{branch} is up to date with {origin}.", &[("branch", &default), ("origin", &origin)]))).into_any_element()),
             BaseSync::Known { ahead: 0, behind } => Some(
                 v_flex()
                     .gap(px(6.))
                     .child(
-                        Checkbox::new("branch-new-update").small().checked(new.update).label(format!("Update {default} from {origin} first")).on_click(cx.listener(|this, on: &bool, window, cx| {
+                        Checkbox::new("branch-new-update").small().checked(new.update).label(tf("Update {branch} from {origin} first", &[("branch", &default), ("origin", &origin)])).on_click(cx.listener(|this, on: &bool, window, cx| {
                             swallow_click(window, cx);
                             if let Some(n) = this.branch_new.as_mut() {
                                 n.update = *on;
@@ -1282,15 +1317,21 @@ impl Workbench {
                             cx.notify();
                         })),
                     )
-                    .child(quiet(format!("{origin} has {} that {default} here lacks. A branch made without {} can conflict when it is merged.", plural(*behind, "commit", "commits"), if *behind == 1 { "it" } else { "them" })))
+                    .child(quiet(fill(
+                        count(*behind, "{origin} has {n} commit that {branch} here lacks. A branch made without it can conflict when it is merged.", "{origin} has {n} commits that {branch} here lacks. A branch made without them can conflict when it is merged."),
+                        &[("origin", &origin), ("branch", &default)],
+                    )))
                     .into_any_element(),
             ),
             BaseSync::Known { ahead, behind: 0 } => Some(
                 h_flex()
                     .gap(px(8.))
                     .items_start()
-                    .child(div().flex_1().min_w_0().child(quiet(format!("{default} has {} not pushed to {origin}. The new branch will have {}.", plural(*ahead, "commit", "commits"), if *ahead == 1 { "it" } else { "them" }))))
-                    .child(small_pill("branch-new-push", "icons/arrow-up.svg", if new.pushing { "Pushing…".to_string() } else { format!("Push {default}") }, Press::Quiet, new.pushing, &theme).when(!new.pushing, |d| {
+                    .child(div().flex_1().min_w_0().child(quiet(fill(
+                        count(*ahead, "{branch} has {n} commit not pushed to {origin}. The new branch will have it.", "{branch} has {n} commits not pushed to {origin}. The new branch will have them."),
+                        &[("branch", &default), ("origin", &origin)],
+                    ))))
+                    .child(small_pill("branch-new-push", "icons/arrow-up.svg", if new.pushing { t("Pushing…").to_string() } else { tf("Push {branch}", &[("branch", &default)]) }, Press::Quiet, new.pushing, &theme).when(!new.pushing, |d| {
                         d.on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.branch_new_push(cx)
@@ -1298,13 +1339,18 @@ impl Workbench {
                     }))
                     .into_any_element(),
             ),
-            BaseSync::Known { ahead, behind } => Some(quiet(format!("{default} here and on {origin} have gone separate ways: {} here, {} there. Bringing them together takes a merge, which is yours to make, so the branch is made from {default} as it is here.", plural(*ahead, "commit", "commits"), plural(*behind, "commit", "commits"))).into_any_element()),
+            BaseSync::Known { ahead, behind } => Some(
+                quiet(tf("{branch} here and on {origin} have gone separate ways: {ahead} here, {behind} there. Bringing them together takes a merge, which is yours to make, so the branch is made from {branch} as it is here.",
+                    &[("branch", &default), ("origin", &origin), ("ahead", &commits(*ahead)), ("behind", &commits(*behind))],
+                ))
+                .into_any_element(),
+            ),
             BaseSync::Failed(why) => {
                 let sign_in = git::why_net(why) == git::NetTrouble::SignIn;
                 let words = match git::why_net(why) {
-                    git::NetTrouble::Offline => format!("Could not reach {origin} to see whether {default} is up to date. The branch will be made from {default} as it is here."),
-                    git::NetTrouble::SignIn => format!("{origin} did not take your sign-in, so it is not known whether {default} is up to date. The branch will be made from {default} as it is here."),
-                    git::NetTrouble::Other => format!("Could not ask {origin} whether {default} is up to date: {why}."),
+                    git::NetTrouble::Offline => tf("Could not reach {origin} to see whether {branch} is up to date. The branch will be made from {branch} as it is here.", &[("origin", &origin), ("branch", &default)]),
+                    git::NetTrouble::SignIn => tf("{origin} did not take your sign-in, so it is not known whether {branch} is up to date. The branch will be made from {branch} as it is here.", &[("origin", &origin), ("branch", &default)]),
+                    git::NetTrouble::Other => tf("Could not ask {origin} whether {branch} is up to date: {why}.", &[("origin", &origin), ("branch", &default), ("why", &why)]),
                 };
                 let reason = why.clone();
                 Some(
@@ -1314,9 +1360,9 @@ impl Workbench {
                         .child(Icon::new(IconName::TriangleAlert).with_size(px(12.)).mt(px(3.)).text_color(theme.danger).flex_shrink_0())
                         .child(div().flex_1().min_w_0().text_size(px(12.)).line_height(px(18.)).child(words))
                         .when(sign_in, |d| {
-                            d.child(small_pill("branch-new-sign-in", "icons/circle-user.svg", "Sign in…", Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
+                            d.child(small_pill("branch-new-sign-in", "icons/circle-user.svg", t("Sign in…"), Press::Quiet, false, &theme).on_click(cx.listener(move |this, _, window, cx| {
                                 swallow_click(window, cx);
-                                this.open_gate("fetch".into(), reason.clone(), cx)
+                                this.open_gate(t("{host} did not take this machine's sign-in, so Emaki could not fetch. Nothing was changed.").into(), reason.clone(), cx)
                             })))
                         })
                         .into_any_element(),
@@ -1328,7 +1374,7 @@ impl Workbench {
         let based = if two {
             v_flex()
                 .gap(px(8.))
-                .child(div().text_size(px(12.5)).child("Create branch based on…"))
+                .child(div().text_size(px(12.5)).child(t("Create branch based on…")))
                 .child(
                     v_flex()
                         .w_full()
@@ -1336,27 +1382,27 @@ impl Workbench {
                         .border_1()
                         .border_color(theme.border)
                         .overflow_hidden()
-                        .child(option("new-from-default", new.from_default, default.clone(), "The default branch of the repository. Pick this to start on something new that does not depend on your current branch.", true, cx))
+                        .child(option("new-from-default", new.from_default, default.clone(), t("The default branch of the repository. Pick this to start on something new that does not depend on your current branch."), true, cx))
                         .child(div().h(px(1.)).w_full().bg(theme.border))
-                        .child(option("new-from-here", !new.from_default, here.clone(), "The branch checked out. Pick this to build on the work done on it.", false, cx)),
+                        .child(option("new-from-here", !new.from_default, here.clone(), t("The branch checked out. Pick this to build on the work done on it."), false, cx)),
                 )
                 .children(sync)
         } else if b.current.is_some() && b.current == b.default {
-            v_flex().child(quiet(format!("The new branch will be based on {here}, the branch checked out, which is the default branch of the repository.")))
+            v_flex().child(quiet(tf("The new branch will be based on {branch}, the branch checked out, which is the default branch of the repository.", &[("branch", &here)])))
         } else if b.current.is_some() {
-            v_flex().child(quiet(format!("The new branch will be based on {here}, the branch checked out.")))
+            v_flex().child(quiet(tf("The new branch will be based on {branch}, the branch checked out.", &[("branch", &here)])))
         } else {
-            v_flex().child(quiet(format!("The new branch will be based on the commit checked out ({here}).")))
+            v_flex().child(quiet(tf("The new branch will be based on the commit checked out ({commit}).", &[("commit", &here)])))
         };
 
         let under_name = if taken {
-            Some(div().text_size(px(12.)).text_color(theme.danger).child(format!("A branch named {name} already exists.")).into_any_element())
+            Some(div().text_size(px(12.)).text_color(theme.danger).child(tf("A branch named {branch} already exists.", &[("branch", &name)])).into_any_element())
         } else if !name.is_empty() && name != typed.trim() {
-            Some(quiet(format!("Will be created as {name}.")).into_any_element())
+            Some(quiet(tf("Will be created as {branch}.", &[("branch", &name)])).into_any_element())
         } else {
             None
         };
-        let label = if new.update && new.from_default && two { "Update and Create Branch" } else { "Create Branch" };
+        let label = if new.update && new.from_default && two { t("Update and Create Branch") } else { t("Create Branch") };
 
         let card = v_flex()
             .id("branch-new")
@@ -1374,19 +1420,19 @@ impl Workbench {
             .child(
                 h_flex()
                     .items_center()
-                    .child(div().flex_1().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Create a branch"))
+                    .child(div().flex_1().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(t("Create a branch")))
                     .child(Button::new("branch-new-close").ghost().xsmall().icon(IconName::Close).on_click(cx.listener(|this, _, window, cx| this.branch_new_close(window, cx)))),
             )
             .child(
                 v_flex()
                     .gap(px(6.))
-                    .child(div().text_size(px(12.5)).child("Name"))
+                    .child(div().text_size(px(12.5)).child(t("Name")))
                     .child(
                         h_flex()
                             .id("branch-name-field")
                             .track_focus(&focus)
                             .role(Role::TextInput)
-                            .aria_label("The new branch's name")
+                            .aria_label(t("The new branch's name"))
                             .aria_value(typed.clone())
                             .px(px(8.))
                             .h(px(32.))
@@ -1406,7 +1452,7 @@ impl Workbench {
                     .w_full()
                     .justify_end()
                     .gap(px(8.))
-                    .child(choice_pill("branch-new-cancel", "icons/close.svg", "Cancel", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                    .child(choice_pill("branch-new-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.branch_new_close(window, cx);
                     })))
@@ -1436,12 +1482,13 @@ impl Workbench {
 
     // -- signing in -----------------------------------------------------------
 
-    /// The sheet that says how to sign in, after the remote refused
-    /// `what` with `why`.
-    pub(crate) fn open_gate(&mut self, what: String, why: String, cx: &mut Context<Self>) {
+    /// The sheet that says how to sign in, after the remote refused with
+    /// `why`: `said` is the whole sentence for what could not be done,
+    /// its `{host}` filled when the sheet is drawn.
+    pub(crate) fn open_gate(&mut self, said: String, why: String, cx: &mut Context<Self>) {
         self.branch_ask = None;
         self.branch_menu = None;
-        self.git_gate = Some(GitGate { what, why, account: None, checking: false });
+        self.git_gate = Some(GitGate { said, why, account: None, checking: false });
         cx.notify();
         let Some(root) = self.git_dir() else { return };
         cx.spawn(async move |this, cx| {
@@ -1471,7 +1518,7 @@ impl Workbench {
                 match reached {
                     Ok(()) => {
                         this.git_gate = None;
-                        this.notice = Some(Notice::said("signed in: the remote answers"));
+                        this.notice = Some(Notice::said(t("signed in: the remote answers")));
                         this.branch_fetch(true, cx);
                     }
                     Err(why) => {
@@ -1508,14 +1555,14 @@ impl Workbench {
 
         let mut steps: Vec<AnyElement> = Vec::new();
         match &gate.account {
-            None => steps.push(quiet("Looking at how this machine signs in…".into()).into_any_element()),
+            None => steps.push(quiet(t("Looking at how this machine signs in…").into()).into_any_element()),
             Some(a) if !a.github() => {
-                steps.push(prose(format!("This repository is on {host}. Sign git in to it the way {host} documents, then check again.")).into_any_element());
+                steps.push(prose(tf("This repository is on {host}. Sign git in to it the way {host} documents, then check again.", &[("host", &host)])).into_any_element());
             }
             Some(a) if a.ssh => {
-                steps.push(step(1, "Check your key", vec![self.command_box("gate-ssh".into(), "ssh -T git@github.com".into(), false, cx), quiet("This repository is reached over ssh, with a key and no password. GitHub answers with your name when it knows the key.".into()).into_any_element()]).into_any_element());
-                let link = small_pill("gate-ssh-docs", "icons/external-link.svg", "How to add a key", Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://docs.github.com/en/authentication/connecting-to-github-with-ssh"));
-                steps.push(step(2, "Add a key if it does not", vec![h_flex().child(link).into_any_element()]).into_any_element());
+                steps.push(step(1, t("Check your key"), vec![self.command_box("gate-ssh".into(), "ssh -T git@github.com".into(), false, cx), quiet(t("This repository is reached over ssh, with a key and no password. GitHub answers with your name when it knows the key.").into()).into_any_element()]).into_any_element());
+                let link = small_pill("gate-ssh-docs", "icons/external-link.svg", t("How to add a key"), Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://docs.github.com/en/authentication/connecting-to-github-with-ssh"));
+                steps.push(step(2, t("Add a key if it does not"), vec![h_flex().child(link).into_any_element()]).into_any_element());
             }
             Some(a) => {
                 let mut n = 0;
@@ -1526,16 +1573,16 @@ impl Workbench {
                     } else if cfg!(windows) {
                         self.command_box("gate-gh-install".into(), "winget install --id GitHub.cli".into(), false, cx)
                     } else {
-                        h_flex().child(small_pill("gate-gh-linux", "icons/external-link.svg", "How to install it on Linux", Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://github.com/cli/cli/blob/trunk/docs/install_linux.md"))).into_any_element()
+                        h_flex().child(small_pill("gate-gh-linux", "icons/external-link.svg", t("How to install it on Linux"), Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://github.com/cli/cli/blob/trunk/docs/install_linux.md"))).into_any_element()
                     };
-                    steps.push(step(n, "Install GitHub's command line tool", vec![install, quiet("It signs in through the browser and hands git the sign-in, with no token to copy.".into()).into_any_element()]).into_any_element());
+                    steps.push(step(n, t("Install GitHub's command line tool"), vec![install, quiet(t("It signs in through the browser and hands git the sign-in, with no token to copy.").into()).into_any_element()]).into_any_element());
                 }
                 if !a.gh_signed {
                     n += 1;
-                    steps.push(step(n, "Sign in", vec![self.command_box("gate-gh-login".into(), "gh auth login".into(), false, cx), quiet("Choose GitHub.com and HTTPS, answer yes to signing git in with your GitHub credentials, and sign in with a web browser.".into()).into_any_element()]).into_any_element());
+                    steps.push(step(n, t("Sign in"), vec![self.command_box("gate-gh-login".into(), "gh auth login".into(), false, cx), quiet(t("Choose GitHub.com and HTTPS, answer yes to signing git in with your GitHub credentials, and sign in with a web browser.").into()).into_any_element()]).into_any_element());
                 } else {
                     n += 1;
-                    steps.push(step(n, "Hand git the sign-in", vec![self.command_box("gate-gh-setup".into(), "gh auth setup-git".into(), false, cx), quiet("GitHub's tool is signed in on this machine, and git was refused all the same. This has git use that sign-in. If it was refused again after it, the account signed in has no right to this repository.".into()).into_any_element()]).into_any_element());
+                    steps.push(step(n, t("Hand git the sign-in"), vec![self.command_box("gate-gh-setup".into(), "gh auth setup-git".into(), false, cx), quiet(t("GitHub's tool is signed in on this machine, and git was refused all the same. This has git use that sign-in. If it was refused again after it, the account signed in has no right to this repository.").into()).into_any_element()]).into_any_element());
                 }
             }
         }
@@ -1554,17 +1601,17 @@ impl Workbench {
             .border_1()
             .border_color(theme.border)
             .shadow(float_shadow(&theme))
-            .child(h_flex().gap(px(8.)).items_center().child(Icon::default().path("icons/github.svg").with_size(px(16.)).text_color(theme.foreground)).child(div().flex_1().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(format!("Sign in to {name}"))))
-            .child(prose(format!("{name} did not take this machine's sign-in, so Emaki could not {}. Nothing was changed.", gate.what)))
+            .child(h_flex().gap(px(8.)).items_center().child(Icon::default().path("icons/github.svg").with_size(px(16.)).text_color(theme.foreground)).child(div().flex_1().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(tf("Sign in to {name}", &[("name", &name)]))))
+            .child(prose(gate.said.replace("{host}", &name)))
             .child(div().w_full().px(px(10.)).py(px(7.)).rounded(px(8.)).bg(theme.muted.opacity(0.6)).font_family(theme.mono_font_family.clone()).text_size(px(11.5)).line_height(px(17.)).text_color(theme.muted_foreground).child(gate.why.clone()))
             .children(steps)
             .when(github, |d| {
-                d.child(quiet("Paste a command into a terminal. GitHub Desktop signs in for itself alone: being signed in there does not sign git in for other apps.".into())).child(
+                d.child(quiet(t("Paste a command into a terminal. GitHub Desktop signs in for itself alone: being signed in there does not sign git in for other apps.").into())).child(
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(quiet("No account yet?".into()))
-                        .child(small_pill("gate-signup", "icons/external-link.svg", "Create one on GitHub", Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://github.com/signup"))),
+                        .child(quiet(t("No account yet?").into()))
+                        .child(small_pill("gate-signup", "icons/external-link.svg", t("Create one on GitHub"), Press::Quiet, false, &theme).on_click(|_, _, cx| cx.open_url("https://github.com/signup"))),
                 )
             })
             .child(
@@ -1572,12 +1619,12 @@ impl Workbench {
                     .w_full()
                     .justify_end()
                     .gap(px(8.))
-                    .child(choice_pill("gate-close", "icons/close.svg", "Close", Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
+                    .child(choice_pill("gate-close", "icons/close.svg", t("Close"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.git_gate = None;
                         cx.notify();
                     })))
-                    .child(choice_pill("gate-check", "icons/refresh.svg", if gate.checking { "Checking…" } else { "Check again" }, Press::Primary, gate.checking, &theme).when(!gate.checking, |d| {
+                    .child(choice_pill("gate-check", "icons/refresh.svg", if gate.checking { t("Checking…") } else { t("Check again") }, Press::Primary, gate.checking, &theme).when(!gate.checking, |d| {
                         d.on_click(move |_, window, cx| {
                             swallow_click(window, cx);
                             let _ = entity.update(cx, |this, cx| this.gate_check(cx));

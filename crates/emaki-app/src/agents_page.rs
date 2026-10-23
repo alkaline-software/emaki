@@ -15,7 +15,7 @@ use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable a
 use emaki_core::agents::{self, Agent, Found, Os};
 use emaki_core::transcript::SessionRef;
 
-use crate::format::plural;
+use crate::i18n::{count, phrase, t, tf};
 use crate::workbench::{page_in, Page, Press, Scope, Workbench, CONTENT_W};
 
 /// How old what was found may be before a visit to the page looks again.
@@ -43,7 +43,7 @@ pub(crate) struct AgentSwap {
 }
 
 /// The way of installing that is a download and not a command.
-const DOWNLOAD: &str = "Download";
+const DOWNLOAD: &str = phrase("Download");
 
 /// The icon before a choice of the install step: a system's, or a
 /// way's, by what does the installing. None for any other control.
@@ -264,7 +264,7 @@ impl Workbench {
             .items_center()
             .justify_center()
             .when(!busy, |d| d.cursor_pointer().hover(move |s| s.bg(hover_bg)))
-            .managed_tooltip(move |window, cx| crate::workbench::tip(if busy { "Refreshing…" } else { "Refresh status" }, window, cx))
+            .managed_tooltip(move |window, cx| crate::workbench::tip(if busy { t("Refreshing…") } else { t("Refresh status") }, window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.check_agents(true, cx)))
             .child(if busy { icon.with_animation("agents-checking", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))).into_any_element() } else { icon.into_any_element() })
             .into_any_element()
@@ -294,10 +294,10 @@ impl Workbench {
         let tool = agents::tools().iter().any(|t| t.id == a.id);
         let signed = self.agent_found(a.id).is_some_and(|f| f.signed);
         let (color, words, dot) = match self.installed_here(a) {
-            None => (theme.muted_foreground, "Looking…", false),
-            Some(true) if tool && !signed => (theme.muted_foreground, "Not signed in", false),
-            Some(true) => (agent_ink(a, theme), if tool { "Ready" } else { "Installed" }, true),
-            Some(false) => (theme.muted_foreground, if tool { "No git" } else { "Not installed" }, false),
+            None => (theme.muted_foreground, t("Looking…"), false),
+            Some(true) if tool && !signed => (theme.muted_foreground, t("Not signed in"), false),
+            Some(true) => (agent_ink(a, theme), if tool { t("Ready") } else { t("Installed") }, true),
+            Some(false) => (theme.muted_foreground, if tool { t("No git") } else { t("Not installed") }, false),
         };
         h_flex()
             .flex_shrink_0()
@@ -335,7 +335,7 @@ impl Workbench {
         // Said only when there is something to say: a command whose
         // source is gone.
         let stale = self.agents_stale.len();
-        let warn = (stale > 0).then(|| div().text_size(px(12.5)).text_color(theme.danger).child(format!("{} may be out of date; the agent's page says which.", plural(stale, "install command", "install commands"))));
+        let warn = (stale > 0).then(|| div().text_size(px(12.5)).text_color(theme.danger).child(count(stale, "{n} install command may be out of date; the agent's page says which.", "{n} install commands may be out of date; the agent's page says which.")));
         // One row in the catalog's order, whatever is installed: a
         // card says so itself, and stays where it is when that changes.
         let cards: Vec<AnyElement> = agents::all().iter().map(|a| self.agent_card(a, cx)).collect();
@@ -348,7 +348,7 @@ impl Workbench {
             .pt(px(20.))
             .pb(px(40.))
             .gap(px(20.))
-            .child(h_flex().items_center().gap(px(12.)).child(div().flex_1().min_w_0().text_size(px(30.)).font_family(display.clone()).child("Agents")).child(self.check_button(cx)))
+            .child(h_flex().items_center().gap(px(12.)).child(div().flex_1().min_w_0().text_size(px(30.)).font_family(display.clone()).child(t("Agents"))).child(self.check_button(cx)))
             .children(warn)
             .child(h_flex().w_full().gap(px(16.)).items_stretch().children(cards))
             .when(!tools.is_empty(), |d| {
@@ -356,7 +356,7 @@ impl Workbench {
                     v_flex()
                         .pt(px(12.))
                         .gap(px(4.))
-                        .child(div().text_size(px(20.)).font_family(display).child("Version control")),
+                        .child(div().text_size(px(20.)).font_family(display).child(t("Version control"))),
                 )
                 .child(v_flex().w_full().gap(px(16.)).children(tools))
             })
@@ -400,15 +400,15 @@ impl Workbench {
             .border_t_1()
             .border_b_1()
             .border_color(theme.border)
-            .child(self.agent_fact(installed, if found.is_none() { "Looking…" } else if installed { "Installed" } else { "Not installed" }, version, ink, cx))
-            .child(self.agent_fact(signed, if signed { "Signed in" } else { "No sign-in seen" }, String::new(), ink, cx))
+            .child(self.agent_fact(installed, if found.is_none() { t("Looking…") } else if installed { t("Installed") } else { t("Not installed") }, version, ink, cx))
+            .child(self.agent_fact(signed, if signed { t("Signed in") } else { t("No sign-in seen") }, String::new(), ink, cx))
             // Sessions are an agent's to have.
-            .when(a.with_emaki.is_empty(), |d| d.child(self.agent_fact(sessions > 0, if sessions > 0 { "Sessions kept" } else { "No sessions yet" }, if sessions > 0 { sessions.to_string() } else { String::new() }, ink, cx)));
+            .when(a.with_emaki.is_empty(), |d| d.child(self.agent_fact(sessions > 0, if sessions > 0 { t("Sessions kept") } else { t("No sessions yet") }, if sessions > 0 { sessions.to_string() } else { String::new() }, ink, cx)));
         let ready = installed && signed;
         let foot = h_flex()
             .gap(px(6.))
             .items_center()
-            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(if ready { theme.muted_foreground } else { ink }).child(if ready { "Details" } else { "Set up" }))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(if ready { theme.muted_foreground } else { ink }).child(if ready { t("Details") } else { t("Set up") }))
             .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(if ready { theme.muted_foreground.opacity(0.7) } else { ink }));
         let id = a.id;
         v_flex()
@@ -429,9 +429,9 @@ impl Workbench {
                 v_flex()
                     .gap(px(2.))
                     .child(div().truncate().text_size(px(24.)).line_height(px(30.)).font_family(display).child(a.name))
-                    .child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(a.maker)),
+                    .child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(t(a.maker))),
             )
-            .child(div().flex_1().min_h(px(40.)).text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.82)).child(a.about))
+            .child(div().flex_1().min_h(px(40.)).text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.82)).child(t(a.about)))
             .child(facts)
             .child(foot)
             .into_any_element()
@@ -455,13 +455,13 @@ impl Workbench {
             .pl(px(20.))
             .border_l_1()
             .border_color(theme.border)
-            .child(self.agent_fact(installed, match git { None => "Looking…", Some(true) => "Git installed", Some(false) => "No git" }, String::new(), ink, cx))
-            .child(self.agent_fact(signed, if signed { "GitHub signed in" } else { "No GitHub sign-in seen" }, String::new(), ink, cx));
+            .child(self.agent_fact(installed, match git { None => t("Looking…"), Some(true) => t("Git installed"), Some(false) => t("No git") }, String::new(), ink, cx))
+            .child(self.agent_fact(signed, if signed { t("GitHub signed in") } else { t("No GitHub sign-in seen") }, String::new(), ink, cx));
         let foot = h_flex()
             .flex_shrink_0()
             .gap(px(6.))
             .items_center()
-            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(if ready { theme.muted_foreground } else { ink }).child(if ready { "Details" } else { "Set up" }))
+            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(if ready { theme.muted_foreground } else { ink }).child(if ready { t("Details") } else { t("Set up") }))
             .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(if ready { theme.muted_foreground.opacity(0.7) } else { ink }));
         let id = a.id;
         h_flex()
@@ -483,8 +483,8 @@ impl Workbench {
                     .flex_1()
                     .min_w_0()
                     .gap(px(4.))
-                    .child(h_flex().gap(px(10.)).items_baseline().child(div().truncate().text_size(px(22.)).line_height(px(28.)).font_family(display).child(a.name)).child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(a.maker)))
-                    .child(div().text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.82)).child(a.about)),
+                    .child(h_flex().gap(px(10.)).items_baseline().child(div().truncate().text_size(px(22.)).line_height(px(28.)).font_family(display).child(a.name)).child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(t(a.maker))))
+                    .child(div().text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.82)).child(t(a.about))),
             )
             .child(facts)
             .child(foot)
@@ -517,7 +517,7 @@ impl Workbench {
             .justify_center()
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
-            .managed_tooltip(move |window, cx| crate::workbench::tip(if done { "Copied" } else { "Copy" }, window, cx))
+            .managed_tooltip(move |window, cx| crate::workbench::tip(if done { t("Copied") } else { t("Copy") }, window, cx))
             .on_click({
                 let command = command.clone();
                 cx.listener(move |this, _, _, cx| this.copy_text(key.clone(), command.to_string(), cx))
@@ -573,7 +573,7 @@ impl Workbench {
             .cursor_pointer()
             .text_color(if on { lit } else { theme.muted_foreground })
             .hover(move |s| s.bg(hover).text_color(lit))
-            .managed_tooltip(|window, cx| crate::workbench::tip("Shell Terminal in your home folder (⌘⇧S)", window, cx))
+            .managed_tooltip(|window, cx| crate::workbench::tip(t("Shell Terminal in your home folder (⌘⇧S)"), window, cx))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
             .children(fill)
             .child(Icon::default().path("icons/terminal.svg").with_size(px(15.)).relative());
@@ -642,7 +642,7 @@ impl Workbench {
             .items_center()
             .text_size(px(12.5))
             .text_color(theme.muted_foreground)
-            .child(div().id("agents-up").cursor_pointer().hover(move |s| s.text_color(hover)).on_click(cx.listener(|this, _, _, cx| this.show_agents(None, cx))).child("Agents"))
+            .child(div().id("agents-up").cursor_pointer().hover(move |s| s.text_color(hover)).on_click(cx.listener(|this, _, _, cx| this.show_agents(None, cx))).child(t("Agents")))
             .child(Icon::new(IconName::ChevronRight).with_size(px(11.)))
             .child(div().min_w_0().truncate().child(a.name));
 
@@ -657,15 +657,15 @@ impl Workbench {
                     .min_w_0()
                     .gap(px(2.))
                     .child(h_flex().gap(px(12.)).items_center().child(div().min_w_0().truncate().text_size(px(30.)).font_family(display).child(a.name)).child(self.agent_chip(a, cx)))
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(a.maker)),
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(t(a.maker))),
             );
         // The steps are this machine's: what the page can see and tick.
         let os = Os::here();
         let links = h_flex()
             .gap(px(8.))
             .items_center()
-            .child(link("agent-site", "Website", a.site, &tinted))
-            .child(link("agent-docs", "Documentation", a.docs, &tinted))
+            .child(link("agent-site", t("Website"), a.site, &tinted))
+            .child(link("agent-docs", t("Documentation"), a.docs, &tinted))
             .child(div().flex_1())
             .child(self.check_button(cx));
         // A step's words, a line a thing to do, each with its number.
@@ -684,7 +684,7 @@ impl Workbench {
                 (false, Some(p)) => format!("{} · {p}", f.version),
                 (false, None) => f.version.clone(),
                 (true, Some(p)) => p,
-                (true, None) => "Installed".to_string(),
+                (true, None) => t("Installed").to_string(),
             }
         });
         let install = {
@@ -713,9 +713,11 @@ impl Workbench {
                     Os::Linux => "agent-way-linux",
                     Os::Windows => "agent-way-windows",
                 };
-                let short = |by: &'static str| by.split(" (").next().unwrap_or(by).to_string();
+                // A way by its name alone, less what it needs: "npm", not
+                // "npm (needs Node.js)".
+                let short = |by: &'static str| t(by.split(" (").next().unwrap_or(by)).to_string();
                 let options = hows.iter().map(|by| (*by, short(by), None)).collect();
-                pick = pick.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("Install with")).child(self.segmented_sized(control, options, how, on, true, cx));
+                pick = pick.child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(t("Install with"))).child(self.segmented_sized(control, options, how, on, true, cx));
             }
             // What a way on a system says to do. Its words are known by
             // the system and the way, never by their place on the page:
@@ -728,15 +730,15 @@ impl Workbench {
                 let quiet = |part: &str, words: String, cx: &App| div().text_size(px(12.)).line_height(px(18.)).text_color(theme.muted_foreground).child(self.selectable_as(id(part), &words, cx));
                 let col = v_flex().w_full().gap(px(10.));
                 match how {
-                    None => col.child(quiet("none", format!("No installer for {} is listed here. See {}'s documentation.", os.label(), a.name), cx)),
+                    None => col.child(quiet("none", tf("No installer for {os} is listed here. See {agent}'s documentation.", &[("os", &os.label()), ("agent", &a.name)]), cx)),
                     Some(DOWNLOAD) => {
                         let url = a.download;
                         let open = match os {
-                            Os::Mac => format!("Open it and move {} to Applications.", a.name),
-                            Os::Windows => "Open it and install.".to_string(),
-                            Os::Linux => "Install it with your software installer.".to_string(),
+                            Os::Mac => tf("Open it and move {agent} to Applications.", &[("agent", &a.name)]),
+                            Os::Windows => t("Open it and install.").to_string(),
+                            Os::Linux => t("Install it with your software installer.").to_string(),
                         };
-                        col.child(numbered_at(1, true, h_flex().gap(px(10.)).items_center().child(prose("download", format!("Download {} from {}:", a.name, a.maker), cx)).child(crate::branches::small_pill("agent-download", "icons/ways/download.svg", "Download", crate::workbench::Press::Quiet, false, &tinted).on_click(move |_, _, cx| cx.open_url(url))).into_any_element()))
+                        col.child(numbered_at(1, true, h_flex().gap(px(10.)).items_center().child(prose("download", tf("Download {agent} from {maker}:", &[("agent", &a.name), ("maker", &a.maker)]), cx)).child(crate::branches::small_pill("agent-download", "icons/ways/download.svg", t(DOWNLOAD), crate::workbench::Press::Quiet, false, &tinted).on_click(move |_, _, cx| cx.open_url(url))).into_any_element()))
                             .child(numbered(2, prose("download-open", open, cx).into_any_element()))
                     }
                     Some(by) => {
@@ -749,19 +751,19 @@ impl Workbench {
                             1,
                             v_flex()
                                 .gap(px(8.))
-                                .child(prose("run", if os == Os::here() { "Run in the terminal:".into() } else { "Run in a terminal on that computer:".into() }, cx))
+                                .child(prose("run", if os == Os::here() { t("Run in the terminal:").into() } else { t("Run in a terminal on that computer:").into() }, cx))
                                 .child(self.command_box(format!("agent-way-{}-{}-{i}", a.id, os.as_str()), w.command.into(), os == Os::here(), cx))
-                                .when(gone, |d| d.child(div().text_size(px(12.)).line_height(px(18.)).text_color(theme.danger).child(format!("This command's source is no longer published. See {}'s documentation.", a.name))))
+                                .when(gone, |d| d.child(div().text_size(px(12.)).line_height(px(18.)).text_color(theme.danger).child(tf("This command's source is no longer published. See {agent}'s documentation.", &[("agent", &a.name)]))))
                                 .into_any_element(),
                         ))
                         .child(numbered(
                             2,
                             if os == Os::Windows {
-                                prose("again", "When it finishes, open a new terminal.".into(), cx).into_any_element()
+                                prose("again", t("When it finishes, open a new terminal.").into(), cx).into_any_element()
                             } else {
                                 v_flex()
                                     .gap(px(8.))
-                                    .child(prose("again", "When it finishes, run any line it asks you to, then restart the terminal:".into(), cx))
+                                    .child(prose("again", t("When it finishes, run any line it asks you to, then restart the terminal:").into(), cx))
                                     .child(self.command_box(format!("agent-again-{}-{}", a.id, os.as_str()), agents::SHELL_AGAIN.into(), os == Os::here(), cx))
                                     .into_any_element()
                             },
@@ -798,7 +800,7 @@ impl Workbench {
         let git_ready = git.as_ref().is_some_and(|g| g.ready);
         // What this machine has, beside the tick that says so, whichever
         // system's steps are shown.
-        let git_status = git_ready.then(|| if Os::here() == Os::Mac { "Command line tools installed".to_string() } else { "Git installed".to_string() });
+        let git_status = git_ready.then(|| if Os::here() == Os::Mac { t("Command line tools installed").to_string() } else { t("Git installed").to_string() });
         let git_step = {
             let git_body = |os: Os, cx: &mut Context<Self>| -> Div {
                 let id = |part: &str| format!("agent-git-text-{}-{}-{part}", a.id, os.as_str());
@@ -806,14 +808,14 @@ impl Workbench {
                 let col = v_flex().w_full().gap(px(10.));
                 match os {
                     Os::Mac => col
-                        .child(prose("what", "On a Mac, git comes with Apple's command line tools. Run in the terminal:".into(), cx))
+                        .child(prose("what", t("On a Mac, git comes with Apple's command line tools. Run in the terminal:").into(), cx))
                         .child(self.command_box(format!("agent-git-{}-mac", a.id), agents::GIT_MAC.into(), os == Os::here(), cx)),
                     Os::Linux => col
-                        .child(prose("what", "Most Linux systems have git. If not, on Ubuntu or Debian, run:".into(), cx))
+                        .child(prose("what", t("Most Linux systems have git. If not, on Ubuntu or Debian, run:").into(), cx))
                         .child(self.command_box(format!("agent-git-{}-linux", a.id), agents::GIT_LINUX.into(), os == Os::here(), cx)),
                     Os::Windows => col
-                        .child(prose("what", "Download Git for Windows and install it with the default choices.".into(), cx))
-                        .child(h_flex().child(crate::branches::small_pill("agent-git-download", "icons/ways/download.svg", "Download Git", crate::workbench::Press::Quiet, false, &tinted).on_click(|_, _, cx| cx.open_url(agents::GIT_WINDOWS)))),
+                        .child(prose("what", t("Download Git for Windows and install it with the default choices.").into(), cx))
+                        .child(h_flex().child(crate::branches::small_pill("agent-git-download", "icons/ways/download.svg", t("Download Git"), crate::workbench::Press::Quiet, false, &tinted).on_click(|_, _, cx| cx.open_url(agents::GIT_WINDOWS)))),
                 }
             };
             let tall = self.agent_git_h.clone();
@@ -835,14 +837,14 @@ impl Workbench {
         // someone else; that it is done is the tick.
         if a.sign_in.is_empty() {
             // Signed in to in its own window, with nothing to type.
-            sign = sign.child(prose(a.sign_in_how.to_string(), cx));
+            sign = sign.child(prose(t(a.sign_in_how).to_string(), cx));
         } else {
             sign = sign
-                .child(numbered(1, v_flex().gap(px(8.)).child(prose(if os == Os::here() { "Run in the terminal:".into() } else { "Run in a terminal on that computer:".into() }, cx)).child(self.command_box("agent-sign-in".into(), a.sign_in.into(), os == Os::here(), cx)).into_any_element()))
-                .child(numbered(2, prose(a.sign_in_how.to_string(), cx).into_any_element()));
+                .child(numbered(1, v_flex().gap(px(8.)).child(prose(if os == Os::here() { t("Run in the terminal:").into() } else { t("Run in a terminal on that computer:").into() }, cx)).child(self.command_box("agent-sign-in".into(), a.sign_in.into(), os == Os::here(), cx)).into_any_element()))
+                .child(numbered(2, prose(t(a.sign_in_how).to_string(), cx).into_any_element()));
         }
         if !a.plans.is_empty() {
-            sign = sign.child(quiet(a.plans.to_string(), cx));
+            sign = sign.child(quiet(t(a.plans).to_string(), cx));
         }
 
         // Who commits are by: git asks before the first one, and a commit
@@ -875,13 +877,13 @@ impl Workbench {
             // Always the command: run again, it changes the name. The name
             // and email are this machine's own, read from git.
             let mut body = v_flex().gap(px(10.));
-            body = body.child(prose("Git needs a name and email to commit. Use an email on your GitHub account, so GitHub credits the commits to you.".into(), cx));
-            body = body.child(h_flex().gap(px(10.)).child(field("git-name-field", "Name", &self.git_name_input, cx)).child(field("git-email-field", "Email", &self.git_email_input, cx)));
+            body = body.child(prose(t("Git needs a name and email to commit. Use an email on your GitHub account, so GitHub credits the commits to you.").into(), cx));
+            body = body.child(h_flex().gap(px(10.)).child(field("git-name-field", t("Name"), &self.git_name_input, cx)).child(field("git-email-field", t("Email"), &self.git_email_input, cx)));
             if !name.is_empty() && !email.is_empty() {
                 let line = agents::git_identity_command(&name, &email, os);
-                body = body.child(prose(if os == Os::here() { "Run in the terminal:".into() } else { "Run in a terminal on that computer:".into() }, cx)).child(self.command_box(format!("agent-identity-{}", os.as_str()), line.into(), os == Os::here(), cx));
+                body = body.child(prose(if os == Os::here() { t("Run in the terminal:").into() } else { t("Run in a terminal on that computer:").into() }, cx)).child(self.command_box(format!("agent-identity-{}", os.as_str()), line.into(), os == Os::here(), cx));
             } else {
-                body = body.child(quiet("Type both to get the line to run.".into(), cx));
+                body = body.child(quiet(t("Type both to get the line to run.").into(), cx));
             }
             (!known_name.is_empty() && !known_email.is_empty(), body)
         });
@@ -894,19 +896,19 @@ impl Workbench {
         let tool = agents::tools().iter().any(|t| t.id == a.id);
         let github = tool.then(|| {
             let here = os == Os::here();
-            let mut body = v_flex().gap(px(10.)).child(prose("GitHub keeps your repositories online, and Emaki fetches and publishes there once git is signed in.".into(), cx));
+            let mut body = v_flex().gap(px(10.)).child(prose(t("GitHub keeps your repositories online, and Emaki fetches and publishes there once git is signed in.").into(), cx));
             let install = match self.usable_ways(a, os).first() {
-                Some(w) => v_flex().gap(px(8.)).child(prose(if here { "Run in the terminal:".into() } else { "Run in a terminal on that computer:".into() }, cx)).child(self.command_box(format!("agent-gh-{}", os.as_str()), w.command.into(), here, cx)),
-                None => v_flex().items_start().gap(px(8.)).child(prose("Install GitHub's tool:".into(), cx)).child(crate::branches::small_pill("agent-gh-get", "icons/external-link.svg", "GitHub CLI", crate::workbench::Press::Quiet, false, &tinted).on_click(|_, _, cx| cx.open_url(agents::GH_INSTALL))),
+                Some(w) => v_flex().gap(px(8.)).child(prose(if here { t("Run in the terminal:").into() } else { t("Run in a terminal on that computer:").into() }, cx)).child(self.command_box(format!("agent-gh-{}", os.as_str()), w.command.into(), here, cx)),
+                None => v_flex().items_start().gap(px(8.)).child(prose(t("Install GitHub's tool:").into(), cx)).child(crate::branches::small_pill("agent-gh-get", "icons/external-link.svg", "GitHub CLI", crate::workbench::Press::Quiet, false, &tinted).on_click(|_, _, cx| cx.open_url(agents::GH_INSTALL))),
             };
             body = body
                 .child(numbered(1, install.into_any_element()))
-                .child(numbered(2, v_flex().gap(px(8.)).child(prose(format!("Then sign in, so git can fetch and publish as you. {}", a.sign_in_how), cx)).child(self.command_box("agent-gh-login".into(), a.sign_in.into(), here, cx)).into_any_element()))
+                .child(numbered(2, v_flex().gap(px(8.)).child(prose(tf("Then sign in, so git can fetch and publish as you. {how}", &[("how", &t(a.sign_in_how))]), cx)).child(self.command_box("agent-gh-login".into(), a.sign_in.into(), here, cx)).into_any_element()))
                 .child(
                     h_flex()
                         .gap(px(10.))
                         .items_center()
-                        .child(quiet("Prefer an app? GitHub Desktop works on the same repositories.".into(), cx))
+                        .child(quiet(t("Prefer an app? GitHub Desktop works on the same repositories.").into(), cx))
                         .child(crate::branches::small_pill("agent-desktop-get", "icons/ways/download.svg", "GitHub Desktop", crate::workbench::Press::Quiet, false, &tinted).on_click(|_, _, cx| cx.open_url(agents::GITHUB_DESKTOP))),
                 );
             body
@@ -921,22 +923,22 @@ impl Workbench {
             .bg(if theme.mode.is_dark() { theme.muted.opacity(0.35) } else { theme.popover });
         let steps = match (github, identity) {
             (Some(github), Some((known, who))) => card
-                .child(self.agent_step(1, git_ready, false, "Install git".into(), git_status, git_step, ink, cx))
+                .child(self.agent_step(1, git_ready, false, t("Install git").into(), git_status, git_step, ink, cx))
                 // Signed in first, so the email the next step asks for is
                 // the account's just signed in to.
-                .child(self.agent_step(2, signed, false, "Sign in to GitHub".into(), None, github, ink, cx))
-                .child(self.agent_step(3, known, true, "Name your commits".into(), None, who, ink, cx)),
+                .child(self.agent_step(2, signed, false, t("Sign in to GitHub").into(), None, github, ink, cx))
+                .child(self.agent_step(3, known, true, t("Name your commits").into(), None, who, ink, cx)),
             // An agent's own: git is optional for Emaki and has a page of
             // its own, so it is no step here.
             _ => card
-                .child(self.agent_step(1, installed, false, format!("Install {}", a.name), here, install, ink, cx))
-                .child(self.agent_step(2, signed, true, "Sign in".into(), None, sign, ink, cx)),
+                .child(self.agent_step(1, installed, false, tf("Install {agent}", &[("agent", &a.name)]), here, install, ink, cx))
+                .child(self.agent_step(2, signed, true, t("Sign in").into(), None, sign, ink, cx)),
         };
 
         // The way to the sessions themselves: All Sessions, narrowed to
         // this agent. One row and not a list, which said it twice.
         let kept = a.reads.filter(|_| !sessions.is_empty()).map(|id| {
-            let count = sessions.len();
+            let n = sessions.len();
             h_flex()
                 .id("agent-sessions")
                 .w_full()
@@ -952,12 +954,12 @@ impl Workbench {
                 .hover(move |s| s.border_color(ink.opacity(0.55)).bg(ink.opacity(0.05)))
                 .on_click(cx.listener(move |this, _, _, cx| this.show_sessions_in(Scope::Agent(id), None, cx)))
                 .child(Icon::default().path("icons/scroll.svg").with_size(px(16.)).text_color(ink))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(plural(count, "session", "sessions")))
-                .child(div().flex_shrink_0().text_size(px(12.5)).text_color(theme.muted_foreground).child("See in All Sessions"))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(count(n, "{n} session", "{n} sessions")))
+                .child(div().flex_shrink_0().text_size(px(12.5)).text_color(theme.muted_foreground).child(t("See in All Sessions")))
                 .child(Icon::new(IconName::ChevronRight).with_size(px(14.)).text_color(theme.muted_foreground.opacity(0.7)))
         });
 
-        v_flex().w_full().max_w(CONTENT_W).pt(px(20.)).pb(px(40.)).gap(px(16.)).child(crumb).child(head).child(prose(a.about.to_string(), cx)).child(links).child(steps).children(kept)
+        v_flex().w_full().max_w(CONTENT_W).pt(px(20.)).pb(px(40.)).gap(px(16.)).child(crumb).child(head).child(prose(t(a.about).to_string(), cx)).child(links).child(steps).children(kept)
     }
 }
 

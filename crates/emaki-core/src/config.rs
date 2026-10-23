@@ -99,11 +99,18 @@ pub struct AppConfig {
     /// label a small model writes on the person's account. Off, the panel
     /// says so and asks nothing.
     pub outline: bool,
+    /// Three or more tool calls in a row fold into one row of the
+    /// conversation that opens; off, each call is a card of its own.
+    pub fold_runs: bool,
+    /// The window's language: `system`, or a code of the app's
+    /// `i18n::CHOICES`. On a Mac the app's own `AppleLanguages` is what
+    /// counts, and this follows it.
+    pub language: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true }
+        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, fold_runs: true, language: "system".into() }
     }
 }
 

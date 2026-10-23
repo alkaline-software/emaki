@@ -307,6 +307,8 @@ upstream revision finds them.
    the editor's own edits and an input method composing go in as they
    are.
 
+39. `crates/ui/locales/ui.yml` (`Input`): Cut, Copy, Paste and Select All in Japanese, Korean, French, German and Spanish, the words of a field's menu, so it speaks every language Emaki's window does (`emaki-app/src/i18n.rs`). Upstream has English and Chinese. Kotoba's copy has the same words (its change 31).
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

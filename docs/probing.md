@@ -78,6 +78,8 @@ EMAKI_SHOT=/tmp/shot.png EMAKI_OPEN=<id> ./target/debug/Emaki  # write a picture
 
 `EMAKI_GO` steps `treeall` (⌘A in the files tree) and `treeband:<y>:<y2>` (a rectangle dragged down it, in points from the tree's top); `file:menu` with the editor showing is a right click on its first line's word.
 
+`EMAKI_LANG=<code>` (`zh-Hans`, `zh-Hant`, `ja`, `ko`, `fr`, `de`, `es`, `en`) draws the window in that language whatever is chosen, and changes nothing that is saved. `EMAKI_SETTINGS_SHOTS` with it shoots every section in that language.
+
 `EMAKI_NO_AGENTS=1` shows the new-session page as a machine with no agent on it has it.
 
 Debug prints: `EMAKI_TIMING=1` (load and hand-over per open), `EMAKI_A11Y=1` (gpui's view of the accessibility tree at every draw), `EMAKI_SCROLL_DEBUG=1` (every wheel event with its phase and owner), `EMAKI_GLIDE_DEBUG=1` (the outline's move and the move to the new messages, tick by tick), `EMAKI_OUTLINE_DEBUG=1`, `EMAKI_PTY_LOG=<file>` (the hidden terminal's raw output).

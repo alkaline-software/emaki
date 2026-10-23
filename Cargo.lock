@@ -3852,6 +3852,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sys-locale",
  "trash",
  "tree-sitter",
  "tree-sitter-r",

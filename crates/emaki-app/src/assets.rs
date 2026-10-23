@@ -13,7 +13,7 @@ use gpui::{AssetSource, Result, SharedString};
 
 pub struct Assets;
 
-const OWN: &[(&str, &[u8])] = &[
+pub(crate) const OWN: &[(&str, &[u8])] = &[
     ("icon/app.png", include_bytes!("../assets/icon/icon-128.png")),
     ("icon/app-large.png", include_bytes!("../assets/icon/icon-512.png")),
     ("icons/agents/codex.svg", include_bytes!("../assets/icons/agents/codex.svg")),
@@ -30,6 +30,10 @@ const OWN: &[(&str, &[u8])] = &[
     ("icons/flags/es.svg", include_bytes!("../assets/icons/flags/es.svg")),
     ("icons/flags/fr.svg", include_bytes!("../assets/icons/flags/fr.svg")),
     ("icons/flags/de.svg", include_bytes!("../assets/icons/flags/de.svg")),
+    ("icons/flags/cn.svg", include_bytes!("../assets/icons/flags/cn.svg")),
+    ("icons/flags/hk.svg", include_bytes!("../assets/icons/flags/hk.svg")),
+    ("icons/flags/jp.svg", include_bytes!("../assets/icons/flags/jp.svg")),
+    ("icons/flags/kr.svg", include_bytes!("../assets/icons/flags/kr.svg")),
     ("icons/refresh.svg", include_bytes!("../assets/icons/refresh.svg")),
     // The editor's find: whole word and replace all drawn in Tabler's
     // manner, which has neither; regex is Tabler's.
