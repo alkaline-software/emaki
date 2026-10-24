@@ -276,6 +276,18 @@ pub fn way_programs_in(dirs: &[PathBuf]) -> Vec<&'static str> {
 /// a program an installer has just put on its `PATH`.
 pub const SHELL_AGAIN: &str = "exec $SHELL -l";
 
+/// What Claude Code's documentation has a person run on Windows when its
+/// installer says its folder is not on the PATH, which that installer
+/// leaves as it is (Troubleshoot installation, Verify your PATH): the
+/// documentation's two lines, on one. Codex's installer adds its own.
+pub const CLAUDE_WINDOWS_PATH: &str = "$currentPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); [Environment]::SetEnvironmentVariable('PATH', \"$currentPath;$env:USERPROFILE\\.local\\bin\", 'User')";
+
+/// The line to run after a way's install, where its maker gives one:
+/// Claude Code's PATH on Windows, by its own installer.
+pub fn after_install(agent: &Agent, way: &Way) -> Option<&'static str> {
+    (agent.id == "claude-code" && way.os == WINDOWS && way.by == "PowerShell").then_some(CLAUDE_WINDOWS_PATH)
+}
+
 /// Git on this machine: whether it is there to use, and the name and
 /// address commits are signed with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -340,6 +352,8 @@ impl Found {
 /// the system's `PATH` until the login shell's is asked for.
 pub fn search_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    // What an installer added since the app started (winget's links among them).
+    dirs.extend(crate::driver::windows_path_now().map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
     let home = paths::home();
     for d in [".local/bin", ".claude/local", ".npm-global/bin", ".npm/bin", ".bun/bin", ".volta/bin", ".asdf/shims", ".local/share/mise/shims", ".cargo/bin", ".deno/bin", "Library/pnpm", ".opencode/bin", ".amp/bin"] {
         dirs.push(home.join(d));

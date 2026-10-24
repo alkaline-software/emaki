@@ -11,11 +11,16 @@
 //!   attributes), and swapped in with two renames. The old process keeps
 //!   running from its unlinked files until the window quits, and the new
 //!   app is opened once it has: never two at once.
-//! - Windows: the installer is started; it replaces the files itself once
-//!   the running app has quit.
+//! - Windows: a copy Velopack installed (every one from v0.3.1) is updated
+//!   by Velopack: its feed for this architecture, beside the installers on
+//!   the release, says what the newest package is, which is fetched and
+//!   applied by its updater once the app has quit, and the app opened
+//!   again. A copy from before (NSIS's installer) or a build of one's own
+//!   fetches the installer and starts it.
 //! - Linux: an AppImage is replaced in place (`APPIMAGE` names the file the
-//!   kernel is running) and started again. A `.deb` install is sent to the
-//!   release page instead.
+//!   kernel is running) and started again. A `.deb` install fetches the
+//!   new `.deb` and has apt install it, through the system's password
+//!   prompt (`pkexec`), then starts the new binary.
 //!
 //! What was learned is kept in `~/.emaki/state/update.json`: when the last
 //! check ran and what it found, so an automatic check runs once a day and
@@ -44,10 +49,24 @@ pub fn asset_name() -> Option<&'static str> {
     } else if cfg!(target_os = "windows") {
         Some(if cfg!(target_arch = "aarch64") { "Emaki-windows-arm64-setup.exe" } else { "Emaki-windows-x64-setup.exe" })
     } else if cfg!(target_os = "linux") {
-        Some(if cfg!(target_arch = "aarch64") { "Emaki-linux-arm64.AppImage" } else { "Emaki-linux-x64.AppImage" })
+        // What this copy was installed as: an AppImage says so in `APPIMAGE`.
+        let image = std::env::var_os("APPIMAGE").is_some();
+        Some(match (cfg!(target_arch = "aarch64"), image) {
+            (true, true) => "Emaki-linux-arm64.AppImage",
+            (false, true) => "Emaki-linux-x64.AppImage",
+            (true, false) => "Emaki-linux-arm64.deb",
+            (false, false) => "Emaki-linux-x64.deb",
+        })
     } else {
         None
     }
+}
+
+/// Whether this copy came from the Microsoft Store, which keeps it
+/// current itself: Windows runs a Store package from its own folder,
+/// `WindowsApps`, and nothing here updates it.
+pub fn from_store() -> bool {
+    cfg!(windows) && std::env::current_exe().is_ok_and(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps")))
 }
 
 /// The project's own page.
@@ -149,6 +168,10 @@ pub fn downloads_dir() -> PathBuf {
 /// Fetch this machine's installer for `version` into the cache, reporting
 /// bytes so far and the total when known. Answers the file.
 pub fn download(version: &str, progress: &dyn Fn(u64, Option<u64>)) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    if let Some(um) = velopack() {
+        return velopack_download(&um, progress);
+    }
     let asset = asset_name().ok_or("no installer is built for this platform")?;
     let dir = downloads_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -200,6 +223,9 @@ pub fn install_into(installer: &Path, bundle: Option<&Path>) -> Result<(), Strin
     }
     #[cfg(target_os = "windows")]
     {
+        if installer.extension().is_some_and(|e| e == "nupkg") {
+            return velopack_apply();
+        }
         crate::process::command(installer).spawn().map(|_| ()).map_err(|e| format!("could not start the installer: {e}"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -281,10 +307,112 @@ fn open_once_gone(pid: u32, bundle: &Path) -> std::io::Result<()> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn install_linux(image: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
+    if image.extension().is_some_and(|e| e == "deb") {
+        return install_deb(image);
+    }
     let running = std::env::var_os("APPIMAGE").map(PathBuf::from).ok_or("Emaki is not running as an AppImage here; get the new build from the release page")?;
     let staged = running.with_extension("AppImage.new");
     std::fs::copy(image, &staged).map_err(|e| e.to_string())?;
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     std::fs::rename(&staged, &running).map_err(|e| format!("could not replace the AppImage: {e}"))?;
     crate::process::command(&running).spawn().map(|_| ()).map_err(|e| format!("the new AppImage is in place but did not start: {e}"))
+}
+
+/// A `.deb` installed over the one running, by apt (which also brings
+/// any library the new one needs), as root through `pkexec`: the
+/// system's own password prompt. The running binary keeps its unlinked
+/// file; the new one is started from the same path.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn install_deb(deb: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let deb = std::fs::canonicalize(deb).map_err(|e| e.to_string())?;
+    let out = crate::process::command("pkexec").args(["apt-get", "install", "-y"]).arg(&deb).output().map_err(|e| format!("could not ask for the password to install: {e}"))?;
+    if !out.status.success() {
+        // pkexec answers 126 when the prompt was dismissed.
+        if out.status.code() == Some(126) {
+            return Err("the install was not allowed".into());
+        }
+        return Err(format!("apt could not install the new version: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let exe = exe.to_string_lossy().trim_end_matches(" (deleted)").to_string();
+    crate::process::command(&exe).spawn().map(|_| ()).map_err(|e| format!("the new version is installed but did not start: {e}"))
+}
+
+/// Velopack's view of this copy, when Velopack installed it: its feeds
+/// are read from the latest release's files, as the installers are, or
+/// from the folder or address `EMAKI_UPDATE_FEED` names, for a probe.
+#[cfg(windows)]
+fn velopack() -> Option<velopack::UpdateManager> {
+    // An address on github.com would be read through GitHub's API by
+    // `AutoSource`, sixty times an hour at most; the files themselves are not.
+    match std::env::var("EMAKI_UPDATE_FEED") {
+        Ok(feed) => velopack::UpdateManager::new(velopack::sources::AutoSource::new(&feed), None, None),
+        Err(_) => velopack::UpdateManager::new(velopack::sources::HttpSource::new(format!("https://github.com/{REPO}/releases/latest/download")), None, None),
+    }
+    .ok()
+}
+
+/// The newest package fetched into Velopack's own folder, reporting its
+/// bytes as the installer's download does. Answers the package.
+#[cfg(windows)]
+fn velopack_download(um: &velopack::UpdateManager, progress: &dyn Fn(u64, Option<u64>)) -> Result<PathBuf, String> {
+    let info = match um.check_for_updates().map_err(|e| format!("the release feed could not be read: {e}"))? {
+        velopack::UpdateCheck::UpdateAvailable(info) => info,
+        _ => return Err("the release has no newer package for this computer".into()),
+    };
+    let total = info.TargetFullRelease.Size;
+    let (tx, rx) = std::sync::mpsc::channel::<i16>();
+    let fetch = {
+        let (um, info) = (um.clone(), info.clone());
+        std::thread::spawn(move || um.download_updates(&info, Some(tx)))
+    };
+    progress(0, Some(total));
+    for percent in rx {
+        progress(total * percent.clamp(0, 100) as u64 / 100, Some(total));
+    }
+    fetch.join().map_err(|_| "the download stopped".to_string())?.map_err(|e| format!("the download stopped: {e}"))?;
+    let here = velopack::locator::auto_locate_app_manifest(velopack::locator::LocationContext::FromCurrentExe).map_err(|e| e.to_string())?;
+    Ok(here.get_packages_dir().join(&info.TargetFullRelease.FileName))
+}
+
+/// Velopack's updater is started and waits for this app to quit, then
+/// puts the fetched package in place and opens the new version.
+#[cfg(windows)]
+fn velopack_apply() -> Result<(), String> {
+    let um = velopack().ok_or("Velopack did not install this copy")?;
+    let asset = um.get_update_pending_restart().ok_or("the new version was not fetched")?;
+    um.wait_exit_then_apply_updates(&asset, false, true, Vec::<String>::new()).map_err(|e| format!("could not start the updater: {e}"))
+}
+
+/// Where Velopack puts the app: `%LOCALAPPDATA%\<pack id>`. Not `Emaki`,
+/// NSIS's folder until v0.3.0, where Velopack's installer found an app
+/// already installed and asked whether to repair it. release.yml packs
+/// under it.
+pub const WINDOWS_PACK_ID: &str = "AlkalineSoftware.Emaki";
+
+/// What NSIS's installer left (v0.3.0 and before), taken away once this
+/// copy is Velopack's: its program and uninstaller, their folder, its
+/// uninstall entry and Start menu folder. The desktop's shortcut has the
+/// same name as Velopack's, which replaced it. NSIS's uninstaller is not
+/// run: it ends every `Emaki.exe`, this one too. Looked for at each
+/// start, so a program still running at the first is taken at the next.
+#[cfg(windows)]
+pub fn drop_nsis_install() {
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else { return };
+    let old = PathBuf::from(local).join("Emaki");
+    if !old.join("uninstall.exe").is_file() || velopack::locator::auto_locate_app_manifest(velopack::locator::LocationContext::FromCurrentExe).is_err() {
+        return;
+    }
+    if std::fs::remove_file(old.join("Emaki.exe")).is_err() && old.join("Emaki.exe").exists() {
+        return;
+    }
+    let _ = std::fs::remove_file(old.join("uninstall.exe"));
+    let _ = std::fs::remove_dir(&old);
+    let _ = windows_registry::CURRENT_USER.remove_tree(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Emaki");
+    let _ = windows_registry::CURRENT_USER.remove_tree(r"Software\Alkaline Software\Emaki");
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let folder = PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs\Emaki");
+        let _ = std::fs::remove_file(folder.join("Emaki.lnk"));
+        let _ = std::fs::remove_dir(&folder);
+    }
 }

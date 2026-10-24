@@ -1,8 +1,8 @@
 name: release
 
 # Installers, built only when a version tag is pushed (`git tag v0.2.0 &&
-# git push --tags`). Each OS packages its own build with cargo-packager and
-# the files are attached to a GitHub Release under stable names, so the
+# git push --tags`). Each OS packages its own build (cargo-packager on macOS
+# and Linux, Velopack on Windows) and the files are attached to a GitHub Release under stable names, so the
 # docs can link `releases/latest/download/<name>` and never go stale. The
 # release's notes are the tag's section of CHANGELOG.md.
 on:
@@ -32,13 +32,15 @@ jobs:
             asset: Emaki-mac-x64.dmg
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            formats: nsis
+            formats: velopack
+            rid: win-x64
             asset: Emaki-windows-x64-setup.exe
           # Windows on ARM runs the x64 build only under emulation, and a
           # Linux on ARM (any VM on an Apple silicon Mac) not at all.
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
-            formats: nsis
+            formats: velopack
+            rid: win-arm64
             asset: Emaki-windows-arm64-setup.exe
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -81,20 +83,87 @@ jobs:
         with:
           shared-key: release-${{ matrix.target }}
 
-      # Pinned: the Windows installer is this version's NSIS template, made
-      # one step (crates/emaki-app/windows/installer.nsi).
       - name: cargo-packager
+        if: runner.os != 'Windows'
         run: cargo install cargo-packager --version 0.11.8 --locked
+
+      # Velopack makes the Windows installer: Setup.exe shows the splash
+      # (scripts/splash/) while it puts Emaki in place, then opens it, and
+      # the app updates itself from the feed packed beside it. Pinned to
+      # the crate the app links (`velopack` in the manifests).
+      - uses: actions/setup-dotnet@v6
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: "9.0.x"
+      - name: vpk
+        if: runner.os == 'Windows'
+        run: dotnet tool install -g vpk --version 1.2.161
 
       - name: Build
         run: cargo build --release --locked -p emaki-app --target ${{ matrix.target }}
 
       - name: Package
-        if: runner.os != 'macOS'
+        if: runner.os == 'Linux'
         run: cargo packager --release -p emaki-app --target ${{ matrix.target }} --formats ${{ matrix.formats }}
         env:
           # linuxdeploy is an AppImage itself; runners have no FUSE for it.
           APPIMAGE_EXTRACT_AND_RUN: 1
+
+      # With Azure Artifact Signing's secrets in the repository, vpk signs
+      # Emaki.exe, Velopack's own programs and Setup.exe with the account's
+      # certificate (signtool and Azure's library, which vpk carries; the
+      # sign-in is the service principal's, read from the environment).
+      # Without them the installer is unsigned and SmartScreen stops it.
+      # The feed and the package go up with the installer: the app reads
+      # `releases.<rid>.json` from the latest release (update.rs).
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          SIGN_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          SIGN_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          SIGN_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          New-Item -ItemType Directory -Force pack | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/Emaki.exe" pack/
+          $sign = @()
+          if ($env:AZURE_CLIENT_ID -and $env:SIGN_ACCOUNT) {
+            @{ Endpoint = $env:SIGN_ENDPOINT; CodeSigningAccountName = $env:SIGN_ACCOUNT; CertificateProfileName = $env:SIGN_PROFILE } | ConvertTo-Json | Set-Content metadata.json
+            $sign = @('--azureTrustedSignFile', 'metadata.json')
+          }
+          vpk pack --packId AlkalineSoftware.Emaki --packVersion $version --packDir pack --mainExe Emaki.exe `
+            --packTitle Emaki --packAuthors "Alkaline Software" `
+            --icon crates/emaki-app/assets/icon/icon.ico `
+            --splashImage scripts/splash/splash.png --splashProgressColor "#5061B3" `
+            --channel ${{ matrix.rid }} --runtime ${{ matrix.rid }} --noPortable `
+            --outputDir velopack @sign
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem velopack
+
+      # The Microsoft Store's package, once Partner Center has reserved the
+      # app's identity (the repository's STORE_* variables): an .msix the
+      # Store signs, kept with the run for uploading to Partner Center and
+      # not put on the release, where nothing could install it unsigned.
+      - name: Store package (Windows)
+        if: runner.os == 'Windows' && vars.STORE_IDENTITY_NAME != ''
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $arch = if ('${{ matrix.rid }}' -eq 'win-arm64') { 'arm64' } else { 'x64' }
+          New-Item -ItemType Directory -Force store | Out-Null
+          scripts/windows-msix.ps1 -Exe "target/${{ matrix.target }}/release/Emaki.exe" -Version $version -Arch $arch `
+            -Name '${{ vars.STORE_IDENTITY_NAME }}' -Publisher '${{ vars.STORE_PUBLISHER }}' -PublisherName '${{ vars.STORE_PUBLISHER_NAME }}' `
+            -Out "store/Emaki-windows-$arch.msix"
+
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows' && vars.STORE_IDENTITY_NAME != ''
+        with:
+          name: store-${{ matrix.rid }}
+          path: store/*
 
       # With the certificate in the repository's secrets the bundle gets a
       # Developer ID signature, the hardened runtime, and, with the Apple ID
@@ -139,7 +208,9 @@ jobs:
           mkdir -p upload
           case "${{ matrix.formats }}" in
             dmg)   mv dist/*.dmg "upload/${{ matrix.asset }}" ;;
-            nsis)  mv dist/*-setup.exe "upload/${{ matrix.asset }}" ;;
+            velopack)
+                   mv velopack/*-Setup.exe "upload/${{ matrix.asset }}"
+                   mv velopack/*.nupkg velopack/releases.*.json upload/ ;;
             appimage,deb)
                    mv dist/*.AppImage "upload/${{ matrix.asset }}"
                    mv dist/*.deb "upload/$(basename "${{ matrix.asset }}" .AppImage).deb" ;;
@@ -164,6 +235,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: upload
+          pattern: Emaki-*
           merge-multiple: true
 
       - name: Release notes from CHANGELOG.md

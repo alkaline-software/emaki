@@ -1185,6 +1185,55 @@ pub fn login_shell_path() -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
+/// The `PATH` Windows hands a program started now: the system's, then
+/// the person's, as the registry has them, with `%VARIABLE%`s filled in.
+/// The app's own is the one it was started with, and an installer that
+/// adds a folder (Claude Code's adds `~\.local\bin`) changes only the
+/// registry's. `None` elsewhere, or when neither can be read.
+pub fn windows_path_now() -> Option<String> {
+    #[cfg(windows)]
+    {
+        use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
+        let read = |key: windows_registry::Result<windows_registry::Key>| key.and_then(|k| k.get_hstring("Path")).ok().map(|h| expand_vars(&h.to_string_lossy()));
+        let machine = read(LOCAL_MACHINE.open(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"));
+        let user = read(CURRENT_USER.open("Environment"));
+        let joined: Vec<String> = [machine, user].into_iter().flatten().filter(|p| !p.is_empty()).collect();
+        (!joined.is_empty()).then(|| joined.join(";"))
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+/// `%NAME%` replaced by the variable's value, as Windows expands a
+/// `REG_EXPAND_SZ`; one not set is left as it is.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn expand_vars(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end) if end > 0 => match std::env::var(&after[..end]) {
+                Ok(v) => {
+                    out.push_str(&v);
+                    rest = &after[end + 1..];
+                }
+                Err(_) => {
+                    out.push_str(&rest[start..start + end + 2]);
+                    rest = &after[end + 1..];
+                }
+            },
+            _ => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The variables that steer one launch of the window and no later one.
 const ONE_LAUNCH: &[&str] = &["EMAKI_PAGE", "EMAKI_OPEN", "EMAKI_GO", "EMAKI_SHOT", "EMAKI_SHOT_AFTER", "EMAKI_FIND", "EMAKI_SETTINGS", "EMAKI_TYPE", "EMAKI_QUESTION", "EMAKI_KEYS", "EMAKI_TERM_KEYS"];
 
@@ -2015,6 +2064,14 @@ impl Drop for Driver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_registry_path_has_its_variables_filled_in() {
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(expand_vars("%PATH%\\bin;C:\\Tools"), format!("{path}\\bin;C:\\Tools"));
+        assert_eq!(expand_vars("%EMAKI_NOT_SET_ANYWHERE%\\x"), "%EMAKI_NOT_SET_ANYWHERE%\\x");
+        assert_eq!(expand_vars("100%"), "100%");
+    }
 
     /// A driver with no child behind it: frames go in through `on_frame`,
     /// events come out of the channel, writes fail as "exited".

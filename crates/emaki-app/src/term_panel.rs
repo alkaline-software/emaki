@@ -696,7 +696,7 @@ impl Workbench {
         if !cx.has_active_drag() {
             self.shell_drag = None;
         }
-        let name = pty::shell_argv().first().and_then(|s| std::path::Path::new(s).file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "shell".into());
+        let name = pty::shell_argv().first().and_then(|s| std::path::Path::new(s).file_stem().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "shell".into());
         let empty = Shells::default();
         let set = self.shells.get(&r.session_id).unwrap_or(&empty);
         let n = set.tabs.len().max(1) as f32;
@@ -916,8 +916,8 @@ impl Workbench {
         let Some(pty) = self.term_panel_pty() else { return };
         let (col, row) = self.term_cell(e.position, &pty);
         // ⌘ and a click opens the link under the pointer, in a program
-        // that hears the mouse too.
-        if e.button == MouseButton::Left && e.modifiers.platform {
+        // that hears the mouse too; Ctrl off a Mac.
+        if e.button == MouseButton::Left && e.modifiers.secondary() {
             if let Some(link) = self.term_link_at(&pty, row, col) {
                 match link.target {
                     Target::Url(url) => cx.open_url(&url),
@@ -1175,11 +1175,47 @@ impl Workbench {
         self.term_panel_shown().then(|| self.side_term_bounds.get())
     }
 
+    /// The panel's own keys off a Mac, as the system's terminal has them:
+    /// Ctrl+Shift+C and V copy and paste, and so do Ctrl+Insert and
+    /// Shift+Insert; on Windows Ctrl+V pastes too, and Ctrl+C copies what
+    /// is selected and is the shell's Ctrl+C when nothing is. Ctrl+Tab and
+    /// Ctrl+Page Down are the next shell tab. Whether it was one of them.
+    fn term_pc_key(&mut self, k: &Keystroke, cx: &mut Context<Self>) -> bool {
+        let m = &k.modifiers;
+        if cfg!(target_os = "macos") || m.alt || m.platform {
+            return false;
+        }
+        let windows = cfg!(windows);
+        let tabs = !self.term_side_agent();
+        match (m.control, m.shift, k.key.to_ascii_lowercase().as_str()) {
+            (true, true, "c") | (true, false, "insert") => {
+                self.term_copy(cx);
+            }
+            (true, false, "c") if windows && !self.term_sel_text().is_empty() => {
+                self.term_copy(cx);
+                self.side_sel = None;
+            }
+            (true, true, "v") | (false, true, "insert") => self.term_paste(cx),
+            (true, false, "v") if windows => self.term_paste(cx),
+            (true, false, "tab") | (true, false, "pagedown") if tabs => self.shell_step(1, cx),
+            (true, true, "tab") | (true, false, "pageup") if tabs => self.shell_step(-1, cx),
+            _ => return false,
+        }
+        true
+    }
+
     /// A key in the panel, as the bytes a terminal sends for it. ⌘V is a
-    /// paste; any other key with ⌘ is the window's.
+    /// paste; any other key with ⌘ is the window's. Off a Mac,
+    /// `term_pc_key` has the panel's own.
     fn term_panel_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(pty) = self.term_panel_pty().filter(|p| p.alive()) else { return };
         let k = &e.keystroke;
+        if self.term_pc_key(k, cx) {
+            self.term_unhover();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if k.modifiers.platform {
             // ⌘ with the keys of a line is the line's start, its end, all
             // of it before the cursor, and a new line that sends nothing,

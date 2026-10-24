@@ -16,6 +16,7 @@ How to look at a state of the window from a script, without the person's hands. 
 - What the window remembers is `<home>/state/ui.json`. Edit it before the launch to choose a panel (`outline_on`, `files_on`), tabs or the sidebar.
 - `EMAKI_GO` step `press:<keystroke>` (`press:shift-up`) presses a key as the keyboard does, through every listener and binding on the way. The `EMAKI_KEYS` names send an action to the focus instead, which finds nothing wrong when a key never becomes its action. `treecaret` prints the selection in the tree's name field.
 - `EMAKI_GO` step `attach:<path>` puts that file in the composer, as a drop does.
+- `EMAKI_GO` step `update:<version>` begins an update as the settings' button does, whether or not the release is newer. On Windows `EMAKI_UPDATE_FEED` names the folder or address Velopack reads its feed from in place of the latest release, so an update can be tried with packages of one's own.
 - `EMAKI_GO` step `size:<small|medium|large|custom>` picks Text Size's preset; `textsize:<place>:<points>` sets one place's size (conversation, composer, preview, editor, terminal).
 - `EMAKI_GO` step `pointer:<x>:<y>` moves the pointer there, in points from the window's top left, through the window as the mouse does, so a hover and its tooltip can be drawn; `wheel:<x>:<y>:<dy>` scrolls that many points there; `clickat:<x>:<y>` presses and lets go there as well.
 - A new home copies the whole archive (over a gigabyte here) and reads every session before the ones after the newest can be opened. Keep one scratch home for a run of probes and write its `ui.json` again before each, and remove it when done.
@@ -104,5 +105,6 @@ A variable that steers one launch (`EMAKI_PAGE`, `EMAKI_GO`, `EMAKI_SHOT` and th
 - `open` hands a newly launched terminal app the opener's environment, so a probe copy run with `CLAUDE_CONFIG_DIR` at a scratch tree starts a terminal whose Claude Code is not logged in. Have the terminal app running first.
 - `kaku cli spawn` hands the new pane the caller's environment, so a session started from inside a Claude Code session is its child and never registers. Start it from a script that unsets `CLAUDE*` first.
 - `emaki-core pty --resume <id>` can stand in for the person's terminal.
+- In a Windows or Linux VM, an app started by the VM tool's command runner lives in that command's job: it is ended with the command, and on Windows everything it starts ignores Ctrl+C, so a terminal there cannot interrupt a program. Start the app the person's way, through Explorer (`explorer.exe <path>`) or the desktop's app search, to look at either. A variable for it is set with `setx` before Explorer starts it. `EMAKI_GO` steps run once a session is open, so a VM with no session runs none.
 
 Each feature's own probing notes are at the end of its doc.

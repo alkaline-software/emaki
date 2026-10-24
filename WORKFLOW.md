@@ -10,19 +10,20 @@ A `v*` tag pushed to `alkaline-software/emaki` runs `release.yml`. Six package j
 |---|---|---|
 | `Emaki-mac-arm64.dmg` | CI, then replaced from this machine | Developer ID, notarized, stapled |
 | `Emaki-mac-x64.dmg` | CI, then replaced from this machine | Developer ID, notarized, stapled |
-| `Emaki-windows-x64-setup.exe` | CI | unsigned (SmartScreen asks once) |
-| `Emaki-windows-arm64-setup.exe` | CI | unsigned (SmartScreen asks once) |
+| `Emaki-windows-x64-setup.exe` | CI (Velopack) | Azure Artifact Signing, once its secrets are set; unsigned before |
+| `Emaki-windows-arm64-setup.exe` | CI (Velopack) | the same |
+| `Emaki-<version>-win-<arch>-full.nupkg`, `releases.win-<arch>.json` | CI (Velopack) | the package and feed a Windows copy updates itself from |
 | `Emaki-linux-x64.AppImage` | CI | n/a |
 | `Emaki-linux-x64.deb` | CI | n/a |
 | `Emaki-linux-arm64.AppImage` | CI | n/a |
 | `Emaki-linux-arm64.deb` | CI | n/a |
 
-The names never change, so `releases/latest/download/<name>` links stay valid. CI's own Mac images are ad-hoc signed because the signing secrets are not in the repository (see "Signing in CI" below); the notarized ones are built here by `scripts/release-mac.sh` and uploaded over them.
+The names never change, so `releases/latest/download/<name>` links stay valid. The Windows feed and package carry the version and are found through the feed, whose own name is stable. The Microsoft Store's `.msix` packages are not on the release: CI keeps them with the run (`store-win-x64`, `store-win-arm64`), once the Store identity is set (see "The Microsoft Store" below). CI's own Mac images are ad-hoc signed because the signing secrets are not in the repository (see "Signing in CI" below); the notarized ones are built here by `scripts/release-mac.sh` and uploaded over them.
 
 ## One-time setup on a Mac
 
 - Rust via rustup, plus the Intel target: `rustup target add x86_64-apple-darwin`.
-- `cargo install cargo-packager --version 0.11.8 --locked`, the version `release.yml` pins (the Windows installer is its template).
+- `cargo install cargo-packager --version 0.11.8 --locked`, the version `release.yml` pins.
 - Xcode or its command line tools (`codesign`, `hdiutil`, `notarytool`, `stapler`).
 - The certificate `Developer ID Application: Pingfan Hu (XC2WL5WN7J)` in the login keychain (`security find-identity -v -p codesigning` lists it).
 - The notarytool keychain profile `notarytool-profile` (`xcrun notarytool store-credentials notarytool-profile` once, with the Apple ID, an app-specific password and team `XC2WL5WN7J`).
@@ -169,7 +170,48 @@ gh secret set APPLE_TEAM_ID --repo alkaline-software/emaki --body "XC2WL5WN7J"
 rm /tmp/cert.p12
 ```
 
-Windows stays unsigned until SignPath (free for open source) is set up.
+## Signing on Windows
+
+SmartScreen stops an unsigned installer ("Windows protected your PC"). `release.yml` has `vpk` sign Emaki.exe, Velopack's programs and Setup.exe with Azure Artifact Signing (formerly Trusted Signing) when these exist in the repository, and leaves them unsigned otherwise. Once, in the Azure portal, with an Azure subscription:
+
+1. Create an Artifact Signing account (Basic, about $9.99 a month) in a region; its endpoint is the region's, `https://<region>.codesigning.azure.net/`.
+2. Identity validation, Individual (the United States or Canada), with a government ID. It takes from hours to a few business days.
+3. A certificate profile of type Public Trust on the validated identity.
+4. An app registration (Microsoft Entra ID): its client ID, tenant ID and a client secret. On the signing account, Access control, give it the role Artifact Signing Certificate Profile Signer.
+5. Then:
+
+```
+gh secret set AZURE_TENANT_ID --repo alkaline-software/emaki --body "<tenant id>"
+gh secret set AZURE_CLIENT_ID --repo alkaline-software/emaki --body "<client id>"
+gh secret set AZURE_CLIENT_SECRET --repo alkaline-software/emaki --body "<client secret>"
+gh variable set ARTIFACT_SIGNING_ENDPOINT --repo alkaline-software/emaki --body "https://<region>.codesigning.azure.net/"
+gh variable set ARTIFACT_SIGNING_ACCOUNT --repo alkaline-software/emaki --body "<account name>"
+gh variable set ARTIFACT_SIGNING_PROFILE --repo alkaline-software/emaki --body "<certificate profile name>"
+```
+
+The client secret expires (two years at most): set a new one before it does. A new certificate still gets SmartScreen's warning for the first releases, until downloads build its reputation; the same identity across releases keeps what was built. `Get-AuthenticodeSignature .\Emaki-windows-x64-setup.exe` on Windows says whether a release's installer is signed.
+
+## The Microsoft Store
+
+The Store signs what it sells, so its copy never meets SmartScreen. Once:
+
+1. Register as an individual developer at storedeveloper.microsoft.com (free) with a Microsoft account.
+2. In Partner Center, create a new app and reserve the name Emaki.
+3. Product management, Product identity gives three values. Then:
+
+```
+gh variable set STORE_IDENTITY_NAME --repo alkaline-software/emaki --body "<Package/Identity/Name>"
+gh variable set STORE_PUBLISHER --repo alkaline-software/emaki --body "<Package/Identity/Publisher>"
+gh variable set STORE_PUBLISHER_NAME --repo alkaline-software/emaki --body "<Package/Properties/PublisherDisplayName>"
+```
+
+Each release then leaves `Emaki-windows-x64.msix` and `Emaki-windows-arm64.msix` with the release run. After step 6:
+
+```
+gh run download <run-id> --repo alkaline-software/emaki --pattern 'store-*' --dir dist/store
+```
+
+In Partner Center, start a submission, upload both packages under Packages, fill the listing the first time (the description and screenshots), and submit. The package asks for two restricted capabilities, `runFullTrust` and `unvirtualizedResources`; for the second the submission asks why: a terminal app whose shells and agents must install into the real AppData, where the rest of the system sees what they install. Certification takes from hours to a few days. The Store updates its copies itself; the app shows no Updates in Settings there.
 
 ## The pieces a release depends on
 
