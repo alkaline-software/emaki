@@ -2,6 +2,15 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.3.1
+
+1. **Windows installer**: No more wizard: a picture of Emaki while it installs, then the app opens, and updates come in the same way; a copy from v0.3.0 moves over by itself.
+2. **Signed for Windows**: The Windows build is ready to be signed and offered in the Microsoft Store, so SmartScreen stops blocking it once the accounts are in place.
+3. **Terminal keys on Windows and Linux**: Both terminals take keys as Windows Terminal and GNOME's terminal do: Ctrl and a letter go to the shell or agent, Ctrl+Shift+C and V copy and paste (Ctrl+C and V too on Windows), Ctrl+Shift+T and W open and close tabs, and Ctrl with an arrow or Backspace moves or deletes a word.
+4. **PowerShell**: The terminal on Windows opens PowerShell, so the install commands on the Agents page run as written, and a new tab finds what was just installed.
+5. **Claude Code on Windows**: Its setup step gives the line that adds Claude Code to your PATH, which its installer leaves out.
+6. **Linux updates**: Emaki installed from the .deb updates itself after asking for your password.
+
 ## v0.3.0
 
 1. **Languages**: The window in eight languages, English, Simplified and Traditional Chinese, Japanese, Korean, French, German and Spanish, picked with flags in Settings; the AI era's terms (model, agent, token, prompt) stay as they are.
