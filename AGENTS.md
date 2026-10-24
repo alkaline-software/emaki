@@ -155,6 +155,8 @@ scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
 scripts/make-icon.sh       remakes assets/icon from scripts/icon/icon.html
 scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
+scripts/splash/            the Windows installer's splash and the script that draws it
+scripts/windows-msix.ps1   the Microsoft Store's package, from a Windows build; scripts/windows-store-assets.py draws its tiles
 scripts/release-notes.sh   one version's section of CHANGELOG.md, the release notes
 scripts/release-check.sh   before a tag: version, lock, changelog, the notary credential, tests, build, Windows type check
 scripts/release-publish.sh after CI: the notarized Mac images onto the draft release, then publish
@@ -169,7 +171,7 @@ CHANGELOG.md               one section per release; the release job reads it
 STAGES.md                  the high-level plan: three stages, a page
 PLAN.md                    the detailed plan: tasks, decisions, what has landed
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
-.github/workflows/release.yml  installers on a v* tag, via cargo-packager
+.github/workflows/release.yml  installers on a v* tag: cargo-packager, Velopack on Windows, the Store's package
 ```
 
 **Each document has one job.** This file is what Emaki is, the rules that hold in every session, and where to read next. `docs/` is how each part works and why. STAGES.md is where the app is going, in three stages; a change of direction goes there. PLAN.md is the detailed plan under it: phases, tasks with checkmarks, decisions and their dates. WORKFLOW.md is how to cut a release, CHANGELOG.md what each release changed for the person installing it, and README.md a short introduction for GitHub that sends the reader to emaki.lol, whose pages say how each part works.

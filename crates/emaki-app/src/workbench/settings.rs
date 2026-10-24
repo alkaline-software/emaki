@@ -1030,7 +1030,8 @@ impl Workbench {
     /// found, and the updates last, so the credits stay with the card.
     fn about_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
-        let updates = self.updates_group(cx);
+        // A copy from the Microsoft Store is updated by the Store.
+        let updates = (!update::from_store()).then(|| self.updates_group(cx));
         let current = update::current_version();
         let link_hover = theme.primary;
         let link = |id: &'static str, name: &'static str, url: &'static str| {
@@ -1046,7 +1047,7 @@ impl Workbench {
         };
         let prose = || h_flex().flex_wrap().justify_center().text_size(px(13.5)).line_height(px(22.)).text_color(theme.muted_foreground);
         let go = |id: &'static str, icon: &'static str, label: &'static str, url: String| crate::branches::small_pill(id, icon, label, Press::Quiet, false, &theme).h(CONTROL_H).on_click(move |_, _, cx| cx.open_url(&url));
-        vec![
+        let mut rows = vec![
             // A title card, set in the middle as a film's first one is:
             // who presents, the app as the sidebar names it, and its
             // version. The icon and the name are each a link to the
@@ -1092,10 +1093,11 @@ impl Workbench {
                         .child(go("about-notes", "icons/file-text.svg", t("Release Notes"), update::release_page(&current))),
                 )
                 .into_any_element(),
-            // More room over it than the page's gap, so the pills close
-            // the credits and the card starts something else.
-            div().w_full().pt(px(12.)).child(updates).into_any_element(),
-        ]
+        ];
+        // More room over it than the page's gap, so the pills close the
+        // credits and the card starts something else.
+        rows.extend(updates.map(|u| div().w_full().pt(px(12.)).child(u).into_any_element()));
+        rows
     }
 }
 

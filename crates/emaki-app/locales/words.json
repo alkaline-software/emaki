@@ -5552,6 +5552,15 @@
     "de": "Wenn es fertig ist, öffne ein neues Terminal.",
     "es": "Cuando termine, abre un terminal nuevo."
   },
+  "When it finishes, run this if it says its folder is not in your PATH, then open a new terminal:": {
+    "zh-Hans": "完成后，如果它说它的文件夹不在 PATH 中，运行这一行，然后打开一个新的终端：",
+    "zh-Hant": "完成後，如果它說它的資料夾不在 PATH 中，執行這一行，然後打開新的終端機：",
+    "ja": "終わったら、フォルダが PATH にないと表示された場合はこれを実行し、新しいターミナルを開きます：",
+    "ko": "끝나면 폴더가 PATH에 없다고 나오면 이 줄을 실행한 뒤 새 터미널을 여세요:",
+    "fr": "Une fois terminé, exécutez ceci s’il indique que son dossier n’est pas dans votre PATH, puis ouvrez un nouveau terminal :",
+    "de": "Wenn es fertig ist und meldet, dass sein Ordner nicht in deinem PATH ist, führe dies aus und öffne dann ein neues Terminal:",
+    "es": "Cuando termine, ejecuta esto si dice que su carpeta no está en tu PATH y abre un terminal nuevo:"
+  },
   "When it finishes, run any line it asks you to, then restart the terminal:": {
     "zh-Hans": "完成后，运行它要求运行的命令行，然后重启终端：",
     "zh-Hant": "完成後，執行它要求的指令行，然後重新啟動終端機：",

@@ -107,6 +107,19 @@ fn key_bindings() -> Vec<KeyBinding> {
     ];
     if !cfg!(target_os = "macos") {
         keys.push(KeyBinding::new("win-,", OpenSettings, None));
+        // Off a Mac the window's keys are Ctrl's, and Ctrl with a letter in
+        // a terminal is the shell's and the agent's (Ctrl+R, Ctrl+W,
+        // Ctrl+L, Ctrl+E): there none of the window's applies, and the
+        // panel's own take Ctrl+Shift, as Windows Terminal and GNOME's
+        // terminal have them. Bound after the global ones, which these
+        // have to outrank at the same depth.
+        keys.extend(('a'..='z').map(|c| KeyBinding::new(&format!("ctrl-{c}"), NoAction, Some(TERMINAL_CONTEXT))));
+        keys.extend([
+            KeyBinding::new("ctrl-enter", NoAction, Some(TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-k", TermClear, Some(TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-t", TermNewTab, Some(TERMINAL_CONTEXT)),
+            KeyBinding::new("ctrl-shift-w", CloseTab, Some(TERMINAL_CONTEXT)),
+        ]);
     }
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -315,6 +328,14 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
 }
 
 fn main() {
+    // Velopack's installer and updater start the app with a hook to answer,
+    // and it leaves at once. What NSIS's installer left goes once
+    // Velopack's copy runs.
+    #[cfg(windows)]
+    {
+        velopack::VelopackApp::build().run();
+        emaki_core::update::drop_nsis_install();
+    }
     // Started from the Dock there is no shell above us, and the PATH is
     // the system's: the person's own is asked of their shell, before any
     // thread or child is started, so that everything Claude Code runs

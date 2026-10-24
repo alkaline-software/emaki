@@ -70,6 +70,10 @@ deckcraft-render = { git = "https://github.com/storytold/deckcraft", rev = "0ec0
 sys-locale = "0.3"
 
 # The .exe carries the icon as a resource; nothing to do elsewhere.
+[target.'cfg(windows)'.dependencies]
+# Velopack's installer runs the app with a hook to answer at start (`main`).
+velopack = "=1.2.161"
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
@@ -98,20 +102,21 @@ blitz-traits = "=0.3.0-beta.2"
 anyrender = "=0.13.0"
 anyrender_vello_cpu = "=0.17.0"
 
-# Installers: `cargo packager --release` (cargo-packager) builds the app and
-# wraps it per platform. release.yml passes `--formats` per OS and renames
-# the results to the stable names the docs link to. No signing identity is
-# set here: the macOS bundle is signed afterwards by scripts/release-mac.sh,
-# and Windows is unsigned, which the docs' SmartScreen steps cover.
+# Installers: `cargo packager --release` (cargo-packager) wraps the app for
+# Linux and is the bundle's base on macOS. release.yml passes `--formats`
+# per OS and renames the results to the stable names the docs link to. No
+# signing identity is set here: the macOS bundle is signed afterwards by
+# scripts/release-mac.sh, and Windows is packed and signed by Velopack in
+# release.yml.
 [package.metadata.packager]
 productName = "Emaki"
-# The `.deb`'s Maintainer, which dpkg warns of when missing, and the
-# publisher Windows lists the app under (else "pingfanhu", from the
-# identifier).
+# The `.deb`'s Maintainer, which dpkg warns of when missing.
 authors = ["Alkaline Software"]
 publisher = "Alkaline Software"
 identifier = "com.pingfanhu.emaki"
 description = "Every coding-agent session on this machine, kept for good, in one window you can also talk to."
+# The `.deb`'s long description, which App Center shows under the short one (else "(none)").
+longDescription = "Emaki keeps every Claude Code and Codex session on this machine, shows each as a conversation, searches all of them, and lets you continue one from the window."
 homepage = "https://github.com/alkaline-software/emaki"
 licenseFile = "../../LICENSE"
 category = "DeveloperTool"
@@ -125,12 +130,6 @@ minimumSystemVersion = "14.0"
 # (`i18n::LANGS`), so System Settings, Language & Region, Applications
 # can give Emaki its own.
 infoPlistPath = "macos/Info.plist"
-
-[package.metadata.packager.nsis]
-installMode = "currentUser"
-# One step, no wizard: the progress, then Emaki opens (the file says what
-# changed from cargo-packager's own).
-template = "windows/installer.nsi"
 
 [package.metadata.packager.deb]
 depends = ["libxkbcommon0", "libxkbcommon-x11-0", "libwayland-client0", "libvulkan1", "libfontconfig1", "libfreetype6", "libx11-xcb1", "libxcb1"]

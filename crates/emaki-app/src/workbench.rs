@@ -4369,7 +4369,7 @@ impl Workbench {
     /// Once a day, when the setting allows: the same check the button
     /// makes, but quiet unless it finds something.
     fn check_updates_daily(&mut self) {
-        if !self.cfg.app.check_updates || self.update.checking || self.update.installing {
+        if !self.cfg.app.check_updates || self.update.checking || self.update.installing || emaki_core::update::from_store() {
             return;
         }
         if self.now - self.update.last_check < 86_400.0 {
@@ -5264,6 +5264,13 @@ impl Workbench {
                 cx.notify();
             }
             Some("agents:check") => self.check_agents(true, cx),
+            // An update to `version` begins as the settings' button begins
+            // one, whatever the release says (with `EMAKI_UPDATE_FEED` on
+            // Windows, from a feed of one's own).
+            Some(t) if t.starts_with("update:") => {
+                self.update.available = Some(t["update:".len()..].to_string());
+                self.install_update_now(cx);
+            }
             Some(t) if t.starts_with("agent:") => self.show_agents(emaki_core::agents::by_id(&t["agent:".len()..]).map(|a| a.id), cx),
             Some(t) if t.starts_with("agentos:") => {
                 if let Some(os) = emaki_core::agents::Os::parse(&t["agentos:".len()..]) {
@@ -16680,10 +16687,69 @@ pub fn slash_command(text: &str) -> Option<String> {
 
 /// A key pressed on the terminal card, as a terminal sends it. None for
 /// a key that is the app's own (anything with ⌘) or sends nothing.
+///
+/// Off a Mac the keys follow the system's own terminal. Ctrl with an
+/// arrow, Backspace or Delete is a word: on Windows Windows Terminal's
+/// sequences, which the console turns into the keys PowerShell and cmd
+/// know; on Linux readline's word keys, which every shell and the agents
+/// take. Alt with a key is that key after Escape, and a modifier on an
+/// arrow, Home, End or a page key is told as xterm tells it.
 pub(crate) fn term_bytes(k: &Keystroke) -> Option<Vec<u8>> {
     let m = &k.modifiers;
     if m.platform {
         return None;
+    }
+    let pc = !cfg!(target_os = "macos");
+    // AltGr is Ctrl and Alt to the window, and types a character of its own.
+    if pc && m.control && m.alt {
+        if let Some(c) = k.key_char.as_ref().filter(|c| !c.is_empty() && **c != k.key && !c.chars().any(char::is_control)) {
+            return Some(c.clone().into_bytes());
+        }
+    }
+    if pc && m.control && !m.alt && !m.shift {
+        let word: Option<&[u8]> = match (cfg!(windows), k.key.as_str()) {
+            (true, "left") => Some(b"\x1b[1;5D"),
+            (true, "right") => Some(b"\x1b[1;5C"),
+            (true, "backspace") => Some(b"\x08"),
+            (true, "delete") => Some(b"\x1b[3;5~"),
+            (false, "left") => Some(b"\x1bb"),
+            (false, "right") => Some(b"\x1bf"),
+            (false, "backspace") => Some(b"\x17"),
+            (false, "delete") => Some(b"\x1bd"),
+            _ => None,
+        };
+        if let Some(bytes) = word {
+            return Some(bytes.to_vec());
+        }
+    }
+    // xterm's modifier number: 1, and Shift 1, Alt 2, Ctrl 4 added.
+    let held = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.control as u8;
+    if pc && held > 1 {
+        let final_letter = match k.key.as_str() {
+            "up" => Some('A'),
+            "down" => Some('B'),
+            "right" => Some('C'),
+            "left" => Some('D'),
+            "home" => Some('H'),
+            "end" => Some('F'),
+            _ => None,
+        };
+        if let Some(c) = final_letter {
+            return Some(format!("\x1b[1;{held}{c}").into_bytes());
+        }
+        let tilde = match k.key.as_str() {
+            "insert" => Some(2),
+            "delete" => Some(3),
+            "pageup" => Some(5),
+            "pagedown" => Some(6),
+            _ => None,
+        };
+        if let Some(n) = tilde {
+            return Some(format!("\x1b[{n};{held}~").into_bytes());
+        }
+    }
+    if m.control && k.key == "space" {
+        return Some(vec![0]);
     }
     let named: Option<&[u8]> = match k.key.as_str() {
         "enter" => Some(b"\r"),
@@ -16698,20 +16764,33 @@ pub(crate) fn term_bytes(k: &Keystroke) -> Option<Vec<u8>> {
         "left" => Some(b"\x1b[D"),
         "home" => Some(b"\x1b[H"),
         "end" => Some(b"\x1b[F"),
+        "insert" => Some(b"\x1b[2~"),
         "delete" => Some(b"\x1b[3~"),
         "pageup" => Some(b"\x1b[5~"),
         "pagedown" => Some(b"\x1b[6~"),
         _ => None,
     };
+    // Off a Mac, Alt is a meta key: Escape, then what the key sends.
+    let meta = |bytes: Vec<u8>| if pc && m.alt { [b"\x1b".as_slice(), &bytes].concat() } else { bytes };
     if let Some(bytes) = named {
-        return Some(bytes.to_vec());
+        return Some(meta(bytes.to_vec()));
     }
     if m.control {
-        let c = k.key.chars().next().filter(|c| k.key.len() == 1 && c.is_ascii_alphabetic())?;
-        return Some(vec![c.to_ascii_lowercase() as u8 & 0x1f]);
+        let mut chars = k.key.chars();
+        let c = chars.next().filter(|_| chars.next().is_none())?.to_ascii_lowercase();
+        let byte = match c {
+            'a'..='z' => c as u8 & 0x1f,
+            '@' => 0,
+            '[' => 0x1b,
+            '\\' => 0x1c,
+            ']' => 0x1d,
+            '/' | '_' | '-' => 0x1f,
+            _ => return None,
+        };
+        return Some(meta(vec![byte]));
     }
-    let typed = k.key_char.clone().or_else(|| (k.key.chars().count() == 1).then(|| k.key.clone()))?;
-    Some(typed.into_bytes())
+    let typed = k.key_char.clone().or_else(|| (k.key.chars().count() == 1).then(|| if m.shift { k.key.to_uppercase() } else { k.key.clone() }))?;
+    Some(meta(typed.into_bytes()))
 }
 
 /// A mode being walked to on a terminal session: ⇧Tab is the only thing
@@ -17493,5 +17572,40 @@ impl Render for Workbench {
                 m.by = self.pill_at.borrow().get(&(m.what, false)).copied().unwrap_or(m.by);
                 d.child(self.render_pick(m, false, window, cx))
             })
+    }
+}
+
+#[cfg(test)]
+mod term_key_tests {
+    use super::term_bytes;
+    use gpui::Keystroke;
+
+    fn bytes(key: &str) -> Option<Vec<u8>> {
+        term_bytes(&Keystroke::parse(key).unwrap())
+    }
+
+    /// Ctrl with a letter is the shell's everywhere, and a word key is the
+    /// system's own terminal's: readline's on Linux, Windows Terminal's on
+    /// Windows; a Mac's word keys are ⌥'s, in the panel.
+    #[test]
+    fn keys_are_the_systems_own_terminals() {
+        assert_eq!(bytes("ctrl-r"), Some(b"\x12".to_vec()));
+        assert_eq!(bytes("ctrl-w"), Some(b"\x17".to_vec()));
+        assert_eq!(bytes("ctrl-space"), Some(vec![0]));
+        assert_eq!(bytes("cmd-v"), None);
+        if cfg!(target_os = "linux") {
+            assert_eq!(bytes("ctrl-left"), Some(b"\x1bb".to_vec()));
+            assert_eq!(bytes("ctrl-backspace"), Some(b"\x17".to_vec()));
+            assert_eq!(bytes("alt-b"), Some(b"\x1bb".to_vec()));
+            assert_eq!(bytes("shift-up"), Some(b"\x1b[1;2A".to_vec()));
+        }
+        if cfg!(windows) {
+            assert_eq!(bytes("ctrl-left"), Some(b"\x1b[1;5D".to_vec()));
+            assert_eq!(bytes("ctrl-backspace"), Some(b"\x08".to_vec()));
+            assert_eq!(bytes("ctrl-delete"), Some(b"\x1b[3;5~".to_vec()));
+        }
+        if cfg!(target_os = "macos") {
+            assert_eq!(bytes("ctrl-left"), Some(b"\x1b[D".to_vec()));
+        }
     }
 }

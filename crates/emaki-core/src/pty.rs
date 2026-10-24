@@ -156,10 +156,21 @@ pub fn claude_argv(session_id: &str, resume: bool, mode: &str, model: &str, effo
 }
 
 /// The person's own shell, as a login shell, for the terminal panel: what
-/// `SHELL` names, else `sh`; on Windows what `COMSPEC` names, else `cmd`.
+/// `SHELL` names, else `sh`. On Windows PowerShell, as Windows Terminal
+/// opens: PowerShell 7 where it is installed, else the Windows PowerShell
+/// every Windows has. The commands the agents page gives for Windows are
+/// PowerShell's, and `cmd` answered the first of them "'irm' is not
+/// recognized".
 pub fn shell_argv() -> Vec<String> {
     if cfg!(windows) {
-        return vec![std::env::var("COMSPEC").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "cmd.exe".into())];
+        static PWSH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let shell = PWSH.get_or_init(|| {
+            let seven = std::env::var_os("ProgramFiles").map(|p| std::path::PathBuf::from(p).join("PowerShell").join("7"));
+            let dirs = driver::windows_path_now().map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
+            let five = std::env::var_os("SystemRoot").map(|r| std::path::PathBuf::from(r).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
+            dirs.into_iter().chain(seven).map(|d| d.join("pwsh.exe")).find(|p| p.is_file()).or(five).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "powershell.exe".into())
+        });
+        return vec![shell.clone(), "-NoLogo".into()];
     }
     vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into()), "-l".into()]
 }
@@ -175,6 +186,13 @@ fn child_env() -> Vec<(String, String)> {
         driver::child_env().into_iter().filter(|(k, _)| !THEIRS.contains(&k.as_str()) && !THEIR_PREFIXES.iter().any(|p| k.starts_with(p))).collect();
     env.push(("TERM".into(), "xterm-256color".into()));
     env.push(("COLORTERM".into(), "truecolor".into()));
+    // On Windows a program installed since the app started is on the
+    // PATH Windows keeps, not on the app's: a new terminal gets the one
+    // kept now, as Windows Terminal's new tab does.
+    if let Some(path) = driver::windows_path_now() {
+        env.retain(|(k, _)| !k.eq_ignore_ascii_case("PATH"));
+        env.push(("PATH".into(), path));
+    }
     env
 }
 

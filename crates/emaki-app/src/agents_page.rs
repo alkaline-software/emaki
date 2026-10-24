@@ -758,7 +758,13 @@ impl Workbench {
                         ))
                         .child(numbered(
                             2,
-                            if os == Os::Windows {
+                            if let Some(path) = agents::after_install(a, w) {
+                                v_flex()
+                                    .gap(px(8.))
+                                    .child(prose("again", t("When it finishes, run this if it says its folder is not in your PATH, then open a new terminal:").into(), cx))
+                                    .child(self.command_box(format!("agent-path-{}-{}", a.id, os.as_str()), path.into(), os == Os::here(), cx))
+                                    .into_any_element()
+                            } else if os == Os::Windows {
                                 prose("again", t("When it finishes, open a new terminal.").into(), cx).into_any_element()
                             } else {
                                 v_flex()

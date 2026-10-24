@@ -3617,6 +3617,12 @@ fn the_catalog_of_agents_holds_together() {
     assert_eq!(agents::source_of(&way("pipx install aider-chat")).as_deref(), Some("https://pypi.org/pypi/aider-chat/json"));
     assert_eq!(agents::source_of(&way("winget install GitHub.Copilot")), None);
 
+    // Claude Code's PowerShell install on Windows, and no other way, is
+    // followed by its documented PATH line: its installer leaves the PATH
+    // as it is, and winget's and Codex's add their own.
+    let after: Vec<_> = all.iter().flat_map(|a| a.install.iter().filter_map(move |w| agents::after_install(a, w).map(|_| (a.id, w.by)))).collect();
+    assert_eq!(after, [("claude-code", "PowerShell")]);
+
     // Every agent whose sessions are read is in the catalog.
     for id in emaki_core::model::AgentId::ALL {
         assert!(agents::of(id).is_some(), "{}", id.as_str());
