@@ -5960,6 +5960,14 @@ impl Workbench {
     /// Write the window's state to `state/ui.json`. `now` forces it; otherwise
     /// writes are spaced two seconds apart, which is enough for a window being
     /// dragged.
+    /// The window's place and the rest written now, as its close button
+    /// closes it: a move in the last two seconds is otherwise not yet
+    /// saved, and closing the window is not a quit, whose save it misses.
+    pub(crate) fn save_ui_closing(&mut self, window: &Window) {
+        self.window_rect = Some(window_rect(window));
+        self.save_ui(true);
+    }
+
     pub(crate) fn save_ui(&mut self, now: bool) {
         if !now && self.last_ui_save.elapsed() < Duration::from_secs(2) {
             return;
