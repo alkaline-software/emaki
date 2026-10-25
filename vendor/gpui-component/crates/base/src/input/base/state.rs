@@ -1419,7 +1419,10 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         self.undo_manager.break_transaction_coalescing();
-        let offset = self.previous_start_of_word();
+        // From the caret, wherever the selection's other end is: from its
+        // start, ⌥⇧← with a selection made rightward dropped it and took
+        // the word before it. (Emaki addition.)
+        let offset = self.previous_start_of_word(self.cursor());
         self.select_to(offset, cx);
     }
 
@@ -1430,13 +1433,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         self.undo_manager.break_transaction_coalescing();
-        let offset = self.next_end_of_word();
+        let offset = self.next_end_of_word(self.cursor());
         self.select_to(offset, cx);
     }
 
-    /// Return the start offset of the previous word.
-    pub(super) fn previous_start_of_word(&mut self) -> usize {
-        let offset = self.selected_range.start;
+    /// Return the start offset of the word before `offset`.
+    pub(super) fn previous_start_of_word(&mut self, offset: usize) -> usize {
         let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
         // FIXME: Avoid to_string
         let left_part = self.text.slice(0..offset).to_string();
@@ -1447,9 +1449,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             .unwrap_or(0)
     }
 
-    /// Return the next end offset of the next word.
-    pub(super) fn next_end_of_word(&mut self) -> usize {
-        let offset = self.cursor();
+    /// Return the end offset of the word after `offset`.
+    pub(super) fn next_end_of_word(&mut self, offset: usize) -> usize {
         let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
         let right_part = self.text.slice(offset..self.text.len()).to_string();
 
@@ -1801,7 +1802,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        let offset = self.previous_start_of_word();
+        let offset = self.previous_start_of_word(self.cursor());
         self.replace_text_in_range_silent(
             Some(self.range_to_utf16(&(offset..self.cursor()))),
             "",
@@ -1823,7 +1824,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        let offset = self.next_end_of_word();
+        let offset = self.next_end_of_word(self.cursor());
         self.replace_text_in_range_silent(
             Some(self.range_to_utf16(&(self.cursor()..offset))),
             "",
@@ -1890,6 +1891,20 @@ impl<M: InputModeKind> InputBaseState<M> {
         if M::has_inline_completion(self) {
             M::clear_inline_completion(self, cx);
             return; // Consume the escape, don't propagate
+        }
+
+        // Emaki: the field's find card open, Escape puts it away and goes
+        // no further, with the keyboard in the field as in the card. Passed
+        // on, it reached the window, which stopped the turn running. Drawn
+        // again once the card has gone, as the card's own close is.
+        if self.search_session.open {
+            self.close_search(cx);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(crate::input::SEARCH_ANIM + std::time::Duration::from_millis(20)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+            return;
         }
 
         if self.ime_marked_range.is_some() {
@@ -3611,6 +3626,66 @@ mod tests {
             })
         });
         assert_eq!(calls.get(), 1);
+    }
+
+    /// ⌥⇧← and ⌥⇧→ go a word from the caret, whichever end of the
+    /// selection it is at, and ⌥← and ⌥→ let a selection go from the end
+    /// they go toward. (Emaki addition.)
+    #[gpui::test]
+    fn word_steps_go_from_the_caret(cx: &mut TestAppContext) {
+        let input_view = InputView::new(cx);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+        let text = "And I also share with you a";
+        let at = |w: &str| if w == "a" { text.len() - 1 } else { text.find(w).unwrap() };
+        let picked = |cx: &mut VisualTestContext| cx.update(|_, cx| input.read_with(cx, |s, _| (s.selected_range.start, s.selected_range.end, s.cursor())));
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value(text, window, cx);
+                // Made rightward: from "I" to the end, the caret there.
+                state.selected_range = (at("I")..text.len()).into();
+                state.selection_reversed = false;
+                state.select_to_previous_word(&SelectToPreviousWordStart, window, cx);
+            });
+        });
+        assert_eq!(picked(&mut cx), (at("I"), at("a"), at("a")));
+        cx.update(|window, cx| input.update(cx, |state, cx| state.select_to_previous_word(&SelectToPreviousWordStart, window, cx)));
+        assert_eq!(picked(&mut cx), (at("I"), at("you"), at("you")));
+        // Past the selection's other end, it turns round.
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                for _ in 0..5 {
+                    state.select_to_previous_word(&SelectToPreviousWordStart, window, cx);
+                }
+            })
+        });
+        assert_eq!(picked(&mut cx), (at("And"), at("I"), at("And")));
+        // Made leftward, the caret at its start: → takes words off it there.
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.selected_range = (at("I")..text.len()).into();
+                state.selection_reversed = true;
+                state.select_to_next_word(&SelectToNextWordEnd, window, cx);
+            });
+        });
+        assert_eq!(picked(&mut cx), (at(" also"), text.len(), at(" also")));
+        // ⌥← lets a selection go from its start, ⌥→ from its end.
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.selected_range = (at("also")..at(" share")).into();
+                state.selection_reversed = false;
+                state.move_to_previous_word(&MoveToPreviousWord, window, cx);
+            });
+        });
+        assert_eq!(picked(&mut cx), (at("I"), at("I"), at("I")));
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.selected_range = (at("also")..at(" share")).into();
+                state.selection_reversed = true;
+                state.move_to_next_word(&MoveToNextWord, window, cx);
+            });
+        });
+        assert_eq!(picked(&mut cx), (at(" with"), at(" with"), at(" with")));
     }
 
     #[gpui::test]

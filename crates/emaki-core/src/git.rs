@@ -696,14 +696,19 @@ pub fn why_net(words: &str) -> NetTrouble {
 /// for one it has not, git fails the whole fetch.
 pub fn fetch_names(dir: &Path) -> Vec<String> {
     let Some(r) = remote(dir) else { return Vec::new() };
-    let default = line(dir, &["symbolic-ref", "--short", "-q", &format!("refs/remotes/{r}/HEAD")]).and_then(|h| h.split_once('/').map(|(_, n)| n.to_string())).or_else(|| ["main", "master"].iter().map(|n| n.to_string()).find(|n| has_ref(dir, &format!("refs/remotes/{r}/{n}"))));
     let mut names: Vec<String> = Vec::new();
-    for name in [line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]), default].into_iter().flatten() {
+    for name in [line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]), remote_default(dir, &r)].into_iter().flatten() {
         if !names.contains(&name) && has_ref(dir, &format!("refs/remotes/{r}/{name}")) {
             names.push(name);
         }
     }
     names
+}
+
+/// The remote's default branch: what its HEAD names, else main or
+/// master where the remote is known to have it.
+fn remote_default(dir: &Path, r: &str) -> Option<String> {
+    line(dir, &["symbolic-ref", "--short", "-q", &format!("refs/remotes/{r}/HEAD")]).and_then(|h| h.split_once('/').map(|(_, n)| n.to_string())).or_else(|| ["main", "master"].iter().map(|n| n.to_string()).find(|n| has_ref(dir, &format!("refs/remotes/{r}/{n}"))))
 }
 
 fn has_ref(dir: &Path, name: &str) -> bool {
@@ -716,16 +721,30 @@ fn has_ref(dir: &Path, name: &str) -> bool {
 /// (`fetch_branch`). Where the remote is known to have neither (nothing
 /// was ever fetched), it is asked for everything, once. Nothing to do,
 /// and no failure, in a repository with no remote.
+///
+/// Then, as GitHub Desktop does, the local default branch is brought up
+/// to the remote's when it is not the one checked out and has no
+/// commits of its own: nothing checked out moves, and the list shows it
+/// as new as the remote's.
 pub fn fetch(dir: &Path) -> Result<(), String> {
     let Some(r) = remote(dir) else { return Ok(()) };
     let names = fetch_names(dir);
     if names.is_empty() {
-        return net(dir, &["fetch", "--prune", "--quiet", &r]);
+        net(dir, &["fetch", "--prune", "--quiet", &r])?;
+    } else {
+        let specs: Vec<String> = names.iter().map(|n| format!("+refs/heads/{n}:refs/remotes/{r}/{n}")).collect();
+        let mut args = vec!["fetch", "--quiet", r.as_str()];
+        args.extend(specs.iter().map(String::as_str));
+        net(dir, &args)?;
     }
-    let specs: Vec<String> = names.iter().map(|n| format!("+refs/heads/{n}:refs/remotes/{r}/{n}")).collect();
-    let mut args = vec!["fetch", "--quiet", r.as_str()];
-    args.extend(specs.iter().map(String::as_str));
-    net(dir, &args)
+    let current = line(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    if let Some(default) = remote_default(dir, &r).filter(|d| current.as_ref() != Some(d)) {
+        if ahead_behind(dir, &default).is_some_and(|(ahead, behind)| ahead == 0 && behind > 0) {
+            // Refused only when a worktree has it checked out: left as it is.
+            let _ = fast_forward(dir, &default);
+        }
+    }
+    Ok(())
 }
 
 /// Ask the remote for one branch as it has it now: what a switch to a
@@ -1282,6 +1301,9 @@ pub struct Diff {
     /// A picture's bytes before and after, in place of lines: none for
     /// a file of another kind.
     pub pictures: Option<Pictures>,
+    /// For a row with a line on both sides, by its place in `rows`: the
+    /// bytes of the left line taken out and of the right one put in.
+    pub words: std::collections::BTreeMap<usize, [Vec<Range<usize>>; 2]>,
 }
 
 /// A picture as the last commit had it and as it is now, or as a commit
@@ -1419,7 +1441,44 @@ pub fn parse_diff(text: &str) -> Diff {
             }
         }
     }
+    // As GitHub Desktop marks them: only in a run of changed lines with as
+    // many taken out as put in, every row of it a pair.
+    let mut ix = 0;
+    while ix < d.rows.len() {
+        let run = d.rows[ix..].iter().take_while(|r| matches!(r, Row::Changed { .. })).count();
+        if run == 0 {
+            ix += 1;
+            continue;
+        }
+        if d.rows[ix..ix + run].iter().all(|r| matches!(r, Row::Changed { left: Some(_), right: Some(_) })) {
+            for at in ix..ix + run {
+                if let Row::Changed { left: Some((_, a)), right: Some((_, b)) } = &d.rows[at] {
+                    if let Some(marks) = word_changes(a, b) {
+                        d.words.insert(at, marks);
+                    }
+                }
+            }
+        }
+        ix += run;
+    }
     d
+}
+
+/// What of a line was taken out and what of the line beside it put in,
+/// as GitHub Desktop marks them (`relativeChanges`): what stands between
+/// the start the two have in common and the end they have in common, one
+/// span a side, empty where nothing was. None for lines too long to
+/// compare.
+pub fn word_changes(old: &str, new: &str) -> Option<[Vec<Range<usize>>; 2]> {
+    if old.len().max(new.len()) > 4096 {
+        return None;
+    }
+    let prefix: usize = old.chars().zip(new.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a.len_utf8()).sum();
+    let (a, b) = (&old[prefix..], &new[prefix..]);
+    let suffix: usize = a.chars().rev().zip(b.chars().rev()).take_while(|(x, y)| x == y).map(|(x, _)| x.len_utf8()).sum();
+    let span = |line: &str| Some(prefix..line.len() - suffix).filter(|r| !r.is_empty()).into_iter().collect::<Vec<_>>();
+    let marks = [span(old), span(new)];
+    (!(marks[0].is_empty() && marks[1].is_empty())).then_some(marks)
 }
 
 /// How a run of lines in a file differs from what git has of it.

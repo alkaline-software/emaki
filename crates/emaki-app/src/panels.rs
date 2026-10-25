@@ -498,6 +498,96 @@ const OFFICE_BYTES: usize = 40_000_000;
 const TABLE_CELL: usize = 48;
 /// How long the file's pane takes to come and to go.
 pub(crate) const FILE_ANIM: Duration = Duration::from_millis(200);
+
+/// A markdown file as it reads, in a view of its own that the window
+/// keeps from one frame to the next. The window draws a frame whenever
+/// anything in it moves (a session's spinner, a card coming up), and a
+/// long document took longer to lay out than a frame lasts: a frame that
+/// changes nothing in the file neither lays it out nor paints it again.
+/// A kept view is laid out at the height it is given rather than
+/// measured, so it is given the height it last had, and a change of that
+/// is taken up the frame after. It is drawn afresh whenever what it is
+/// drawn from changes, and while the pane or the file fades in, since
+/// what is kept keeps the opacity it was painted at.
+pub(crate) struct FileDoc {
+    pub(crate) path: PathBuf,
+    text: String,
+    shown: Option<DocShown>,
+    find: gpui_component::text::TextFind,
+    spots: gpui_component::text::HeadingSpots,
+    pub(crate) kept: gpui_component::text::KeptViews,
+    height: Rc<std::cell::Cell<Pixels>>,
+    /// The serial of the fade the file came in with, and when it began.
+    fade: (u64, std::time::Instant),
+}
+
+/// What a file's text is drawn with, besides the text.
+#[derive(Clone, PartialEq)]
+struct DocShown {
+    rel: String,
+    quarto: Option<emaki_core::math::Dialect>,
+    /// The words found, their case, and the current match, while the
+    /// find bar is open.
+    find: Option<(String, bool, usize)>,
+    size: f32,
+    pad: (f32, f32),
+    look: (bool, Hsla, Hsla, Hsla),
+}
+
+impl Render for FileDoc {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let Some(shown) = self.shown.clone() else { return div().into_any_element() };
+        let (pad_x, pad_y) = shown.pad;
+        // A YAML header is the file's fields, not its first words
+        // (markdown reads it as a rule and a heading): a band across the
+        // pane's top, the page divided into the header and the text under
+        // it. It stands inside the scroller, out to its edges by the
+        // scroller's padding, and is drawn as a table in the same text, so
+        // a selection runs through it as through the rest.
+        let (band, rest) = match emaki_core::files::front_matter(&self.text) {
+            Some((fields, rest)) => {
+                let band = div()
+                    .mx(px(-pad_x))
+                    .mt(px(-pad_y))
+                    .mb(px(pad_y))
+                    .px(px(pad_x))
+                    .py(px(12.))
+                    .bg(theme.muted.opacity(if theme.mode.is_dark() { 0.5 } else { 0.7 }))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(px(shown.size))
+                    .child(crate::transcript::md_view_fields(format!("fields-{}", shown.rel), emaki_core::files::front_matter_table(&fields), self.kept.clone(), cx));
+                (Some(band), rest.to_string())
+            }
+            None => (None, self.text.clone()),
+        };
+        let find = shown.find.is_some().then(|| self.find.clone());
+        let view = crate::transcript::md_view_file(format!("file-{}", shown.rel), rest, shown.quarto, find, Some(self.spots.clone()), self.kept.clone(), cx);
+        let height = self.height.clone();
+        v_flex()
+            .w_full()
+            .relative()
+            .children(band)
+            .child(div().text_size(px(shown.size)).line_height(relative(1.6)).child(view))
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        if (bounds.size.height - height.get()).abs() > px(0.5) {
+                            height.set(bounds.size.height);
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+}
 /// How long files dragged in are held over a closed folder before it
 /// opens.
 const TREE_SPRING: Duration = Duration::from_millis(650);
@@ -538,7 +628,15 @@ fn heads_of(text: &str) -> Vec<FileHead> {
     while let Some(node) = stack.pop() {
         if let Node::Heading(h) = node {
             let line = h.position.as_ref().map_or(0, |p| p.start.line.saturating_sub(1)) + before;
-            heads.push(FileHead { level: h.depth, title: node.to_string(), line });
+            // Quarto's attributes after the words (`## Title {.class}`)
+            // are not the title.
+            let mut title = node.to_string();
+            if let Some(open) = title.trim_end().strip_suffix('}').and_then(|t| t.rfind('{')) {
+                if title[..open].ends_with(char::is_whitespace) {
+                    title.truncate(open);
+                }
+            }
+            heads.push(FileHead { level: h.depth, title: title.trim_end().to_string(), line });
             continue;
         }
         if let Some(children) = node.children() {
@@ -547,6 +645,43 @@ fn heads_of(text: &str) -> Vec<FileHead> {
     }
     heads
 }
+/// The headings of a LaTeX or Typst text as it is written, by the line
+/// each is on: LaTeX's sectioning commands (a chapter is the first level
+/// where the text has one, else a section) and Typst's `=` lines outside
+/// raw blocks.
+fn heads_written(text: &str, written: Written) -> Vec<FileHead> {
+    static TEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^\s*\\(part|chapter|section|subsection|subsubsection|paragraph)\*?(?:\[[^\]]*\])?\{(.*)\}").unwrap());
+    static TYP: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^\s*(=+)\s+(.*?)\s*(<[^>]*>)?\s*$").unwrap());
+    let mut heads = Vec::new();
+    match written {
+        Written::Latex => {
+            let rank = ["part", "chapter", "section", "subsection", "subsubsection", "paragraph"];
+            let found: Vec<(usize, usize, String)> = text.lines().enumerate().filter_map(|(line, l)| {
+                let l = l.split_once('%').map_or(l, |(a, _)| a);
+                let c = TEX.captures(l)?;
+                Some((line, rank.iter().position(|r| *r == &c[1])?, c[2].trim_end_matches('}').to_string()))
+            }).collect();
+            let top = found.iter().map(|f| f.1).min().unwrap_or(0);
+            for (line, at, title) in found {
+                heads.push(FileHead { level: (at - top + 1) as u8, title, line });
+            }
+        }
+        Written::Typst => {
+            let mut raw = false;
+            for (line, l) in text.lines().enumerate() {
+                if l.trim_start().starts_with("```") {
+                    raw = !raw;
+                    continue;
+                }
+                if let Some(c) = TYP.captures(l).filter(|_| !raw) {
+                    heads.push(FileHead { level: c[1].len().min(6) as u8, title: c[2].to_string(), line });
+                }
+            }
+        }
+    }
+    heads
+}
+
 pub(crate) const FILE_MIN: Pixels = px(280.);
 /// What the file pane's head keeps for the file's name before it folds
 /// Open and Reveal into one More button, and Save into its icon.
@@ -1306,11 +1441,16 @@ fn table_shape(mut rows: Vec<Vec<String>>) -> (Vec<Vec<String>>, Vec<usize>) {
 /// found nothing. Pictures written as markdown (`![](docs/a.png)`) and as
 /// HTML (`<img src="docs/a.png">`); a block of code is code, and keeps
 /// its words. An address (`https://…`) is fetched as it is (`fetch.rs`).
-fn pictures_from(text: &str, dir: &Path) -> String {
+fn pictures_from(text: &str, dir: &Path, root: Option<&Path>) -> String {
     use markdown::mdast::Node;
     static SRC: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)<img\b[^>]*?\ssrc\s*=\s*["']([^"']+)["']"#).unwrap());
-    let relative = |url: &str| !url.is_empty() && !url.starts_with(['/', '#', '\\']) && !url.contains("://") && !url.starts_with("data:") && !url.starts_with("mailto:");
-    let whole = |url: &str| format!("file://{}", dir.join(url).display());
+    // A path from `/` is from the project's root where there is one
+    // (Quarto's rule); elsewhere it is left alone.
+    let relative = |url: &str| !url.is_empty() && !url.starts_with(['#', '\\']) && !url.contains("://") && !url.starts_with("data:") && !url.starts_with("mailto:") && (root.is_some() || !url.starts_with('/'));
+    let whole = |url: &str| match (url.strip_prefix('/'), root) {
+        (Some(rest), Some(root)) => format!("file://{}", root.join(rest).display()),
+        _ => format!("file://{}", dir.join(url).display()),
+    };
     // The parser panics on some inputs (`transcript::markdown_is_safe`).
     let opts = markdown::ParseOptions::gfm();
     let Ok(Ok(tree)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(text, &opts))) else { return text.to_string() };
@@ -1330,7 +1470,12 @@ fn pictures_from(text: &str, dir: &Path) -> String {
                     edits.push((at..at + image.url.len(), url));
                 }
             }
-            (Node::Html(_), Some(span)) => {
+            // Raw HTML too: a block (```` ```{=html} ````) and a span
+            // (`` `<img …>`{=html} ``), which the view draws as HTML.
+            (Node::Html(_), Some(span)) | (Node::Code(_), Some(span)) | (Node::InlineCode(_), Some(span)) => {
+                if matches!(node, Node::Code(c) if !c.lang.as_deref().is_some_and(|l| l.starts_with("{=html"))) || matches!(node, Node::InlineCode(_) if !text[span.end..].starts_with("{=html}")) {
+                    continue;
+                }
                 for cap in SRC.captures_iter(&text[span.clone()]) {
                     let m = cap.get(1).unwrap();
                     if relative(m.as_str()) {
@@ -1384,12 +1529,26 @@ fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Rc<str>>) {
             if let Some(cells) = notebook {
                 source = Some(text.as_str().into());
                 FileBody::Notebook(cells)
-            } else if lang == "markdown" && !cut {
+            } else if (lang == "markdown" || written_as(path).is_some()) && !cut {
                 if whole {
                     source = Some(text.as_str().into());
                 }
+                // A Quarto document is read with its includes pasted in
+                // and its variables filled (`emaki_core::quarto`), and a
+                // path from `/` is from its project's root. A LaTeX or a
+                // Typst document is first written as one.
+                let text = match written_as(path) {
+                    Some(Written::Latex) => emaki_core::latex::to_markdown(&text, path),
+                    Some(Written::Typst) => emaki_core::typst_doc::to_markdown(&text, path),
+                    None => text,
+                };
+                let quarto = reads_as_quarto(path).is_some();
+                let (text, root) = if quarto { (emaki_core::quarto::expand(&text, path), emaki_core::quarto::project_root(path)) } else { (text, None) };
+                // The ids the conversion gave its headings are not the
+                // file's words.
+                let text = if written_as(path).is_some() { emaki_core::quarto::bare_headings(&text) } else { text };
                 FileBody::Markdown(match path.parent() {
-                    Some(dir) => pictures_from(&text, dir),
+                    Some(dir) => pictures_from(&text, dir, root.as_deref()),
                     None => text,
                 })
             } else if lang == "html" && !cut {
@@ -1410,6 +1569,34 @@ fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Rc<str>>) {
         }
     };
     (body, source)
+}
+
+/// A document written in another language that the pane reads as Quarto
+/// does, once it is written as Quarto's markdown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Written {
+    Latex,
+    Typst,
+}
+
+fn written_as(path: &Path) -> Option<Written> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "tex" | "latex" | "ltx" => Some(Written::Latex),
+        "typ" => Some(Written::Typst),
+        _ => None,
+    }
+}
+
+/// Whether the file reads as Quarto's markdown, and whose math it writes:
+/// a Quarto or R Markdown document, and a LaTeX or Typst one written as
+/// one.
+pub(crate) fn reads_as_quarto(path: &Path) -> Option<emaki_core::math::Dialect> {
+    use emaki_core::math::Dialect;
+    match written_as(path) {
+        Some(Written::Latex) => Some(Dialect::Tex),
+        Some(Written::Typst) => Some(Dialect::Typst),
+        None => path.extension().and_then(|e| e.to_str()).filter(|e| ["qmd", "rmd"].contains(&e.to_ascii_lowercase().as_str())).map(|_| Dialect::Tex),
+    }
 }
 
 /// The file as it would read with `text` in it: what the pane shows as
@@ -2902,10 +3089,13 @@ impl Workbench {
         let this = cx.entity();
         window.defer(cx, move |window, cx| {
             let text = gpui_base::TextSelection::selected_text(window, cx);
+            let link = crate::workbench::link_menu_items();
             this.update(cx, |this, cx| {
                 let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
-                if !text.trim().is_empty() {
-                    items.push((t("Copy"), MenuDo::Copy(text)));
+                match link {
+                    Some(link) => items.extend(link),
+                    None if !text.trim().is_empty() => items.push((t("Copy"), MenuDo::Copy(text))),
+                    None => {}
                 }
                 if let Some(path) = picture {
                     items.push((t("Copy Image"), MenuDo::CopyImage(crate::workbench::Pic::File(path))));
@@ -3487,7 +3677,9 @@ impl Workbench {
         let v = self.file_view.as_ref()?;
         let (text, lang): (Rc<str>, &'static str) = match &v.body {
             FileBody::Code(text, lang, _) => (v.source.clone().unwrap_or_else(|| text.as_str().into()), *lang),
-            FileBody::Markdown(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), "markdown"),
+            // A LaTeX or Typst file is its own words, not the markdown it
+            // reads as.
+            FileBody::Markdown(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), if written_as(&v.path).is_some() { emaki_core::render_md::lang_for_path(&v.path.to_string_lossy()) } else { "markdown" }),
             FileBody::Html(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), "html"),
             FileBody::Notebook(_) if self.file_raw => (v.source.clone()?, "json"),
             // A table has its editor whichever way it shows: a cell
@@ -5877,10 +6069,16 @@ impl Workbench {
         use std::hash::{Hash, Hasher};
         let v = self.file_view.as_ref()?;
         let FileBody::Markdown(read) = &v.body else { return None };
-        let text = match self.file_editor.as_ref().filter(|ed| ed.path == v.path) {
+        // As it reads, the structure is the read text's: a Quarto file
+        // reads with its includes pasted in, more headings than it has
+        // as written, and the view's headings are counted in that order.
+        let editing = self.file_editor.as_ref().filter(|ed| ed.path == v.path && self.file_raw);
+        let text = match editing {
             Some(ed) => ed.state.read(cx).value().to_string(),
             None => read.clone(),
         };
+        // A LaTeX or Typst file as it is written has headings of its own.
+        let written = written_as(&v.path).filter(|_| editing.is_some());
         let mut h = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut h);
         let key = h.finish();
@@ -5889,7 +6087,10 @@ impl Workbench {
                 return Some(heads.clone());
             }
         }
-        let heads = Rc::new(heads_of(&text));
+        let heads = Rc::new(match written {
+            Some(w) => heads_written(&text, w),
+            None => heads_of(&text),
+        });
         self.file_heads = Some((key, heads.clone()));
         Some(heads)
     }
@@ -6551,7 +6752,7 @@ impl Workbench {
     pub(crate) fn branch_begin(&mut self, name: String, create: bool, base: Option<String>, update: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.close_branch_menu(window, cx);
         let Some(root) = self.git_dir() else { return };
-        if self.branches().is_some_and(|b| b.current.as_deref() == Some(&name)) || self.branch_busy {
+        if self.branches().is_some_and(|b| b.current.as_deref() == Some(name.as_str())) || self.branch_busy {
             return;
         }
         if create && !git::valid_name(&name) {
@@ -7276,13 +7477,16 @@ impl Workbench {
     pub(crate) fn open_changes(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
         let Some(folder) = self.files_root() else { return };
         // Of a folder of checkouts, the one the file named is in, else
-        // the one in use; and with no file named, its first change.
+        // the one in use; and with no file named, the one shown there
+        // last while it is still changed, else its first change.
         let root = path.as_ref().and_then(|p| self.repo_of(p)).or_else(|| self.git_dir()).unwrap_or(folder);
         if self.repo_of(&root).is_some() {
             self.tree.repo = Some(root.clone());
         }
         let rows = self.repo_rows(&root);
-        let picked = path.or_else(|| rows.first().and_then(|i| self.tree.changed.get(*i)).map(|(p, _)| p.clone()));
+        let changed = |p: &PathBuf| rows.iter().any(|i| self.tree.changed.get(*i).is_some_and(|(c, _)| c == p));
+        let last = self.changes_last.get(&root).filter(|p| changed(p)).cloned();
+        let picked = path.or(last).or_else(|| rows.first().and_then(|i| self.tree.changed.get(*i)).map(|(p, _)| p.clone()));
         let files = UniformListScrollHandle::new();
         if let Some(at) = picked.as_ref().and_then(|p| rows.iter().position(|i| self.tree.changed.get(*i).is_some_and(|(c, _)| c == p))) {
             files.scroll_to_item(at, ScrollStrategy::Center);
@@ -7318,6 +7522,9 @@ impl Workbench {
     pub(crate) fn close_changes(&mut self, cx: &mut Context<Self>) {
         let Some(c) = self.changes.as_mut().filter(|c| c.closing.is_none()) else { return };
         c.closing = Some(std::time::Instant::now());
+        if let Some(p) = c.picked.clone() {
+            self.changes_last.insert(c.root.clone(), p);
+        }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CHANGES_OUT).await;
             this.update(cx, |this, cx| {
@@ -7614,9 +7821,11 @@ impl Workbench {
         let shown = c.diff.as_ref().filter(|(of, _)| Some(of) == showing.as_ref()).map(|(_, d)| d.clone());
         let rel = picked.as_ref().map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\', "/")).unwrap_or_default();
         // GitHub's own colors for a line put in and a line taken out:
-        // the line's ground, and a stronger one behind its number.
+        // the line's ground, a stronger one behind its number, and the
+        // strongest behind the words that changed on it.
         let rgba_of = |hex: u32, a: f32| Hsla::from(rgb(hex)).opacity(a);
         let (add, add_no, del, del_no) = if dark { (rgba_of(0x2ea043, 0.16), rgba_of(0x3fb950, 0.30), rgba_of(0xf85149, 0.14), rgba_of(0xf85149, 0.30)) } else { (Hsla::from(rgb(0xe6ffec)), Hsla::from(rgb(0xccffd8)), Hsla::from(rgb(0xffebe9)), Hsla::from(rgb(0xffd7d5))) };
+        let (add_word, del_word) = if dark { (rgba_of(0x2ea043, 0.40), rgba_of(0xf85149, 0.40)) } else { (Hsla::from(rgb(0xabf2bc)), rgba_of(0xff8182, 0.40)) };
         let body = match &shown {
             None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { t("Reading…").to_string() } else if c.history { String::new() } else { match &repo_name { Some(r) => tf("Nothing has changed in {repo} since the last commit.", &[("repo", r)]), None => t("Nothing has changed since the last commit.").to_string() } }).into_any_element(),
             Some(d) if d.pictures.is_some() => picture_compare(d.pictures.as_ref().unwrap(), &c.pictures, &theme),
@@ -7631,8 +7840,11 @@ impl Workbench {
                 let (border, band, mono) = (theme.border, theme.muted.opacity(0.5), mono.clone());
                 let lines = gpui::list(c.list.clone(), move |ix, _, _| {
                     let Some(row) = rows.rows.get(ix) else { return div().into_any_element() };
+                    // The words that changed on each side of the row.
+                    let changed = rows.words.get(&ix);
+                    let words = |side: usize, color: Hsla| changed.map(|m| m[side].iter().map(|r| (r.clone(), HighlightStyle { background_color: Some(color), ..Default::default() })).collect::<Vec<_>>()).unwrap_or_default();
                     // One side of a row: the number on its ground, a mark, the words.
-                    let side = |cell: Option<(&u32, &str)>, mark: &'static str, ground: Option<(Hsla, Hsla)>| {
+                    let side = |cell: Option<(&u32, &str)>, mark: &'static str, ground: Option<(Hsla, Hsla)>, marks: Vec<(std::ops::Range<usize>, HighlightStyle)>| {
                         h_flex()
                             .flex_1()
                             .min_w_0()
@@ -7641,18 +7853,18 @@ impl Workbench {
                             .when(cell.is_none(), |el| el.bg(band.opacity(0.35)))
                             .child(div().w(px(46.)).h_full().flex_shrink_0().pr(px(8.)).text_right().text_color(quiet).when_some(ground, |el, (_, no)| el.bg(no)).children(cell.map(|(n, _)| n.to_string())))
                             .child(div().w(px(18.)).flex_shrink_0().text_center().text_color(quiet).child(if cell.is_some() { mark } else { "" }))
-                            .child(div().flex_1().min_w_0().pr(px(8.)).text_color(ink).children(cell.map(|(_, t)| if t.is_empty() { " ".to_string() } else { t.to_string() })))
+                            .child(div().flex_1().min_w_0().pr(px(8.)).text_color(ink).children(cell.map(|(_, t)| if t.is_empty() { StyledText::new(" ") } else { StyledText::new(t.to_string()).with_highlights(marks) })))
                     };
                     let line = h_flex().w_full().items_stretch().font_family(mono.clone()).text_size(px(12.)).line_height(px(19.));
                     match row {
                         git::Row::Hunk(head) => h_flex().w_full().h(px(28.)).px(px(14.)).items_center().bg(band).border_t_1().border_b_1().border_color(border).font_family(mono.clone()).text_size(px(11.5)).text_color(quiet).child(div().truncate().child(head.clone())).into_any_element(),
-                        git::Row::Same { old, new, text } => line.child(side(Some((old, text)), "", None)).child(div().w(px(1.)).flex_shrink_0().bg(border)).child(side(Some((new, text)), "", None)).into_any_element(),
-                        git::Row::Changed { right: Some((n, t)), .. } if all_new => line.child(side(Some((n, t.as_str())), "+", Some((add, add_no)))).into_any_element(),
-                        git::Row::Changed { left: Some((n, t)), .. } if all_gone => line.child(side(Some((n, t.as_str())), "-", Some((del, del_no)))).into_any_element(),
+                        git::Row::Same { old, new, text } => line.child(side(Some((old, text)), "", None, Vec::new())).child(div().w(px(1.)).flex_shrink_0().bg(border)).child(side(Some((new, text)), "", None, Vec::new())).into_any_element(),
+                        git::Row::Changed { right: Some((n, t)), .. } if all_new => line.child(side(Some((n, t.as_str())), "+", Some((add, add_no)), Vec::new())).into_any_element(),
+                        git::Row::Changed { left: Some((n, t)), .. } if all_gone => line.child(side(Some((n, t.as_str())), "-", Some((del, del_no)), Vec::new())).into_any_element(),
                         git::Row::Changed { left, right } => line
-                            .child(side(left.as_ref().map(|(n, t)| (n, t.as_str())), "-", left.as_ref().map(|_| (del, del_no))))
+                            .child(side(left.as_ref().map(|(n, t)| (n, t.as_str())), "-", left.as_ref().map(|_| (del, del_no)), words(0, del_word)))
                             .child(div().w(px(1.)).flex_shrink_0().bg(border))
-                            .child(side(right.as_ref().map(|(n, t)| (n, t.as_str())), "+", right.as_ref().map(|_| (add, add_no))))
+                            .child(side(right.as_ref().map(|(n, t)| (n, t.as_str())), "+", right.as_ref().map(|_| (add, add_no)), words(1, add_word)))
                             .into_any_element(),
                     }
                 })
@@ -7923,15 +8135,45 @@ impl Workbench {
             FileBody::Markdown(_) if self.file_raw => div().into_any_element(),
             FileBody::Code(..) => div().into_any_element(),
             FileBody::Markdown(text) => {
-                // A YAML header is the file's fields, not its first
-                // words: markdown reads it as a rule and a heading. It
-                // is drawn as a table in the same text, so a selection
-                // runs through it as through the rest.
-                let words = match emaki_core::files::front_matter(text) {
-                    Some((fields, rest)) => format!("{}\n{rest}", emaki_core::files::front_matter_table(&fields)),
-                    None => text.clone(),
+                let shown = DocShown {
+                    rel: v.rel.clone(),
+                    quarto: reads_as_quarto(&v.path),
+                    find: self.text_find_open.then(|| (self.text_find.query(), self.text_find.case_sensitive(), self.text_find.current())),
+                    size: self.cfg.app.text_sizes().preview,
+                    pad: (pad_x, pad_y),
+                    look: (theme.mode.is_dark(), theme.primary, theme.background, theme.foreground),
                 };
-                div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), words, self.text_find_open.then(|| self.text_find.clone()), Some(self.file_heads_spots.clone()), cx)).into_any_element()
+                let kept = self.file_doc.borrow().clone().filter(|d| d.read(cx).path == v.path);
+                let doc = kept.unwrap_or_else(|| {
+                    let doc = cx.new(|_| FileDoc { path: v.path.clone(), text: String::new(), shown: None, find: self.text_find.clone(), spots: self.file_heads_spots.clone(), kept: Default::default(), height: Rc::new(std::cell::Cell::new(px(0.))), fade: (u64::MAX, std::time::Instant::now()) });
+                    *self.file_doc.borrow_mut() = Some(doc.clone());
+                    doc
+                });
+                let serial = self.file_serial;
+                let (changed, height, fading) = doc.update(cx, |d, _| {
+                    let mut changed = d.shown.as_ref() != Some(&shown);
+                    if changed {
+                        d.shown = Some(shown);
+                    }
+                    if d.text != *text {
+                        d.text = text.clone();
+                        changed = true;
+                    }
+                    if d.fade.0 != serial {
+                        d.fade = (serial, std::time::Instant::now());
+                    }
+                    (changed, d.height.get(), d.fade.1.elapsed() < FILE_ANIM + Duration::from_millis(20))
+                });
+                let opening = self.file_anim.is_some_and(|(_, at, _)| at.elapsed() < FILE_ANIM);
+                let settled = !changed && !fading && !leaving && !opening;
+                if settled {
+                    // Nothing in a view drawn from the cache paints, so
+                    // its text is kept in the window's selection here.
+                    let kept = doc.read(cx).kept.clone();
+                    div().w_full().relative().child(AnyView::from(doc).cached(StyleRefinement::default().w_full().h(height))).child(canvas(move |_, window, cx| kept.keep(window, cx), |_, _, _, _| {}).absolute().size_0()).into_any_element()
+                } else {
+                    doc.into_any_element()
+                }
             }
             FileBody::Notebook(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), None, cx)).into_any_element(),
             // The web view stands over the pane's room; nothing of the
@@ -8938,6 +9180,7 @@ impl Workbench {
             "branches" => self.branch_probe = Some(String::new()),
             // The comparison, on the first changed file or on that one.
             "changes" => self.open_changes(None, cx),
+            "changes:off" => self.close_changes(cx),
             // Of a folder of checkouts: the list of them, and one chosen
             // by its name.
             "repolist" => self.repo_menu = Some(point(px(80.), px(90.))),
@@ -9139,13 +9382,26 @@ impl Workbench {
             // left, as the mouse moves it: pointer:832:166; clickat: is
             // a press and a release there.
             // wheel:<x>:<y>:<dy> is a scroll of that many points there.
-            t if t.starts_with("pointer:") || t.starts_with("clickat:") || t.starts_with("wheel:") => {
+            t if t.starts_with("pointer:") || t.starts_with("clickat:") || t.starts_with("rightat:") || t.starts_with("wheel:") => {
                 let mut at = t.splitn(2, ':').nth(1).unwrap_or("").split(':').filter_map(|v| v.parse::<f32>().ok());
                 if let (Some(x), Some(y)) = (at.next(), at.next()) {
-                    let how = if t.starts_with("clickat:") { Some(0.) } else if t.starts_with("wheel:") { Some(at.next().unwrap_or(-200.)) } else { None };
+                    let how = if t.starts_with("clickat:") { Some(0.) } else if t.starts_with("rightat:") { Some(f32::INFINITY) } else if t.starts_with("wheel:") { Some(at.next().unwrap_or(-200.)) } else { None };
                     self.pending_pointer.push((point(px(x), px(y)), how));
                     cx.notify();
                 }
+            }
+            // A drag with the left button, from one place to another:
+            // dragat:<x>:<y>:<x2>:<y2>; seltext prints what is selected.
+            t if t.starts_with("dragat:") => {
+                let n: Vec<f32> = t["dragat:".len()..].split(':').filter_map(|v| v.parse().ok()).collect();
+                if let [x, y, x2, y2] = n[..] {
+                    self.pending_drag.push((point(px(x), px(y)), point(px(x2), px(y2))));
+                    cx.notify();
+                }
+            }
+            "seltext" => {
+                self.pending_seltext = true;
+                cx.notify();
             }
             "treecaret" => {
                 let s = self.tree_input.read(cx);
@@ -9388,7 +9644,7 @@ mod draft_tests {
     fn pictures_are_read_from_the_files_folder() {
         let dir = std::path::Path::new("/home/a b/repo");
         let text = "![shot](docs/shot.png)\n\n<p><img src=\"assets/x.gif\" width=\"100%\"></p>\n\n```md\n![code](docs/shot.png)\n```\n\n![web](https://emaki.lol/a.gif) ![top](/abs/a.png)\n";
-        let out = super::pictures_from(text, dir);
+        let out = super::pictures_from(text, dir, None);
         assert!(out.contains("![shot](<file:///home/a b/repo/docs/shot.png>)"), "{out}");
         assert!(out.contains("<img src=\"file:///home/a b/repo/assets/x.gif\""), "{out}");
         assert!(out.contains("![code](docs/shot.png)"), "a block of code keeps its words: {out}");

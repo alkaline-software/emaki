@@ -24,10 +24,16 @@ use super::{
 
 const IMAGE_LEN: usize = 1;
 
+/// Formulas in a run of text: each one's room, picture and whether it
+/// stands alone (`text/math.rs`). (Emaki addition.)
+pub(super) type MathRooms = Vec<(Range<usize>, super::math::MathPicture, bool)>;
+
 pub(super) struct InlineFlow {
     id: ElementId,
     items: Vec<InlineFlowItem>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    /// The face formulas' rooms are set in. (Emaki addition.)
+    math_family: Option<SharedString>,
 }
 
 pub(super) enum InlineFlowItem {
@@ -36,6 +42,7 @@ pub(super) enum InlineFlowItem {
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        math: MathRooms,
     },
     Image {
         url: SharedUri,
@@ -67,6 +74,7 @@ enum PositionedFragment {
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        math: MathRooms,
     },
     Image {
         item_ix: usize,
@@ -80,6 +88,7 @@ enum MeasureItem {
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        math: MathRooms,
     },
     Image {
         url: SharedUri,
@@ -100,6 +109,7 @@ enum LineFragmentKind {
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        math: MathRooms,
     },
     Image,
 }
@@ -114,7 +124,14 @@ impl InlineFlow {
             id: id.into(),
             items,
             link_click_handler,
+            math_family: None,
         }
+    }
+
+    /// The face formulas' rooms are set in. (Emaki addition.)
+    pub(super) fn with_math_family(mut self, family: Option<SharedString>) -> Self {
+        self.math_family = family;
+        self
     }
 
     fn image_element(
@@ -192,6 +209,12 @@ impl Element for InlineFlow {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let measure_items = self.items.iter().map(MeasureItem::from).collect::<Vec<_>>();
+        // The paragraph's own style, taken here: the measure closure runs
+        // when the window lays the whole tree out, where the style on the
+        // stack is the root's. Measured in that font and painted in the
+        // paragraph's, a wider face wrapped every line's last words onto
+        // a line of their own, over the next. (Emaki addition.)
+        let text_style = window.text_style();
         let line_height = window.line_height();
         let rem_size = window.rem_size();
         let image_sizes = measure_items
@@ -213,10 +236,10 @@ impl Element for InlineFlow {
             .collect::<Vec<_>>();
         let layout_state = InlineFlowLayoutState::default();
         let layout_ref = layout_state.layout.clone();
+        let math_family = self.math_family.clone();
 
         let layout_id = window.request_measured_layout(Default::default(), {
             move |known_dimensions, available_space, window, _cx| {
-                let text_style = window.text_style();
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         AvailableSpace::Definite(width) => Some(width),
@@ -229,6 +252,8 @@ impl Element for InlineFlow {
                     &measure_items,
                     &image_sizes,
                     &text_style,
+                    math_family.as_ref(),
+                    line_height,
                     wrap_width,
                     window,
                 );
@@ -270,7 +295,7 @@ impl Element for InlineFlow {
                     text,
                     links,
                     highlights,
-                    ..
+                    math,
                 } => {
                     let state = match &self.items[item_ix] {
                         InlineFlowItem::Text {
@@ -291,6 +316,7 @@ impl Element for InlineFlow {
                         highlights,
                         self.link_click_handler.clone(),
                     )
+                    .with_math(self.math_family.clone(), math)
                     .into_any_element();
                     element.prepaint_as_root(
                         bounds.origin + origin,
@@ -363,11 +389,12 @@ impl From<&InlineFlowItem> for MeasureItem {
                 text,
                 links,
                 highlights,
-                ..
+                math,
             } => MeasureItem::Text {
                 text: text.clone(),
                 links: links.clone(),
                 highlights: highlights.clone(),
+                math: math.clone(),
             },
             InlineFlowItem::Image {
                 url, width, height, ..
@@ -393,10 +420,11 @@ fn layout_flow(
     items: &[MeasureItem],
     image_sizes: &[Option<Size<Pixels>>],
     text_style: &TextStyle,
+    math_family: Option<&SharedString>,
+    line_height: Pixels,
     wrap_width: Option<Pixels>,
     window: &mut Window,
 ) -> InlineFlowLayout {
-    let line_height = window.line_height();
     let rem_size = window.rem_size();
     let total_len = items.iter().map(MeasureItem::len).sum::<usize>();
     if total_len == 0 {
@@ -430,6 +458,7 @@ fn layout_flow(
                     text,
                     links,
                     highlights,
+                    math,
                 } => {
                     let local_start = line_range.start.max(item_start) - item_start;
                     let local_end = line_range.end.min(item_end) - item_start;
@@ -442,7 +471,12 @@ fn layout_flow(
                         let links = slice_ranges(links, local_start, local_end, |range, link| {
                             (range, link.clone())
                         });
-                        let runs = runs_for_highlights(&subtext, text_style, highlights.clone());
+                        let math = math
+                            .iter()
+                            .filter(|(r, _, _)| local_start <= r.start && r.end <= local_end)
+                            .map(|(r, p, d)| ((r.start - local_start)..(r.end - local_start), p.clone(), *d))
+                            .collect::<MathRooms>();
+                        let runs = runs_for_highlights(&subtext, text_style, highlights.clone(), math_family.map(|f| (f, &math)));
                         let shaped_line = shape_line(subtext.clone(), font_size, &runs, window);
                         let width = shaped_line.width();
                         line_width += width;
@@ -452,6 +486,7 @@ fn layout_flow(
                                 text: subtext,
                                 links,
                                 highlights,
+                                math,
                             },
                             size: size(width, line_height),
                             source_range: local_start..local_end,
@@ -485,6 +520,7 @@ fn layout_flow(
                     text,
                     links,
                     highlights,
+                    math,
                 } => PositionedFragment::Text {
                     item_ix: fragment.item_ix,
                     origin,
@@ -493,6 +529,7 @@ fn layout_flow(
                     text,
                     links,
                     highlights,
+                    math,
                 },
                 LineFragmentKind::Image => PositionedFragment::Image {
                     item_ix: fragment.item_ix,
@@ -701,6 +738,7 @@ fn runs_for_highlights(
     text: &str,
     default_style: &TextStyle,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    math: Option<(&SharedString, &MathRooms)>,
 ) -> Vec<TextRun> {
     let mut runs = Vec::new();
     let mut ix = 0;
@@ -709,12 +747,15 @@ fn runs_for_highlights(
         if ix < range.start {
             runs.push(default_style.clone().to_run(range.start - ix));
         }
-        runs.push(
-            default_style
-                .clone()
-                .highlight(highlight)
-                .to_run(range.len()),
-        );
+        let mut style = default_style.clone();
+        // A formula's room is measured in the face it is set in, as the
+        // text element sets it. (Emaki addition.)
+        if let Some((family, rooms)) = math {
+            if rooms.iter().any(|(r, _, _)| r.start <= range.start && range.end <= r.end) {
+                style.font_family = family.clone();
+            }
+        }
+        runs.push(style.highlight(highlight).to_run(range.len()));
         ix = range.end;
     }
 

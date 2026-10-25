@@ -260,23 +260,7 @@ upstream revision finds them.
    (`MarkdownExtensions::parse_options_with`): a view's parse options
    can be changed over GFM's, for the conversation, which turns off what
    chat text sets off by accident (`docs/conversation.md`).
-34. The code editor's find. `crates/ui/src/input/overlay.rs`: the panel
-   is shown anew when it opens (`SearchSession::opened`), not whenever
-   the query changes; the panel's own typing changed it, the field was
-   selected again at each letter, and the next letter replaced it. It is
-   still drawn while it closes (`closing`, `closed_at`).
-   `crates/base/src/input/editor/search.rs`: the matcher is a regular
-   expression (`SearchOptions`: case, whole word, regex), escaped unless
-   regex is on, case folded beyond ASCII, and a replacement fills `$1`
-   from its match (`replacement_for`); upstream had one literal through
-   AhoCorasick. `crates/ui/src/input/search.rs`: the panel drawn as the
-   window's find bar, after VS Code's (a chevron for the replace row,
-   the toggles in the field, ↩ and ⌘↩ in the replace field, ⌥⌘C, ⌥⌘W,
-   ⌥⌘R), moving as it opens and closes over its measured height, two
-   rows in a narrow pane; ⌘F in it closes it. Its room around the card
-   is inside the box that closes: padding is the least a box shrinks
-   to, and the close stood still at it before the panel went. `crates/base/src/input/base/state.rs`: Replace is
-   ⌥⌘F, since ⌘⇧F is the window's.
+34. The code editor's find. `crates/ui/src/input/overlay.rs`: the panel is shown anew when it opens (`SearchSession::opened`), not whenever the query changes; the panel's own typing changed it, the field was selected again at each letter, and the next letter replaced it. It is still drawn while it closes (`closing`, `closed_at`). `crates/base/src/input/editor/search.rs`: the matcher is a regular expression (`SearchOptions`: case, whole word, regex), escaped unless regex is on, case folded beyond ASCII, and a replacement fills `$1` from its match (`replacement_for`); upstream had one literal through AhoCorasick. `crates/ui/src/input/search.rs`: the panel drawn as the window's find bar, after VS Code's (a chevron for the replace row, the toggles in the field, ↩ and ⌘↩ in the replace field, ⌥⌘C, ⌥⌘W, ⌥⌘R), moving as it opens and closes over its measured height, two rows in a narrow pane; ⌘F in it closes it. Its room around the card is inside the box that closes: padding is the least a box shrinks to, and the close stood still at it before the panel went. `crates/base/src/input/base/state.rs`: Replace is ⌥⌘F, since ⌘⇧F is the window's. Escape in a field whose card is open closes the card and is not passed on (`escape`); passed on, it reached the window, which took it to stop the turn running.
 35. `crates/ui/src/tooltip.rs` (`set_label`, `label`): the application
    says how a hover's label is drawn, so the toolkit's own labels (the
    find panel's) draw their keys as the application's do.
@@ -320,6 +304,30 @@ upstream revision finds them.
 44. `crates/base/src/text_selection.rs` (the mouse-move listener in `paint_text_selection`): a move with the left button up ends the drag, as a release would. The release does not always come: on Windows a press on the window's frame is handed to the window as a mouse-down and the system's resize or move keeps the release, and every later move went on selecting until a click. A test (`a_move_with_the_button_up_ends_a_drag_whose_release_was_lost`) holds it.
 
 45. `crates/base/src/input/base/state.rs` (`InputState::line_top`): how far down the text a buffer line begins, soft wraps and folds counted as scrolling to the caret counts them, and the view's height, so a caller can scroll a line to a place of its own choosing. Emaki's structure glides a heading to a third of the way down the file's editor with it.
+
+46. `crates/base/src/input/base/state.rs`, `movement.rs` (`previous_start_of_word`, `next_end_of_word`): a word step goes from the place it is handed. ⌥⇧← and ⌥⇧→ (Ctrl off a Mac) go from the caret, so a selection made rightward is taken back a word at a time; upstream went from the selection's start, and the first ⌥⇧← dropped the selection and took the word before it. ⌥← lets a selection go from its start and ⌥→ from its end, as the Mac's fields do. A test (`word_steps_go_from_the_caret`) holds it.
+
+47. `crates/ui/src/text/style.rs` (`TextViewStyle::front_matter`), `node.rs` (`render_fields`): a view told its text opens with a file's header of fields, written by the caller as a two-column table, draws that table as rows: a field a row, the key in a quiet column as wide as the longest, keys and values in the mono face, a hairline between rows, and no card of its own (the band around them is the caller's). The cells are the table's own, so a selection runs through them.
+
+48. `crates/ui/src/text/style.rs` (`TextViewStyle::chunk_words`, `chunk_icons`), `node.rs` (`CodeBlock::render`, `ChunkFold`, `chunk_label`, `chunk_icon`): a Quarto or R Markdown chunk (a fence whose language is in braces) has a head row, a chevron, its language's mark from the caller's icon folder and its name, and folds by itself at a click on it: what is under the head closes to it over a moment off the chunk's own clock, by its height as last drawn, kept by keyed state named for what the chunk holds. The hover labels are the caller's words.
+
+49. `crates/ui/src/text/format/quarto.rs` (new), `markdown.rs` (`blocks_of`, `reparse`, `parse_inlines`), `markdown_ext.rs` (`MarkdownExtensions::quarto`), `node.rs` (`BlockNode::Div`, `DivAttrs`, `Heading::attrs`, `ImageNode::align` and `caption`, `TextMark::attr`, `render_div`), `inline.rs` (`with_attr_chip`), `Cargo.toml` (`regex`): Quarto's syntax over markdown, read when the extensions say so. A paragraph is cut at fence lines (`::: {.class}`, `:::`), the pieces between read again on their own with their spans where they stand, and what an open and its close hold nested into a `Div`, drawn by its class (callouts, columns, `layout-ncol`, centering, `.hidden`, else a chip and a hairline). Attributes after a heading go on the heading, after a picture set its width and place, after a link or span are dropped, the span unwrapped. A picture alone in a paragraph is a figure with its alt text as caption, placed by its margins in a block. A raw `{=html}` block or inline is parsed as HTML. Math (`$…$`, `$$`) is read when Quarto's syntax is (`MarkdownExtensions::parse_options`) and drawn as Unicode (`quarto::tex`), display math in a centered block. A `.panel-tabset` is tabs (`render_tabset`, `TabSet`). A heading's attributes and a div's are paragraphs of their own (`Heading::attrs`, `Div::chip`), selectable, drawn as quiet chips. A shortcode left over, and an attribute set, is a quiet chip: inline code in muted ink on a plate of the muted color. Tests at the module's foot (`quarto::tests`) hold it; `cargo test -p gpui-component --lib quarto` in a copy of this folder with Emaki's `Cargo.lock` runs them.
+
+50. `crates/ui/src/text/inline_flow.rs` (`request_layout`): the paragraph's text style and line height are taken as the layout is requested and handed to the measure closure. The closure runs when the window lays the whole tree out, where the style on the stack is the root's: measured in that font and painted in the paragraph's, a wider face (the conversation's serif) wrapped every line's last words onto a line of their own, drawn over the next, in any paragraph with a picture among its words.
+
+51. `crates/ui/src/text/node.rs` (`LinkMark::raw`, `NodeContext::source`), `format/markdown.rs`, `inline.rs` (`right_clicked_link`), `state.rs` (`TextViewMultiClickKind::Link`): a link keeps the markdown it was written as, and a right click on one selects the whole link and keeps it, with its words, for the caller's menu to take.
+
+52. `crates/ui/src/text/math.rs` (new), `markdown_ext.rs` (`MarkdownExtensions::math`), `format/quarto.rs` (`math_node`, `inline_math`, `display_math`), `format/markdown.rs`, `node.rs` (`InlineNode::math`, the paragraph's display line, `selected_run_text`, `emit_run`), `inline.rs` (`with_math`, `paint_math`), `inline_flow.rs` (`MathRooms`): math set as pictures by a typesetter the caller hands the markdown extensions (`MathFace`), asked while the text is parsed. A formula stays a piece of its line's text, a room of no-break spaces in the caller's math face with its picture painted over it on the line's baseline, so it wraps, selects, finds and copies (as its source) with the words; on a line of its own it is a line as tall as its picture with its `\tag{n}` at the right. Without a face it is the Unicode it was before.
+
+53. `crates/ui/src/text/node.rs` (`render_callout`, `render_div`), `style.rs` (`TextViewStyle::callout_icons`): a Quarto callout's options (`appearance`, `icon`, `collapse`, folding on the chunk's clock) and its kind's icon; theorem-like divs, proofs and column classes drawn as their words with no chip.
+
+54. `crates/ui/src/text/format/quarto.rs` (`margin_rows`, `MARGIN_ROW`, `is_margin`, `is_column`), `format/markdown.rs` (`ast_to_document`), `node.rs` (`render_div`): a Quarto document with margin notes set in two columns, each block of the text a row with the notes beside it, the notes wrapping under it where the pane is narrow.
+
+55. `crates/ui/src/text/inline.rs` (`Spots`, `layout_selections`, `text_line_bounds`, `paint_chips`, the mouse-move listener): where each character of a run is, found in one walk of its lines for indices in rising order. `TextLayout::position_for_index` walks the line from its start for each index, and the selection's band, the text's boxes for the selection layer and the code plates asked it twice a character every frame, so a paragraph cost its length squared: 70% of a frame with a long document open. A run wholly above or below what shows has no text boxes. A run draws again under the pointer only when the link under it changes, not at every letter crossed. A line whose glyphs are not in the text's order asks `position_for_index` as before. `the_walk_puts_each_index_where_the_layout_does` holds it.
+
+56. `crates/ui/src/text/node.rs` (`CodeBlock::render`): a code block's actions are made for the block under the pointer only (`on_hover`, keyed state), not for every block at opacity 0: a document of a hundred chunks built a copy button view each every frame.
+
+57. `crates/ui/src/text/find.rs` (`KeptViews`, `TextFind::case_sensitive`), `text_view.rs` (`TextView::kept`), `selection_adapter.rs` (`keep`), `crates/base/src/text_selection.rs` (`TextSelectionHandle::keep_registered`): text views inside a view the caller draws from gpui's cache (`AnyView::cached`) stay in the window's selection. A view registers as it paints and one that did not register in a frame was taken for gone, its selection cleared and its state notified, which threw the cache away every other frame and left nothing to start a selection on. The caller holds a `KeptViews`, hands it to each view, and calls `keep` in a frame the cache is drawn from.
 
 ## Updating
 

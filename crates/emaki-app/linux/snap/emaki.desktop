@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Emaki
+Comment=Every coding-agent session on this machine, kept for good, in one window you can also talk to.
+Exec=emaki
+Icon=${SNAP}/meta/gui/icon.png
+StartupWMClass=Emaki
+Categories=Development;
+Terminal=false

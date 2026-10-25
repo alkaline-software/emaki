@@ -712,6 +712,24 @@ impl TextSelectionHandle {
         });
     }
 
+    /// Keeps for this frame the geometry the participant registered last,
+    /// when the window drew it from a cache and it did not paint: it is
+    /// where it was, and a participant that did not register in a frame
+    /// was taken for gone, its selection cleared and its view told so.
+    /// (Emaki addition.)
+    pub fn keep_registered(&self, window: &mut Window, cx: &mut App) {
+        let Some(state) = WindowSelectionState::existing(window, cx) else {
+            return;
+        };
+        let id = self.entity_id();
+        state.update(cx, |state, _| {
+            let generation = state.frame_generation;
+            if let Some(registration) = state.participants.get_mut(&id) {
+                registration.generation = generation;
+            }
+        });
+    }
+
     /// Projects the current snapshot onto plain-text runs and caches their copy text.
     pub fn update_runs(&self, runs: &[TextSelectionRun], cx: &mut App) -> TextSelectionProjection {
         self.0.update(cx, |state, _| state.update_runs(runs))

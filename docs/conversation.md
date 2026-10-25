@@ -4,6 +4,7 @@ About `crates/emaki-app/src/transcript.rs`, the conversation list in `crates/ema
 
 ## Rules
 
+- **A measure closure sees the root's text style.** What `request_measured_layout` is handed runs when the window lays the whole tree out, with the root's style on the stack, not the element's: take `window.text_style()` and `window.line_height()` in `request_layout` and move them in. The vendored inline flow (a paragraph with a picture among its words) measured its lines in the root's sans and painted them in the conversation's serif, and every line's last words wrapped onto a line of their own, over the next (UPSTREAM.md 50).
 - Never splice a list item the reader may be inside. gpui's `ListState` moves the scroll anchor to the start of any spliced range that contains it, and a live session's last round is one tall item, so a re-splice on reload throws the reader to the top of that round.
 - `set_detail` tells the list only about a change in count (append new rounds, reset on a rewrite). Toggling a tool, thought, run or thumbnail just notifies: items render from the current session on every frame and are re-measured as they render.
 - The cards that come up while a session runs are drawn under the last round, in the list's last item (`render_list_item`; `docs/live-turn.md`, The cards). They are not an item of their own: the list's count is the rounds', and everything that goes by it stays as it is.
@@ -42,6 +43,10 @@ The bubble is the one item of a row, which shrinks it to the room there is (`min
 ## Code blocks
 
 A block of code does not wrap its lines: one wider than its room scrolls sideways (the vendored `node.rs`, listed in `UPSTREAM.md`). Wrapped, anything set out in columns (a table, a mock of a screen) came apart, and the terminal was where it could be read. The scroller is the toolkit's own, the one a table has, and takes a sideways gesture only, so a wheel over a block still moves the conversation. Where more lies past an edge the text fades out there: cut off clean, a line read as all there was. A selection dragged to a block's edge scrolls it that way, as a field does (`code_drag`, vendored `node.rs`).
+
+## A right click on a link
+
+In the conversation and in a file as it reads, a right click on a link selects the whole link, not the word under the pointer (the vendored `inline.rs`, `TextViewMultiClickKind::Link`), and the menu is Copy Link, Copy Text and Copy Markdown, in that order (`link_menu_items`). The address is the link's; the text is the words it shows; the markdown is the link as written, taken from the parsed source (`LinkMark::raw`), so marks inside it stay. A reference link keeps its own markdown, not its definition's. A link from HTML has no markdown, and that choice is left out. The view keeps a right click as a kind and a point and draws the selection from them at each paint, so a link selection is a kind of its own: set as a range only, it was redrawn as the word.
 
 ## Copy buttons and times
 

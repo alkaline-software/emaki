@@ -8,6 +8,7 @@ use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
+use emaki_core::math::Dialect;
 use emaki_core::model::*;
 use emaki_core::render_md::{clip, code_block, command_text, human_duration, patch_stat, pretty_args, render_patch};
 
@@ -98,28 +99,74 @@ pub(crate) fn chat_parse_options(opts: &mut markdown::ParseOptions) {
 /// frame, and a selection was gone the moment the mouse let go.
 static CHAT_MARKDOWN: std::sync::LazyLock<gpui_component::text::MarkdownExtensions> = std::sync::LazyLock::new(|| gpui_component::text::MarkdownExtensions::default().parse_options_with(chat_parse_options));
 
+/// Quarto's syntax over markdown (fenced divs, attributes, raw blocks,
+/// shortcodes), read by the vendored `format/quarto.rs`. Made once, as
+/// `CHAT_MARKDOWN` is: a set made anew is a new revision.
+static QUARTO_MARKDOWN: std::sync::LazyLock<gpui_component::text::MarkdownExtensions> = std::sync::LazyLock::new(|| gpui_component::text::MarkdownExtensions::default().quarto().math(math_face(Dialect::Tex)));
+
+/// The same, for a Typst file read as Quarto (`emaki_core::typst_doc`),
+/// whose math is Typst's.
+static TYPST_MARKDOWN: std::sync::LazyLock<gpui_component::text::MarkdownExtensions> = std::sync::LazyLock::new(|| gpui_component::text::MarkdownExtensions::default().quarto().math(math_face(Dialect::Typst)));
+
+/// How much larger a formula is set than the words around it: New
+/// Computer Modern's small letters are shorter than the window's faces'.
+const MATH_SCALE: f32 = 1.1;
+
+/// Formulas set by Typst (`emaki_core::math`), each once, in the face the
+/// window carries for them; its two no-break spaces' widths are what the
+/// room a formula takes in a line is made of.
+fn math_face(dialect: Dialect) -> gpui_component::text::MathFace {
+    gpui_component::text::MathFace {
+        family: crate::fonts::math_family(),
+        glue: emaki_core::math::glue(),
+        set: std::sync::Arc::new(move |src, display| {
+            emaki_core::math::formula(src, dialect, display).map(|f| gpui_component::text::MathPicture {
+                svg: f.svg.clone(),
+                width: f.width * MATH_SCALE,
+                height: f.height * MATH_SCALE,
+                baseline: f.baseline * MATH_SCALE,
+            })
+        }),
+    }
+}
+
 /// Markdown as a conversation draws it: `md_view` read with
 /// `chat_parse_options`, and with the code among its words in the
 /// smaller cut of the monospace face (`fonts::inline_mono_family`), so
 /// it stands no taller than they do.
 pub(crate) fn chat_md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, None, cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, cx)
 }
 
 /// Markdown as a document draws it, a file's or a page's: all of GFM,
 /// as GitHub reads the file.
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, None, cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, cx)
 }
 
 /// `md_view`, with words found in it painted (`TextFind`): a file as it
 /// reads, with its find open; and with where its headings are painted
 /// kept, for the outline at the files panel's foot (`HeadingSpots`).
 pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, find, headings, cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, find, headings, None, cx)
 }
 
-fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, cx: &App) -> impl IntoElement {
+/// A file's markdown as it reads: with `quarto`, Quarto's syntax read
+/// too, its math written as that dialect writes it. Each Quarto or R
+/// Markdown chunk folds by itself. `kept` holds it for frames it is drawn
+/// from a cache in (`panels::FileDoc`).
+pub(crate) fn md_view_file(id: String, text: String, quarto: Option<Dialect>, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), cx)
+}
+
+/// A file's YAML header as its fields: `text` is the header written as a
+/// table (`files::front_matter_table`), drawn a field a row in the mono
+/// face, for the band over the file.
+pub(crate) fn md_view_fields(id: String, text: String, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, true, None, None, Some(kept), cx)
+}
+
+fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown as it is, in a code block,
     // rather than taking the window down.
@@ -131,7 +178,10 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, f
         .selectable(true)
         .find(find)
         .headings(headings)
+        .kept(kept)
         .when(chat, |v| v.markdown_extensions(CHAT_MARKDOWN.clone()))
+        .when(quarto == Some(Dialect::Tex), |v| v.markdown_extensions(QUARTO_MARKDOWN.clone()))
+        .when(quarto == Some(Dialect::Typst), |v| v.markdown_extensions(TYPST_MARKDOWN.clone()))
         .style(
             TextViewStyle {
                 // The headings' sizes go from the text's own where the view
@@ -163,6 +213,12 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, f
                 // letters, a faint wash of it on a rounded plate behind.
                 inline_code: HighlightStyle { color: Some(theme.link), ..Default::default() },
                 inline_code_chip: Some((theme.primary.opacity(if dark { 0.16 } else { 0.10 }), theme.primary.opacity(if dark { 0.22 } else { 0.18 }))),
+                front_matter: fields,
+                // A chunk's head: its language's mark (the set from
+                // pingfan.org's styles), and its fold button's labels.
+                chunk_words: [t("Fold").into(), t("Unfold").into()],
+                chunk_icons: "icons/lang".into(),
+                callout_icons: "icons/callout".into(),
                 ..Default::default()
             }
             .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.))),
@@ -260,6 +316,12 @@ fn is_run_item(it: &Item) -> bool {
 /// included, fold into one row (see `render_round`) while runs fold
 /// (`fold`, the setting), and the find bar has to open that row to show
 /// a hit inside it.
+/// What tells a prompt's attachments apart: a pasted picture by its row and
+/// place in it, a kept file by its path too.
+fn attachment_key(a: &Attachment) -> String {
+    format!("{}:{}:{}", a.uuid, a.index, a.path)
+}
+
 pub(crate) fn run_start(rnd: &Round, jx: usize, fold: bool) -> Option<usize> {
     let is_run_item = |it: &Item| is_run_item(it);
     if !fold || !rnd.items.get(jx).map(is_run_item).unwrap_or(false) {
@@ -712,6 +774,24 @@ impl Workbench {
         v.into_any_element()
     }
 
+    /// The pictures of round `ix`'s prompt that can be drawn now, in their
+    /// order, each with its attachment's key (`attachment_key`): what the
+    /// lightbox steps through when one of them is opened.
+    pub(crate) fn prompt_pictures(&mut self, ix: usize, cx: &mut Context<Self>) -> Vec<(String, crate::workbench::Lightbox)> {
+        let pics: Vec<Attachment> = self.detail.as_ref().and_then(|d| d.session.rounds.get(ix)).map(|r| r.attachments.iter().filter(|a| a.kind == "image").cloned().collect()).unwrap_or_default();
+        pics.iter()
+            .filter_map(|a| {
+                let path = (!a.path.is_empty()).then(|| PathBuf::from(&a.path));
+                let source = match path.as_ref().filter(|p| p.is_file()) {
+                    Some(p) => self.picture_source(p, cx).map(ImageSource::from),
+                    None => self.detail.as_ref().and_then(|d| d.thumbs.get(&format!("{}:{}", a.uuid, a.index)).cloned().flatten()).map(|t| ImageSource::from(t.image)),
+                }?;
+                let title = if a.name.is_empty() { t("image").to_string() } else { a.name.clone() };
+                Some((attachment_key(a), crate::workbench::Lightbox { title, source, path }))
+            })
+            .collect()
+    }
+
     /// A pasted or attached file inside a prompt: a thumbnail for a picture
     /// (from the file it was kept as, or read back out of the transcript), a
     /// typed icon with name and size for anything else.
@@ -722,6 +802,7 @@ impl Workbench {
         let thumb_key = format!("{}:{}", a.uuid, a.index);
         let is_image = a.kind == "image";
         let (t2, p2, k2) = (title.clone(), path.clone(), thumb_key.clone());
+        let key = attachment_key(a);
         let dark = theme.mode.is_dark();
         // Resolve the picture, and its size, before the click listener
         // borrows `cx`. The size shapes the tile so the whole picture shows.
@@ -776,7 +857,16 @@ impl Workbench {
                         }
                     }),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    // A picture opens among the prompt's others, which
+                    // the arrows then go through.
+                    if is_image {
+                        let set = this.prompt_pictures(ix, cx);
+                        if let Some(at) = set.iter().position(|(k, _)| *k == key) {
+                            this.open_lightbox_in(set.into_iter().map(|(_, l)| l).collect(), at, cx);
+                            return;
+                        }
+                    }
                     let image = if !is_image {
                         None
                     } else if let Some(p) = p2.as_ref().filter(|p| p.is_file()) {
@@ -787,7 +877,7 @@ impl Workbench {
                     if is_image && image.is_none() && !p2.as_ref().is_some_and(|p| p.is_file()) {
                         return;
                     }
-                    this.preview_attachment(t2.clone(), p2.clone(), image, window, cx);
+                    this.preview_attachment(t2.clone(), p2.clone(), image, cx);
                 }))
                 .child(el)
         };
@@ -1238,7 +1328,7 @@ impl Workbench {
                                             move |this, ev: &MouseDownEvent, _, cx| this.attachment_menu(ev.position, file.clone().filter(|p| p.is_file()), Some(crate::workbench::Pic::Bytes(pic.clone())), cx)
                                         }),
                                     )
-                                    .on_click(cx.listener(move |this, _, window, cx| this.preview_attachment(title.clone(), file.clone(), Some(image.clone()), window, cx)))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.preview_attachment(title.clone(), file.clone(), Some(image.clone()), cx)))
                                     .child(img(ImageSource::from(t.image)).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain))
                                     .child(tile_caption(w, caption, &theme)),
                             );

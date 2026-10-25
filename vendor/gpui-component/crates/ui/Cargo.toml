@@ -133,6 +133,8 @@ markdown = { version = "1.0.0", features = ["serde"] }
 
 # HTML Parser
 html5ever = "0.27"
+# Emaki: the Quarto pass over markdown (`text/format/quarto.rs`).
+regex = "1"
 markup5ever_rcdom = "0.3.0"
 
 # Calendar

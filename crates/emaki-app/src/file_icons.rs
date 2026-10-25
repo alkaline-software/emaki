@@ -5,8 +5,25 @@
 //! for a light window, Mocha for a dark one) and `theme.json`, its table
 //! of which icon a name gets, both copied from the extension
 //! (`catppuccin.catppuccin-vsc-icons` 1.26.0, MIT, `LICENSE` beside
-//! them). One is ours: `quarto.svg`, Quarto's quartered circle drawn in
-//! the theme's line and blue, since the theme has no icon for `.qmd`.
+//! them). Some are ours, drawn in the theme's hand for kinds it has no
+//! icon for, and their extensions added to the table: `quarto.svg`,
+//! Quarto's circle of four quarters with a light fill, in Markdown's
+//! sapphire since a `.qmd` is markdown and more (the theme's issue 579
+//! asks for one); `parquet`, `arrow` (Arrow and Feather), `calendar`,
+//! `email`, `ebook`, `subtitles`, `lock`, `package` (a Linux or Android
+//! package), `disc` (a disk image) and `contact`; the coding agents'
+//! marks, for their files and folders, in the colors the window gives
+//! the agents (`look::agent_hex`): `claude`, Anthropic's A and backslash
+//! in lines, for `CLAUDE.md`; `codex`, OpenAI's knot; `gemini`; and
+//! `agents`, the Agents page's sparkles, for `AGENTS.md`;
+//! and folders with a mark at their lower right as the theme's have:
+//! `folder_quarto` (`.quarto`, `_freeze`, `_extensions`), `folder_claude`,
+//! `folder_codex`, `folder_gemini`, `folder_agents` and `folder_r` (`R`,
+//! `renv`). Kinds one of the theme's own icons fits are added under that
+//! icon (`.rds` under R's data, a DuckDB file under the database, `target`
+//! under the folder of what is built). One of the theme's is changed:
+//! `folder_github`'s mark is GitHub's orchid, as the Agents page wears
+//! it, where the theme's is gray.
 //! The icons carry their own colors, so they are drawn as
 //! pictures (`img`), not as the one-color masks the window's other
 //! icons are.
@@ -92,6 +109,22 @@ mod tests {
         assert_eq!(file_id("notes.md"), "markdown");
         assert_eq!(file_id("LICENSE"), "license");
         assert_eq!(file_id("no-such.zzzz"), "_file");
+        // Ours, for what the theme has no icon for, and the theme's own
+        // for kinds it does not name.
+        assert_eq!(file_id("works.qmd"), "quarto");
+        assert_eq!(file_id("trips.parquet"), "parquet");
+        assert_eq!(file_id("Emaki.AppImage"), "package");
+        assert_eq!(file_id("renv.lock"), "lock");
+        assert_eq!(file_id("model.rds"), "rdata");
+        assert_eq!(file_id("CLAUDE.md"), "claude");
+        assert_eq!(file_id("AGENTS.md"), "agents");
+        // YAML is YAML's whatever it is for, Quarto's own config too.
+        assert_eq!(file_id("_quarto.yml"), "yaml");
+        assert_eq!(folder_id(".claude", false), "folder_claude");
+        assert_eq!(folder_id(".codex", true), "folder_codex_open");
+        assert_eq!(folder_id(".quarto", false), "folder_quarto");
+        assert_eq!(folder_id("R", false), "folder_r");
+        assert_eq!(folder_id("target", false), "folder_dist");
         assert_eq!(folder_id("scripts", false), "folder_scripts");
         assert_eq!(folder_id("scripts", true), "folder_scripts_open");
         assert_eq!(folder_id("whatever", false), "_folder");

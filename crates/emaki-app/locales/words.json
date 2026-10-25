@@ -8683,5 +8683,50 @@
     "fr": "⇧↩ pour aller à la ligne",
     "de": "⇧↩ für eine neue Zeile",
     "es": "⇧↩ para una línea nueva"
+  },
+  "Fold": {
+    "zh-Hans": "折叠",
+    "zh-Hant": "摺疊",
+    "ja": "折りたたむ",
+    "ko": "접기",
+    "fr": "Replier",
+    "de": "Einklappen",
+    "es": "Contraer"
+  },
+  "Unfold": {
+    "zh-Hans": "展开",
+    "zh-Hant": "展開",
+    "ja": "展開",
+    "ko": "펼치기",
+    "fr": "Déplier",
+    "de": "Ausklappen",
+    "es": "Expandir"
+  },
+  "Copy Link": {
+    "zh-Hans": "拷贝链接",
+    "zh-Hant": "拷貝連結",
+    "ja": "リンクをコピー",
+    "ko": "링크 복사",
+    "fr": "Copier le lien",
+    "de": "Link kopieren",
+    "es": "Copiar enlace"
+  },
+  "Copy Text": {
+    "zh-Hans": "拷贝文字",
+    "zh-Hant": "拷貝文字",
+    "ja": "テキストをコピー",
+    "ko": "텍스트 복사",
+    "fr": "Copier le texte",
+    "de": "Text kopieren",
+    "es": "Copiar texto"
+  },
+  "Copy Markdown": {
+    "zh-Hans": "拷贝 Markdown",
+    "zh-Hant": "拷貝 Markdown",
+    "ja": "Markdown をコピー",
+    "ko": "Markdown 복사",
+    "fr": "Copier le Markdown",
+    "de": "Markdown kopieren",
+    "es": "Copiar Markdown"
   }
 }

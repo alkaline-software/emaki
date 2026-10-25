@@ -51,6 +51,22 @@ pub struct TextViewStyle {
     /// The weight strong (bold) text is drawn at; `None` is [`FontWeight::BOLD`].
     /// (Emaki: added so strong text can be a semibold, as the Claude app sets it.)
     pub strong_font_weight: Option<FontWeight>,
+    /// The table the text opens with is a file's header of fields (a YAML
+    /// header written out as a table by the caller), drawn as fields: the
+    /// keys and values in the mono face, the keys quiet, on a card of its
+    /// own. (Emaki addition.)
+    pub front_matter: bool,
+    /// The hover labels of a Quarto chunk's fold (a block of code whose
+    /// fence names its language in braces, ```` ```{r} ````), open and
+    /// folded: the caller's, in its own language. (Emaki addition.)
+    pub chunk_words: [SharedString; 2],
+    /// Where the language icons a chunk's head wears are, as asset paths
+    /// (`icons/lang`): `<dir>/r.svg`. Empty, no icon. (Emaki addition.)
+    pub chunk_icons: SharedString,
+    /// Where a Quarto callout's icons are, as asset paths: `<dir>/note.svg`,
+    /// `tip`, `warning`, `caution`, `important`, one color each. Empty, no
+    /// icon. (Emaki addition.)
+    pub callout_icons: SharedString,
     pub is_dark: bool,
 }
 
@@ -82,6 +98,10 @@ impl PartialEq for TextViewStyle {
             && self.inline_code_font_family == other.inline_code_font_family
             && self.inline_code_chip == other.inline_code_chip
             && self.strong_font_weight == other.strong_font_weight
+            && self.front_matter == other.front_matter
+            && self.chunk_words == other.chunk_words
+            && self.chunk_icons == other.chunk_icons
+            && self.callout_icons == other.callout_icons
             && self.is_dark == other.is_dark
     }
 }
@@ -100,6 +120,10 @@ impl Default for TextViewStyle {
             inline_code_font_family: None,
             inline_code_chip: None,
             strong_font_weight: None,
+            front_matter: false,
+            chunk_words: ["Fold".into(), "Unfold".into()],
+            chunk_icons: SharedString::default(),
+            callout_icons: SharedString::default(),
             is_dark: false,
         }
     }

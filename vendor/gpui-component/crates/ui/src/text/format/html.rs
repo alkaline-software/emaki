@@ -388,6 +388,8 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &Rc<Node>) {
                     alt: alt.map(Into::into),
                     width,
                     height,
+                    align: None,
+                    caption: None,
                     title: title.map(Into::into),
                 });
             }
@@ -447,6 +449,7 @@ fn parse_node(
                 }
 
                 let heading = BlockNode::Heading {
+                    attrs: None,
                     level,
                     children: paragraph,
                     span: None,
@@ -485,6 +488,8 @@ fn parse_node(
                     alt: alt.map(Into::into),
                     width,
                     height,
+                    align: None,
+                    caption: None,
                 });
 
                 if children.len() > 0 {

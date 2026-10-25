@@ -755,6 +755,24 @@ impl Hub {
         });
     }
 
+    /// Type a command at the hidden terminal's prompt and run it, as a
+    /// message is typed: nothing goes in before the prompt is on the
+    /// screen, and Return goes once the prompt shows the command. Claude
+    /// Code keeps what is typed while it starts and makes a Return there
+    /// a line break, so a command typed the moment it had registered sat
+    /// in the prompt over an empty line, not run.
+    pub fn command_in_terminal(self: &Arc<Self>, session_id: &str, command: &str) {
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        let text = command.to_string();
+        thread::spawn(move || {
+            if let Err(e) = hub.type_message(&sid, &text, &[], true) {
+                hub.say(e);
+            }
+            hub.refresh();
+        });
+    }
+
     /// `ask` puts a terminal that is not at its prompt in front of the
     /// person. One message at a time is typed into a terminal: a second
     /// waits for the first to be sent, or the two arrive as one.

@@ -2518,6 +2518,19 @@ fn git_marks_files_and_the_folders_that_hold_them() {
             Row::Changed { left: Some((7, "gone".into())), right: None },
         ]
     );
+    // On a changed line, what stands between the start and the end it has
+    // in common with the line beside it, by byte, one span a side; only in
+    // a run with as many lines taken out as put in.
+    // Two taken out and three put in: none marked.
+    assert!(d.words.is_empty());
+    let d = git::parse_diff("@@ -1,3 +1,3 @@\n keep\n-the old line\n-two\n+the new line\n+dos\n");
+    assert_eq!((d.words.get(&2), d.words.get(&3)), (Some(&[vec![4..7], vec![4..7]]), Some(&[vec![0..3], vec![0..3]])));
+    assert_eq!(git::word_changes("let a = foo(1, 2);", "let a = bar(1, 2);"), Some([vec![8..11], vec![8..11]]));
+    assert_eq!(git::word_changes("keep this, drop that", "keep this."), Some([vec![9..20], vec![9..10]]));
+    assert_eq!(git::word_changes("is open: the end. A new", "is open. A new"), Some([vec![7..16], vec![]]));
+    assert_eq!(git::word_changes("same", "same"), None);
+    let d = git::parse_diff("@@ -1,2 +1,3 @@\n-the old line\n+the new line\n+more\n");
+    assert!(d.words.is_empty());
     assert!(git::parse_diff("diff --git a/p.png b/p.png\nBinary files a/p.png and b/p.png differ\n").binary);
 
     // A rename is followed by the path it came from, which is not an entry.
@@ -3790,15 +3803,15 @@ fn git_publishes_fetches_and_branches_from_another_branch() {
     assert_eq!(git::ahead_behind(&work, "mine"), Some((0, 0)));
     assert_eq!(git::reach(&work), Ok(()));
 
-    // Somebody else pushes to main: a fetch says how far behind it is
-    // here, and it is brought up while another branch is checked out.
+    // Somebody else pushes to main: a fetch from another branch brings
+    // main up with it, as GitHub Desktop's does, and the checkout stays.
     commit(&other, "c.txt", "three\n");
     run(&other, &["push", "-q", "origin", "main"]);
-    assert_eq!(git::ahead_behind(&work, "main"), Some((0, 0)), "nothing is known before a fetch");
+    let theirs = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&other).args(["rev-parse", "main"]).output().unwrap().stdout).unwrap();
     assert_eq!(git::fetch(&work), Ok(()));
-    assert_eq!(git::ahead_behind(&work, "main"), Some((0, 1)));
-    assert_eq!(git::fast_forward(&work, "main"), Ok(()));
     assert_eq!(git::ahead_behind(&work, "main"), Some((0, 0)));
+    assert_eq!(String::from_utf8(std::process::Command::new("git").arg("-C").arg(&work).args(["rev-parse", "main"]).output().unwrap().stdout).unwrap(), theirs);
+    assert_eq!(git::fast_forward(&work, "main"), Ok(()), "nothing left to bring up");
     assert_eq!(git::branches(&work).unwrap().current.as_deref(), Some("mine"), "the checkout did not move");
 
     // A new branch from main, not from the branch checked out: it has
@@ -3831,6 +3844,13 @@ fn git_publishes_fetches_and_branches_from_another_branch() {
     assert_eq!(git::ahead_behind(&work, "main"), Some((1, 1)));
     assert!(git::fast_forward(&work, "main").is_err());
     assert!(work.join("d.txt").exists() && !work.join("e.txt").exists());
+    // Nor does a fetch from another branch move it.
+    run(&work, &["switch", "-q", "mine"]);
+    commit(&other, "f.txt", "theirs again\n");
+    run(&other, &["push", "-q", "origin", "main"]);
+    git::fetch(&work).unwrap();
+    assert_eq!(git::ahead_behind(&work, "main"), Some((1, 2)));
+    run(&work, &["switch", "-q", "main"]);
 
     // A remote that is not there says so, and nothing waits on a prompt.
     run(&work, &["remote", "set-url", "origin", root.join("gone.git").to_str().unwrap()]);
@@ -4423,4 +4443,91 @@ fn the_editors_pairs_follow_the_language() {
     let (json_close, _) = for_lang("json");
     assert!(!json_close.contains(&('(', ')')));
     assert_eq!(for_lang("nothing-known"), for_lang(""));
+}
+
+#[test]
+fn quarto_includes_and_variables_are_pasted_in() {
+    use emaki_core::quarto;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("_quarto.yml"), "project:\n  type: website\nwebsite:\n  title: Pingfan Hu\n").unwrap();
+    fs::write(root.join("_variables.yml"), "sloan: \"[Sloan](https://sloan.org)\"\nemail:\n  info: info@x.org\n").unwrap();
+    fs::create_dir_all(root.join("resources/chunks")).unwrap();
+    fs::create_dir_all(root.join("posts")).unwrap();
+    // An included file: its header is metadata, left out; its own include
+    // is from the root; a cycle stops.
+    fs::write(root.join("resources/chunks/research.qmd"), "---\ntitle: never shown\n---\n\n### Data {.about-title}\n\nFunded by {{< var sloan >}}.\n\n{{< include /resources/chunks/more.qmd >}}\n").unwrap();
+    fs::write(root.join("resources/chunks/more.qmd"), "More, at {{< var email.info >}}.\n{{< include /resources/chunks/research.qmd >}}\n").unwrap();
+    fs::write(root.join("posts/_aside.qmd"), "An aside.").unwrap();
+    let main = root.join("posts/about.qmd");
+    let text = "---\ntitle: \"About\"\nlabels:\n  kind: page\n---\n\nSite {{< meta website.title >}}, page {{< meta title >}} of kind {{< meta labels.kind >}}.\n\n{{< include /resources/chunks/research.qmd >}}\n\n{{< include _aside.qmd >}}\n\nShown: {{{< var sloan >}}}. Unknown: {{< var nope >}} {{< video https://x >}}.\n";
+    let out = quarto::expand(text, &main);
+    assert_eq!(quarto::project_root(&main).as_deref(), Some(root));
+    assert!(out.contains("Site Pingfan Hu, page About of kind page."), "{out}");
+    assert!(out.contains("### Data {.about-title}\n\nFunded by [Sloan](https://sloan.org).\n\nMore, at info@x.org."), "{out}");
+    assert!(!out.contains("never shown"));
+    // The cycle: the inner include of research.qmd stays as written.
+    assert!(out.contains("{{< include /resources/chunks/research.qmd >}}"), "{out}");
+    assert!(out.contains("An aside."));
+    assert!(out.contains("Shown: {{< var sloan >}}."), "{out}");
+    assert!(out.contains("Unknown: {{< var nope >}} {{< video https://x >}}."), "{out}");
+    // Outside a project: no root, no variables, includes beside the file.
+    let away = tempfile::tempdir().unwrap();
+    fs::write(away.path().join("_aside.qmd"), "An aside.").unwrap();
+    let lone = away.path().join("lone.qmd");
+    assert_eq!(quarto::project_root(&lone), None);
+    assert_eq!(quarto::expand("x {{< include _aside.qmd >}} {{< var sloan >}}", &lone), "x An aside. {{< var sloan >}}");
+}
+
+#[test]
+fn quarto_cross_references_and_citations_resolve() {
+    use emaki_core::quarto;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("refs.bib"), "@article{smith2020,\n  author = {Smith, John and Doe, Ann},\n  title = {{A Study}},\n  journal = {Journal of Things},\n  year = {2020},\n  volume = {4}, number = 2,\n  pages = {1--9}\n}\n@book{lee, author = \"Kim Lee and Bo Park and Cy Roe\", title = {Book}, publisher = {Press}, date = {2019-05-01}}\n").unwrap();
+    let main = root.join("doc.qmd");
+    let text = "---\ntitle: Doc\nbibliography: refs.bib\n---\n\n## Intro {#sec-intro}\n\nSee @fig-cat and @tbl-n, [@fig-cat; @fig-dog], and [-@fig-dog]. Also @eq-e, @sec-intro and @fig-none.\n\n![A cat](cat.png){#fig-cat width=\"50%\"}\n\n![A dog](dog.png){#fig-dog}\n\n| a |\n|---|\n| 1 |\n\n: Numbers {#tbl-n}\n\n$$\nE = mc^2\n$$ {#eq-e}\n\nAs @smith2020 found [see @lee, p. 3; -@smith2020], unlike [@nobody]. Mail a@b.com stays. `@fig-cat` in code stays.\n\n```{r}\n#| label: fig-plot\nx <- \"@fig-cat\"\n```\n\nThen @fig-plot.\n";
+    let out = quarto::expand(text, &main);
+    assert!(out.starts_with("---\ntitle: Doc\nbibliography: refs.bib\n---\n"), "{out}");
+    assert!(out.contains("See Figure 1 and Table 1, Figure 1, Figure 2, and 2. Also Equation 1, Section “Intro” and **?@fig-none**."), "{out}");
+    assert!(out.contains("![Figure 1: A cat](cat.png){#fig-cat width=\"50%\"}"), "{out}");
+    assert!(out.contains("![Figure 2: A dog](dog.png){#fig-dog}"), "{out}");
+    assert!(out.contains("*Table 1: Numbers*"), "{out}");
+    assert!(out.contains("E = mc^2\n\\tag{1}\n$$\n"), "{out}");
+    assert!(out.contains("As Smith and Doe (2020) found (see Lee et al. 2019, p. 3; 2020), unlike (**nobody?**)."), "{out}");
+    assert!(out.contains("Mail a@b.com stays. `@fig-cat` in code stays."), "{out}");
+    assert!(out.contains("x <- \"@fig-cat\""), "{out}");
+    assert!(out.contains("Then Figure 3."), "{out}");
+    assert!(out.contains("## References\n\nLee, K., Park, B., & Roe, C. (2019). Book. *Press*.\n\nSmith, J., & Doe, A. (2020). A Study. *Journal of Things*, 4(2), 1–9."), "{out}");
+    // Numbered sections, the document's own words, and no bibliography:
+    // an `@word` is no citation.
+    let text = "---\nnumber-sections: true\ncrossref:\n  fig-title: Fig.\n---\n\n# One\n\n## Two {#sec-two}\n\n![x](x.png){#fig-x}\n\nIn @sec-two, @fig-x; ping @someone.\n";
+    let out = quarto::expand(text, &main);
+    assert!(out.contains("In Section 1.1, Fig. 1; ping @someone."), "{out}");
+    assert!(!out.contains("References"));
+    // The headings carry their numbers, an unnumbered one none and no
+    // count; a theorem opens with its lead; a callout of a numbered kind
+    // is titled by its number, from `title=`, its first heading, or alone.
+    let text = "---\nnumber-sections: true\n---\n\n# One\n\n# Preface {.unnumbered}\n\n## Two {#sec-two}\n\n::: {#thm-main name=\"Main\"}\nEvery $x$ is fine.\n:::\n\n::: {#lem-small}\n\n- a list first\n:::\n\n::: {#tip-a .callout-tip title=\"Use it\"}\nBody.\n:::\n\n::: {#nte-b .callout-note}\n## Heads up\nBody.\n:::\n\n::: {#wrn-c .callout-warning}\nBody.\n:::\n\nSee @thm-main, @lem-small, @tip-a and @wrn-c.\n";
+    let out = quarto::expand(text, &main);
+    assert!(out.contains("# 1 One\n"), "{out}");
+    assert!(out.contains("# Preface {.unnumbered}\n"), "{out}");
+    assert!(out.contains("## 1.1 Two {#sec-two}\n"), "{out}");
+    assert!(out.contains("::: {#thm-main name=\"Main\"}\n**Theorem 1 (Main)** Every $x$ is fine."), "{out}");
+    assert!(out.contains("::: {#lem-small}\n\n**Lemma 1**\n\n- a list first"), "{out}");
+    assert!(out.contains("title=\"Tip 1: Use it\""), "{out}");
+    assert!(out.contains("## Note 1: Heads up\n"), "{out}");
+    assert!(out.contains("::: {#wrn-c .callout-warning title=\"Warning 1\"}\nBody."), "{out}");
+    assert!(out.contains("See Theorem 1, Lemma 1, Tip 1 and Warning 1."), "{out}");
+    // An aside leaves its paragraph for a margin note just before it;
+    // one in code stays.
+    let text = "Words here [a *note* with [a link](u)]{.aside} and more.\n\n```\n[kept]{.aside}\n```\n";
+    let out = quarto::expand(text, &main);
+    assert!(out.starts_with("::: {.column-margin}\na *note* with [a link](u)\n:::\n\nWords here and more.\n"), "{out}");
+    assert!(out.contains("[kept]{.aside}"), "{out}");
+    // A caption with a link or a citation in it is still numbered.
+    let out = quarto::expand("![A [map](m.html) after [@lee]](a.png){#fig-a}\n\nSee @fig-a.\n", &main);
+    assert!(out.contains("![Figure 1: A [map](m.html) after [@lee]](a.png){#fig-a}"), "{out}");
+    // A converted document's headings lose the ids it was given.
+    assert_eq!(quarto::bare_headings("# One {#sec-one}\n\n## Two {#sec-two .unnumbered}\n\n```\n# kept {#x}\n```\nText {#y}\n"), "# One\n\n## Two\n\n```\n# kept {#x}\n```\nText {#y}\n");
 }

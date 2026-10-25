@@ -33,6 +33,7 @@ The first version of this project (then called scribe) reconstructed conversatio
 Emaki is an elegant app, held to the bar of the work that wins Awwwards, the Webbys and the FWA (`docs/design.md`; read it before changing anything a person sees): a considered layout, and motion wherever anything changes. Every change meets this unasked. The person has asked many times.
 
 - **Nothing changes from one frame to the next.** What appears, goes, opens, closes, grows or moves does so over a moment, with what is around it: a card, a line, an arrow, a scroll a click starts. A jump is a bug. Use the pattern its neighbors use. (`docs/window.md`, Motion)
+- **No pause at the end of a motion.** It runs into its place and stops, with no crawl, hesitation or second step in its last frames; every new animation so far had one until it was looked for. The causes and the fix are in `docs/window.md`, Motion.
 - **What is cut says so:** it fades out at that edge and can be reached.
 - **Words are few.** Say what to do once, to someone who can use a computer: no line on how to paste or type a password, and no note that repeats what the control above it already shows.
 - **Look before saying it is done:** at all the change shows, hides or moves, and at the layout in a narrow window.
@@ -78,7 +79,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
-| `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs` | `docs/panels.md` |
+| `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `quarto.rs`, `math.rs`, `latex.rs`, `typst_doc.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs`; the vendored `text/format/quarto.rs` and `text/math.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs`; `i18n.rs`, `locales/words.json`, any word the window shows | `docs/window.md` |
 | Anything a person sees, new or changed: a control, a color, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
@@ -116,6 +117,9 @@ crates/emaki-core/        everything without a window
   src/files.rs               a folder's files for "@" in the composer: the list, the match, the tokens; a table's rows, and where a cell of one is written
   src/parquet_file.rs        a Parquet file read for showing: its columns, its row count, its first rows
   src/office.rs              Word, PowerPoint and Excel files read for showing: a document or a deck as markdown, a workbook as sheets
+  src/quarto.rs              a Quarto document made ready to read without `quarto render`: its includes pasted in, its variables and metadata filled
+  src/math.rs                a formula set by Typst for the file's pane: LaTeX's math by way of MiTeX, Typst's as it is
+  src/latex.rs src/typst_doc.rs  a LaTeX or Typst document written as the Quarto markdown the file's pane reads
   src/fsops.rs               what the files tree does to the disk, as moves to take back and do again; what is removed is held, not thrown away
   src/indent.rs              where a new line starts in the file's editor, by language, and what one step of indent is
   src/pairs.rs               the pairs the file's editor closes as an open is typed and puts around a selection, by language
@@ -157,6 +161,7 @@ scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
 scripts/splash/            the Windows installer's splash and the script that draws it
 scripts/windows-msix.ps1   the Microsoft Store's package, from a Windows build; scripts/windows-store-assets.py draws its tiles
+scripts/linux-snap.sh      the Snap Store's package, from a Linux build; its metadata is in crates/emaki-app/linux/snap/
 scripts/release-notes.sh   one version's section of CHANGELOG.md, the release notes
 scripts/release-check.sh   before a tag: version, lock, changelog, the notary credential, tests, build, Windows type check
 scripts/release-publish.sh after CI: the notarized Mac images onto the draft release, then publish
@@ -171,7 +176,7 @@ CHANGELOG.md               one section per release; the release job reads it
 STAGES.md                  the high-level plan: three stages, a page
 PLAN.md                    the detailed plan: tasks, decisions, what has landed
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
-.github/workflows/release.yml  installers on a v* tag: cargo-packager, Velopack on Windows, the Store's package
+.github/workflows/release.yml  installers on a v* tag: cargo-packager, Velopack on Windows, the Store's package, the snap
 ```
 
 **Each document has one job.** This file is what Emaki is, the rules that hold in every session, and where to read next. `docs/` is how each part works and why. STAGES.md is where the app is going, in three stages; a change of direction goes there. PLAN.md is the detailed plan under it: phases, tasks with checkmarks, decisions and their dates. WORKFLOW.md is how to cut a release, CHANGELOG.md what each release changed for the person installing it, and README.md a short introduction for GitHub that sends the reader to emaki.lol, whose pages say how each part works.
