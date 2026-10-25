@@ -316,13 +316,14 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             // The window's own close button asks as Quit does when a file
             // has changes not saved.
             let asked = workbench.downgrade();
-            window.on_window_should_close(cx, move |_, cx| {
+            window.on_window_should_close(cx, move |window, cx| {
                 asked
                     .update(cx, |w, cx| {
                         let go = w.file_guard(crate::panels::FileThen::CloseWindow, cx);
                         if go {
                             w.keep_composers(cx);
                             w.close_settings(cx);
+                            w.save_ui_closing(window);
                         }
                         go
                     })
