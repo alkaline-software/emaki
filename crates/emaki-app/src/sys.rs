@@ -505,3 +505,106 @@ pub fn set_own_language(code: Option<&str>) {
 }
 #[cfg(not(target_os = "macos"))]
 pub fn set_own_language(_code: Option<&str>) {}
+
+/// Keep the display on, or let it sleep again: held while a session
+/// works and the setting is on (`AppConfig::keep_display_on`), as a
+/// video playing holds it. Asked of the system on the main thread, each
+/// change once. On a Mac an IOKit assertion against idle display sleep;
+/// on Windows the thread's execution state, which lasts while the main
+/// thread does; on Linux `systemd-inhibit` holding off idleness for as
+/// long as its child runs, and nothing where there is no systemd.
+pub fn hold_display(on: bool) {
+    use std::sync::Mutex;
+    static HELD: Mutex<Option<display::Held>> = Mutex::new(None);
+    let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    match (on, held.is_some()) {
+        (true, false) => *held = display::hold(),
+        (false, true) => {
+            if let Some(h) = held.take() {
+                display::release(h);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod display {
+    use std::ffi::{c_char, c_void};
+
+    pub struct Held(u32);
+
+    #[link(name = "IOKit", kind = "framework")]
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn IOPMAssertionCreateWithName(kind: *mut c_void, level: u32, name: *mut c_void, id: *mut u32) -> i32;
+        fn IOPMAssertionRelease(id: u32) -> i32;
+        fn CFStringCreateWithCString(alloc: *const c_void, text: *const c_char, encoding: u32) -> *mut c_void;
+        fn CFRelease(obj: *mut c_void);
+    }
+
+    pub fn hold() -> Option<Held> {
+        const UTF8: u32 = 0x0800_0100;
+        const LEVEL_ON: u32 = 255;
+        unsafe {
+            let kind = CFStringCreateWithCString(std::ptr::null(), c"PreventUserIdleDisplaySleep".as_ptr(), UTF8);
+            let name = CFStringCreateWithCString(std::ptr::null(), c"Emaki: a session is working".as_ptr(), UTF8);
+            let mut id = 0u32;
+            let done = !kind.is_null() && !name.is_null() && IOPMAssertionCreateWithName(kind, LEVEL_ON, name, &mut id) == 0;
+            for s in [kind, name].into_iter().filter(|s| !s.is_null()) {
+                CFRelease(s);
+            }
+            done.then_some(Held(id))
+        }
+    }
+
+    pub fn release(h: Held) {
+        unsafe {
+            IOPMAssertionRelease(h.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+mod display {
+    pub struct Held;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetThreadExecutionState(flags: u32) -> u32;
+    }
+    const CONTINUOUS: u32 = 0x8000_0000;
+    const SYSTEM_REQUIRED: u32 = 0x0000_0001;
+    const DISPLAY_REQUIRED: u32 = 0x0000_0002;
+
+    pub fn hold() -> Option<Held> {
+        (unsafe { SetThreadExecutionState(CONTINUOUS | SYSTEM_REQUIRED | DISPLAY_REQUIRED) } != 0).then_some(Held)
+    }
+
+    pub fn release(_: Held) {
+        unsafe {
+            SetThreadExecutionState(CONTINUOUS);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+mod display {
+    pub struct Held(std::process::Child);
+
+    pub fn hold() -> Option<Held> {
+        emaki_core::process::command("systemd-inhibit")
+            .args(["--what=idle", "--who=Emaki", "--why=A session is working", "--mode=block", "sleep", "infinity"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()
+            .map(Held)
+    }
+
+    pub fn release(mut h: Held) {
+        let _ = h.0.kill();
+        let _ = h.0.wait();
+    }
+}

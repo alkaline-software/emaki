@@ -113,10 +113,11 @@ impl<M: InputModeKind> InputBaseState<M> {
         if !selected.is_empty() {
             self.search_session.query = selected;
         }
-        self.search_session.anchor_offset = self
-            .last_layout
-            .as_ref()
-            .map(|layout| layout.visible_range_offset.start);
+        // Emaki: the find starts from the selection, or the caret, as an
+        // editor's does, so a word selected is the match it is on; from
+        // the view's top it was the first match in view, wherever the
+        // caret was.
+        self.search_session.anchor_offset = Some(self.selected_range().start);
         let options = self.search_session.options();
         self.search_session.matcher.set_query(&self.search_session.query, options);
         self.search_session.matcher.update(&self.text);
@@ -152,6 +153,11 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) {
         self.search_session.update_query(query, case_insensitive);
         self.search_session.matcher.update(&self.text);
+        // Emaki: the match it is on stays the first from where the find
+        // began, as the words change.
+        if let Some(anchor) = self.search_session.anchor_offset {
+            self.search_session.matcher.update_cursor_by_offset(anchor);
+        }
         cx.notify();
     }
 
@@ -162,9 +168,49 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.set_search_query(query, options.case_insensitive, cx);
     }
 
+    /// Emaki: closed with a match current, the match is what is selected,
+    /// so the caret is where the find had come to, as it is in an editor's
+    /// find; it stayed where it was before the find opened.
     pub fn close_search(&mut self, cx: &mut Context<Self>) {
+        let found = self.search_session.open.then(|| {
+            let matcher = &self.search_session.matcher;
+            matcher.matched_ranges().get(matcher.current_match_index()).cloned()
+        });
         self.search_session.close();
+        if let Some(Some(range)) = found {
+            self.set_selected_range(range, cx);
+        }
         cx.notify();
+    }
+
+    /// Emaki: the query's match after the selection, or the one before
+    /// it, selected and scrolled to, as Sublime Text's Find Next and Find
+    /// Previous are, the panel open or not: the matches are found again
+    /// in the text as it is now. None with no query or no match.
+    pub fn find_from_selection(&mut self, forward: bool, cx: &mut Context<Self>) -> Option<Range<usize>> {
+        let query = self.search_session.query.clone();
+        if query.is_empty() {
+            return None;
+        }
+        let options = self.search_session.options();
+        self.search_session.matcher.set_query(&query, options);
+        self.search_session.matcher.update(&self.text);
+        let ranges = self.search_session.matcher.matched_ranges();
+        if ranges.is_empty() {
+            return None;
+        }
+        let sel = self.selected_range();
+        let ix = if forward {
+            ranges.iter().position(|r| r.start >= sel.end && *r != sel).unwrap_or(0)
+        } else {
+            ranges.iter().rposition(|r| r.end <= sel.start && *r != sel).unwrap_or(ranges.len() - 1)
+        };
+        let range = ranges[ix].clone();
+        self.search_session.matcher.set_current_match_index(ix);
+        self.set_selected_range(range.clone(), cx);
+        self.scroll_to(if forward { range.end } else { range.start }, None, cx);
+        cx.notify();
+        Some(range)
     }
 
     pub fn next_search_match(&mut self, cx: &mut Context<Self>) -> Option<Range<usize>> {

@@ -329,6 +329,16 @@ upstream revision finds them.
 
 57. `crates/ui/src/text/find.rs` (`KeptViews`, `TextFind::case_sensitive`), `text_view.rs` (`TextView::kept`), `selection_adapter.rs` (`keep`), `crates/base/src/text_selection.rs` (`TextSelectionHandle::keep_registered`): text views inside a view the caller draws from gpui's cache (`AnyView::cached`) stay in the window's selection. A view registers as it paints and one that did not register in a frame was taken for gone, its selection cleared and its state notified, which threw the cache away every other frame and left nothing to start a selection on. The caller holds a `KeptViews`, hands it to each view, and calls `keep` in a frame the cache is drawn from.
 
+58. `crates/ui/src/text/text_view.rs` (`TextView::text`): the text of a view made from a state the caller keeps (`TextView::new`), set as it is laid out and after its markdown extensions, so the state is parsed once with them.
+
+59. `crates/base/src/input/editor/search.rs` (`InputBaseState::close_search`): the find closed with a match current selects that match, so the caret is where the find came to, as VS Code and Sublime Text leave it. Upstream leaves the caret where it was before the find opened.
+
+60. `crates/base/src/input/editor/search.rs` (`InputBaseState::find_from_selection`), `crates/base/src/input/base/state.rs` (`fold_at_caret`, `unfold_all`, `extend_selection_to`), `crates/ui/src/input/search.rs` (`FindNext`, `FindPrevious`, ⌘G and ⇧⌘G, F3 and ⇧F3 off a Mac, in `SearchPanel`): what Sublime Text's keys need of the editor (Emaki's `sublime.rs`): the query's next or previous match from the selection, the panel open or not, the matches found again in the text as it is; the section around the caret folded or opened as a click on its mark does; every fold opened; the selection's moving end moved with the other kept.
+
+61. `crates/base/src/input/editor/search.rs` (`open_search`, `set_search_query`): the find begins at the selection, or the caret, and the match it is on is the first from there as the query changes, as VS Code's and Sublime Text's are. Upstream began at the top of the view, and a query typed went back to the first match, so a word selected lower down was not the match the find was on.
+
+62. `crates/base/src/input/base/state.rs` (`cursor_wrap_row`, `start_of_line`, `end_of_line`), `movement.rs` (`update_preferred_column`, `end`, `vertical_offset`): ⌘→ on a row that wraps stops after its last word, the spaces it broke at left; and a caret at a soft wrap put there as a row's end is on that row, as it is drawn, for ⌘←, ⌘→, and the column and row ↑ and ↓ start from. Upstream went past the spaces to the next row's start, where the caret was drawn a space past the word, ⌘← went to the start of the whole line and ↓ two rows down.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

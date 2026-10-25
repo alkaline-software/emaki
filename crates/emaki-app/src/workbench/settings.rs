@@ -562,10 +562,12 @@ impl Workbench {
             }))
             .into_any_element();
         let accent_name = t(crate::look::accent(&app.accent).name);
+        let display_on = self.switch("keep-display-on", app.keep_display_on, Rc::new(|this, on, _, cx| this.set_keep_display_on(on, cx)), cx);
 
         vec![
             group(Some(t("You")), None, vec![line(t("Avatar"), None, avatar, &theme), line(t("Name"), None, self.your_name_field(cx), &theme)], &theme),
             group(Some(t("Window")), None, vec![line(t("Theme"), None, appearance, &theme), line(t("Accent"), Some(div().child(accent_name).into_any_element()), accents, &theme)], &theme),
+            group(Some(t("Power")), None, vec![line(t("Keep the display on while a session works"), None, display_on, &theme)], &theme),
         ]
     }
 
@@ -907,7 +909,8 @@ impl Workbench {
         ]
     }
 
-    /// Files: one switch, and the languages it formats, in two columns
+    /// Files: how a file that shows two ways opens; one switch, and the
+    /// languages it formats, in two columns
     /// on one card, there whether it is on or not and dimmed while off.
     fn files_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
@@ -961,7 +964,10 @@ impl Workbench {
             .child(column(t("Code"), true, cx))
             .child(column(t("Documents and data"), false, cx))
             .into_any_element();
+        let raw = self.cfg.app.file_view == "raw";
+        let view = div().w(CONTROL_W).child(self.segmented("file-view", vec![("rendered", t("Rendered").into(), None), ("raw", t("Raw").into(), None)], if raw { "raw" } else { "rendered" }, Rc::new(|this, key, _, cx| this.set_file_view(key == "raw", cx)), cx)).into_any_element();
         vec![
+            group(None, None, vec![line(t("Open files as"), Some(div().child(t("For supported files.")).into_any_element()), view, &theme)], &theme),
             group(None, None, vec![line(t("Format on save"), Some(div().child(t("A file saved from its pane is put in its language's form.")).into_any_element()), format_on_save, &theme)], &theme),
             group(Some(t("Languages")), None, vec![lists], &theme),
         ]

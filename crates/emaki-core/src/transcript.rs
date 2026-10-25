@@ -43,6 +43,32 @@ fn unshown(raw: &[u8]) -> bool {
 }
 
 /// Parse an entire transcript. Bad lines are skipped, not fatal.
+/// A row as it is kept once read: a picture's bytes dropped, the `data`
+/// of an image block's `source` at any depth and a file read's `base64`.
+/// They are most of a long session's bytes (one of 249 MB held 58 MB of
+/// anything else); the model names a picture and does not hold it
+/// (`build::attachments_of`), and a picture is read from the file when it
+/// is drawn (`image_block_bytes`).
+pub fn without_pictures(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("image") {
+                if let Some(Value::String(data)) = map.get_mut("source").and_then(|s| s.get_mut("data")) {
+                    data.clear();
+                }
+            }
+            if let Some(Value::String(bytes)) = map.get_mut("base64") {
+                bytes.clear();
+            }
+            for (_, child) in map.iter_mut() {
+                without_pictures(child);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(without_pictures),
+        _ => {}
+    }
+}
+
 pub fn read_all(path: &Path) -> Vec<Value> {
     let Ok(file) = fs::File::open(path) else {
         return Vec::new();
@@ -55,7 +81,8 @@ pub fn read_all(path: &Path) -> Vec<Value> {
         match reader.read_until(b'\n', &mut buf) {
             Ok(0) | Err(_) => break,
             Ok(_) => {
-                if let Some(row) = parse_row(&buf) {
+                if let Some(mut row) = parse_row(&buf) {
+                    without_pictures(&mut row);
                     rows.push(row);
                 }
             }
@@ -417,6 +444,23 @@ fn peek_into(r: &mut SessionRef, st: &fs::Metadata) {
         }
         if r.slug.is_empty() && !str_of(row, "slug").is_empty() {
             r.slug = str_of(row, "slug").to_string();
+        }
+    }
+    // A folder named at neither end: the rows between, from the start.
+    // Its first rows can all be the agent's own records, and its last a
+    // title; with no folder the archive kept the session apart from its
+    // project, and kept a second copy once the folder showed.
+    if r.cwd.is_empty() && !whole && fh.seek(SeekFrom::Start(0)).is_ok() {
+        let mut reader = BufReader::new((&mut fh).take(WIDE_TAIL_BYTES));
+        let mut buf = Vec::new();
+        while reader.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+            if buf.windows(6).any(|w| w == b"\"cwd\":") {
+                if let Some(cwd) = parse_row(&buf).map(|row| str_of(&row, "cwd").to_string()).filter(|c| !c.is_empty()) {
+                    r.cwd = cwd;
+                    break;
+                }
+            }
+            buf.clear();
         }
     }
     if let Some(min) = head.iter().map(|x| str_of(x, "timestamp")).filter(|s| !s.is_empty()).min() {

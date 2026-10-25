@@ -419,7 +419,62 @@ fn search_indexes_and_groups_hits() {
     assert!(res.sessions[0].matches[0].snippet.contains('\x02'));
     let again = idx.sync(&refs, false);
     assert_eq!(again.skipped, 1);
+    // Written again as an agent writes: left for later while the file is
+    // still being written and was indexed a moment ago, taken once it has
+    // been still.
+    let more = vec![user("and the fragment test", "2026-01-01T10:01:00Z")];
+    let mut f = fs::OpenOptions::new().append(true).open(&src).unwrap();
+    use std::io::Write as _;
+    f.write_all((serde_json::to_string(&more[0]).unwrap() + "\n").as_bytes()).unwrap();
+    drop(f);
+    let refs = emaki_core::adapters::index_all(0, &[]);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let busy = idx.sync_paced(&refs, now);
+    assert_eq!((busy.indexed, busy.deferred), (0, 1));
+    assert_eq!(idx.search("fragment", 100, 4).sessions[0].hits, 2);
+    let quiet = idx.sync_paced(&refs, now + emaki_core::search::QUIET_AFTER + 1.);
+    assert_eq!((quiet.indexed, quiet.deferred), (1, 0));
+    assert_eq!(idx.search("fragment", 100, 4).sessions[0].hits, 3);
     assert_eq!(fts_query("rm -rf a:b \"exact phrase\" rev*"), "\"rm\" \"rf\" \"a b\" \"exact phrase\" \"rev\"*");
+}
+
+#[test]
+fn a_growing_session_builds_as_a_whole_read_does() {
+    let (_home, _g) = isolated();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s1.jsonl");
+    let write = |rows: &[Value], append: bool| {
+        use std::io::Write as _;
+        let text: String = rows.iter().map(|r| serde_json::to_string(r).unwrap() + "\n").collect();
+        let mut f = fs::OpenOptions::new().create(true).write(true).append(append).truncate(!append).open(&path).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+    };
+    let whole = |path: &std::path::Path| serde_json::to_value(emaki_core::build::build_from_path(path, "/tmp/proj")).unwrap();
+    let mut live = emaki_core::build::LiveRows::new(&path);
+    write(&[user("look at this", "2026-01-01T10:00:00Z")], false);
+    assert_eq!(serde_json::to_value(live.build("/tmp/proj")).unwrap(), whole(&path));
+    // Grown as an agent writes: a reply, a tool call and its result, and a
+    // prompt with a picture, whose bytes neither build keeps.
+    write(
+        &[
+            assistant(vec![json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}})], "tool_use", "2026-01-01T10:00:02Z"),
+            tool_result("t1", "a.txt", "2026-01-01T10:00:03Z"),
+            assistant(vec![json!({"type": "text", "text": "One file."})], "end_turn", "2026-01-01T10:00:04Z"),
+            json!({"type": "user", "uuid": "u-pic", "timestamp": "2026-01-01T10:01:00Z", "sessionId": "s1", "cwd": "/tmp/proj",
+                "message": {"role": "user", "content": [{"type": "text", "text": "[Image #1] and this"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}]}}),
+        ],
+        true,
+    );
+    let grown = live.build("/tmp/proj");
+    assert_eq!(serde_json::to_value(&grown).unwrap(), whole(&path));
+    assert_eq!(grown.rounds.len(), 2);
+    // Put in its place shorter (`--resume` writes a new file): read from
+    // its start.
+    std::fs::remove_file(&path).unwrap();
+    write(&[user("fresh start", "2026-01-02T09:00:00Z")], false);
+    let again = live.build("/tmp/proj");
+    assert_eq!(serde_json::to_value(&again).unwrap(), whole(&path));
+    assert_eq!(again.rounds.len(), 1);
 }
 
 #[test]
@@ -4427,6 +4482,65 @@ fn a_deleted_session_waits_in_the_trash_and_comes_back_whole() {
     assert!(find("bin-1").is_none(), "gone for good");
     assert!(emaki_core::archive::everything_of(&archived).is_empty());
     assert!(trash::load().is_empty());
+}
+
+/// A session copied before its first rows named a folder had a second
+/// copy under its agent's folder name, which the index took for it: a
+/// session deleted from the Trash came back from the other, archived.
+/// One copy a session is left, the fullest; a copy with a row the
+/// fullest lacks is kept beside it; and deleting removes every copy.
+#[test]
+fn a_session_has_one_copy_and_leaves_the_trash_whole() {
+    use emaki_core::trash;
+    let _guard = isolated();
+    let claude = emaki_core::archive::archive_dir().join("claude");
+    let stub = |id: &str| format!("{}\n", json!({"type": "permission-mode", "permissionMode": "auto", "sessionId": id}));
+    let said = |id: &str, n: usize| -> String {
+        (0..n).map(|i| format!("{}\n", json!({"type": "user", "uuid": format!("u{i}"), "sessionId": id, "cwd": "/tmp/web.site", "timestamp": format!("2026-01-01T10:00:0{i}Z"), "message": {"role": "user", "content": format!("message {i}")}}))).collect()
+    };
+    // A stub left in the agent's folder name, and the session in its own.
+    std::fs::create_dir_all(claude.join("-tmp-web-site")).unwrap();
+    std::fs::create_dir_all(claude.join("web.site")).unwrap();
+    std::fs::write(emaki_core::archive::archive_dir().join(".layout"), "2\n").unwrap();
+    std::fs::write(claude.join("-tmp-web-site/one.jsonl"), stub("one")).unwrap();
+    std::fs::write(claude.join("web.site/one.jsonl"), format!("{}{}", stub("one"), said("one", 3))).unwrap();
+    // One whose other copy holds a row the fuller one lacks.
+    std::fs::write(claude.join("-tmp-web-site/two.jsonl"), format!("{}{}\n", said("two", 1), json!({"type": "user", "uuid": "lost", "sessionId": "two", "cwd": "/tmp/web.site", "message": {"role": "user", "content": "only here"}}))).unwrap();
+    std::fs::write(claude.join("web.site/two.jsonl"), said("two", 4)).unwrap();
+
+    let all = || emaki_core::adapters::index_all(0, &[]);
+    let one = all().into_iter().find(|r| r.session_id == "one").unwrap();
+    assert_eq!(one.path, claude.join("web.site/one.jsonl"), "the fullest copy stands for it");
+    assert!(!claude.join("-tmp-web-site/one.jsonl").exists(), "a copy holding nothing more goes");
+    assert!(claude.join("web.site/two.gen1.jsonl").exists(), "one holding more is kept beside it");
+    assert_eq!(all().into_iter().find(|r| r.session_id == "two").unwrap().path, claude.join("web.site/two.jsonl"));
+
+    for id in ["one", "two"] {
+        let r = all().into_iter().find(|r| r.session_id == id).unwrap();
+        trash::put(&r).unwrap();
+        let r = all().into_iter().find(|r| r.session_id == id).unwrap();
+        trash::purge(&r).unwrap();
+        assert!(all().iter().all(|r| r.session_id != id), "{id} is gone for good, every copy of it");
+    }
+    assert!(trash::load().is_empty());
+
+    // A live session's first rows name no folder: nothing is copied until
+    // something is said, and then once, where its folder says.
+    let dir = emaki_core::paths::projects_dir().join("-tmp-web-site");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("three.jsonl");
+    std::fs::write(&path, stub("three")).unwrap();
+    emaki_core::archive::sweep(&all());
+    assert!(!claude.join("-tmp-web-site/three.jsonl").exists());
+    // Its own records at both ends, the folder only between.
+    let note = |i: usize| format!("{}\n", json!({"type": "file-history-snapshot", "messageId": format!("m{i}"), "snapshot": {"pad": "x".repeat(4000)}}));
+    let text = format!("{}{}{}{}", stub("three"), (0..50).map(note).collect::<String>(), said("three", 2), (50..150).map(note).collect::<String>());
+    std::fs::write(&path, text).unwrap();
+    let r = all().into_iter().find(|r| r.session_id == "three").unwrap();
+    assert_eq!(r.cwd, "/tmp/web.site", "the folder is read from between the ends");
+    emaki_core::archive::sweep(&all());
+    let slug = emaki_core::paths::project_slug("/tmp/web.site");
+    assert!(claude.join(slug).join("three.jsonl").exists() && !claude.join("-tmp-web-site").join("three.jsonl").exists());
 }
 
 /// The editor's pairs follow the language, as VS Code's configurations

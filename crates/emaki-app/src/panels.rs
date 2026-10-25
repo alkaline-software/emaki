@@ -507,8 +507,14 @@ pub(crate) const FILE_ANIM: Duration = Duration::from_millis(200);
 /// A kept view is laid out at the height it is given rather than
 /// measured, so it is given the height it last had, and a change of that
 /// is taken up the frame after. It is drawn afresh whenever what it is
-/// drawn from changes, and while the pane or the file fades in, since
-/// what is kept keeps the opacity it was painted at.
+/// drawn from changes, and while it fades in, which it does itself: what
+/// is kept keeps the opacity it was painted at, and a fade above it,
+/// which a tab change starts again (the pane is then at another place in
+/// the window's tree), left a kept file blank.
+///
+/// It keeps its text views' states too, one for each appearance, which a
+/// view keeps by its place otherwise: a change of tab parsed the whole
+/// file again on the window's thread.
 pub(crate) struct FileDoc {
     pub(crate) path: PathBuf,
     text: String,
@@ -516,15 +522,23 @@ pub(crate) struct FileDoc {
     find: gpui_component::text::TextFind,
     spots: gpui_component::text::HeadingSpots,
     pub(crate) kept: gpui_component::text::KeptViews,
+    /// The text's view and the YAML header's, light then dark.
+    states: [Option<(Entity<gpui_component::text::TextViewState>, Entity<gpui_component::text::TextViewState>)>; 2],
     height: Rc<std::cell::Cell<Pixels>>,
     /// The serial of the fade the file came in with, and when it began.
     fade: (u64, std::time::Instant),
 }
 
+impl FileDoc {
+    /// Still fading in, and so drawn afresh each frame.
+    fn fading(&self) -> bool {
+        self.fade.1.elapsed() < FILE_ANIM
+    }
+}
+
 /// What a file's text is drawn with, besides the text.
 #[derive(Clone, PartialEq)]
 struct DocShown {
-    rel: String,
     quarto: Option<emaki_core::math::Dialect>,
     /// The words found, their case, and the current match, while the
     /// find bar is open.
@@ -535,10 +549,12 @@ struct DocShown {
 }
 
 impl Render for FileDoc {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let Some(shown) = self.shown.clone() else { return div().into_any_element() };
         let (pad_x, pad_y) = shown.pad;
+        let appearance = usize::from(theme.mode.is_dark());
+        let (text_state, fields_state) = self.states[appearance].get_or_insert_with(|| (cx.new(|cx| gpui_component::text::TextViewState::markdown("", cx)), cx.new(|cx| gpui_component::text::TextViewState::markdown("", cx)))).clone();
         // A YAML header is the file's fields, not its first words
         // (markdown reads it as a rule and a heading): a band across the
         // pane's top, the page divided into the header and the text under
@@ -557,17 +573,23 @@ impl Render for FileDoc {
                     .border_b_1()
                     .border_color(theme.border)
                     .text_size(px(shown.size))
-                    .child(crate::transcript::md_view_fields(format!("fields-{}", shown.rel), emaki_core::files::front_matter_table(&fields), self.kept.clone(), cx));
+                    .child(crate::transcript::md_view_fields(fields_state, emaki_core::files::front_matter_table(&fields), self.kept.clone(), cx));
                 (Some(band), rest.to_string())
             }
             None => (None, self.text.clone()),
         };
         let find = shown.find.is_some().then(|| self.find.clone());
-        let view = crate::transcript::md_view_file(format!("file-{}", shown.rel), rest, shown.quarto, find, Some(self.spots.clone()), self.kept.clone(), cx);
+        let view = crate::transcript::md_view_file(text_state, rest, shown.quarto, find, Some(self.spots.clone()), self.kept.clone(), cx);
         let height = self.height.clone();
+        // It comes in as the pane's other contents do, over `FILE_ANIM`.
+        let t = (self.fade.1.elapsed().as_secs_f32() / FILE_ANIM.as_secs_f32()).min(1.);
+        if t < 1. {
+            window.request_animation_frame();
+        }
         v_flex()
             .w_full()
             .relative()
+            .opacity(t)
             .children(band)
             .child(div().text_size(px(shown.size)).line_height(relative(1.6)).child(view))
             .child(
@@ -4444,6 +4466,26 @@ impl Workbench {
         (top, side)
     }
 
+    /// The file showing as it reads or as it is written, whichever it is
+    /// not now: ⇧⌘V (`ToggleRaw`), wherever the keyboard is. False when
+    /// no file that shows both ways is showing.
+    pub(crate) fn toggle_file_raw(&mut self, cx: &mut Context<Self>) -> bool {
+        let two = self.file_pane_shown() && self.file_view.as_ref().is_some_and(shows_two_ways);
+        if two {
+            self.set_file_raw(!self.file_raw, cx);
+        }
+        two
+    }
+
+    /// How files that show two ways open, from Settings: saved, and the
+    /// file showing turned to it.
+    pub(crate) fn set_file_view(&mut self, raw: bool, cx: &mut Context<Self>) {
+        self.cfg.app.file_view = if raw { "raw" } else { "rendered" }.into();
+        self.save_app_config();
+        self.set_file_raw(raw, cx);
+        cx.notify();
+    }
+
     /// Markdown as it reads, or as it is written.
     fn set_file_raw(&mut self, raw: bool, cx: &mut Context<Self>) {
         if self.file_raw != raw {
@@ -4479,7 +4521,8 @@ impl Workbench {
         // Paste is offered only with a file on the clipboard to paste.
         let paste = !self.clipboard_files(cx).is_empty();
         // In groups, a line between them: what opens it, what it gives
-        // the message or the clipboard, and what changes it on disk.
+        // the message or the clipboard, what moves it on the clipboard,
+        // and what changes it on disk, Move to Trash last.
         let mut items = match node {
             Some(n) if n.dir => vec![
                 item(t(crate::sys::OPEN_FOLDER_LABEL), FileDo::Open, &n.path),
@@ -4494,17 +4537,16 @@ impl Workbench {
                 item(t("Cut"), FileDo::Cut, &n.path),
                 item(t("Copy"), FileDo::Copy, &n.path),
                 item(t("Duplicate"), FileDo::Duplicate, &n.path),
+                rule(),
                 item(t("Rename"), FileDo::Rename, &n.path),
                 item(t(crate::sys::TRASH_LABEL), FileDo::Trash, &n.path),
             ],
             Some(n) => {
-                let mut items = Vec::new();
+                let mut items = vec![item(t("Open"), FileDo::Open, &n.path), item(t(crate::sys::REVEAL_LABEL), FileDo::Reveal, &n.path)];
                 if self.tree.changed.iter().any(|(p, _)| *p == n.path) {
                     items.push(item(t("Show Changes"), FileDo::Changes, &n.path));
                 }
                 items.extend([
-                    item(t("Open"), FileDo::Open, &n.path),
-                    item(t(crate::sys::REVEAL_LABEL), FileDo::Reveal, &n.path),
                     rule(),
                     item(t("Add to Message"), FileDo::Mention, &n.path),
                     item(t("Copy Path"), FileDo::CopyPath, &n.path),
@@ -4513,6 +4555,7 @@ impl Workbench {
                     item(t("Cut"), FileDo::Cut, &n.path),
                     item(t("Copy"), FileDo::Copy, &n.path),
                     item(t("Duplicate"), FileDo::Duplicate, &n.path),
+                    rule(),
                     item(t("Rename"), FileDo::Rename, &n.path),
                     item(t(crate::sys::TRASH_LABEL), FileDo::Trash, &n.path),
                 ]);
@@ -4524,14 +4567,15 @@ impl Workbench {
                 item(t("New File"), FileDo::NewFile, &root),
                 item(t("New Folder"), FileDo::NewFolder, &root),
                 rule(),
-                item(t("Collapse All Folders"), FileDo::Collapse, &root),
-                rule(),
                 item(t("Copy Path"), FileDo::CopyPath, &root),
+                rule(),
+                item(t("Collapse All Folders"), FileDo::Collapse, &root),
             ],
         };
+        // After Copy, or on the folder's own menu after New Folder.
         if paste {
             let target = node.map(|n| n.path.clone()).unwrap_or(root);
-            let after = items.iter().position(|(label, _)| *label == t("Copy")).map(|at| at + 1).unwrap_or(items.len());
+            let after = items.iter().position(|(label, _)| *label == t("Copy") || (node.is_none() && *label == t("New Folder"))).map(|at| at + 1).unwrap_or(items.len());
             items.insert(after, item(t("Paste"), FileDo::Paste, &target));
         }
         self.open_menu(at, items, cx);
@@ -4580,7 +4624,7 @@ impl Workbench {
     fn files_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let paths = self.tree.marked.clone();
         let item = |label: &'static str, what: FileDo| (label, MenuDo::Files(what, paths.clone()));
-        let items = vec![item(t("Add to Message"), FileDo::Mention), item(t("Copy Paths"), FileDo::CopyPath), item(t("Copy Relative Paths"), FileDo::CopyRel), ("", MenuDo::Rule), item(t("Cut"), FileDo::Cut), item(t("Duplicate"), FileDo::Duplicate), item(t(crate::sys::TRASH_LABEL), FileDo::Trash)];
+        let items = vec![item(t("Add to Message"), FileDo::Mention), item(t("Copy Paths"), FileDo::CopyPath), item(t("Copy Relative Paths"), FileDo::CopyRel), ("", MenuDo::Rule), item(t("Cut"), FileDo::Cut), item(t("Duplicate"), FileDo::Duplicate), ("", MenuDo::Rule), item(t(crate::sys::TRASH_LABEL), FileDo::Trash)];
         self.open_menu(at, items, cx);
     }
 
@@ -7278,7 +7322,7 @@ impl Workbench {
                                         this.branch_publish(to.clone(), cx);
                                     }))
                                     .child(if busy {
-                                        Icon::new(IconName::LoaderCircle).with_size(px(11.)).text_color(theme.primary).with_animation(("branch-publishing", ix), Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))).into_any_element()
+                                        Icon::new(IconName::LoaderCircle).with_size(px(11.)).text_color(theme.primary).rotate(gpui::Radians(crate::ambient::phase(Duration::from_millis(900)) * std::f32::consts::TAU)).into_any_element()
                                     } else {
                                         Icon::new(IconName::ArrowUp).with_size(px(11.)).text_color(theme.primary).into_any_element()
                                     }),
@@ -8136,7 +8180,6 @@ impl Workbench {
             FileBody::Code(..) => div().into_any_element(),
             FileBody::Markdown(text) => {
                 let shown = DocShown {
-                    rel: v.rel.clone(),
                     quarto: reads_as_quarto(&v.path),
                     find: self.text_find_open.then(|| (self.text_find.query(), self.text_find.case_sensitive(), self.text_find.current())),
                     size: self.cfg.app.text_sizes().preview,
@@ -8145,7 +8188,7 @@ impl Workbench {
                 };
                 let kept = self.file_doc.borrow().clone().filter(|d| d.read(cx).path == v.path);
                 let doc = kept.unwrap_or_else(|| {
-                    let doc = cx.new(|_| FileDoc { path: v.path.clone(), text: String::new(), shown: None, find: self.text_find.clone(), spots: self.file_heads_spots.clone(), kept: Default::default(), height: Rc::new(std::cell::Cell::new(px(0.))), fade: (u64::MAX, std::time::Instant::now()) });
+                    let doc = cx.new(|_| FileDoc { path: v.path.clone(), text: String::new(), shown: None, find: self.text_find.clone(), spots: self.file_heads_spots.clone(), kept: Default::default(), states: [None, None], height: Rc::new(std::cell::Cell::new(px(0.))), fade: (u64::MAX, std::time::Instant::now()) });
                     *self.file_doc.borrow_mut() = Some(doc.clone());
                     doc
                 });
@@ -8162,11 +8205,10 @@ impl Workbench {
                     if d.fade.0 != serial {
                         d.fade = (serial, std::time::Instant::now());
                     }
-                    (changed, d.height.get(), d.fade.1.elapsed() < FILE_ANIM + Duration::from_millis(20))
+                    (changed, d.height.get(), d.fading())
                 });
                 let opening = self.file_anim.is_some_and(|(_, at, _)| at.elapsed() < FILE_ANIM);
-                let settled = !changed && !fading && !leaving && !opening;
-                if settled {
+                if !changed && !fading && !leaving && !opening {
                     // Nothing in a view drawn from the cache paints, so
                     // its text is kept in the window's selection here.
                     let kept = doc.read(cx).kept.clone();
@@ -8358,7 +8400,7 @@ impl Workbench {
         // What shows two ways, as it reads and as it is written: markdown
         // and HTML, and a table or an SVG the pane holds whole.
         let table = matches!(v.body, FileBody::Table(..)) && v.source.is_some();
-        let two_ways = markdown || table || matches!(v.body, FileBody::Html(_) | FileBody::Notebook(_)) || (matches!(v.body, FileBody::Picture(..)) && v.source.is_some());
+        let two_ways = shows_two_ways(v);
         let code = matches!(v.body, FileBody::Code(..)) || (two_ways && self.file_raw);
         let dirty = !leaving && self.file_dirty(cx);
         let editor = self.file_editor.as_ref().filter(|_| code && !leaving).map(|ed| {
@@ -8379,27 +8421,38 @@ impl Workbench {
                             // else, as in the composer.
                             let mut items: Vec<(&'static str, MenuDo)> = this.file_corrections(at, cx);
                             if items.is_empty() {
+                                use crate::workbench::EditDo;
                                 if selection {
-                                    items.push((t("Copy"), MenuDo::Edit(crate::workbench::EditDo::Copy, focus.clone())));
+                                    items.push((t("Cut"), MenuDo::Edit(EditDo::Cut, focus.clone())));
+                                    items.push((t("Copy"), MenuDo::Edit(EditDo::Copy, focus.clone())));
                                 }
-                                items.push((t("Select All"), MenuDo::Edit(crate::workbench::EditDo::SelectAll, focus)));
+                                if cx.read_from_clipboard().is_some() {
+                                    items.push((t("Paste"), MenuDo::Edit(EditDo::Paste, focus.clone())));
+                                }
+                                if !items.is_empty() {
+                                    items.push(("", MenuDo::Rule));
+                                }
+                                items.push((t("Select All"), MenuDo::Edit(EditDo::SelectAll, focus)));
                             }
-                            // The text's own two and no more: what is
-                            // asked of the file is on its row's menu.
+                            // The text's own, as the composer's are, and no
+                            // more: what is asked of the file is on its
+                            // row's menu.
                             this.open_menu(at, items, cx);
                         });
                     });
                 }
             };
-            gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(self.cfg.app.text_sizes().editor)).on_secondary_click(menu).into_any_element()
+            let editor = gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(self.cfg.app.text_sizes().editor)).on_secondary_click(menu).into_any_element();
+            self.sublime_wrap(editor, cx)
         });
         let word = self.word.as_ref().filter(|w| matches!(v.body, FileBody::Word) && !leaving && w.read(cx).path == v.path).map(|w| w.clone().into_any_element());
         let cut = match &v.body {
             FileBody::Code(_, _, dropped) if *dropped > 0 => Some(div().flex_shrink_0().px(px(pad_x)).py(px(8.)).border_t_1().border_color(theme.border).child(quiet(tf("Only the first {n} lines are shown. Open the file for the rest.", &[("n", &PREVIEW_LINES)])))),
             _ => None,
         };
-        // What the file is drawn again as, so a new one fades in.
-        let body = div().child(body).with_animation(ElementId::Name(format!("file-body-{}", self.file_serial).into()), Animation::new(FILE_ANIM), |d, t| d.opacity(t));
+        // What the file is drawn again as, so a new one fades in. Markdown
+        // as it reads fades by itself (`FileDoc`).
+        let body = if markdown && !self.file_raw { div().child(body).into_any_element() } else { div().child(body).with_animation(ElementId::Name(format!("file-body-{}", self.file_serial).into()), Animation::new(FILE_ANIM), |d, t| d.opacity(t)).into_any_element() };
         let tool = |id: &'static str, icon: Icon, tip: &'static str| Button::new(id).ghost().small().icon(icon).tooltip(tip);
         // Two segments in the head, as the files and the outline have
         // in the strip, smaller: for markdown how it shows, for a PDF
@@ -8443,7 +8496,7 @@ impl Workbench {
         let modes = if leaving {
             None
         } else if two_ways {
-            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, if table { t("Table") } else { t("Rendered") }), ("icons/file-code.svg", t("Raw")), |this, first, cx| this.set_file_raw(!first, cx), cx))
+            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, if table { t("Table (⌘⇧V)") } else { t("Rendered (⌘⇧V)") }), ("icons/file-code.svg", t("Raw (⌘⇧V)")), |this, first, cx| this.set_file_raw(!first, cx), cx))
         } else if pdf {
             let (was, serial) = self.pdf_side_anim.map(|(was, _, n)| (was, n)).unwrap_or((self.pdf_side, 0));
             Some(pair("pdf-side", self.pdf_side, was, serial, ("icons/gallery-vertical-end.svg", t("Pages")), ("icons/list-bullets.svg", t("Contents")), |this, first, cx| this.pdf_side_toggle(first, cx), cx))
@@ -8998,7 +9051,7 @@ impl Workbench {
                     .gap(px(7.))
                     .child(bar(0.92))
                     .child(bar(0.58))
-                    .with_animation(("outline-wait", e.round), Animation::new(Duration::from_millis(1100)).repeat().with_easing(pulsating_between(0.35, 1.0)), |d, t| d.opacity(t))
+                    .opacity(crate::ambient::pulse(0.35, 1.0, crate::ambient::phase(Duration::from_millis(1100))))
                     .into_any_element()
             } else {
                 let text = div()
@@ -9161,7 +9214,7 @@ impl Workbench {
                 .gap(px(6.))
                 .items_center()
                 .text_color(theme.muted_foreground)
-                .child(crate::workbench::agent_glyph(emaki_core::model::AgentId::ClaudeCode, px(11.), crate::workbench::agent_color(emaki_core::model::AgentId::ClaudeCode, &theme), true, "outline-summing"))
+                .child(crate::workbench::agent_glyph(emaki_core::model::AgentId::ClaudeCode, px(11.), crate::workbench::agent_color(emaki_core::model::AgentId::ClaudeCode, &theme), true))
                 .child(div().min_w_0().truncate().child(t("Summarizing…")))
                 .into_any_element()
         } else {
@@ -9505,6 +9558,19 @@ impl Workbench {
                     self.pending_edit = Some((ed.state.clone(), words, at));
                 }
             }
+            // The editor's text and what is selected in it, printed; and
+            // the caret put at a byte of it.
+            "file:dump" => {
+                if let Some(ed) = self.file_editor.as_ref() {
+                    let s = ed.state.read(cx);
+                    eprintln!("emaki: editor {:?} sel {:?}", s.value().to_string(), s.selected_range());
+                }
+            }
+            t if t.starts_with("file:caret:") => {
+                if let (Some(ed), Ok(at)) = (self.file_editor.as_ref(), t["file:caret:".len()..].parse::<usize>()) {
+                    ed.state.update(cx, |s, cx| s.set_selected_range(at..at, cx));
+                }
+            }
             "file:save" => self.pending_save = true,
             // In a table: choose a cell, write in the chosen one, take
             // the last step back.
@@ -9650,4 +9716,11 @@ mod draft_tests {
         assert!(out.contains("![code](docs/shot.png)"), "a block of code keeps its words: {out}");
         assert!(out.contains("![web](https://emaki.lol/a.gif)") && out.contains("![top](/abs/a.png)"), "{out}");
     }
+}
+
+/// Whether a file shows two ways, as it reads and as it is written:
+/// markdown and HTML, a notebook, and a table or an SVG the pane holds
+/// whole.
+fn shows_two_ways(v: &FileView) -> bool {
+    matches!(v.body, FileBody::Markdown(_) | FileBody::Html(_) | FileBody::Notebook(_)) || (matches!(v.body, FileBody::Table(..) | FileBody::Picture(..)) && v.source.is_some())
 }

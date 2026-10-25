@@ -153,7 +153,7 @@ How it works:
 
 Embedding a terminal app was looked at and dropped: Kaku is WezTerm with its own window and renderer, not a view another app can hold.
 
-"Open in Terminal" on a session's menu is the agent terminal (`open_term_panel_agent`), and there the agent is started when it is not running and may be: the person asked for it by name.
+"Open in Agent Terminal" on a session's menu is the agent terminal (`open_term_panel_agent`), and there the agent is started when it is not running and may be: the person asked for it by name.
 
 ## A terminal of the person's
 

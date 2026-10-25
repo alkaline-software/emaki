@@ -268,7 +268,7 @@ impl Workbench {
             .when(!busy, |d| d.cursor_pointer().hover(move |s| s.bg(hover_bg)))
             .managed_tooltip(move |window, cx| crate::workbench::tip(if busy { t("Refreshing…") } else { t("Refresh status") }, window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.check_agents(true, cx)))
-            .child(if busy { icon.with_animation("agents-checking", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))).into_any_element() } else { icon.into_any_element() })
+            .child(if busy { icon.rotate(gpui::Radians(crate::ambient::phase(Duration::from_millis(900)) * std::f32::consts::TAU)).into_any_element() } else { icon.into_any_element() })
             .into_any_element()
     }
 
