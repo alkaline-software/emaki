@@ -3087,6 +3087,19 @@ fn rect_of(b: Bounds<Pixels>) -> Rect {
     Rect { x: f32::from(b.origin.x), y: f32::from(b.origin.y), w: f32::from(b.size.width), h: f32::from(b.size.height) }
 }
 
+/// Where the window is, as a window is opened there next time. On
+/// Windows `bounds()` starts under the title bar, while a window opened
+/// at a place puts half its frame above it, so a window saved by
+/// `bounds()` opened half a title bar lower each launch. `window_bounds`
+/// is the place in the opening's own terms; full screen and maximized
+/// keep the bounds they fill.
+fn window_rect(window: &Window) -> Rect {
+    match window.window_bounds() {
+        WindowBounds::Windowed(b) => rect_of(b),
+        _ => rect_of(window.bounds()),
+    }
+}
+
 
 
 fn greeting(name: &str) -> String {
@@ -3304,7 +3317,7 @@ impl Workbench {
         })
         .detach();
         cx.observe_window_bounds(window, |this, window, _| {
-            this.window_rect = Some(rect_of(window.bounds()));
+            this.window_rect = Some(window_rect(window));
             this.save_ui(false);
         })
         .detach();
@@ -3921,7 +3934,7 @@ impl Workbench {
             now: now_secs(),
             user_name,
             tabs: ui.tabs.clone(),
-            window_rect: Some(rect_of(window.bounds())),
+            window_rect: Some(window_rect(window)),
             last_ui_save: std::time::Instant::now(),
             narrow: false,
             win_w: px(0.),

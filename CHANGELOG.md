@@ -12,7 +12,7 @@ Each release has a section here, and `release.yml` puts that section on the GitH
 6. **Keep the display on**: A switch in Settings, General keeps the screen awake while a session works; it is off unless you turn it on.
 7. **Menus**: Every right-click menu has an icon for each choice and groups set apart by lines that show in the dark appearance, and projects and folders have Copy Path.
 8. **Choosing sessions**: ⇧ and a click on the All Sessions page chooses every session or project in between, and Archive is offered only for sessions that are not archived.
-9. **Fixes**: The editor's find starts at your selection and leaves the cursor on the match; ⌘←, ⌘→ and the arrow keys stay on the right row of a wrapped line; a new tab's conversation fades in; the shell terminal opens a tab when it has none; Escape closes the composer's find.
+9. **Fixes**: The editor's find starts at your selection and leaves the cursor on the match; ⌘←, ⌘→ and the arrow keys stay on the right row of a wrapped line; a new tab's conversation fades in; the shell terminal opens a tab when it has none; Escape closes the composer's find; on Windows the window opens where you left it instead of a little lower each time.
 
 ## v0.3.1
 
