@@ -227,7 +227,9 @@ pub fn formula(src: &str, dialect: Dialect, display: bool) -> Option<Arc<Formula
     if let Some(done) = SET.lock().unwrap().get(&key) {
         return done.clone();
     }
-    let done = typeset(src, dialect, display).ok().map(Arc::new);
+    // Typst lays a formula out a level a nesting, deep enough for a
+    // thread's own stack on Windows (`on_deep_stack`).
+    let done = crate::on_deep_stack(|| typeset(src, dialect, display)).ok().map(Arc::new);
     SET.lock().unwrap().insert(key, done.clone());
     done
 }
@@ -252,6 +254,18 @@ mod tests {
     fn face() {
         static BYTES: LazyLock<&'static [u8]> = LazyLock::new(|| Box::leak(std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../emaki-app/assets/fonts/NewCMMath-Regular.otf")).unwrap().into_boxed_slice()));
         use_font(*BYTES);
+    }
+
+    /// A formula nested as deep as one can be written ends, set or not,
+    /// on a thread's stack the size Windows gives (`RUST_MIN_STACK` of a
+    /// megabyte for the test's own thread shows it here).
+    #[test]
+    fn a_deep_formula_does_not_take_the_stack() {
+        face();
+        let deep = format!("{}x{}", r"\frac{1}{".repeat(200), "}".repeat(200));
+        let _ = formula(&deep, Dialect::Tex, true);
+        let deep = format!("{}x{}", "(".repeat(400), ")".repeat(400));
+        let _ = formula(&deep, Dialect::Typst, false);
     }
 
     #[test]
