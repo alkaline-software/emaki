@@ -36,6 +36,19 @@ git rev-parse -q --verify "refs/tags/v$v" > /dev/null && fail "the tag v$v exist
 
 cargo test --locked -p emaki-core 2>&1 | grep -E "^test result|FAILED|panicked" || true
 cargo test --locked -p emaki-core > /dev/null 2>&1 || fail "the core tests fail"
+# Again with the stack Windows gives a thread, a megabyte: a reader that
+# recurses as deep as a document is nested passed here and overflowed in
+# CI's Windows jobs (v0.3.2). The tests' own binaries only, as cargo's
+# compiler needs more than that.
+tests=$(cargo test --locked -p emaki-core --no-run --message-format=json 2>/dev/null | python3 -c '
+import sys, json
+for line in sys.stdin:
+    try: m = json.loads(line)
+    except ValueError: continue
+    if m.get("profile", {}).get("test") and m.get("executable"): print(m["executable"])')
+for t in ${(f)tests}; do
+  RUST_MIN_STACK=1048576 "$t" > /dev/null 2>&1 || fail "the core tests fail on a thread with the stack Windows gives (RUST_MIN_STACK=1048576 $t)"
+done
 cargo build --locked -p emaki-app 2>&1 | tail -1
 
 # The Windows job is the one that cannot be run here; the MinGW type check

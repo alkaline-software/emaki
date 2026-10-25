@@ -51,3 +51,16 @@ pub mod web;
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
+/// `read` on a thread of its own with a stack deep enough for a document
+/// nested as far as a parser will go: a LaTeX or Typst file's reading
+/// recurses once a level, in the parser under it as well as in ours, and
+/// Windows gives a thread a megabyte, where a file of a few hundred
+/// levels overflowed it and took the app down. The same on every system.
+pub(crate) fn on_deep_stack<T: Send>(read: impl FnOnce() -> T + Send) -> T {
+    const STACK: usize = 64 << 20;
+    std::thread::scope(|scope| match std::thread::Builder::new().name("emaki-read".into()).stack_size(STACK).spawn_scoped(scope, read) {
+        Ok(reading) => reading.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
+        Err(e) => panic!("a reading thread could not be started: {e}"),
+    })
+}

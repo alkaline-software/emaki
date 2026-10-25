@@ -100,6 +100,10 @@ const VALUES: &[&str] = &[
 
 /// `text`, the Typst document at `file`, as Quarto markdown.
 pub fn to_markdown(text: &str, file: &Path) -> String {
+    crate::on_deep_stack(|| read(text, file))
+}
+
+fn read(text: &str, file: &Path) -> String {
     let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut doc = Doc { dir, seen: vec![canonical(file)], ..Doc::default() };
     let mut flow = Flow::top();
