@@ -36,6 +36,12 @@ pub(super) struct Inline {
     /// A plate, as (fill, border), and the ranges (inline code spans) it
     /// is painted behind. (Emaki addition.)
     chip: Option<((Hsla, Hsla), Vec<Range<usize>>)>,
+    /// The plates behind Quarto's attribute chips, in their own colors.
+    /// (Emaki addition.)
+    attr_chip: Option<((Hsla, Hsla), Vec<Range<usize>>)>,
+    /// Formulas: the math face their room is set in, and each one's room
+    /// and picture (`text/math.rs`). (Emaki addition.)
+    math: Option<(SharedString, Vec<(Range<usize>, super::math::MathPicture, bool)>)>,
     styled_text: StyledText,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
 
@@ -45,7 +51,6 @@ pub(super) struct Inline {
 /// The inline text state, used RefCell to keep the selection state.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct InlineState {
-    hovered_index: Option<usize>,
     /// The text that actually rendering, matched with selection.
     pub(super) text: SharedString,
     pub(super) selection: Option<Selection>,
@@ -77,6 +82,8 @@ impl Inline {
             highlights,
             mono: None,
             chip: None,
+            attr_chip: None,
+            math: None,
             text: text.clone(),
             styled_text: StyledText::new(text),
             link_click_handler,
@@ -106,15 +113,75 @@ impl Inline {
         self
     }
 
+    /// A plate behind the text inside `ranges` in the quiet colors of an
+    /// attribute chip. (Emaki addition.)
+    pub(super) fn with_attr_chip(mut self, colors: (Hsla, Hsla), ranges: Vec<Range<usize>>) -> Self {
+        if !ranges.is_empty() {
+            self.attr_chip = Some((colors, ranges));
+        }
+        self
+    }
+
+    /// Formulas in `family`: each a room of no-break spaces, its picture
+    /// painted over it, on its line's baseline or, on a line of its own,
+    /// centered in it. (Emaki addition.)
+    pub(super) fn with_math(mut self, family: Option<SharedString>, items: Vec<(Range<usize>, super::math::MathPicture, bool)>) -> Self {
+        if let Some(family) = family {
+            if !items.is_empty() {
+                self.math = Some((family, items));
+            }
+        }
+        self
+    }
+
+    /// Each formula's picture over its room, in the color of the words.
+    /// The room's end is where it is looked for: an index at a wrap is
+    /// reported at the end of the line above, and a formula cannot start
+    /// a line and end on the one above it. (Emaki addition.)
+    fn paint_math(&self, text_layout: &TextLayout, bounds: &Bounds<Pixels>, window: &mut Window, cx: &App) {
+        use std::hash::{Hash, Hasher};
+        let Some((_, items)) = &self.math else { return };
+        let color = window.text_style().color;
+        let line_height = text_layout.line_height();
+        for (range, picture, display) in items {
+            let (Some(start), Some(end), Some(line)) = (
+                text_layout.position_for_index(range.start),
+                text_layout.position_for_index(range.end.min(self.text.len())),
+                text_layout.line_layout_for_index(range.end.min(self.text.len())),
+            ) else {
+                continue;
+            };
+            let layout = &line.unwrapped_layout;
+            let size = layout.font_size;
+            let (w, h) = (size * picture.width, size * picture.height);
+            let left = if start.y == end.y { start.x } else { bounds.left() };
+            let x = (left + end.x - w) / 2.;
+            let y = if *display {
+                end.y + (line_height - h) / 2.
+            } else {
+                let baseline = end.y + (line_height - layout.ascent - layout.descent) / 2. + layout.ascent;
+                baseline - size * picture.baseline
+            };
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            picture.svg.hash(&mut hasher);
+            let key = SharedString::from(format!("__math_svg__{}", hasher.finish()));
+            let _ = window.paint_svg(Bounds::new(point(x, y), gpui::size(w, h)), key, Some(&picture.svg), gpui::TransformationMatrix::unit(), color, cx);
+        }
+    }
+
     /// The plates behind inline code: one per line a span is on, a little
     /// taller than the letters and centred on the line. A plate takes in
     /// the nearer of the two spaces set at each end of the span (`CODE_PAD`).
     /// Painted before the text. (Emaki addition.)
     fn paint_code_chips(&self, text_layout: &TextLayout, bounds: &Bounds<Pixels>, window: &mut Window) {
+        for chip in [&self.chip, &self.attr_chip].into_iter().flatten() {
+            self.paint_chips(chip, text_layout, bounds, window);
+        }
+    }
+
+    fn paint_chips(&self, chip: &((Hsla, Hsla), Vec<Range<usize>>), text_layout: &TextLayout, bounds: &Bounds<Pixels>, window: &mut Window) {
         use crate::text::style::CODE_PAD;
-        let Some(((fill, border), ranges)) = &self.chip else {
-            return;
-        };
+        let ((fill, border), ranges) = chip;
         let line_height = text_layout.line_height();
         let font_size = window.text_style().font_size.to_pixels(window.rem_size());
         let height = (font_size * 1.35).min(line_height);
@@ -136,12 +203,12 @@ impl Inline {
             // a line holding only the padding space gets no plate.
             let mut lines: Vec<(Bounds<Pixels>, bool)> = Vec::new();
             let mut offset = start;
+            let mut spots = Spots::new(text_layout);
+            let mut here = spots.at(start);
             for c in span.chars() {
                 let next_offset = offset + c.len_utf8();
-                let (Some(pos), Some(next_pos)) = (
-                    text_layout.position_for_index(offset),
-                    text_layout.position_for_index(next_offset),
-                ) else {
+                let next = spots.at(next_offset);
+                let (Some(pos), Some(next_pos)) = (std::mem::replace(&mut here, next), next) else {
                     offset = next_offset;
                     continue;
                 };
@@ -240,6 +307,7 @@ impl Inline {
                 true,
                 selection_for_multi_click(
                     &self.text,
+                    &self.links,
                     text_layout,
                     *bounds,
                     selection.pos,
@@ -278,16 +346,18 @@ impl Inline {
         // GPUI's content mask as before.
         let mut selection: Option<Selection> = None;
         let mut offset = 0;
-        let mut chars = self.text.chars().peekable();
-        while let Some(c) = chars.next() {
-            let Some(pos) = text_layout.position_for_index(offset) else {
-                offset += c.len_utf8();
+        let mut spots = Spots::new(text_layout);
+        let mut here = spots.at(0);
+        for c in self.text.chars() {
+            let next_offset = offset + c.len_utf8();
+            let next = spots.at(next_offset);
+            let Some(pos) = std::mem::replace(&mut here, next) else {
+                offset = next_offset;
                 continue;
             };
 
-            let next_offset = offset + c.len_utf8();
             let mut char_width = line_height.half();
-            if let Some(next_pos) = text_layout.position_for_index(next_offset) {
+            if let Some(next_pos) = next {
                 if next_pos.y == pos.y {
                     char_width = next_pos.x - pos.x;
                 }
@@ -317,19 +387,28 @@ impl Inline {
         mask_bounds: Bounds<Pixels>,
     ) -> Vec<Bounds<Pixels>> {
         let mut line_bounds = Vec::new();
+        // A run wholly above or below what is shown has no box in it.
+        // (Emaki addition.)
+        let shown = text_layout.bounds();
+        if shown.bottom() + line_height < mask_bounds.top() || shown.top() > mask_bounds.bottom() {
+            return line_bounds;
+        }
         let mut current_line_y = None;
         let mut current_bounds: Option<Bounds<Pixels>> = None;
         let mut offset = 0;
+        let mut spots = Spots::new(text_layout);
+        let mut here = spots.at(0);
 
         for c in self.text.chars() {
             let next_offset = offset + c.len_utf8();
-            let Some(pos) = text_layout.position_for_index(offset) else {
+            let next = spots.at(next_offset);
+            let Some(pos) = std::mem::replace(&mut here, next) else {
                 offset = next_offset;
                 continue;
             };
 
             let mut char_width = line_height.half();
-            if let Some(next_pos) = text_layout.position_for_index(next_offset) {
+            if let Some(next_pos) = next {
                 if next_pos.y == pos.y {
                     char_width = next_pos.x - pos.x;
                 }
@@ -500,6 +579,15 @@ impl Element for Inline {
                     run_style.font_family = family.clone();
                 }
             }
+            // A formula's room is set in the math face, whose spaces are as
+            // wide as the face says.
+            if let Some((family, items)) = &self.math {
+                if items.iter().any(|(r, _, _)| r.start <= range.start && range.end <= r.end) {
+                    run_style.font_family = family.clone();
+                    run_style.font_style = gpui::FontStyle::Normal;
+                    run_style.font_weight = gpui::FontWeight::NORMAL;
+                }
+            }
             runs.push(run_style.highlight(*highlight).to_run(range.len()));
             ix = range.end;
         }
@@ -566,6 +654,7 @@ impl Element for Inline {
         }
         self.styled_text
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+        self.paint_math(&text_layout, &bounds, window, cx);
 
         // layout selections
         let (is_selectable, is_selection, selection) =
@@ -608,6 +697,7 @@ impl Element for Inline {
                 // EMAKI: what of this run is selected as it is painted,
                 // for the right click below.
                 let selected = state.selection.as_ref().map(|s| (s.start.min(s.end), s.start.max(s.end)));
+                let links = self.links.clone();
                 move |event: &MouseDownEvent, phase, window, cx| {
                     if !phase.bubble() || !hitbox.is_hovered(window) {
                         return;
@@ -617,14 +707,19 @@ impl Element for Inline {
                     // a double click does, so a menu has something to
                     // copy; inside a selection there is, it changes
                     // nothing.
+                    // EMAKI: a right click on a link takes the whole link,
+                    // and the link is kept for the menu it opens
+                    // (`right_clicked_link`).
                     let kind = match (event.button, event.click_count) {
                         (MouseButton::Right, _) => {
                             let at = text_layout.index_for_position(event.position).ok();
+                            let link = at.and_then(|at| links.iter().find(|(r, _)| r.start <= at && at < r.end)).cloned();
+                            note_right_clicked_link(link.as_ref().map(|(r, l)| (l.clone(), SharedString::from(text.get(r.clone()).unwrap_or("").to_string()))));
                             if selected.zip(at).is_some_and(|((start, end), at)| start < end && at >= start && at <= end) {
                                 return;
                             }
                             gpui_base::TextSelection::clear(window, cx);
-                            TextViewMultiClickKind::Word
+                            if link.is_some() { TextViewMultiClickKind::Link } else { TextViewMultiClickKind::Word }
                         }
                         (MouseButton::Left, 2) => TextViewMultiClickKind::Word,
                         (MouseButton::Left, 3) => TextViewMultiClickKind::Paragraph,
@@ -633,6 +728,7 @@ impl Element for Inline {
 
                     let Some(range) = selection_for_multi_click(
                         &text,
+                        &links,
                         &text_layout,
                         hitbox.bounds,
                         event.position,
@@ -666,20 +762,24 @@ impl Element for Inline {
         }
 
         // mouse move, update hovered link
+        // EMAKI: drawn again only when the pointer goes onto a link, off
+        // one or from one to another, for the link's cursor. The letter
+        // under the pointer was compared, so each letter it crossed drew
+        // the whole view again.
         window.on_mouse_event({
             let hitbox = hitbox.clone();
             let text_layout = text_layout.clone();
-            let mut hovered_index = state.hovered_index;
+            let links = self.links.clone();
+            let link_at = move |position: Point<Pixels>| {
+                let index = text_layout.index_for_position(position).ok()?;
+                links.iter().position(|(range, _)| range.contains(&index))
+            };
+            let hovered = hitbox.is_hovered(window).then(|| link_at(mouse_position)).flatten();
             move |event: &MouseMoveEvent, phase, window, cx| {
                 if !phase.bubble() || !hitbox.is_hovered(window) {
                     return;
                 }
-
-                let current = hovered_index;
-                let updated = text_layout.index_for_position(event.position).ok();
-                //  notify update when hovering over different links
-                if current != updated {
-                    hovered_index = updated;
+                if link_at(event.position) != hovered {
                     cx.notify(current_view);
                 }
             }
@@ -730,6 +830,7 @@ impl Element for Inline {
 
 fn selection_for_multi_click(
     text: &str,
+    links: &[(Range<usize>, LinkMark)],
     text_layout: &TextLayout,
     bounds: Bounds<Pixels>,
     pos: Point<Pixels>,
@@ -743,10 +844,109 @@ fn selection_for_multi_click(
 
     match kind {
         TextViewMultiClickKind::Word => word_range_at(text, offset),
+        TextViewMultiClickKind::Link => links.iter().find(|(r, _)| r.start <= offset && offset < r.end).map(|(r, _)| r.clone()).or_else(|| word_range_at(text, offset)),
         // Known limitation: a paragraph maps to a single Inline run here. When a
         // paragraph embeds an inline image it is split into multiple Inline runs,
         // so triple-click only selects the run on the clicked side of the image.
         TextViewMultiClickKind::Paragraph => (!text.is_empty()).then_some(0..text.len()),
+    }
+}
+
+/// Where a run's indices are, as `TextLayout::position_for_index` gives
+/// them, for indices asked in rising order, in one walk of its lines.
+/// That method walks a line from its start for each index, so asking it
+/// once a character, as the selection and its text boxes do every frame,
+/// took a paragraph's length squared. A line whose glyphs are not in the
+/// text's order (right to left) is asked of the method. (Emaki addition.)
+struct Spots {
+    layout: TextLayout,
+    lines: smallvec::SmallVec<[Arc<gpui::WrappedLineLayout>; 1]>,
+    origin: Point<Pixels>,
+    line_height: Pixels,
+    /// The line (between two `\n`) the walk is in, its first index and
+    /// its top.
+    hard: usize,
+    start: usize,
+    top: Pixels,
+    /// The wrapped line within it, and the x it starts at.
+    visual: usize,
+    left: Pixels,
+    /// The glyph the walk is at.
+    run: usize,
+    glyph: usize,
+    in_order: bool,
+}
+
+impl Spots {
+    fn new(layout: &TextLayout) -> Self {
+        let mut spots = Self {
+            layout: layout.clone(),
+            lines: layout.line_layouts(),
+            origin: layout.bounds().origin,
+            line_height: layout.line_height(),
+            hard: 0,
+            start: 0,
+            top: px(0.),
+            visual: 0,
+            left: px(0.),
+            run: 0,
+            glyph: 0,
+            in_order: true,
+        };
+        spots.enter_line();
+        spots
+    }
+
+    fn enter_line(&mut self) {
+        (self.visual, self.run, self.glyph) = (0, 0, 0);
+        let Some(line) = self.lines.get(self.hard) else { return };
+        self.in_order = line.runs().iter().flat_map(|r| &r.glyphs).map(|g| g.index).is_sorted();
+        self.left = self.x_at(0);
+    }
+
+    /// `LineLayout::x_for_index` from where the walk is: the x of the
+    /// first glyph at or after `index`, or the line's end.
+    fn x_at(&mut self, index: usize) -> Pixels {
+        let line = &self.lines[self.hard];
+        let runs = line.runs();
+        while let Some(run) = runs.get(self.run) {
+            match run.glyphs.get(self.glyph) {
+                Some(g) if g.index >= index => return g.position.x,
+                Some(_) => self.glyph += 1,
+                None => (self.run, self.glyph) = (self.run + 1, 0),
+            }
+        }
+        line.unwrapped_layout.width
+    }
+
+    fn at(&mut self, index: usize) -> Option<Point<Pixels>> {
+        loop {
+            let line = self.lines.get(self.hard)?.clone();
+            let end = self.start + line.len();
+            if index < self.start {
+                return None;
+            }
+            if index > end {
+                self.top += line.size(self.line_height).height;
+                self.start = end + 1;
+                self.hard += 1;
+                self.enter_line();
+                continue;
+            }
+            if !self.in_order {
+                return self.layout.position_for_index(index);
+            }
+            let i = index - self.start;
+            let bounds = line.wrap_boundaries();
+            let end_of = |k: usize| bounds.get(k).map_or(line.len(), |b| line.runs()[b.run_ix].glyphs[b.glyph_ix].index);
+            while i > end_of(self.visual) {
+                let from = end_of(self.visual);
+                self.visual += 1;
+                self.left = self.x_at(from);
+            }
+            let x = self.x_at(i) - self.left;
+            return Some(self.origin + point(x, self.top + self.line_height * self.visual as f32));
+        }
     }
 }
 
@@ -795,8 +995,22 @@ fn point_in_text_selection(
 
 #[cfg(test)]
 mod tests {
-    use super::point_in_text_selection;
-    use gpui::{point, px};
+    use super::{Spots, point_in_text_selection};
+    use gpui::{AvailableSpace, ParentElement as _, StyledText, Styled as _, TestAppContext, div, point, px, size};
+
+    #[gpui::test]
+    fn the_walk_puts_each_index_where_the_layout_does(cx: &mut TestAppContext) {
+        let text = "a few words that wrap over several lines here\nand a second line, longer than the first, that wraps too\n\nafter an empty one";
+        let words = StyledText::new(text);
+        let layout = words.layout().clone();
+        let cx = cx.add_empty_window();
+        cx.draw(point(px(10.), px(20.)), size(AvailableSpace::Definite(px(140.)), AvailableSpace::MinContent), |_, _| div().w(px(140.)).child(words));
+        assert!(layout.line_layouts().iter().any(|l| !l.wrap_boundaries().is_empty()), "the text should wrap");
+        let mut spots = Spots::new(&layout);
+        for i in 0..=text.len() + 1 {
+            assert_eq!(spots.at(i), layout.position_for_index(i), "index {i}");
+        }
+    }
 
     #[test]
     fn test_point_in_text_selection() {
@@ -1048,4 +1262,22 @@ mod tests {
             line_height
         ));
     }
+}
+
+thread_local! {
+    /// The link a right click was last on, its words, and when. (Emaki
+    /// addition.)
+    static RIGHT_CLICKED_LINK: std::cell::RefCell<Option<(LinkMark, SharedString, std::time::Instant)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn note_right_clicked_link(link: Option<(LinkMark, SharedString)>) {
+    RIGHT_CLICKED_LINK.with(|l| *l.borrow_mut() = link.map(|(m, w)| (m, w, std::time::Instant::now())));
+}
+
+/// The link the right click just made was on, and the words it shows,
+/// taken: for the menu that click opens, which offers to copy the link,
+/// its words, or the markdown it was written as. None when the click was
+/// not on a link. (Emaki addition.)
+pub fn right_clicked_link() -> Option<(LinkMark, SharedString)> {
+    RIGHT_CLICKED_LINK.with(|l| l.borrow_mut().take()).filter(|(_, _, at)| at.elapsed() < std::time::Duration::from_secs(2)).map(|(m, w, _)| (m, w))
 }

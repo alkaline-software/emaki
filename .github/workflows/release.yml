@@ -46,10 +46,12 @@ jobs:
             target: x86_64-unknown-linux-gnu
             formats: appimage,deb
             asset: Emaki-linux-x64.AppImage
+            snap: amd64
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             formats: appimage,deb
             asset: Emaki-linux-arm64.AppImage
+            snap: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -77,7 +79,7 @@ jobs:
             libfontconfig-dev libfreetype-dev libwayland-dev libx11-xcb-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
             libvulkan-dev libvulkan1 mesa-vulkan-drivers libasound2-dev \
-            libfuse2 file
+            libfuse2 file squashfs-tools
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -221,6 +223,34 @@ jobs:
         with:
           name: ${{ matrix.asset }}
           path: upload/*
+
+      # The Snap Store's package, from the same binary as the .deb
+      # (scripts/linux-snap.sh), kept with the run and not put on the
+      # release: a snap from a file installs only with --dangerous. Once
+      # the store has the name and has granted classic confinement, and
+      # the repository has SNAPCRAFT_STORE_CREDENTIALS and SNAP_CHANNEL,
+      # it is uploaded and released to that channel; App Center installs
+      # it from there with no warning, and snapd keeps it current.
+      - name: Snap package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          command -v snap >/dev/null || sudo apt-get install -y --no-install-recommends snapd
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          scripts/linux-snap.sh target/${{ matrix.target }}/release/Emaki "$v" ${{ matrix.snap }} snap/emaki_${{ matrix.snap }}.snap
+
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Linux'
+        with:
+          name: snap-${{ matrix.snap }}
+          path: snap/*
+
+      - name: Snap Store
+        if: runner.os == 'Linux' && vars.SNAP_CHANNEL != '' && startsWith(github.ref, 'refs/tags/')
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          sudo snap install snapcraft --classic
+          snapcraft upload --release=${{ vars.SNAP_CHANNEL }} snap/emaki_${{ matrix.snap }}.snap
 
   # One release, made once the six builds are in, with the tag's section of
   # CHANGELOG.md as its notes. (Each package job making the release itself

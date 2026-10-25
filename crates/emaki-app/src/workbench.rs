@@ -445,6 +445,50 @@ const PILL_HANDLE: f32 = 20.;
 const PILL_GAP: f32 = 6.;
 /// What a pill is wide besides its tabs, and where its first tab starts.
 const PILL_LEAD: f32 = PILL_PAD + PILL_HANDLE + TAB_GAP;
+/// The page tab's key and its pill's name (`page_tab`): no session's key
+/// starts with this character.
+const PAGE_TAB: &str = "\u{1}page";
+
+/// The number ⌘ and a digit goes to a tab with (`go_tab`), on a small
+/// plate set half over the tab's lower edge while ⌘ is held.
+fn tab_hint_plate(n: usize, theme: &gpui_component::Theme) -> Div {
+    div().absolute().left_0().right_0().bottom(px(-8.)).flex().justify_center().child(
+        div()
+            .h(px(16.))
+            .min_w(px(18.))
+            .px(px(5.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_sm()
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.foreground)
+            .child(n.to_string())
+            .with_animation("tab-hint", Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
+    )
+}
+
+/// Which of the pages' buttons stands for a page; none for a session's.
+fn nav_index(page: Page) -> Option<usize> {
+    match page {
+        Page::Sessions => Some(0),
+        Page::Agents => Some(1),
+        Page::New | Page::Session => None,
+    }
+}
+
+/// The width of either end of the top strip on every page: two buttons
+/// on one track, as the pages', the panels' and the terminals' are.
+const STRIP_END: f32 = NAV_PAD * 2. + NAV_SEG_W * 2. + NAV_GAP;
+const NAV_SEG_W: f32 = 30.;
+const NAV_PAD: f32 = 3.;
+const NAV_GAP: f32 = 2.;
+
 fn pill_chrome(tabs: usize) -> f32 {
     PILL_LEAD + PILL_PAD + TAB_GAP * (tabs.max(1) as f32 - 1.)
 }
@@ -720,6 +764,9 @@ const FOLDER_GONE: &str = phrase("The session's folder is gone");
 fn fade_in(id: &'static str, el: impl IntoElement) -> impl IntoElement {
     div().absolute().inset_0().child(el).with_animation(id, Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| d.opacity(t))
 }
+
+/// How long a step to another picture in the lightbox takes.
+const LIGHTBOX_STEP: Duration = Duration::from_millis(200);
 
 /// No less than the find bar's height: what its opening runs up to.
 const FIND_BAR_MOST: f32 = 64.;
@@ -1042,7 +1089,7 @@ pub fn image_dims(b: &[u8]) -> Option<(u32, u32)> {
     if b.starts_with(b"GIF8") {
         return Some((le16(6)?, le16(8)?));
     }
-    if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
+    if b.starts_with(b"RIFF") && b.get(8..12) == Some(&b"WEBP"[..]) {
         return match b.get(12..16)? {
             b"VP8 " => Some((le16(26)? & 0x3fff, le16(28)? & 0x3fff)),
             b"VP8L" => {
@@ -1329,6 +1376,15 @@ pub struct Workbench {
     draft_of: Option<String>,
     /// An attachment opened large over the window.
     pub lightbox: Option<Lightbox>,
+    /// The pictures the lightbox steps through with the arrows (those of
+    /// the prompt it was opened from), and which of them it shows.
+    lightbox_set: Vec<Lightbox>,
+    lightbox_at: usize,
+    lightbox_focus: bool,
+    /// The picture a step left, which fades out under the one arrived at,
+    /// and a count of steps, which names each fade.
+    lightbox_from: Option<usize>,
+    lightbox_steps: u32,
     pub search_input: Entity<InputState>,
     pub search_open: bool,
     /// The settings window, while it is open (`workbench/settings.rs`).
@@ -1679,6 +1735,27 @@ pub struct Workbench {
     /// (`group_tabs`), and when a pill that came after the first draw did.
     tab_groups: Vec<(String, Vec<String>)>,
     pill_born: HashMap<String, Instant>,
+    /// The page tab: one tab at the row's left end, before the sessions',
+    /// for the page that is not a session's (New Session, All Sessions,
+    /// Agents), whichever was gone to last (`page_last`). It is there
+    /// whenever such a page is up, and stays while a session is shown,
+    /// until it is closed.
+    pub(crate) page_tab: bool,
+    pub(crate) page_last: Page,
+    /// The page the page tab named before, and when it changed: its mark
+    /// and name fade out under the new ones, off this clock, so a redraw
+    /// of the tab elsewhere in the tree never plays the fade again.
+    page_swap: Option<(Page, Instant)>,
+    /// When the page tab was closed: it is drawn a moment more, closing
+    /// up, so the tabs after it slide into its room.
+    page_tab_gone: Option<Instant>,
+    /// Where among the pills the page tab stands, as a drag left it.
+    page_tab_at: usize,
+    /// The pages' buttons' plate moving from one page to another: from,
+    /// to, and a count that names each move (`page_nav`).
+    nav_anim: Option<(usize, usize, u32)>,
+    /// The session shown last, which the page tab closing goes back to.
+    last_session: Option<String>,
     tab_plate: TabPlate,
     /// Tabs and pills a drag has just given another place, by key and by
     /// folder: each slides there from where it stood.
@@ -1972,6 +2049,9 @@ pub struct Workbench {
     pub(crate) file_structure_h: Pixels,
     pub(crate) file_structure_drag: Option<(Pixels, Pixels)>,
     pub(crate) file_heads_spots: gpui_component::text::HeadingSpots,
+    /// The markdown file showing, as a view the window keeps between
+    /// frames (`panels::FileDoc`).
+    pub(crate) file_doc: std::cell::RefCell<Option<Entity<crate::panels::FileDoc>>>,
     pub(crate) file_structure_scroll: ScrollHandle,
     pub(crate) file_heads: Option<(u64, std::rc::Rc<Vec<crate::panels::FileHead>>)>,
     pub(crate) file_structure_at: Option<usize>,
@@ -2049,6 +2129,10 @@ pub struct Workbench {
     /// Where `EMAKI_GO=pointer:<x>:<y>` moves the pointer to.
     /// None a move, Some(0) a click, Some(dy) a scroll of dy points.
     pub(crate) pending_pointer: Vec<(Point<Pixels>, Option<f32>)>,
+    /// A probe's drags with the left button, from and to (`dragat:`),
+    /// and whether to print what is selected once they are done (`seltext`).
+    pub(crate) pending_drag: Vec<(Point<Pixels>, Point<Pixels>)>,
+    pub(crate) pending_seltext: bool,
     /// `EMAKI_GO=unarchive:<id>`: that session unarchived at the next draw,
     /// as its menu in the sidebar does it.
     pending_unarchive: Option<String>,
@@ -2198,6 +2282,9 @@ pub struct Workbench {
     /// The comparison of the folder's files against the last commit,
     /// while it shows.
     pub(crate) changes: Option<crate::panels::Changes>,
+    /// The file the comparison last showed, by repository, as GitHub
+    /// Desktop keeps it: it opens there again. Held until the app quits.
+    pub(crate) changes_last: HashMap<PathBuf, PathBuf>,
     /// `EMAKI_GO=file:<path>`: shown at the next draw.
     pub(crate) file_probe: Option<PathBuf>,
     _tasks: Vec<Task<()>>,
@@ -2647,6 +2734,13 @@ impl Workbench {
             self.tabs = order;
             self.save_ui(true);
         }
+        // The page tab is a pill of its own, where a drag last left it,
+        // laid out, sized and moved as the others are; `self.tabs` stays
+        // the sessions'.
+        if self.page_tab || self.page_tab_closing().is_some() {
+            let at = self.page_tab_at.min(groups.len());
+            groups.insert(at, (PAGE_TAB.to_string(), vec![PAGE_TAB.to_string()]));
+        }
         self.tab_groups = groups;
     }
 
@@ -2670,14 +2764,23 @@ impl Workbench {
         if self.pill_shift.is_empty() {
             self.pill_top = None;
         }
-        let n = self.tabs.len();
+        let keys: Vec<String> = self.tab_groups.iter().flat_map(|(_, keys)| keys.iter().cloned()).collect();
+        // A page tab closing has given up its room as it starts: the others
+        // widen into it while it closes, not after.
+        let closing = !self.page_tab && keys.iter().any(|k| k == PAGE_TAB);
+        let n = keys.len() - closing as usize;
         let first = self.tab_widths.is_empty();
         let tabs = &self.tabs;
-        self.tab_widths.retain(|k, _| tabs.contains(k));
+        self.tab_widths.retain(|k, _| keys.contains(k));
         let groups = &self.tab_groups;
         self.pill_born.retain(|p, _| groups.iter().any(|(g, _)| g == p));
-        // The plate goes where the showing tab is.
-        let showing = self.selected.clone().filter(|k| tabs.contains(k));
+        // The plate goes where the showing tab is: a session's, or the
+        // page tab while its page is up.
+        let showing = match self.page {
+            Page::Session => self.selected.clone().filter(|k| tabs.contains(k)),
+            Page::Sessions | Page::Agents => self.page_tab.then(|| PAGE_TAB.to_string()),
+            Page::New => None,
+        };
         self.tabs_reveal |= self.tab_plate.to != showing;
         if self.tab_plate.to != showing {
             self.tab_plate.from = self.tab_plate.to.take().filter(|_| !first);
@@ -2685,7 +2788,7 @@ impl Workbench {
             self.tab_plate.at = (!first).then(Instant::now);
             self.tab_plate.serial += 1;
         }
-        if n == 0 {
+        if keys.is_empty() {
             self.tabs_n = 0;
             return;
         }
@@ -2697,8 +2800,9 @@ impl Workbench {
             }
         }
         let row = self.tabs_row_w.get();
-        let chrome: f32 = self.tab_groups.iter().map(|(_, keys)| pill_chrome(keys.len())).sum::<f32>() + PILL_GAP * (self.tab_groups.len() as f32 - 1.);
-        let target = if row <= 0. { TAB_MAX } else { ((row - chrome) / n as f32).clamp(TAB_MIN, TAB_MAX) };
+        let staying = self.tab_groups.iter().filter(|(p, _)| !(closing && p == PAGE_TAB));
+        let chrome: f32 = staying.clone().map(|(_, keys)| pill_chrome(keys.len())).sum::<f32>() + PILL_GAP * (staying.count() as f32 - 1.).max(0.);
+        let target = if row <= 0. { TAB_MAX } else { ((row - chrome) / n.max(1) as f32).clamp(TAB_MIN, TAB_MAX) };
         // The tab gone to is brought into the row when the tabs are wider
         // than it and it stands outside: by sum, as every place here is.
         // Also when the row itself changes width (the sidebar folded,
@@ -2729,7 +2833,7 @@ impl Workbench {
         }
         let moved = n != self.tabs_n && !first;
         self.tabs_n = n;
-        for key in self.tabs.iter() {
+        for key in keys.iter() {
             match self.tab_widths.get_mut(key) {
                 None => {
                     self.tab_widths.insert(key.clone(), TabWidth { from: if moved { 0. } else { target }, to: target, at: now, serial: 0 });
@@ -2824,7 +2928,10 @@ impl Workbench {
             let before: HashMap<String, f32> = self.tab_groups.iter().zip(spans.iter()).map(|((p, _), (left, _))| (p.clone(), *left)).collect();
             let pill = self.tab_groups.remove(from);
             self.tab_groups.insert(to, pill);
-            self.tabs = self.tab_groups.iter().flat_map(|(_, keys)| keys.iter().cloned()).collect();
+            self.tabs = self.tab_groups.iter().filter(|(p, _)| p != PAGE_TAB).flat_map(|(_, keys)| keys.iter().cloned()).collect();
+            if let Some(at) = self.tab_groups.iter().position(|(p, _)| p == PAGE_TAB) {
+                self.page_tab_at = at;
+            }
             // Every pill that moved slides to where it now stands.
             let now = Instant::now();
             for ((p, _), (left, _)) in self.tab_groups.iter().zip(self.pill_spans(row)) {
@@ -2862,7 +2969,7 @@ impl Workbench {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TAB_HINT_HOLD).await;
             let _ = this.update(cx, |this, cx| {
-                if this.hint_press == Some(press) && !this.tabs.is_empty() {
+                if this.hint_press == Some(press) && !this.tab_groups.is_empty() {
                     this.tab_hints = true;
                     cx.notify();
                 }
@@ -2873,8 +2980,14 @@ impl Workbench {
 
     /// ⌘1 to ⌘9: that tab, or the last one when there are fewer.
     fn go_tab(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.tabs.get(n - 1).or(self.tabs.last()).cloned() else { return };
-        self.open_and_focus(&key, window, cx);
+        // In the row's order, the page tab counted where it stands.
+        let keys: Vec<String> = self.tab_groups.iter().filter(|(p, _)| p != PAGE_TAB || self.page_tab).flat_map(|(_, keys)| keys.iter().cloned()).collect();
+        let Some(key) = keys.get(n - 1).or(keys.last()).cloned() else { return };
+        if key == PAGE_TAB {
+            self.go_page_tab(window, cx);
+        } else {
+            self.open_and_focus(&key, window, cx);
+        }
     }
 
     /// The sidebar over the content, for a narrow window: a scrim that any
@@ -3123,7 +3236,7 @@ impl Workbench {
         cfg.terminal.size = cfg.app.text_sizes().terminal;
         let (hub, mut rx) = Hub::start(cfg.clone());
 
-        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS));
+        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS).searchable(true));
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let find_input = cx.new(|cx| InputState::new(window, cx));
 
@@ -3486,6 +3599,13 @@ impl Workbench {
                         "esc" => window.dispatch_action(Box::new(gpui_component::input::Escape), cx),
                         "shift-up" => window.dispatch_action(Box::new(gpui_base::actions::SelectUp), cx),
                         "shift-down" => window.dispatch_action(Box::new(gpui_base::actions::SelectDown), cx),
+                        // A keystroke through the bindings, from whatever
+                        // has the focus: `press:cmd-f`.
+                        t if t.starts_with("press:") => {
+                            if let Ok(key) = gpui::Keystroke::parse(&t["press:".len()..]) {
+                                window.dispatch_keystroke(key, cx);
+                            }
+                        }
                         _ => {}
                     });
                 }
@@ -3649,6 +3769,11 @@ impl Workbench {
             reload_wanted: false,
             draft_of: None,
             lightbox: None,
+            lightbox_set: Vec::new(),
+            lightbox_at: 0,
+            lightbox_focus: false,
+            lightbox_from: None,
+            lightbox_steps: 0,
             search_input,
             search_open: false,
             settings_window: None,
@@ -3880,6 +4005,7 @@ impl Workbench {
             file_structure_h: px(ui.file_structure_h.unwrap_or(f32::from(crate::panels::STRUCTURE_H))),
             file_structure_drag: None,
             file_heads_spots: gpui_component::text::HeadingSpots::new(),
+            file_doc: Default::default(),
             file_structure_scroll: ScrollHandle::new(),
             file_heads: None,
             file_structure_at: None,
@@ -3914,6 +4040,8 @@ impl Workbench {
             pending_tree_focus: false,
             pending_press: Vec::new(),
             pending_pointer: Vec::new(),
+            pending_drag: Vec::new(),
+            pending_seltext: false,
             pending_unarchive: None,
             tree_focus_back: false,
             pending_new_in: None,
@@ -3991,6 +4119,7 @@ impl Workbench {
             branch_ask_probe: None,
             branch_delete_probe: None,
             changes: None,
+            changes_last: HashMap::new(),
             file_probe: None,
             side_drag: false,
             fit_wanted: false,
@@ -4011,6 +4140,13 @@ impl Workbench {
             tabs_n: 0,
             tab_groups: Vec::new(),
             pill_born: HashMap::new(),
+            page_tab: page != Page::New && page != Page::Session,
+            page_tab_gone: None,
+            page_tab_at: 0,
+            nav_anim: None,
+            page_last: if page == Page::Agents { Page::Agents } else { Page::Sessions },
+            page_swap: None,
+            last_session: None,
             tab_plate: TabPlate::default(),
             tab_shift: HashMap::new(),
             pill_shift: HashMap::new(),
@@ -5045,6 +5181,7 @@ impl Workbench {
         }
         self.page = Page::Session;
         self.selected = Some(key.to_string());
+        self.last_session = Some(key.to_string());
         self.sidebar_peek = false;
         self.save_ui(true);
         if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).cloned() {
@@ -5293,6 +5430,19 @@ impl Workbench {
                 self.lightbox = Some(Lightbox { title: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), source: ImageSource::from(path.clone()), path: Some(path) });
                 cx.notify();
             }
+            // `pics:<n>`: the lightbox on the nth picture (from 0) of the
+            // last prompt with more than one, as a click on it opens it;
+            // `press:right` and the rest then step through them.
+            Some(t) if t.starts_with("pics:") => {
+                let n: usize = t["pics:".len()..].parse().unwrap_or(0);
+                let ix = self.detail.as_ref().and_then(|d| d.session.rounds.iter().rposition(|r| r.attachments.iter().filter(|a| a.kind == "image").count() > 1));
+                if let Some(ix) = ix {
+                    let set = self.prompt_pictures(ix, cx);
+                    eprintln!("emaki: pics: round {ix}, {} pictures", set.len());
+                    self.open_lightbox_in(set.into_iter().map(|(_, l)| l).collect(), n, cx);
+                }
+            }
+            Some("pics") => eprintln!("emaki: pics: {} of {}", self.lightbox_at + 1, self.lightbox_set.len()),
             // Unarchive Session from a session's menu: nothing is asked.
             Some(t) if t.starts_with("unarchive:") => {
                 self.pending_unarchive = self.refs.iter().find(|r| r.session_id.starts_with(&t["unarchive:".len()..])).map(key_of);
@@ -5592,8 +5742,76 @@ impl Workbench {
             _ if self.changes.is_some() => self.close_changes(cx),
             _ if self.file_pane_shown() => self.close_file_view(cx),
             Some(key) if self.page == Page::Session && self.tabs.contains(&key) => self.close_tab(&key, window, cx),
+            // On All Sessions or Agents, the page tab.
+            _ if self.page != Page::Session && self.page != Page::New && self.page_tab => self.close_page_tab(window, cx),
             _ => self.close_window(window, cx),
         }
+    }
+
+    /// The pages' buttons' plate moves from the page that is up to `to`
+    /// when both are pages; from a session's page it is simply there.
+    pub(crate) fn note_nav(&mut self, to: Page) {
+        if let (Some(a), Some(b)) = (nav_index(self.page), nav_index(to)) {
+            if a != b {
+                let serial = self.nav_anim.map(|(_, _, n)| n + 1).unwrap_or(1);
+                self.nav_anim = Some((a, b, serial));
+            }
+        }
+    }
+
+    /// A click on the page tab: its page again, as it was left (where the
+    /// list was scrolled, which agent was open).
+    fn go_page_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.page = if self.page_last == Page::Agents { Page::Agents } else { Page::Sessions };
+        self.sidebar_peek = false;
+        self.save_ui(true);
+        cx.notify();
+    }
+
+    /// The page tab up, naming `page`. A tab already up that named the
+    /// other page changes its name over a moment; one coming up comes in
+    /// whole, name and all.
+    pub(crate) fn show_page_tab(&mut self, page: Page) {
+        if self.page_tab && self.page_last != page {
+            self.page_swap = Some((self.page_last, Instant::now()));
+        }
+        self.page_tab = true;
+        self.page_last = page;
+    }
+
+    /// The page tab put away, closing up over `TAB_ANIM`.
+    fn drop_page_tab(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.page_tab) {
+            return;
+        }
+        self.page_tab_gone = Some(Instant::now());
+        // Drawn once more when its time is up, as nothing.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TAB_ANIM + Duration::from_millis(20)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    /// How far the page tab is from gone while it closes: 1 as it starts,
+    /// 0 at the end. None when it is not closing.
+    fn page_tab_closing(&self) -> Option<f32> {
+        let at = self.page_tab_gone.filter(|_| !self.page_tab)?;
+        let t = at.elapsed().as_secs_f32() / TAB_ANIM.as_secs_f32();
+        (t < 1.).then(|| 1. - ease_out_quint()(t))
+    }
+
+    /// The page tab closed while its page was up: the session shown last
+    /// comes up, or the first tab's, or with none the new-session page.
+    fn close_page_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_page_tab(cx);
+        if self.page != Page::Session {
+            match self.last_session.clone().filter(|k| self.tabs.contains(k)).or_else(|| self.tabs.first().cloned()) {
+                Some(key) => self.open_session(&key, cx),
+                None => self.show_new(None, window, cx),
+            }
+        }
+        cx.notify();
     }
 
     pub fn close_tab(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -5616,9 +5834,14 @@ impl Workbench {
             self.detail = None;
             self.loading = None;
             self.load_task = None;
-            match self.tabs.get(ix.min(self.tabs.len().saturating_sub(1))).cloned() {
-                Some(next) if !self.tabs.is_empty() => self.open_session(&next, cx),
-                _ => self.show_new(None, window, cx),
+            // Closed from over another page (the tabs stand over every
+            // one), the page stays: only the session's own page goes on
+            // to the next tab.
+            if self.page == Page::Session {
+                match self.tabs.get(ix.min(self.tabs.len().saturating_sub(1))).cloned() {
+                    Some(next) if !self.tabs.is_empty() => self.open_session(&next, cx),
+                    _ => self.show_new(None, window, cx),
+                }
             }
         }
         self.save_ui(true);
@@ -5715,7 +5938,9 @@ impl Workbench {
             self.sessions_open.insert(p.clone());
         }
         self.sessions_goto = folder;
+        self.note_nav(Page::Sessions);
         self.page = Page::Sessions;
+        self.show_page_tab(Page::Sessions);
         self.sidebar_peek = false;
         self.save_ui(true);
         cx.notify();
@@ -6604,9 +6829,7 @@ impl Workbench {
         // is closed (`watch_terminal`).
         if self.own_terminal(&r.session_id) {
             self.come_back = Some(ComeBack { mtime: None, typed: Some(now_secs()), ..ComeBack::on_transcript(&r, self.now) });
-            std::thread::spawn(move || {
-                let _ = crate::sys::type_in_terminal(peer.pid, &text);
-            });
+            self.hub.command_in_terminal(&r.session_id, &text);
             cx.notify();
             return;
         }
@@ -7335,9 +7558,7 @@ impl Workbench {
                 // In a terminal of our own the picker is drawn here, over
                 // the composer, and goes when the pick is made.
                 if self.own_terminal(&r.session_id) {
-                    std::thread::spawn(move || {
-                        let _ = crate::sys::type_in_terminal(peer.pid, command);
-                    });
+                    self.hub.command_in_terminal(&r.session_id, command);
                     return self.show_terminal(&r.session_id, false, cx);
                 }
                 self.notice = Some(Notice::said(tf("opening {command} in the terminal…", &[("command", &command)])));
@@ -7492,7 +7713,9 @@ impl Workbench {
     /// (⌘↩) are not said. It sits where the textarea draws its own
     /// first line and takes no click.
     fn render_composer_hint(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.composer.read(cx).value().is_empty() {
+        // Not over the find card the composer's ⌘F opens at its top.
+        let composer = self.composer.read(cx);
+        if !composer.value().is_empty() || composer.search_session().open {
             return None;
         }
         let ink = cx.theme().muted_foreground;
@@ -8921,17 +9144,52 @@ impl Workbench {
         }
     }
 
-    fn open_lightbox(&mut self, lb: Lightbox, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_lightbox(&mut self, lb: Lightbox, cx: &mut Context<Self>) {
+        self.open_lightbox_in(vec![lb], 0, cx);
+    }
+
+    /// The lightbox on the picture `at` of `set`, which the arrows then
+    /// step through (`lightbox_key`). The keys go to the workbench at the
+    /// next draw: a field holding them would take the arrows for its caret.
+    pub(crate) fn open_lightbox_in(&mut self, set: Vec<Lightbox>, at: usize, cx: &mut Context<Self>) {
+        let Some(lb) = set.get(at).cloned() else { return };
         self.lightbox = Some(lb);
-        window.focus(&self.focus_handle, cx);
+        self.lightbox_set = set;
+        self.lightbox_at = at;
+        self.lightbox_from = None;
+        self.lightbox_focus = true;
+        cx.notify();
+    }
+
+    /// ← and ↑ show the picture before, → and ↓ the one after, among the
+    /// pictures the lightbox was opened on. At the first or the last a
+    /// key that would go past it does nothing: the set does not go round.
+    fn lightbox_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.lightbox.is_none() || e.keystroke.modifiers.modified() {
+            return;
+        }
+        let step: isize = match e.keystroke.key.as_str() {
+            "left" | "up" => -1,
+            "right" | "down" => 1,
+            _ => return,
+        };
+        cx.stop_propagation();
+        let to = self.lightbox_at as isize + step;
+        if to < 0 || to as usize >= self.lightbox_set.len() {
+            return;
+        }
+        self.lightbox_from = Some(self.lightbox_at);
+        self.lightbox_steps += 1;
+        self.lightbox_at = to as usize;
+        self.lightbox = self.lightbox_set.get(self.lightbox_at).cloned();
         cx.notify();
     }
 
     /// What a click on an attachment does: a picture opens large here, any
     /// other file opens in the app the system keeps for it.
-    pub fn preview_attachment(&mut self, title: String, path: Option<PathBuf>, image: Option<ImageSource>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn preview_attachment(&mut self, title: String, path: Option<PathBuf>, image: Option<ImageSource>, cx: &mut Context<Self>) {
         match image {
-            Some(source) => self.open_lightbox(Lightbox { title, source, path }, window, cx),
+            Some(source) => self.open_lightbox(Lightbox { title, source, path }, cx),
             None => {
                 if let Some(p) = path {
                     crate::sys::open_path(&p);
@@ -10049,7 +10307,8 @@ impl Workbench {
             let name = p.clone();
             // The folder itself, from the newest session that still has it.
             let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
-            let (plus_cwd, group) = (folder_cwd.clone(), SharedString::from(format!("folder-row-{p}")));
+            let (plus_cwd, row_cwd, group) = (folder_cwd.clone(), folder_cwd.clone(), SharedString::from(format!("folder-row-{p}")));
+            let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
             scroll = scroll.child(
                 h_flex()
                     .id(SharedString::from(format!("folder-{p}")))
@@ -10069,8 +10328,9 @@ impl Workbench {
                     .group(group.clone())
                     // ⌘ and a click adds the project to those chosen or
                     // takes it out, ⇧ and a click chooses from the one
-                    // last clicked to this one; neither opens it. A
-                    // plain click opens it and lets the chosen go.
+                    // last clicked to this one. A plain click begins a
+                    // session in it, what a project is clicked for most,
+                    // and lets the chosen go; its chevron opens it.
                     .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                         // The end of a rectangle's drag is not a click
                         // on the row it ended over.
@@ -10094,7 +10354,11 @@ impl Workbench {
                         this.side_marked.clear();
                         this.side_sessions.clear();
                         this.side_anchor = Some(name.clone());
-                        this.toggle_folder(&name, cx);
+                        // A folder that is gone has no session to begin.
+                        match &row_cwd {
+                            Some(cwd) => this.new_session_in(cwd, window, cx),
+                            None => this.toggle_folder(&name, cx),
+                        }
                     }))
                     .on_mouse_down(MouseButton::Right, {
                         let project = p.clone();
@@ -10121,7 +10385,43 @@ impl Workbench {
                         let (rows, name) = (self.side_rows_at.clone(), p.clone());
                         canvas(move |bounds, _, _| rows.borrow_mut().push((name, bounds, is_pinned)), |_, _, _, _| {}).absolute().inset_0()
                     })
-                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
+                    // The folder's icon, and in its place under the
+                    // pointer a chevron, which opens the folder onto its
+                    // sessions and closes it, turning as they unfold.
+                    .child({
+                        let project = p.clone();
+                        let chevron = Icon::new(IconName::ChevronRight).with_size(px(13.));
+                        let chevron = match anim {
+                            Some((opening, serial)) => chevron
+                                .with_animation(ElementId::Name(format!("folder-turn-{p}-{serial}").into()), Animation::new(FOLDER_ANIM).with_easing(ease_out_quint()), move |icon, t| {
+                                    let t = if opening { t } else { 1. - t };
+                                    icon.rotate(gpui::radians(std::f32::consts::FRAC_PI_2 * t))
+                                })
+                                .into_any_element(),
+                            None => chevron.rotate(gpui::radians(if open { std::f32::consts::FRAC_PI_2 } else { 0. })).into_any_element(),
+                        };
+                        div()
+                            .id(SharedString::from(format!("folder-fold-{p}")))
+                            .relative()
+                            .size(px(22.))
+                            .flex_shrink_0()
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(theme.muted_foreground)
+                            .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
+                            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                                swallow_click(window, cx);
+                                cx.stop_propagation();
+                                if this.side_banded() || ev.modifiers().secondary() || ev.modifiers().shift {
+                                    return;
+                                }
+                                this.toggle_folder(&project, cx);
+                            }))
+                            .child(div().group_hover(group.clone(), |s| s.opacity(0.)).child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
+                            .child(div().absolute().inset_0().flex().items_center().justify_center().opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)).child(chevron))
+                    })
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(p.clone()))
                     .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
                     // The count, and in its place under the pointer a
@@ -10195,7 +10495,6 @@ impl Workbench {
                             }),
                     ),
             );
-            let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
             if !open && anim.is_none() {
                 self.side_prev.borrow_mut().remove(&p);
                 if is_pinned {
@@ -11450,14 +11749,18 @@ impl Workbench {
     /// A right click in the conversation: Copy, for the words selected
     /// there. The text under the pointer selects its word at the same
     /// press (the vendored `inline.rs`), so what is selected is asked
-    /// once the press has been handed round.
+    /// once the press has been handed round. On a link, the whole link is
+    /// selected and the choices are its (`link_menu_items`).
     pub(crate) fn conversation_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
         window.defer(cx, move |window, cx| {
             let text = gpui_base::TextSelection::selected_text(window, cx);
-            if !text.trim().is_empty() {
-                this.update(cx, |this, cx| this.open_menu(at, vec![(phrase("Copy"), MenuDo::Copy(text))], cx));
-            }
+            let items = match link_menu_items() {
+                Some(items) => items,
+                None if !text.trim().is_empty() => vec![(phrase("Copy"), MenuDo::Copy(text))],
+                None => return,
+            };
+            this.update(cx, |this, cx| this.open_menu(at, items, cx));
         });
     }
 
@@ -11918,13 +12221,22 @@ impl Workbench {
             )
     }
 
-    /// The strip along the top of the content pane: room for the traffic
-    /// lights when the sidebar is hidden, a title in the middle, actions on
-    /// the right.
+    /// The strip along the top of a page that is not a session's: room
+    /// for the traffic lights when the sidebar is hidden, the pages'
+    /// buttons where a session has the files and outline ones, the tabs,
+    /// actions on the right.
     pub(crate) fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let center = div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title).into_any_element();
-        self.render_topbar_with(center, right, cx)
+        // The new-session page is the whole card, tabs and all.
+        if self.page == Page::New {
+            return self.render_topbar_ends(Vec::new(), div().flex_1().into_any_element(), right, cx);
+        }
+        let center = if self.tab_groups.is_empty() {
+            div().flex_1().min_w_0().text_center().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title).into_any_element()
+        } else {
+            self.render_tabs(cx)
+        };
+        self.render_topbar_ends(vec![self.page_nav(cx)], center, right, cx)
     }
 
     /// One tab per open session in the top strip: the agent's mark (turning
@@ -12011,10 +12323,30 @@ impl Workbench {
                     },
                 )
             });
-            // The pill is moved by its handle, which says whose it is.
+            // The pill is moved by its handle, which says whose it is. The
+            // page tab's stands still and wears its page's mark.
             let name = project.clone();
             let ghost = project.clone();
-            let handle = div()
+            let handle = if project == PAGE_TAB {
+                // The pages' pill wears a mark of its own where a folder's
+                // has the folder, and is moved by it as any pill is.
+                let ghost = self.page_title().to_string();
+                div()
+                    .id("pill-handle-page")
+                    .w(px(PILL_HANDLE))
+                    .h(px(TAB_H))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_grab()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.text_color(theme.foreground))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                    .when(self.page_tab, |d| d.on_drag(DragPill(PAGE_TAB.to_string()), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone()))))
+                    .child(Icon::default().path("icons/layout-dashboard.svg").with_size(px(13.)))
+            } else {
+                div()
                 .id(ElementId::Name(format!("pill-handle-{project}").into()))
                 .w(px(PILL_HANDLE))
                 .h(px(TAB_H))
@@ -12028,7 +12360,8 @@ impl Workbench {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .on_drag(DragPill(project.clone()), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone())))
                 .when(!name.starts_with('\u{0}'), |d| d.managed_tooltip(move |window, cx| crate::workbench::tip(name.clone(), window, cx)))
-                .child(Icon::new(IconName::Folder).with_size(px(13.)));
+                .child(Icon::new(IconName::Folder).with_size(px(13.)))
+            };
             let mut pill = h_flex()
                 .relative()
                 .flex_shrink_0()
@@ -12041,12 +12374,24 @@ impl Workbench {
                 .children(plate)
                 .child(handle);
         for ((key, width), shift) in keys.into_iter().zip(widths.iter().copied()).zip(shifts.iter().copied()) {
+            if key == PAGE_TAB {
+                let fresh = width.from == 0. && width.at.elapsed() < TAB_ANIM;
+                // It has its number as any tab has, in the row's order.
+                let plate = (ix < 9).then_some(ix + 1).filter(|_| hints).map(|n| tab_hint_plate(n, &theme));
+                ix += 1;
+                let slot = div().relative().h(px(TAB_H)).flex_shrink_0().child(self.render_page_tab(hints, cx)).children(plate);
+                pill = pill.child(slot.with_animation(ElementId::Name(format!("tab-w-{key}-{}", width.serial).into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    let d = d.w(px(width.now()));
+                    if fresh { d.opacity(t) } else { d }
+                }));
+                continue;
+            }
             let r = self.refs.iter().find(|r| key_of(r) == key).cloned();
             let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| t("untitled").into());
             let agent = r.as_ref().map(|r| r.agent).unwrap_or(AgentId::ClaudeCode);
             let unnamed = r.as_ref().is_some_and(|r| self.unnamed(r));
             let working = r.as_ref().map(|r| self.is_working(r)).unwrap_or(false);
-            let active = self.selected.as_deref() == Some(key.as_str());
+            let active = self.page == Page::Session && self.selected.as_deref() == Some(key.as_str());
             let dragged = self.drag_tab.as_deref() == Some(key.as_str());
             let open_key = key.clone();
             let close_key = key.clone();
@@ -12143,27 +12488,7 @@ impl Workbench {
             // row lays out and what a change of width moves.
             // The number that goes to it (`go_tab`): the first nine.
             let digit = (ix < 9).then_some(ix + 1);
-            let plate = digit.filter(|_| hints).map(|n| {
-                div().absolute().left_0().right_0().bottom(px(-8.)).flex().justify_center().child(
-                    div()
-                        .h(px(16.))
-                        .min_w(px(18.))
-                        .px(px(5.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.))
-                        .bg(theme.background)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_sm()
-                        .text_size(px(10.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.foreground)
-                        .child(n.to_string())
-                        .with_animation("tab-hint", Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()), |d, t| d.opacity(t)),
-                )
-            });
+            let plate = digit.filter(|_| hints).map(|n| tab_hint_plate(n, &theme));
             // The width is read off the clock the plate reads, so the two
             // never part by a frame.
             let slot = div().relative().h(px(TAB_H)).flex_shrink_0().child(tab).children(plate);
@@ -12178,6 +12503,25 @@ impl Workbench {
             // The wrapper stays as long as the plate's move is live: taken
             // off sooner, the plate under it is a new element and plays
             // its move again.
+            // The page tab closing: its pill is drawn closing up, the
+            // gap after it too, and takes no click.
+            // What it takes up, the gap with it, goes to nothing in step
+            // with the clock: its width and padding in proportion, since
+            // a width under the padding stays the padding's and the last
+            // pixels then closed at a crawl, and the gap by a margin as
+            // far under it (none when it stands alone).
+            if project == PAGE_TAB && !self.page_tab {
+                let full = pill_chrome(1) + widths.first().map(|w| w.now()).unwrap_or(TAB_MAX);
+                let gap = if self.tab_groups.len() > 1 { PILL_GAP } else { 0. };
+                row = row.child(pill.overflow_hidden().flex_shrink_0().with_animation(ElementId::Name("page-pill-gone".into()), Animation::new(TAB_ANIM), {
+                    let gone = self.page_tab_gone;
+                    move |d, _| {
+                        let k = gone.map(|at| 1. - ease_out_quint()((at.elapsed().as_secs_f32() / TAB_ANIM.as_secs_f32()).min(1.))).unwrap_or(0.);
+                        d.w(px(full * k)).p(px(PILL_PAD * k)).mr(px(gap * (k - 1.))).opacity(k)
+                    }
+                }));
+                continue;
+            }
             let born = self.pill_born.get(&project).copied().filter(|at| at.elapsed() < TAB_ANIM + Duration::from_millis(80));
             row = row.child(match born {
                 Some(at) => {
@@ -12200,28 +12544,164 @@ impl Workbench {
         row.into_any_element()
     }
 
-    /// The left end is room for the window's buttons (`render_strip`, and
-    /// the traffic lights) when the sidebar is not beside the content;
-    /// `right` is the page's actions. Both ends are at least 120px so the
-    /// center stays centerd when they are short.
-    fn render_topbar_with(&self, center: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_topbar_ends(Vec::new(), center, right, cx)
+    /// The name of the page the page tab stands for.
+    fn page_title(&self) -> &'static str {
+        if self.page_last == Page::Agents { t("Agents") } else { t("All Sessions") }
+    }
+
+    /// The pages' own buttons, where a session's page has the files and
+    /// outline ones: All Sessions and Agents, as one control whose plate
+    /// slides to the page gone to. A press goes there in the page tab, as
+    /// the sidebar's entries do.
+    fn page_nav(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
+        let plate_bg = if dark { theme.secondary_active } else { theme.popover };
+        let seg_h = 24.;
+        let on = nav_index(self.page);
+        let x_of = |i: usize| NAV_PAD + i as f32 * (NAV_SEG_W + NAV_GAP);
+        let (from, to, serial) = self.nav_anim.filter(|(_, to, _)| Some(*to) == on).unwrap_or((on.unwrap_or(0), on.unwrap_or(0), 0));
+        let plate = on.map(|_| {
+            let (a, b) = (x_of(from), x_of(to));
+            div().absolute().top(px(NAV_PAD)).w(px(NAV_SEG_W)).h(px(seg_h)).rounded(px(7.)).bg(plate_bg).shadow_sm().with_animation(
+                ElementId::Name(format!("page-nav-plate-{serial}").into()),
+                Animation::new(TAB_ANIM).with_easing(ease_out_quint()),
+                move |d, t| d.left(px(a + (b - a) * t)),
+            )
+        });
+        let segment = |i: usize, id: &'static str, icon: Icon, tip: String, cx: &mut Context<Self>| {
+            let active = on == Some(i);
+            h_flex()
+                .id(id)
+                .w(px(NAV_SEG_W))
+                .h(px(seg_h))
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.))
+                .cursor_pointer()
+                .text_color(if active { theme.foreground } else { theme.muted_foreground })
+                // Set on the active one too, for gpui's sake: see
+                // `panel_buttons`.
+                .hover(|s| s.text_color(theme.foreground))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                .on_click(cx.listener(move |this, _, _, cx| match i {
+                    0 => this.show_sessions(Scope::All, cx),
+                    _ => this.show_agents(None, cx),
+                }))
+                .child(icon.with_size(px(15.)))
+        };
+        h_flex()
+            .relative()
+            .flex_shrink_0()
+            .p(px(NAV_PAD))
+            .gap(px(NAV_GAP))
+            .rounded(px(9.))
+            .bg(track_bg)
+            .children(plate)
+            .child(segment(0, "page-nav-sessions", Icon::default().path("icons/scroll.svg"), format!("{} (⌘L)", t("All Sessions")), cx))
+            .child(segment(1, "page-nav-agents", Icon::default().path("icons/sparkles.svg"), format!("{} (⌘E)", t("Agents")), cx))
+            .into_any_element()
+    }
+
+    /// The page tab's own face: the page's name, quiet unless its page is
+    /// up, and a close button while there is a session to go to. A click
+    /// goes back to the page as it was left.
+    fn render_page_tab(&self, hints: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        let plate_bg = if dark { theme.secondary_active } else { theme.popover };
+        let hover_bg = plate_bg.opacity(0.5);
+        let close_bg = theme.border;
+        let active = matches!(self.page, Page::Sessions | Page::Agents);
+        let ghost = self.page_title().to_string();
+        let dragged = self.drag_tab.as_deref() == Some(PAGE_TAB);
+        h_flex()
+            .id("tab-page")
+            .size_full()
+            .pl(px(9.))
+            .pr(px(5.))
+            .gap(px(6.))
+            .items_center()
+            .rounded(px(7.))
+            .border_1()
+            .border_color(if hints { theme.border } else { gpui::transparent_black() })
+            .cursor_pointer()
+            .overflow_hidden()
+            .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
+            .when(dragged, |d| d.opacity(0.45))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+            .when(self.page_tab, |d| d.on_drag(DragTab(PAGE_TAB.to_string()), move |_, _, _, cx| cx.new(|_| TabGhost(ghost.clone()))))
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.page_tab {
+                    this.go_page_tab(window, cx)
+                }
+            }))
+            // The page's mark and name, which come in over the last page's.
+            .child({
+                let fg = if active { theme.foreground } else { theme.muted_foreground };
+                let weight = if active { FontWeight::MEDIUM } else { FontWeight::NORMAL };
+                let face = |page: Page| {
+                    let mark = if page == Page::Agents { "icons/sparkles.svg" } else { "icons/scroll.svg" };
+                    let name = if page == Page::Agents { t("Agents") } else { t("All Sessions") };
+                    h_flex()
+                        .size_full()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(Icon::default().path(mark).with_size(px(14.)).text_color(fg))
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).font_weight(weight).text_color(fg).child(name))
+                };
+                let swap = self.page_swap.filter(|(_, at)| at.elapsed() < TAB_ANIM);
+                let k = move || swap.map(|(_, at)| ease_out_quint()((at.elapsed().as_secs_f32() / TAB_ANIM.as_secs_f32()).min(1.))).unwrap_or(1.);
+                let now = face(self.page_last).with_animation(ElementId::Name(format!("page-face-{:?}", swap.map(|(_, at)| at)).into()), Animation::new(TAB_ANIM), move |d, _| d.opacity(k()));
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .children(swap.map(|(was, _)| div().absolute().inset_0().child(face(was)).with_animation(ElementId::Name(format!("page-face-was-{:?}", swap.map(|(_, at)| at)).into()), Animation::new(TAB_ANIM), move |d, _| d.opacity(1. - k()))))
+                    .child(now)
+            })
+            .map(|d| {
+                d.child(
+                    div()
+                        .id("tab-page-close")
+                        .size(px(18.))
+                        .flex_shrink_0()
+                        .rounded(px(4.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(close_bg))
+                        .managed_tooltip(|window, cx| crate::workbench::tip(t("Close Tab (⌘W)"), window, cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.close_page_tab(window, cx);
+                        }))
+                        .child(Icon::new(IconName::Close).xsmall().text_color(theme.muted_foreground)),
+                )
+            })
+            .into_any_element()
     }
 
     /// The strip with something at its left end too: the buttons there
     /// stand after the room kept for the traffic lights when the sidebar
     /// is away.
     fn render_topbar_ends(&self, left: Vec<AnyElement>, center: AnyElement, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
-        // An end with nothing at it keeps 120px so the center stays
-        // centerd; one with buttons is as wide as they are, so the tabs
-        // stand the same way off both.
-        let mut left_end = h_flex().when(left.is_empty(), |d| d.min_w(px(120.))).flex_shrink_0().items_center().gap(px(6.));
+        // Both ends are one width on every page (`STRIP_END`, the widest
+        // control either holds), so the tabs keep one center line: the
+        // page's buttons at the left, the terminal's at the right, or
+        // nothing, never move them.
+        let mut left_end = h_flex().min_w(px(STRIP_END)).flex_shrink_0().items_center().gap(px(6.));
         // The room goes as the sidebar comes, so the strip does not
         // jump at either end of it.
         let away = 1. - self.side_t();
         if away > 0. {
             let room = (self.strip_right() - px(4.) - FRAME + px(12.) - STRIP_PAD) * away;
-            left_end = if left.is_empty() { left_end.w(room.max(px(120.))) } else { left_end.pl(room) };
+            left_end = left_end.pl(room);
         }
         let left_end = left_end.children(left);
         // The card starts a frame down, and its strip ends where the
@@ -12236,7 +12716,7 @@ impl Workbench {
             .items_center()
             .child(left_end)
             .child(center)
-            .child(h_flex().when(right.is_empty(), |d| d.min_w(px(120.))).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
+            .child(h_flex().min_w(px(STRIP_END)).flex_shrink_0().justify_end().items_center().gap(px(6.)).children(right))
     }
 
     // -- the sessions page ----------------------------------------------------
@@ -13232,7 +13712,7 @@ impl Workbench {
         // word to flash by.
         let Some(detail) = &self.detail else {
             let tabs = self.render_tabs(cx);
-            return v_flex().flex_1().h_full().child(self.render_topbar_with(tabs, Vec::new(), cx)).into_any_element();
+            return v_flex().flex_1().h_full().child(self.render_topbar_ends(self.panel_buttons(cx), tabs, Vec::new(), cx)).into_any_element();
         };
         let session = detail.session.clone();
         let list = detail.list.clone();
@@ -15496,6 +15976,7 @@ impl Workbench {
                 this.focus_composer(window, cx)
             }))
             .when(!attachments.is_empty(), |d| {
+                let attachments_all = attachments.clone();
                 d.child(h_flex().flex_wrap().gap(px(6.)).pb(px(2.)).children(attachments.into_iter().enumerate().map(|(i, a)| {
                     let theme = cx.theme().clone();
                     let size = std::fs::metadata(&a.path).map(|m| m.len()).unwrap_or(0);
@@ -15525,9 +16006,21 @@ impl Workbench {
                         )
                         .on_click({
                             let picture = picture.clone();
-                            cx.listener(move |this, _, window, cx| {
+                            let set: Vec<(usize, Lightbox)> = attachments_all
+                                .iter()
+                                .zip(pictures.iter())
+                                .enumerate()
+                                .filter_map(|(j, (a, p))| p.clone().map(|p| (j, Lightbox { title: a.name.clone(), source: ImageSource::from(p), path: Some(a.path.clone()) })))
+                                .collect();
+                            cx.listener(move |this, _, _, cx| {
+                                // A picture opens among the others waiting
+                                // to be sent, and the arrows go through them.
+                                if let Some(at) = set.iter().position(|(j, _)| *j == i) {
+                                    this.open_lightbox_in(set.iter().map(|(_, l)| l.clone()).collect(), at, cx);
+                                    return;
+                                }
                                 let image = picture.clone().map(ImageSource::from);
-                                this.preview_attachment(a_title.clone(), Some(a_path.clone()), image, window, cx);
+                                this.preview_attachment(a_title.clone(), Some(a_path.clone()), image, cx);
                             })
                         })
                         .child(match picture {
@@ -15624,9 +16117,15 @@ impl Workbench {
                         }
                     }))
                     .capture_action(cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
-                        // The slash list first, then anything else open,
-                        // then the running turn: the textarea would keep
-                        // the key to itself otherwise.
+                        // The composer's find card open, the key is the
+                        // card's, with the keyboard in the card or in the
+                        // text: it closes it and goes no further. Then the
+                        // slash list, then anything else open, then the
+                        // running turn: the textarea would keep the key to
+                        // itself otherwise.
+                        if this.composer.read(cx).search_session().open {
+                            return;
+                        }
                         if this.slash_key(SlashKey::Close, window, cx) {
                             cx.stop_propagation();
                         } else if this.pick.is_some() || this.dialog_seen.is_some() || this.lightbox.is_some() || this.search_open || this.find_open || this.term_open.is_some() {
@@ -15894,7 +16393,42 @@ impl Workbench {
                 this.lightbox = None;
                 cx.notify();
             }))
-            .child(div().id("lightbox-img").occlude().on_click(|_, window, cx| swallow_click(window, cx)).max_w(gpui::relative(0.88)).max_h(gpui::relative(0.8)).rounded(px(12.)).overflow_hidden().shadow_lg().child(img(lb.source.clone()).max_w(gpui::relative(1.0)).max_h(gpui::relative(1.0)).object_fit(ObjectFit::Contain).rounded(px(12.))))
+            // Every picture of the set is drawn in one place, those not
+            // shown at nothing, so each is loaded before it is stepped to
+            // and none comes up empty. A step brings the new one in over
+            // the one left, which fades under it.
+            .child({
+                let set = if self.lightbox_set.is_empty() { vec![lb.clone()] } else { self.lightbox_set.clone() };
+                let (at, from, steps) = (self.lightbox_at.min(set.len() - 1), self.lightbox_from, self.lightbox_steps);
+                // The one shown is drawn last, over the one it fades in on.
+                let mut order: Vec<(usize, Lightbox)> = set.into_iter().enumerate().collect();
+                let top = order.remove(at);
+                order.push(top);
+                div().relative().w(gpui::relative(0.88)).h(gpui::relative(0.8)).children(order.into_iter().map(move |(i, pic)| {
+                    let shown = i == at;
+                    // The picture is the region's size and fits itself in
+                    // it whole, rounded where it is drawn. Held to a share of
+                    // a box whose height was its own, a tall one was never
+                    // held and was cut off at the region's foot.
+                    let frame = img(pic.source)
+                        .id(("lightbox-img", i))
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .rounded(px(12.))
+                        .when(shown, |d| d.occlude().on_click(|_, window, cx| swallow_click(window, cx)));
+                    let place = div().absolute().inset_0().flex().items_center().justify_center();
+                    let step = Animation::new(LIGHTBOX_STEP);
+                    if shown && from.is_some() {
+                        place.child(frame).with_animation(ElementId::Name(format!("lightbox-in-{steps}").into()), step.with_easing(ease_out_quint()), |d, t| d.opacity(t)).into_any_element()
+                    } else if shown {
+                        place.child(frame).into_any_element()
+                    } else if from == Some(i) {
+                        place.child(frame).with_animation(ElementId::Name(format!("lightbox-out-{steps}").into()), step, |d, t| d.opacity(1. - t)).into_any_element()
+                    } else {
+                        place.opacity(0.).child(frame).into_any_element()
+                    }
+                }))
+            })
             // The bar under the picture: the whole name or path, in the mono
             // face, selectable and wrapping rather than cut short, with Open
             // and Reveal when there is a file behind it.
@@ -15913,6 +16447,11 @@ impl Workbench {
                     .border_1()
                     .border_color(theme.border)
                     .shadow_md()
+                    // Which of the prompt's pictures this is, when it has
+                    // more than one: the arrows go through them.
+                    .when(self.lightbox_set.len() > 1, |d| {
+                        d.child(div().flex_shrink_0().font_family(theme.mono_font_family.clone()).text_size(px(12.5)).text_color(theme.muted_foreground).child(format!("{} / {}", self.lightbox_at + 1, self.lightbox_set.len())))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -17291,13 +17830,31 @@ impl Render for Workbench {
         for (at, how) in std::mem::take(&mut self.pending_pointer) {
             window.defer(cx, move |window, cx| {
                 window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: Modifiers::default() }), cx);
-                if let Some(dy) = how.filter(|dy| *dy != 0.) {
+                // An infinite step is a right click (`rightat:`).
+                if how == Some(f32::INFINITY) {
+                    window.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Right, position: at, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }), cx);
+                    window.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Right, position: at, modifiers: Modifiers::default(), click_count: 1 }), cx);
+                } else if let Some(dy) = how.filter(|dy| *dy != 0.) {
                     window.dispatch_event(gpui::PlatformInput::ScrollWheel(ScrollWheelEvent { position: at, delta: ScrollDelta::Pixels(point(px(0.), px(dy))), modifiers: Modifiers::default(), touch_phase: TouchPhase::Started }), cx);
                 } else if how.is_some() {
                     window.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }), cx);
                     window.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: 1 }), cx);
                 }
             });
+        }
+        for (from, to) in std::mem::take(&mut self.pending_drag) {
+            window.defer(cx, move |window, cx| {
+                window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: from, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                window.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: from, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }), cx);
+                for step in 1..=8 {
+                    let at = from + (to - from) * (step as f32 / 8.);
+                    window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: Modifiers::default() }), cx);
+                }
+                window.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: to, modifiers: Modifiers::default(), click_count: 1 }), cx);
+            });
+        }
+        if std::mem::take(&mut self.pending_seltext) {
+            window.defer(cx, |window, cx| eprintln!("emaki: selected {:?}", gpui_base::TextSelection::selected_text(window, cx)));
         }
         for key in std::mem::take(&mut self.pending_press) {
             window.defer(cx, move |window, cx| {
@@ -17308,6 +17865,9 @@ impl Render for Workbench {
         }
         if std::mem::take(&mut self.pending_tree_focus) {
             window.focus(&self.tree_focus, cx);
+        }
+        if std::mem::take(&mut self.lightbox_focus) {
+            window.focus(&self.focus_handle, cx);
         }
         // A file closed with the tree beside it: its row is still lit
         // there, so the tree's keys (⌘⌫, ⌘C, the arrows) act on it. Not
@@ -17477,6 +18037,7 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &ToggleShell, window, cx| this.toggle_term_key(false, window, cx)))
             .on_action(cx.listener(|this, _: &ReopenTab, _, cx| this.reopen_tab(cx)))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| this.rename_key(e, window, cx)))
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.lightbox_key(e, cx)))
             .on_action(cx.listener(|this, _: &ToggleAgent, window, cx| this.toggle_term_key(true, window, cx)))
             .on_action(cx.listener(|this, _: &Tab1, window, cx| this.go_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &Tab2, window, cx| this.go_tab(2, window, cx)))
@@ -17608,4 +18169,19 @@ mod term_key_tests {
             assert_eq!(bytes("ctrl-left"), Some(b"\x1b[D".to_vec()));
         }
     }
+}
+
+/// A right click's menu on a link, when the click was on one: the address
+/// first, then the words it shows, then the markdown it was written as
+/// (not offered for a link that came from HTML, which has none).
+pub(crate) fn link_menu_items() -> Option<Vec<(&'static str, MenuDo)>> {
+    let (link, words) = gpui_component::text::right_clicked_link()?;
+    let mut items = vec![(t("Copy Link"), MenuDo::CopyAs("icons/link.svg", link.url.to_string()))];
+    if !words.trim().is_empty() {
+        items.push((t("Copy Text"), MenuDo::CopyAs("icons/typography.svg", words.to_string())));
+    }
+    if let Some(raw) = link.raw.filter(|r| !r.trim().is_empty()) {
+        items.push((t("Copy Markdown"), MenuDo::CopyAs("icons/markdown.svg", raw.to_string())));
+    }
+    Some(items)
 }

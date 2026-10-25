@@ -76,6 +76,9 @@ pub struct TextView {
     find: Option<super::TextFind>,
     /// Emaki: where its headings are painted (`HeadingSpots`).
     headings: Option<super::HeadingSpots>,
+    /// Emaki: the views kept registered while drawn from a cache
+    /// (`KeptViews`).
+    kept: Option<super::KeptViews>,
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -119,6 +122,7 @@ impl TextView {
             markdown_extensions: Arc::default(),
             find: None,
             headings: None,
+            kept: None,
         }
     }
 
@@ -139,6 +143,7 @@ impl TextView {
             markdown_extensions: Arc::default(),
             find: None,
             headings: None,
+            kept: None,
         }
     }
 
@@ -159,6 +164,7 @@ impl TextView {
             markdown_extensions: Arc::default(),
             find: None,
             headings: None,
+            kept: None,
         }
     }
 
@@ -180,6 +186,11 @@ impl TextView {
     /// goes to one (`HeadingSpots`).
     pub fn headings(mut self, headings: Option<super::HeadingSpots>) -> Self {
         self.headings = headings;
+        self
+    }
+
+    pub fn kept(mut self, kept: Option<super::KeptViews>) -> Self {
+        self.kept = kept;
         self
     }
 
@@ -371,6 +382,9 @@ impl Element for TextView {
             }
         });
 
+        if let Some(kept) = &self.kept {
+            kept.note(&state);
+        }
         let focus_handle = state.read(cx).focus_handle.clone();
         let list_state = state.read(cx).list_state.clone();
 
@@ -647,8 +661,20 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        let nested_action = cx.debug_bounds("nested-code-action").unwrap();
-        let top_level_action = cx.debug_bounds("top-level-code-action").unwrap();
+        // EMAKI: a block's actions are made while the pointer is on it
+        // alone, so the pointer goes down the view and each is caught as
+        // it shows.
+        let (mut nested_action, mut top_level_action) = (None, None);
+        for y in (0..400).step_by(8) {
+            cx.simulate_mouse_move(point(px(700.), px(y as f32)), None, Modifiers::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            nested_action = nested_action.or(cx.debug_bounds("nested-code-action"));
+            top_level_action = top_level_action.or(cx.debug_bounds("top-level-code-action"));
+        }
+        let (nested_action, top_level_action) = (nested_action.unwrap(), top_level_action.unwrap());
         assert!(
             top_level_action.right() - nested_action.right() < px(32.),
             "nested code block should fill the list item's available width"

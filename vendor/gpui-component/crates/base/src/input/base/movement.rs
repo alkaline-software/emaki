@@ -310,7 +310,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let offset = self.previous_start_of_word();
+        // A selection is let go from its start going back and from its
+        // end going on, as the Mac's fields do. (Emaki addition.)
+        let offset = self.previous_start_of_word(self.selected_range.start);
         self.move_to(offset, None, cx);
     }
 
@@ -320,7 +322,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let offset = self.next_end_of_word();
+        let offset = self.next_end_of_word(self.selected_range.end);
         self.move_to(offset, None, cx);
     }
 }

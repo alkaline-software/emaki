@@ -49,6 +49,10 @@ impl TextFind {
         self.0.query.borrow().clone()
     }
 
+    pub fn case_sensitive(&self) -> bool {
+        self.0.case_sensitive.get()
+    }
+
     /// How many matches the view painted when it last painted whole.
     pub fn count(&self) -> usize {
         self.0.count.get()
@@ -164,6 +168,39 @@ fn find_in(text: &str, query: &str, case_sensitive: bool) -> Vec<Range<usize>> {
         }
     }
     out
+}
+
+/// Emaki: the text views drawn inside a view the window keeps from one
+/// frame to the next (`AnyView::cached`). A text view takes part in the
+/// window's selection by registering as it paints, and one that does not
+/// register in a frame is taken for gone: in a frame drawn from the cache
+/// nothing in it paints, so the application, which holds one of these
+/// and hands it to each view (`TextView::kept`), keeps them registered
+/// where they were (`keep`).
+#[derive(Clone, Default)]
+pub struct KeptViews(Rc<RefCell<Vec<gpui::WeakEntity<super::TextViewState>>>>);
+
+impl KeptViews {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn note(&self, state: &gpui::Entity<super::TextViewState>) {
+        let mut views = self.0.borrow_mut();
+        views.retain(|v| v.upgrade().is_some());
+        if !views.iter().any(|v| v.entity_id() == state.entity_id()) {
+            views.push(state.downgrade());
+        }
+    }
+
+    /// For a frame the views are drawn from the cache in.
+    pub fn keep(&self, window: &mut gpui::Window, cx: &mut gpui::App) {
+        let views: Vec<_> = self.0.borrow().iter().filter_map(|v| v.upgrade()).collect();
+        for view in views {
+            let adapter = view.read(cx).selection_adapter.clone();
+            adapter.keep(window, cx);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -74,7 +74,8 @@ pub(crate) struct Shells {
     /// The last `id` given.
     last: u64,
     /// The first tab has been made: an empty row after that is the
-    /// person's doing and stays empty.
+    /// person's doing and stays empty while the side shows. Brought up
+    /// again empty, the side makes one as it did at first (`term_go`).
     begun: bool,
     /// Why the last shell did not start.
     failed: Option<String>,
@@ -298,6 +299,13 @@ impl Workbench {
             if let Some(agent) = to {
                 self.side_term_agent = agent;
                 self.side_asked(crate::panels::Side::Term, cx);
+            }
+        }
+        // The shell's side brought up with no tab in it opens on a new
+        // one, as it did the first time it was looked at.
+        if to == Some(false) {
+            if let Some(set) = self.term_owner().and_then(|r| self.shells.get_mut(&r.session_id)).filter(|s| s.tabs.is_empty()) {
+                set.begun = false;
             }
         }
         self.side_term_anim = Some((from, to, Instant::now(), self.side_term_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
@@ -1642,18 +1650,21 @@ impl Workbench {
                         this.shell_new(None, cx);
                         window.focus(&this.side_term_focus, cx);
                     }))
-                    .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+                    .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                         // ⌘W, the window's own action, heard here first
                         // while the panel has the keyboard. On the shell's
                         // side it is the shell's and nothing else's: it
-                        // closes the tab showing, and with none to close
-                        // does nothing, so it never reaches a file shown or
-                        // the session's tab. On the agent's side it is the
-                        // window's.
+                        // closes the tab showing, and with none left puts
+                        // the panel away, as its button does, so it never
+                        // reaches a file shown or the session's tab. On the
+                        // agent's side it is the window's.
                         if this.term_side_agent() {
                             cx.propagate();
                         } else if let Some(id) = this.term_owner().and_then(|r| this.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
                             this.shell_close(id, cx);
+                        } else {
+                            this.term_go(None, cx);
+                            window.focus(&this.focus_handle, cx);
                         }
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.term_mouse_up(e, cx)))

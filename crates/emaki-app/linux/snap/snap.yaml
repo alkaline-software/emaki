@@ -1,0 +1,14 @@
+name: emaki
+title: Emaki
+version: '{{VERSION}}'
+summary: Every coding-agent session on this machine, kept for good
+description: |
+  Emaki keeps every Claude Code and Codex session on this machine, shows each as a conversation, searches all of them, and lets you continue one from the window.
+license: MIT
+architectures: [{{ARCH}}]
+base: core24
+confinement: classic
+grade: stable
+apps:
+  emaki:
+    command: bin/Emaki

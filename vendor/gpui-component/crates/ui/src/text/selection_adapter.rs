@@ -186,6 +186,12 @@ impl TextViewSelectionAdapter {
         self.text_bounds.clear();
     }
 
+    /// Keeps last frame's registration, for a frame the view is drawn
+    /// from a cache in (`KeptViews`). (Emaki addition.)
+    pub(super) fn keep(&self, window: &mut Window, cx: &mut App) {
+        self.selection.keep_registered(window, cx);
+    }
+
     pub(super) fn register_inline(&mut self, bounds: Vec<Bounds<Pixels>>) {
         self.text_bounds.extend(bounds);
     }

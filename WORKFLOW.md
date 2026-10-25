@@ -18,7 +18,7 @@ A `v*` tag pushed to `alkaline-software/emaki` runs `release.yml`. Six package j
 | `Emaki-linux-arm64.AppImage` | CI | n/a |
 | `Emaki-linux-arm64.deb` | CI | n/a |
 
-The names never change, so `releases/latest/download/<name>` links stay valid. The Windows feed and package carry the version and are found through the feed, whose own name is stable. The Microsoft Store's `.msix` packages are not on the release: CI keeps them with the run (`store-win-x64`, `store-win-arm64`), once the Store identity is set (see "The Microsoft Store" below). CI's own Mac images are ad-hoc signed because the signing secrets are not in the repository (see "Signing in CI" below); the notarized ones are built here by `scripts/release-mac.sh` and uploaded over them.
+The names never change, so `releases/latest/download/<name>` links stay valid. The Windows feed and package carry the version and are found through the feed, whose own name is stable. The Microsoft Store's `.msix` packages are not on the release: CI keeps them with the run (`store-win-x64`, `store-win-arm64`), once the Store identity is set (see "The Microsoft Store" below). The snaps are kept the same way (`snap-amd64`, `snap-arm64`) and go to the Snap Store (see "The Snap Store" below). CI's own Mac images are ad-hoc signed because the signing secrets are not in the repository (see "Signing in CI" below); the notarized ones are built here by `scripts/release-mac.sh` and uploaded over them.
 
 ## One-time setup on a Mac
 
@@ -212,6 +212,34 @@ gh run download <run-id> --repo alkaline-software/emaki --pattern 'store-*' --di
 ```
 
 In Partner Center, start a submission, upload both packages under Packages, fill the listing the first time (the description and screenshots), and submit. The package asks for two restricted capabilities, `runFullTrust` and `unvirtualizedResources`; for the second the submission asks why: a terminal app whose shells and agents must install into the real AppData, where the rest of the system sees what they install. Certification takes from hours to a few days. The Store updates its copies itself; the app shows no Updates in Settings there.
+
+## The Snap Store
+
+App Center warns "Potentially unsafe" about every `.deb` opened from a file, whoever made it; a snap from the Snap Store installs with no warning, and snapd keeps it current. Once:
+
+1. Sign in at snapcraft.io with an Ubuntu One account and register the name `emaki` (snapcraft.io/register-snap).
+2. Ask for classic confinement: a post in the "store-requests" category of forum.snapcraft.io, naming the snap and why. Emaki is a terminal app for coding agents: it runs the person's shell and agents, which must install and run as they do outside it, and it reads their sessions in `~/.claude` and `~/.codex`, which a strict snap cannot see. The reviewers answer on the forum, in days to a couple of weeks.
+3. The upload credentials, from any machine with snapcraft (`sudo snap install snapcraft --classic` on Ubuntu, `brew install snapcraft` on a Mac):
+
+```
+snapcraft export-login --snaps=emaki --acls package_access,package_push,package_update,package_release - | gh secret set SNAPCRAFT_STORE_CREDENTIALS --repo alkaline-software/emaki
+```
+
+4. Once classic is granted:
+
+```
+gh variable set SNAP_CHANNEL --repo alkaline-software/emaki --body stable
+```
+
+Each release run makes `emaki_amd64.snap` and `emaki_arm64.snap` and keeps them with the run (`snap-amd64`, `snap-arm64`); with the secret and the variable set it uploads both and releases them to that channel. Before then, the first upload is by hand, and waits for the classic review:
+
+```
+gh run download <run-id> --repo alkaline-software/emaki --pattern 'snap-*' --dir dist/snap
+snapcraft upload --release=stable dist/snap/snap-arm64/emaki_arm64.snap
+snapcraft upload --release=stable dist/snap/snap-amd64/emaki_amd64.snap
+```
+
+The store page (snapcraft.io/emaki) takes its icon, screenshots and links from the listing in the snap's dashboard, filled once.
 
 ## The pieces a release depends on
 

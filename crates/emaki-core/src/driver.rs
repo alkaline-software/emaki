@@ -1248,6 +1248,10 @@ pub fn child_env() -> Vec<(String, String)> {
         // launch's alone. Handed on, it reached the session's shell, and
         // a relaunch from there opened on the same page for ever.
         .filter(|(k, _)| !ONE_LAUNCH.contains(&k.as_str()))
+        // snapd's word to the snap that it is one (`SNAP`, `SNAP_NAME`…)
+        // is the app's: a shell or an agent started from it is not in a
+        // snap, and a tool that reads them takes it to be.
+        .filter(|(k, _)| !(crate::update::in_snap() && k.starts_with("SNAP")))
         .collect()
 }
 

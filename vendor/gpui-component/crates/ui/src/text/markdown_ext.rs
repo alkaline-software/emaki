@@ -179,6 +179,13 @@ type ParseOptionsFn = dyn Fn(&mut ParseOptions) + Send + Sync;
 #[derive(Clone, Default)]
 pub struct MarkdownExtensions {
     enable_mdx: bool,
+    /// Quarto's syntax over the markdown: fenced divs, attributes on
+    /// headings, pictures and spans, raw blocks, shortcodes
+    /// (`format/quarto.rs`). (Emaki addition.)
+    quarto: bool,
+    /// The caller's math typesetter, for Quarto's math (`text/math.rs`).
+    /// (Emaki addition.)
+    math: Option<super::math::MathFace>,
     parse_options_with: Option<Arc<ParseOptionsFn>>,
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
@@ -194,6 +201,28 @@ impl MarkdownExtensions {
         self.enable_mdx = true;
         self.bump_revision();
         self
+    }
+
+    /// Read Quarto's syntax too. (Emaki addition.)
+    pub fn quarto(mut self) -> Self {
+        self.quarto = true;
+        self.bump_revision();
+        self
+    }
+
+    pub(crate) fn is_quarto(&self) -> bool {
+        self.quarto
+    }
+
+    /// Set Quarto's math with `face`, as pictures. (Emaki addition.)
+    pub fn math(mut self, face: super::math::MathFace) -> Self {
+        self.math = Some(face);
+        self.bump_revision();
+        self
+    }
+
+    pub(crate) fn math_face(&self) -> Option<&super::math::MathFace> {
+        self.math.as_ref()
     }
 
     /// Change the parse options over GFM's (and MDX's, when enabled): turn
@@ -286,6 +315,11 @@ impl MarkdownExtensions {
             options.constructs.mdx_expression_text = true;
             options.constructs.mdx_jsx_flow = true;
             options.constructs.mdx_jsx_text = true;
+        }
+        if self.quarto {
+            // Quarto's math: `$…$` in a line, `$$` on lines of their own.
+            options.constructs.math_text = true;
+            options.constructs.math_flow = true;
         }
         if let Some(change) = &self.parse_options_with {
             change(&mut options);

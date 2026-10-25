@@ -62,11 +62,17 @@ pub fn asset_name() -> Option<&'static str> {
     }
 }
 
-/// Whether this copy came from the Microsoft Store, which keeps it
-/// current itself: Windows runs a Store package from its own folder,
-/// `WindowsApps`, and nothing here updates it.
+/// Whether this copy came from a store that keeps it current itself, and
+/// nothing here updates it: the Microsoft Store (Windows runs a Store
+/// package from its own folder, `WindowsApps`) or the Snap Store (snapd
+/// starts a snap with `SNAP_NAME` set, `in_snap`).
 pub fn from_store() -> bool {
-    cfg!(windows) && std::env::current_exe().is_ok_and(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps")))
+    (cfg!(windows) && std::env::current_exe().is_ok_and(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps")))) || in_snap()
+}
+
+/// Whether this copy is the snap, started by snapd.
+pub fn in_snap() -> bool {
+    cfg!(target_os = "linux") && std::env::var("SNAP_NAME").is_ok_and(|n| n == "emaki")
 }
 
 /// The project's own page.

@@ -62,6 +62,17 @@ gridcraft-xlsx = { git = "https://github.com/storytold/gridcraft", rev = "b3acae
 # written with; all but zstd are Rust.
 parquet = { version = "60", default-features = false, features = ["snap", "flate2", "flate2-rust_backened", "lz4", "zstd", "brotli"] }
 
+# Math in a document set as Typst sets it (`math.rs`): Typst's own
+# compiler and its SVG export, and MiTeX, which writes LaTeX math as
+# Typst's. Typst's parser reads a `.typ` file for showing (`typst_doc.rs`).
+typst = "0.15.1"
+typst-layout = "0.15.1"
+typst-svg = "0.15.1"
+typst-syntax = "0.15.1"
+mitex = "0.2.4"
+# The math face's spaces' widths, read as Typst reads its fonts.
+ttf-parser = "0.25"
+
 # Probing a pid (the inbox registry) is a Unix signal; a file's identity on
 # Windows needs the NTFS file index, which std does not expose on stable.
 [target.'cfg(unix)'.dependencies]

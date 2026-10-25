@@ -54,8 +54,21 @@ pub(crate) enum BlockNode {
         level: u8,
         children: Paragraph,
         span: Option<Span>,
+        /// Quarto's attributes after the words (`## Title {.class}`), as
+        /// written, braces and all: words of the document's own, so they
+        /// select and copy with the rest. (Emaki addition.)
+        attrs: Option<Paragraph>,
     },
     Blockquote {
+        children: Vec<BlockNode>,
+        span: Option<Span>,
+    },
+    /// A Quarto fenced div (`::: {.class}` … `:::`): what it holds, its
+    /// attributes, and them as written, for the chip that shows them.
+    /// (Emaki addition.)
+    Div {
+        attrs: DivAttrs,
+        chip: Paragraph,
         children: Vec<BlockNode>,
         span: Option<Span>,
     },
@@ -122,6 +135,7 @@ impl BlockNode {
             BlockNode::Paragraph(paragraph) => paragraph.span,
             BlockNode::Heading { span, .. } => *span,
             BlockNode::Blockquote { span, .. } => *span,
+            BlockNode::Div { span, .. } => *span,
             BlockNode::List { span, .. } => *span,
             BlockNode::ListItem { span, .. } => *span,
             BlockNode::CodeBlock(code_block) => code_block.span,
@@ -171,13 +185,18 @@ impl BlockNode {
                 }
             }
             BlockNode::Heading {
-                level, children, ..
+                level, children, attrs, ..
             } => {
-                let block_text = match kind {
-                    BlockTextKind::All => children.text(),
-                    BlockTextKind::Selected => children.selected_text(),
-                    BlockTextKind::SelectedSource => children.selected_source(),
+                let of = |p: &Paragraph| match kind {
+                    BlockTextKind::All => p.text(),
+                    BlockTextKind::Selected => p.selected_text(),
+                    BlockTextKind::SelectedSource => p.selected_source(),
                 };
+                let mut block_text = of(children);
+                // Its attributes after it, as the line is written.
+                if let Some(chip) = attrs.as_ref().map(of).filter(|c| !c.is_empty()) {
+                    block_text = if block_text.is_empty() { chip } else { format!("{} {chip}", block_text.trim_end()) };
+                }
                 if !block_text.is_empty() {
                     // In source mode, prefix the heading marker so a selected
                     // heading round-trips as Markdown (e.g. `## Title`).
@@ -202,6 +221,25 @@ impl BlockNode {
             }
             BlockNode::ListItem { children, .. } => {
                 text.push_str(&Self::children_text(children, kind));
+            }
+            BlockNode::Div { attrs, chip, children, .. } => {
+                let block_text = Self::children_text(children, kind);
+                let chip_text = match kind {
+                    BlockTextKind::All => chip.text(),
+                    BlockTextKind::Selected => chip.selected_text(),
+                    BlockTextKind::SelectedSource => chip.selected_source(),
+                };
+                if matches!(kind, BlockTextKind::SelectedSource) && !block_text.is_empty() {
+                    text.push_str(&format!("::: {{{}}}\n", attrs.text));
+                    text.push_str(&block_text);
+                    text.push_str(":::\n");
+                } else {
+                    if !chip_text.is_empty() && !attrs.has_class(crate::text::format::quarto::MATH_CLASS) {
+                        text.push_str(&chip_text);
+                        text.push('\n');
+                    }
+                    text.push_str(&block_text);
+                }
             }
             BlockNode::Blockquote { children, .. } => {
                 let block_text = Self::children_text(children, kind);
@@ -309,6 +347,7 @@ impl BlockNode {
     /// why it counts (see [`ParsedDocument::selected_text`]).
     pub(super) fn has_selection(&self) -> bool {
         match self {
+            BlockNode::Div { chip, children, .. } => chip.has_selection() || children.iter().any(|child| child.has_selection()),
             BlockNode::Root { children, .. }
             | BlockNode::Blockquote { children, .. }
             | BlockNode::List { children, .. }
@@ -316,7 +355,7 @@ impl BlockNode {
                 children.iter().any(|child| child.has_selection())
             }
             BlockNode::Paragraph(paragraph) => paragraph.has_selection(),
-            BlockNode::Heading { children, .. } => children.has_selection(),
+            BlockNode::Heading { children, attrs, .. } => children.has_selection() || attrs.as_ref().is_some_and(|a| a.has_selection()),
             BlockNode::Table(table) => table.children.iter().any(|row| {
                 row.children
                     .iter()
@@ -333,6 +372,12 @@ impl BlockNode {
 
     pub(super) fn clear_selection(&self) {
         match self {
+            BlockNode::Div { chip, children, .. } => {
+                chip.clear_selection();
+                for child in children.iter() {
+                    child.clear_selection();
+                }
+            }
             BlockNode::Root { children, .. }
             | BlockNode::Blockquote { children, .. }
             | BlockNode::List { children, .. }
@@ -342,7 +387,12 @@ impl BlockNode {
                 }
             }
             BlockNode::Paragraph(paragraph) => paragraph.clear_selection(),
-            BlockNode::Heading { children, .. } => children.clear_selection(),
+            BlockNode::Heading { children, attrs, .. } => {
+                children.clear_selection();
+                if let Some(attrs) = attrs {
+                    attrs.clear_selection();
+                }
+            }
             BlockNode::Table(table) => {
                 for row in table.children.iter() {
                     for cell in row.children.iter() {
@@ -367,6 +417,9 @@ pub struct LinkMark {
     /// Optional identifier for footnotes.
     pub identifier: Option<SharedString>,
     pub title: Option<SharedString>,
+    /// The link as written in the markdown, for a menu's Copy Markdown.
+    /// (Emaki addition.)
+    pub raw: Option<SharedString>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -381,9 +434,18 @@ pub struct TextMark {
     /// `None` means the text is not highlighted.
     pub highlight: Option<Hsla>,
     pub link: Option<LinkMark>,
+    /// Quarto's own syntax shown as a quiet chip in the mono face: an
+    /// attribute set, a shortcode not resolved. (Emaki addition.)
+    pub attr: bool,
 }
 
 impl TextMark {
+    pub fn attr(mut self) -> Self {
+        self.attr = true;
+        self.code = true;
+        self
+    }
+
     pub fn bold(mut self) -> Self {
         self.bold = true;
         self
@@ -426,6 +488,7 @@ impl TextMark {
         self.strikethrough |= other.strikethrough;
         self.underline |= other.underline;
         self.code |= other.code;
+        self.attr |= other.attr;
         if other.highlight.is_some() {
             self.highlight = other.highlight;
         }
@@ -448,6 +511,76 @@ impl From<Span> for ElementId {
     }
 }
 
+/// Where a figure stands: Quarto's `fig-align`. (Emaki addition.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// The attributes of a Quarto fenced div, heading, picture or span, as
+/// Pandoc writes them: `{#id .class key="value"}`. (Emaki addition.)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DivAttrs {
+    pub id: Option<SharedString>,
+    pub classes: Vec<SharedString>,
+    pub pairs: Vec<(SharedString, SharedString)>,
+    /// As written inside the braces.
+    pub text: SharedString,
+}
+
+impl DivAttrs {
+    /// `{#id .class key="value" key2=value2}`, or a bare class name as a
+    /// fence may give one (`::: warning`).
+    pub fn parse(text: &str) -> Self {
+        let inner = text.trim();
+        let inner = inner.strip_prefix('{').and_then(|t| t.strip_suffix('}')).unwrap_or(inner).trim();
+        let mut attrs = DivAttrs { text: inner.to_string().into(), ..Default::default() };
+        let mut rest = inner;
+        while !rest.is_empty() {
+            let end = word_end(rest);
+            let word = &rest[..end];
+            rest = rest[end..].trim_start();
+            if let Some(id) = word.strip_prefix('#') {
+                attrs.id = Some(id.to_string().into());
+            } else if let Some(class) = word.strip_prefix('.') {
+                attrs.classes.push(class.to_string().into());
+            } else if let Some((k, v)) = word.split_once('=') {
+                let v = v.trim_matches(|c| c == '"' || c == '\'');
+                attrs.pairs.push((k.to_string().into(), v.to_string().into()));
+            } else if !word.is_empty() {
+                attrs.classes.push(word.to_string().into());
+            }
+        }
+        attrs
+    }
+
+    pub fn has_class(&self, class: &str) -> bool {
+        self.classes.iter().any(|c| c == class)
+    }
+
+    pub fn value(&self, key: &str) -> Option<&str> {
+        self.pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_ref())
+    }
+}
+
+/// Where the first word of an attribute list ends: at a space outside
+/// quotes.
+fn word_end(text: &str) -> usize {
+    let mut quote: Option<char> = None;
+    for (ix, c) in text.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c.is_whitespace() => return ix,
+            None => {}
+        }
+    }
+    text.len()
+}
+
 #[allow(unused)]
 #[derive(Debug, Default, Clone)]
 pub struct ImageNode {
@@ -457,6 +590,12 @@ pub struct ImageNode {
     pub alt: Option<SharedString>,
     pub width: Option<DefiniteLength>,
     pub height: Option<DefiniteLength>,
+    /// Where a figure stands in its line, from Quarto's `fig-align`.
+    /// (Emaki addition.)
+    pub align: Option<ImageAlign>,
+    /// The words under a figure: Quarto's, the alt text of a picture
+    /// standing alone. (Emaki addition.)
+    pub caption: Option<SharedString>,
 }
 
 impl ImageNode {
@@ -475,6 +614,8 @@ impl PartialEq for ImageNode {
             && self.title == other.title
             && self.alt == other.alt
             && self.width == other.width
+            && self.align == other.align
+            && self.caption == other.caption
             && self.height == other.height
     }
 }
@@ -486,13 +627,16 @@ pub(crate) struct InlineNode {
     pub(crate) image: Option<ImageNode>,
     /// The text styles, each tuple contains the range of the text and the style.
     pub(crate) marks: Vec<(Range<usize>, TextMark)>,
+    /// A formula: its text is the room its picture is painted over, or
+    /// its words where it has none (`text/math.rs`). (Emaki addition.)
+    pub(crate) math: Option<Arc<super::math::MathSource>>,
 
     state: Arc<Mutex<InlineState>>,
 }
 
 impl PartialEq for InlineNode {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text && self.image == other.image && self.marks == other.marks
+        self.text == other.text && self.image == other.image && self.marks == other.marks && self.math == other.math
     }
 }
 
@@ -585,6 +729,11 @@ fn emit_run(
         }
         selected.emitted = true;
 
+        // A formula is copied as it was written. (Emaki addition.)
+        if let Some(math) = &child.math {
+            out.push_str(&math.markdown());
+            continue;
+        }
         out.push_str(&reconstruct_markdown(
             &child.text,
             &child.marks,
@@ -593,6 +742,32 @@ fn emit_run(
     }
 
     selected
+}
+
+/// The selected words of one rendered run, a formula as it was written.
+/// (Emaki addition.)
+fn selected_run_text(state: &Arc<Mutex<InlineState>>, run: &[(usize, &InlineNode)], out: &mut String) {
+    let Ok(state) = state.lock() else { return };
+    let Some(selection) = &state.selection else { return };
+    let (lo, hi) = (selection.start.min(state.text.len()), selection.end.min(state.text.len()));
+    if lo >= hi {
+        return;
+    }
+    if run.iter().all(|(_, c)| c.math.is_none()) {
+        out.push_str(&state.text[lo..hi]);
+        return;
+    }
+    for (start, child) in run {
+        let end = start + child.text.len();
+        let (a, b) = (lo.max(*start), hi.min(end));
+        if a >= b {
+            continue;
+        }
+        match &child.math {
+            Some(math) => out.push_str(&math.markdown()),
+            None => out.push_str(state.text.get(a..b).unwrap_or_default()),
+        }
+    }
 }
 
 /// The Markdown source for an inline image, e.g. `![alt](url "title")`.
@@ -792,8 +967,15 @@ impl InlineNode {
             text: text.into(),
             image: None,
             marks: vec![],
+            math: None,
             state: Arc::new(Mutex::new(InlineState::default())),
         }
+    }
+
+    /// The node is this formula. (Emaki addition.)
+    pub(crate) fn with_math(mut self, math: super::math::MathSource) -> Self {
+        self.math = Some(Arc::new(math));
+        self
     }
 
     pub(crate) fn image(image: ImageNode) -> Self {
@@ -844,22 +1026,22 @@ impl Paragraph {
 
     pub(super) fn selected_text(&self) -> String {
         let mut text = String::new();
-
+        // Walked in the runs [`Paragraph::render`] draws, as
+        // `selected_source` walks them, so a formula's room is read as the
+        // formula. (Emaki: the runs.)
+        let mut run: Vec<(usize, &InlineNode)> = Vec::new();
+        let mut offset = 0;
         for c in self.children.iter() {
-            let Ok(state) = c.state.lock() else {
+            if c.image.is_none() {
+                run.push((offset, c));
+                offset += c.text.len();
                 continue;
-            };
-            if let Some(selection) = &state.selection {
-                text.push_str(&state.text[selection.start..selection.end]);
             }
+            selected_run_text(&c.state, &run, &mut text);
+            run.clear();
+            offset = 0;
         }
-
-        if let Ok(state) = self.state.lock()
-            && let Some(selection) = &state.selection
-        {
-            text.push_str(&state.text[selection.start..selection.end]);
-        }
-
+        selected_run_text(&self.state, &run, &mut text);
         text
     }
 
@@ -1069,6 +1251,72 @@ pub struct CodeBlock {
     pub span: Option<Span>,
 }
 
+/// The icon of a chunk's language, by its file's name in the caller's
+/// set (`TextViewStyle::chunk_icons`). (Emaki addition.)
+fn chunk_icon(lang: Option<&str>) -> Option<&'static str> {
+    let inner = lang?.strip_prefix('{')?.trim_end_matches('}');
+    let word = inner.trim_start_matches('=').split(|c: char| c == ',' || c.is_whitespace()).next()?.trim().to_ascii_lowercase();
+    Some(match word.as_str() {
+        "r" => "r",
+        "python" | "py" => "python",
+        "julia" | "jl" => "julia",
+        "ojs" | "js" | "javascript" | "node" => "javascript",
+        "mermaid" => "mermaid",
+        "dot" | "graphviz" => "graphviz",
+        "bash" | "sh" | "zsh" | "shell" => "bash",
+        "sql" => "sql",
+        "html" => "html",
+        "css" => "css",
+        "latex" | "tex" => "latex",
+        "typst" => "typst",
+        "stata" => "stata",
+        "rust" => "rust",
+        "c" => "c",
+        "cpp" | "rcpp" => "cpp",
+        "go" => "go",
+        "java" => "java",
+        "swift" => "swift",
+        "md" | "markdown" | "asis" => "markdown",
+        _ => "code",
+    })
+}
+
+/// The name a Quarto chunk's language is shown under: `{r}` R,
+/// `{python}` Python, a raw block (`{=latex}`) its format. None for a
+/// block of code that is not a chunk. (Emaki addition.)
+fn chunk_label(lang: Option<&str>) -> Option<String> {
+    let inner = lang?.strip_prefix('{')?.trim_end_matches('}');
+    let word = inner.trim_start_matches('=').split(|c: char| c == ',' || c.is_whitespace()).next()?.trim();
+    if word.is_empty() {
+        return None;
+    }
+    let name = match word.to_ascii_lowercase().as_str() {
+        "r" => "R",
+        "python" | "py" => "Python",
+        "julia" | "jl" => "Julia",
+        "ojs" => "OJS",
+        "mermaid" => "Mermaid",
+        "dot" => "Graphviz",
+        "bash" | "sh" | "zsh" => "Bash",
+        "sql" => "SQL",
+        "html" => "HTML",
+        "latex" | "tex" => "LaTeX",
+        "typst" => "Typst",
+        "openxml" => "OpenXML",
+        "rst" => "reStructuredText",
+        "css" => "CSS",
+        "js" | "javascript" => "JavaScript",
+        "stata" => "Stata",
+        "sas" => "SAS",
+        _ => {
+            let mut chars = word.chars();
+            let first = chars.next()?.to_uppercase().collect::<String>();
+            return Some(format!("{first}{}", chars.as_str()));
+        }
+    };
+    Some(name.to_string())
+}
+
 impl PartialEq for CodeBlock {
     fn eq(&self, other: &Self) -> bool {
         self.lang == other.lang && self.code() == other.code() && self.span == other.span
@@ -1239,38 +1487,72 @@ impl CodeBlock {
         // way, as a text field does. (Emaki addition.)
         let drag_key = SharedString::from(format!("codeblock-drag-{:p}", Arc::as_ptr(&self.state)));
         let drag = window.use_keyed_state(drag_key, cx, |_, _| CodeDrag::default());
+        // The actions are made for the block under the pointer only: made
+        // for every block, a document of a hundred chunks built a button
+        // for each of them every frame, a quarter of the frame's time.
+        // (Emaki addition.)
+        let pointed = node_cx.code_block_actions.is_some().then(|| window.use_keyed_state(SharedString::from(format!("codeblock-hover-{:p}", Arc::as_ptr(&self.state))), cx, |_, _| false));
+        // A Quarto chunk folds by itself (Emaki addition): a head row,
+        // its chevron and its language, stays, and what is under it
+        // closes up to it over a moment, off the chunk's own clock. The
+        // fold is kept by what the chunk says, so a file read again keeps
+        // its folds.
+        let label = chunk_label(self.lang.as_deref());
+        let fold = label.as_ref().map(|_| {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.lang.hash(&mut h);
+            self.code().hash(&mut h);
+            let key = SharedString::from(format!("chunk-fold-{:x}", h.finish()));
+            window.use_keyed_state(key, cx, |_, _| ChunkFold::default())
+        });
+        let (open, shown, body_h) = match &fold {
+            Some(f) => {
+                let f = f.read(cx);
+                if f.at.is_some_and(|at| at.elapsed() < CHUNK_FOLD) {
+                    window.request_animation_frame();
+                }
+                (f.open, f.shown(), f.height.clone())
+            }
+            None => (true, 1., std::rc::Rc::new(std::cell::Cell::new(0.))),
+        };
+        let head = label.map(|label| {
+            let [fold_tip, unfold_tip] = style.chunk_words.clone();
+            let icon = (!style.chunk_icons.is_empty()).then(|| chunk_icon(self.lang.as_deref())).flatten().map(|id| SharedString::from(format!("{}/{id}.svg", style.chunk_icons)));
+            let tip = if open { fold_tip } else { unfold_tip };
+            let fold = fold.clone().unwrap();
+            div()
+                .id("chunk-head")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.))
+                .cursor_pointer()
+                .font_family(cx.theme().font_family.clone())
+                .text_size(px(11.5))
+                .line_height(px(16.))
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| s.text_color(cx.theme().foreground))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| {
+                    gpui_base::TextSelection::end(window, cx);
+                    cx.stop_propagation();
+                    fold.update(cx, |f, cx| {
+                        f.toggle();
+                        cx.notify();
+                    });
+                    window.refresh();
+                })
+                .child(
+                    crate::Sizable::with_size(crate::Icon::new(crate::IconName::ChevronDown), px(12.))
+                        .rotate(gpui::Radians(-std::f32::consts::FRAC_PI_2 * (1. - shown))),
+                )
+                .children(icon.map(|path| gpui::img(path).size(px(13.)).flex_shrink_0()))
+                .child(label)
+        });
 
-        div()
-            .w_full()
-            .min_w_0()
-            .when(!options.is_last, |this| this.pb(style.paragraph_gap))
-            .child(
-                div()
-                    .id(("codeblock", options.ix))
-                    // EMAKI: the actions show while the pointer is on the
-                    // block, and not all the time.
-                    .group("codeblock")
-                    .w_full()
-                    .min_w_0()
-                    .p_3()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().tokens.muted)
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(cx.theme().mono_font_size)
-                    .relative()
-                    .refine_style(&style.code_block)
-                    // A line of code is not wrapped: what is set out in
-                    // columns (a table, a drawing, a mock of a screen)
-                    // came apart where a line was broken. A block wider
-                    // than its room scrolls sideways, and only when the
-                    // gesture is sideways, so a wheel over it still moves
-                    // what it is in (`horizontal_scroll_area`, as a table
-                    // has). Where more lies past an edge the
-                    // text fades into the block's ground there, and the
-                    // scrollbar shows under the pointer: cut off clean,
-                    // a line read as all there was. (Emaki addition.)
-                    .whitespace_nowrap()
-                    .child({
+        let code = {
                         let scroll = scroll.clone();
                         let (at, most) = (-scroll.offset().x, scroll.max_offset().x);
                         let ground = cx.theme().muted;
@@ -1307,11 +1589,73 @@ impl CodeBlock {
                             .when(at > px(1.), |d| d.child(fade(true)))
                             .when(most - at > px(1.), |d| d.child(fade(false)))
                             .child(code_drag(drag.clone(), scroll.clone()).absolute().inset_0())
-                    })
+                    };
+        // What folds: the code, and the room between it and the head.
+        // Measured as it is drawn, so a fold closes from the height it had.
+        let body = {
+            let height = body_h.clone();
+            div()
+                .w_full()
+                .min_w_0()
+                .flex_shrink_0()
+                .relative()
+                .when(fold.is_some(), |d| d.pt_2())
+                .child(code)
+                .child(gpui::canvas(move |bounds, _, _| height.set(f32::from(bounds.size.height)), |_, _, _, _| {}).absolute().inset_0())
+        };
+        let body = if shown >= 1. {
+            body.into_any_element()
+        } else {
+            div().w_full().min_w_0().h(px(body_h.get() * shown)).overflow_hidden().opacity(shown).child(body).into_any_element()
+        };
+
+        let block = div()
+            .w_full()
+            .min_w_0()
+            .flex_shrink_0()
+            .when(!options.is_last, |this| this.pb(style.paragraph_gap))
+            .child(
+                div()
+                    .id(("codeblock", options.ix))
+                    // EMAKI: the actions show while the pointer is on the
+                    // block, and not all the time.
+                    .group("codeblock")
+                    .w_full()
+                    .min_w_0()
+                    .p_3()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().tokens.muted)
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(cx.theme().mono_font_size)
+                    .relative()
+                    .refine_style(&style.code_block)
+                    // A line of code is not wrapped: what is set out in
+                    // columns (a table, a drawing, a mock of a screen)
+                    // came apart where a line was broken. A block wider
+                    // than its room scrolls sideways, and only when the
+                    // gesture is sideways, so a wheel over it still moves
+                    // what it is in (`horizontal_scroll_area`, as a table
+                    // has). Where more lies past an edge the
+                    // text fades into the block's ground there, and the
+                    // scrollbar shows under the pointer: cut off clean,
+                    // a line read as all there was. (Emaki addition.)
+                    .whitespace_nowrap()
+                    .children(head)
+                    .when(shown > 0., |d| d.child(body))
                     // On the block and not on the text's own box: there
                     // it lay over the last line.
-                    .horizontal_scrollbar(&scroll)
-                    .when_some(node_cx.code_block_actions.clone(), |this, actions| {
+                    .when(open, |d| d.horizontal_scrollbar(&scroll))
+                    .when_some(pointed.clone(), |d, pointed| {
+                        d.on_hover(move |on, _, cx| {
+                            pointed.update(cx, |was, cx| {
+                                if *was != *on {
+                                    *was = *on;
+                                    cx.notify();
+                                }
+                            })
+                        })
+                    })
+                    .when_some(node_cx.code_block_actions.clone().filter(|_| pointed.as_ref().is_some_and(|p| *p.read(cx))), |this, actions| {
                         this.child(
                             div()
                                 .id("actions")
@@ -1325,8 +1669,63 @@ impl CodeBlock {
                                 .child(actions(&self, window, cx)),
                         )
                     }),
-            )
-            .into_any_element()
+            );
+        block.into_any_element()
+    }
+}
+
+/// How long a tabset's plate and content take to change. (Emaki addition.)
+const TABSET_ANIM: std::time::Duration = std::time::Duration::from_millis(220);
+
+/// A tabset's choice: the tab shown, the one before it and when that
+/// changed, the content's height then and as last drawn, and where each
+/// tab stands in its track (left and width). (Emaki addition.)
+#[derive(Default)]
+struct TabSet {
+    at: usize,
+    from: usize,
+    when: Option<std::time::Instant>,
+    from_h: f32,
+    height: std::rc::Rc<std::cell::Cell<f32>>,
+    spots: std::rc::Rc<RefCell<Vec<(f32, f32)>>>,
+    track_x: std::rc::Rc<std::cell::Cell<f32>>,
+}
+
+/// How long a chunk takes to fold or open. (Emaki addition.)
+const CHUNK_FOLD: std::time::Duration = std::time::Duration::from_millis(220);
+
+/// A chunk's fold: whether it is open, when that last changed, and the
+/// height of what folds as last drawn. Open at first. (Emaki addition.)
+struct ChunkFold {
+    open: bool,
+    at: Option<std::time::Instant>,
+    height: std::rc::Rc<std::cell::Cell<f32>>,
+}
+
+impl Default for ChunkFold {
+    fn default() -> Self {
+        Self { open: true, at: None, height: Default::default() }
+    }
+}
+
+impl ChunkFold {
+    /// How much of what folds shows now: 1 all, 0 none.
+    fn shown(&self) -> f32 {
+        let t = self.at.map(|at| (at.elapsed().as_secs_f32() / CHUNK_FOLD.as_secs_f32()).min(1.)).unwrap_or(1.);
+        let e = gpui::ease_out_quint()(t);
+        if self.open { e } else { 1. - e }
+    }
+
+    /// Fold or open. Turned back on the way, it goes on from where it is:
+    /// its clock set back to the moment that share was reached.
+    fn toggle(&mut self) {
+        let was = self.shown();
+        self.open = !self.open;
+        let left = if self.open { was } else { 1. - was };
+        // ease_out_quint is 1 - (1 - t)^5; this is the t it gives `left` at.
+        let back = CHUNK_FOLD.mul_f32(1. - (1. - left.clamp(0., 1.)).powf(0.2));
+        let now = std::time::Instant::now();
+        self.at = Some(now.checked_sub(back).unwrap_or(now));
     }
 }
 
@@ -1412,6 +1811,9 @@ pub(crate) struct NodeContext {
     pub(crate) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     pub(crate) link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
+    /// The markdown being parsed, which node positions count in: a link
+    /// keeps what it was written as. (Emaki addition.)
+    pub(crate) source: Option<Arc<str>>,
 }
 
 impl NodeContext {
@@ -1439,6 +1841,7 @@ impl Paragraph {
                 self.inline_flow_items(node_cx, cx),
                 node_cx.link_click_handler.clone(),
             )
+            .with_math_family(node_cx.markdown_extensions.math_face().map(|f| f.family.clone()))
             .into_any_element();
         }
 
@@ -1449,8 +1852,52 @@ impl Paragraph {
         // The inline code spans, in the same offsets as `highlights`, for
         // the mono face `Inline` gives them. (Emaki addition.)
         let mut code_ranges: Vec<Range<usize>> = vec![];
+        // Quarto's attribute chips, apart: their plate is the quiet one.
+        // (Emaki addition.)
+        let mut attr_ranges: Vec<Range<usize>> = vec![];
+        let attr_chip = (cx.theme().muted, cx.theme().border);
+        // Formulas: their rooms and pictures, and the face the rooms are
+        // set in. (Emaki addition.)
+        let math_family = node_cx.markdown_extensions.math_face().map(|f| f.family.clone());
+        let mut math_items: Vec<(Range<usize>, crate::text::math::MathPicture, bool)> = vec![];
         let mut links: Vec<(Range<usize>, LinkMark)> = vec![];
         let mut offset = 0;
+
+        // A formula alone on a line of its own: the line as tall as its
+        // picture, centered, its number at the right. (Emaki addition.)
+        if let [only] = children.as_slice() {
+            if let Some(math) = only.math.as_ref().filter(|m| m.display) {
+                if let Some(picture) = math.picture.clone() {
+                    let text: SharedString = only.text.clone();
+                    if let Ok(mut state) = self.state.lock() {
+                        state.set_text(text.clone());
+                    }
+                    let room = 0..text.len();
+                    let clear = HighlightStyle { color: Some(gpui::transparent_black()), ..Default::default() };
+                    let line = Inline::new(0, self.state.clone(), vec![], vec![(room.clone(), clear)], node_cx.link_click_handler.clone())
+                        .with_math(math_family, vec![(room, picture.clone(), true)]);
+                    let tag = math.tag.clone().map(|t| div().pl_4().flex_shrink_0().whitespace_nowrap().child(format!("({t})")));
+                    return div()
+                        .id(span.unwrap_or_default())
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .id("math-room")
+                                .min_w_0()
+                                .overflow_x_scroll()
+                                .line_height(relative(picture.height + 0.5))
+                                .whitespace_nowrap()
+                                .child(line),
+                        )
+                        .child(div().flex_1().flex().flex_row().justify_end().children(tag))
+                        .into_any_element();
+                }
+            }
+        }
 
         let mut ix = 0;
         for inline_node in children {
@@ -1470,8 +1917,10 @@ impl Paragraph {
                             highlights.clone(),
                             node_cx.link_click_handler.clone(),
                         )
-                        .with_mono(node_cx.style.inline_code_font_family.clone(), code_ranges.clone())
+                        .with_mono(node_cx.style.inline_code_font_family.clone(), code_ranges.iter().chain(attr_ranges.iter()).cloned().collect())
                         .with_chip(node_cx.style.inline_code_chip, code_ranges.clone())
+                        .with_attr_chip(attr_chip, attr_ranges.clone())
+                        .with_math(math_family.clone(), std::mem::take(&mut math_items))
                         .into_any_element(),
                     );
                 }
@@ -1482,6 +1931,9 @@ impl Paragraph {
                         .object_fit(ObjectFit::Contain)
                         .max_w(relative(1.))
                         .when_some(image.width, |this, width| this.w(width))
+                        // Where a figure stands (Quarto's `fig-align`).
+                        .when(image.align == Some(ImageAlign::Center), |this| this.mx_auto())
+                        .when(image.align == Some(ImageAlign::Right), |this| this.ml_auto())
                         .when_some(image.link.clone(), |this, link| {
                             let title = image.title();
                             let link_click_handler = link_click_handler.clone();
@@ -1547,7 +1999,10 @@ impl Paragraph {
                             ..Default::default()
                         });
                     }
-                    if style.code {
+                    if style.attr {
+                        highlight.color = Some(cx.theme().muted_foreground);
+                        attr_ranges.push(inner_range.clone());
+                    } else if style.code {
                         highlight = highlight.highlight(node_cx.style.inline_code_highlight(cx));
                         code_ranges.push(inner_range.clone());
                     }
@@ -1565,7 +2020,7 @@ impl Paragraph {
                         // convert link references, replace link
                         if let Some(identifier) = link_mark.identifier.as_ref() {
                             if let Some(mark) = node_cx.link_refs.get(identifier) {
-                                link_mark = mark.clone();
+                                link_mark = LinkMark { raw: link_mark.raw.take(), ..mark.clone() };
                             }
                         }
 
@@ -1573,6 +2028,12 @@ impl Paragraph {
                     }
 
                     node_highlights.push((inner_range, highlight));
+                }
+                // A formula's room: its own run, clear, its picture over it.
+                if let Some(picture) = inline_node.math.as_ref().and_then(|m| m.picture.clone().map(|p| (p, m.display))) {
+                    let room = offset..offset + text_len;
+                    node_highlights.push((room.clone(), HighlightStyle { color: Some(gpui::transparent_black()), ..Default::default() }));
+                    math_items.push((room, picture.0, picture.1));
                 }
 
                 highlights = gpui::combine_highlights(highlights, node_highlights).collect();
@@ -1594,15 +2055,27 @@ impl Paragraph {
                     highlights,
                     node_cx.link_click_handler.clone(),
                 )
-                .with_mono(node_cx.style.inline_code_font_family.clone(), code_ranges.clone())
+                .with_mono(node_cx.style.inline_code_font_family.clone(), code_ranges.iter().chain(attr_ranges.iter()).cloned().collect())
                 .with_chip(node_cx.style.inline_code_chip, code_ranges)
+                .with_attr_chip(attr_chip, attr_ranges)
+                .with_math(math_family, math_items)
                 .into_any_element(),
             );
         }
 
+        // A figure (Quarto): its caption under the picture, quiet and
+        // centered. The paragraph stays a block: the picture is put where
+        // `fig-align` says by its margins (below), since in a column of
+        // flex the picture kept the height of its written width while the
+        // pane cut its width, and stood in a box too tall. (Emaki addition.)
+        let figure = children.iter().find_map(|n| n.image.as_ref()).filter(|_| children.len() == 1);
+        let caption = figure.and_then(|i| i.caption.clone());
         div()
             .id(span.unwrap_or_default())
             .children(child_nodes)
+            .when_some(caption, |d, caption| {
+                d.child(div().w_full().pt(rems(0.4)).text_center().text_size(rems(0.875)).text_color(cx.theme().muted_foreground).child(caption))
+            })
             .into_any_element()
     }
 
@@ -1617,6 +2090,7 @@ impl Paragraph {
         let mut text = String::new();
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = vec![];
         let mut links: Vec<(Range<usize>, LinkMark)> = vec![];
+        let mut math: crate::text::inline_flow::MathRooms = vec![];
         let mut offset = 0;
 
         for inline_node in &self.children {
@@ -1633,6 +2107,7 @@ impl Paragraph {
                         text: text.clone().into(),
                         links: links.clone(),
                         highlights: highlights.clone(),
+                        math: std::mem::take(&mut math),
                     });
                 }
 
@@ -1673,7 +2148,9 @@ impl Paragraph {
                             ..Default::default()
                         });
                     }
-                    if style.code {
+                    if style.attr {
+                        highlight.color = Some(cx.theme().muted_foreground);
+                    } else if style.code {
                         highlight = highlight.highlight(node_cx.style.inline_code_highlight(cx));
                     }
                     if let Some(color) = style.highlight {
@@ -1690,13 +2167,20 @@ impl Paragraph {
                         if let Some(identifier) = link_mark.identifier.as_ref()
                             && let Some(mark) = node_cx.link_refs.get(identifier)
                         {
-                            link_mark = mark.clone();
+                            link_mark = LinkMark { raw: link_mark.raw.take(), ..mark.clone() };
                         }
 
                         links.push((inner_range.clone(), link_mark));
                     }
 
                     node_highlights.push((inner_range, highlight));
+                }
+                if let Some(m) = inline_node.math.as_ref() {
+                    if let Some(picture) = m.picture.clone() {
+                        let room = offset..offset + text_len;
+                        node_highlights.push((room.clone(), HighlightStyle { color: Some(gpui::transparent_black()), ..Default::default() }));
+                        math.push((room, picture, m.display));
+                    }
                 }
 
                 highlights = gpui::combine_highlights(highlights, node_highlights).collect();
@@ -1713,6 +2197,7 @@ impl Paragraph {
                 text: text.into(),
                 links,
                 highlights,
+                math,
             });
         }
 
@@ -1785,6 +2270,14 @@ impl BlockNode {
             } => {
                 let hashes = "#".repeat(*level as usize);
                 format!("{} {}", hashes, children.to_markdown())
+            }
+            BlockNode::Div { attrs, children, .. } => {
+                let content = children
+                    .iter()
+                    .map(|child| child.to_markdown())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                format!("::: {{{}}}\n{content}\n:::", attrs.text)
             }
             BlockNode::Blockquote { children, .. } => {
                 let content = children
@@ -2024,6 +2517,7 @@ impl BlockNode {
                                 )));
                             }
                             BlockNode::Root { .. }
+                            | BlockNode::Div { .. }
                             | BlockNode::Heading { .. }
                             | BlockNode::Blockquote { .. }
                             | BlockNode::CodeBlock(_)
@@ -2295,6 +2789,63 @@ impl BlockNode {
             .into_any_element()
     }
 
+    /// A file's header of fields, written as a table of two columns: a
+    /// field a row, the key in a quiet column as wide as the longest, the
+    /// value beside it, both in the mono face as the header is written,
+    /// a hairline between rows. The band around them is the caller's.
+    /// Its cells are the table's, so a selection runs through them.
+    /// (Emaki addition.)
+    fn render_fields(
+        table: &Table,
+        options: &NodeRenderOptions,
+        node_cx: &NodeContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let font_size = f32::from(window.text_style().font_size.to_pixels(window.rem_size())) * 0.875;
+        // The mono face's letters are one width, about 0.6 of its size.
+        let longest = table.children.iter().filter_map(|row| row.children.first()).map(|cell| cell.children.text().chars().count()).max().unwrap_or(0);
+        let key_w = longest as f32 * font_size * 0.6 + 2.;
+        let rows = table.children.len();
+        div()
+            .id(("fields", options.ix))
+            .w_full()
+            .font_family(theme.mono_font_family.clone())
+            .text_size(px(font_size))
+            .line_height(relative(1.55))
+            .children(table.children.iter().enumerate().map(|(ix, row)| {
+                let mut cells = row.children.iter();
+                let key = cells.next();
+                let value = cells.next();
+                div()
+                    .id(("field", ix))
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(18.))
+                    .py(px(4.))
+                    .when(ix + 1 < rows, |d| d.border_b_1().border_color(theme.border.opacity(0.6)))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(key_w))
+                            .max_w(relative(0.4))
+                            .overflow_hidden()
+                            .text_color(theme.muted_foreground)
+                            .children(key.map(|c| c.children.render(node_cx, window, cx))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(theme.foreground)
+                            .children(value.map(|c| c.children.render(node_cx, window, cx))),
+                    )
+            }))
+            .into_any_element()
+    }
+
     /// Default table layout: a flex grid whose columns are proportioned by
     /// content length and shrink to fit the container width (cell text wraps).
     fn render_wrap_table(
@@ -2386,6 +2937,479 @@ impl BlockNode {
             .into_any_element()
     }
 
+    /// A Quarto fenced div as its class says (Emaki addition):
+    /// a callout (`.callout-note`, `-tip`, `-warning`, `-caution`,
+    /// `-important`) is a card with a title, its kind's color at the
+    /// left; `.hidden` is not drawn; `.columns` sets its `.column`
+    /// children side by side, each as wide as its `width` says;
+    /// `layout-ncol=N` sets its children in rows of N; a `style` with
+    /// `text-align: center` centers what it holds. Any other is what it
+    /// holds, with its attributes in a quiet chip at its top and a
+    /// hairline at its left, so its extent can be seen.
+    fn render_div(
+        attrs: &DivAttrs,
+        chip_words: &Paragraph,
+        children: &[BlockNode],
+        options: NodeRenderOptions,
+        mb: gpui::Rems,
+        node_cx: &NodeContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let ix = options.ix;
+        if attrs.has_class("hidden") {
+            return div().into_any_element();
+        }
+        if attrs.has_class(crate::text::format::quarto::MATH_CLASS) {
+            let n = children.len();
+            return div()
+                .id(("math", ix))
+                .w_full()
+                .pb(mb)
+                .text_center()
+                .children(children.iter().enumerate().map(|(i, c)| c.render_block(NodeRenderOptions { ix: i, is_last: i + 1 == n, ..options }, node_cx, window, cx)))
+                .into_any_element();
+        }
+        let theme = cx.theme().clone();
+        let render_children = |children: &[BlockNode], window: &mut Window, cx: &mut App| -> Vec<AnyElement> {
+            let n = children.len();
+            children.iter().enumerate().map(|(i, c)| c.render_block(NodeRenderOptions { ix: i, is_last: i + 1 == n, ..options }, node_cx, window, cx)).collect()
+        };
+        let chip = |chip: &Paragraph, window: &mut Window, cx: &mut App| {
+            div()
+                .flex_shrink_0()
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().muted)
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_size(px(11.))
+                .line_height(px(16.))
+                .text_color(cx.theme().muted_foreground)
+                .child(chip.render(node_cx, window, cx))
+        };
+        let callout = attrs.classes.iter().find_map(|c| c.strip_prefix("callout-")).map(str::to_string).or_else(|| attrs.has_class("callout").then(|| "note".to_string()));
+        if let Some(kind) = callout {
+            return Self::render_callout(&kind, attrs, children, options, mb, node_cx, window, cx);
+        }
+        // A theorem, a proof, an abstract and the like read as the words
+        // they hold, the bold lead the file was read with first: no chip,
+        // no rule. (Emaki addition.)
+        // The margin layout's row: the block of the text, and beside it
+        // the notes that stand level with it. The two share the width
+        // three to one; where the pane is too narrow for both, the notes
+        // wrap under the block, across its width. (Emaki addition.)
+        if attrs.has_class(crate::text::format::quarto::MARGIN_ROW) {
+            let grow = |d: gpui::Div, by: f32, basis: f32| {
+                let mut d = d.min_w_0().flex_basis(px(basis));
+                d.style().flex_grow = Some(by);
+                d.style().flex_shrink = Some(1.);
+                d
+            };
+            let (main, notes) = children.split_first().map(|(m, n)| (Some(m), n)).unwrap_or((None, &[]));
+            let main = main.map(|m| m.render_block(NodeRenderOptions { ix: 0, ..options }, node_cx, window, cx));
+            let n = notes.len();
+            let notes = notes.iter().enumerate().map(|(i, c)| c.render_block(NodeRenderOptions { ix: i + 1, is_last: i + 1 == n, ..options }, node_cx, window, cx)).collect::<Vec<_>>();
+            return div()
+                .id(("margin-row", ix))
+                .w_full()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_start()
+                .gap_x(px(28.))
+                .child(grow(div(), 3., 380.).children(main))
+                .child(grow(div(), 1., 170.).pb(if n > 0 { mb } else { rems(0.) }).children(notes))
+                .into_any_element();
+        }
+        // A margin note: smaller and quieter than the text.
+        if attrs.has_class("column-margin") || attrs.has_class("aside") {
+            return div()
+                .id(("margin", ix))
+                .w_full()
+                .when(!options.is_last, |d| d.pb(mb))
+                .text_size(rems(0.85))
+                .line_height(relative(1.5))
+                .text_color(cx.theme().muted_foreground)
+                .children(render_children(children, window, cx))
+                .into_any_element();
+        }
+        let plain = crate::text::format::quarto::is_column(attrs)
+            || attrs.id.as_ref().is_some_and(|id| crate::text::format::quarto::THEOREM_KINDS.iter().any(|k| id.starts_with(&format!("{k}-"))))
+            || ["proof", "remark", "abstract", "theorem", "lemma", "corollary", "proposition", "conjecture", "definition", "example", "exercise", "solution"].iter().any(|c| attrs.has_class(c));
+        if plain {
+            return div().id(("plain", ix)).w_full().pb(mb).children(render_children(children, window, cx)).into_any_element();
+        }
+        if attrs.has_class("panel-tabset") {
+            if let Some(tabs) = Self::render_tabset(children, options, mb, node_cx, window, cx) {
+                return tabs;
+            }
+        }
+        if attrs.has_class("columns") {
+            let columns = children.iter().enumerate().map(|(i, c)| {
+                let (inner, width) = match c {
+                    BlockNode::Div { attrs, children, .. } if attrs.has_class("column") => (children.as_slice(), attrs.value("width").and_then(|w| w.trim_end_matches('%').parse::<f32>().ok()).map(|p| p / 100.)),
+                    _ => (std::slice::from_ref(c), None),
+                };
+                div()
+                    .id(("column", i))
+                    .min_w_0()
+                    .map(|d| match width {
+                        Some(w) => d.w(relative(w)),
+                        None => d.flex_1(),
+                    })
+                    .children(render_children(inner, window, cx))
+            });
+            return div().w_full().pb(mb).child(div().id(("columns", ix)).w_full().flex().flex_row().gap_4().items_start().children(columns)).into_any_element();
+        }
+        if let Some(ncol) = attrs.value("layout-ncol").and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 1) {
+            let share = 1. / ncol as f32;
+            let cells = children.iter().enumerate().map(|(i, c)| div().id(("cell", i)).w(relative(share)).min_w_0().px_1().child(c.render_block(NodeRenderOptions { ix: i, is_last: true, ..options }, node_cx, window, cx)));
+            return div().w_full().pb(mb).child(div().id(("layout", ix)).w_full().flex().flex_row().flex_wrap().items_start().children(cells)).into_any_element();
+        }
+        // Centered: the words by their alignment, a figure standing alone
+        // in a paragraph by its own (`ImageAlign`), the paragraph still as
+        // wide as the div. Shrunk to its content in a centering column, a
+        // picture's "no wider than the paragraph" had no width to be
+        // measured against and ran past the pane.
+        let centered = attrs.value("style").is_some_and(|s| s.replace(' ', "").contains("text-align:center")) || attrs.has_class("text-center");
+        let centered_children: Vec<BlockNode>;
+        let children = if centered {
+            centered_children = children
+                .iter()
+                .cloned()
+                .map(|c| match c {
+                    BlockNode::Paragraph(mut p) if p.children.len() == 1 && p.children[0].image.is_some() => {
+                        let image = p.children[0].image.as_mut().unwrap();
+                        if image.align.is_none() {
+                            image.align = Some(ImageAlign::Center);
+                        }
+                        BlockNode::Paragraph(p)
+                    }
+                    other => other,
+                })
+                .collect();
+            centered_children.as_slice()
+        } else {
+            children
+        };
+        let body = div()
+            .id(("div", ix))
+            .w_full()
+            .when(centered, |d| d.text_center())
+            .children(render_children(children, window, cx));
+        div()
+            .w_full()
+            .pb(mb)
+            .child(
+                div()
+                    .w_full()
+                    .border_l_2()
+                    .border_color(theme.border)
+                    .pl_3()
+                    .child(div().flex().flex_row().pb(rems(0.4)).child(chip(chip_words, window, cx)))
+                    .child(body),
+            )
+            .into_any_element()
+    }
+
+    /// A Quarto callout (`::: {.callout-note}`): a card with its kind's
+    /// color at the left. Its options are Quarto's: `appearance`
+    /// (`default` a head on a tint with the kind's icon, `simple` the head
+    /// on the card's ground, `minimal` no icon and a head only for a title
+    /// given), `icon=false`, and `collapse` (`true` folded at first,
+    /// `false` open), which makes the head a fold that closes the body up
+    /// to it as a chunk's does. The title is `title=`, else the first
+    /// heading inside, else the kind's name, Quarto's own word.
+    /// (Emaki addition.)
+    #[allow(clippy::too_many_arguments)]
+    fn render_callout(
+        kind: &str,
+        attrs: &DivAttrs,
+        children: &[BlockNode],
+        options: NodeRenderOptions,
+        mb: gpui::Rems,
+        node_cx: &NodeContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let ix = options.ix;
+        let theme = cx.theme().clone();
+        let (color, name) = match kind {
+            "tip" => (theme.success, "Tip"),
+            "warning" => (theme.warning, "Warning"),
+            // Quarto's caution is an orange, between its warning and its
+            // important.
+            "caution" => (Hsla { h: theme.warning.h * 0.6, ..theme.warning }, "Caution"),
+            "important" => (theme.danger, "Important"),
+            _ => (theme.info, "Note"),
+        };
+        let icon_name = match kind {
+            "tip" | "warning" | "caution" | "important" => kind,
+            _ => "note",
+        };
+        let appearance = attrs.value("appearance").unwrap_or("default");
+        let minimal = appearance == "minimal";
+        let tinted = appearance != "simple" && !minimal;
+        let style = &node_cx.style;
+        let icon = (!minimal && attrs.value("icon") != Some("false") && !style.callout_icons.is_empty()).then(|| SharedString::from(format!("{}/{icon_name}.svg", style.callout_icons)));
+        let mut body: Vec<&BlockNode> = children.iter().collect();
+        let title: Option<AnyElement> = match attrs.value("title") {
+            Some(t) => Some(div().child(t.to_string()).into_any_element()),
+            None => match body.first() {
+                Some(BlockNode::Heading { children, .. }) => {
+                    let heading = children.clone();
+                    body.remove(0);
+                    Some(heading.render(node_cx, window, cx))
+                }
+                _ => (!minimal).then(|| div().child(name).into_any_element()),
+            },
+        };
+        let body: Vec<BlockNode> = body.into_iter().cloned().collect();
+        let collapse = attrs.value("collapse").filter(|v| *v == "true" || *v == "false");
+        let fold = collapse.map(|v| {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            attrs.text.hash(&mut h);
+            Self::children_text(children, BlockTextKind::All).hash(&mut h);
+            let key = SharedString::from(format!("callout-fold-{:x}", h.finish()));
+            let open = v == "false";
+            window.use_keyed_state(key, cx, move |_, _| ChunkFold { open, ..ChunkFold::default() })
+        });
+        let (open, shown, body_h) = match &fold {
+            Some(f) => {
+                let f = f.read(cx);
+                if f.at.is_some_and(|at| at.elapsed() < CHUNK_FOLD) {
+                    window.request_animation_frame();
+                }
+                (f.open, f.shown(), f.height.clone())
+            }
+            None => (true, 1., std::rc::Rc::new(std::cell::Cell::new(0.))),
+        };
+        let head = (title.is_some() || fold.is_some()).then(|| {
+            let [fold_tip, unfold_tip] = style.chunk_words.clone();
+            let tip = if open { fold_tip } else { unfold_tip };
+            div()
+                .id(("callout-head", ix))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .px_4()
+                .py_2()
+                .font_weight(FontWeight::SEMIBOLD)
+                .when(tinted, |d| d.bg(color.opacity(0.08)))
+                .children(icon.map(|path| gpui::svg().path(path).size(px(16.)).flex_shrink_0().text_color(color)))
+                .child(div().flex_1().min_w_0().children(title))
+                .when_some(fold.clone(), |d, fold| {
+                    d.cursor_pointer()
+                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, window, cx| {
+                            gpui_base::TextSelection::end(window, cx);
+                            cx.stop_propagation();
+                            fold.update(cx, |f, cx| {
+                                f.toggle();
+                                cx.notify();
+                            });
+                            window.refresh();
+                        })
+                        .child(
+                            crate::Sizable::with_size(crate::Icon::new(crate::IconName::ChevronDown), px(14.))
+                                .text_color(theme.muted_foreground)
+                                .rotate(gpui::Radians(-std::f32::consts::FRAC_PI_2 * (1. - shown))),
+                        )
+                })
+        });
+        let n = body.len();
+        let content = div()
+            .w_full()
+            .px_4()
+            .when(head.is_some(), |d| d.pt_2())
+            .when(head.is_none(), |d| d.pt_3())
+            .children(body.iter().enumerate().map(|(i, c)| c.render_block(NodeRenderOptions { ix: i, is_last: i + 1 == n, ..options }, node_cx, window, cx)))
+            .child(div().h(px(12.)));
+        // What folds is measured as it is drawn, so a fold closes from the
+        // height it had.
+        let content = {
+            let height = body_h.clone();
+            div().w_full().relative().child(content).child(gpui::canvas(move |bounds, _, _| height.set(f32::from(bounds.size.height)), |_, _, _, _| {}).absolute().inset_0())
+        };
+        let content = if shown >= 1. {
+            Some(content.into_any_element())
+        } else if shown > 0. {
+            Some(div().w_full().h(px(body_h.get() * shown)).overflow_hidden().opacity(shown).child(content).into_any_element())
+        } else {
+            None
+        };
+        div()
+            .w_full()
+            .pb(mb)
+            .child(
+                div()
+                    .id(("callout", ix))
+                    .w_full()
+                    .overflow_hidden()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .border_l_3()
+                    .border_color(color)
+                    .when(tinted, |d| d.bg(color.opacity(0.04)))
+                    .children(head)
+                    .children(content),
+            )
+            .into_any_element()
+    }
+
+    /// A Quarto tabset (`::: {.panel-tabset}`): a tab for each heading at
+    /// the highest level inside, its blocks under it the tab's content.
+    /// The tabs are a segmented control whose plate slides to the tab
+    /// chosen, and the content fades in while its box's height runs from
+    /// the last tab's to this one's. None when it holds no heading, and
+    /// it is drawn as a plain div. (Emaki addition.)
+    fn render_tabset(
+        children: &[BlockNode],
+        options: NodeRenderOptions,
+        mb: gpui::Rems,
+        node_cx: &NodeContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let level = children.iter().filter_map(|c| if let BlockNode::Heading { level, .. } = c { Some(*level) } else { None }).min()?;
+        let mut before: Vec<BlockNode> = Vec::new();
+        let mut tabs: Vec<(String, Vec<BlockNode>)> = Vec::new();
+        for c in children {
+            match c {
+                BlockNode::Heading { level: l, children: words, .. } if *l == level => tabs.push((words.text().trim().to_string(), Vec::new())),
+                c => match tabs.last_mut() {
+                    Some((_, blocks)) => blocks.push(c.clone()),
+                    None => before.push(c.clone()),
+                },
+            }
+        }
+        let key = children.iter().find_map(|c| c.span()).map(|s| s.start).unwrap_or(options.ix);
+        let state = window.use_keyed_state(SharedString::from(format!("tabset-{key}")), cx, |_, _| TabSet::default());
+        let (at, from, t, from_h, height, spots, track_x) = {
+            let st = state.read(cx);
+            let t = st.when.map(|w| gpui::ease_out_quint()((w.elapsed().as_secs_f32() / TABSET_ANIM.as_secs_f32()).min(1.))).unwrap_or(1.);
+            if t < 1. {
+                window.request_animation_frame();
+            }
+            st.spots.borrow_mut().truncate(tabs.len());
+            (st.at.min(tabs.len() - 1), st.from.min(tabs.len() - 1), t, st.from_h, st.height.clone(), st.spots.clone(), st.track_x.clone())
+        };
+        let theme = cx.theme().clone();
+        let dark = theme.mode.is_dark();
+        // The plate, from where the last tab is to where this one is.
+        let plate = {
+            let spots = spots.borrow();
+            let origin = track_x.get();
+            match (spots.get(from), spots.get(at)) {
+                (Some(a), Some(b)) if b.1 > 0. => {
+                    let (x, w) = (a.0 + (b.0 - a.0) * t - origin, a.1 + (b.1 - a.1) * t);
+                    Some(div().absolute().top(px(2.)).bottom(px(2.)).left(px(x)).w(px(w)).rounded(px(6.)).bg(if dark { theme.secondary_active } else { theme.popover }).shadow_sm())
+                }
+                _ => None,
+            }
+        };
+        let track = {
+            let spots = spots.clone();
+            div()
+                .id(("tabset-track", key))
+                .relative()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(2.))
+                .p(px(2.))
+                .rounded(px(8.))
+                .bg(if dark { theme.tab_bar_segmented } else { theme.muted })
+                .children(plate)
+                .children(tabs.iter().enumerate().map(|(i, (title, _))| {
+                    let state = state.clone();
+                    let spots = spots.clone();
+                    div()
+                        .id(("tab", i))
+                        .relative()
+                        .px(px(12.))
+                        .py(px(3.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .text_size(rems(0.875))
+                        .text_color(if i == at { theme.foreground } else { theme.muted_foreground })
+                        .hover(|s| s.text_color(theme.foreground))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, window, cx| {
+                            gpui_base::TextSelection::end(window, cx);
+                            state.update(cx, |st, cx| {
+                                if st.at != i {
+                                    st.from = st.at;
+                                    st.at = i;
+                                    st.from_h = st.height.get();
+                                    st.when = Some(std::time::Instant::now());
+                                    cx.notify();
+                                }
+                            });
+                            window.refresh();
+                        })
+                        .child(title.clone())
+                        // Where each tab is, for the plate.
+                        .child(
+                            gpui::canvas(
+                                move |bounds, _, _| {
+                                    let mut spots = spots.borrow_mut();
+                                    if spots.len() <= i {
+                                        spots.resize(i + 1, (0., 0.));
+                                    }
+                                    spots[i] = (f32::from(bounds.origin.x), f32::from(bounds.size.width));
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
+                }))
+                .child({
+                    // The track's own place: the tabs' are the window's.
+                    let track_x = track_x.clone();
+                    gpui::canvas(move |bounds, _, _| track_x.set(f32::from(bounds.origin.x)), |_, _, _, _| {}).absolute().inset_0()
+                })
+        };
+        let content = tabs.get(at).map(|(_, blocks)| blocks.clone()).unwrap_or_default();
+        let n = content.len();
+        let body = {
+            let height = height.clone();
+            div()
+                .w_full()
+                .flex_shrink_0()
+                .relative()
+                .pt_3()
+                .opacity(t)
+                .children(content.iter().enumerate().map(|(i, c)| c.render_block(NodeRenderOptions { ix: i, is_last: i + 1 == n, ..options }, node_cx, window, cx)))
+                .child(gpui::canvas(move |bounds, _, _| height.set(f32::from(bounds.size.height)), |_, _, _, _| {}).absolute().inset_0())
+        };
+        let new_h = height.get();
+        let body = if t < 1. && from_h > 0. && new_h > 0. {
+            div().w_full().h(px(from_h + (new_h - from_h) * t)).overflow_hidden().child(body).into_any_element()
+        } else {
+            body.into_any_element()
+        };
+        let nb = before.len();
+        Some(
+            div()
+                .id(("tabset", key))
+                .w_full()
+                .pb(mb)
+                .children(before.iter().enumerate().map(|(i, c)| c.render_block(NodeRenderOptions { ix: i, is_last: i + 1 == nb, ..options }, node_cx, window, cx)))
+                .child(div().flex().flex_row().child(track))
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_block(
         &self,
         options: NodeRenderOptions,
@@ -2413,7 +3437,7 @@ impl BlockNode {
                 .child(paragraph.render(node_cx, window, cx))
                 .into_any_element(),
             BlockNode::Heading {
-                level, children, ..
+                level, children, attrs, ..
             } => {
                 let (text_size, font_weight) = match level {
                     1 => (rems(2.), FontWeight::BOLD),
@@ -2440,6 +3464,24 @@ impl BlockNode {
                 // Emaki: where it is painted, for an outline of the
                 // document (`HeadingSpots`).
                 let level = *level;
+                // Quarto's attributes, in a quiet chip after the words,
+                // small whatever the heading's size. (Emaki addition.)
+                let chip = attrs.as_ref().map(|attrs| {
+                    div()
+                        .flex_shrink_0()
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().muted)
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .font_weight(FontWeight::NORMAL)
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(attrs.render(node_cx, window, cx))
+                });
                 div()
                     .id(SharedString::from(format!("h{}-{}", level, ix)))
                     .relative()
@@ -2447,7 +3489,16 @@ impl BlockNode {
                     .whitespace_normal()
                     .text_size(text_size)
                     .font_weight(font_weight)
-                    .child(children.render(node_cx, window, cx))
+                    .map(|d| match chip {
+                        // Centered on the words' first line: a box of that
+                        // line's height. By baseline, gpui set the chip's
+                        // box on the line's foot, and it stood low.
+                        Some(chip) => {
+                            let line = window.text_style().line_height.to_pixels(gpui::AbsoluteLength::Pixels(text_size), window.rem_size());
+                            d.flex().flex_row().flex_wrap().items_start().gap_x(px(8.)).child(children.render(node_cx, window, cx)).child(div().h(line).flex().items_center().child(chip))
+                        }
+                        None => d.child(children.render(node_cx, window, cx)),
+                    })
                     .child(
                         gpui::canvas(
                             |_, _, _| {},
@@ -2466,6 +3517,9 @@ impl BlockNode {
                         .size_full(),
                     )
                     .into_any_element()
+            }
+            BlockNode::Div { attrs, chip, children, .. } => {
+                Self::render_div(attrs, chip, children, options, mb, node_cx, window, cx)
             }
             BlockNode::Blockquote { children, .. } => div()
                 .w_full()
@@ -2528,6 +3582,11 @@ impl BlockNode {
                 };
 
                 div().pb(mb).child(inner).into_any_element()
+            }
+            BlockNode::Table(table)
+                if node_cx.style.front_matter && table.span.is_some_and(|s| s.start == 0) =>
+            {
+                Self::render_fields(table, &options, node_cx, window, cx)
             }
             BlockNode::Table { .. } => {
                 Self::render_table(self, &options, node_cx, window, cx).into_any_element()
@@ -2661,6 +3720,22 @@ mod tests {
         assert_eq!(paragraph.selected_text(), "plain words");
     }
 
+    #[test]
+    fn a_formula_selected_copies_as_its_source() {
+        use crate::text::math::{MathPicture, MathSource};
+        let picture = MathPicture { svg: Arc::from(&b"<svg/>"[..]), width: 1., height: 1., baseline: 0.8 };
+        let math = MathSource { src: "x^2".into(), display: false, tag: None, picture: Some(picture) };
+        let children = vec![InlineNode::new("Let "), InlineNode::new("\u{A0}\u{A0}\u{202F}").with_math(math), InlineNode::new(" be.")];
+        let paragraph = paragraph_with_children(children);
+        let len = paragraph.state.lock().unwrap().text.len();
+        set_paragraph_selection(&paragraph, 0..len);
+        assert_eq!(paragraph.selected_text(), "Let $x^2$ be.");
+        assert_eq!(paragraph.selected_source(), "Let $x^2$ be.");
+        // A selection that only runs into the formula's room takes it whole.
+        set_paragraph_selection(&paragraph, 2..6);
+        assert_eq!(paragraph.selected_text(), "t $x^2$");
+    }
+
     fn selected_paragraph(text: &str) -> Paragraph {
         let len = text.len();
         let paragraph = paragraph_with_children(vec![
@@ -2673,6 +3748,7 @@ mod tests {
     #[test]
     fn heading_selected_source_prefixes_hashes() {
         let heading = BlockNode::Heading {
+            attrs: None,
             level: 2,
             children: selected_paragraph("Title"),
             span: None,
@@ -3028,6 +4104,7 @@ mod tests {
             source: String::new().into(),
             blocks: vec![
                 BlockNode::Heading {
+                    attrs: None,
                     level: 1,
                     children: selected_paragraph("Title"),
                     span: None,

@@ -15,6 +15,7 @@ use crate::text::{
 /// Parse Markdown into a tree of nodes.
 pub(crate) fn parse(source: &str, cx: &mut NodeContext) -> Result<ParsedDocument, SharedString> {
     let options = cx.markdown_extensions.parse_options();
+    cx.source = Some(source.into());
     markdown::to_mdast(&source, &options)
         .map(|n| ast_to_document(source, n, cx))
         .map_err(|e| e.to_string().into())
@@ -86,15 +87,14 @@ fn merge_children_with_mark(
     mark: TextMark,
     cx: &mut NodeContext,
 ) -> String {
-    let mut text = String::new();
     let mut merged_text = String::new();
     let mut merged_marks = Vec::new();
 
-    for child in children {
-        let mut child_paragraph = Paragraph::default();
-        let child_text = parse_paragraph(&mut child_paragraph, child, cx);
-        text.push_str(&child_text);
-
+    // One paragraph for all the children, so Quarto's attributes after
+    // a picture or a link inside a mark are seen (`parse_inlines`).
+    let mut child_paragraph = Paragraph::default();
+    let text = parse_inlines(&mut child_paragraph, children, cx);
+    {
         for node in child_paragraph.children {
             let merged_offset = merged_text.len();
             merged_text.push_str(&node.text);
@@ -129,7 +129,7 @@ fn merge_children_with_mark(
     text
 }
 
-fn append_inline_html_blocks(paragraph: &mut Paragraph, blocks: Vec<BlockNode>) -> Option<String> {
+pub(super) fn append_inline_html_blocks(paragraph: &mut Paragraph, blocks: Vec<BlockNode>) -> Option<String> {
     let mut text = String::new();
 
     for block in blocks {
@@ -154,6 +154,74 @@ fn append_inline_html_blocks(paragraph: &mut Paragraph, blocks: Vec<BlockNode>) 
     Some(text)
 }
 
+/// The inline nodes of one run (a paragraph's, a heading's, a mark's)
+/// into `paragraph`, with Quarto's syntax read when it is on: a text
+/// run after a picture, a link or inline code that opens with `{` is an
+/// attribute set, applied and taken out (`quarto::apply_inline_attrs`),
+/// and the words of a run are read for spans and shortcodes
+/// (`quarto::push_text`). (Emaki addition.)
+fn parse_inlines(paragraph: &mut Paragraph, children: &[mdast::Node], cx: &mut NodeContext) -> String {
+    if !cx.markdown_extensions.is_quarto() {
+        let mut text = String::new();
+        for child in children {
+            text.push_str(&parse_paragraph(paragraph, child, cx));
+        }
+        return text;
+    }
+    let mut text = String::new();
+    let mut before: Option<&mdast::Node> = None;
+    let mut ix = 0;
+    while ix < children.len() {
+        let child = &children[ix];
+        match child {
+            // Math, as Unicode and in italics; what Pandoc would not
+            // read as math is the words it was, dollars and all.
+            Node::InlineMath(val) if super::quarto::is_math(&val.value) => {
+                let node = super::quarto::inline_math(&val.value, cx);
+                text.push_str(&node.text);
+                paragraph.push(node);
+            }
+            Node::InlineMath(val) => {
+                let words = format!("${}$", val.value);
+                paragraph.push(InlineNode::new(&words).marks(vec![(0..words.len(), TextMark::default())]));
+                text.push_str(&words);
+            }
+            Node::Text(val) => {
+                let mut value = val.value.as_str();
+                if let Some(prev) = before.filter(|p| matches!(p, Node::Image(_) | Node::Link(_) | Node::InlineCode(_))) {
+                    if let Some(end) = super::quarto::attrs_end(value) {
+                        super::quarto::apply_inline_attrs(paragraph, prev, &value[..end], cx);
+                        value = &value[end..];
+                    }
+                }
+                // A shortcode an autolink cut in pieces (`{{< video
+                // https://x >}}`): the pieces up to its close, joined
+                // back as the words they are.
+                if let Some(open) = value.rfind("{{<").filter(|at| !value[*at..].contains(">}}")) {
+                    let close = children[ix + 1..].iter().take(6).position(|c| matches!(c, Node::Text(t) if t.value.contains(">}}")));
+                    if let Some(j) = close.filter(|j| children[ix + 1..ix + 1 + j].iter().all(|c| matches!(c, Node::Link(_) | Node::Text(_)))) {
+                        let end = ix + 1 + j;
+                        let mut joined = value[..open].to_string();
+                        joined.push_str(&value[open..]);
+                        for c in &children[ix + 1..=end] {
+                            joined.push_str(&c.to_string());
+                        }
+                        text.push_str(&super::quarto::push_text(paragraph, &joined));
+                        before = Some(&children[end]);
+                        ix = end + 1;
+                        continue;
+                    }
+                }
+                text.push_str(&super::quarto::push_text(paragraph, value));
+            }
+            other => text.push_str(&parse_paragraph(paragraph, other, cx)),
+        }
+        before = Some(child);
+        ix += 1;
+    }
+    text
+}
+
 fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeContext) -> String {
     let span = node.position().map(|pos| Span {
         start: cx.offset + pos.start.offset,
@@ -167,9 +235,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
 
     match node {
         Node::Paragraph(val) => {
-            val.children.iter().for_each(|c| {
-                text.push_str(&parse_paragraph(paragraph, c, cx));
-            });
+            text = parse_inlines(paragraph, &val.children, cx);
         }
         Node::Text(val) => {
             text = val.value.clone();
@@ -208,9 +274,12 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             paragraph.push(InlineNode::new(&text).marks(vec![(lead..text.len() - lead, TextMark::default().code())]));
         }
         Node::Link(val) => {
+            // The link as written, for Copy Markdown. (Emaki addition.)
+            let raw = val.position.as_ref().zip(cx.source.as_ref()).and_then(|(p, s)| s.get(p.start.offset..p.end.offset)).map(|r| SharedString::from(r.to_string()));
             let link_mark = Some(LinkMark {
                 url: val.url.clone().into(),
                 title: val.title.clone().map(|s| s.into()),
+                raw,
                 ..Default::default()
             });
 
@@ -276,6 +345,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
                 url: "".into(),
                 title: link.label.clone().map(Into::into),
                 identifier: Some(link.identifier.clone().into()),
+                raw: link.position.as_ref().zip(cx.source.as_ref()).and_then(|(p, s)| s.get(p.start.offset..p.end.offset)).map(|r| SharedString::from(r.to_string())),
             };
 
             text = merge_children_with_mark(
@@ -304,15 +374,71 @@ fn ast_to_document(source: &str, root: mdast::Node, cx: &mut NodeContext) -> Par
         _ => panic!("expected root node"),
     };
 
-    let blocks = root
-        .children
-        .into_iter()
-        .map(|c| ast_to_node(source, c, cx))
-        .collect();
+    let mut blocks = blocks_of(source, root.children, cx);
+    if cx.markdown_extensions.is_quarto() {
+        blocks = super::quarto::margin_rows(blocks);
+    }
     ParsedDocument {
         source: source.to_string().into(),
         blocks,
     }
+}
+
+/// The blocks of a list of sibling nodes. With Quarto's syntax on, a
+/// paragraph holding fence lines (`::: {.class}`, `:::`) is cut at them,
+/// the pieces between read again on their own, and what stands between
+/// an open and its close nested into a `Div` (`quarto.rs`). (Emaki
+/// addition.)
+fn blocks_of(source: &str, children: Vec<mdast::Node>, cx: &mut NodeContext) -> Vec<BlockNode> {
+    if !cx.markdown_extensions.is_quarto() {
+        return children.into_iter().map(|c| ast_to_node(source, c, cx)).collect();
+    }
+    let mut pieces = Vec::new();
+    for child in children {
+        match child {
+            Node::Paragraph(val) if val.position.is_some() => {
+                let pos = val.position.clone().unwrap();
+                let (start, end) = (pos.start.offset, pos.end.offset.min(source.len()));
+                let slice = &source[start..end];
+                let fences = super::quarto::fences(slice);
+                if fences.is_empty() {
+                    pieces.push(super::quarto::Piece::Block(ast_to_node(source, Node::Paragraph(val), cx)));
+                    continue;
+                }
+                let mut at = 0;
+                for fence in fences {
+                    pieces.extend(reparse(source, start + at, start + fence.range.start, cx));
+                    let span = Some(Span { start: cx.offset + start + fence.range.start, end: cx.offset + start + fence.range.end });
+                    pieces.push(match fence.open {
+                        Some(attrs) => super::quarto::Piece::Open(attrs, span),
+                        None => super::quarto::Piece::Close(span),
+                    });
+                    at = (fence.range.end + 1).min(slice.len());
+                }
+                pieces.extend(reparse(source, start + at, end, cx));
+            }
+            other => pieces.push(super::quarto::Piece::Block(ast_to_node(source, other, cx))),
+        }
+    }
+    super::quarto::nest(pieces)
+}
+
+/// The piece of `source` between two fences read as markdown of its own,
+/// its spans where the piece stands.
+fn reparse(source: &str, start: usize, end: usize, cx: &mut NodeContext) -> Vec<super::quarto::Piece> {
+    let Some(piece) = source.get(start..end) else { return Vec::new() };
+    if piece.trim().is_empty() {
+        return Vec::new();
+    }
+    let options = cx.markdown_extensions.parse_options();
+    let Ok(Node::Root(root)) = markdown::to_mdast(piece, &options) else { return Vec::new() };
+    let was = cx.offset;
+    let was_source = cx.source.replace(piece.into());
+    cx.offset += start;
+    let blocks: Vec<_> = root.children.into_iter().map(|c| ast_to_node(piece, c, cx)).collect();
+    cx.offset = was;
+    cx.source = was_source;
+    blocks.into_iter().map(super::quarto::Piece::Block).collect()
 }
 
 fn new_span(pos: Option<markdown::unist::Position>, cx: &NodeContext) -> Option<Span> {
@@ -334,20 +460,24 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
 
     match value {
         Node::Root(_) => unreachable!("node::Root should be handled separately"),
+        // A paragraph that is one piece of math is math on its own line
+        // (`$$x$$` written in a line), as Pandoc draws it.
+        Node::Paragraph(val) if cx.markdown_extensions.is_quarto() && matches!(val.children.as_slice(), [Node::InlineMath(m)] if super::quarto::is_math(&m.value)) => {
+            let Some(Node::InlineMath(m)) = val.children.first() else { unreachable!() };
+            super::quarto::display_math(&m.value, new_span(val.position.clone(), cx), cx)
+        }
+        Node::Math(val) if cx.markdown_extensions.is_quarto() => super::quarto::display_math(&val.value, new_span(val.position.clone(), cx), cx),
         Node::Paragraph(val) => {
             let mut paragraph = Paragraph::default();
-            val.children.iter().for_each(|c| {
-                parse_paragraph(&mut paragraph, c, cx);
-            });
+            parse_inlines(&mut paragraph, &val.children, cx);
+            if cx.markdown_extensions.is_quarto() {
+                super::quarto::caption_lone_figure(&mut paragraph);
+            }
             paragraph.span = new_span(val.position, cx);
             BlockNode::Paragraph(paragraph)
         }
         Node::Blockquote(val) => {
-            let children = val
-                .children
-                .into_iter()
-                .map(|c| ast_to_node(source, c, cx))
-                .collect();
+            let children = blocks_of(source, val.children, cx);
             BlockNode::Blockquote {
                 children,
                 span: new_span(val.position, cx),
@@ -366,11 +496,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             }
         }
         Node::ListItem(val) => {
-            let children = val
-                .children
-                .into_iter()
-                .map(|c| ast_to_node(source, c, cx))
-                .collect();
+            let children = blocks_of(source, val.children, cx);
             BlockNode::ListItem {
                 children,
                 spread: val.spread,
@@ -382,6 +508,14 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             html: false,
             span: new_span(val.position, cx),
         },
+        Node::Code(raw) if cx.markdown_extensions.is_quarto() && super::quarto::raw_html(raw.lang.as_deref()) => {
+            // A raw block of HTML is the HTML, drawn as the view draws it.
+            let span = new_span(raw.position.clone(), cx);
+            match super::html::parse(&raw.value, cx) {
+                Ok(el) => BlockNode::Root { children: el.blocks, span },
+                Err(_) => BlockNode::CodeBlock(CodeBlock::new(raw.value.into(), raw.lang.map(|s| s.into()), span)),
+            }
+        }
         Node::Code(raw) => BlockNode::CodeBlock(CodeBlock::new(
             raw.value.into(),
             raw.lang.map(|s| s.into()),
@@ -389,11 +523,11 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
         )),
         Node::Heading(val) => {
             let mut paragraph = Paragraph::default();
-            val.children.iter().for_each(|c| {
-                parse_paragraph(&mut paragraph, c, cx);
-            });
+            parse_inlines(&mut paragraph, &val.children, cx);
+            let attrs = if cx.markdown_extensions.is_quarto() { super::quarto::take_heading_attrs(&mut paragraph) } else { None };
 
             BlockNode::Heading {
+                attrs,
                 level: val.depth,
                 children: paragraph,
                 span: new_span(val.position, cx),
@@ -492,6 +626,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
                     url: def.url.clone().into(),
                     identifier: Some(def.identifier.clone().into()),
                     title: def.title.clone().map(Into::into),
+                    raw: None,
                 },
             );
 

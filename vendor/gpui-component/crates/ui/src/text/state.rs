@@ -554,6 +554,9 @@ pub(crate) struct TextViewMultiClickSelection {
 pub(crate) enum TextViewMultiClickKind {
     Word,
     Paragraph,
+    /// The whole link under the point, from a right click on one.
+    /// (Emaki addition.)
+    Link,
 }
 
 impl Render for TextViewState {

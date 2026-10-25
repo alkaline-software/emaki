@@ -67,7 +67,22 @@ const WORDMARK_OWN: &str = "Belleza";
 /// Kaku's own list. The symbols are built in.
 pub const TERM_FALLBACKS: &[&str] = &["PingFang SC", "Apple Symbols", "Apple Color Emoji", "Symbols Nerd Font Mono"];
 
+/// The face formulas are set in, by Typst (`emaki_core::math`) and in
+/// the room each takes in a line: New Computer Modern Math, under the
+/// GUST Font License (`NewCMMath-GUST.txt` beside it).
+pub const MATH_FACE: &[u8] = include_bytes!("../assets/fonts/NewCMMath-Regular.otf");
+
+/// The math face's family as the text system names it: its own name
+/// table says "NewComputerModern Math" or "NewComputerModernMath", by
+/// which name is read.
+static MATH_FAMILY: std::sync::OnceLock<SharedString> = std::sync::OnceLock::new();
+
+pub fn math_family() -> SharedString {
+    MATH_FAMILY.get().cloned().unwrap_or_else(|| "NewComputerModern Math".into())
+}
+
 const FACES: &[&[u8]] = &[
+    MATH_FACE,
     include_bytes!("../assets/fonts/Belleza-Regular.ttf"),
     include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
     include_bytes!("../assets/fonts/IBMPlexMono-Bold.ttf"),
@@ -310,6 +325,7 @@ impl Global for ChatFonts {}
 /// `config.json` asks for, which titles follow.
 pub fn install(chat: &str, cx: &mut App) {
     let _ = cx.text_system().add_fonts(FACES.iter().map(|b| std::borrow::Cow::Borrowed(*b)).collect());
+    emaki_core::math::use_font(MATH_FACE);
     // The smaller cut of each monospace face, for code among a
     // conversation's words: the built-in ones, and the system's own
     // where that is one of the choices, read from the system and never
@@ -318,6 +334,9 @@ pub fn install(chat: &str, cx: &mut App) {
     let cuts: Vec<std::borrow::Cow<'static, [u8]>> = MONO_FACES.iter().copied().chain(system.as_deref()).filter_map(|font| inline_cut(font, INLINE_SCALE, INLINE_SUFFIX)).map(std::borrow::Cow::Owned).collect();
     let _ = cx.text_system().add_fonts(cuts);
     let names = cx.text_system().all_font_names();
+    if let Some(name) = names.iter().find(|n| n.replace(' ', "") == "NewComputerModernMath") {
+        let _ = MATH_FAMILY.set(name.clone().into());
+    }
     let inline = names.iter().filter(|name| name.ends_with(INLINE_SUFFIX)).cloned().collect();
     // `EMAKI_WORDMARK=<family>` draws the name in that face, for a look
     // at the one Windows and Linux get.
