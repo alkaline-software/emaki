@@ -168,6 +168,15 @@ impl TextView {
         }
     }
 
+    /// The text of a view made with [`TextView::new`] (Emaki addition):
+    /// set as the view is laid out, after its markdown extensions, so a
+    /// state the caller keeps is parsed once with them rather than once
+    /// without and again with.
+    pub fn text(mut self, text: impl Into<SharedString>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+
     /// Set [`TextViewStyle`].
     pub fn style(mut self, style: TextViewStyle) -> Self {
         self.text_view_style = style;

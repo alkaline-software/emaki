@@ -51,7 +51,7 @@ EMAKI_GO=effort:high EMAKI_OPEN=<id> ./target/debug/Emaki  # send a value withou
 EMAKI_GO="page:new;newfolder:<path>;newagent:codex;say:<words>" EMAKI_OPEN=<id> ./target/debug/Emaki  # a new Codex session: the folder, the agent, a message (a real model call); allow, deny and stop answer the oldest card and stop the turn; pick:mode and pick:agent open those lists
 EMAKI_GO="open:<id2>;page:new" EMAKI_OPEN=<id> ./target/debug/Emaki  # go to another session, or to the new-session page
 EMAKI_GO="page:new;pick:folder" EMAKI_OPEN=<id> ./target/debug/Emaki  # the new-session page's list of folders (steps wait for a session to be open, so name one)
-EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # open or close that folder in the sidebar, as its chevron does; mark:<name> is ⌘ and a click on it and markto:<name> ⇧ and one, projects:open, projects:hide and projects:show what the menu of those chosen does, hidden a click on the Hidden heading and temporary one on Temporary, and sideband:<y>:<y2> a rectangle dragged down the Projects card; project:<name> is a click on a project on the sessions page; manage is its Select button, pickall:<project> chooses a project's sessions, manage:archive and manage:delete ask (and nothing answers)
+EMAKI_GO=folder:<name> EMAKI_OPEN=<id> ./target/debug/Emaki  # click that folder in the sidebar; mark:<name> is ⌘ and a click on it and markto:<name> ⇧ and one, projects:open, projects:hide and projects:show what the menu of those chosen does, hidden a click on the Hidden heading and temporary one on Temporary, and sideband:<y>:<y2> a rectangle dragged down the Projects card; project:<name> is a click on a project on the sessions page; manage is its Select button, pickrow:<id> and pickproj:<project> are a click on a row while choosing, with `+` before the name for ⇧ (`pickrow:+<id>`), picked prints what is chosen, pickall:<project> chooses a project's sessions, manage:archive and manage:delete ask (and nothing answers)
 EMAKI_GO="sidebar;float" EMAKI_OPEN=<id> ./target/debug/Emaki  # the sidebar's button, then the pointer on it
 EMAKI_GO="pin:<project>;pin:<other>;pindrag:<other>:<project>" EMAKI_OPEN=<id> ./target/debug/Emaki  # pin two projects (pin: again unpins), then drag the second onto the first
 EMAKI_GO="open:<id2>;tabhints" EMAKI_OPEN=<id> ./target/debug/Emaki  # the tabs' numbers, as holding ⌘ shows them
@@ -78,13 +78,15 @@ EMAKI_SHOT=/tmp/shot.png EMAKI_OPEN=<id> ./target/debug/Emaki  # write a picture
 
 `EMAKI_KEYS=send` is ⌘↩, `blur` takes the focus off everything, and `astray` puts it on an element no frame holds, as a thing closed leaves it (`EMAKI_FOCUS_DEBUG=1` prints where it is at every draw, and whether the native keyboard is at the window's own view; `EMAKI_GO=web:keys` gives it to the page in the web view as a click there does, and `EMAKI_KEYS_STAY=1` stops the window taking it back): `EMAKI_KEYS=tabs,blur,closetab,tabs` shows what ⌘W does then.
 
+`EMAKI_GO` step `file:caret:<byte>` puts the caret in the file's editor there and `file:dump` prints its text and selection, so a key pressed in it (`press:`) can be read back. `press:cmd-k+cmd-u` presses keys one after another in one step, as a chord's are: steps are five seconds apart and gpui waits about a second for a chord's next key.
+
 `EMAKI_GO` steps `treeall` (⌘A in the files tree) and `treeband:<y>:<y2>` (a rectangle dragged down it, in points from the tree's top); `file:menu` with the editor showing is a right click on its first line's word.
 
 `EMAKI_LANG=<code>` (`zh-Hans`, `zh-Hant`, `ja`, `ko`, `fr`, `de`, `es`, `en`) draws the window in that language whatever is chosen, and changes nothing that is saved. `EMAKI_SETTINGS_SHOTS` with it shoots every section in that language.
 
 `EMAKI_NO_AGENTS=1` shows the new-session page as a machine with no agent on it has it.
 
-Debug prints: `EMAKI_TIMING=1` (load and hand-over per open), `EMAKI_A11Y=1` (gpui's view of the accessibility tree at every draw), `EMAKI_SCROLL_DEBUG=1` (every wheel event with its phase and owner), `EMAKI_GLIDE_DEBUG=1` (the outline's move and the move to the new messages, tick by tick), `EMAKI_OUTLINE_DEBUG=1`, `EMAKI_PTY_LOG=<file>` (the hidden terminal's raw output).
+Debug prints: `ZED_MEASUREMENTS=1` (gpui's own: each frame's duration, which counts the wait for the display, so a process's CPU time over a stretch, `ps -o cputime`, is the measure of what a state costs), `EMAKI_TIMING=1` (load and hand-over per open), `EMAKI_A11Y=1` (gpui's view of the accessibility tree at every draw), `EMAKI_SCROLL_DEBUG=1` (every wheel event with its phase and owner), `EMAKI_GLIDE_DEBUG=1` (the outline's move and the move to the new messages, tick by tick), `EMAKI_OUTLINE_DEBUG=1`, `EMAKI_PTY_LOG=<file>` (the hidden terminal's raw output).
 
 A variable that steers one launch (`EMAKI_PAGE`, `EMAKI_GO`, `EMAKI_SHOT` and the rest above) is not handed to the agent's child (`driver::child_env`). Set on a relaunch, one used to reach the session's shell and every relaunch from there, so the window opened on the same page from then on.
 

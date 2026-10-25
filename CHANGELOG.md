@@ -2,6 +2,18 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.3.2
+
+1. **Lighter and faster**: Emaki uses a fraction of the CPU and power it did while an agent works, and a long session or a large file no longer slows the window down.
+2. **Math and documents**: Formulas are set by Typst, LaTeX and Typst files read the way Quarto files do, and Quarto's callout options, margin column, theorems and numbered sections show as they should.
+3. **Sublime Text keys**: The file editor takes Sublime Text's keys for lines, comments, case, brackets, folds and find, only while you type in it.
+4. **Rendered or raw**: ⇧⌘V switches a file between its two views from anywhere in the window, and Settings, Files says which one files open in.
+5. **Trash**: Emptying the Trash removes every copy of a session, so none comes back as archived, and deleting a running session waits for it to stop.
+6. **Keep the display on**: A switch in Settings, General keeps the screen awake while a session works; it is off unless you turn it on.
+7. **Menus**: Every right-click menu has an icon for each choice and groups set apart by lines that show in the dark appearance, and projects and folders have Copy Path.
+8. **Choosing sessions**: ⇧ and a click on the All Sessions page chooses every session or project in between, and Archive is offered only for sessions that are not archived.
+9. **Fixes**: The editor's find starts at your selection and leaves the cursor on the match; ⌘←, ⌘→ and the arrow keys stay on the right row of a wrapped line; a new tab's conversation fades in; the shell terminal opens a tab when it has none; Escape closes the composer's find.
+
 ## v0.3.1
 
 1. **Windows installer**: No more wizard: a picture of Emaki while it installs, then the app opens, and updates come in the same way; a copy from v0.3.0 moves over by itself.

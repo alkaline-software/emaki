@@ -46,7 +46,7 @@ use gpui_component::checkbox::Checkbox;
 mod settings;
 pub use settings::SETTINGS_CONTEXT;
 
-actions!(emaki, [ReopenTab, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ReopenTab, ToggleRaw, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -154,6 +154,8 @@ pub(crate) enum MenuDo {
     DeleteBranch(String),
     /// Put these words on the clipboard.
     Copy(String),
+    /// A path on the clipboard: drawn as an address, not as the words copied.
+    CopyPath(String),
     /// The same, with an icon that says what the words are (a session's
     /// id, a command, a branch's name).
     CopyAs(&'static str, String),
@@ -215,19 +217,23 @@ impl MenuDo {
             MenuDo::File(FileDo::Mention, _) | MenuDo::Files(FileDo::Mention, _) => "icons/at.svg",
             MenuDo::Files(FileDo::Trash, _) => "icons/trash.svg",
             MenuDo::File(FileDo::Cut, _) | MenuDo::Files(FileDo::Cut, _) => "icons/scissors.svg",
-            MenuDo::File(FileDo::Duplicate, _) | MenuDo::Files(FileDo::Duplicate | FileDo::Copy, _) => "icons/copy.svg",
+            MenuDo::File(FileDo::Duplicate, _) | MenuDo::Files(FileDo::Duplicate, _) => "icons/copy-plus.svg",
+            // A path is where a file is: copied, it is an address.
+            MenuDo::File(FileDo::CopyPath | FileDo::CopyRel, _) | MenuDo::Files(FileDo::CopyPath | FileDo::CopyRel, _) => "icons/link.svg",
             MenuDo::Files(..) => "icons/copy.svg",
-            MenuDo::Commit(crate::branches::CommitDo::Undo | crate::branches::CommitDo::Revert, _) => "icons/undo-2.svg",
+            MenuDo::Commit(crate::branches::CommitDo::Undo, _) => "icons/undo-2.svg",
+            MenuDo::Commit(crate::branches::CommitDo::Revert, _) => "icons/history.svg",
             MenuDo::Commit(crate::branches::CommitDo::CopySha, _) => "icons/hash.svg",
             MenuDo::Commit(crate::branches::CommitDo::View, _) | MenuDo::Web(_) => "icons/globe.svg",
             MenuDo::File(FileDo::NewFile, _) => "icons/file-plus.svg",
             MenuDo::File(FileDo::NewFolder, _) => "icons/folder-plus.svg",
             MenuDo::File(FileDo::Trash, _) => "icons/trash.svg",
-            MenuDo::File(FileDo::CopyPath | FileDo::CopyRel | FileDo::Copy, _) => "icons/copy.svg",
+            MenuDo::File(FileDo::Copy, _) => "icons/copy.svg",
             MenuDo::File(FileDo::Paste, _) => "icons/clipboard.svg",
             MenuDo::File(FileDo::Collapse, _) => "icons/copy-minus.svg",
             MenuDo::CopyAs(icon, _) => icon,
             MenuDo::DeleteBranch(_) => "icons/trash.svg",
+            MenuDo::CopyPath(_) => "icons/link.svg",
             MenuDo::Copy(_) => "icons/copy.svg",
             MenuDo::CopyImage(_) => "icons/image.svg",
             MenuDo::OpenTerminal(_) => "icons/square-terminal.svg",
@@ -243,8 +249,12 @@ impl MenuDo {
             MenuDo::Pdf(crate::panels::PdfDo::SelectAll) | MenuDo::Edit(EditDo::SelectAll, _) => "icons/select-all.svg",
             MenuDo::Edit(EditDo::Cut, _) => "icons/scissors.svg",
             MenuDo::Edit(EditDo::Paste, _) => "icons/clipboard.svg",
-            // A spelling's corrections are words only, as the system's are.
-            MenuDo::Fix(..) | MenuDo::FixFile(..) | MenuDo::Learn(_) | MenuDo::Ignore(..) | MenuDo::Note(_) | MenuDo::Rule => "",
+            // A correction puts its words in place of the marked ones.
+            MenuDo::Fix(..) | MenuDo::FixFile(..) => "icons/replace.svg",
+            MenuDo::Learn(_) => "icons/book-open.svg",
+            MenuDo::Ignore(..) => "icons/eye-off.svg",
+            MenuDo::Note(_) => "icons/info.svg",
+            MenuDo::Rule => "",
         }
     }
 
@@ -1228,6 +1238,12 @@ pub struct Workbench {
     /// motion), whether one is being done now, and what came of the last.
     manage: bool,
     picked: HashSet<String>,
+    /// The row a plain click last chose on the sessions page, a project's
+    /// (true) or a session's, which ⇧ and a click reaches from; and the
+    /// rows of each kind as the page last drew them (`pick_click`).
+    pick_anchor: Option<(bool, String)>,
+    page_sess_drawn: std::cell::RefCell<Vec<String>>,
+    page_proj_drawn: std::cell::RefCell<Vec<(String, Vec<String>)>>,
     manage_ask: Option<(ManageDo, u32)>,
     manage_busy: bool,
     manage_said: Option<String>,
@@ -1368,6 +1384,8 @@ pub struct Workbench {
     /// half written at the read (a large pasted picture is one long
     /// line) did not show until the agent's first words, seconds later.
     reload_wanted: bool,
+    /// The rows of the session showing, kept between its reads.
+    live_rows: Option<(String, emaki_core::build::LiveRows)>,
     /// The folder last opened or closed: which, whether it was opened,
     /// when, and the click's number, for the moment its sessions take to
     /// unfold or fold away.
@@ -1783,6 +1801,9 @@ pub struct Workbench {
     trash: emaki_core::trash::Trash,
     trashed: Vec<SessionRef>,
     trash_open: bool,
+    /// The sessions listed as the newest of their chain, by its key: one
+    /// Claude Code went on with in a background session (`continued_in`).
+    chains: HashMap<String, Vec<SessionRef>>,
     /// The projects chosen together in the sidebar (⌘ and a click, ⇧
     /// and one, as the files tree has it), the one a range is taken
     /// from, and the projects as last drawn, in their order, which a
@@ -1850,6 +1871,10 @@ pub struct Workbench {
     /// The conversations of the other open tabs, kept as they were left
     /// so that going back to one draws it at once; see `open_session`.
     stashed: HashMap<String, Detail>,
+    /// A conversation read for a tab and shown for the first time, with
+    /// when and a serial: its page fades and rises into place under the
+    /// tabs (`render_detail`), where the read had left it empty.
+    detail_in: Option<(String, Instant, u32)>,
     startup_open: Option<String>,
     pub(crate) focus_handle: FocusHandle,
     /// The two panels beside a conversation, one on at most, as their
@@ -2052,6 +2077,12 @@ pub struct Workbench {
     /// The markdown file showing, as a view the window keeps between
     /// frames (`panels::FileDoc`).
     pub(crate) file_doc: std::cell::RefCell<Option<Entity<crate::panels::FileDoc>>>,
+    /// The window's clock, for what moves while something is at work (`ambient`).
+    pub(crate) ambient: Entity<crate::ambient::Ambient>,
+    /// The conversation's list, as a view the window keeps between frames.
+    pub(crate) conversation: Entity<crate::transcript::ConversationList>,
+    /// The sidebar beside the content, as a view the window keeps between frames.
+    pub(crate) side_view: Entity<SideView>,
     pub(crate) file_structure_scroll: ScrollHandle,
     pub(crate) file_heads: Option<(u64, std::rc::Rc<Vec<crate::panels::FileHead>>)>,
     pub(crate) file_structure_at: Option<usize>,
@@ -3692,6 +3723,7 @@ impl Workbench {
         if std::env::var_os("EMAKI_GO").is_some() {
             crate::sys::keep_on_top(window);
         }
+        let file_raw = cfg.app.file_view == "raw";
         Self {
             hub,
             cfg,
@@ -3702,6 +3734,9 @@ impl Workbench {
             sessions_goto: None,
             manage: false,
             picked: HashSet::new(),
+            pick_anchor: None,
+            page_sess_drawn: std::cell::RefCell::new(Vec::new()),
+            page_proj_drawn: std::cell::RefCell::new(Vec::new()),
             manage_ask: None,
             manage_busy: false,
             manage_said: None,
@@ -3767,6 +3802,7 @@ impl Workbench {
             renames: load_renames(),
             renamed: HashMap::new(),
             reload_wanted: false,
+            live_rows: None,
             draft_of: None,
             lightbox: None,
             lightbox_set: Vec::new(),
@@ -4006,12 +4042,15 @@ impl Workbench {
             file_structure_drag: None,
             file_heads_spots: gpui_component::text::HeadingSpots::new(),
             file_doc: Default::default(),
+            ambient: cx.new(|_| crate::ambient::Ambient::default()),
+            conversation: { let wb = cx.entity(); cx.new(|cx| crate::transcript::ConversationList::new(wb, cx)) },
+            side_view: { let wb = cx.entity(); cx.new(|cx| SideView::new(wb, cx)) },
             file_structure_scroll: ScrollHandle::new(),
             file_heads: None,
             file_structure_at: None,
             file_structure_pick: None,
             fold_file: false,
-            file_raw: false,
+            file_raw,
             file_editor: None,
             file_parked: Vec::new(),
             file_ask: None,
@@ -4132,6 +4171,7 @@ impl Workbench {
             float_block: false,
             float_anim: None,
             stashed: HashMap::new(),
+            detail_in: None,
             tabs_row_w: Rc::new(std::cell::Cell::new(0.)),
             tabs_scroll: ScrollHandle::new(),
             tabs_reveal: true,
@@ -4160,6 +4200,7 @@ impl Workbench {
             trash: emaki_core::trash::load(),
             trashed: Vec::new(),
             trash_open: false,
+            chains: HashMap::new(),
             side_marked: Vec::new(),
             side_sessions: Vec::new(),
             side_sess_anchor: None,
@@ -4206,6 +4247,30 @@ impl Workbench {
                 // showing or it is one of ours getting under way.
                 let shown = self.selected.clone();
                 let mut dropped: HashSet<String> = HashSet::new();
+                // A session Claude Code went on with in a background
+                // session is that one: listed once, as the newest of the
+                // chain, and a tab or a selection on an older one goes to
+                // it. Its history is in the newest, which copied it.
+                let ids: HashSet<String> = refs.iter().map(|r| r.session_id.clone()).collect();
+                let newest = |from: &str| {
+                    let mut at = from.to_string();
+                    for _ in 0..16 {
+                        match refs.iter().find(|r| r.session_id == at).map(|r| r.continued_in.clone()).filter(|next| ids.contains(next)) {
+                            Some(next) => at = next,
+                            None => break,
+                        }
+                    }
+                    at
+                };
+                let went_on: Vec<(String, String)> = refs.iter().filter(|r| ids.contains(&r.continued_in)).map(|r| (key_of(r), format!("{}:{}", r.agent.as_str(), newest(&r.session_id)))).collect();
+                // What is done to the row is done to every session of the
+                // chain (`manage_targets`): one left out would be listed
+                // again, as its own, once the newest is in the Trash.
+                self.chains.clear();
+                for r in refs.iter().filter(|r| ids.contains(&r.continued_in)) {
+                    self.chains.entry(format!("{}:{}", r.agent.as_str(), newest(&r.session_id))).or_default().push(r.clone());
+                }
+                refs.retain(|r| !ids.contains(&r.continued_in));
                 // The sessions in the Trash are listed there alone, the
                 // last deleted first; a tab on one goes. Read again each
                 // time: the scanner removes those past their days, and
@@ -4225,23 +4290,6 @@ impl Workbench {
                     at(b).total_cmp(&at(a))
                 });
                 self.trashed = trashed;
-                // A session Claude Code went on with in a background
-                // session is that one: listed once, as the newest of the
-                // chain, and a tab or a selection on an older one goes to
-                // it. Its history is in the newest, which copied it.
-                let ids: HashSet<String> = refs.iter().map(|r| r.session_id.clone()).collect();
-                let newest = |from: &str| {
-                    let mut at = from.to_string();
-                    for _ in 0..16 {
-                        match refs.iter().find(|r| r.session_id == at).map(|r| r.continued_in.clone()).filter(|next| ids.contains(next)) {
-                            Some(next) => at = next,
-                            None => break,
-                        }
-                    }
-                    at
-                };
-                let went_on: Vec<(String, String)> = refs.iter().filter(|r| ids.contains(&r.continued_in)).map(|r| (key_of(r), format!("{}:{}", r.agent.as_str(), newest(&r.session_id)))).collect();
-                refs.retain(|r| !ids.contains(&r.continued_in));
                 refs.retain(|r| {
                     let keep = !r.blank
                         || shown.as_deref() == Some(key_of(r).as_str())
@@ -4349,6 +4397,7 @@ impl Workbench {
                     }
                 }
                 self.was_working = working;
+                self.hold_display();
                 if self.page == Page::New && self.new_cwd.is_empty() {
                     self.new_cwd = self.recent_cwds().first().cloned().unwrap_or_default();
                 }
@@ -4607,6 +4656,23 @@ impl Workbench {
             self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         cx.notify();
+    }
+
+    fn set_keep_display_on(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.cfg.app.keep_display_on = on;
+        if let Err(e) = Config::edit(move |c| c.app.keep_display_on = on) {
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
+        }
+        self.hold_display();
+        cx.notify();
+    }
+
+    /// The display held on while a session works, the sidebar's blue dot,
+    /// when the setting says so (`sys::hold_display`). Looked at with each
+    /// pass of the index, and when the setting changes.
+    fn hold_display(&self) {
+        let working = self.cfg.app.keep_display_on && self.refs.iter().any(|r| !self.is_draft(&r.session_id) && self.hub.is_live(r, self.now) && self.is_working(r));
+        crate::sys::hold_display(working);
     }
 
     fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -5254,6 +5320,24 @@ impl Workbench {
             Some(t) if t.starts_with("pickall:") => {
                 let keys: Vec<String> = self.refs.iter().filter(|r| r.project() == t["pickall:".len()..]).map(key_of).collect();
                 self.pick(&keys, cx);
+            }
+            // A click on a row while choosing, as `pick_click` takes it:
+            // `pickrow:<session id>` and `pickproj:<project>`, with `+`
+            // first for ⇧ (`pickrow:+<id>`); `picked` prints what is chosen.
+            Some(t) if t.starts_with("pickrow:") || t.starts_with("pickproj:") => {
+                let (proj, rest) = t.split_once(':').map(|(a, b)| (a == "pickproj", b)).unwrap_or((false, ""));
+                let (shift, id) = rest.strip_prefix('+').map_or((false, rest), |id| (true, id));
+                if proj {
+                    let keys: Vec<String> = self.refs.iter().filter(|r| r.project() == id).map(key_of).collect();
+                    self.pick_click(Some(id), &keys, shift, cx);
+                } else if let Some(key) = self.refs.iter().find(|r| r.session_id.starts_with(id)).map(key_of) {
+                    self.pick_click(None, &[key], shift, cx);
+                }
+            }
+            Some("picked") => {
+                let mut v: Vec<&String> = self.picked.iter().collect();
+                v.sort();
+                eprintln!("emaki: picked {} {v:?}", v.len());
             }
             Some("manage:archive") => self.manage_asked(ManageDo::Archive, cx),
             Some("manage:delete") => self.manage_asked(ManageDo::Delete, cx),
@@ -5965,14 +6049,36 @@ impl Workbench {
         // list took, per open, so a slow session can be measured, not guessed.
         let timing = std::env::var_os("EMAKI_TIMING").is_some();
         let started = std::time::Instant::now();
-        let task = cx.background_spawn(async move { adapters::for_agent(r.agent).load(&r) });
+        // A Claude Code session's rows are kept from one read to the next
+        // and its file read on from where it stopped (`build::LiveRows`):
+        // the session showing is read again at every write while its agent
+        // works, and a long one took half a second each time.
+        let rows = (r.agent == AgentId::ClaudeCode).then(|| match self.live_rows.take() {
+            Some((k, rows)) if k == key && rows.path() == r.path => rows,
+            _ => emaki_core::build::LiveRows::new(&r.path),
+        });
+        let task = cx.background_spawn(async move {
+            match rows {
+                Some(mut rows) => {
+                    let mut session = rows.build(&r.cwd);
+                    if session.title.is_empty() {
+                        session.title = r.title.clone();
+                    }
+                    (session, Some(rows))
+                }
+                None => (adapters::for_agent(r.agent).load(&r), None),
+            }
+        });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let mut session = task.await;
+            let (mut session, rows) = task.await;
             let loaded = started.elapsed();
             this.update(cx, |this, cx| {
                 this.loading = None;
                 if this.selected.as_deref() != Some(key.as_str()) {
                     return;
+                }
+                if let Some(rows) = rows {
+                    this.live_rows = Some((key.clone(), rows));
                 }
                 let rounds = session.rounds.len();
                 let t = std::time::Instant::now();
@@ -6141,6 +6247,8 @@ impl Workbench {
                 let list = ListState::new(n, ListAlignment::Bottom, px(512.));
                 list.set_follow_mode(FollowMode::Tail);
                 self.folds.borrow_mut().clear();
+                let serial = self.detail_in.as_ref().map_or(0, |(_, _, n)| n + 1);
+                self.detail_in = Some((key.clone(), Instant::now(), serial));
                 self.detail = Some(Detail {
                     key,
                     path,
@@ -6239,7 +6347,7 @@ impl Workbench {
     }
 
     /// Write the look section of `config.json` as this window now has it.
-    fn save_app_config(&mut self) {
+    pub(crate) fn save_app_config(&mut self) {
         let app = self.cfg.app.clone();
         if let Err(e) = Config::edit(move |c| c.app = app) {
             self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
@@ -6417,7 +6525,7 @@ impl Workbench {
         // A choice that fills takes the width it is given, the choices
         // sharing it: the settings' rows, whose controls start and end
         // together, and the languages, which stand under their entry.
-        let fill = matches!(control, "writing-language" | "appearance" | "size" | "send-key" | "term-theme" | "term-cursor");
+        let fill = matches!(control, "writing-language" | "appearance" | "size" | "send-key" | "file-view" | "term-theme" | "term-cursor");
         let (from, to) = {
             let mut st = self.seg_state.borrow_mut();
             let e = st.entry(control).or_insert((current, current, None));
@@ -7024,7 +7132,7 @@ impl Workbench {
                     this.pick_toggle(PickFor::Folder, cx);
                 }))
             })
-            .when(!cwd.is_empty(), |d| d.on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(Some(cwd.clone())))], cx))))
+            .when(!cwd.is_empty(), |d| d.on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(Some(cwd.clone()))), (phrase("Copy Path"), MenuDo::CopyPath(cwd.clone()))], cx))))
             .child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(14.)).flex_shrink_0())
             .child(div().flex_shrink_0().max_w(px(280.)).truncate().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(name))
             .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(parent))
@@ -10126,7 +10234,19 @@ impl Workbench {
         theme
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The sidebar beside the content, kept between frames (`SideView`),
+    /// with its marks at work painted over it. Drawn afresh while a name
+    /// is typed in one of its rows: a field's keys tell the field, not the
+    /// view it is in.
+    fn kept_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let typing = self.renaming.is_some() && self.rename_at == RenameAt::Side;
+        let side = self.side_view.clone();
+        let marks = side.read(cx).marks.clone();
+        let view = if typing { side.into_any_element() } else { AnyView::from(side).cached(StyleRefinement::default().size_full()).into_any_element() };
+        div().size_full().relative().child(view).child(canvas(|_, _, _| {}, move |_, _, window, cx| marks.paint(window, cx)).absolute().size_0()).into_any_element()
+    }
+
+    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Self::shell_theme(cx);
         // The Projects card: a well in the frame, a little off its ground.
         let card_bg = if cx.theme().mode.is_dark() { cx.theme().background.opacity(0.55) } else { theme.foreground.opacity(0.045) };
@@ -10307,8 +10427,7 @@ impl Workbench {
             let name = p.clone();
             // The folder itself, from the newest session that still has it.
             let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
-            let (plus_cwd, row_cwd, group) = (folder_cwd.clone(), folder_cwd.clone(), SharedString::from(format!("folder-row-{p}")));
-            let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
+            let (plus_cwd, group) = (folder_cwd.clone(), SharedString::from(format!("folder-row-{p}")));
             scroll = scroll.child(
                 h_flex()
                     .id(SharedString::from(format!("folder-{p}")))
@@ -10328,9 +10447,8 @@ impl Workbench {
                     .group(group.clone())
                     // ⌘ and a click adds the project to those chosen or
                     // takes it out, ⇧ and a click chooses from the one
-                    // last clicked to this one. A plain click begins a
-                    // session in it, what a project is clicked for most,
-                    // and lets the chosen go; its chevron opens it.
+                    // last clicked to this one; neither opens it. A
+                    // plain click opens it and lets the chosen go.
                     .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                         // The end of a rectangle's drag is not a click
                         // on the row it ended over.
@@ -10354,11 +10472,7 @@ impl Workbench {
                         this.side_marked.clear();
                         this.side_sessions.clear();
                         this.side_anchor = Some(name.clone());
-                        // A folder that is gone has no session to begin.
-                        match &row_cwd {
-                            Some(cwd) => this.new_session_in(cwd, window, cx),
-                            None => this.toggle_folder(&name, cx),
-                        }
+                        this.toggle_folder(&name, cx);
                     }))
                     .on_mouse_down(MouseButton::Right, {
                         let project = p.clone();
@@ -10385,43 +10499,7 @@ impl Workbench {
                         let (rows, name) = (self.side_rows_at.clone(), p.clone());
                         canvas(move |bounds, _, _| rows.borrow_mut().push((name, bounds, is_pinned)), |_, _, _, _| {}).absolute().inset_0()
                     })
-                    // The folder's icon, and in its place under the
-                    // pointer a chevron, which opens the folder onto its
-                    // sessions and closes it, turning as they unfold.
-                    .child({
-                        let project = p.clone();
-                        let chevron = Icon::new(IconName::ChevronRight).with_size(px(13.));
-                        let chevron = match anim {
-                            Some((opening, serial)) => chevron
-                                .with_animation(ElementId::Name(format!("folder-turn-{p}-{serial}").into()), Animation::new(FOLDER_ANIM).with_easing(ease_out_quint()), move |icon, t| {
-                                    let t = if opening { t } else { 1. - t };
-                                    icon.rotate(gpui::radians(std::f32::consts::FRAC_PI_2 * t))
-                                })
-                                .into_any_element(),
-                            None => chevron.rotate(gpui::radians(if open { std::f32::consts::FRAC_PI_2 } else { 0. })).into_any_element(),
-                        };
-                        div()
-                            .id(SharedString::from(format!("folder-fold-{p}")))
-                            .relative()
-                            .size(px(22.))
-                            .flex_shrink_0()
-                            .rounded(px(5.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(theme.muted_foreground)
-                            .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
-                            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                                swallow_click(window, cx);
-                                cx.stop_propagation();
-                                if this.side_banded() || ev.modifiers().secondary() || ev.modifiers().shift {
-                                    return;
-                                }
-                                this.toggle_folder(&project, cx);
-                            }))
-                            .child(div().group_hover(group.clone(), |s| s.opacity(0.)).child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
-                            .child(div().absolute().inset_0().flex().items_center().justify_center().opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)).child(chevron))
-                    })
+                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(p.clone()))
                     .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
                     // The count, and in its place under the pointer a
@@ -10495,6 +10573,7 @@ impl Workbench {
                             }),
                     ),
             );
+            let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
             if !open && anim.is_none() {
                 self.side_prev.borrow_mut().remove(&p);
                 if is_pinned {
@@ -10529,7 +10608,7 @@ impl Workbench {
                             .ml(px(18.))
                             .px(px(10.))
                             .gap(px(8.))
-                            .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(g.row.agent, px(13.), theme.muted_foreground.opacity(0.75), false, SharedString::from(format!("gone-glyph-{}", g.row.key)))))
+                            .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(g.row.agent, px(13.), theme.muted_foreground.opacity(0.75), false)))
                             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme.sidebar_foreground).child(g.row.title.clone()));
                         div()
                             .overflow_hidden()
@@ -10553,7 +10632,6 @@ impl Workbench {
                 let active = page == Page::Session && self.selected.as_deref() == Some(key.as_str());
                 let dot = self.live_color(&r, cx);
                 let working = self.is_working(&r);
-                let glyph_id = SharedString::from(format!("recent-glyph-{key}"));
                 let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
                 let menu_key = key.clone();
                 let (born, after) = (self.side_born.borrow().contains_key(&key), key.clone());
@@ -10633,7 +10711,7 @@ impl Workbench {
                             MouseButton::Right,
                             cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.side_session_menu(&menu_key, ev.position, cx)),
                         )
-                        .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working, glyph_id)))
+                        .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(r.agent, px(13.), glyph_color, working)))
                         .map(|d| {
                             if naming {
                                 // The name is written here, in the row.
@@ -10802,7 +10880,7 @@ impl Workbench {
                         .group(group.clone())
                         .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
                         .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.trash_menu(Some(&menu_key), ev.position, cx)))
-                        .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(row.agent, px(13.), theme.muted_foreground.opacity(0.75), false, SharedString::from(format!("trash-glyph-{key}")))))
+                        .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(row.agent, px(13.), theme.muted_foreground.opacity(0.75), false)))
                         .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme.sidebar_foreground).child(row.title.clone()))
                         .children(days.map(|days| {
                             div()
@@ -11242,10 +11320,8 @@ impl Workbench {
         let several = self.side_sessions.len() > 1 && self.side_sessions.iter().any(|k| k == key);
         let items = if several {
             let keys = self.side_sessions.clone();
-            let mut items = vec![(phrase("Archive Sessions"), MenuDo::Sessions(ManageDo::Archive, keys.clone()))];
-            if self.refs.iter().any(|r| r.archived && keys.iter().any(|k| *k == key_of(r))) {
-                items.push((phrase("Unarchive Sessions"), MenuDo::Sessions(ManageDo::Unarchive, keys.clone())));
-            }
+            let mut items = self.archive_items(&keys);
+            items.push(("", MenuDo::Rule));
             items.push((phrase("Delete Sessions"), MenuDo::Sessions(ManageDo::Delete, keys)));
             items
         } else {
@@ -11260,6 +11336,7 @@ impl Workbench {
                 } else {
                     items.push((phrase("Archive Session"), MenuDo::Sessions(ManageDo::Archive, vec![key.to_string()])));
                 }
+                items.push(("", MenuDo::Rule));
                 items.push((phrase("Delete Session"), MenuDo::Sessions(ManageDo::Delete, vec![key.to_string()])));
             }
             items
@@ -11267,11 +11344,27 @@ impl Workbench {
         self.open_menu(at, items, cx);
     }
 
+    /// Archive for the active sessions among `keys` and Unarchive for the
+    /// archived ones, each offered only when there is one, and each done
+    /// to those alone.
+    fn archive_items(&self, keys: &[String]) -> Vec<(&'static str, MenuDo)> {
+        let of = |archived: bool| -> Vec<String> { self.refs.iter().filter(|r| r.archived == archived && !r.path.as_os_str().is_empty() && keys.contains(&key_of(r))).map(key_of).collect() };
+        let (active, archived) = (of(false), of(true));
+        let mut items = Vec::new();
+        if !active.is_empty() {
+            items.push((if active.len() == 1 { phrase("Archive Session") } else { phrase("Archive Sessions") }, MenuDo::Sessions(ManageDo::Archive, active)));
+        }
+        if !archived.is_empty() {
+            items.push((if archived.len() == 1 { phrase("Unarchive Session") } else { phrase("Unarchive Sessions") }, MenuDo::Sessions(ManageDo::Unarchive, archived)));
+        }
+        items
+    }
+
     /// A right click in the Trash: on a session, Put Back and Delete
-    /// Now; on its heading, Empty Trash.
+    /// Permanently; on its heading, Empty Trash.
     fn trash_menu(&mut self, key: Option<&str>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let items = match key {
-            Some(key) => vec![(phrase("Put Back"), MenuDo::Sessions(ManageDo::PutBack, vec![key.to_string()])), (phrase("Delete Now"), MenuDo::Sessions(ManageDo::Purge, vec![key.to_string()]))],
+            Some(key) => vec![(phrase("Put Back"), MenuDo::Sessions(ManageDo::PutBack, vec![key.to_string()])), ("", MenuDo::Rule), (phrase("Delete Permanently"), MenuDo::Sessions(ManageDo::Purge, vec![key.to_string()]))],
             None => vec![(phrase("Empty Trash"), MenuDo::Sessions(ManageDo::Purge, self.trashed.iter().map(key_of).collect()))],
         };
         self.open_menu(at, items, cx);
@@ -11298,11 +11391,19 @@ impl Workbench {
         }
         let of: Vec<String> = if several { self.side_marked.clone() } else { vec![project.to_string()] };
         let hidden = of.iter().all(|p| self.hidden.contains(p));
-        let mut items = Vec::new();
+        // Its folder on disk; where it stands in the list; its sessions,
+        // archived now or deleted (the sessions, and nothing in the
+        // project's folder), the one that cannot be taken back last.
+        let mut items = vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::Projects(ProjectsDo::Open, of.clone()))];
+        // The folder's path, or each one's on a line of its own.
+        let paths: Vec<String> = of.iter().filter_map(|p| self.project_folder(p)).collect();
+        if !paths.is_empty() {
+            items.push((if paths.len() > 1 { phrase("Copy Paths") } else { phrase("Copy Path") }, MenuDo::CopyPath(paths.join("\n"))));
+        }
+        items.push(("", MenuDo::Rule));
         if !several && !hidden {
             items.push(if self.pinned.iter().any(|p| p == project) { (phrase("Unpin Project"), MenuDo::Unpin(project.to_string())) } else { (phrase("Pin Project"), MenuDo::Pin(project.to_string())) });
         }
-        items.push((crate::sys::OPEN_FOLDER_LABEL, MenuDo::Projects(ProjectsDo::Open, of.clone())));
         let keys: Vec<String> = self.refs.iter().filter(|r| of.iter().any(|p| *p == r.project())).map(key_of).collect();
         items.push(match (hidden, several) {
             (true, true) => (phrase("Show Projects"), MenuDo::Projects(ProjectsDo::Show, of)),
@@ -11310,14 +11411,13 @@ impl Workbench {
             (false, true) => (phrase("Hide Projects"), MenuDo::Projects(ProjectsDo::Hide, of)),
             (false, false) => (phrase("Hide Project"), MenuDo::Projects(ProjectsDo::Hide, of.clone())),
         });
-        // Its sessions, archived now or deleted: the sessions, and
-        // nothing in the project's folder.
         if !keys.is_empty() {
-            items.push(("", MenuDo::Rule));
-            items.push((phrase("Archive Sessions"), MenuDo::Sessions(ManageDo::Archive, keys.clone())));
-            if self.refs.iter().any(|r| r.archived && keys.iter().any(|k| *k == key_of(r))) {
-                items.push((phrase("Unarchive Sessions"), MenuDo::Sessions(ManageDo::Unarchive, keys.clone())));
+            let archiving = self.archive_items(&keys);
+            if !archiving.is_empty() {
+                items.push(("", MenuDo::Rule));
+                items.extend(archiving);
             }
+            items.push(("", MenuDo::Rule));
             items.push((phrase("Delete Sessions"), MenuDo::Sessions(ManageDo::Delete, keys)));
         }
         self.open_menu(at, items, cx);
@@ -11682,10 +11782,8 @@ impl Workbench {
             items.push((phrase("Copy Image"), MenuDo::CopyImage(pic)));
         }
         if let Some(path) = path {
-            if !items.is_empty() {
-                items.push(("", MenuDo::Rule));
-            }
-            items.push((phrase("Copy Path"), MenuDo::Copy(path.to_string_lossy().to_string())));
+            items.push((phrase("Copy Path"), MenuDo::CopyPath(path.to_string_lossy().to_string())));
+            items.push(("", MenuDo::Rule));
             items.push((crate::sys::REVEAL_LABEL, MenuDo::Reveal(path)));
         }
         // The conversation's own menu is not for this press.
@@ -11732,7 +11830,7 @@ impl Workbench {
             (phrase("Copy Session ID"), MenuDo::CopyAs("icons/hash.svg", r.session_id.clone())),
             (phrase("Copy Resume Command"), MenuDo::CopyAs("icons/terminal.svg", resume)),
             ("", MenuDo::Rule),
-            (phrase("Open in Terminal"), MenuDo::OpenTerminal(key.to_string())),
+            (phrase("Open in Agent Terminal"), MenuDo::OpenTerminal(key.to_string())),
             (crate::sys::OPEN_SESSION_FOLDER_LABEL, MenuDo::OpenFolder(Self::folder_exists(r).then(|| r.cwd.clone()))),
             (crate::sys::REVEAL_SESSION_LABEL, MenuDo::RevealTranscript(r.path.clone())),
         ];
@@ -11774,7 +11872,7 @@ impl Workbench {
             MenuDo::Reveal(path) | MenuDo::RevealTranscript(path) => crate::sys::reveal_path(&path),
             MenuDo::File(what, path) => self.file_do(what, path, window, cx),
             MenuDo::Files(what, paths) => self.files_do(what, paths, window, cx),
-            MenuDo::Copy(text) | MenuDo::CopyAs(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            MenuDo::Copy(text) | MenuDo::CopyAs(_, text) | MenuDo::CopyPath(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuDo::CopyImage(pic) => self.copy_image(pic, cx),
             MenuDo::OpenTerminal(key) => {
                 if self.selected.as_deref() != Some(key.as_str()) {
@@ -12117,7 +12215,10 @@ impl Workbench {
             .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
         for (ix, (label, what)) in menu.items.into_iter().enumerate() {
             if matches!(what, MenuDo::Rule) {
-                card = card.child(div().h(rule_h).flex().items_center().child(div().h(px(1.)).w_full().mx(px(6.)).bg(theme.border)));
+                // The dark palette's border is a shade off the card and
+                // cannot be seen on it: a line of the ink, as a hover is.
+                let line = if theme.mode.is_dark() { theme.foreground.opacity(0.14) } else { theme.border };
+                card = card.child(div().h(rule_h).flex().items_center().child(div().h(px(1.)).w_full().mx(px(6.)).bg(line)));
                 continue;
             }
             let words = what.words(label);
@@ -12431,7 +12532,7 @@ impl Workbench {
                         this.open_session(&open_key, cx)
                     }
                 }))
-                .child(agent_glyph(agent, px(14.), agent_color(agent, &theme), working, format!("tab-glyph-{ix}")))
+                .child(agent_glyph(agent, px(14.), agent_color(agent, &theme), working))
                 .map(|d| {
                     if naming {
                         // The name is written here, on the tab. A press
@@ -12744,6 +12845,7 @@ impl Workbench {
     fn manage_toggle(&mut self, cx: &mut Context<Self>) {
         self.manage = !self.manage;
         self.picked.clear();
+        self.pick_anchor = None;
         self.manage_said = None;
         cx.notify();
     }
@@ -12762,18 +12864,48 @@ impl Workbench {
         cx.notify();
     }
 
+    /// A click on a row while choosing: `project` is the project's name
+    /// for its row. With ⇧, from the row a plain click last chose to this
+    /// one, every row of that kind as drawn is chosen too: sessions to a
+    /// session, projects (all of their sessions) to a project. From one
+    /// kind to the other it is a plain click: what a range of both would
+    /// take in is not plain to see.
+    fn pick_click(&mut self, project: Option<&str>, keys: &[String], shift: bool, cx: &mut Context<Self>) {
+        let Some(id) = project.map(str::to_string).or_else(|| keys.first().cloned()) else { return };
+        if let Some((_, from)) = self.pick_anchor.clone().filter(|(was, _)| shift && *was == project.is_some()) {
+            let range: Option<Vec<String>> = if project.is_some() {
+                let rows = self.page_proj_drawn.borrow();
+                rows.iter().position(|(p, _)| *p == from).zip(rows.iter().position(|(p, _)| *p == id)).map(|(a, b)| rows[a.min(b)..=a.max(b)].iter().flat_map(|(_, k)| k.iter().cloned()).collect())
+            } else {
+                let rows = self.page_sess_drawn.borrow();
+                rows.iter().position(|k| *k == from).zip(rows.iter().position(|k| *k == id)).map(|(a, b)| rows[a.min(b)..=a.max(b)].to_vec())
+            };
+            if let Some(range) = range {
+                self.picked.extend(range);
+                self.manage_said = None;
+                cx.notify();
+                return;
+            }
+        }
+        self.pick(keys, cx);
+        self.pick_anchor = Some((project.is_some(), id));
+    }
+
     /// Of the sessions chosen, the ones `what` is done to, and how many
     /// are running: left as they are by Archive, and stopped by Delete,
     /// which is done to every one. One begun here with nothing sent has
     /// no file, and an archived one is not archived again: neither is
     /// counted. Put Back and Purge are of the sessions in the Trash.
     fn manage_targets(&self, what: ManageDo) -> (Vec<SessionRef>, usize) {
+        // A row is its chain: the sessions it went on from go with it.
+        let with_chain = |r: &SessionRef| std::iter::once(r.clone()).chain(self.chains.get(&key_of(r)).into_iter().flatten().cloned()).collect::<Vec<_>>();
         if matches!(what, ManageDo::PutBack | ManageDo::Purge) {
-            return (self.trashed.iter().filter(|r| self.manage_keys.contains(&key_of(r))).cloned().collect(), 0);
+            return (self.trashed.iter().filter(|r| self.manage_keys.contains(&key_of(r))).flat_map(with_chain).collect(), 0);
         }
         let mut running = 0;
         let mut go = Vec::new();
-        for r in self.refs.iter().filter(|r| self.manage_keys.contains(&key_of(r))) {
+        for r in self.refs.iter().filter(|r| self.manage_keys.contains(&key_of(r))).flat_map(with_chain) {
+            let r = &r;
             if r.path.as_os_str().is_empty() || (what == ManageDo::Archive && r.archived) || (what == ManageDo::Unarchive && !r.archived) {
                 continue;
             }
@@ -12888,15 +13020,19 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let mut stopped = false;
+        // What runs in a session deleted, ours, is stopped, and the
+        // deleting waits for each process to be gone: one still writing
+        // would leave a file the archive's copy is not the same as.
+        let mut stopped: Vec<(Option<Arc<dyn emaki_core::driver::Drive>>, Option<u32>)> = Vec::new();
         if what == ManageDo::Delete {
             for r in &go {
                 let sid = &r.session_id;
-                if self.drivers.remove(sid).is_some() || self.hub.driver_for(sid).is_some() || self.hub.terminal_for(sid).is_some() {
+                let (driver, pty) = (self.hub.driver_for(sid), self.hub.terminal_for(sid));
+                if self.drivers.remove(sid).is_some() || driver.is_some() || pty.is_some() {
+                    stopped.push((driver, pty.and_then(|p| u32::try_from(p.pid).ok())));
                     self.hub.stop_driver(sid);
                     self.hub.stop_terminal(sid);
                     self.hub.mark_ended(sid);
-                    stopped = true;
                 }
             }
         }
@@ -12908,10 +13044,18 @@ impl Workbench {
             let failed: Vec<(String, String)> = cx
                 .background_executor()
                 .spawn(async move {
-                    // What was stopped is given a moment to write its
-                    // last and let go of its file.
-                    if stopped {
-                        std::thread::sleep(Duration::from_millis(800));
+                    // A driver's stop returns once its child is gone; a
+                    // terminal's is asked of the system. Ten seconds at
+                    // most: a process that will not go leaves its session
+                    // to the Trash unarchived (`trash::put`).
+                    let until = Instant::now() + Duration::from_secs(10);
+                    for (driver, pid) in &stopped {
+                        if let Some(d) = driver {
+                            d.stop();
+                        }
+                        while Instant::now() < until && pid.is_some_and(emaki_core::peer::process_alive) {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
                     }
                     let mut failed = Vec::new();
                     for r in &work {
@@ -13010,6 +13154,8 @@ impl Workbench {
     /// narrow the page to an agent.
     fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        self.page_sess_drawn.borrow_mut().clear();
+        self.page_proj_drawn.borrow_mut().clear();
         let scope = self.scope.clone();
 
         let filter = |id: SharedString, label: String, to: Scope, cx: &mut Context<Self>| {
@@ -13123,6 +13269,7 @@ impl Workbench {
                 let anim = self.sessions_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
                 let name = p.clone();
                 let keys: Vec<String> = list.iter().map(key_of).collect();
+                self.page_proj_drawn.borrow_mut().push((p.clone(), keys.clone()));
                 let project_box = pick_box(format!("p-{p}"), state_of(&keys), &theme);
                 let chevron_of = p.clone();
                 // Come to from the sidebar, the page is brought to this
@@ -13163,8 +13310,12 @@ impl Workbench {
                         .hover(|s| s.bg(theme.muted))
                         // Choosing, a click on the row chooses all of its
                         // sessions, and the chevron is what opens it.
-                        .on_click(cx.listener(move |this, _, _, cx| if this.manage { this.pick(&keys, cx) } else { this.sessions_toggle(&name, cx) }))
-                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))], cx)))
+                        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| if this.manage { this.pick_click(Some(&name), &keys, ev.modifiers().shift, cx) } else { this.sessions_toggle(&name, cx) }))
+                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let mut items = vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))];
+                            items.extend(folder_cwd.clone().map(|c| (phrase("Copy Path"), MenuDo::CopyPath(c))));
+                            this.open_menu(ev.position, items, cx)
+                        }))
                         .children(goto)
                         .children(project_box)
                         .child(div().w(px(24.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(17.)).text_color(tint)))
@@ -13205,10 +13356,10 @@ impl Workbench {
                     let card = self.card_for(&r);
                     let dot = self.live_color(&r, cx);
                     let working = self.is_working(&r);
-                    let glyph_id = SharedString::from(format!("row-glyph-{key}"));
                     let glyph_color = if dot.is_some() { agent_color(r.agent, &theme) } else { theme.muted_foreground.opacity(0.75) };
                     let menu_key = key.clone();
                     let session_box = pick_box(format!("s-{key}"), state_of(std::slice::from_ref(&key)), &theme);
+                    self.page_sess_drawn.borrow_mut().push(key.clone());
                     body = body.child(
                         h_flex()
                             .id(SharedString::from(format!("row-{key}")))
@@ -13221,13 +13372,13 @@ impl Workbench {
                             .rounded(px(10.))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.muted))
-                            .on_click(cx.listener(move |this, _, window, cx| if this.manage { this.pick(std::slice::from_ref(&key), cx) } else { this.open_and_focus(&key, window, cx) }))
+                            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| if this.manage { this.pick_click(None, std::slice::from_ref(&key), ev.modifiers().shift, cx) } else { this.open_and_focus(&key, window, cx) }))
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.open_menu(ev.position, this.session_menu(&menu_key, RenameAt::Sheet), cx)),
                             )
                             .children(session_box)
-                            .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working, glyph_id)))
+                            .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), glyph_color, working)))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -13307,7 +13458,7 @@ impl Workbench {
                         .hover(|s| s.bg(theme.muted))
                         .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.trash_menu(Some(&menu_key), ev.position, cx)))
                         .children(pick_box(format!("t-{key}"), 0, &theme).map(|b| div().invisible().child(b)))
-                        .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), theme.muted_foreground.opacity(0.75), false, SharedString::from(format!("trash-page-glyph-{key}")))))
+                        .child(div().w(px(24.)).flex().justify_center().child(agent_glyph(r.agent, px(15.), theme.muted_foreground.opacity(0.75), false)))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -13383,6 +13534,9 @@ impl Workbench {
         // so what is chosen far down can still be acted on.
         let n = self.picked.len();
         let none = n == 0 || self.manage_busy;
+        // Archive is for an active session: with only archived ones
+        // chosen it is there, dimmed, so the plate does not move.
+        let none_active = none || !self.refs.iter().any(|r| !r.archived && !r.path.as_os_str().is_empty() && self.picked.contains(&key_of(r)));
         let said = if self.manage_busy { Some(t("Working…").to_string()) } else { self.manage_said.clone() };
         // A pill as the page's filters are: quiet, the danger's, or solid.
         let pill = |id: &'static str, icon: Option<&'static str>, label: &'static str, kind: u8, off: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>, on: fn(&mut Self, &mut Context<Self>)| {
@@ -13449,7 +13603,7 @@ impl Workbench {
                         .child(if n == 0 { t("Select all").to_string() } else { tf("{n} selected", &[("n", &n)]) }),
                 )
                 .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).children(said.clone()))
-                .child(pill(ids[1], Some("icons/archive.svg"), t("Archive"), 0, none, &theme, cx, |this, cx| this.manage_asked(ManageDo::Archive, cx)))
+                .child(pill(ids[1], Some("icons/archive.svg"), t("Archive"), 0, none_active, &theme, cx, |this, cx| this.manage_asked(ManageDo::Archive, cx)))
                 .child(pill(ids[2], Some("icons/trash.svg"), t("Delete"), 1, none, &theme, cx, |this, cx| this.manage_asked(ManageDo::Delete, cx)))
                 .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(theme.border))
                 .child(pill(ids[3], None, t("Done"), 2, false, &theme, cx, |this, cx| this.manage_toggle(cx)))
@@ -13716,7 +13870,6 @@ impl Workbench {
         };
         let session = detail.session.clone();
         let list = detail.list.clone();
-        let entity = cx.entity().downgrade();
 
         let mut right: Vec<AnyElement> = Vec::new();
         if r.archived {
@@ -13768,17 +13921,24 @@ impl Workbench {
         });
 
         let chat_font = crate::fonts::chat_family(&self.cfg.app.chat_font, cx);
+        // The list is a view the window keeps between frames
+        // (`transcript::ConversationList`): drawn from the cache unless it
+        // is another session's list, and with its turning marks painted
+        // and its text kept in the selection here, at every frame.
+        let conversation = self.conversation.clone();
+        let other = conversation.update(cx, |c, _| c.set_list(&key_of(&r), &list));
+        let (marks, kept) = { let c = conversation.read(cx); (c.marks.clone(), c.kept.clone()) };
+        // Fading in, it is drawn afresh: a frame kept from the cache keeps
+        // the opacity it was painted at.
+        let arriving = self.detail_in.as_ref().filter(|(k, at, _)| *k == key_of(&r) && at.elapsed() < PAGE_IN).map(|(_, _, n)| *n);
+        let list_view = if other || arriving.is_some() { conversation.into_any_element() } else { AnyView::from(conversation).cached(StyleRefinement::default().size_full()).into_any_element() };
         let transcript = div()
             .flex_1()
             .min_h_0()
             .relative()
             .when_some(chat_font, |d, f| d.font_family(f))
-            .child(
-                gpui::list(list.clone(), move |ix, window, cx| {
-                    entity.upgrade().map(|e| e.update(cx, |this, cx| this.render_list_item(ix, window, cx))).unwrap_or_else(|| div().into_any_element())
-                })
-                .size_full(),
-            )
+            .child(list_view)
+            .child(canvas(move |_, window, cx| kept.keep(window, cx), move |_, _, window, cx| marks.paint(window, cx)).absolute().size_0())
             .vertical_scrollbar(&list)
             .children(unread)
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.conversation_menu(ev.position, window, cx)));
@@ -13833,7 +13993,7 @@ impl Workbench {
                 .items_center()
                 .text_size(px(12.))
                 .text_color(theme.muted_foreground)
-                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), true, "status-glyph"))
+                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), true))
                 .map(|d| match seen {
                     Some(w) => d
                         .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(word(w.color)).child(w.verb))
@@ -13918,7 +14078,7 @@ impl Workbench {
                 .items_center()
                 .text_size(px(12.))
                 .text_color(theme.muted_foreground)
-                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "waiting-glyph"))
+                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false))
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said))
                 .child(div().flex_1().min_w_0().truncate().child(where_))
                 .when(in_terminal && waiting_on, |d| d.child(crate::branches::small_pill("waiting-terminal", "icons/terminal.svg", if own { t("Show the terminal") } else { t("Open the terminal") }, Press::Primary, false, &theme).on_click(cx.listener(|this, _, window, cx| {
@@ -13957,7 +14117,7 @@ impl Workbench {
                 .items_center()
                 .text_size(px(12.))
                 .text_color(theme.muted_foreground)
-                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false, "behind-glyph"))
+                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false))
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(self.behind_said.borrow().clone()))
                 .child(div().flex_1().min_w_0().truncate().child(t("below")))
                 .child(choice_pill("behind-show", "icons/arrow-down.svg", t("Show"), Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).when(behind_on, |d| {
@@ -14032,6 +14192,12 @@ impl Workbench {
                     .children(foot_cards)
                     .child(v_flex().w_full().items_center().pt(px(8.)).child(self.render_composer(cx))),
             );
+        // A tab's first read come in: what it left empty under the tabs
+        // fades and rises into place, as a page's content does (`page_in`).
+        let conversation = match arriving {
+            Some(n) => v_flex().flex_1().min_w_0().h_full().child(conversation.relative().with_animation(ElementId::Name(format!("detail-in-{n}").into()), Animation::new(PAGE_IN).with_easing(ease_out_quint()), |d, t| d.opacity(t).top(px(8. * (1. - t))))),
+            None => conversation,
+        };
         v_flex()
             .flex_1()
             .min_w_0()
@@ -14142,7 +14308,10 @@ impl Workbench {
                 }
                 cx.notify();
             }))
-            .child(div().size(px(7.)).rounded_full().bg(theme.blue).flex_shrink_0().with_animation(if agents { "agents-dot" } else { "shells-dot" }, Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.opacity(0.35 + 0.65 * (1. - (2. * t - 1.).abs()))))
+            .child(div().size(px(7.)).rounded_full().bg(theme.blue).flex_shrink_0().opacity({
+                let t = crate::ambient::phase(Duration::from_millis(1400));
+                0.35 + 0.65 * (1. - (2. * t - 1.).abs())
+            }))
             .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(if agents { count(shells_n, "{n} agent running in the background", "{n} agents running in the background") } else { count(shells_n, "{n} command running in the background", "{n} commands running in the background") }))
             .child(div().flex_1().min_w_0().truncate().child(if shells.len() == 1 { label(first) } else { String::new() }))
             .when(shells.len() == 1, |d| d.child(div().flex_shrink_0().child(elapsed_since(&first.started, self.now))))
@@ -14256,7 +14425,7 @@ impl Workbench {
     /// A round as the conversation's list draws it, and under the last
     /// one the cards (`render_cards`): part of the list's last item, so
     /// the list is told of no item more and nothing is spliced.
-    fn render_list_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_list_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let round = self.render_round(ix, window, cx);
         let last = self.detail.as_ref().is_some_and(|d| ix + 1 == d.session.rounds.len());
         if last {
@@ -16812,8 +16981,11 @@ fn flag_of(control: &str, key: &str) -> Option<&'static str> {
     })
 }
 
+/// How long a page's content takes to come in (`page_in`, `detail_in`).
+const PAGE_IN: Duration = Duration::from_millis(240);
+
 pub fn page_in(id: &'static str, el: Div) -> AnyElement {
-    el.with_animation(ElementId::Name(id.into()), Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()), |d, t| d.opacity(t).pt(px(8. * (1. - t)))).into_any_element()
+    el.with_animation(ElementId::Name(id.into()), Animation::new(PAGE_IN).with_easing(ease_out_quint()), |d, t| d.opacity(t).pt(px(8. * (1. - t)))).into_any_element()
 }
 
 /// The shadow under a floating card (the composer, a palette): a wide soft
@@ -16906,33 +17078,79 @@ pub fn agent_color(agent: AgentId, theme: &gpui_component::Theme) -> Hsla {
 }
 
 /// The agent's glyph, turning (Claude) or breathing (Codex) while the agent
-/// is at work, still otherwise. The animation needs a stable id per place.
-pub fn agent_glyph(agent: AgentId, size: Pixels, color: Hsla, working: bool, id: impl Into<SharedString>) -> AnyElement {
+/// is at work, still otherwise, on the window's clock (`ambient`).
+pub fn agent_glyph(agent: AgentId, size: Pixels, color: Hsla, working: bool) -> AnyElement {
     if !working {
         return agent_icon(agent, size, color).into_any_element();
     }
-    let id: SharedString = id.into();
+    // In a view the window keeps it is painted beside the view, which is
+    // not drawn again for a step of the clock.
+    if let Some(place) = crate::ambient::mark_place(agent, size, color) {
+        return place;
+    }
     match agent {
         // Claude's mark turns once every 2.8 s and breathes twice a turn
         // (down to 82% of its size and 55% opacity), what the Python
         // viewer's `spark` did; a fixed box keeps the breathing from
         // moving anything around it.
-        AgentId::ClaudeCode => div()
-            .size(size)
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(agent_icon(agent, size, color).with_animation(ElementId::Name(id), Animation::new(Duration::from_millis(2800)).repeat(), move |icon, t| {
-                let breath = 0.5 - 0.5 * (t * 4.0 * std::f32::consts::PI).cos();
-                icon.rotate(gpui::Radians(t * std::f32::consts::TAU)).with_size(size * (1.0 - 0.18 * breath)).opacity(1.0 - 0.45 * breath)
-            }))
-            .into_any_element(),
-        AgentId::Codex => div()
-            .child(agent_icon(agent, size, color))
-            .with_animation(ElementId::Name(id), Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.3, 1.0)), |d, t| d.opacity(t))
-            .into_any_element(),
+        AgentId::ClaudeCode => {
+            let t = crate::ambient::phase(Duration::from_millis(2800));
+            let breath = 0.5 - 0.5 * (t * 4.0 * std::f32::consts::PI).cos();
+            div()
+                .size(size)
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(agent_icon(agent, size, color).rotate(gpui::Radians(t * std::f32::consts::TAU)).with_size(size * (1.0 - 0.18 * breath)).opacity(1.0 - 0.45 * breath))
+                .into_any_element()
+        }
+        AgentId::Codex => div().child(agent_icon(agent, size, color)).opacity(crate::ambient::pulse(0.3, 1.0, crate::ambient::phase(Duration::from_millis(1200)))).into_any_element(),
     }
+}
+
+/// The sidebar beside the content, in a view of its own that the window
+/// keeps between frames, as the conversation's list is
+/// (`transcript::ConversationList`): drawn afresh whenever the workbench
+/// changes, which it observes, and when its own rows ask (the pointer on
+/// one, a folder unfolding). Its marks at work are painted beside it at
+/// every step of the clock (`ambient::Marks`).
+pub(crate) struct SideView {
+    workbench: WeakEntity<Workbench>,
+    pub(crate) marks: crate::ambient::Marks,
+}
+
+impl SideView {
+    fn new(workbench: Entity<Workbench>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&workbench, |_, _, cx| cx.notify()).detach();
+        Self { workbench: workbench.downgrade(), marks: Default::default() }
+    }
+}
+
+impl Render for SideView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.marks.clear();
+        let _here = crate::ambient::Within::enter(None, self.marks.clone());
+        self.workbench.upgrade().map(|wb| wb.update(cx, |wb, cx| wb.render_sidebar(cx).into_any_element())).unwrap_or_else(|| div().into_any_element())
+    }
+}
+
+/// `agent_glyph` at work, painted where it stands (`ambient::Marks`):
+/// the same turn, breath and pulse.
+pub(crate) fn paint_agent_glyph(agent: AgentId, color: Hsla, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    let (scale, alpha, angle) = match agent {
+        AgentId::ClaudeCode => {
+            let t = crate::ambient::phase(Duration::from_millis(2800));
+            let breath = 0.5 - 0.5 * (t * 4.0 * std::f32::consts::PI).cos();
+            (1.0 - 0.18 * breath, 1.0 - 0.45 * breath, t * std::f32::consts::TAU)
+        }
+        AgentId::Codex => (1.0, crate::ambient::pulse(0.3, 1.0, crate::ambient::phase(Duration::from_millis(1200))), 0.),
+    };
+    let center = bounds.center();
+    let drawn = Bounds::from_corners(center - (center - bounds.origin) * scale, center + (bounds.bottom_right() - center) * scale);
+    let sf = window.scale_factor();
+    let turn = gpui::TransformationMatrix::unit().translate(center.scale(sf)).rotate(gpui::Radians(angle)).translate(center.scale(-sf));
+    let _ = window.paint_svg(drawn, agent_icon_path(agent).into(), None, turn, color.opacity(alpha), cx);
 }
 
 /// What a choice on a card is, which is how its pill is drawn.
@@ -17856,10 +18074,14 @@ impl Render for Workbench {
         if std::mem::take(&mut self.pending_seltext) {
             window.defer(cx, |window, cx| eprintln!("emaki: selected {:?}", gpui_base::TextSelection::selected_text(window, cx)));
         }
-        for key in std::mem::take(&mut self.pending_press) {
+        // Keys one after another in one step (`press:cmd-k+cmd-u`), as
+        // a chord's are, which gpui waits a second at most between.
+        for keys in std::mem::take(&mut self.pending_press) {
             window.defer(cx, move |window, cx| {
-                if let Ok(key) = gpui::Keystroke::parse(&key) {
-                    window.dispatch_keystroke(key, cx);
+                for key in keys.split('+').filter(|k| !k.is_empty()) {
+                    if let Ok(key) = gpui::Keystroke::parse(key) {
+                        window.dispatch_keystroke(key, cx);
+                    }
                 }
             });
         }
@@ -18034,6 +18256,15 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_panel(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleOutline, _, cx| this.toggle_panel(false, cx)))
+            // Off a Mac the same keys are the terminal's paste, which
+            // keeps them while the keyboard is there.
+            .on_action(cx.listener(|this, _: &ToggleRaw, window, cx| {
+                if !cfg!(target_os = "macos") && this.side_term_focus.is_focused(window) {
+                    this.term_paste(cx);
+                } else {
+                    this.toggle_file_raw(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleShell, window, cx| this.toggle_term_key(false, window, cx)))
             .on_action(cx.listener(|this, _: &ReopenTab, _, cx| this.reopen_tab(cx)))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| this.rename_key(e, window, cx)))
@@ -18075,7 +18306,7 @@ impl Render for Workbench {
                 // room in the row opens, and out as it closes.
                 h_flex().size_full().when(side_t > 0., |d| {
                     let w = self.sidebar_w;
-                    d.child(div().h_full().flex_shrink_0().overflow_hidden().w((w * side_t).round()).when(!side_kept, |d| d.child(div().h_full().w(w).ml(w * (side_t - 1.)).child(self.render_sidebar(cx)))))
+                    d.child(div().h_full().flex_shrink_0().overflow_hidden().w((w * side_t).round()).when(!side_kept, |d| d.child(div().h_full().w(w).ml(w * (side_t - 1.)).child(self.kept_sidebar(cx)))))
                 })
                 // The content is a card on the frame. Its corners are
                 // painted over what is in them (`card_corners`): a clip
@@ -18132,6 +18363,13 @@ impl Render for Workbench {
             .when_some(self.pick.clone().filter(|m| !m.in_settings), |d, mut m| {
                 m.by = self.pill_at.borrow().get(&(m.what, false)).copied().unwrap_or(m.by);
                 d.child(self.render_pick(m, false, window, cx))
+            })
+            // The clock's step, and last of all the frame's question to it:
+            // whether anything drawn in it moves on the clock (`ambient`).
+            .child(div().absolute().size_0().child(self.ambient.clone()))
+            .child({
+                let ambient = self.ambient.clone();
+                canvas(|_, _, _| {}, move |_, _, window, cx| crate::ambient::after_frame(&ambient, window, cx)).absolute().size_0()
             })
     }
 }

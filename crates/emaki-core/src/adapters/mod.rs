@@ -10,7 +10,7 @@
 pub mod claude;
 pub mod codex;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::archive;
@@ -143,6 +143,10 @@ pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
         if adapter.archives_itself() {
             continue;
         }
+        // A session the archive alone has is its fullest copy: a
+        // generation set aside, or a copy in another project's folder
+        // (`archive::one_copy_each`), is never what stands for it.
+        let mut kept: HashMap<(AgentId, String), (bool, u64, SessionRef)> = HashMap::new();
         for (_project, path) in archive::iter_archived(adapter.id()) {
             let Ok(st) = std::fs::metadata(&path) else { continue };
             if st.len() < min_size {
@@ -157,6 +161,21 @@ pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
             }
             r.archived = true;
             r.kept = true;
+            let main = !path.file_name().is_some_and(|n| n.to_string_lossy().contains(".gen"));
+            let rank = (main, st.len());
+            match kept.entry((r.agent, r.session_id.clone())) {
+                std::collections::hash_map::Entry::Occupied(mut e) if (e.get().0, e.get().1) < rank => {
+                    e.insert((main, st.len(), r));
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert((main, st.len(), r));
+                }
+            }
+        }
+        let mut kept: Vec<SessionRef> = kept.into_values().map(|(_, _, r)| r).collect();
+        kept.sort_by(|a, b| a.path.cmp(&b.path));
+        for r in kept {
             seen.insert((r.agent, r.session_id.clone()));
             refs.push(r);
         }

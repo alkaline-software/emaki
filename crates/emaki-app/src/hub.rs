@@ -306,12 +306,33 @@ impl Hub {
             .name("emaki-search".into())
             .spawn(move || {
                 let Ok(mut index) = SearchIndex::open() else { return };
-                while let Ok(mut refs) = rx.recv() {
+                // A session still being written waits its turn
+                // (`SearchIndex::sync_paced`); while one waits, the index
+                // looks again every few seconds with no new request.
+                let mut refs: Vec<SessionRef> = Vec::new();
+                let mut waiting = false;
+                loop {
+                    let got = if waiting {
+                        match rx.recv_timeout(Duration::from_secs(5)) {
+                            Ok(newest) => Some(newest),
+                            Err(mpsc::RecvTimeoutError::Timeout) => None,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        match rx.recv() {
+                            Ok(newest) => Some(newest),
+                            Err(_) => break,
+                        }
+                    };
+                    if let Some(newest) = got {
+                        refs = newest;
+                    }
                     // Only the newest request matters.
                     while let Ok(newer) = rx.try_recv() {
                         refs = newer;
                     }
-                    let _ = index.sync(&refs, false);
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+                    waiting = index.sync_paced(&refs, now).deferred > 0;
                 }
             })
             .ok();

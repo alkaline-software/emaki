@@ -100,7 +100,21 @@ Each run ends with `built dist/Emaki-mac-<arch>.dmg (X.Y.Z, <arch>, signed, nota
 
 Check each run's own exit code and last line. Step 3 asked the notary service already, so a credential that cannot be reached here is new since then: see "When something fails".
 
-### 6. Put them on the release and publish it
+### 6. Install and run it on Windows and Linux
+
+Before anything is public, the draft's own installers are installed and opened on the other systems, in VMPal's VMs on this Mac (`Windows 11` and `Ubuntu 26`, both ARM): the tests in CI build and test the code, and nothing else installs the packages a person downloads. Download them from the draft:
+
+```
+gh release download vX.Y.Z --repo alkaline-software/emaki --dir dist/try --pattern 'Emaki-windows-*-setup.exe' --pattern 'Emaki-linux-arm64.*'
+```
+
+- **Windows**: copy `Emaki-windows-arm64-setup.exe` and `Emaki-windows-x64-setup.exe` (which Windows on ARM runs emulated) into the VM, run each, and see the splash and then the window open; the app is under `%LOCALAPPDATA%\Emaki`. Look at what Windows shows first: without Artifact Signing (see "Signing on Windows") SmartScreen stops the download with "Windows protected your PC", and the release is not free of warnings until that is set up.
+- **Linux**: install the `.deb` with `sudo apt install ./Emaki-linux-arm64.deb` and open Emaki from the app grid; make the AppImage executable and run it. Both must open the window with no error in a terminal started beside them. The x64 Linux packages have no machine here and are tried only by CI's build.
+- In each, the window opens on the new-session page, the sidebar lists the agents' sessions, a session opens, and the terminal panel runs a shell.
+
+A package that does not install or open is a reason to stop: fix it, then redo the release from step 3 ("Redoing a release under the same tag").
+
+### 7. Put them on the release and publish it
 
 Once the workflow is green and both images are built:
 
@@ -110,7 +124,7 @@ scripts/release-publish.sh X.Y.Z
 
 It refuses unless the release workflow for the tag has finished and succeeded (`action-gh-release` replaces same-named assets, so an upload made while the job runs is overwritten by it) and both images are notarized, stapled and newer than the tag's commit. Then it uploads them over CI's ad-hoc ones, downloads them back and compares checksums, checks the downloaded copies the way Gatekeeper will, and publishes the draft as the latest release. The release is not done until this prints "published with notarized Mac images". v0.1.5 was published by CI with the ad-hoc images and the upload came half an hour later; the app updated itself from them in between and macOS refused it.
 
-### 7. Install the release build here
+### 8. Install the release build here
 
 Drag from the disk image, or:
 
@@ -120,11 +134,11 @@ ditto "/Volumes/Emaki vX.Y.Z/Emaki.app" /Applications/Emaki.app
 hdiutil detach "/Volumes/Emaki vX.Y.Z"
 ```
 
-Keep no other `Emaki.app` on the disk (`dist/`, a scratch folder, `scripts/make-app.sh`'s output): Launchpad and Spotlight list each one. Step 8 removes the ones a release leaves.
+Keep no other `Emaki.app` on the disk (`dist/`, a scratch folder, `scripts/make-app.sh`'s output): Launchpad and Spotlight list each one. Step 9 removes the ones a release leaves.
 
-### 8. Delete the compiled files
+### 9. Delete the compiled files
 
-Every release ends with this step, and a release is not finished until it has run. Nothing compiled is kept between releases: disk space is worth more here than the minutes the next build takes. Do it without being asked, once the release is confirmed done: step 6 printed "published with notarized Mac images" and the installed copy opens. Then:
+Every release ends with this step, and a release is not finished until it has run. Nothing compiled is kept between releases: disk space is worth more here than the minutes the next build takes. Do it without being asked, once the release is confirmed done: step 7 printed "published with notarized Mac images" and the installed copy opens. Then:
 
 ```
 scripts/release-clean.sh
@@ -154,11 +168,11 @@ git tag -a vX.Y.Z -m "Emaki vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The Mac images must be rebuilt from the new commit (step 5) and published again (step 6).
+The Mac images must be rebuilt from the new commit (step 5), the other systems tried again (step 6), and published again (step 7).
 
 ## Signing in CI
 
-`release.yml` signs and notarizes on the runner when five repository secrets exist; step 5 then disappears and step 6 is only `gh release edit vX.Y.Z --draft=false --latest`. Write access is enough to set them:
+`release.yml` signs and notarizes on the runner when five repository secrets exist; step 5 then disappears and step 7 is only `gh release edit vX.Y.Z --draft=false --latest`. Write access is enough to set them:
 
 ```
 security export -k login.keychain-db -t identities -f pkcs12 -P "<passphrase>" -o /tmp/cert.p12
@@ -205,7 +219,7 @@ gh variable set STORE_PUBLISHER --repo alkaline-software/emaki --body "<Package/
 gh variable set STORE_PUBLISHER_NAME --repo alkaline-software/emaki --body "<Package/Properties/PublisherDisplayName>"
 ```
 
-Each release then leaves `Emaki-windows-x64.msix` and `Emaki-windows-arm64.msix` with the release run. After step 6:
+Each release then leaves `Emaki-windows-x64.msix` and `Emaki-windows-arm64.msix` with the release run. After step 7:
 
 ```
 gh run download <run-id> --repo alkaline-software/emaki --pattern 'store-*' --dir dist/store
@@ -271,7 +285,7 @@ Every failure met while cutting a release gets a line here once it is solved, wi
 - **Notarization rejected**: `xcrun notarytool log <submission-id> --keychain-profile notarytool-profile`. The usual causes are a binary signed without `--options runtime` or an unsigned helper inside the bundle; the script signs with `--deep` and the hardened runtime, so look for a new binary the packager added.
 - **The Finder layout step fails**: the volume `Emaki vX.Y.Z` was already mounted, or Finder had no session. The script detaches a stale volume first; `hdiutil info` shows what is mounted.
 - **Two Emakis in Launchpad or Spotlight**: a second bundle somewhere on disk. `mdfind "kMDItemFSName == 'Emaki.app'"` lists them; keep only `/Applications/Emaki.app`. The one found after v0.1.9 was the dev build's, in `target/debug`, which is not a release's doing: it is made again at every `scripts/dev-app.sh`. It is now made in `target/debug/dev.noindex/`, which Spotlight passes by, and step 8 removes it with the rest of `target/`.
-- **The Mac images on the release are ad-hoc signed**, or macOS says the app "cannot be opened" after an update: step 6 was skipped. Run `scripts/release-publish.sh X.Y.Z`. To check an installed copy: `spctl -a -vv /Applications/Emaki.app` must say "Notarized Developer ID"; "rejected" with `Signature=adhoc` from `codesign -dv` is CI's image. Reinstall from `dist/` (step 7).
+- **The Mac images on the release are ad-hoc signed**, or macOS says the app "cannot be opened" after an update: step 7 was skipped. Run `scripts/release-publish.sh X.Y.Z`. To check an installed copy: `spctl -a -vv /Applications/Emaki.app` must say "Notarized Developer ID"; "rejected" with `Signature=adhoc` from `codesign -dv` is CI's image. Reinstall from `dist/` (step 8).
 - **The Windows job fails with "cannot find type" or an unresolved import**: a line used on every platform leans on something gated for Unix or macOS. `scripts/release-check.sh` runs the type check that finds it; the macOS and Linux jobs pass without it.
 - **"Node.js NN is deprecated" on a run**: an action is a major version behind. `gh api repos/<owner>/<action>/releases/latest -q .tag_name` gives the current one; move `rust.yml` and `release.yml` together.
 - **A terminal says "Transcript saving is off, inherited CLAUDE_CODE_CHILD_SESSION marker"**: Emaki was started from inside a Claude Code session and a terminal app it launched carries that session's variables. Quit the terminal app and reopen it. When an agent starts Emaki, it must clear every `CLAUDE*` variable first.

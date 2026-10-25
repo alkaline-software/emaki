@@ -8,6 +8,8 @@
 
 mod a11y;
 mod agents_page;
+mod ambient;
+mod sublime;
 mod assets;
 mod branches;
 mod csd;
@@ -37,7 +39,7 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, ChooseFolder, OpenSettings, Refresh, ReopenTab, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
+pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, ChooseFolder, OpenSettings, Refresh, ReopenTab, ToggleRaw, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
@@ -56,6 +58,8 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-b", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-f", ToggleFiles, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-o", ToggleOutline, Some(KEY_CONTEXT)),
+        // A file that reads two ways, as it reads or as it is written.
+        KeyBinding::new("secondary-shift-v", ToggleRaw, Some(KEY_CONTEXT)),
         // The two sides of the terminal at a conversation's right.
         KeyBinding::new("secondary-shift-s", ToggleShell, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-a", ToggleAgent, Some(KEY_CONTEXT)),
@@ -129,6 +133,8 @@ fn key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-secondary-f", ToggleFullScreen, None),
         ]);
     }
+    // Sublime Text's, while the keyboard is in the file's editor.
+    keys.extend(sublime::bindings());
     keys
 }
 
@@ -195,6 +201,7 @@ pub(crate) fn app_menus() -> Vec<Menu> {
             MenuItem::action(t("Toggle Sidebar"), ToggleSidebar),
             MenuItem::action(t("Toggle Files"), ToggleFiles),
             MenuItem::action(t("Toggle Outline"), ToggleOutline),
+            MenuItem::action(t("Toggle Rendered and Raw"), ToggleRaw),
             MenuItem::action(t("Toggle Shell Terminal"), ToggleShell),
             MenuItem::action(t("Toggle Agent Terminal"), ToggleAgent),
         ],

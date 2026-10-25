@@ -26,7 +26,9 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         };
 
-        let Some(pos) = line.position_for_index(point.column, last_layout, false) else {
+        // Emaki: where the caret is drawn, the end of a row at a soft wrap
+        // when it was put there as one (`cursor_line_end_affinity`).
+        let Some(pos) = line.position_for_index(point.column, last_layout, self.cursor_line_end_affinity) else {
             self.preferred_column = None;
             return;
         };
@@ -106,6 +108,14 @@ impl<M: InputModeKind> InputBaseState<M> {
         let was_preferred_column = self.preferred_column;
 
         let mut display_point = self.display_map.offset_to_wrap_display_point(offset);
+        // Emaki: a caret at a soft wrap drawn as the upper row's end is on
+        // that row (`cursor_wrap_row`), so ↓ goes to the row it shows over.
+        let row = self.text.offset_to_point(offset).row;
+        let on = self.cursor_wrap_row(row);
+        if on < display_point.local_row {
+            display_point.row -= display_point.local_row - on;
+            display_point.local_row = on;
+        }
 
         // Convert wrap row → display row (skips folded rows), move, then convert back
         let current_display_row = self
@@ -289,6 +299,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         let offset = self.end_of_line();
         self.move_to(offset, Some(MoveDirection::Down), cx);
         self.cursor_line_end_affinity = true;
+        // Emaki: the column ↑ and ↓ keep is the row's end, where the caret
+        // is drawn, not the next row's start the same byte also is.
+        self.update_preferred_column();
     }
 
     pub(super) fn move_to_start(

@@ -35,6 +35,7 @@ Emaki is an elegant app, held to the bar of the work that wins Awwwards, the Web
 - **Nothing changes from one frame to the next.** What appears, goes, opens, closes, grows or moves does so over a moment, with what is around it: a card, a line, an arrow, a scroll a click starts. A jump is a bug. Use the pattern its neighbors use. (`docs/window.md`, Motion)
 - **No pause at the end of a motion.** It runs into its place and stops, with no crawl, hesitation or second step in its last frames; every new animation so far had one until it was looked for. The causes and the fix are in `docs/window.md`, Motion.
 - **What is cut says so:** it fades out at that edge and can be reached.
+- **A motion that repeats runs on the window's clock** (`ambient::phase`), never on `Animation::repeat`, which draws the whole window at the display's rate for as long as it runs. The conversation's list, the sidebar and a markdown file are views the window keeps between frames: what they are drawn from must reach them. (`docs/window.md`, Frames)
 - **Words are few.** Say what to do once, to someone who can use a computer: no line on how to paste or type a password, and no note that repeats what the control above it already shows.
 - **Look before saying it is done:** at all the change shows, hides or moves, and at the layout in a narrow window.
 
@@ -79,7 +80,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
-| `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `quarto.rs`, `math.rs`, `latex.rs`, `typst_doc.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs`; the vendored `text/format/quarto.rs` and `text/math.rs` | `docs/panels.md` |
+| `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `sublime.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `quarto.rs`, `math.rs`, `latex.rs`, `typst_doc.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs`; the vendored `text/format/quarto.rs` and `text/math.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs`; `i18n.rs`, `locales/words.json`, any word the window shows | `docs/window.md` |
 | Anything a person sees, new or changed: a control, a color, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
@@ -144,6 +145,7 @@ crates/emaki-app/         the window
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets
   src/pictures.rs            files drawn small: which are pictures, what a thumbnail is drawn from, the tile of any other kind
   src/spelling.rs            a markdown, Quarto or text file checked in its editor as the composer is: the marks, the menu, the correction
+  src/sublime.rs             Sublime Text's keys in the file's editor, and only there
   src/word.rs                a Word document written in: WordCraft's engine with the pane's own pages, caret, keys and strip
   src/html_web.rs            an HTML file, a video or a sound in the system's web view, set in the file's pane; hidden while the window draws over it
   src/fetch.rs               gpui's HTTP client, for a picture a markdown file shows from an address
@@ -185,9 +187,9 @@ PLAN.md                    the detailed plan: tasks, decisions, what has landed
 
 **One dev build at a time.** Two copies share `~/.emaki` and both write `state/ui.json`, and the Dock shows two identical icons. The person keeps the installed Emaki open beside the dev build on purpose; a second dev build is a mistake. A probe copy has its own `EMAKI_HOME` (`docs/probing.md`).
 
-**After a change to the app, relaunch it with `scripts/relaunch.sh`.** The person develops Emaki in Emaki, so at the end of any task that changed the app, build it (`cargo build -p emaki-app`) and run `scripts/relaunch.sh` as the last command before the final reply, without being asked. A change to documents alone needs no relaunch. The script returns at once; fifteen seconds later, or when the turn is over if that is later, it quits the dev build and starts the new one (`scripts/dev-app.sh`). The installed Emaki is never quit: the person works in it beside the dev build. The agent's session is a child of the app, so quitting the app ends the session: the script waits while the session's registry record says `busy`. Never `pkill` by hand from inside the app, and look at a change before the relaunch with a probe copy.
+**After a change to the app, relaunch it with `scripts/relaunch.sh`.** The person develops Emaki in Emaki, so at the end of any task that changed the app, build it (`cargo build -p emaki-app`) and run `scripts/relaunch.sh` as the last command before the final reply, without being asked. A change to documents alone needs no relaunch. The script returns at once; fifteen seconds after the turn is over it quits the dev build and starts the new one (`scripts/dev-app.sh`). Those seconds are the person's, to read the reply and start typing: counted from the script's run, they were gone by the end of a long reply, and the app quit under the person's typing. The installed Emaki is never quit: the person works in it beside the dev build. The agent's session is a child of the app, so quitting the app ends the session: the script waits while the session's registry record says `busy`. Never `pkill` by hand from inside the app, and look at a change before the relaunch with a probe copy.
 
-**"Clean up after the release" means `scripts/release-clean.sh`.** It is the last step of a release (WORKFLOW.md, step 8), run without being asked and as the last command, from whichever Emaki the session is in. Run that script and nothing by hand: it deletes `target/` and `dist/`, and when the dev build is the one running it quits it after the turn and opens the installed app.
+**"Clean up after the release" means `scripts/release-clean.sh`.** It is the last step of a release (WORKFLOW.md, step 9), run without being asked and as the last command, from whichever Emaki the session is in. Run that script and nothing by hand: it deletes `target/` and `dist/`, and when the dev build is the one running it quits it after the turn and opens the installed app.
 
 ## Writing things down
 

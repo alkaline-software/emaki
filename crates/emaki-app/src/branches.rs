@@ -186,7 +186,7 @@ impl Workbench {
         let web = self.repo_web_pill(cx);
         if self.branch_fetching {
             return Some(
-                row.child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0().with_animation("branch-fetching", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
+                row.child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0().rotate(gpui::Radians(crate::ambient::phase(Duration::from_millis(900)) * std::f32::consts::TAU)))
                     .child(div().flex_1().min_w_0().truncate().child(tf("Asking {origin}…", &[("origin", &origin)])))
                     .children(web)
                     .children(pull)
@@ -488,14 +488,16 @@ impl Workbench {
         let newest = c.commits.as_ref().and_then(|l| l.first()).filter(|m| m.sha == sha && m.local).is_some();
         let page = git::commit_url(&c.root, &sha).is_some();
         let item = |label: &'static str, what: CommitDo| (label, MenuDo::Commit(what, sha.clone()));
-        let mut items = Vec::new();
-        if newest {
-            items.push(item(t("Undo Commit"), CommitDo::Undo));
-        }
-        items.extend([item(t("Revert Changes in Commit"), CommitDo::Revert), ("", MenuDo::Rule), item(t("Copy Commit Hash"), CommitDo::CopySha)]);
+        // What reads it first, what changes the branch after a line.
+        let mut items = vec![item(t("Copy Commit Hash"), CommitDo::CopySha)];
         if page {
             items.push(item(t("View on the Web"), CommitDo::View));
         }
+        items.push(("", MenuDo::Rule));
+        if newest {
+            items.push(item(t("Undo Commit"), CommitDo::Undo));
+        }
+        items.push(item(t("Revert Changes in Commit"), CommitDo::Revert));
         if self.changes.as_ref().is_some_and(|c| c.commit.as_ref() != Some(&sha)) {
             self.history_pick(sha.clone(), cx);
         }
@@ -1300,7 +1302,7 @@ impl Workbench {
                 h_flex()
                     .gap(px(7.))
                     .items_center()
-                    .child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).with_animation("branch-new-checking", Animation::new(Duration::from_millis(900)).repeat(), |icon, t| icon.rotate(gpui::Radians(t * std::f32::consts::TAU))))
+                    .child(Icon::new(IconName::LoaderCircle).with_size(px(12.)).text_color(theme.muted_foreground).rotate(gpui::Radians(crate::ambient::phase(Duration::from_millis(900)) * std::f32::consts::TAU)))
                     .child(quiet(tf("Asking {origin} whether {branch} is up to date…", &[("origin", &origin), ("branch", &default)])))
                     .into_any_element(),
             ),

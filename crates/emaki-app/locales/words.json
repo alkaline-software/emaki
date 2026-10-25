@@ -1331,15 +1331,6 @@
     "de": "Branch löschen",
     "es": "Eliminar rama"
   },
-  "Delete Now": {
-    "zh-Hans": "立即删除",
-    "zh-Hant": "立即刪除",
-    "ja": "今すぐ削除",
-    "ko": "지금 삭제",
-    "fr": "Supprimer maintenant",
-    "de": "Jetzt löschen",
-    "es": "Eliminar ahora"
-  },
   "Delete Session": {
     "zh-Hans": "删除会话",
     "zh-Hant": "刪除工作階段",
@@ -3374,15 +3365,6 @@
     "de": "Im Finder öffnen",
     "es": "Abrir en el Finder"
   },
-  "Open in Terminal": {
-    "zh-Hans": "在终端中打开",
-    "zh-Hant": "在終端機中打開",
-    "ja": "ターミナルで開く",
-    "ko": "터미널에서 열기",
-    "fr": "Ouvrir dans le terminal",
-    "de": "Im Terminal öffnen",
-    "es": "Abrir en el terminal"
-  },
   "Open it and install.": {
     "zh-Hans": "打开它并安装。",
     "zh-Hant": "打開它並安裝。",
@@ -4750,15 +4732,6 @@
     "fr": "TOML",
     "de": "TOML",
     "es": "TOML"
-  },
-  "Table": {
-    "zh-Hans": "表格",
-    "zh-Hant": "表格",
-    "ja": "テーブル",
-    "ko": "표",
-    "fr": "Tableau",
-    "de": "Tabelle",
-    "es": "Tabla"
   },
   "Take the last commit back, keeping its changes": {
     "zh-Hans": "撤回上一个提交，保留其更改",
@@ -8728,5 +8701,95 @@
     "fr": "Copier le Markdown",
     "de": "Markdown kopieren",
     "es": "Copiar Markdown"
+  },
+  "Power": {
+    "zh-Hans": "电源",
+    "zh-Hant": "電源",
+    "ja": "電源",
+    "ko": "전원",
+    "fr": "Alimentation",
+    "de": "Energie",
+    "es": "Energía"
+  },
+  "Keep the display on while a session works": {
+    "zh-Hans": "会话工作时保持屏幕常亮",
+    "zh-Hant": "工作階段運作時保持螢幕常亮",
+    "ja": "セッションの作業中はディスプレイをオンのままにする",
+    "ko": "세션이 작업하는 동안 디스플레이 켜 두기",
+    "fr": "Garder l’écran allumé pendant qu’une session travaille",
+    "de": "Bildschirm eingeschaltet lassen, während eine Sitzung arbeitet",
+    "es": "Mantener la pantalla encendida mientras una sesión trabaja"
+  },
+  "Toggle Rendered and Raw": {
+    "zh-Hans": "切换渲染与源码",
+    "zh-Hant": "切換渲染與原始碼",
+    "ja": "レンダリングとソースを切り替え",
+    "ko": "렌더링과 원본 전환",
+    "fr": "Basculer rendu et source",
+    "de": "Gerendert und Quelltext umschalten",
+    "es": "Alternar renderizado y código"
+  },
+  "Open in Agent Terminal": {
+    "zh-Hans": "在 Agent 终端中打开",
+    "zh-Hant": "在 Agent 終端機中打開",
+    "ja": "Agent ターミナルで開く",
+    "ko": "Agent 터미널에서 열기",
+    "fr": "Ouvrir dans le terminal de l’agent",
+    "de": "Im Agent-Terminal öffnen",
+    "es": "Abrir en el terminal del agente"
+  },
+  "Delete Permanently": {
+    "zh-Hans": "永久删除",
+    "zh-Hant": "永久刪除",
+    "ja": "完全に削除",
+    "ko": "영구적으로 삭제",
+    "fr": "Supprimer définitivement",
+    "de": "Endgültig löschen",
+    "es": "Eliminar permanentemente"
+  },
+  "Table (⌘⇧V)": {
+    "zh-Hans": "表格 (⌘⇧V)",
+    "zh-Hant": "表格 (⌘⇧V)",
+    "ja": "テーブル (⌘⇧V)",
+    "ko": "표 (⌘⇧V)",
+    "fr": "Tableau (⌘⇧V)",
+    "de": "Tabelle (⌘⇧V)",
+    "es": "Tabla (⌘⇧V)"
+  },
+  "Rendered (⌘⇧V)": {
+    "zh-Hans": "渲染 (⌘⇧V)",
+    "zh-Hant": "渲染 (⌘⇧V)",
+    "ja": "レンダリング (⌘⇧V)",
+    "ko": "렌더링 (⌘⇧V)",
+    "fr": "Rendu (⌘⇧V)",
+    "de": "Gerendert (⌘⇧V)",
+    "es": "Renderizado (⌘⇧V)"
+  },
+  "Raw (⌘⇧V)": {
+    "zh-Hans": "原始 (⌘⇧V)",
+    "zh-Hant": "原始 (⌘⇧V)",
+    "ja": "ソース (⌘⇧V)",
+    "ko": "원본 (⌘⇧V)",
+    "fr": "Brut (⌘⇧V)",
+    "de": "Roh (⌘⇧V)",
+    "es": "Sin formato (⌘⇧V)"
+  },
+  "Open files as": {
+    "zh-Hans": "文件打开方式",
+    "zh-Hant": "檔案打開方式",
+    "ja": "ファイルの表示",
+    "ko": "파일 열기 방식",
+    "fr": "Ouvrir les fichiers en",
+    "de": "Dateien öffnen als",
+    "es": "Abrir archivos como"
+  },
+  "For supported files.": {
+    "zh-Hans": "适用于支持的文件。",
+    "zh-Hant": "適用於支援的檔案。",
+    "ja": "対応するファイルに。",
+    "ko": "지원되는 파일에 적용됩니다.",
+    "fr": "Pour les fichiers pris en charge.",
+    "de": "Für unterstützte Dateien.",
+    "es": "Para archivos compatibles."
   }
 }

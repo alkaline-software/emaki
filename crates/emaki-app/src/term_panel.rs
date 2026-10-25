@@ -162,8 +162,8 @@ impl TermDo {
     pub(crate) fn icon(self) -> &'static str {
         match self {
             TermDo::Copy => "icons/copy.svg",
-            TermDo::Paste => "icons/file-plus.svg",
-            TermDo::Clear => "icons/trash.svg",
+            TermDo::Paste => "icons/clipboard.svg",
+            TermDo::Clear => "icons/eraser.svg",
             TermDo::NewTab => "icons/plus.svg",
             TermDo::CloseTab => "icons/close.svg",
         }
@@ -327,7 +327,7 @@ impl Workbench {
         cx.notify();
     }
 
-    /// "Open in Terminal" on a session's menu: the agent's side comes.
+    /// "Open in Agent Terminal" on a session's menu: the agent's side comes.
     pub(crate) fn open_term_panel_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.term_go(Some(true), cx);
         window.focus(&self.side_term_focus, cx);
@@ -524,9 +524,11 @@ impl Workbench {
                     this.look_for_agents(cx);
                 }
                 // The cursor's blink is a draw too, while the panel has the keyboard.
+                // A frame, not a change: the panel is drawn afresh at every
+                // frame, and what the window keeps between frames is not.
                 let blink = this.side_focused && this.cfg.terminal.cursor_blink && this.blink_on() != this.side_blink_on;
                 if blink || this.term_panel_pty().is_some_and(|p| p.quiet_for() < POLL * 4 || !p.alive()) {
-                    cx.notify();
+                    crate::ambient::redraw(&this.ambient, cx);
                 }
                 true
             });
@@ -950,7 +952,6 @@ impl Workbench {
                     items.push((phrase("Copy"), MenuDo::Term(TermDo::Copy)));
                 }
                 items.push((phrase("Paste"), MenuDo::Term(TermDo::Paste)));
-                items.push((phrase("Clear"), MenuDo::Term(TermDo::Clear)));
                 if !self.term_side_agent() {
                     items.push(("", MenuDo::Rule));
                     items.push((phrase("New Tab"), MenuDo::Term(TermDo::NewTab)));
@@ -958,6 +959,9 @@ impl Workbench {
                         items.push((phrase("Close Tab"), MenuDo::Term(TermDo::CloseTab)));
                     }
                 }
+                // What empties the screen, apart.
+                items.push(("", MenuDo::Rule));
+                items.push((phrase("Clear"), MenuDo::Term(TermDo::Clear)));
                 self.open_menu(e.position, items, cx);
                 return;
             }
@@ -1003,7 +1007,7 @@ impl Workbench {
     /// takes for a picture (`[Image #1]`) as it does one the window sends,
     /// or files copied in the Finder as their paths. A terminal takes
     /// words alone, and a screenshot pasted there did nothing.
-    fn term_paste(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn term_paste(&mut self, cx: &mut Context<Self>) {
         use gpui::ClipboardEntry;
         let Some(pty) = self.term_panel_pty().filter(|p| p.alive()) else { return };
         let Some(item) = cx.read_from_clipboard() else { return };
@@ -1500,7 +1504,7 @@ impl Workbench {
                         .font_family(theme.font_family.clone())
                         .text_size(px(12.5))
                         .text_color(hsla(mix(ink, ground, 0.35)))
-                        .child(crate::workbench::agent_glyph(r.agent, px(13.), crate::workbench::agent_color(r.agent, &theme), true, "term-panel-starting"))
+                        .child(crate::workbench::agent_glyph(r.agent, px(13.), crate::workbench::agent_color(r.agent, &theme), true))
                         .child(tf("Starting {agent}, one moment…", &[("agent", &r.agent.display_name())]))
                 });
                 let ended = (!pty.alive()).then(|| {

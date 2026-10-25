@@ -24,7 +24,7 @@ use gpui_base::input::{SEARCH_ANIM, SearchOptions};
 
 const CONTEXT: &'static str = "SearchPanel";
 
-actions!(input, [Tab, ToggleMatchCase, ToggleWholeWord, ToggleRegex]);
+actions!(input, [Tab, ToggleMatchCase, ToggleWholeWord, ToggleRegex, FindNext, FindPrevious]);
 
 /// Emaki: the panel's own keys for its three toggles, as VS Code has them.
 pub(crate) fn init(cx: &mut App) {
@@ -41,6 +41,15 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("alt-w", ToggleWholeWord, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("alt-r", ToggleRegex, Some(CONTEXT)),
+        // Sublime Text's Find Next and Find Previous, as ↩ and ⇧↩ are.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-g", FindNext, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-g", FindPrevious, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("f3", FindNext, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("shift-f3", FindPrevious, Some(CONTEXT)),
     ]);
 }
 
@@ -593,6 +602,8 @@ impl<M: crate::input::overlay::OverlayMode> Render for SearchPanel<M> {
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::on_action_enter))
             .on_action(cx.listener(Self::on_action_escape))
+            .on_action(cx.listener(|this, _: &FindNext, window, cx| this.next(window, cx)))
+            .on_action(cx.listener(|this, _: &FindPrevious, window, cx| this.prev(window, cx)))
             .on_action(cx.listener(Self::on_action_search))
             .on_action(cx.listener(Self::on_action_tab))
             .on_action(cx.listener(Self::on_action_tab_prev))

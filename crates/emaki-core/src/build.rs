@@ -1741,6 +1741,48 @@ pub fn fallback_title(rounds: &[Round], limit: usize) -> String {
     "Untitled session".into()
 }
 
+/// A session read as it grows: the rows read so far, kept, and the file
+/// read on from where the last read stopped (`TranscriptTail`). For the
+/// session the window shows, which its agent writes to every few seconds
+/// while it works: read whole at each write, a session of 249 MB took a
+/// sixth of a second to read and a third to build. The model is built
+/// from every row each time, as `build_from_path` builds it.
+pub struct LiveRows {
+    tail: crate::transcript::TranscriptTail,
+    rows: Vec<Value>,
+}
+
+impl LiveRows {
+    pub fn new(path: &Path) -> Self {
+        Self { tail: crate::transcript::TranscriptTail::new(path.to_path_buf()), rows: Vec::new() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.tail.path
+    }
+
+    /// The session as its file has it now.
+    pub fn build(&mut self, cwd_hint: &str) -> Session {
+        let mut new = self.tail.read_new();
+        // A file put in the old one's place (`--resume`, compaction) is
+        // read from its start.
+        if self.tail.restarted {
+            self.rows.clear();
+        }
+        new.iter_mut().for_each(crate::transcript::without_pictures);
+        self.rows.extend(new);
+        let path = self.tail.path.clone();
+        let subs = load_subagents(&path);
+        build(BuildInput {
+            rows: &self.rows,
+            transcript_path: &path.to_string_lossy(),
+            cwd_hint,
+            subagents: Some(&subs),
+            nested: false,
+        })
+    }
+}
+
 pub fn build_from_path(path: &Path, cwd_hint: &str) -> Session {
     let rows = read_all(path);
     let subs = load_subagents(path);

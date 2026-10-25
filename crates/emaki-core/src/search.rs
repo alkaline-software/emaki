@@ -1,7 +1,8 @@
 //! Full-text search across every conversation, live and archived alike.
 //!
 //! SQLite FTS5, one document per *item*: a prompt, a reply paragraph, a
-//! thought, a tool call. Sync is incremental on (size, mtime). The database is
+//! thought, a tool call. Sync is incremental on (size, mtime), and in
+//! the app a session still being written waits its turn (`sync_paced`). The database is
 //! `~/.emaki/search.db`, separate from the Python daemon's `index.db` so the
 //! two never fight over a schema version.
 
@@ -87,7 +88,16 @@ pub struct SyncReport {
     pub failed: usize,
     pub documents: usize,
     pub seconds: f64,
+    /// Changed sessions left for later (`sync_paced`).
+    #[serde(default)]
+    pub deferred: usize,
 }
+
+/// A session whose file is still being written is indexed again at most
+/// once in this long, in seconds (`sync_paced`)...
+pub const BUSY_EVERY: f64 = 60.;
+/// ...and as soon as the file has been still this long.
+pub const QUIET_AFTER: f64 = 10.;
 
 pub struct SearchIndex {
     conn: Connection,
@@ -167,6 +177,11 @@ impl SearchIndex {
         }
     }
 
+    /// When the session was last indexed, in seconds since the epoch.
+    fn indexed_at(&self, r: &SessionRef) -> Option<f64> {
+        self.conn.query_row("SELECT indexed_at FROM sources WHERE key=?1", params![Self::key(r)], |row| row.get(0)).optional().unwrap_or(None)
+    }
+
     /// (Re)index one session. Returns the number of documents written.
     pub fn index_ref(&mut self, r: &SessionRef, session: Option<&Session>) -> rusqlite::Result<usize> {
         let built;
@@ -217,12 +232,35 @@ impl SearchIndex {
 
     /// Bring the index up to date. Only changed sessions are re-read.
     pub fn sync(&mut self, refs: &[SessionRef], force: bool) -> SyncReport {
+        self.sync_with(refs, force, None)
+    }
+
+    /// `sync` for an app that is open while sessions are written, at time
+    /// `at` (seconds since the epoch): a session that changed and is still
+    /// being written is left for later (`SyncReport::deferred`) when it was
+    /// indexed in the last `BUSY_EVERY`, and taken as soon as its file has
+    /// been still for `QUIET_AFTER`. A session is read whole to be indexed
+    /// (`index_ref`), and an agent at work writes its transcript every few
+    /// seconds: a session of 250 MB was parsed whole that often, as long as
+    /// the agent worked.
+    pub fn sync_paced(&mut self, refs: &[SessionRef], at: f64) -> SyncReport {
+        self.sync_with(refs, false, Some(at))
+    }
+
+    fn sync_with(&mut self, refs: &[SessionRef], force: bool, paced: Option<f64>) -> SyncReport {
         let started = now();
         let mut report = SyncReport::default();
         for r in refs {
             if !force && !self.needs_reindex(r) {
                 report.skipped += 1;
                 continue;
+            }
+            if let Some(at) = paced {
+                let written = std::fs::metadata(&r.path).map(|st| crate::transcript::mtime_secs(&st)).unwrap_or(r.mtime);
+                if at - written < QUIET_AFTER && self.indexed_at(r).is_some_and(|was| at - was < BUSY_EVERY) {
+                    report.deferred += 1;
+                    continue;
+                }
             }
             match self.index_ref(r, None) {
                 Ok(n) => {

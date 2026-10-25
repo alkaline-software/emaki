@@ -168,6 +168,15 @@ fn still_begins_with(src: &Path, dst: &Path) -> bool {
     matches!((read(src), read(dst)), (Some(a), Some(b)) if a == b)
 }
 
+/// Whether `whole` begins with every byte of `part`.
+fn begins_with(whole: &Path, part: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(fw), Ok(fp)) = (fs::File::open(whole), fs::File::open(part)) else { return false };
+    let Ok(n) = fp.metadata().map(|m| m.len()) else { return false };
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    fp.take(n).read_to_end(&mut b).is_ok() && fw.take(n).read_to_end(&mut a).is_ok() && a == b
+}
+
 /// Whether two files hold the same bytes, all of them read.
 fn same_bytes(a: &Path, b: &Path) -> bool {
     use std::io::Read;
@@ -392,7 +401,55 @@ pub fn settle_layout() -> bool {
             done &= move_into(&dir, &root.join(claude).join(name));
         }
     }
+    if done {
+        static SETTLED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+        let mut settled = SETTLED.lock().unwrap_or_else(|e| e.into_inner());
+        if !settled.contains(&root) {
+            settled.push(root.clone());
+            one_copy_each(&root.join(claude));
+        }
+    }
     done
+}
+
+/// A session of Claude Code's is one file, by its id, in one project's
+/// folder. A copy made before its first rows named a folder went under
+/// its agent's folder name instead, and the session was then copied again
+/// where it belongs: the index took whichever folder sorted first, and a
+/// session deleted from the Trash came back from the copy left over. Each
+/// such copy is folded into the fullest one, once a launch: dropped when
+/// that holds every row of it, else kept beside it as a generation, and
+/// its sidecars merged in (`move_into`).
+fn one_copy_each(root: &Path) {
+    let Ok(projects) = fs::read_dir(root) else { return };
+    let mut by_name: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for project in projects.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()) {
+        let Ok(files) = fs::read_dir(&project) else { continue };
+        for f in files.filter_map(Result::ok).map(|e| e.path()) {
+            let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if f.is_file() && name.ends_with(".jsonl") && !name.contains(".gen") {
+                by_name.entry(name).or_default().push(f);
+            }
+        }
+    }
+    for (_, mut copies) in by_name.into_iter().filter(|(_, c)| c.len() > 1) {
+        copies.sort_by_key(|p| std::cmp::Reverse(fs::metadata(p).map(|m| m.len()).unwrap_or(0)));
+        let keep = copies.remove(0);
+        for other in copies {
+            if begins_with(&keep, &other) || nothing_lost(&keep, &other) {
+                let _ = fs::remove_file(&other);
+            } else {
+                let _ = move_into(&other, &keep);
+            }
+            let side = other.with_extension("");
+            if side.is_dir() {
+                let _ = move_into(&side, &keep.with_extension(""));
+            }
+            if let Some(dir) = other.parent() {
+                let _ = fs::remove_dir(dir);
+            }
+        }
+    }
 }
 
 /// Move `src` to `dst`, into what is already there when something is.
@@ -434,6 +491,13 @@ pub fn archive_ref(r: &SessionRef, state: &mut State, stats: &mut Stats) {
         return;
     }
     if r.kept || is_inside_archive(&r.path) {
+        return;
+    }
+    // Claude Code's first rows, written before anything is said, name no
+    // folder: copied then, the session had a second copy under its agent's
+    // folder name once the first message named its own. Nothing said is
+    // nothing to rescue.
+    if r.agent == AgentId::ClaudeCode && r.cwd.is_empty() && r.blank {
         return;
     }
     let target = archived_main(r);
@@ -645,41 +709,60 @@ pub fn everything_of(r: &SessionRef) -> Vec<PathBuf> {
             out.push(r.path.with_extension(""));
         }
     }
-    let target = archived_main(r);
-    out.push(target.clone());
-    out.push(target.with_extension(""));
-    // `<name>.genN.jsonl` beside it, and each one's sidecars.
-    let stem = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let gen_of = stem.split(".gen").next().unwrap_or(&stem).to_string();
-    if let Some(entries) = target.parent().and_then(|p| fs::read_dir(p).ok()) {
-        let mut gens: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                *p != target && name.strip_prefix(gen_of.as_str()).and_then(|rest| rest.strip_prefix(".gen")).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-            })
-            .collect();
-        gens.sort();
-        if stem == gen_of {
+    // Its copy in the archive, and any other a project's folder has of
+    // it (`one_copy_each`), each with the generations set aside beside it
+    // and each one's sidecars.
+    let mut mains = vec![archived_main(r)];
+    if r.agent == AgentId::ClaudeCode && !r.session_id.is_empty() {
+        let name = paths::safe_component(&format!("{}.jsonl", r.session_id));
+        if let Ok(projects) = fs::read_dir(archive_dir().join(r.agent.archive_subdir())) {
+            let mut more: Vec<PathBuf> = projects.filter_map(Result::ok).map(|e| e.path().join(&name)).filter(|p| p.is_file() && !mains.contains(p)).collect();
+            more.sort();
+            mains.extend(more);
+        }
+    }
+    for target in &mains {
+        out.push(target.clone());
+        out.push(target.with_extension(""));
+        let stem = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let gen_of = stem.split(".gen").next().unwrap_or(&stem).to_string();
+        if stem != gen_of {
+            continue;
+        }
+        if let Some(entries) = target.parent().and_then(|p| fs::read_dir(p).ok()) {
+            let mut gens: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    p != target && name.strip_prefix(gen_of.as_str()).and_then(|rest| rest.strip_prefix(".gen")).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                })
+                .collect();
+            gens.sort();
             out.extend(gens);
         }
     }
-    // The markdown rendered from it, under any title it has had.
-    let slug = if r.cwd.is_empty() { paths::safe_component(&r.project_dir) } else { paths::project_slug(&r.cwd) };
+    // The markdown rendered from it, under any title it has had, in the
+    // folder of its project and of each copy's.
     let sid8: String = paths::safe_component(&r.session_id).chars().take(8).collect();
     if !sid8.is_empty() {
-        if let Ok(entries) = fs::read_dir(paths::logs_dir().join(slug)) {
-            let suffix = format!("-{sid8}.md");
-            out.extend(entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix))));
+        let mut slugs = vec![if r.cwd.is_empty() { paths::safe_component(&r.project_dir) } else { paths::project_slug(&r.cwd) }];
+        slugs.extend(mains.iter().filter_map(|m| m.parent()?.file_name()).map(|n| n.to_string_lossy().to_string()));
+        slugs.sort();
+        slugs.dedup();
+        let suffix = format!("-{sid8}.md");
+        for slug in slugs {
+            if let Ok(entries) = fs::read_dir(paths::logs_dir().join(slug)) {
+                out.extend(entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix))));
+            }
         }
     }
     // With no id the uploads folder is everybody's.
     if !r.session_id.is_empty() {
         out.push(paths::uploads_dir(&r.session_id));
     }
-    out.retain(|p| p.exists());
-    out.dedup();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| p.exists() && seen.insert(p.clone()));
     out
 }
 

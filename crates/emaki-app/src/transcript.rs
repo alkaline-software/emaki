@@ -37,6 +37,56 @@ const EXPLAIN_FLIP: Duration = Duration::from_millis(160);
 /// the copy button. It is always laid out at this height.
 const HOVER_ROW_H: Pixels = px(24.);
 
+/// The conversation's list, in a view of its own that the window keeps
+/// between frames (`AnyView::cached`). A frame that changes nothing in it
+/// (a step of the clock, the terminal panel's screen moving) neither lays
+/// out nor paints what is in view again: that was most of every frame's
+/// work while an agent worked. It is drawn afresh whenever the workbench
+/// changes, which it observes, and when its own content asks, as the list
+/// does when it is scrolled and a row does when the pointer comes onto it.
+/// A mark that turns in it is painted beside it instead, on the clock,
+/// where its last drawing put it (`ambient::Marks`), and its text is kept
+/// in the window's selection while it is drawn from the cache
+/// (`KeptViews`).
+pub(crate) struct ConversationList {
+    workbench: WeakEntity<Workbench>,
+    /// The session's list, by its key.
+    list: Option<(String, ListState)>,
+    pub(crate) kept: gpui_component::text::KeptViews,
+    pub(crate) marks: crate::ambient::Marks,
+}
+
+impl ConversationList {
+    pub(crate) fn new(workbench: Entity<Workbench>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&workbench, |_, _, cx| cx.notify()).detach();
+        Self { workbench: workbench.downgrade(), list: None, kept: Default::default(), marks: Default::default() }
+    }
+
+    /// The list to draw, the session's; whether it is another than the
+    /// one drawn last.
+    pub(crate) fn set_list(&mut self, key: &str, list: &ListState) -> bool {
+        if self.list.as_ref().is_some_and(|(k, _)| k == key) {
+            return false;
+        }
+        self.list = Some((key.to_string(), list.clone()));
+        true
+    }
+}
+
+impl Render for ConversationList {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let Some((_, list)) = self.list.clone() else { return div().into_any_element() };
+        self.marks.clear();
+        let (entity, kept, marks) = (self.workbench.clone(), self.kept.clone(), self.marks.clone());
+        gpui::list(list, move |ix, window, cx| {
+            let _here = crate::ambient::Within::enter(Some(kept.clone()), marks.clone());
+            entity.upgrade().map(|e| e.update(cx, |this, cx| this.render_list_item(ix, window, cx))).unwrap_or_else(|| div().into_any_element())
+        })
+        .size_full()
+        .into_any_element()
+    }
+}
+
 /// Whether the markdown crate can parse `text` without panicking. Version
 /// 1.0.0, the one the toolkit's text view uses, aborts on some inputs
 /// ("Cannot push to non-parent" in `to_mdast`); the smallest one found is a
@@ -135,46 +185,54 @@ fn math_face(dialect: Dialect) -> gpui_component::text::MathFace {
 /// smaller cut of the monospace face (`fonts::inline_mono_family`), so
 /// it stands no taller than they do.
 pub(crate) fn chat_md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, None, cx)
 }
 
 /// Markdown as a document draws it, a file's or a page's: all of GFM,
 /// as GitHub reads the file.
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, None, cx)
 }
 
 /// `md_view`, with words found in it painted (`TextFind`): a file as it
 /// reads, with its find open; and with where its headings are painted
 /// kept, for the outline at the files panel's foot (`HeadingSpots`).
 pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, find, headings, None, cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, find, headings, None, None, cx)
 }
 
 /// A file's markdown as it reads: with `quarto`, Quarto's syntax read
 /// too, its math written as that dialect writes it. Each Quarto or R
-/// Markdown chunk folds by itself. `kept` holds it for frames it is drawn
-/// from a cache in (`panels::FileDoc`).
-pub(crate) fn md_view_file(id: String, text: String, quarto: Option<Dialect>, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), cx)
+/// Markdown chunk folds by itself. It is drawn from `state`, which the
+/// file's view keeps, and `kept` holds it for frames it is drawn from a
+/// cache in (`panels::FileDoc`).
+pub(crate) fn md_view_file(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), Some(state), cx)
 }
 
 /// A file's YAML header as its fields: `text` is the header written as a
 /// table (`files::front_matter_table`), drawn a field a row in the mono
 /// face, for the band over the file.
-pub(crate) fn md_view_fields(id: String, text: String, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, true, None, None, Some(kept), cx)
+pub(crate) fn md_view_fields(state: Entity<gpui_component::text::TextViewState>, text: String, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, true, None, None, Some(kept), Some(state), cx)
 }
 
-fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, cx: &App) -> impl IntoElement {
+/// `state`, when the caller keeps the view's state, is drawn from in
+/// place of one kept by the view's `id` where it is drawn.
+fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, state: Option<Entity<gpui_component::text::TextViewState>>, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown as it is, in a code block,
     // rather than taking the window down.
     let text = if markdown_is_safe(&text, chat) { text } else { code_block(&text, "text") };
+    // In the conversation's list, kept with the list's other text.
+    let kept = kept.or_else(crate::ambient::kept_here);
     let dark = theme.mode.is_dark();
     let code_bg = theme.muted;
     let border = theme.border;
-    TextView::markdown(SharedString::from(format!("{id}-{}", if dark { "d" } else { "l" })), text)
+    match state {
+        Some(state) => TextView::new(&state).text(text),
+        None => TextView::markdown(SharedString::from(format!("{id}-{}", if dark { "d" } else { "l" })), text),
+    }
         .selectable(true)
         .find(find)
         .headings(headings)
@@ -747,7 +805,7 @@ impl Workbench {
             }))
             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground))
             .child(if running {
-                agent_glyph(session.agent, px(13.), agent_color(session.agent, &theme), true, SharedString::from(format!("run-glyph-{ix}-{start}")))
+                agent_glyph(session.agent, px(13.), agent_color(session.agent, &theme), true)
             } else {
                 Icon::new(IconName::SquareTerminal).with_size(px(13.)).text_color(theme.muted_foreground).into_any_element()
             })

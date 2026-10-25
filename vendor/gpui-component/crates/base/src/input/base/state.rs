@@ -991,6 +991,37 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.toggle_fold_moving(line, cx);
     }
 
+    /// The innermost section the caret is in, folded (`fold`) or
+    /// unfolded, as a click on its mark does: Sublime Text's Fold and
+    /// Unfold. Whether one changed. (Emaki addition.)
+    pub fn fold_at_caret(&mut self, fold: bool, cx: &mut Context<Self>) -> bool {
+        let line = self.text.offset_to_point(self.cursor()).row;
+        let head = (0..=line).rev().find(|l| self.display_map.fold_candidate_at(*l).is_some_and(|r| r.end_line > r.start_line && r.end_line >= line && self.display_map.is_folded_at(*l) != fold));
+        match head {
+            Some(l) => {
+                self.toggle_fold_moving(l, cx);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The selection's moving end to `offset`, the other end where it is,
+    /// as ⇧ and a key that moves the caret leaves it. (Emaki addition.)
+    pub fn extend_selection_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.text.clip_offset(offset.min(self.text.len()), Bias::Left);
+        self.select_to(offset, cx);
+    }
+
+    /// Every folded section open again. (Emaki addition.)
+    pub fn unfold_all(&mut self, cx: &mut Context<Self>) {
+        let folded: Vec<usize> = self.display_map.folded_ranges().iter().map(|r| r.start_line).collect();
+        for line in folded {
+            self.display_map.set_folded(line, false);
+        }
+        cx.notify();
+    }
+
     /// Whether an input method is part way through a character: what is
     /// in the text is not yet what was typed. (Emaki addition.)
     pub fn composing(&self) -> bool {
@@ -1460,6 +1491,19 @@ impl<M: InputModeKind> InputBaseState<M> {
             .unwrap_or(self.text.len())
     }
 
+    /// Which wrapped row of buffer line `row` the caret is on. At a soft
+    /// wrap the caret's byte ends one row and begins the next: it is the
+    /// end of the first when it was put there as a row's end (⌘→,
+    /// `cursor_line_end_affinity`), as it is drawn. Taken for the next
+    /// row, ⌘← from there went to the line's start, and ⌘→ again to the
+    /// next row's end. (Emaki addition.)
+    pub(super) fn cursor_wrap_row(&self, row: usize) -> usize {
+        let local = self.display_map.offset_to_wrap_display_point(self.cursor()).local_row;
+        let logical_start = self.text.line_start_offset(row);
+        let at_wrap = self.display_map.line(row).and_then(|line| line.wrapped_lines.get(local)).is_some_and(|range| logical_start + range.start == self.cursor());
+        if self.cursor_line_end_affinity && local > 0 && at_wrap { local - 1 } else { local }
+    }
+
     /// Get start of line byte offset of cursor.
     ///
     /// When soft wrap is active, first press goes to visual line start,
@@ -1473,9 +1517,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         let logical_start = self.text.line_start_offset(row);
 
         if self.soft_wrap && self.is_code_editor() {
-            let wrap_point = self.display_map.offset_to_wrap_display_point(self.cursor());
             if let Some(line) = self.display_map.line(row)
-                && let Some(range) = line.wrapped_lines.get(wrap_point.local_row)
+                && let Some(range) = line.wrapped_lines.get(self.cursor_wrap_row(row))
             {
                 let visual_start = logical_start + range.start;
                 if self.cursor() != visual_start {
@@ -1501,11 +1544,19 @@ impl<M: InputModeKind> InputBaseState<M> {
         let logical_end = self.text.line_end_offset(row);
 
         if self.soft_wrap && self.is_code_editor() {
-            let wrap_point = self.display_map.offset_to_wrap_display_point(self.cursor());
+            let local = self.cursor_wrap_row(row);
             if let Some(line) = self.display_map.line(row)
-                && let Some(range) = line.wrapped_lines.get(wrap_point.local_row)
+                && let Some(range) = line.wrapped_lines.get(local)
             {
-                let visual_end = logical_start + range.end;
+                // Emaki: a row that wraps ends after its last word, the
+                // spaces it broke at left on it: their end is the next
+                // row's start, where a caret was drawn a space past the
+                // word and ↓ went two rows down.
+                let mut visual_end = logical_start + range.end;
+                if local + 1 < line.wrapped_lines.len() {
+                    let row_text = self.text.slice(logical_start + range.start..visual_end).to_string();
+                    visual_end = logical_start + range.start + row_text.trim_end_matches([' ', '\t']).len();
+                }
                 if self.cursor() != visual_end {
                     return visual_end;
                 }
