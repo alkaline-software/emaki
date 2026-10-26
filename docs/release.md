@@ -54,7 +54,7 @@ caffeinate -d -t 14400 &             # the display stays on, so the screen stays
 scripts/release-check.sh X.Y.Z
 ```
 
-The notary credential is out of reach while the screen is locked (see "When something fails"). Emaki's Keep the display on holds only while a session works on a turn, not while the turn is over and a background command waits on CI, which is most of a release. An agent starts `caffeinate` as a background command of its own, for the four hours a release with a redo can take.
+The notary credential is out of reach while the screen is locked (see "When something fails"). Emaki's Keep the display on holds while a background command waits on CI too, but only where that setting is on and the session is Emaki's to see. An agent starts `caffeinate` as a background command of its own all the same, for the four hours a release with a redo can take.
 
 The check holds the commit to everything the tag will be held to: the version in `Cargo.toml`, a changelog section of ten items at most, a notary service that answers to the saved credential (step 5 needs it, an hour later), a lock that builds with `--locked`, a clean tree, the core tests (once more with Windows' one-megabyte stack), the app build, and a Windows type check. Do not tag until it says "ready to tag". A tag that fails in CI has to be redone, and every redo means building and notarizing the Mac images again.
 

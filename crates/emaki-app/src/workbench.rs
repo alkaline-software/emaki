@@ -590,6 +590,11 @@ impl TabShift {
 
 /// The buttons beside the traffic lights: each one's box.
 const STRIP_BTN: Pixels = px(26.);
+/// The rail's column: where its first button stands, under the title
+/// row; an entry's square; the room between two.
+const RAIL_TOP: Pixels = px(52.);
+const RAIL_ENTRY: Pixels = px(36.);
+const RAIL_GAP: Pixels = px(4.);
 /// The sidebar's rows: an agent or a folder, and a session under a folder.
 const SIDE_ROW_H: Pixels = px(26.);
 const SIDE_SESSION_H: Pixels = px(24.);
@@ -641,6 +646,9 @@ const STRIP_PAD: Pixels = px(7.5);
 pub(crate) const CARD_R: Pixels = px(if cfg!(target_os = "macos") { 12. } else { 4. });
 /// Room for the traffic lights on a transparent title bar.
 pub const TRAFFIC_W: Pixels = px(85.);
+/// The rail the sidebar folds to, on a Mac: the traffic lights' room and
+/// a little more before the card.
+const RAIL_W: Pixels = px(86.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// The settings panel's sections, in rail order: key, label, icon.
@@ -1729,20 +1737,17 @@ pub struct Workbench {
     /// stays where it is and only what is around it moves.
     side_was: Option<bool>,
     peek_was: bool,
-    side_anim: Option<(bool, Instant, bool)>,
-    peek_anim: Option<(bool, Instant, bool)>,
-    /// The press that kept a floating sidebar, until the next draw.
-    float_kept: bool,
+    side_anim: Option<(bool, Instant)>,
+    peek_anim: Option<(bool, Instant)>,
+    /// The sidebar's Projects card beside the rail: when it last came or
+    /// began to go, the page and session showing when it came, and
+    /// whether it is up.
+    rail_fly: Option<(Instant, (Page, Option<String>), bool)>,
+    /// Where the new-session page was come to from: the page, and the
+    /// session when it was one. Its button pressed again goes back there.
+    new_from: Option<(Page, Option<String>)>,
     /// `EMAKI_GO=sidefit` asked for the fitted width at the next draw.
     fit_wanted: bool,
-    /// The sidebar is folded away and showing over the content because the
-    /// pointer is on its button, until the pointer leaves it.
-    sidebar_float: bool,
-    /// The click that folded the sidebar away left the pointer on the
-    /// button: that is not a hover, and floats nothing until it has left.
-    float_block: bool,
-    /// The float last coming or going: which, when, and its number.
-    float_anim: Option<(bool, Instant, u32)>,
     /// The tab row's width as last laid out, each tab's width (see
     /// `sync_tab_widths`), and how many tabs those were worked out for.
     tabs_row_w: Rc<std::cell::Cell<f32>>,
@@ -2554,83 +2559,15 @@ impl Workbench {
         if self.narrow { self.sidebar_peek } else { self.sidebar_open }
     }
 
-    /// The sidebar button, or its key. On a floating sidebar it keeps the
-    /// sidebar; otherwise it shows or hides it.
-    fn toggle_sidebar(&mut self, clicked: bool, cx: &mut Context<Self>) {
-        if self.sidebar_float {
-            self.sidebar_float = false;
-            self.float_anim = None;
-            self.float_kept = true;
-            self.show_sidebar();
-        } else if self.sidebar_pinned() {
+    /// The sidebar button, or its key: shows or hides it.
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.rail_fly_close(cx);
+        if self.sidebar_pinned() {
             self.hide_sidebar();
-            self.float_block = clicked;
         } else {
             self.show_sidebar();
         }
         cx.notify();
-    }
-
-    /// Float the folded sidebar in over the content, or let it go.
-    fn set_float(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.sidebar_float == on || (on && self.sidebar_pinned()) {
-            return;
-        }
-        self.sidebar_float = on;
-        let serial = self.float_anim.map(|(_, _, n)| n + 1).unwrap_or(0);
-        self.float_anim = Some((on, Instant::now(), serial));
-        if !on {
-            // Drawn until it has slid out, then dropped.
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(FLOAT_ANIM).await;
-                let _ = this.update(cx, |_, cx| cx.notify());
-            })
-            .detach();
-        }
-        cx.notify();
-    }
-
-    /// The pointer moved while the sidebar floats: off the sidebar, it goes.
-    fn float_follow(&mut self, e: &MouseMoveEvent, window: &Window, cx: &mut Context<Self>) {
-        if !self.sidebar_float {
-            return;
-        }
-        let view = window.viewport_size();
-        let p = e.position;
-        if p.x < px(0.) || p.x > self.sidebar_w || p.y < px(0.) || p.y > view.height {
-            self.set_float(false, cx);
-        }
-    }
-
-    /// The floating sidebar: no scrim, the content stays as it is, and it
-    /// slides in from the edge. `None` once it is neither up nor on its
-    /// way out.
-    fn render_sidebar_float(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (opening, at, serial) = self.float_anim?;
-        if self.sidebar_pinned() || (!self.sidebar_float && at.elapsed() >= FLOAT_ANIM) {
-            return None;
-        }
-        let dark = cx.theme().mode.is_dark();
-        let shadow = vec![BoxShadow { color: gpui::black().opacity(if dark { 0.5 } else { 0.14 }), offset: point(px(6.), px(0.)), blur_radius: px(28.), spread_radius: px(-6.), inset: false }];
-        Some(
-            div()
-                .id("sidebar-float")
-                .absolute()
-                .top_0()
-                .h_full()
-                .w(self.sidebar_w)
-                .occlude()
-                .shadow(shadow)
-                .child(self.render_sidebar(cx))
-                .with_animation(ElementId::Name(format!("sidebar-float-{serial}").into()), Animation::new(FLOAT_ANIM).with_easing(ease_out_quint()), {
-                    let w = self.sidebar_w;
-                    move |d, t| {
-                    let shown = if opening { t } else { 1. - t };
-                    d.left(w * (shown - 1.)).opacity(0.4 + 0.6 * shown)
-                }
-                })
-                .into_any_element(),
-        )
     }
 
     /// Where the strip of buttons starts: past the traffic lights on
@@ -2638,11 +2575,6 @@ impl Workbench {
     /// the system puts them at the left (`csd.rs`).
     fn strip_left(&self) -> Pixels {
         if cfg!(target_os = "macos") { TRAFFIC_W + px(2.) } else { px(10.) + self.csd_room.get().0 }
-    }
-
-    /// Where the strip ends: the sidebar button and search.
-    fn strip_right(&self) -> Pixels {
-        self.strip_left() + STRIP_BTN * 2.
     }
 
     /// The window's own buttons and edges, where the system draws none
@@ -2655,20 +2587,21 @@ impl Workbench {
         }, cx)
     }
 
-    /// The buttons at the window's top left, over the sidebar when it is
-    /// there and over the top strip when it is not, so the sidebar button
-    /// never moves: the sidebar and search.
+    /// The buttons at the window's top left: the sidebar and search. In
+    /// the title row beside the traffic lights while the sidebar is
+    /// there, and at the head of the rail's column under them while it is
+    /// away, moving between the two with the sidebar. Both places are on
+    /// the frame, so they are in the sidebar's inks.
     fn render_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Over the sidebar the buttons are in its inks, over the card's
-        // strip in the page's.
-        let over_side = self.side_t() > 0.5 || self.sidebar_float || (self.narrow && self.sidebar_peek);
-        let theme = if over_side { Self::shell_theme(cx) } else { cx.theme().clone() };
+        let theme = Self::shell_theme(cx);
+        let k = self.strip_t();
+        let size = STRIP_BTN + (RAIL_ENTRY - STRIP_BTN) * (1. - k);
         let button = |id: &'static str, icon: IconName, tip: &'static str, lit: bool| {
             let hover = theme.foreground.opacity(0.07);
             div()
                 .id(id)
-                .size(STRIP_BTN)
-                .rounded(px(6.))
+                .size(size)
+                .rounded(px(6.) + px(2.) * (1. - k))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2677,38 +2610,189 @@ impl Workbench {
                 .when(lit, |d| d.bg(hover))
                 .hover(move |s| s.bg(hover))
                 .when(!tip.is_empty(), |d| d.managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx)))
-                .child(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground))
+                .child(Icon::new(icon).with_size(px(16.) + px(2.) * (1. - k)).text_color(theme.muted_foreground))
         };
-        h_flex()
+        // In the title row the lights' centers are at 26.25: the middle
+        // of the card's strip, which starts a frame down. In the rail the
+        // two stand one under the other, under the middle light, at the
+        // size of the rail's own entries.
+        let row_y = px(1.) + FRAME / 2. + (TITLEBAR_H - STRIP_BTN) / 2.;
+        let rail_x = self.rail_mid() - RAIL_ENTRY / 2.;
+        let at = |i: f32| {
+            let (x, y) = (self.strip_left() + STRIP_BTN * i, row_y);
+            let (rx, ry) = (rail_x, RAIL_TOP + (RAIL_ENTRY + RAIL_GAP) * i);
+            (rx + (x - rx) * k, ry + (y - ry) * k)
+        };
+        let ((sx, sy), (qx, qy)) = (at(0.), at(1.));
+        div()
             .absolute()
-            // The lights' centers are at 26.25: the middle of
-            // the card's strip, which starts a frame down.
-            .top(px(1.) + FRAME / 2.)
-            .left(self.strip_left())
-            .h(TITLEBAR_H)
-            .items_center()
-            // Its label on a wrapper: an element takes one hover listener,
-            // and the button's floats the sidebar.
-            .child(
-                div().id("strip-sidebar-tip").managed_tooltip(|window, cx| crate::workbench::tip(t("Sidebar (⌘⇧B)"), window, cx)).child(
-                    button("strip-sidebar", IconName::PanelLeft, "", self.sidebar_float)
-                        .on_hover(cx.listener(|this, over: &bool, _, cx| {
-                            if !*over {
-                                this.float_block = false;
-                            } else if !this.float_block {
-                                this.set_float(true, cx);
-                            }
-                        }))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            swallow_click(window, cx);
-                            this.toggle_sidebar(true, cx);
-                        })),
-                ),
-            )
-            .child(button("strip-search", IconName::Search, t("Search (⌘K)"), false).on_click(cx.listener(|this, _, window, cx| {
+            .top_0()
+            .left_0()
+            .child(button("strip-sidebar", IconName::PanelLeft, t("Sidebar (⌘⇧B)"), false).absolute().left(sx).top(sy).on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.toggle_sidebar(cx);
+            })))
+            .child(button("strip-search", IconName::Search, t("Search (⌘K)"), false).absolute().left(qx).top(qy).on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.open_search(window, cx);
             })))
+    }
+
+    /// The rail the sidebar folds to: under the sidebar button and search,
+    /// which come down into it as the sidebar goes, the three entries as
+    /// icons, then Projects, which shows the sidebar's Projects card
+    /// beside the rail (`render_rail_fly`), and at its foot the app's
+    /// icon and the person's picture. It fades as the sidebar comes over
+    /// it. Empty, it moves the window, as the title row does.
+    fn render_rail(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shown = (1. - self.strip_t() * 1.6).max(0.);
+        if shown <= 0. {
+            return None;
+        }
+        let theme = Self::shell_theme(cx);
+        let (page, scope) = (self.page, self.scope.clone());
+        let mid = self.rail_mid();
+        let top = RAIL_TOP + (RAIL_ENTRY + RAIL_GAP) * 2. + px(12.);
+        let base = Self::drag_region(div(), cx);
+        let entry = |id: &'static str, glyph: AnyElement, words: &'static str, active: bool, i: f32, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
+            let hover = theme.sidebar_accent.opacity(0.6);
+            div()
+                .id(id)
+                .absolute()
+                .left(mid - RAIL_ENTRY / 2.)
+                .top(top + (RAIL_ENTRY + RAIL_GAP) * i)
+                .size(RAIL_ENTRY)
+                .rounded(px(9.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .when(active, |d| d.bg(theme.sidebar_accent))
+                .hover(move |s| s.bg(hover))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(words, window, cx))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    on(this, window, cx);
+                }))
+                .child(glyph)
+        };
+        let plus = div().size(px(24.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(14.)).text_color(theme.primary_foreground)).into_any_element();
+        let icon = |path: &'static str, active: bool| Icon::default().path(path).with_size(px(18.)).text_color(if active { theme.foreground } else { theme.muted_foreground }).into_any_element();
+        let sessions = page == Page::Sessions && scope == Scope::All;
+        let fly = self.rail_fly_up();
+        let rule = |y: Pixels| div().absolute().left(mid - px(12.)).top(y).w(px(24.)).h(px(1.)).bg(theme.foreground.opacity(0.1));
+
+        let rail = base
+            .absolute()
+            .top_0()
+            .left_0()
+            .h_full()
+            .w(self.rail_w())
+            .opacity(shown)
+            .child(rule(top - px(7.)))
+            .child(entry("rail-new", plus, t("New Session (⌘N)"), page == Page::New, 0., Box::new(|this, window, cx| this.new_toggle(window, cx))))
+            .child(entry("rail-sessions", icon("icons/scroll.svg", sessions), t("All Sessions (⌘L)"), sessions, 1., Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
+            .child(entry("rail-agents", icon("icons/sparkles.svg", page == Page::Agents), t("Agents (⌘E)"), page == Page::Agents, 2., Box::new(|this, _, cx| this.show_agents(None, cx))))
+            .child(rule(top + (RAIL_ENTRY + RAIL_GAP) * 3. + px(3.)))
+            .child(entry("rail-projects", icon("icons/folder.svg", fly), t("Projects"), fly, 3.25, Box::new(|this, _, cx| this.rail_fly_go(cx))))
+            .child(img("icon/app.png").absolute().left(mid - px(16.)).bottom(px(60.)).size(px(32.)))
+            .child(
+                self.avatar(28., cx)
+                    .id("rail-avatar")
+                    .absolute()
+                    .left(mid - px(14.))
+                    .bottom(px(18.))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Your picture and name"), window, cx))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.open_settings(Some("appearance"), cx);
+                    })),
+            );
+        Some(rail.into_any_element())
+    }
+
+    /// Whether the Projects card is up beside the rail.
+    pub(crate) fn rail_fly_up(&self) -> bool {
+        self.rail_fly.as_ref().is_some_and(|f| f.2)
+    }
+
+    /// The rail's Projects button: the card beside the rail, or, when it
+    /// is up, put away.
+    fn rail_fly_go(&mut self, cx: &mut Context<Self>) {
+        if self.rail_fly_up() {
+            self.rail_fly_close(cx);
+        } else {
+            let at = self.selected_ref().filter(|_| self.page == Page::Session).map(key_of);
+            self.rail_fly = Some((Instant::now(), (self.page, at), true));
+            cx.notify();
+        }
+    }
+
+    /// The card beside the rail goes, over a moment.
+    fn rail_fly_close(&mut self, cx: &mut Context<Self>) {
+        if let Some(f) = self.rail_fly.as_mut().filter(|f| f.2) {
+            f.0 = Instant::now();
+            f.2 = false;
+            cx.notify();
+        }
+    }
+
+    /// The sidebar's Projects card beside the rail, the height of the
+    /// window under the title row and the sidebar's width, on the
+    /// sidebar's ground: the card itself (`render_sidebar_as`), so a row,
+    /// its menu, a drag and the keys do there what they do in the
+    /// sidebar. A click outside it, Escape, the button again, the
+    /// sidebar coming or a session or page gone to puts it away. It
+    /// slides out from the rail and fades in, and goes the way it came.
+    fn render_rail_fly(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (at, _, open) = self.rail_fly.clone()?;
+        let done = at.elapsed() >= FLOAT_ANIM;
+        if !open && done {
+            return None;
+        }
+        if !done {
+            window.request_animation_frame();
+        }
+        let t = ease_out_quint()((at.elapsed().as_secs_f32() / FLOAT_ANIM.as_secs_f32()).min(1.));
+        let shown = if open { t } else { 1. - t };
+        let theme = Self::shell_theme(cx);
+        let dark = cx.theme().mode.is_dark();
+        let shadow = vec![BoxShadow { color: gpui::black().opacity(if dark { 0.5 } else { 0.18 }), offset: point(px(0.), px(8.)), blur_radius: px(28.), spread_radius: px(-6.), inset: false }];
+        let scrim = open.then(|| {
+            div().id("rail-fly-scrim").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.rail_fly_close(cx);
+            }))
+        });
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .children(scrim)
+                .child(
+                    div()
+                        .id("rail-fly")
+                        .absolute()
+                        .left(self.rail_w() + px(4.) - px(12.) * (1. - shown))
+                        .top(RAIL_TOP)
+                        .bottom(FRAME * 2.)
+                        .w(self.sidebar_w)
+                        .rounded(px(12.))
+                        .overflow_hidden()
+                        .bg(theme.sidebar)
+                        .border_1()
+                        .border_color(theme.foreground.opacity(0.1))
+                        .shadow(shadow)
+                        .occlude()
+                        .opacity(shown)
+                        .child(self.render_sidebar_as(true, cx)),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Empty space along the top of the window moves the window. The app
@@ -3018,10 +3102,8 @@ impl Workbench {
     /// click closes, so choosing a session in it also puts it away.
     fn render_sidebar_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // The scrim comes up and the sidebar slides in from the edge,
-        // and they go the way they came. A sidebar that was floating
-        // there stays where it is.
+        // and they go the way they came.
         let t = Self::shown_t(self.peek_anim, self.sidebar_peek);
-        let slid = if matches!(self.peek_anim, Some((true, _, true))) { 1. } else { t };
         div()
             .id("sidebar-scrim")
             .absolute()
@@ -3032,16 +3114,16 @@ impl Workbench {
                 this.sidebar_peek = false;
                 cx.notify();
             }))
-            .child(div().occlude().absolute().left(self.sidebar_w * (slid - 1.)).top_0().h_full().w(self.sidebar_w).shadow_lg().child(self.render_sidebar(cx)))
+            .child(div().occlude().absolute().left(self.sidebar_w * (t - 1.)).top_0().h_full().w(self.sidebar_w).shadow_lg().child(self.render_sidebar(cx)))
     }
 
     /// How far something is shown, from 0 to 1, by its coming or going
     /// (`side_anim`, `peek_anim`) and where it rests. Drawn off the
     /// clock: the sidebar's width is not one element's to animate, the
     /// top strip, the panels and their edges all stand by it.
-    fn shown_t(anim: Option<(bool, Instant, bool)>, rest: bool) -> f32 {
+    fn shown_t(anim: Option<(bool, Instant)>, rest: bool) -> f32 {
         match anim {
-            Some((coming, at, _)) if at.elapsed() < FLOAT_ANIM => {
+            Some((coming, at)) if at.elapsed() < FLOAT_ANIM => {
                 let t = ease_out_quint()(at.elapsed().as_secs_f32() / FLOAT_ANIM.as_secs_f32());
                 if coming { t } else { 1. - t }
             }
@@ -3054,25 +3136,47 @@ impl Workbench {
         Self::shown_t(self.side_anim, self.sidebar_open && !self.narrow)
     }
 
-    /// The room the sidebar takes of the row as it is drawn now.
+    /// The room the sidebar takes of the row as it is drawn now: put
+    /// away, it is the rail.
     pub(crate) fn side_w_now(&self) -> Pixels {
-        self.sidebar_w * self.side_t()
+        let rail = self.rail_w();
+        rail + (self.sidebar_w - rail) * self.side_t()
     }
 
-    /// Where the content's card begins: at the sidebar's edge, or a
-    /// frame in from the window's when the sidebar is away.
+    /// Where the content's card begins: at the sidebar's edge, or at the
+    /// rail's when the sidebar is away.
     pub(crate) fn content_left(&self) -> Pixels {
-        self.side_w_now().max(FRAME)
+        self.side_w_now()
+    }
+
+    /// The rail the sidebar folds to: the traffic lights over it, and
+    /// under them its icons in a column, so the card never reaches the
+    /// window's corner. Wider where the system's buttons at the left are
+    /// the window's own (`csd.rs`).
+    pub(crate) fn rail_w(&self) -> Pixels {
+        if cfg!(target_os = "macos") { RAIL_W } else { RAIL_W.max(self.csd_room.get().0 + px(12.)) }
+    }
+
+    /// The middle of the rail's column: under the middle traffic light.
+    fn rail_mid(&self) -> Pixels {
+        if cfg!(target_os = "macos") { px(46.5) } else { self.rail_w() / 2. }
+    }
+
+    /// How far the sidebar button and search are from the rail toward
+    /// the title row, from 0 to 1: up there while the sidebar is beside
+    /// the content or stands over the scrim.
+    fn strip_t(&self) -> f32 {
+        self.side_t().max(Self::shown_t(self.peek_anim, self.narrow && self.sidebar_peek))
     }
 
     /// A change in whether something shows starts its coming or going,
     /// from as far as the one before had got.
-    fn turn(anim: &mut Option<(bool, Instant, bool)>, coming: bool, kept: bool) {
+    fn turn(anim: &mut Option<(bool, Instant)>, coming: bool) {
         let done = match *anim {
-            Some((_, at, _)) if at.elapsed() < FLOAT_ANIM => FLOAT_ANIM - at.elapsed(),
+            Some((_, at)) if at.elapsed() < FLOAT_ANIM => FLOAT_ANIM - at.elapsed(),
             _ => Duration::ZERO,
         };
-        *anim = Some((coming, Instant::now().checked_sub(done).unwrap_or_else(Instant::now), kept));
+        *anim = Some((coming, Instant::now().checked_sub(done).unwrap_or_else(Instant::now)));
     }
 }
 
@@ -4159,14 +4263,12 @@ impl Workbench {
             file_probe: None,
             side_drag: false,
             fit_wanted: false,
-            sidebar_float: false,
             side_was: None,
             peek_was: false,
             side_anim: None,
             peek_anim: None,
-            float_kept: false,
-            float_block: false,
-            float_anim: None,
+            rail_fly: None,
+            new_from: None,
             stashed: HashMap::new(),
             detail_in: None,
             tabs_row_w: Rc::new(std::cell::Cell::new(0.)),
@@ -4665,11 +4767,23 @@ impl Workbench {
     }
 
     /// The display held on while a session works, the sidebar's blue dot,
-    /// when the setting says so (`sys::hold_display`). Looked at with each
-    /// pass of the index, and when the setting changes.
+    /// or waits on a command or a subagent it left running in the
+    /// background, when the setting says so (`sys::hold_display`). Looked
+    /// at with each pass of the index, and when the setting changes.
     fn hold_display(&self) {
-        let working = self.cfg.app.keep_display_on && self.refs.iter().any(|r| !self.is_draft(&r.session_id) && self.hub.is_live(r, self.now) && self.is_working(r));
+        let working = self.cfg.app.keep_display_on && self.refs.iter().any(|r| !self.is_draft(&r.session_id) && self.hub.is_live(r, self.now) && (self.is_working(r) || self.background_running(r)));
         crate::sys::hold_display(working);
+    }
+
+    /// Whether something the agent left running in the background is
+    /// running still: begun since the agent now behind the session
+    /// started, as `shells_running` has it for the open session.
+    fn background_running(&self, r: &SessionRef) -> bool {
+        if r.state.background.is_empty() {
+            return false;
+        }
+        let Some(peer) = self.hub.peer_for(&r.session_id) else { return false };
+        r.state.background.iter().any(|ts| peer.started_at <= 0. || emaki_core::build::parse_ts(ts).map(|t| t.timestamp() as f64).unwrap_or(0.) + 1. >= peer.started_at)
     }
 
     fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -5439,7 +5553,7 @@ impl Workbench {
                 }
             }
             // The sidebar button, and the pointer on it.
-            Some("sidebar") => self.toggle_sidebar(false, cx),
+            Some("sidebar") => self.toggle_sidebar(cx),
             // The sidebar's edge dragged to that x and let go, and the
             // double click on it.
             Some(t) if t.starts_with("side:") => {
@@ -5468,7 +5582,6 @@ impl Workbench {
                 self.fit_wanted = true;
                 cx.notify();
             }
-            Some("float") => self.set_float(true, cx),
             // The tabs' numbers, as ⌘ held shows them.
             Some("tabhints") => {
                 self.tab_hints_probe = true;
@@ -6282,6 +6395,9 @@ impl Workbench {
     }
 
     fn show_new(&mut self, cwd: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != Page::New {
+            self.new_from = Some((self.page, self.selected_ref().filter(|_| self.page == Page::Session).map(key_of)));
+        }
         self.page = Page::New;
         self.selected = None;
         self.sidebar_peek = false;
@@ -6293,6 +6409,30 @@ impl Workbench {
         }
         self.focus_composer(window, cx);
         cx.notify();
+    }
+
+    /// New Session's button, in the sidebar and in the rail: the
+    /// new-session page, or, pressed on it, back to where it was come to
+    /// from, the session or the page; with that gone, the session shown
+    /// last.
+    fn new_toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != Page::New {
+            return self.show_new(None, window, cx);
+        }
+        match self.new_from.take() {
+            Some((Page::Session, Some(key))) if self.tabs.contains(&key) => self.open_session(&key, cx),
+            Some((page @ (Page::Sessions | Page::Agents), _)) => {
+                self.note_nav(page);
+                self.page = page;
+                self.save_ui(true);
+                cx.notify();
+            }
+            _ => {
+                if let Some(key) = self.last_session.clone().filter(|k| self.tabs.contains(k)).or_else(|| self.tabs.first().cloned()) {
+                    self.open_session(&key, cx);
+                }
+            }
+        }
     }
 
     // -- settings ----------------------------------------------------------
@@ -8745,7 +8885,7 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let inline_sidebar = (self.sidebar_open && !self.narrow) || self.sidebar_float;
+        let inline_sidebar = self.sidebar_open && !self.narrow;
         let (files, outline) = self.panels_shown();
         let file = self.file_pane_bounds().is_some_and(|b| b.contains(&e.position));
         let here = if file {
@@ -8758,6 +8898,8 @@ impl Workbench {
             Pane::Files
         } else if outline && self.outline_scroll.bounds().contains(&e.position) {
             Pane::Outline
+        } else if self.rail_fly_up() && self.side_room.get().contains(&e.position) {
+            Pane::Sidebar
         } else if !inline_sidebar || e.position.x >= self.sidebar_w {
             Pane::Content
         } else {
@@ -9282,7 +9424,9 @@ impl Workbench {
     /// What Escape closes, nearest first: the lightbox, then the search;
     /// with nothing open, it stops the running turn.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open_ask.is_some() {
+        if self.rail_fly_up() {
+            self.rail_fly_close(cx);
+        } else if self.open_ask.is_some() {
             self.open_ask = None;
             cx.notify();
         } else if self.manage_ask.is_some() {
@@ -10347,7 +10491,14 @@ impl Workbench {
         div().size_full().relative().child(view).child(canvas(|_, _, _| {}, move |_, _, window, cx| marks.paint(window, cx)).absolute().size_0()).into_any_element()
     }
 
-    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.render_sidebar_as(false, cx)
+    }
+
+    /// The sidebar, or, `projects_only`, its Projects card alone, as the
+    /// rail's Projects button shows it beside the rail: the same rows,
+    /// drawn by the same code, so they do what they do in the sidebar.
+    fn render_sidebar_as(&self, projects_only: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = Self::shell_theme(cx);
         // The Projects card: a well in the frame, a little off its ground.
         let card_bg = if cx.theme().mode.is_dark() { cx.theme().background.opacity(0.55) } else { theme.foreground.opacity(0.045) };
@@ -10393,7 +10544,7 @@ impl Workbench {
             .cursor_pointer()
             .when(page == Page::New, |d| d.bg(theme.sidebar_accent))
             .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
-            .on_click(cx.listener(|this, _, window, cx| this.show_new(None, window, cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.new_toggle(window, cx)))
             .child(div().size(px(22.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.primary_foreground)))
             .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(t(NEW_TITLE)))
             .child(kbd_hint("⌘N", &theme));
@@ -11148,7 +11299,9 @@ impl Workbench {
             div().absolute().left(left - room.left()).top(top - room.top()).w((right - left).max(px(0.))).h((bottom - top).max(px(0.))).rounded(px(3.)).border_1().border_color(theme.primary.opacity(0.7)).bg(theme.primary.opacity(0.12))
         });
         let room = self.side_room.clone();
-        let folders_card = card(t("Projects")).flex_1().min_h_0().mt(px(10.)).mb(px(8.)).child(
+        // Beside the rail the card is as far from the panel's edge at its
+        // top and foot as at its sides.
+        let folders_card = card(t("Projects")).flex_1().min_h_0().mt(px(if projects_only { 8. } else { 10. })).mb(px(8.)).child(
             v_flex()
                 .id("side-card")
                 .relative()
@@ -11240,6 +11393,9 @@ impl Workbench {
                 .children(band),
         );
 
+        if projects_only {
+            return v_flex().size_full().text_color(theme.sidebar_foreground).child(folders_card).into_any_element();
+        }
         v_flex()
             .w(self.sidebar_w)
             .h_full()
@@ -11250,6 +11406,7 @@ impl Workbench {
             .child(top)
             .child(folders_card)
             .child(footer)
+            .into_any_element()
     }
 
     /// Whether a folder in the sidebar shows its sessions: the person's
@@ -12903,15 +13060,9 @@ impl Workbench {
         // control either holds), so the tabs keep one center line: the
         // page's buttons at the left, the terminal's at the right, or
         // nothing, never move them.
-        let mut left_end = h_flex().min_w(px(STRIP_END)).flex_shrink_0().items_center().gap(px(6.));
-        // The room goes as the sidebar comes, so the strip does not
-        // jump at either end of it.
-        let away = 1. - self.side_t();
-        if away > 0. {
-            let room = (self.strip_right() - px(4.) - FRAME + px(12.) - STRIP_PAD) * away;
-            left_end = left_end.pl(room);
-        }
-        let left_end = left_end.children(left);
+        // The card starts at the sidebar's edge or at the rail's, never
+        // under the traffic lights, so its strip keeps no room for them.
+        let left_end = h_flex().min_w(px(STRIP_END)).flex_shrink_0().items_center().gap(px(6.)).children(left);
         // The card starts a frame down, and its strip ends where the
         // sidebar's does.
         Self::drag_region(h_flex(), cx)
@@ -17285,7 +17436,7 @@ impl Render for SideView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.marks.clear();
         let _here = crate::ambient::Within::enter(None, self.marks.clone());
-        self.workbench.upgrade().map(|wb| wb.update(cx, |wb, cx| wb.render_sidebar(cx).into_any_element())).unwrap_or_else(|| div().into_any_element())
+        self.workbench.upgrade().map(|wb| wb.update(cx, |wb, cx| wb.render_sidebar(cx))).unwrap_or_else(|| div().into_any_element())
     }
 }
 
@@ -18145,8 +18296,9 @@ impl Render for Workbench {
         // first (`side_rank`): the panel at the left and the terminal
         // through their buttons' own calls, or the buttons stayed lit,
         // and the file shown is not drawn until there is room again.
-        // With the sidebar away the content has a frame at either side.
-        let (unfit, sides) = self.sides_fit(vw - FRAME);
+        // With the sidebar away the content has the rail at its left.
+        let rail = self.rail_w();
+        let (unfit, sides) = self.sides_fit(vw - rail);
         if unfit.iter().any(|s| *s != crate::panels::Side::File) {
             let this = cx.entity();
             window.defer(cx, move |_, cx| this.update(cx, |this, cx| this.fit_sides(true, cx)));
@@ -18157,9 +18309,9 @@ impl Render for Workbench {
         // A side panel put away for the window's width comes back where
         // it fits again, well past that width, not at it: a hand that
         // wavers at the width a panel went at would bring it in and out.
-        if self.sides_back(vw - FRAME) {
+        if self.sides_back(vw - rail) {
             let this = cx.entity();
-            window.defer(cx, move |_, cx| this.update(cx, |this, cx| this.side_away_back(vw - FRAME, cx)));
+            window.defer(cx, move |_, cx| this.update(cx, |this, cx| this.side_away_back(vw - rail, cx)));
         }
         // The sidebar leaves the row where the side panels that stay, and
         // the room of those put away for the window's width
@@ -18174,20 +18326,19 @@ impl Render for Workbench {
         // button, the key, a window dragged narrower or wider, a panel
         // that needed its room. Not under a drag of its own edge, where
         // it is the pointer's, and not at the first draw.
-        let kept = std::mem::take(&mut self.float_kept);
         let beside = self.sidebar_open && !self.narrow;
         if self.side_was != Some(beside) {
             if self.side_was.is_some() && !self.side_drag {
-                Self::turn(&mut self.side_anim, beside, kept);
+                Self::turn(&mut self.side_anim, beside);
             }
             self.side_was = Some(beside);
         }
         let peek = self.narrow && self.sidebar_peek;
         if self.peek_was != peek {
-            Self::turn(&mut self.peek_anim, peek, kept);
+            Self::turn(&mut self.peek_anim, peek);
             self.peek_was = peek;
         }
-        let moving = |a: Option<(bool, Instant, bool)>| a.is_some_and(|(_, at, _)| at.elapsed() < FLOAT_ANIM);
+        let moving = |a: Option<(bool, Instant)>| a.is_some_and(|(_, at)| at.elapsed() < FLOAT_ANIM);
         let (side_moving, peek_moving) = (moving(self.side_anim), moving(self.peek_anim));
         if side_moving || peek_moving {
             window.request_animation_frame();
@@ -18195,12 +18346,15 @@ impl Render for Workbench {
         if std::mem::take(&mut self.fit_wanted) {
             self.sidebar_w = self.sidebar_fit(window, cx);
         }
+        // The Projects card beside the rail goes once a session or a page
+        // has been gone to from it, as the narrow window's sidebar does.
+        let showing = (self.page, self.selected_ref().filter(|_| self.page == Page::Session).map(key_of));
+        if self.rail_fly.as_ref().is_some_and(|f| f.2 && f.1 != showing) {
+            self.rail_fly_close(cx);
+        }
         let sidebar_open = beside && !side_moving;
         let sidebar_peek = peek || peek_moving;
         let side_t = self.side_t();
-        // A sidebar that was floating when it was kept is drawn where it
-        // was, over the row, while the row makes room under it.
-        let side_kept = side_moving && matches!(self.side_anim, Some((true, _, true)));
         self.sync_tab_widths(cx);
         // `EMAKI_FOCUS_DEBUG=1` prints where the keyboard is at every draw.
         if std::env::var_os("EMAKI_FOCUS_DEBUG").is_some() {
@@ -18347,13 +18501,7 @@ impl Render for Workbench {
                                 let _ = scroll.update(cx, |w, cx| w.route_scroll(e, cx));
                             }
                         });
-                        // A floating sidebar goes when the pointer leaves it.
                         let (mover, lifter) = (this.clone(), this.clone());
-                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
-                            if phase == DispatchPhase::Capture {
-                                let _ = this.update(cx, |w, cx| w.float_follow(e, window, cx));
-                            }
-                        });
                         // The sidebar's edge, once held, follows the
                         // pointer wherever it goes, and nothing under
                         // it hears the move.
@@ -18433,7 +18581,7 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &crate::Quit, _, cx| this.quit(cx)))
             .on_action(cx.listener(|this, _: &crate::CloseWindow, window, cx| this.close_window(window, cx)))
             .on_action(cx.listener(|this, _: &GoSessions, _, cx| this.show_sessions(Scope::All, cx)))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(false, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_panel(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleOutline, _, cx| this.toggle_panel(false, cx)))
             // Off a Mac the same keys are the terminal's paste, which
@@ -18486,7 +18634,7 @@ impl Render for Workbench {
                 // room in the row opens, and out as it closes.
                 h_flex().size_full().when(side_t > 0., |d| {
                     let w = self.sidebar_w;
-                    d.child(div().h_full().flex_shrink_0().overflow_hidden().w((w * side_t).round()).when(!side_kept, |d| d.child(div().h_full().w(w).ml(w * (side_t - 1.)).child(self.kept_sidebar(cx)))))
+                    d.child(div().h_full().flex_shrink_0().overflow_hidden().w((w * side_t).round()).child(div().h_full().w(w).ml(w * (side_t - 1.)).child(self.kept_sidebar(cx))))
                 })
                 // The content is a card on the frame. Its corners are
                 // painted over what is in them (`card_corners`): a clip
@@ -18508,15 +18656,15 @@ impl Render for Workbench {
                     ),
                 ),
             )
+            .children(self.render_rail(cx))
             .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))
             .children(self.render_panel_grip(cx))
             .children(self.render_file_grip(cx))
             .children(self.render_outline_grip(cx))
             .children(self.render_term_grip(cx))
-            .when(side_kept, |d| d.child(div().absolute().top_0().left_0().h_full().w(self.sidebar_w).child(self.render_sidebar(cx))))
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
-            .children(self.render_sidebar_float(cx))
             .child(self.render_strip(cx))
+            .children(self.render_rail_fly(window, cx))
             .children(self.csd_chrome(window, cx))
             .when(search_open, |d| d.child(self.render_search(cx)))
             .when(self.changes.is_some(), |d| d.child(fade_in("changes-in", self.render_changes(cx))))
@@ -18604,3 +18752,4 @@ pub(crate) fn link_menu_items() -> Option<Vec<(&'static str, MenuDo)>> {
     }
     Some(items)
 }
+

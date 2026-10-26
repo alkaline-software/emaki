@@ -152,6 +152,15 @@
     "de": "Agents",
     "es": "Agents"
   },
+  "Agents (⌘E)": {
+    "zh-Hans": "Agents (⌘E)",
+    "zh-Hant": "Agents (⌘E)",
+    "ja": "Agents (⌘E)",
+    "ko": "Agents (⌘E)",
+    "fr": "Agents (⌘E)",
+    "de": "Agents (⌘E)",
+    "es": "Agents (⌘E)"
+  },
   "Align left (⌘L)": {
     "zh-Hans": "左对齐 (⌘L)",
     "zh-Hant": "靠左對齊 (⌘L)",
@@ -178,6 +187,15 @@
     "fr": "Toutes les sessions",
     "de": "Alle Sitzungen",
     "es": "Todas las sesiones"
+  },
+  "All Sessions (⌘L)": {
+    "zh-Hans": "所有会话 (⌘L)",
+    "zh-Hant": "所有工作階段 (⌘L)",
+    "ja": "すべてのセッション (⌘L)",
+    "ko": "모든 세션 (⌘L)",
+    "fr": "Toutes les sessions (⌘L)",
+    "de": "Alle Sitzungen (⌘L)",
+    "es": "Todas las sesiones (⌘L)"
   },
   "All · {n}": {
     "zh-Hans": "全部 · {n}",
@@ -2689,6 +2707,15 @@
     "fr": "Nouvelle session",
     "de": "Neue Sitzung",
     "es": "Nueva sesión"
+  },
+  "New Session (⌘N)": {
+    "zh-Hans": "新会话 (⌘N)",
+    "zh-Hant": "新工作階段 (⌘N)",
+    "ja": "新規セッション (⌘N)",
+    "ko": "새로운 세션 (⌘N)",
+    "fr": "Nouvelle session (⌘N)",
+    "de": "Neue Sitzung (⌘N)",
+    "es": "Nueva sesión (⌘N)"
   },
   "New Session in This Project": {
     "zh-Hans": "在此项目中新建会话",

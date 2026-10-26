@@ -416,6 +416,12 @@ pub struct TurnState {
     pub since: String,
     pub turn_started: String,
     pub tool: String,
+    /// When each command or subagent the agent left running in the
+    /// background began, of those the rows read have not seen end. One
+    /// is running only while the agent that started it is: whoever reads
+    /// this holds it against when that agent started.
+    #[serde(default)]
+    pub background: Vec<String>,
 }
 
 impl TurnState {
@@ -590,6 +596,8 @@ pub fn turn_state(rows: &[Value], cwd: &str) -> TurnState {
         }
         decided = true;
     }
+    let all: Vec<&Value> = rows.iter().collect();
+    state.background = shells_of(&all).into_iter().filter(|sh| sh.ended.is_empty()).map(|sh| sh.started).collect();
     state
 }
 
