@@ -3824,6 +3824,7 @@ impl Workbench {
         if self.file_guard(FileThen::CloseWindow, cx) {
             self.keep_composers(cx);
             self.close_settings(cx);
+            self.save_ui_closing(window);
             window.remove_window();
         }
     }
