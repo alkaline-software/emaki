@@ -22,16 +22,21 @@ pub struct UiState {
     pub sidebar_open: Option<bool>,
     /// How wide the sidebar was dragged to.
     pub sidebar_w: Option<f32>,
-    /// The files panel and the outline beside a conversation.
+    /// The files panel beside a conversation, and how wide it was
+    /// dragged to.
     pub files_on: Option<bool>,
-    pub outline_on: Option<bool>,
-    /// How wide that panel was dragged to.
     pub panel_w: Option<f32>,
+    /// The outline at the conversation's left, and how wide it was
+    /// dragged to.
+    pub outline_on: Option<bool>,
+    pub outline_w: Option<f32>,
+    /// The agent terminal in the conversation's place.
+    pub cli_layout: Option<bool>,
     /// The list of branches in the order of their names, not by when
     /// each was last committed to.
     pub branches_by_name: Option<bool>,
-    /// The terminal at the conversation's right: how wide it was dragged
-    /// to, and whether it showed the agent and not the shell.
+    /// The shell terminal at the conversation's right: how wide it was
+    /// dragged to.
     pub term_w: Option<f32>,
     /// How wide the file shown beside the conversation was dragged to.
     pub file_w: Option<f32>,
@@ -41,7 +46,6 @@ pub struct UiState {
     pub file_structure_h: Option<f32>,
     /// What stands beside a PDF's pages: `pages`, `contents` or nothing.
     pub pdf_side: Option<String>,
-    pub term_agent: Option<bool>,
     /// The agent a new session is begun with, and what a new Codex
     /// session starts in: its mode, model and effort.
     pub new_agent: Option<String>,

@@ -203,7 +203,7 @@ pub(crate) fn app_menus() -> Vec<Menu> {
             MenuItem::action(t("Toggle Outline"), ToggleOutline),
             MenuItem::action(t("Toggle Rendered and Raw"), ToggleRaw),
             MenuItem::action(t("Toggle Shell Terminal"), ToggleShell),
-            MenuItem::action(t("Toggle Agent Terminal"), ToggleAgent),
+            MenuItem::action(t("Toggle CLI Layout"), ToggleAgent),
         ],
     });
     menus.push(Menu {
