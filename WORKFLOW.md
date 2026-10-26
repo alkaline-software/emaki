@@ -58,8 +58,11 @@ Add `## vX.Y.Z` to `CHANGELOG.md`, newest first, written for the person installi
 Commit the bump and the changelog, then:
 
 ```
+caffeinate -d -t 14400 &             # the display stays on, so the screen stays unlocked
 scripts/release-check.sh X.Y.Z
 ```
+
+The notary credential is out of reach while the screen is locked, and this Mac locks the screen the moment the display sleeps (see "When something fails"). Emaki's Keep the display on holds it only while a session works on a turn, not while the turn is over and a background command waits on CI, which is most of a release. An agent starts `caffeinate` as a background command of its own, for the four hours a release with a redo can take.
 
 It holds the commit to everything the tag will be held to: the version in `Cargo.toml`, a changelog section of ten items at most, a notary service that answers to the saved credential (step 5 needs it, an hour later), a lock that builds with `--locked`, a clean tree, the core tests, the app build, and a Windows type check (MinGW; `brew install mingw-w64 && rustup target add x86_64-pc-windows-gnu` once). Do not tag until it says "ready to tag". A tag that fails in CI has to be redone, and every redo means building and notarizing the Mac images again; v0.1.5 was tagged three times, the first for a line that did not compile on Windows, which this check catches in a minute.
 
@@ -110,7 +113,7 @@ gh release download vX.Y.Z --repo alkaline-software/emaki --dir dist/try --patte
 
 - **Windows**: copy `Emaki-windows-arm64-setup.exe` and `Emaki-windows-x64-setup.exe` (which Windows on ARM runs emulated) into the VM, run each, and see the splash and then the window open; the app is under `%LOCALAPPDATA%\AlkalineSoftware.Emaki`, and an older one there is updated in place. A file copied in by VMPal has no mark of a download, so first give it the one a browser gives (`Set-Content <file> -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"`) and look at what Windows shows first: without Artifact Signing (see "Signing on Windows") SmartScreen stops it with "Windows protected your PC" and an unknown publisher, and the release is not free of warnings until that is set up.
 - **Linux**: install the `.deb` with `sudo apt install ./Emaki-linux-arm64.deb` and open Emaki from the app grid; make the AppImage executable and run it. Both must open the window with no error in a terminal started beside them; the AppImage's `xkbcommon: ERROR ... unrecognized keysym` lines are its own older keyboard library reading the system's Compose file, and are not ours. The x64 Linux packages have no machine here and are tried only by CI's build.
-- In each, the window opens on the new-session page, the sidebar lists the agents' sessions, a session opens, a file opens from the files panel, and the terminal panel runs a shell. A VM with no sessions gets one: a short transcript in `~/.claude/projects/<the folder's path, each character but a letter or digit made a dash>/<id>.jsonl` shows in the sidebar while the app runs. Then close the window and open it again twice: it comes back where it was.
+- In each, the window opens on the new-session page, the sidebar lists the agents' sessions, a session opens, a file opens from the files panel, and the terminal panel runs a shell. A VM with no sessions gets one: a short transcript in `~/.claude/projects/<the folder's path, each character but a letter or digit made a dash>/<id>.jsonl` shows in the sidebar while the app runs. Then close the window and open it again twice: it comes back where it was. On Windows, drag it somewhere else and close it at once: it opens where it was dropped. On Linux the close button is the one the window draws (GNOME draws none): resize the window, close it at once, and `~/.emaki/state/ui.json` is written at that moment with the new size.
 
 A package that does not install or open is a reason to stop: fix it, then redo the release from step 3 ("Redoing a release under the same tag").
 
@@ -129,10 +132,14 @@ It refuses unless the release workflow for the tag has finished and succeeded (`
 Drag from the disk image, or:
 
 ```
-hdiutil attach dist/Emaki-mac-arm64.dmg
-ditto "/Volumes/Emaki vX.Y.Z/Emaki.app" /Applications/Emaki.app
+hdiutil attach -nobrowse dist/Emaki-mac-arm64.dmg
+ditto "/Volumes/Emaki vX.Y.Z/Emaki.app" /Applications/Emaki.app.new
+mv /Applications/Emaki.app "$TMPDIR/Emaki.app.old" && mv /Applications/Emaki.app.new /Applications/Emaki.app
+rm -rf "$TMPDIR/Emaki.app.old"
 hdiutil detach "/Volumes/Emaki vX.Y.Z"
 ```
+
+The new bundle is copied beside the old and put in its place by a rename, never copied over it: the installed Emaki may be running (the person keeps it open, and the agent may be its child), and a copy over a running app's executable changes the pages macOS has mapped and checks against their signature, which can end the app with the session in it. Renamed away, the old files stay whole for as long as the copy running them lives.
 
 Keep no other `Emaki.app` on the disk (`dist/`, a scratch folder, `scripts/make-app.sh`'s output): Launchpad and Spotlight list each one. Step 9 removes the ones a release leaves.
 
@@ -152,7 +159,9 @@ It refuses in two cases: the installed copy is not a notarized release, or `dist
 
 Nothing here can be lost: all of it is rebuilt from the source. The cost is time. The next `cargo build -p emaki-app` starts from nothing and takes some minutes, and so does the next release build.
 
-The agent cutting the release is usually a child of the dev build (`scripts/dev-app.sh`), whose bundle is in `target/`. The script cleans under it all the same: a running program keeps the files it has open, so the app and the session go on, as they did when v0.2.3 was cleaned this way by mistake. The app has no bundle on disk from then on, so the script ends by handing over: `scripts/relaunch.sh --installed` quits the dev build once the turn is over and opens `/Applications/Emaki.app`. Make it the last command of the release, and tell the person the window they are looking at will close and the installed one will open, with the session there to be continued.
+The agent cutting the release is often a child of the dev build (`scripts/dev-app.sh`), whose bundle is in `target/`. The script cleans under it all the same: a running program keeps the files it has open, so the app and the session go on, as they did when v0.2.3 was cleaned this way by mistake. The app has no bundle on disk from then on, so the script ends by handing over: `scripts/relaunch.sh --installed` quits the dev build once the turn is over and opens `/Applications/Emaki.app`. Make it the last command of the release, and tell the person the window they are looking at will close and the installed one will open, with the session there to be continued.
+
+When the agent is a child of the installed Emaki instead, `ps -o ppid= -p $PPID` names it. Step 8 then put the new bundle in place under a running copy of the last version, which goes on running it: the person quits the installed Emaki and opens it again to run the new one, and the session is there to be continued.
 
 Afterwards `du -sh .` on the repository should be well under a gigabyte; the script prints it.
 
@@ -169,6 +178,8 @@ git push origin vX.Y.Z
 ```
 
 The Mac images must be rebuilt from the new commit (step 5), the other systems tried again (step 6), and published again (step 7).
+
+Claude Code's auto mode refuses an agent the first three commands, as a destructive git action, unless the person has allowed `gh release delete` and `git push origin :refs/tags/*` in `.claude/settings.local.json`. Without that rule the agent asks the person to run them in a terminal, and goes on from the tag once they are done. A command typed with `!` runs only in the session's own window, the Emaki whose child the session is, not in another Emaki showing the same session.
 
 ## Signing in CI
 
@@ -278,7 +289,7 @@ Every failure met while cutting a release gets a line here once it is solved, wi
 - **One Mac package job in `release.yml` fails right after "satisfies its Designated Requirement", with no message, while the other passes**: `hdiutil create` on the runner ("Resource busy"). `release-mac.sh` now tries it five times and says why. If it still fails, re-run only that job, which keeps the tag and the images built here: `gh run rerun <run-id> --failed --repo alkaline-software/emaki`. The `release` job waits for all six. v0.1.9's Intel job did this.
 - **`release-mac.sh` stops with "Finder ... AppleEvent timed out (-1712)"**: macOS asked whether the terminal may control Finder and nobody answered. Allow it (System Settings, Privacy & Security, Automation) and run the script again. Check the script's exit code and that both images are in `dist/`: piped into `tail`, a failed first image went unnoticed for v0.1.9 until the second was done.
 
-- **`release-mac.sh --notarize` stops with "No Keychain password item found for profile: notarytool-profile"**, run by an agent in Emaki, while the same two commands work in the person's own terminal: the credential is in place, and the agent's sandbox keeps its commands from the keychain. An agent runs `release-check.sh` and the two commands of step 5 outside its sandbox; then they reach the profile as the person's terminal does. `release-check.sh` now asks the notary service before anything is built, so step 3 says so. In v0.2.3 it was found after the tag was out.
+- **`release-mac.sh --notarize` or `release-check.sh` stops with "No Keychain password item found for profile: notarytool-profile"** while the profile is in place: the Mac's screen is locked. `store-credentials` keeps the profile in the keychain that opens only while the screen is unlocked, and this Mac locks it the moment the display sleeps, so a release run overnight finds no profile from then on, in an agent's session or anyone's, while builds and CI go on. It is not the sandbox or which Emaki the session runs in: in v0.3.2 every failure came after the display turned off at 23:41 and the same commands worked once it was on again. Notarize while the person is at the Mac; a run that reaches step 5 with the screen locked waits for it. In v0.2.3 it was found after the tag was out, which is why step 3 asks the notary service first.
 - **`release-clean.sh` must find the running dev build with `ps`**: `pgrep` leaves out its own ancestors, and the app is the ancestor of the session that runs the script. Written with `pgrep`, it sees nothing, and the dev build is left running with no files and nothing opened in its place.
 
 - **"Cargo.toml says X but the tag is vY"**: the version and the tag disagree. Fix `Cargo.toml`, commit, redo the tag.
