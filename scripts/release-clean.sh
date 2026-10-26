@@ -21,14 +21,14 @@ fail() { print -u2 "release-clean: $1"; exit 1; }
 # session runs in is one, so it reported nothing with the dev build up.
 running=$(ps -axo pid=,command= | awk -v t="$root/target/" 'index($0, t) && $2 != "awk"' || true)
 spctl -a -vv /Applications/Emaki.app 2>&1 | grep -q "Notarized Developer ID" \
-  || fail "/Applications/Emaki.app is not a notarized release (WORKFLOW.md step 8)"
+  || fail "/Applications/Emaki.app is not a notarized release (docs/release.md step 8)"
 
 # Images still in dist/ are a release's. A release not yet published may
 # be redone, and a redo wants them and the release builds.
 if [[ -n "$(print -l dist/*.dmg(N))" ]]; then
   v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
   draft=$(gh release view "v$v" --repo alkaline-software/emaki --json isDraft -q .isDraft 2>/dev/null || true)
-  [[ "$draft" == false ]] || fail "dist/ holds disk images and v$v is not published (WORKFLOW.md step 7)"
+  [[ "$draft" == false ]] || fail "dist/ holds disk images and v$v is not published (docs/release.md step 7)"
 fi
 
 before=$(du -sh . | cut -f1)

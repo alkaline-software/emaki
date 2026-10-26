@@ -26,13 +26,13 @@ if [[ "$(uname)" == Darwin ]]; then
     notary=(--keychain-profile "${NOTARY_PROFILE:-notarytool-profile}")
   fi
   said=$(xcrun notarytool history $notary 2>&1) \
-    || fail "the notary service cannot be reached with the saved credential (WORKFLOW.md, When something fails):
+    || fail "the notary service cannot be reached with the saved credential (docs/release.md, When something fails):
 ${said##*Error: }"
 fi
 # --locked is how CI builds: a lock that was not refreshed fails here.
 cargo check --locked -p emaki-app -p emaki-core 2>&1 | tail -1
 [[ -z "$(git status --porcelain)" ]] || fail "uncommitted changes; the tag would not hold them"
-git rev-parse -q --verify "refs/tags/v$v" > /dev/null && fail "the tag v$v exists already (WORKFLOW.md, redoing a release)"
+git rev-parse -q --verify "refs/tags/v$v" > /dev/null && fail "the tag v$v exists already (docs/release.md, redoing a release)"
 
 cargo test --locked -p emaki-core 2>&1 | grep -E "^test result|FAILED|panicked" || true
 cargo test --locked -p emaki-core > /dev/null 2>&1 || fail "the core tests fail"
