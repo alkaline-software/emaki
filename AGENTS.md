@@ -90,6 +90,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs` | `docs/core.md` |
 | `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, `process.rs`, `csd.rs`, any `cfg` for an OS | `docs/platform.md` |
 | Checking a change in the window from a script | `docs/probing.md` |
+| Bumping the version and cutting a release | `docs/release.md` |
 
 A change that crosses two rows reads both docs. `workbench.rs` is in most rows: go by what the code you are changing does.
 
@@ -172,16 +173,13 @@ scripts/statusline.sh      Claude Code's status line, ours: prints the line, lea
 scripts/relaunch.sh        quit the running Emaki and start the new build, once the agent's turn is over; --installed starts /Applications/Emaki.app
 scripts/dev-app.sh         start the build in target/debug as an app: on a Mac a bundle opened through the system, never a bare executable
 scripts/home-scroll.py     the landscape on the handscroll over the greeting, as line drawings a depth each
-docs/                      how each part works and its traps; the index below says which to read
-WORKFLOW.md                how to cut a release, step by step
+docs/                      how each part works and its traps; the index below says which to read; docs/release.md, how to cut a release
 CHANGELOG.md               one section per release; the release job reads it
-STAGES.md                  the high-level plan: three stages, a page
-PLAN.md                    the detailed plan: tasks, decisions, what has landed
 .github/workflows/rust.yml     tests and a build on macOS, Windows, Linux, every push
 .github/workflows/release.yml  installers on a v* tag: cargo-packager, Velopack on Windows, the Store's package, the snap
 ```
 
-**Each document has one job.** This file is what Emaki is, the rules that hold in every session, and where to read next. `docs/` is how each part works and why. STAGES.md is where the app is going, in three stages; a change of direction goes there. PLAN.md is the detailed plan under it: phases, tasks with checkmarks, decisions and their dates. WORKFLOW.md is how to cut a release, CHANGELOG.md what each release changed for the person installing it, and README.md a short introduction for GitHub that sends the reader to emaki.lol, whose pages say how each part works.
+**Each document has one job.** This file is what Emaki is, the rules that hold in every session, and where to read next. `docs/` is how each part works and why, and `docs/release.md` how to cut a release, step by step. CHANGELOG.md what each release changed for the person installing it, and README.md a short introduction for GitHub that sends the reader to emaki.lol, whose pages say how each part works.
 
 ## Running it
 
@@ -189,7 +187,7 @@ PLAN.md                    the detailed plan: tasks, decisions, what has landed
 
 **After a change to the app, relaunch it with `scripts/relaunch.sh`.** The person develops Emaki in Emaki, so at the end of any task that changed the app, build it (`cargo build -p emaki-app`) and run `scripts/relaunch.sh` as the last command before the final reply, without being asked. A change to documents alone needs no relaunch. The script returns at once; fifteen seconds after the turn is over it quits the dev build and starts the new one (`scripts/dev-app.sh`). Those seconds are the person's, to read the reply and start typing: counted from the script's run, they were gone by the end of a long reply, and the app quit under the person's typing. The installed Emaki is never quit: the person works in it beside the dev build. The agent's session is a child of the app, so quitting the app ends the session: the script waits while the session's registry record says `busy`. Never `pkill` by hand from inside the app, and look at a change before the relaunch with a probe copy.
 
-**"Clean up after the release" means `scripts/release-clean.sh`.** It is the last step of a release (WORKFLOW.md, step 9), run without being asked and as the last command, from whichever Emaki the session is in. Run that script and nothing by hand: it deletes `target/` and `dist/`, and when the dev build is the one running it quits it after the turn and opens the installed app.
+**"Clean up after the release" means `scripts/release-clean.sh`.** It is the last step of a release (`docs/release.md`, step 9), run without being asked and as the last command, from whichever Emaki the session is in. Run that script and nothing by hand: it deletes `target/` and `dist/`, and when the dev build is the one running it quits it after the turn and opens the installed app.
 
 ## Writing things down
 

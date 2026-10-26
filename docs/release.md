@@ -1,6 +1,6 @@
 # Releasing Emaki
 
-Everything about cutting a release: bumping the version, the changelog, the tag, what CI builds, signing and notarizing the Mac images on this machine, uploading them, cleaning up, redoing a release, and the pieces that feed it (the icon, the disk-image background). AGENTS.md says how the pieces fit; this file says what to run, in order.
+What to run, in order, to cut a release, and what to do when a step fails. `docs/platform.md` (CI and releases) says how the pieces fit.
 
 ## What a release is
 
@@ -12,13 +12,13 @@ A `v*` tag pushed to `alkaline-software/emaki` runs `release.yml`. Six package j
 | `Emaki-mac-x64.dmg` | CI, then replaced from this machine | Developer ID, notarized, stapled |
 | `Emaki-windows-x64-setup.exe` | CI (Velopack) | Azure Artifact Signing, once its secrets are set; unsigned before |
 | `Emaki-windows-arm64-setup.exe` | CI (Velopack) | the same |
-| `Emaki-<version>-win-<arch>-full.nupkg`, `releases.win-<arch>.json` | CI (Velopack) | the package and feed a Windows copy updates itself from |
+| `AlkalineSoftware.Emaki-<version>-win-<arch>-full.nupkg`, `releases.win-<arch>.json` | CI (Velopack) | the package and feed a Windows copy updates itself from; the name starts with the pack id |
 | `Emaki-linux-x64.AppImage` | CI | n/a |
 | `Emaki-linux-x64.deb` | CI | n/a |
 | `Emaki-linux-arm64.AppImage` | CI | n/a |
 | `Emaki-linux-arm64.deb` | CI | n/a |
 
-The names never change, so `releases/latest/download/<name>` links stay valid. The Windows feed and package carry the version and are found through the feed, whose own name is stable. The Microsoft Store's `.msix` packages are not on the release: CI keeps them with the run (`store-win-x64`, `store-win-arm64`), once the Store identity is set (see "The Microsoft Store" below). The snaps are kept the same way (`snap-amd64`, `snap-arm64`) and go to the Snap Store (see "The Snap Store" below). CI's own Mac images are ad-hoc signed because the signing secrets are not in the repository (see "Signing in CI" below); the notarized ones are built here by `scripts/release-mac.sh` and uploaded over them.
+The names never change, so `releases/latest/download/<name>` links stay valid. The Windows feed and package carry the version and are found through the feed, whose own name is stable. The Microsoft Store's `.msix` packages and the snaps are not on the release: CI keeps them with the run (`store-win-x64`, `store-win-arm64`, `snap-amd64`, `snap-arm64`) for their stores (see "The Microsoft Store" and "The Snap Store"). CI's own Mac images are ad-hoc signed because the signing secrets are not in the repository (see "Signing in CI"); the notarized ones are built here by `scripts/release-mac.sh` and uploaded over them.
 
 ## One-time setup on a Mac
 
@@ -35,23 +35,15 @@ The names never change, so `releases/latest/download/<name>` links stay valid. T
 
 ### 1. Bump the version
 
-The version lives in one file:
-
-```
-Cargo.toml            version = "X.Y.Z"      (the workspace; both crates inherit it)
-```
-
-`Cargo.lock` records the crates' versions too, and CI builds with `--locked`, so refresh it after the bump and commit it with the rest:
+The version lives in one place, `version = "X.Y.Z"` in the workspace's `Cargo.toml`; both crates inherit it. `Cargo.lock` records it too, and CI builds with `--locked`, so refresh the lock and commit it with the rest:
 
 ```
 cargo check -p emaki-app
 ```
 
-The release workflow refuses a tag whose number disagrees with `Cargo.toml`.
-
 ### 2. Write the changelog section
 
-Add `## vX.Y.Z` to `CHANGELOG.md`, newest first, written for the person installing the app: what changed for them, not which files moved. It is a numbered list, a topic in bold and then one sentence, small fixes gathered under **Fixes**, ten items at most. The workflow refuses a tag with no section, and `scripts/release-notes.sh X.Y.Z` prints exactly what the release page will show.
+Add `## vX.Y.Z` to `CHANGELOG.md`, newest first, written for the person installing the app: what changed for them, not which files moved. It is a numbered list, a topic in bold and then one sentence, small fixes gathered under **Fixes**, ten items at most. `scripts/release-notes.sh X.Y.Z` prints exactly what the release page will show.
 
 ### 3. Check it before the tag
 
@@ -62,13 +54,13 @@ caffeinate -d -t 14400 &             # the display stays on, so the screen stays
 scripts/release-check.sh X.Y.Z
 ```
 
-The notary credential is out of reach while the screen is locked, and this Mac locks the screen the moment the display sleeps (see "When something fails"). Emaki's Keep the display on holds it only while a session works on a turn, not while the turn is over and a background command waits on CI, which is most of a release. An agent starts `caffeinate` as a background command of its own, for the four hours a release with a redo can take.
+The notary credential is out of reach while the screen is locked (see "When something fails"). Emaki's Keep the display on holds only while a session works on a turn, not while the turn is over and a background command waits on CI, which is most of a release. An agent starts `caffeinate` as a background command of its own, for the four hours a release with a redo can take.
 
-It holds the commit to everything the tag will be held to: the version in `Cargo.toml`, a changelog section of ten items at most, a notary service that answers to the saved credential (step 5 needs it, an hour later), a lock that builds with `--locked`, a clean tree, the core tests, the app build, and a Windows type check (MinGW; `brew install mingw-w64 && rustup target add x86_64-pc-windows-gnu` once). Do not tag until it says "ready to tag". A tag that fails in CI has to be redone, and every redo means building and notarizing the Mac images again; v0.1.5 was tagged three times, the first for a line that did not compile on Windows, which this check catches in a minute.
+The check holds the commit to everything the tag will be held to: the version in `Cargo.toml`, a changelog section of ten items at most, a notary service that answers to the saved credential (step 5 needs it, an hour later), a lock that builds with `--locked`, a clean tree, the core tests (once more with Windows' one-megabyte stack), the app build, and a Windows type check. Do not tag until it says "ready to tag". A tag that fails in CI has to be redone, and every redo means building and notarizing the Mac images again.
 
 ### 4. Push, wait for the tests, then tag
 
-Work happens on a branch; `main` is fast-forwarded to it at release. `rust.yml` runs on a push to `main`, and it is the only place the tests run on Windows and Linux (the check in step 3 type-checks Windows and runs nothing there). So push, let that run finish, and tag only once it is green on all three:
+`rust.yml` runs on a push to `main`, and it is the only place the tests run on Windows and Linux (step 3 type-checks Windows and runs nothing there). So push, let that run finish, and tag only once it is green on all three:
 
 ```
 git push origin HEAD                 # the branch
@@ -90,7 +82,7 @@ gh run watch <run-id> --repo alkaline-software/emaki --exit-status
 
 ### 5. Build, sign and notarize the Mac images here
 
-While CI runs, and from the tagged commit: an image built before the last fix is an image of other code, and `release-publish.sh` refuses one older than the tag's commit. Both architectures build on an Apple Silicon Mac. The script packages the bundle with cargo-packager, signs it with the Developer ID and the hardened runtime, lays the disk image out through Finder over `scripts/dmg/background.png`, compresses it, signs it, submits it to the notary service, waits, staples and validates:
+From the tagged commit: an image built before the last fix is an image of other code, and `release-publish.sh` refuses one older than the tag's commit. Both architectures build on an Apple Silicon Mac. The script packages the bundle with cargo-packager, signs it with the Developer ID and the hardened runtime, lays the disk image out through Finder over `scripts/dmg/background.png`, compresses it, signs it, submits it to the notary service, waits, staples and validates:
 
 ```
 cargo build --release --locked -p emaki-app
@@ -99,19 +91,17 @@ scripts/release-mac.sh --no-build --notarize
 scripts/release-mac.sh --no-build --notarize --target x86_64-apple-darwin
 ```
 
-Each run ends with `built dist/Emaki-mac-<arch>.dmg (X.Y.Z, <arch>, signed, notarized)` and leaves only the two images in `dist/`. Notarization takes a few minutes per image; the four commands together about ten.
-
-Check each run's own exit code and last line. Step 3 asked the notary service already, so a credential that cannot be reached here is new since then: see "When something fails".
+Each run ends with `built dist/Emaki-mac-<arch>.dmg (X.Y.Z, <arch>, signed, notarized)` and leaves only the two images in `dist/`. The four commands together take about ten minutes. Check each run's own exit code and last line, not output piped through `tail`.
 
 ### 6. Install and run it on Windows and Linux
 
-Before anything is public, the draft's own installers are installed and opened on the other systems, in VMPal's VMs on this Mac (`Windows 11` and `Ubuntu 26`, both ARM): the tests in CI build and test the code, and nothing else installs the packages a person downloads. Download them from the draft:
+Before anything is public, the draft's own installers are installed and opened on the other systems, in VMPal's VMs on this Mac (`Windows 11` and `Ubuntu 26`, both ARM): CI builds and tests the code, and nothing else installs the packages a person downloads. Download them from the draft:
 
 ```
 gh release download vX.Y.Z --repo alkaline-software/emaki --dir dist/try --pattern 'Emaki-windows-*-setup.exe' --pattern 'Emaki-linux-arm64.*'
 ```
 
-- **Windows**: copy `Emaki-windows-arm64-setup.exe` and `Emaki-windows-x64-setup.exe` (which Windows on ARM runs emulated) into the VM, run each, and see the splash and then the window open; the app is under `%LOCALAPPDATA%\AlkalineSoftware.Emaki`, and an older one there is updated in place. A file copied in by VMPal has no mark of a download, so first give it the one a browser gives (`Set-Content <file> -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"`) and look at what Windows shows first: without Artifact Signing (see "Signing on Windows") SmartScreen stops it with "Windows protected your PC" and an unknown publisher, and the release is not free of warnings until that is set up.
+- **Windows**: copy `Emaki-windows-arm64-setup.exe` and `Emaki-windows-x64-setup.exe` (which Windows on ARM runs emulated) into the VM, run each, and see the splash and then the window open; the app is under `%LOCALAPPDATA%\AlkalineSoftware.Emaki`, and an older one there is updated in place. A file copied in by VMPal has no mark of a download, so first give it the one a browser gives (`Set-Content <file> -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"`) and look at what Windows shows first: without Artifact Signing (see "Signing on Windows") SmartScreen stops it with "Windows protected your PC" and an unknown publisher.
 - **Linux**: install the `.deb` with `sudo apt install ./Emaki-linux-arm64.deb` and open Emaki from the app grid; make the AppImage executable and run it. Both must open the window with no error in a terminal started beside them; the AppImage's `xkbcommon: ERROR ... unrecognized keysym` lines are its own older keyboard library reading the system's Compose file, and are not ours. The x64 Linux packages have no machine here and are tried only by CI's build.
 - In each, the window opens on the new-session page, the sidebar lists the agents' sessions, a session opens, a file opens from the files panel, and the terminal panel runs a shell. A VM with no sessions gets one: a short transcript in `~/.claude/projects/<the folder's path, each character but a letter or digit made a dash>/<id>.jsonl` shows in the sidebar while the app runs. Then close the window and open it again twice: it comes back where it was. On Windows, drag it somewhere else and close it at once: it opens where it was dropped. On Linux the close button is the one the window draws (GNOME draws none): resize the window, close it at once, and `~/.emaki/state/ui.json` is written at that moment with the new size.
 
@@ -125,7 +115,7 @@ Once the workflow is green and both images are built:
 scripts/release-publish.sh X.Y.Z
 ```
 
-It refuses unless the release workflow for the tag has finished and succeeded (`action-gh-release` replaces same-named assets, so an upload made while the job runs is overwritten by it) and both images are notarized, stapled and newer than the tag's commit. Then it uploads them over CI's ad-hoc ones, downloads them back and compares checksums, checks the downloaded copies the way Gatekeeper will, and publishes the draft as the latest release. The release is not done until this prints "published with notarized Mac images". v0.1.5 was published by CI with the ad-hoc images and the upload came half an hour later; the app updated itself from them in between and macOS refused it.
+It refuses unless the release workflow for the tag has finished and succeeded (`action-gh-release` replaces same-named assets, so an upload made while the job runs is overwritten by it) and both images are notarized, stapled and newer than the tag's commit. Then it uploads them over CI's ad-hoc ones, downloads them back and compares checksums, checks the downloaded copies the way Gatekeeper will, and publishes the draft as the latest release. The release is not done until this prints "published with notarized Mac images": a release published with CI's ad-hoc images is one the app updates itself from and macOS then refuses.
 
 ### 8. Install the release build here
 
@@ -145,25 +135,22 @@ Keep no other `Emaki.app` on the disk (`dist/`, a scratch folder, `scripts/make-
 
 ### 9. Delete the compiled files
 
-Every release ends with this step, and a release is not finished until it has run. Nothing compiled is kept between releases: disk space is worth more here than the minutes the next build takes. Do it without being asked, once the release is confirmed done: step 7 printed "published with notarized Mac images" and the installed copy opens. Then:
+Every release ends with this step, and a release is not finished until it has run. Nothing compiled is kept between releases: disk space is worth more here than the minutes the next build takes, and all of it is rebuilt from the source. Do it without being asked, once step 7 printed "published with notarized Mac images" and the installed copy opens:
 
 ```
 scripts/release-clean.sh
 ```
 
-- It runs `cargo clean`, which deletes `target/`: every build made while developing and for the release (debug, release, the Intel and Windows targets), and with it the dev build's bundle. Months of incremental builds had grown it past 80 GB by v0.1.9.
+- It runs `cargo clean`, which deletes `target/`: every build made while developing and for the release, and with it the dev build's bundle. Months of incremental builds grow it past 80 GB.
 - It deletes `dist/`, the two disk images, which are on the release by now.
 - It asks Spotlight for every `Emaki.app` and fails if there is one other than `/Applications/Emaki.app`.
+- It prints `du -sh .` on the repository, which should be well under a gigabyte.
 
-It refuses in two cases: the installed copy is not a notarized release, or `dist/` holds images of a version that is not published (a redo of the release wants them and the release builds).
+It refuses in two cases: the installed copy is not a notarized release, or `dist/` holds images of a version that is not published (a redo of the release wants them).
 
-Nothing here can be lost: all of it is rebuilt from the source. The cost is time. The next `cargo build -p emaki-app` starts from nothing and takes some minutes, and so does the next release build.
-
-The agent cutting the release is often a child of the dev build (`scripts/dev-app.sh`), whose bundle is in `target/`. The script cleans under it all the same: a running program keeps the files it has open, so the app and the session go on, as they did when v0.2.3 was cleaned this way by mistake. The app has no bundle on disk from then on, so the script ends by handing over: `scripts/relaunch.sh --installed` quits the dev build once the turn is over and opens `/Applications/Emaki.app`. Make it the last command of the release, and tell the person the window they are looking at will close and the installed one will open, with the session there to be continued.
+The agent cutting the release is often a child of the dev build (`scripts/dev-app.sh`), whose bundle is in `target/`. The script cleans under it all the same: a running program keeps the files it has open, so the app and the session go on. The app has no bundle on disk from then on, so the script ends by handing over: `scripts/relaunch.sh --installed` quits the dev build once the turn is over and opens `/Applications/Emaki.app`. Make it the last command of the release, and tell the person the window they are looking at will close and the installed one will open, with the session there to be continued.
 
 When the agent is a child of the installed Emaki instead, `ps -o ppid= -p $PPID` names it. Step 8 then put the new bundle in place under a running copy of the last version, which goes on running it: the person quits the installed Emaki and opens it again to run the new one, and the session is there to be continued.
-
-Afterwards `du -sh .` on the repository should be well under a gigabyte; the script prints it.
 
 ## Redoing a release under the same tag
 
@@ -268,37 +255,27 @@ The store page (snapcraft.io/emaki) takes its icon, screenshots and links from t
 
 ## The pieces a release depends on
 
-**The icon.** `scripts/icon/icon.html` is the source: it draws the picture on a canvas, at any size. `scripts/make-icon.sh` runs it (WebKit, through `scripts/icon/render.swift`, so on a Mac) into `crates/emaki-app/assets/icon`: the PNGs as the rounded icon with its margin and shadow (the Dock icon the app sets at start, Windows, Linux), `icon.ico`, and `icon.icns` as the full square, opaque to the corners, because macOS 26 masks every app icon to its own rounded square over a gray backing and shows anything transparent as a gray border. Open the page in a browser to see every size on one sheet. Change the drawing, run the script, rebuild, commit the assets.
+**The icon.** Change the drawing in `scripts/icon/icon.html`, run `scripts/make-icon.sh` (WebKit, so on a Mac) to remake `crates/emaki-app/assets/icon`, rebuild, and commit the assets. Open the page in a browser to see every size on one sheet. How it is drawn is in `docs/platform.md`, The app icon.
 
 **The disk-image background.** `scripts/dmg/background.png`, drawn by `scripts/dmg/background.py` (Pillow, LXGW WenKai Medium) in the app's cream and its periwinkle accent: "Drag Emaki to Applications" and an arrow, 1320x840 at 2x for the 660x420 Finder window. Run the script only when the picture changes; the PNG is committed.
 
-**The layout.** `release-mac.sh` mounts a read-write image and has Finder set the window, the 128pt icons at 165 and 495, and the background, then converts to a compressed read-only image. Only Finder writes a `.DS_Store` Finder honors, so the layout is not generated offline. This works on the GitHub macOS runners too.
+**The layout.** `release-mac.sh` mounts a read-write image and has Finder set the window, the icons and the background, then converts to a compressed read-only image. Only Finder writes a `.DS_Store` Finder honors, so the layout is not generated offline. This works on the GitHub macOS runners too.
 
 ## When something fails
 
 Every failure met while cutting a release gets a line here once it is solved, with what would have caught it, and the steps above are changed so it is caught before the tag next time.
 
-- **A test passes here and fails on Windows or Linux** (the `rust` workflow goes red after the push): the tests only run on the other systems in CI. Step 4 now waits for that run before tagging. v0.1.6's second cut was tagged with it still running, and a new test failed on Windows, where a file name's trailing dot is ignored, so `main.rs.` answered as `main.rs`; the tag and both notarized images were redone.
-
-- **A test that makes a git repository fails on Windows only, on a line end**: Git for Windows has `core.autocrlf` on, so a file it checks out or restores comes back with `\r\n`. A test's own repository sets `core.autocrlf false`. v0.1.9's first push to `main` went red on this before the tag, which is what step 4's wait is for. It has to be set in the repository (`git config`), not passed with `-c` to the test's own commands: the code under test runs git itself and reads the repository's settings. v0.2.0's first push went red on a test that passed `-c` only ("local changes would be overwritten by checkout").
-
-- **A git test fails on Windows only, on a remote that is a folder**: a test's remote is a temp folder, `C:/Users/...` there, and a parser of remotes that takes `x:y` for `host:path` reads it as a host "C". One letter before the colon is a drive (`git::host_of`), as git has it. v0.2.5's first push to `main` went red on it before the tag.
-
-- **A test overflows its stack on Windows only** ("has overflowed its stack"): Windows gives a thread a megabyte, a Mac and Linux eight, and a reader that recurses as deep as a document is nested (Typst's parser and layout under a Typst or LaTeX file, or a formula) passed here. Such reading runs on a thread of its own with a deep stack (`on_deep_stack`), and `release-check.sh` runs the core tests again with a megabyte (`RUST_MIN_STACK`). v0.3.2's first push to `main` went red on it before the tag.
-- **On Windows the window opens a little lower at each launch**, until its foot is under the taskbar: the window's place was saved from `bounds()`, which starts under the title bar, and gpui opens a window at a place with half its frame above it. It is saved from `window_bounds()` now (`docs/window.md`, What the window remembers). Step 6 closes and opens the window twice since v0.3.2, whose first draft was redone for it.
-- **One Mac package job in `release.yml` fails right after "satisfies its Designated Requirement", with no message, while the other passes**: `hdiutil create` on the runner ("Resource busy"). `release-mac.sh` now tries it five times and says why. If it still fails, re-run only that job, which keeps the tag and the images built here: `gh run rerun <run-id> --failed --repo alkaline-software/emaki`. The `release` job waits for all six. v0.1.9's Intel job did this.
-- **`release-mac.sh` stops with "Finder ... AppleEvent timed out (-1712)"**: macOS asked whether the terminal may control Finder and nobody answered. Allow it (System Settings, Privacy & Security, Automation) and run the script again. Check the script's exit code and that both images are in `dist/`: piped into `tail`, a failed first image went unnoticed for v0.1.9 until the second was done.
-
-- **`release-mac.sh --notarize` or `release-check.sh` stops with "No Keychain password item found for profile: notarytool-profile"** while the profile is in place: the Mac's screen is locked. `store-credentials` keeps the profile in the keychain that opens only while the screen is unlocked, and this Mac locks it the moment the display sleeps, so a release run overnight finds no profile from then on, in an agent's session or anyone's, while builds and CI go on. It is not the sandbox or which Emaki the session runs in: in v0.3.2 every failure came after the display turned off at 23:41 and the same commands worked once it was on again. Notarize while the person is at the Mac; a run that reaches step 5 with the screen locked waits for it. In v0.2.3 it was found after the tag was out, which is why step 3 asks the notary service first.
-- **`release-clean.sh` must find the running dev build with `ps`**: `pgrep` leaves out its own ancestors, and the app is the ancestor of the session that runs the script. Written with `pgrep`, it sees nothing, and the dev build is left running with no files and nothing opened in its place.
-
-- **"Cargo.toml says X but the tag is vY"**: the version and the tag disagree. Fix `Cargo.toml`, commit, redo the tag.
-- **"CHANGELOG.md has no section '## vX.Y.Z'"**: add it, commit, redo the tag.
-- **`--locked` fails in CI after a bump**: `Cargo.lock` was not refreshed. `cargo check -p emaki-app`, commit the lock.
+- **A test passes here and fails on Windows or Linux** (the `rust` workflow goes red after the push): the tests only run on the other systems in CI, which is why step 4 waits for that run before tagging. Windows has failed on its own rules: a file name's trailing dot is ignored, so `main.rs.` answered as `main.rs` (v0.1.6, after the tag).
+- **A test that makes a git repository fails on Windows only, on a line end**: Git for Windows has `core.autocrlf` on, so a file it checks out or restores comes back with `\r\n`. A test's own repository sets `core.autocrlf false` with `git config`, not `-c` on the test's own commands: the code under test runs git itself and reads the repository's settings.
+- **A git test fails on Windows only, on a remote that is a folder**: a test's remote is a temp folder, `C:/Users/...` there, and a parser of remotes that takes `x:y` for `host:path` reads it as a host "C". One letter before the colon is a drive (`git::host_of`), as git has it.
+- **A test overflows its stack on Windows only** ("has overflowed its stack"): Windows gives a thread a megabyte, a Mac and Linux eight, and a reader that recurses as deep as a document is nested (Typst's parser and layout under a Typst or LaTeX file, or a formula) passed here. Such reading runs on a thread of its own with a deep stack (`on_deep_stack`), and `release-check.sh` runs the core tests again with a megabyte (`RUST_MIN_STACK`).
+- **On Windows the window opens a little lower at each launch**: its place was saved from the wrong bounds (`docs/window.md`, What the window remembers). Step 6 closes and opens the window twice to catch it.
+- **One Mac package job in `release.yml` fails right after "satisfies its Designated Requirement", with no message, while the other passes**: `hdiutil create` on the runner ("Resource busy"). `release-mac.sh` tries it five times and says why. If it still fails, re-run only that job, which keeps the tag and the images built here: `gh run rerun <run-id> --failed --repo alkaline-software/emaki`. The `release` job waits for all six.
+- **`release-mac.sh` stops with "Finder ... AppleEvent timed out (-1712)"**: macOS asked whether the terminal may control Finder and nobody answered. Allow it (System Settings, Privacy & Security, Automation) and run the script again.
+- **`release-mac.sh --notarize` or `release-check.sh` stops with "No Keychain password item found for profile: notarytool-profile"** while the profile is in place: the Mac's screen is locked. `store-credentials` keeps the profile in the keychain that opens only while the screen is unlocked, and this Mac locks it the moment the display sleeps, so a release run overnight finds no profile from then on, in an agent's session or anyone's, while builds and CI go on. It is not the sandbox or which Emaki the session runs in. Notarize while the person is at the Mac; a run that reaches step 5 with the screen locked waits for it.
+- **CI refuses the tag with "Cargo.toml says X but the tag is vY", "CHANGELOG.md has no section '## vX.Y.Z'", a `--locked` failure, or a Windows job's "cannot find type" or unresolved import**: `scripts/release-check.sh` was skipped, which catches each of these. Fix it (a line used on every platform that leans on something gated for Unix or macOS, for the last), commit, redo the tag.
 - **Notarization rejected**: `xcrun notarytool log <submission-id> --keychain-profile notarytool-profile`. The usual causes are a binary signed without `--options runtime` or an unsigned helper inside the bundle; the script signs with `--deep` and the hardened runtime, so look for a new binary the packager added.
 - **The Finder layout step fails**: the volume `Emaki vX.Y.Z` was already mounted, or Finder had no session. The script detaches a stale volume first; `hdiutil info` shows what is mounted.
-- **Two Emakis in Launchpad or Spotlight**: a second bundle somewhere on disk. `mdfind "kMDItemFSName == 'Emaki.app'"` lists them; keep only `/Applications/Emaki.app`. The one found after v0.1.9 was the dev build's, in `target/debug`, which is not a release's doing: it is made again at every `scripts/dev-app.sh`. It is now made in `target/debug/dev.noindex/`, which Spotlight passes by, and step 8 removes it with the rest of `target/`.
+- **Two Emakis in Launchpad or Spotlight**: a second bundle somewhere on disk. `mdfind "kMDItemFSName == 'Emaki.app'"` lists them; keep only `/Applications/Emaki.app`. The dev build's bundle is made in `target/debug/dev.noindex/`, which Spotlight passes by, and step 9 removes it with the rest of `target/`.
 - **The Mac images on the release are ad-hoc signed**, or macOS says the app "cannot be opened" after an update: step 7 was skipped. Run `scripts/release-publish.sh X.Y.Z`. To check an installed copy: `spctl -a -vv /Applications/Emaki.app` must say "Notarized Developer ID"; "rejected" with `Signature=adhoc` from `codesign -dv` is CI's image. Reinstall from `dist/` (step 8).
-- **The Windows job fails with "cannot find type" or an unresolved import**: a line used on every platform leans on something gated for Unix or macOS. `scripts/release-check.sh` runs the type check that finds it; the macOS and Linux jobs pass without it.
 - **"Node.js NN is deprecated" on a run**: an action is a major version behind. `gh api repos/<owner>/<action>/releases/latest -q .tag_name` gives the current one; move `rust.yml` and `release.yml` together.
-- **A terminal says "Transcript saving is off, inherited CLAUDE_CODE_CHILD_SESSION marker"**: Emaki was started from inside a Claude Code session and a terminal app it launched carries that session's variables. Quit the terminal app and reopen it. When an agent starts Emaki, it must clear every `CLAUDE*` variable first.

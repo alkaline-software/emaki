@@ -107,6 +107,7 @@ A variable that steers one launch (`EMAKI_PAGE`, `EMAKI_GO`, `EMAKI_SHOT` and th
 
 - `open` hands a newly launched terminal app the opener's environment, so a probe copy run with `CLAUDE_CONFIG_DIR` at a scratch tree starts a terminal whose Claude Code is not logged in. Have the terminal app running first.
 - `kaku cli spawn` hands the new pane the caller's environment, so a session started from inside a Claude Code session is its child and never registers. Start it from a script that unsets `CLAUDE*` first.
+- A terminal that says "Transcript saving is off, inherited CLAUDE_CODE_CHILD_SESSION marker" was launched by an Emaki started from inside a Claude Code session, and carries that session's variables. Quit the terminal app and reopen it. An agent that starts Emaki clears every `CLAUDE*` variable first.
 - `emaki-core pty --resume <id>` can stand in for the person's terminal.
 - In a Windows or Linux VM, an app started by the VM tool's command runner lives in that command's job: it is ended with the command, and on Windows everything it starts ignores Ctrl+C, so a terminal there cannot interrupt a program. Start the app the person's way, through Explorer (`explorer.exe <path>`) or the desktop's app search, to look at either. A variable for it is set with `setx` before Explorer starts it. `EMAKI_GO` steps run once a session is open, so a VM with no session runs none.
 

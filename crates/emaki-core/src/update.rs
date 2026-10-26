@@ -1,7 +1,7 @@
 //! Keeping the app current: what the newest release is, fetching its
 //! installer for this machine, and putting it in place.
 //!
-//! The release lives on GitHub under stable asset names (see WORKFLOW.md),
+//! The release lives on GitHub under stable asset names (see docs/release.md),
 //! so nothing here needs the API: the newest version is read off the
 //! redirect `releases/latest` answers with, and the installer is at
 //! `releases/download/v<version>/<asset>`. Installing is per platform:
