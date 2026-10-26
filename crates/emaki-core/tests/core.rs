@@ -2313,6 +2313,26 @@ fn background_shells_start_and_end() {
     assert_eq!((s.shells[1].command.as_str(), s.shells[1].ended.as_str()), ("sleep 600", ""));
 }
 
+/// The index's state says what is still running in the background, so a
+/// session that waits on a command keeps the display on as one at work
+/// does; the command's notification takes it off the list.
+#[test]
+fn turn_state_lists_background_work_until_it_ends() {
+    let call = json!({"type": "assistant", "uuid": "a-t1", "timestamp": "2026-10-06T03:37:43.000Z", "sessionId": "s1",
+        "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "gh run watch 1", "run_in_background": true}}]}});
+    let start = json!({"type": "user", "uuid": "r-bg1", "timestamp": "2026-10-06T03:37:44.000Z", "sessionId": "s1",
+        "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Command running in background with ID: bg1."}]},
+        "toolUseResult": {"stdout": "", "backgroundTaskId": "bg1"}});
+    let reply = json!({"type": "assistant", "uuid": "a2", "timestamp": "2026-10-06T03:37:50.000Z", "sessionId": "s1",
+        "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": "Watching the run."}]}});
+    let mut rows = vec![call, start, reply];
+    let state = emaki_core::build::turn_state(&rows, "");
+    assert_eq!(state.background, vec!["2026-10-06T03:37:44.000Z".to_string()]);
+    rows.push(json!({"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-06T03:50:00.000Z", "sessionId": "s1",
+        "content": "<task-notification>\n<task-id>bg1</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"}));
+    assert!(emaki_core::build::turn_state(&rows, "").background.is_empty());
+}
+
 /// A subagent launched without waiting for it is a background task too:
 /// it starts at the `Agent` result that says `isAsync`, ends at the
 /// notification for its id, and what it is on is the end of its own
