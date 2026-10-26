@@ -31,8 +31,7 @@ use crate::format::clock;
 use crate::i18n::{count, t, tf};
 use crate::workbench::{choice_pill, float_shadow, Press, swallow_click, MenuDo, Notice, Page, Workbench};
 
-/// How wide a panel is; both are, so one takes the other's place without
-/// moving the conversation.
+/// How wide the files panel is to begin with.
 pub const PANEL_W: Pixels = px(264.);
 /// The panel's edge is dragged between these; a double click on it asks
 /// for no more than `PANEL_FIT_MAX`, and dragged narrower than
@@ -41,9 +40,15 @@ pub(crate) const PANEL_MIN: Pixels = px(200.);
 const PANEL_MAX: Pixels = px(520.);
 const PANEL_FIT_MAX: Pixels = px(380.);
 const PANEL_FOLD_AT: Pixels = px(130.);
+/// How wide the outline is to begin with, and the least it is dragged
+/// to; narrower than `PANEL_FOLD_AT` it is put away, as the files panel
+/// is.
+pub(crate) const OUTLINE_W: Pixels = px(240.);
+pub(crate) const OUTLINE_MIN: Pixels = px(180.);
+const OUTLINE_MAX: Pixels = px(440.);
 /// The outline's width at a double click: its lines are sentences, cut
 /// at any width, so this is a width they read well at.
-const OUTLINE_FIT: Pixels = px(300.);
+const OUTLINE_FIT: Pixels = px(280.);
 /// How far past the outline's view, above and below, labels are asked
 /// for, and how long its scroller rests before they are.
 const LABEL_AHEAD: Pixels = px(320.);
@@ -710,28 +715,32 @@ pub(crate) const FILE_MIN: Pixels = px(280.);
 const HEAD_NAME_ROOM: f32 = 110.;
 
 /// A panel beside the conversation that gives its room up when the
-/// window has too little: the file shown, the files or the outline at
-/// the left, and the terminal at the right. The sidebar is not one: it
+/// window has too little: the file shown, the files panel at the left,
+/// the outline at the left of the conversation's pane, and the shell
+/// terminal at the right. The sidebar is not one: it
 /// leaves the row first, for an overlay. Which goes is by their rank
 /// (`Workbench::side_rank`), the one opened or used last at its top.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Side {
     File,
     Left,
+    Outline,
     Term,
 }
 
 impl Side {
     /// The order before any is opened or used: the file, which was asked
-    /// for to be read; the panel the file is found in; the terminal,
-    /// which goes on running away and is one key from coming back.
-    pub(crate) const RANK: [Side; 3] = [Side::File, Side::Left, Side::Term];
+    /// for to be read; the files panel it is found in; the terminal,
+    /// which goes on running away and is one key from coming back; the
+    /// outline, a way through the conversation it stands beside.
+    pub(crate) const RANK: [Side; 4] = [Side::File, Side::Left, Side::Term, Side::Outline];
 
     /// The least it takes of the row.
     pub(crate) fn least(self) -> Pixels {
         match self {
             Side::File => FILE_MIN,
             Side::Left => PANEL_MIN,
+            Side::Outline => OUTLINE_MIN,
             Side::Term => crate::term_panel::TERM_MIN,
         }
     }
@@ -1932,31 +1941,31 @@ impl Workbench {
         (!cwd.is_empty()).then(|| PathBuf::from(cwd))
     }
 
-    /// Which of the two panels is drawn: (files, outline), one at most.
+    /// Which of the two panels is drawn: (files, outline). The files
+    /// panel stands at the conversation's left, and the outline at the
+    /// left of the conversation's own pane, in the rendered layout.
     pub(crate) fn panels_shown(&self) -> (bool, bool) {
         if self.page != Page::Session || self.detail.is_none() {
             return (false, false);
         }
-        (self.files_on, self.outline_on && !self.files_on)
+        (self.files_on, self.outline_drawn())
     }
 
-    /// The panel chosen, whether or not this page draws it: files is
-    /// `true`, the outline `false`.
-    fn panel_on(&self) -> Option<bool> {
-        if self.files_on {
-            Some(true)
-        } else if self.outline_on {
-            Some(false)
-        } else {
-            None
-        }
+    /// Whether the outline is drawn on a conversation: asked for, and
+    /// the layout the rendered one, whose rounds it is a list of.
+    pub(crate) fn outline_drawn(&self) -> bool {
+        self.outline_on && !self.cli_shown()
     }
 
-    /// A panel's button was pressed: the one showing goes, and any other
-    /// takes the place of the one that was.
+    /// A panel's button or key was pressed: the files panel's, or the
+    /// outline's. The one showing goes, and one away comes. The outline
+    /// has nothing to show in the CLI layout, where its button is put away.
     pub(crate) fn toggle_panel(&mut self, files: bool, cx: &mut Context<Self>) {
-        let to = (self.panel_on() != Some(files)).then_some(files);
-        self.panel_go(to, cx);
+        if files {
+            self.panel_go(!self.files_on, cx);
+        } else if !self.cli_shown() {
+            self.outline_show(!self.outline_on, cx);
+        }
     }
 
     /// Which of the side panels asked for do not fit beside the
@@ -1989,7 +1998,8 @@ impl Workbench {
     pub(crate) fn side_wanted(&self, side: Side) -> bool {
         match side {
             Side::File => self.file_view.is_some(),
-            Side::Left => self.files_on || self.outline_on,
+            Side::Left => self.files_on,
+            Side::Outline => self.outline_drawn(),
             Side::Term => self.side_term,
         }
     }
@@ -2019,32 +2029,32 @@ impl Workbench {
             Side::Term
         } else if self.file_pane_bounds().is_some_and(|b| b.contains(&at)) {
             Side::File
-        } else if (files && self.files_scroll.bounds().contains(&at)) || (outline && self.outline_scroll.bounds().contains(&at)) {
+        } else if files && self.files_scroll.bounds().contains(&at) {
             Side::Left
+        } else if outline && self.outline_scroll.bounds().contains(&at) {
+            Side::Outline
         } else {
             return;
         };
         self.side_used(side);
     }
 
-    /// The side panels that do not fit go, by their rank: the panel at
-    /// the left and the terminal are put away as their buttons put them
-    /// away, and the file shown is only not drawn (`fold_file`), so what
-    /// is not saved in it stays. `held`: put away for the window's width,
-    /// so they come back when it is wide enough again (`side_away`).
+    /// The side panels that do not fit go, by their rank: the files
+    /// panel, the outline and the terminal are put away as their buttons
+    /// put them away, and the file shown is only not drawn (`fold_file`),
+    /// so what is not saved in it stays. `held`: put away for the
+    /// window's width, so they come back when it is wide enough again
+    /// (`side_away`).
     pub(crate) fn fit_sides(&mut self, held: bool, cx: &mut Context<Self>) {
         for side in self.sides_fit(self.view_w - crate::workbench::FRAME).0 {
-            let shown = match side {
-                Side::Left => self.panel_on(),
-                Side::Term => self.term_on(),
-                Side::File => continue,
-            };
             match side {
-                Side::Left => self.panel_go(None, cx),
-                _ => self.term_go(None, cx),
+                Side::Left => self.panel_go(false, cx),
+                Side::Outline => self.outline_show(false, cx),
+                Side::Term => self.term_go(false, cx),
+                Side::File => continue,
             }
-            if let (true, Some(shown)) = (held, shown) {
-                self.side_away.push((side, shown));
+            if held {
+                self.side_away.push(side);
             }
         }
     }
@@ -2058,46 +2068,46 @@ impl Workbench {
             return false;
         }
         let wanted = self.side_rank.into_iter().filter(|s| self.side_wanted(*s)).fold(px(0.), |a, s| a + s.least());
-        self.side_away.iter().any(|(s, _)| self.conv_need.get() + wanted + s.least() + crate::workbench::FOLD_SLACK <= room)
+        self.side_away.iter().any(|s| self.conv_need.get() + wanted + s.least() + crate::workbench::FOLD_SLACK <= room)
     }
 
     /// The side panels put away for the window's width that fit again in
-    /// `room` come back, the highest in their rank first, showing what
-    /// they showed. Coming back is not a use: the rank stays as it was.
+    /// `room` come back, the highest in their rank first. Coming back is
+    /// not a use: the rank stays as it was.
     pub(crate) fn side_away_back(&mut self, room: Pixels, cx: &mut Context<Self>) {
         let rank = self.side_rank;
         for side in rank {
-            let Some(&(_, shown)) = self.side_away.iter().find(|(s, _)| *s == side) else { continue };
+            if !self.side_away.contains(&side) {
+                continue;
+            }
             let wanted = rank.into_iter().filter(|s| self.side_wanted(*s)).fold(px(0.), |a, s| a + s.least());
             if self.conv_need.get() + wanted + side.least() + crate::workbench::FOLD_SLACK > room {
                 continue;
             }
             match side {
-                Side::Left => self.panel_go(Some(shown), cx),
-                _ => self.term_go(Some(shown), cx),
+                Side::Left => self.panel_go(true, cx),
+                Side::Outline => self.outline_show(true, cx),
+                _ => self.term_go(true, cx),
             }
         }
         self.side_rank = rank;
     }
 
-    /// The panel goes to the files, to the outline, or away, and the
-    /// change is drawn.
-    pub(crate) fn panel_go(&mut self, to: Option<bool>, cx: &mut Context<Self>) {
-        let from = self.panel_on();
+    /// The files panel comes or goes, and the change is drawn.
+    pub(crate) fn panel_go(&mut self, to: bool, cx: &mut Context<Self>) {
+        let from = self.files_on;
         if from == to {
             return;
         }
-        self.side_away.retain(|(s, _)| *s != Side::Left);
-        self.files_on = to == Some(true);
-        self.outline_on = to == Some(false);
-        if to.is_some() {
+        self.side_away.retain(|s| *s != Side::Left);
+        self.files_on = to;
+        if to {
             self.side_asked(Side::Left, cx);
         }
-        self.outline_at = None;
         self.panel_anim = Some((from, to, std::time::Instant::now(), self.panel_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
         self.save_ui(true);
         cx.notify();
-        if from.is_some() {
+        if from {
             // The panel left is drawn while it goes: once more when it has.
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(crate::workbench::PANEL_ANIM + Duration::from_millis(20)).await;
@@ -2107,106 +2117,102 @@ impl Workbench {
         }
     }
 
-    /// The two buttons at the top strip's left end, as one control: a
-    /// track with a segment each, and a raised plate under the one whose
-    /// panel shows. The plate slides from one to the other, comes in
-    /// under the first pressed and fades under the one pressed again.
+    /// The outline comes or goes, and the change is drawn.
+    pub(crate) fn outline_show(&mut self, to: bool, cx: &mut Context<Self>) {
+        if self.outline_on == to {
+            return;
+        }
+        self.side_away.retain(|s| *s != Side::Outline);
+        let was = self.outline_drawn();
+        self.outline_on = to;
+        if to {
+            self.side_asked(Side::Outline, cx);
+        }
+        self.outline_changed(was);
+        self.save_ui(true);
+        cx.notify();
+    }
+
+    /// Whether the outline is drawn may have changed, from `was`, by its
+    /// button: the change is drawn, and what goes is drawn once more when
+    /// it has.
+    pub(crate) fn outline_changed(&mut self, was: bool) {
+        let now = self.outline_drawn();
+        if was == now {
+            return;
+        }
+        self.outline_at = None;
+        self.outline_anim = Some((was, now, std::time::Instant::now(), self.outline_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
+    }
+
+    /// The files panel's button at the top strip's left end: its icon
+    /// alone, with the accent's line under it while the panel shows, as
+    /// the shell terminal's is at the right end.
     pub(crate) fn panel_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let theme = cx.theme().clone();
-        let dark = theme.mode.is_dark();
-        let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
-        let plate_bg = if dark { theme.secondary_active } else { theme.popover };
-        let (seg_w, seg_h, pad, gap) = (30., 24., 3., 2.);
-        let x_of = |which: bool| pad + if which { 0. } else { seg_w + gap };
-        let on = self.panel_on();
-        // Without a press since launch there is nothing to move from.
-        let (from, to, serial) = self.panel_anim.map(|(from, to, _, n)| (from, to, n + 1)).unwrap_or((on, on, 0));
-        let plate = (from.is_some() || to.is_some()).then(|| {
-            let (a, b) = (x_of(from.or(to).unwrap_or(true)), x_of(to.or(from).unwrap_or(true)));
-            let (o_a, o_b) = (if from.is_some() { 1. } else { 0. }, if to.is_some() { 1. } else { 0. });
-            div().absolute().top(px(pad)).w(px(seg_w)).h(px(seg_h)).rounded(px(7.)).bg(plate_bg).shadow_sm().with_animation(
-                ElementId::Name(format!("panel-plate-{serial}").into()),
-                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                move |d, t| d.left(px(a + (b - a) * t)).opacity(o_a + (o_b - o_a) * t),
-            )
-        });
-        let segment = |id: &'static str, icon: &'static str, tip: &'static str, which: bool, cx: &mut Context<Self>| {
-            let active = on == Some(which);
-            h_flex()
-                .id(id)
-                .w(px(seg_w))
-                .h(px(seg_h))
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .rounded(px(7.))
-                .cursor_pointer()
-                .text_color(if active { theme.foreground } else { theme.muted_foreground })
-                // On the active one too, where it changes nothing: gpui
-                // keeps "the pointer is over this" for the text's color
-                // and only hears the pointer leave while a hover style is
-                // set. Without one the mark stayed lit when its segment
-                // went back to rest with the pointer elsewhere.
-                .hover(|s| s.text_color(theme.foreground))
-                .managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(which, cx)))
-                .child(Icon::default().path(icon).with_size(px(15.)))
-        };
-        vec![h_flex()
+        let on = self.files_on;
+        let (was, serial) = self.panel_anim.map(|(from, _, at, n)| (crate::workbench::pressed_from(from, on, at), n + 1)).unwrap_or((on, 0));
+        vec![self.toggle_button("panel-files", "icons/tree-view.svg", t("Files (⌘⇧F)"), (was, on, serial), false, Rc::new(|this, _, cx| this.toggle_panel(true, cx)), cx)]
+    }
+
+    /// The outline's button at the path bar's left end, as the files
+    /// panel's is at the strip's, smaller. In the CLI layout, where there
+    /// is no outline, it fades out where it stands and takes no click.
+    pub(crate) fn outline_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.outline_on;
+        let (was, serial) = self.outline_anim.map(|(from, _, at, n)| (crate::workbench::pressed_from(from, on, at), n + 1)).unwrap_or((on, 0));
+        let cli = self.cli_shown();
+        let moving = self.presence("outline-button", !cli, cx).is_some();
+        let button = self.toggle_button("outline-toggle", "icons/list-bullets.svg", t("Outline (⌘⇧O)"), (was, on, serial), true, Rc::new(|this, _, cx| this.toggle_panel(false, cx)), cx);
+        // The fade's wrapper is there at rest too, under the name of the
+        // last change: taken off when the fade was over, it made the button
+        // a new element, and the plate under it played its fade again.
+        let n = self.presence_serial("outline-button");
+        div()
             .relative()
             .flex_shrink_0()
-            .p(px(pad))
-            .gap(px(gap))
-            .rounded(px(9.))
-            .bg(track_bg)
-            .children(plate)
-            .child(segment("panel-files", "icons/tree-view.svg", t("Files (⌘⇧F)"), true, cx))
-            .child(segment("panel-outline", "icons/list-bullets.svg", t("Outline (⌘⇧O)"), false, cx))
-            .into_any_element()]
+            .child(button)
+            .when(cli, |d| d.child(div().absolute().inset_0().occlude()))
+            .with_animation(ElementId::Name(format!("outline-button-{n}").into()), Animation::new(crate::workbench::FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                let t = if moving { t } else { 1. };
+                d.opacity(if cli { 1. - t } else { t })
+            })
+            .into_any_element()
     }
 
-    /// The panel that was showing until a moment ago, put away or
-    /// replaced, drawn for the moment it takes to go.
-    pub(crate) fn panel_leaving(&self) -> Option<bool> {
+    /// Whether the files panel was showing until a moment ago and is
+    /// now put away: drawn for the moment it takes to go.
+    pub(crate) fn panel_leaving(&self) -> bool {
         if self.page != Page::Session || self.detail.is_none() {
-            return None;
+            return false;
         }
-        match self.panel_anim {
-            Some((Some(from), to, at, _)) if to != Some(from) && at.elapsed() < crate::workbench::PANEL_ANIM => Some(from),
-            _ => None,
-        }
+        matches!(self.panel_anim, Some((true, false, at, _)) if at.elapsed() < crate::workbench::PANEL_ANIM)
     }
 
-    /// A panel as it arrives and as it goes: beside nothing it widens
-    /// from nothing and fades in, and put away it narrows and fades out;
-    /// in the other's place it fades in while the other fades out over
-    /// it, so the conversation stays where it is. The wrapper is there at rest too, under the same
-    /// name: an animation inside the panel is kept by the names above
-    /// it, and began again when the wrapper went.
-    fn panel_in(&self, files: bool, el: Div) -> AnyElement {
-        let live = self.panel_anim.filter(|(_, _, at, _)| at.elapsed() < crate::workbench::PANEL_ANIM);
-        // (widens or narrows, comes or goes)
-        let play = match live {
-            Some((from, to, _, _)) if to == Some(files) => Some((from.is_none(), true)),
-            Some((from, to, _, _)) if from == Some(files) => Some((to.is_none(), false)),
-            _ => None,
-        };
-        // Going while the other comes: over the other's place, out of the
-        // row's layout.
-        let over = matches!(live, Some((from, Some(_), _, _)) if from == Some(files));
-        let serial = self.panel_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0);
-        let w = self.panel_w_now();
+    /// Whether the outline was drawn until a moment ago and no longer is.
+    pub(crate) fn outline_leaving(&self) -> bool {
+        if self.page != Page::Session || self.detail.is_none() {
+            return false;
+        }
+        matches!(self.outline_anim, Some((true, false, at, _)) if at.elapsed() < crate::workbench::PANEL_ANIM)
+    }
+
+    /// A panel as it arrives and as it goes: it widens from nothing and
+    /// fades in, and put away it narrows and fades out. `anim` is the
+    /// panel's last change and `w` its width. The wrapper is there at
+    /// rest too, under the same name: an animation inside the panel is
+    /// kept by the names above it, and began again when the wrapper went.
+    fn panel_in(name: &str, anim: Option<(bool, bool, std::time::Instant, u32)>, w: Pixels, el: Div) -> AnyElement {
+        let play = anim.filter(|(from, to, at, _)| from != to && at.elapsed() < crate::workbench::PANEL_ANIM).map(|(_, to, _, _)| to);
+        let serial = anim.map(|(_, _, _, n)| n + 1).unwrap_or(0);
         div()
             .h_full()
             .flex_shrink_0()
             .overflow_hidden()
-            .when(over, |d| d.absolute().top_0().left_0())
             .child(el)
-            .with_animation(ElementId::Name(format!("panel-{files}-{serial}").into()), Animation::new(crate::workbench::PANEL_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
-                Some((wide, comes)) => {
+            .with_animation(ElementId::Name(format!("{name}-{serial}").into()), Animation::new(crate::workbench::PANEL_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
+                Some(comes) => {
                     let t = if comes { t } else { 1. - t };
-                    d.w(if wide { (w * t).round() } else { w }).opacity(t)
+                    d.w((w * t).round()).opacity(t)
                 }
                 None => d,
             })
@@ -2222,10 +2228,20 @@ impl Workbench {
     }
 
     /// The widest the panel may be dragged: the conversation keeps
-    /// `CONVERSATION_MIN` beside it.
+    /// `CONVERSATION_MIN` beside it, and the other panels their least.
     fn panel_max(&self) -> Pixels {
         let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
-        PANEL_MAX.min(self.pane_w - self.conv_min.get() - term - self.file_pane_least()).max(PANEL_MIN)
+        PANEL_MAX.min(self.pane_w - self.conv_min.get() - term - self.file_pane_least() - self.outline_least()).max(PANEL_MIN)
+    }
+
+    /// What the files panel takes of the row as drawn, none when it is away.
+    pub(crate) fn left_w(&self) -> Pixels {
+        if self.panels_shown().0 { self.panel_w_now() } else { px(0.) }
+    }
+
+    /// The least the outline takes of the row, none when it is away.
+    pub(crate) fn outline_least(&self) -> Pixels {
+        if self.panels_shown().1 { OUTLINE_MIN } else { px(0.) }
     }
 
     /// Whether the file's pane is drawn.
@@ -2238,10 +2254,9 @@ impl Workbench {
         if self.file_pane_shown() { FILE_MIN } else { px(0.) }
     }
 
-    /// Where the file's pane begins: after the files or the outline.
+    /// Where the file's pane begins: after the files panel.
     fn file_pane_left(&self) -> Pixels {
-        let (files, outline) = self.panels_shown();
-        self.panel_left() + if files || outline { self.panel_w_now() } else { px(0.) }
+        self.panel_left() + self.left_w()
     }
 
     /// The pane's width as drawn: what it was dragged to, less when the
@@ -2252,7 +2267,7 @@ impl Workbench {
     pub(crate) fn file_pane_w(&self) -> Pixels {
         let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
         let all = self.view_w - self.file_pane_left() - term;
-        let own = self.file_w.min(all - self.conv_min.get()).max(FILE_MIN);
+        let own = self.file_w.min(all - self.conv_min.get() - self.outline_least()).max(FILE_MIN);
         let t = self.file_big_t();
         (own + (all.max(own) - own) * t).round()
     }
@@ -2300,7 +2315,7 @@ impl Workbench {
         }
         let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
         let all = self.view_w - self.file_pane_left() - term;
-        let own = self.file_w.min(all - self.conv_min.get()).max(FILE_MIN);
+        let own = self.file_w.min(all - self.conv_min.get() - self.outline_least()).max(FILE_MIN);
         Some(div().flex_1().min_w_0().h_full().overflow_hidden().opacity(1. - t).child(conversation.flex_none().w((all - own).max(px(0.)))).into_any_element())
     }
 
@@ -2314,7 +2329,7 @@ impl Workbench {
         }
         let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
         let left = self.file_pane_left();
-        let w = (e.position.x - left).clamp(FILE_MIN, (self.view_w - left - term - self.conv_min.get()).max(FILE_MIN));
+        let w = (e.position.x - left).clamp(FILE_MIN, (self.view_w - left - term - self.conv_min.get() - self.outline_least()).max(FILE_MIN));
         if w != self.file_w {
             self.file_w = w;
             cx.notify();
@@ -2358,36 +2373,34 @@ impl Workbench {
         )
     }
 
-    /// The panel's width as drawn: what it was dragged to, less when the
-    /// conversation would be left with too little (the window narrowed,
-    /// the terminal opened). The terminal gives way first, down to its
-    /// least, then this panel.
+    /// The files panel's width as drawn: what it was dragged to, less
+    /// when the conversation would be left with too little (the window
+    /// narrowed, the terminal opened). The terminal gives way first, down
+    /// to its least, then this panel.
     pub(crate) fn panel_w_now(&self) -> Pixels {
         self.panel_w.min(self.panel_max())
     }
 
-    /// The panel's edge follows the pointer while it is held, between the
-    /// least and the most; well under the least the panel is put away,
-    /// and brought back out in the same drag it is there again. As the
-    /// sidebar's edge does it.
+    /// The files panel's edge follows the pointer while it is held,
+    /// between the least and the most; well under the least the panel is
+    /// put away, and brought back out in the same drag it is there again.
+    /// As the sidebar's edge does it.
     pub(crate) fn panel_drag_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
-        let Some(files) = self.panel_drag else { return };
+        if !self.panel_drag {
+            return;
+        }
         if e.pressed_button != Some(MouseButton::Left) {
             self.panel_drag_end();
             return;
         }
         let w = e.position.x - self.panel_left();
         let open = w >= PANEL_FOLD_AT;
-        let was = self.panel_on();
-        let now = open.then_some(files);
-        if now != was {
-            self.files_on = now == Some(true);
-            self.outline_on = now == Some(false);
-            self.outline_at = None;
-            // The control's plate follows; the panel itself is under the
+        if open != self.files_on {
+            // The button's line follows; the panel itself is under the
             // pointer and does not play its arrival.
             let long_ago = std::time::Instant::now().checked_sub(crate::workbench::PANEL_ANIM).unwrap_or_else(std::time::Instant::now);
-            self.panel_anim = Some((was, now, long_ago, self.panel_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
+            self.panel_anim = Some((self.files_on, open, long_ago, self.panel_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
+            self.files_on = open;
             cx.notify();
         }
         if open {
@@ -2400,18 +2413,17 @@ impl Workbench {
     }
 
     pub(crate) fn panel_drag_end(&mut self) {
-        if self.panel_drag.take().is_some() {
+        if std::mem::take(&mut self.panel_drag) {
+            self.save_ui(true);
+        }
+        if std::mem::take(&mut self.outline_drag) {
             self.save_ui(true);
         }
     }
 
-    /// The width a double click on the edge goes to: for the files, the
-    /// widest row showing, as it would be laid out; for the outline, a
-    /// width its lines read well at.
+    /// The width a double click on the files panel's edge goes to: the
+    /// widest row showing, as it would be laid out.
     pub(crate) fn panel_fit(&mut self, window: &Window, cx: &App) -> Pixels {
-        if !self.files_on {
-            return OUTLINE_FIT.min(self.panel_max());
-        }
         let Some(root) = self.files_root() else { return PANEL_W };
         let font = font(cx.theme().font_family.clone());
         let measure = |text: &str| {
@@ -2433,42 +2445,115 @@ impl Workbench {
         px(widest.ceil()).clamp(PANEL_MIN, PANEL_FIT_MAX.min(self.panel_max()))
     }
 
-    /// The strip over the panel's edge that takes the drag and the double
+    /// A strip over a panel's edge that takes the drag and the double
     /// click, lit under the pointer as the sidebar's is.
-    pub(crate) fn render_panel_grip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let (files, outline) = self.panels_shown();
-        if !(files || outline) {
+    fn grip(&self, id: &'static str, top: Pixels, x: Pixels, held: bool, press: impl Fn(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static, cx: &mut Context<Self>) -> AnyElement {
+        let line = cx.theme().primary.opacity(0.55);
+        div()
+            .id(id)
+            .group(id)
+            .absolute()
+            .top(top)
+            .bottom(crate::workbench::FRAME)
+            .left(x - PANEL_GRIP / 2.)
+            .w(PANEL_GRIP)
+            .occlude()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    press(this, ev.click_count == 2, window, cx);
+                    swallow_click(window, cx);
+                    cx.notify();
+                }),
+            )
+            .child(div().absolute().top_0().h_full().left(PANEL_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover(id, move |s| s.bg(line)))
+            .into_any_element()
+    }
+
+    /// The files panel's edge.
+    pub(crate) fn render_panel_grip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.panels_shown().0 {
             return None;
         }
-        let line = cx.theme().primary.opacity(0.55);
-        let held = self.panel_drag.is_some();
-        Some(
-            div()
-                .id("panel-grip")
-                .group("panel-grip")
-                .absolute()
-                .top(crate::workbench::TITLEBAR_H)
-                .bottom(crate::workbench::FRAME)
-                .left(self.panel_left() + self.panel_w_now() - PANEL_GRIP / 2.)
-                .w(PANEL_GRIP)
-                .occlude()
-                .cursor(CursorStyle::ResizeLeftRight)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                        if ev.click_count == 2 {
-                            this.panel_drag = None;
-                            this.panel_w = this.panel_fit(window, cx);
-                            this.save_ui(true);
-                        } else {
-                            this.panel_drag = Some(files);
-                        }
-                        swallow_click(window, cx);
-                        cx.notify();
-                    }),
-                )
-                .child(div().absolute().top_0().h_full().left(PANEL_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("panel-grip", move |s| s.bg(line))),
-        )
+        Some(self.grip("panel-grip", crate::workbench::TITLEBAR_H, self.panel_left() + self.panel_w_now(), self.panel_drag, |this, twice, window, cx| {
+            if twice {
+                this.panel_drag = false;
+                this.panel_w = this.panel_fit(window, cx);
+                this.save_ui(true);
+            } else {
+                this.panel_drag = true;
+            }
+        }, cx))
+    }
+
+    // -- the outline's edge -------------------------------------------------
+
+    /// Where the outline begins: at the left of the conversation's pane,
+    /// after the file shown when there is one.
+    fn outline_left(&self) -> Pixels {
+        self.file_pane_left() + if self.file_pane_shown() { self.file_pane_w() } else { px(0.) }
+    }
+
+    /// The widest the outline may be: the conversation keeps its least
+    /// beside it in their pane.
+    fn outline_max(&self) -> Pixels {
+        let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
+        OUTLINE_MAX.min(self.view_w - self.outline_left() - term - self.conv_min.get()).max(OUTLINE_MIN)
+    }
+
+    /// The outline's width as drawn: what it was dragged to, less when
+    /// the conversation would be left with too little. The panels beside
+    /// the pane give way first, down to their least.
+    pub(crate) fn outline_w_now(&self) -> Pixels {
+        self.outline_w.min(self.outline_max())
+    }
+
+    /// The outline's edge follows the pointer while it is held, as the
+    /// files panel's does: well under its least it is put away, and
+    /// comes back in the same drag.
+    pub(crate) fn outline_drag_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.outline_drag {
+            return;
+        }
+        if e.pressed_button != Some(MouseButton::Left) {
+            self.panel_drag_end();
+            return;
+        }
+        let w = e.position.x - self.outline_left();
+        let open = w >= PANEL_FOLD_AT;
+        if open != self.outline_on {
+            let long_ago = std::time::Instant::now().checked_sub(crate::workbench::PANEL_ANIM).unwrap_or_else(std::time::Instant::now);
+            self.outline_anim = Some((self.outline_on, open, long_ago, self.outline_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
+            self.outline_on = open;
+            self.outline_at = None;
+            cx.notify();
+        }
+        if open {
+            let w = w.clamp(OUTLINE_MIN, self.outline_max());
+            if w != self.outline_w {
+                self.outline_w = w;
+                cx.notify();
+            }
+        }
+    }
+
+    /// The outline's edge. A double click goes to a width its lines read
+    /// well at.
+    pub(crate) fn render_outline_grip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.panels_shown().1 || self.file_over() {
+            return None;
+        }
+        // Under the path bar, whose ends hold the outline's button.
+        Some(self.grip("outline-grip", crate::workbench::TITLEBAR_H + HEAD_H, self.outline_left() + self.outline_w_now(), self.outline_drag, |this, twice, _, _| {
+            if twice {
+                this.outline_drag = false;
+                this.outline_w = OUTLINE_FIT.min(this.outline_max());
+                this.save_ui(true);
+            } else {
+                this.outline_drag = true;
+            }
+        }, cx))
     }
 
     // -- files ----------------------------------------------------------------
@@ -6081,7 +6166,7 @@ impl Workbench {
             if !this.tree_rename_key(e, window, cx) {
                 this.tree_key(e, cx);
             }
-        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head(t("Files"), self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body).children(exists.then(|| self.render_file_structure(cx)).flatten());
+        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(crate::look::files_ground(&theme)).child(panel_head(t("Files"), self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body).children(exists.then(|| self.render_file_structure(cx)).flatten());
         // The structure's edge, held: the pointer anywhere over the panel
         // sets its height, and a release anywhere lets it go.
         let el = el
@@ -6098,7 +6183,7 @@ impl Workbench {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.file_structure_let_go()))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.file_structure_let_go()));
-        self.panel_in(true, el)
+        Self::panel_in("panel-files", self.panel_anim, self.panel_w_now(), el)
     }
 
     fn file_structure_let_go(&mut self) {
@@ -8987,12 +9072,12 @@ impl Workbench {
                     this.open_settings(Some("conversation"), cx);
                 })))
                 .with_animation("outline-off", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t));
-            let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head(t("Outline"), None, None, &theme)).child(note);
-            return self.panel_in(false, el);
+            let w = self.outline_w_now();
+            let el = v_flex().w(w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(note);
+            return Self::panel_in("panel-outline", self.outline_anim, w, el);
         }
         let Some(d) = self.detail.as_mut() else { return div().into_any_element() };
         let entries = d.outline.get_or_insert_with(|| Rc::new(outline::of(&d.session))).clone();
-        let nentries = entries.len();
         let key = d.key.clone();
         // The round in view is the one at the top, or the last once the
         // conversation is at its end, where a short last round never
@@ -9008,7 +9093,6 @@ impl Workbench {
         }
         let current = self.outline_pick.unwrap_or(if at_end { entries.len().saturating_sub(1) } else { top }).min(entries.len().saturating_sub(1));
 
-        let waiting = self.outline_asking.len();
         // The entries with no label yet, and which child of the scroller
         // each is, for asking about the ones in sight.
         let mut unlabeled: Vec<(usize, usize, String, String)> = Vec::new();
@@ -9116,7 +9200,9 @@ impl Workbench {
         // same way, by the foot and not by its row.
         let (off, most) = (self.outline_scroll.offset().y, self.outline_scroll.max_offset().y);
         let at_foot = most > px(0.) && off <= px(1.) - most;
-        let leaving = self.panel_leaving() == Some(false);
+        // Going, by its button or with the rendered layout: drawn as it
+        // is, asking for nothing.
+        let leaving = self.outline_leaving() || self.cli_shown();
         let moved = !leaving && self.outline_at != at && !rows.is_empty();
         if moved {
             self.outline_at = at;
@@ -9206,22 +9292,11 @@ impl Workbench {
                 .with_animation("outline-on", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
                 .into_any_element()
         };
-        let el = v_flex().w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(panel_head(t("Outline"), None, Some(if waiting > 0 {
-            // The labels are on their way.
-            // Narrow, and in a long language, the words give way to the
-            // panel's name.
-            h_flex()
-                .min_w_0()
-                .gap(px(6.))
-                .items_center()
-                .text_color(theme.muted_foreground)
-                .child(crate::workbench::agent_glyph(emaki_core::model::AgentId::ClaudeCode, px(11.), crate::workbench::agent_color(emaki_core::model::AgentId::ClaudeCode, &theme), true))
-                .child(div().min_w_0().truncate().child(t("Summarizing…")))
-                .into_any_element()
-        } else {
-            div().text_color(theme.muted_foreground.opacity(0.8)).child(crate::i18n::count(nentries, "{n} prompt", "{n} prompts")).into_any_element()
-        }), &theme)).child(body);
-        self.panel_in(false, el)
+        // Under the path bar, whose button says what it is: no head of
+        // its own. An entry waiting for its label breathes.
+        let w = self.outline_w_now();
+        let el = v_flex().w(w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(body);
+        Self::panel_in("panel-outline", self.outline_anim, w, el)
     }
 
     /// `EMAKI_GO` steps for the two panels; whether `step` was one.
@@ -9336,10 +9411,18 @@ impl Workbench {
             // The panel's edge dragged to that width and let go, and the
             // double click on it.
             t if t.starts_with("panelw:") => {
-                if let (Ok(w), Some(which)) = (t["panelw:".len()..].parse::<f32>(), self.panel_on()) {
-                    self.panel_drag = Some(which);
+                if let (Ok(w), true) = (t["panelw:".len()..].parse::<f32>(), self.files_on) {
+                    self.panel_drag = true;
                     let at = point(self.panel_left() + px(w), px(300.));
                     self.panel_drag_to(&MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: Modifiers::default() }, cx);
+                    self.panel_drag_end();
+                }
+            }
+            t if t.starts_with("outlinew:") => {
+                if let (Ok(w), true) = (t["outlinew:".len()..].parse::<f32>(), self.outline_on) {
+                    self.outline_drag = true;
+                    let at = point(self.outline_left() + px(w), px(300.));
+                    self.outline_drag_to(&MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: Modifiers::default() }, cx);
                     self.panel_drag_end();
                 }
             }

@@ -143,15 +143,6 @@
     "de": "Agent",
     "es": "Agent"
   },
-  "Agent Terminal (⌘⇧A)": {
-    "zh-Hans": "Agent 终端 (⌘⇧A)",
-    "zh-Hant": "Agent 終端機 (⌘⇧A)",
-    "ja": "Agent ターミナル (⌘⇧A)",
-    "ko": "Agent 터미널 (⌘⇧A)",
-    "fr": "Terminal de l’agent (⌘⇧A)",
-    "de": "Agent-Terminal (⌘⇧A)",
-    "es": "Terminal del agent (⌘⇧A)"
-  },
   "Agents": {
     "zh-Hans": "Agents",
     "zh-Hant": "Agents",
@@ -3464,15 +3455,6 @@
     "de": "Orchidee",
     "es": "Orquídea"
   },
-  "Outline": {
-    "zh-Hans": "大纲",
-    "zh-Hant": "大綱",
-    "ja": "アウトライン",
-    "ko": "개요",
-    "fr": "Plan",
-    "de": "Gliederung",
-    "es": "Esquema"
-  },
   "Outline (⌘⇧O)": {
     "zh-Hans": "大纲 (⌘⇧O)",
     "zh-Hant": "大綱 (⌘⇧O)",
@@ -4679,15 +4661,6 @@
     "de": "Struktur",
     "es": "Estructura"
   },
-  "Summarizing…": {
-    "zh-Hans": "正在总结…",
-    "zh-Hant": "正在摘要…",
-    "ja": "要約中…",
-    "ko": "요약하는 중…",
-    "fr": "Résumé en cours…",
-    "de": "Wird zusammengefasst …",
-    "es": "Resumiendo…"
-  },
   "Switch branch": {
     "zh-Hans": "切换分支",
     "zh-Hant": "切換分支",
@@ -5164,15 +5137,6 @@
     "fr": "Aujourd’hui",
     "de": "Heute",
     "es": "Hoy"
-  },
-  "Toggle Agent Terminal": {
-    "zh-Hans": "显示或隐藏 Agent 终端",
-    "zh-Hant": "顯示或隱藏 Agent 終端機",
-    "ja": "Agent ターミナルの表示/非表示",
-    "ko": "Agent 터미널 보기/가리기",
-    "fr": "Afficher ou masquer le terminal de l’agent",
-    "de": "Agent-Terminal ein- oder ausblenden",
-    "es": "Mostrar u ocultar el terminal del agent"
   },
   "Toggle Files": {
     "zh-Hans": "显示或隐藏文件面板",
@@ -8144,24 +8108,6 @@
     "de": "{n} Seiten",
     "es": "{n} páginas"
   },
-  "{n} prompt": {
-    "zh-Hans": "{n} 个 prompt",
-    "zh-Hant": "{n} 個 prompt",
-    "ja": "{n} 件の prompt",
-    "ko": "prompt {n}개",
-    "fr": "{n} prompt",
-    "de": "{n} Prompt",
-    "es": "{n} prompt"
-  },
-  "{n} prompts": {
-    "zh-Hans": "{n} 个 prompt",
-    "zh-Hant": "{n} 個 prompt",
-    "ja": "{n} 件の prompt",
-    "ko": "prompt {n}개",
-    "fr": "{n} prompts",
-    "de": "{n} Prompts",
-    "es": "{n} prompts"
-  },
   "{n} round": {
     "zh-Hans": "{n} 轮",
     "zh-Hant": "{n} 輪",
@@ -8729,15 +8675,6 @@
     "de": "Gerendert und Quelltext umschalten",
     "es": "Alternar renderizado y código"
   },
-  "Open in Agent Terminal": {
-    "zh-Hans": "在 Agent 终端中打开",
-    "zh-Hant": "在 Agent 終端機中打開",
-    "ja": "Agent ターミナルで開く",
-    "ko": "Agent 터미널에서 열기",
-    "fr": "Ouvrir dans le terminal de l’agent",
-    "de": "Im Agent-Terminal öffnen",
-    "es": "Abrir en el terminal del agente"
-  },
   "Delete Permanently": {
     "zh-Hans": "永久删除",
     "zh-Hant": "永久刪除",
@@ -8791,5 +8728,41 @@
     "fr": "Pour les fichiers pris en charge.",
     "de": "Für unterstützte Dateien.",
     "es": "Para archivos compatibles."
+  },
+  "Rendered Layout (⌘⇧A)": {
+    "zh-Hans": "渲染布局 (⌘⇧A)",
+    "zh-Hant": "渲染版面 (⌘⇧A)",
+    "ja": "レンダリングレイアウト (⌘⇧A)",
+    "ko": "렌더링 레이아웃 (⌘⇧A)",
+    "fr": "Disposition rendue (⌘⇧A)",
+    "de": "Gerendertes Layout (⌘⇧A)",
+    "es": "Diseño renderizado (⌘⇧A)"
+  },
+  "CLI Layout (⌘⇧A)": {
+    "zh-Hans": "CLI 布局 (⌘⇧A)",
+    "zh-Hant": "CLI 版面 (⌘⇧A)",
+    "ja": "CLI レイアウト (⌘⇧A)",
+    "ko": "CLI 레이아웃 (⌘⇧A)",
+    "fr": "Disposition CLI (⌘⇧A)",
+    "de": "CLI-Layout (⌘⇧A)",
+    "es": "Diseño CLI (⌘⇧A)"
+  },
+  "Toggle CLI Layout": {
+    "zh-Hans": "切换 CLI 布局",
+    "zh-Hant": "切換 CLI 版面",
+    "ja": "CLI レイアウトの切り替え",
+    "ko": "CLI 레이아웃 전환",
+    "fr": "Basculer la disposition CLI",
+    "de": "CLI-Layout umschalten",
+    "es": "Alternar el diseño CLI"
+  },
+  "Open in CLI Layout": {
+    "zh-Hans": "在 CLI 布局中打开",
+    "zh-Hant": "在 CLI 版面中打開",
+    "ja": "CLI レイアウトで開く",
+    "ko": "CLI 레이아웃에서 열기",
+    "fr": "Ouvrir dans la disposition CLI",
+    "de": "Im CLI-Layout öffnen",
+    "es": "Abrir en el diseño CLI"
   }
 }

@@ -77,6 +77,14 @@ pub fn on_frame() -> (&'static str, &'static str) {
     (a.dark[0], ON_DARK)
 }
 
+/// The files panel's ground, which the structure at its foot shares: a
+/// step lighter than the gray of the panels beside it, so the folder
+/// reads apart from the outline next to it.
+pub fn files_ground(theme: &Theme) -> gpui::Hsla {
+    let hex = if theme.mode.is_dark() { 0x2a2927 } else { 0xf5f4f2 };
+    gpui::rgb(hex).into()
+}
+
 /// The colors of the agents' own marks, their makers': Claude's
 /// terracotta and Codex's green, whatever accent the window wears. Not
 /// accents: no window wears them.

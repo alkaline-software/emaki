@@ -1,14 +1,17 @@
-//! A terminal at the conversation's right, under the top strip, opened
-//! with the strip's terminal button. Two things show in it, one at a
-//! time: a shell of the person's in the session's folder, and the
-//! session's own agent as it runs in the hidden terminal
+//! The window's two terminals. The shell terminal stands at the
+//! conversation's right, under the top strip, opened with the strip's
+//! button: a shell of the person's in the session's folder, a tab each.
+//! The agent terminal is the CLI layout, in the conversation's place:
+//! the session's own agent as it runs in the hidden terminal
 //! (`emaki_core::pty`), the same screen the window reads and types into.
 //!
 //! Both are a `Pty`: a child on a pty this process owns and a screen
 //! model that draws nothing. Here the screen is drawn, a row a line in
 //! the mono face, the keyboard is written to the child, and the pty is
-//! kept the size of the panel.
+//! kept the size of its room. Each keeps its own `TermView`.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +40,8 @@ const WHEEL_ROW: f32 = 15.;
 const BLINK: Duration = Duration::from_millis(500);
 /// How long the panel takes to come and to go.
 const TERM_PANEL_ANIM: Duration = Duration::from_millis(200);
+/// How long one layout takes to fade in over the other.
+pub(crate) const CLI_ANIM: Duration = Duration::from_millis(220);
 /// How often a panel that shows looks for something new on its screen.
 const POLL: Duration = Duration::from_millis(33);
 /// How often the agents' page looks again while the shell is beside it.
@@ -45,6 +50,10 @@ const LOOK_AGAIN: Duration = Duration::from_secs(4);
 const COPIED_FOR: Duration = Duration::from_millis(2500);
 /// The head over a side, as tall as the path bar over the conversation.
 const HEAD_H: f32 = 31.;
+/// How much deeper than the agent terminal's ground the room at either
+/// side of its column is, in the CLI layout: the black laid over it in
+/// the light appearance and in the dark one.
+const CLI_SIDE_DEEPER: (f32, f32) = (0.035, 0.2);
 /// A shell's tab in the head: its height, the most and the least it is
 /// wide, and the room between two.
 const TAB_H: f32 = 22.;
@@ -148,6 +157,75 @@ impl Sel {
     }
 }
 
+/// What one terminal on the screen keeps of its own: the shell terminal
+/// at the right and the agent terminal in the CLI layout are one each,
+/// and both can show at once.
+pub(crate) struct TermView {
+    pub(crate) focus: FocusHandle,
+    /// Where its screen was last drawn, and the rows and columns that fit.
+    pub(crate) bounds: Rc<Cell<Bounds<Pixels>>>,
+    pub(crate) size: Rc<Cell<(u16, u16)>>,
+    /// The CLI layout's whole pane, the room at the screen's sides with
+    /// it: the wheel over that room is the screen's.
+    room: Rc<Cell<Bounds<Pixels>>>,
+    /// How many rows back it is scrolled, and what of the wheel is left
+    /// over from the last whole row.
+    back: usize,
+    wheel: f32,
+    /// A cell's width, as last drawn.
+    cell_w: f32,
+    /// The button held on a program that hears the mouse, and the cell
+    /// last told to it.
+    mouse: Option<u8>,
+    mouse_cell: (u16, u16),
+    /// What is selected, whether the drag that selects is still held,
+    /// and when a selection was last copied.
+    pub(crate) sel: Option<Sel>,
+    selecting: bool,
+    copied: Option<Instant>,
+    /// The room around the screen as last drawn: at the sides and the
+    /// top, and at the foot.
+    pad: (f32, f32),
+    /// Where the cursor was at the last draw and since when, which is
+    /// when its blinking began again; whether it was drawn; and whether
+    /// it had the keyboard.
+    blink: ((u16, u16), Instant),
+    blink_on: bool,
+    focused: bool,
+    /// The link under the pointer.
+    link: Option<Link>,
+    /// A press with ⌥ that has not moved: let go, it takes the cursor there.
+    alt: bool,
+    /// The cell the pointer was last over, column and row.
+    hover: (u16, u16),
+}
+
+impl TermView {
+    pub(crate) fn new(cx: &mut App) -> Self {
+        TermView {
+            focus: cx.focus_handle(),
+            bounds: Rc::new(Cell::new(Bounds::default())),
+            size: Rc::new(Cell::new((0, 0))),
+            room: Rc::new(Cell::new(Bounds::default())),
+            back: 0,
+            wheel: 0.,
+            cell_w: 0.,
+            mouse: None,
+            mouse_cell: (0, 0),
+            sel: None,
+            selecting: false,
+            copied: None,
+            pad: (0., 0.),
+            blink: ((0, 0), Instant::now()),
+            blink_on: true,
+            focused: false,
+            link: None,
+            alt: false,
+            hover: (u16::MAX, u16::MAX),
+        }
+    }
+}
+
 /// A choice of the panel's own menu, opened with a right click.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TermDo {
@@ -227,7 +305,7 @@ const AGENTS_SHELLS: &str = "~agents";
 impl Workbench {
     /// Whether the panel is drawn: asked for, on a conversation.
     pub(crate) fn term_panel_shown(&self) -> bool {
-        self.term_on().is_some() && self.term_stage()
+        self.term_on() && self.term_stage()
     }
 
     /// Whether the page showing can have the panel: a conversation, or
@@ -254,37 +332,64 @@ impl Workbench {
         self.selected_ref().cloned()
     }
 
-    /// Whether the side asked for is the agent's.
-    fn term_side_agent(&self) -> bool {
-        self.side_term_agent && !self.term_at_agents()
-    }
-
-    /// Which side is asked for: the agent's is `true`, the shell's
-    /// `false`, none when the panel is away.
-    pub(crate) fn term_on(&self) -> Option<bool> {
+    /// Whether the shell terminal is asked for, beside a conversation or
+    /// inside an agent on the agents page, which keeps its own choice.
+    pub(crate) fn term_on(&self) -> bool {
         if self.term_at_agents() {
-            return self.agents_shell.then_some(false);
+            return self.agents_shell;
         }
-        self.side_term.then_some(self.side_term_agent)
+        self.side_term
     }
 
-    /// One of the strip's two terminal buttons was pressed: the side
-    /// showing goes, and any other takes the place of the one that was.
-    pub(crate) fn toggle_term(&mut self, agent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let to = (self.term_on() != Some(agent)).then_some(agent);
+    /// Whether the CLI layout is drawn: asked for, on a conversation
+    /// that has an agent to show. A session begun here with nothing sent
+    /// has none yet and keeps its composer.
+    pub(crate) fn cli_shown(&self) -> bool {
+        self.cli_layout && self.page == Page::Session && self.detail.is_some() && self.selected_ref().is_some_and(|r| !self.is_draft(&r.session_id))
+    }
+
+    /// Whether the session showing can have the CLI layout: not one begun
+    /// here with nothing sent.
+    pub(crate) fn cli_possible(&self) -> bool {
+        self.page == Page::Session && self.detail.is_some() && self.selected_ref().is_some_and(|r| !self.is_draft(&r.session_id))
+    }
+
+    /// One of the two terminals' own state: the agent's, or the shell's.
+    pub(crate) fn view(&self, agent: bool) -> &TermView {
+        if agent { &self.agent_view } else { &self.shell_view }
+    }
+
+    pub(crate) fn view_mut(&mut self, agent: bool) -> &mut TermView {
+        if agent { &mut self.agent_view } else { &mut self.shell_view }
+    }
+
+    /// Which terminal has the keyboard: the agent's is `true`.
+    pub(crate) fn term_focused(&self, window: &Window) -> Option<bool> {
+        if self.shell_view.focus.is_focused(window) {
+            Some(false)
+        } else if self.agent_view.focus.is_focused(window) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// The shell terminal's button was pressed: it comes, or goes.
+    pub(crate) fn toggle_term(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let to = !self.term_on();
         self.term_go(to, cx);
-        window.focus(if to.is_some() { &self.side_term_focus } else { &self.focus_handle }, cx);
+        window.focus(if to { &self.shell_view.focus } else { &self.focus_handle }, cx);
     }
 
-    /// ⌘⇧S and ⌘⇧A, the buttons' keys: beside a conversation only.
-    pub(crate) fn toggle_term_key(&mut self, agent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.term_stage() && !(agent && self.term_at_agents()) {
-            self.toggle_term(agent, window, cx);
+    /// ⌘⇧S, the button's key: where the panel can be.
+    pub(crate) fn toggle_term_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.term_stage() {
+            self.toggle_term(window, cx);
         }
     }
 
-    /// The panel goes to that side, or away, and the change is drawn.
-    pub(crate) fn term_go(&mut self, to: Option<bool>, cx: &mut Context<Self>) {
+    /// The panel comes or goes, and the change is drawn.
+    pub(crate) fn term_go(&mut self, to: bool, cx: &mut Context<Self>) {
         let from = self.term_on();
         if from == to {
             return;
@@ -292,31 +397,29 @@ impl Workbench {
         // The agents page's shell is its own choice: it neither opens
         // the panel beside a conversation nor closes it.
         if self.term_at_agents() {
-            self.agents_shell = to.is_some();
+            self.agents_shell = to;
         } else {
-            self.side_away.retain(|(s, _)| *s != crate::panels::Side::Term);
-            self.side_term = to.is_some();
-            if let Some(agent) = to {
-                self.side_term_agent = agent;
+            self.side_away.retain(|s| *s != crate::panels::Side::Term);
+            self.side_term = to;
+            if to {
                 self.side_asked(crate::panels::Side::Term, cx);
             }
         }
-        // The shell's side brought up with no tab in it opens on a new
-        // one, as it did the first time it was looked at.
-        if to == Some(false) {
+        // Brought up with no tab in it, it opens on a new one, as it did
+        // the first time it was looked at.
+        if to {
             if let Some(set) = self.term_owner().and_then(|r| self.shells.get_mut(&r.session_id)).filter(|s| s.tabs.is_empty()) {
                 set.begun = false;
             }
         }
         self.side_term_anim = Some((from, to, Instant::now(), self.side_term_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
-        self.side_back = 0;
-        self.side_sel = None;
-        if to.is_some() {
+        self.shell_view.back = 0;
+        self.shell_view.sel = None;
+        if to {
             self.term_panel_watch(cx);
             self.warm_now();
-        }
-        if from.is_some() {
-            // The side left is drawn while it goes: once more when it has.
+        } else {
+            // The panel left is drawn while it goes: once more when it has.
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(TERM_PANEL_ANIM + Duration::from_millis(20)).await;
                 let _ = this.update(cx, |_, cx| cx.notify());
@@ -327,21 +430,89 @@ impl Workbench {
         cx.notify();
     }
 
-    /// "Open in Agent Terminal" on a session's menu: the agent's side comes.
-    pub(crate) fn open_term_panel_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.term_go(Some(true), cx);
-        window.focus(&self.side_term_focus, cx);
+    /// The layout slider was moved, or ⌘⇧A pressed: the agent terminal
+    /// takes the conversation's place, or gives it back. The keyboard
+    /// goes with it, to the terminal or to the composer.
+    pub(crate) fn toggle_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.cli_possible() {
+            return;
+        }
+        let to = !self.cli_layout;
+        self.layout_go(to, cx);
+        if to {
+            window.focus(&self.agent_view.focus, cx);
+        } else {
+            let composer = self.composer.read(cx).focus_handle(cx);
+            window.focus(&composer, cx);
+        }
     }
 
-    /// A probe's step (`EMAKI_GO`), which has no window to hand.
+    /// The layout goes to the CLI's or back to the rendered one. The
+    /// change is drawn where it is seen (`layout_seen`).
+    pub(crate) fn layout_go(&mut self, cli: bool, cx: &mut Context<Self>) {
+        if self.cli_layout == cli {
+            return;
+        }
+        self.cli_layout = cli;
+        self.agent_view.back = 0;
+        self.agent_view.sel = None;
+        if cli {
+            self.term_panel_watch(cx);
+            self.warm_now();
+        }
+        self.save_ui(true);
+        cx.notify();
+    }
+
+    /// Whether the layout drawn for a session changed since its last draw,
+    /// by the slider or by the session itself (a first message sent from
+    /// the composer): the one comes in over the other's place as the
+    /// other goes, the outline inside the rendered layout, and fading
+    /// with it. A change of tab plays nothing.
+    pub(crate) fn layout_seen(&mut self, key: &str, cx: &mut Context<Self>) {
+        let now = self.cli_shown();
+        let was = match &self.cli_seen {
+            Some((k, was)) if k == key => *was,
+            _ => now,
+        };
+        self.cli_seen = Some((key.to_string(), now));
+        if now {
+            self.term_watch_on(cx);
+        }
+        if was == now {
+            return;
+        }
+        // The outline goes and comes inside the rendered layout's fade,
+        // not by its own; back, it brings the marked entry into sight.
+        self.outline_at = None;
+        self.cli_anim = Some((now, Instant::now(), self.cli_anim.map(|(_, _, n)| n + 1).unwrap_or(0)));
+        // What goes is drawn while it goes: once more when it has.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CLI_ANIM + Duration::from_millis(20)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    /// "Open in CLI Layout" on a session's menu: the agent terminal takes
+    /// the conversation's place, with the keyboard.
+    pub(crate) fn open_term_panel_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout_go(true, cx);
+        window.focus(&self.agent_view.focus, cx);
+    }
+
+    /// A probe's step (`EMAKI_GO`), which has no window to hand. One that
+    /// acts on a screen acts on the agent's in the CLI layout and on the
+    /// shell's otherwise.
     pub(crate) fn term_panel_probe(&mut self, step: &str, cx: &mut Context<Self>) {
+        let agent = self.cli_shown();
         match step {
-            "term" => self.term_go(Some(self.side_term_agent), cx),
-            "term:shell" => self.term_go(Some(false), cx),
-            "term:agent" => self.term_go(Some(true), cx),
-            "term:off" => self.term_go(None, cx),
+            "term" | "term:shell" => self.term_go(true, cx),
+            "term:agent" | "layout:cli" => self.layout_go(true, cx),
+            "layout:rendered" => self.layout_go(false, cx),
+            "term:off" => self.term_go(false, cx),
             "term:start" => {
-                self.term_go(Some(true), cx);
+                self.layout_go(true, cx);
                 self.start_hidden_terminal(cx);
             }
             "term:tab+" => self.shell_new(None, cx),
@@ -353,25 +524,24 @@ impl Workbench {
                     cx.notify();
                 }
             }
-            "term:copied" => self.side_copied = Some(Instant::now()),
+            "term:copied" => self.view_mut(agent).copied = Some(Instant::now()),
             _ if step.starts_with("term:hover:") => {
                 // term:hover:<row>,<col>
                 let n: Vec<u16> = step["term:hover:".len()..].split(',').filter_map(|v| v.parse().ok()).collect();
-                if let ([row, col], Some(pty)) = (&n[..], self.term_panel_pty()) {
-                    self.side_link = self.term_link_at(&pty, *row, *col);
+                if let ([row, col], Some(pty)) = (&n[..], self.term_pty_of(agent)) {
+                    self.view_mut(agent).link = self.term_link_at(agent, &pty, *row, *col);
                 }
             }
             _ if step.starts_with("term:text:") => self.cfg.terminal.size = step["term:text:".len()..].parse().unwrap_or(13.),
-            "term:clear" => self.term_clear(),
+            "term:clear" => self.term_clear(agent),
             _ if step.starts_with("term:sel:") => {
                 // term:sel:<unit>,<row>,<col>,<row>,<col>
                 let n: Vec<u16> = step["term:sel:".len()..].split(',').filter_map(|v| v.parse().ok()).collect();
                 if let [unit, r1, c1, r2, c2] = n[..] {
-                    self.side_sel = Some(Sel { anchor: (r1, c1), head: (r2, c2), unit: unit as usize % 4, block: unit >= 4 });
-                    eprintln!("emaki: selected {:?}", self.term_sel_text());
+                    self.view_mut(agent).sel = Some(Sel { anchor: (r1, c1), head: (r2, c2), unit: unit as usize % 4, block: unit >= 4 });
+                    eprintln!("emaki: selected {:?}", self.term_sel_text(agent));
                 }
             }
-            _ if step.starts_with("term:w:") => self.side_term_w = px(step["term:w:".len()..].parse().unwrap_or(520.)),
             "term:tab-" => {
                 if let Some(id) = self.term_owner().and_then(|r| self.shells.get(&r.session_id).map(|s| s.on)) {
                     self.shell_close(id, cx);
@@ -384,7 +554,7 @@ impl Workbench {
                 }
             }
             _ => {
-                if let Some(pty) = step.strip_prefix("termtype:").and_then(|_| self.term_panel_pty()) {
+                if let Some(pty) = step.strip_prefix("termtype:").and_then(|_| self.term_pty_of(agent)) {
                     // Return comes a moment after the words: Codex's
                     // terminal takes the two in one burst for a paste,
                     // and a pasted Return is a new line.
@@ -400,122 +570,28 @@ impl Workbench {
         cx.notify();
     }
 
-    /// The two buttons at the top strip's right end, as one control, the
-    /// way the files and the outline have theirs at its left: a track
-    /// with a segment each, the shell's and the agent's, and a raised
-    /// plate under the one whose side shows. The plate slides from one to
-    /// the other, comes in under the first pressed and fades under the
-    /// one pressed again.
-    pub(crate) fn term_buttons(&self, agent: AgentId, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let dark = theme.mode.is_dark();
-        let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
-        let plate_bg = if dark { theme.secondary_active } else { theme.popover };
-        let (seg_w, seg_h, pad, gap) = (30., 24., 3., 2.);
-        let x_of = |agent: bool| pad + if agent { seg_w + gap } else { 0. };
-        let on = self.term_on();
-        // Without a press since launch there is nothing to move from.
-        let (from, to, serial) = self.side_term_anim.map(|(from, to, _, n)| (from, to, n + 1)).unwrap_or((on, on, 0));
-        let plate = (from.is_some() || to.is_some()).then(|| {
-            let (a, b) = (x_of(from.or(to).unwrap_or(false)), x_of(to.or(from).unwrap_or(false)));
-            let (o_a, o_b) = (if from.is_some() { 1. } else { 0. }, if to.is_some() { 1. } else { 0. });
-            div().absolute().top(px(pad)).w(px(seg_w)).h(px(seg_h)).rounded(px(7.)).bg(plate_bg).shadow_sm().with_animation(
-                ElementId::Name(format!("term-plate-{serial}").into()),
-                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                move |d, t| d.left(px(a + (b - a) * t)).opacity(o_a + (o_b - o_a) * t),
-            )
-        });
-        // The agent's mark is in the agent's own color under the pointer
-        // and while its side shows.
-        let own = crate::workbench::agent_color(agent, &theme);
-        let segment = |id: &'static str, icon: &'static str, tip: String, which: bool, cx: &mut Context<Self>| {
-            let active = on == Some(which);
-            let lit = if which { own } else { theme.foreground };
-            h_flex()
-                .id(id)
-                .w(px(seg_w))
-                .h(px(seg_h))
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .rounded(px(7.))
-                .cursor_pointer()
-                .text_color(if active { lit } else { theme.muted_foreground })
-                // On the active one too (`panels.rs`, the same control).
-                .hover(move |s| s.text_color(lit))
-                .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
-                .on_click(cx.listener(move |this, _, window, cx| this.toggle_term(which, window, cx)))
-                .child(Icon::default().path(icon).with_size(px(15.)))
-        };
-        h_flex()
-            .relative()
-            .flex_shrink_0()
-            .p(px(pad))
-            .gap(px(gap))
-            .rounded(px(9.))
-            .bg(track_bg)
-            .children(plate)
-            .child(segment("term-shell", "icons/terminal.svg", t("Shell Terminal (⌘⇧S)").to_string(), false, cx))
-            // The agent's side wears the agent's own mark.
-            .child(segment("term-agent", crate::workbench::agent_icon_path(agent), t("Agent Terminal (⌘⇧A)").to_string(), true, cx))
-            .into_any_element()
-    }
-
-    /// The shell's button by itself, for a page with no agent's terminal
-    /// to show (inside an agent on the agents page): the same track and
-    /// plate as the two buttons over a conversation, the plate fading in
-    /// under the one segment and out again.
+    /// The shell terminal's button at the top strip's right end, as the
+    /// files panel's is at its left: its icon alone, with the accent's
+    /// line under it while the panel shows. Inside an agent on the agents
+    /// page it opens a shell in the home folder.
     pub(crate) fn term_shell_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let dark = theme.mode.is_dark();
-        let (seg_w, seg_h, pad) = (30., 24., 3.);
-        let on = self.term_on().is_some();
-        let (was, serial) = self.side_term_anim.map(|(from, _, _, n)| (from.is_some(), n + 1)).unwrap_or((on, 0));
-        let plate = (on || was).then(|| {
-            let (a, b) = (if was { 1. } else { 0. }, if on { 1. } else { 0. });
-            div().absolute().top(px(pad)).left(px(pad)).w(px(seg_w)).h(px(seg_h)).rounded(px(7.)).bg(if dark { theme.secondary_active } else { theme.popover }).shadow_sm().with_animation(
-                ElementId::Name(format!("term-shell-plate-{serial}").into()),
-                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                move |d, t| d.opacity(a + (b - a) * t),
-            )
-        });
-        let lit = theme.foreground;
-        h_flex()
-            .relative()
-            .flex_shrink_0()
-            .p(px(pad))
-            .rounded(px(9.))
-            .bg(if dark { theme.tab_bar_segmented } else { theme.muted })
-            .children(plate)
-            .child(
-                h_flex()
-                    .id("term-shell-only")
-                    .w(px(seg_w))
-                    .h(px(seg_h))
-                    .flex_shrink_0()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(7.))
-                    .cursor_pointer()
-                    .text_color(if on { lit } else { theme.muted_foreground })
-                    .hover(move |s| s.text_color(lit))
-                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Shell Terminal in your home folder (⌘⇧S)"), window, cx))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
-                    .child(Icon::default().path("icons/terminal.svg").with_size(px(15.))),
-            )
-            .into_any_element()
+        let on = self.term_on();
+        let (was, serial) = self.side_term_anim.map(|(from, _, at, n)| (crate::workbench::pressed_from(from, on, at), n + 1)).unwrap_or((on, 0));
+        let tip = if self.term_at_agents() { t("Shell Terminal in your home folder (⌘⇧S)") } else { t("Shell Terminal (⌘⇧S)") };
+        self.toggle_button("term-shell", "icons/terminal.svg", tip, (was, on, serial), false, Rc::new(|this, window, cx| this.toggle_term(window, cx)), cx)
     }
 
     /// While the panel shows, the window is drawn again whenever the
     /// screen it shows has changed: a pty writes from a thread of its
     /// own and says nothing to the window.
     fn term_panel_watch(&mut self, cx: &mut Context<Self>) {
+        self.term_watching = true;
         self.side_term_poll = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(POLL).await;
             let on = this.update(cx, |this, cx| {
-                if this.term_on().is_none() {
+                let (shell, agent) = (this.term_on(), this.cli_layout);
+                if !shell && !agent {
+                    this.term_watching = false;
                     return false;
                 }
                 // Beside an agent's page, the page looks again now and then
@@ -523,11 +599,16 @@ impl Workbench {
                 if this.term_at_agents() && this.agent_open.is_some() && !this.agents_checking && this.agents_checked.is_none_or(|at| at.elapsed() > LOOK_AGAIN) {
                     this.look_for_agents(cx);
                 }
-                // The cursor's blink is a draw too, while the panel has the keyboard.
-                // A frame, not a change: the panel is drawn afresh at every
-                // frame, and what the window keeps between frames is not.
-                let blink = this.side_focused && this.cfg.terminal.cursor_blink && this.blink_on() != this.side_blink_on;
-                if blink || this.term_panel_pty().is_some_and(|p| p.quiet_for() < POLL * 4 || !p.alive()) {
+                // The cursor's blink is a draw too, while a terminal has the
+                // keyboard. A frame, not a change: the terminals are drawn
+                // afresh at every frame, and what the window keeps between
+                // frames is not.
+                let changed = |this: &Self, agent: bool| {
+                    let v = this.view(agent);
+                    let blink = v.focused && this.cfg.terminal.cursor_blink && this.blink_on(agent) != v.blink_on;
+                    blink || this.term_pty_of(agent).is_some_and(|p| p.quiet_for() < POLL * 4 || !p.alive())
+                };
+                if (shell && changed(this, false)) || (agent && this.cli_shown() && changed(this, true)) {
                     crate::ambient::redraw(&this.ambient, cx);
                 }
                 true
@@ -538,10 +619,18 @@ impl Workbench {
         }));
     }
 
+    /// The watch, started where it is not running: a terminal drawn with
+    /// nothing having asked for it, as the CLI layout at launch is.
+    fn term_watch_on(&mut self, cx: &mut Context<Self>) {
+        if !self.term_watching {
+            self.term_panel_watch(cx);
+        }
+    }
+
     /// Whether the cursor is in the lit half of its blink: on and off by
     /// turns, with no fade, from when it last moved.
-    fn blink_on(&self) -> bool {
-        (self.side_blink.1.elapsed().as_millis() / BLINK.as_millis()) % 2 == 0
+    fn blink_on(&self, agent: bool) -> bool {
+        (self.view(agent).blink.1.elapsed().as_millis() / BLINK.as_millis()) % 2 == 0
     }
 
     /// A row's height at the letters' size now.
@@ -592,11 +681,6 @@ impl Workbench {
         let (text, cell_w) = (text * fit, cell_w * fit);
         let lh = (text * LINE_RATIO * self.cfg.terminal.line_scale()).round();
         CardLook { lines: screen_lines(rows, cell_w, lh, k, &[], None), ground: hsla(k.bg), ink: hsla(k.fg), quiet: hsla(mix(k.fg, k.bg, 0.45)), font, text, line_h: lh, cell_w }
-    }
-
-    /// The pty the panel shows now, when there is one.
-    fn term_panel_pty(&self) -> Option<Arc<Pty>> {
-        self.term_pty_of(self.term_side_agent())
     }
 
     /// The pty of one side, when there is one.
@@ -668,14 +752,14 @@ impl Workbench {
         self.shell_swap = Some((from, Instant::now(), self.shell_swap.map(|(_, _, n)| n + 1).unwrap_or(0)));
         let until = TAB_ANIM + Duration::from_millis(80);
         self.shell_reveal = Some(Instant::now() + until);
-        self.side_sel = None;
+        self.shell_view.sel = None;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(until).await;
             let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
-        self.side_back = 0;
-        self.side_wheel = 0.;
+        self.shell_view.back = 0;
+        self.shell_view.wheel = 0.;
     }
 
     /// A tab dragged along the row takes the place the pointer is over.
@@ -759,7 +843,7 @@ impl Workbench {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
                     this.shell_pick(id, cx);
-                    window.focus(&this.side_term_focus, cx);
+                    window.focus(&this.shell_view.focus, cx);
                 }))
                 .child(Icon::default().path("icons/terminal.svg").with_size(px(12.)).flex_shrink_0())
                 .child(div().flex_1().min_w_0().truncate().child(label))
@@ -805,7 +889,7 @@ impl Workbench {
             .on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.shell_new(None, cx);
-                window.focus(&this.side_term_focus, cx);
+                window.focus(&this.shell_view.focus, cx);
             }))
             .child(Icon::default().path("icons/plus.svg").with_size(px(12.)));
         h_flex().min_w_0().h_full().items_center().gap(px(TAB_GAP)).child(row).child(plus)
@@ -815,8 +899,7 @@ impl Workbench {
     /// The panel's width as drawn: what it was dragged to, less when the
     /// conversation would be left with too little.
     pub(crate) fn term_panel_w(&self) -> Pixels {
-        let (files, outline) = self.panels_shown();
-        let beside = if files || outline { self.panel_w_now() } else { px(0.) } + self.file_pane_least();
+        let beside = self.left_w() + self.file_pane_least() + self.outline_least();
         self.side_term_w.min(self.pane_w - beside - self.conv_min.get()).max(TERM_MIN)
     }
 
@@ -828,8 +911,7 @@ impl Workbench {
             }
             return;
         }
-        let (files, outline) = self.panels_shown();
-        let beside = if files || outline { self.panel_w_now() } else { px(0.) } + self.file_pane_least();
+        let beside = self.left_w() + self.file_pane_least() + self.outline_least();
         let w = (self.view_w - e.position.x).clamp(TERM_MIN, (self.pane_w - beside - self.conv_min.get()).max(TERM_MIN));
         if w != self.side_term_w {
             self.side_term_w = w;
@@ -876,17 +958,17 @@ impl Workbench {
 
     /// The wheel over the panel: back through what has left the screen,
     /// or, where a program has the screen to itself, its arrow keys.
-    pub(crate) fn term_panel_wheel(&mut self, delta_y: Pixels, at: Point<Pixels>, mods: &Modifiers) {
-        let Some(pty) = self.term_panel_pty() else { return };
-        self.side_wheel += f32::from(delta_y) / WHEEL_ROW;
-        let lines = self.side_wheel.trunc() as i64;
+    pub(crate) fn term_panel_wheel(&mut self, agent: bool, delta_y: Pixels, at: Point<Pixels>, mods: &Modifiers) {
+        let Some(pty) = self.term_pty_of(agent) else { return };
+        self.view_mut(agent).wheel += f32::from(delta_y) / WHEEL_ROW;
+        let lines = self.view_mut(agent).wheel.trunc() as i64;
         if lines == 0 {
             return;
         }
-        self.side_wheel -= lines as f32;
+        self.view_mut(agent).wheel -= lines as f32;
         // A program that hears the mouse hears the wheel as its own.
-        if let Some(want) = pty.mouse().filter(|_| self.side_back == 0) {
-            let (col, row) = self.term_cell(at, &pty);
+        if let Some(want) = pty.mouse().filter(|_| self.view_mut(agent).back == 0) {
+            let (col, row) = self.term_cell(agent, at, &pty);
             let code = if lines > 0 { 64 } else { 65 } | mod_bits(mods);
             pty.write(&pty::mouse_bytes(code, col, row, true, want.form).repeat(lines.unsigned_abs().min(12) as usize));
             return;
@@ -900,19 +982,19 @@ impl Workbench {
             };
             pty.write(&key.repeat(lines.unsigned_abs() as usize));
         } else {
-            self.side_back = (self.side_back as i64 + lines).max(0) as usize;
-            self.side_sel = None;
-            self.term_unhover();
+            self.view_mut(agent).back = (self.view_mut(agent).back as i64 + lines).max(0) as usize;
+            self.view_mut(agent).sel = None;
+            self.term_unhover(agent);
         }
     }
 
     /// The cell of the screen a point of the window is over: column, row,
     /// held inside the screen.
-    fn term_cell(&self, at: Point<Pixels>, pty: &Pty) -> (u16, u16) {
-        let b = self.side_term_bounds.get();
+    fn term_cell(&self, agent: bool, at: Point<Pixels>, pty: &Pty) -> (u16, u16) {
+        let b = self.view(agent).bounds.get();
         let (rows, cols) = pty.size();
-        let col = (f32::from(at.x - b.left()) - self.side_pad.0) / self.side_cell_w.max(1.);
-        let row = (f32::from(at.y - b.top()) - self.side_pad.0) / self.term_line_h();
+        let col = (f32::from(at.x - b.left()) - self.view(agent).pad.0) / self.view(agent).cell_w.max(1.);
+        let row = (f32::from(at.y - b.top()) - self.view(agent).pad.0) / self.term_line_h();
         (col.floor().clamp(0., cols.saturating_sub(1) as f32) as u16, row.floor().clamp(0., rows.saturating_sub(1) as f32) as u16)
     }
 
@@ -922,13 +1004,13 @@ impl Workbench {
     /// selection (by the letter, and by the word or the row on a double
     /// or triple click), opens the link under it with ⌘, and with ⌥ at
     /// a prompt takes the cursor to the column pressed.
-    fn term_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
-        let Some(pty) = self.term_panel_pty() else { return };
-        let (col, row) = self.term_cell(e.position, &pty);
+    fn term_mouse_down(&mut self, agent: bool, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some(pty) = self.term_pty_of(agent) else { return };
+        let (col, row) = self.term_cell(agent, e.position, &pty);
         // ⌘ and a click opens the link under the pointer, in a program
         // that hears the mouse too; Ctrl off a Mac.
         if e.button == MouseButton::Left && e.modifiers.secondary() {
-            if let Some(link) = self.term_link_at(&pty, row, col) {
+            if let Some(link) = self.term_link_at(agent, &pty, row, col) {
                 match link.target {
                     Target::Url(url) => cx.open_url(&url),
                     Target::File(path) => crate::sys::open_path(&path),
@@ -936,11 +1018,11 @@ impl Workbench {
             }
             return;
         }
-        let want = pty.mouse().filter(|_| pty.alive() && self.side_back == 0);
+        let want = pty.mouse().filter(|_| pty.alive() && self.view_mut(agent).back == 0);
         if let (Some(want), false, Some(button)) = (want, e.modifiers.shift, button_code(e.button)) {
-            self.side_sel = None;
-            self.side_mouse = Some(button);
-            self.side_mouse_cell = (col, row);
+            self.view_mut(agent).sel = None;
+            self.view_mut(agent).mouse = Some(button);
+            self.view_mut(agent).mouse_cell = (col, row);
             pty.write(&pty::mouse_bytes(button | mod_bits(&e.modifiers), col, row, true, want.form));
             return;
         }
@@ -948,38 +1030,39 @@ impl Workbench {
             MouseButton::Left => {}
             MouseButton::Right => {
                 let mut items = Vec::new();
-                if !self.term_sel_text().is_empty() {
+                if !self.term_sel_text(agent).is_empty() {
                     items.push((phrase("Copy"), MenuDo::Term(TermDo::Copy)));
                 }
                 items.push((phrase("Paste"), MenuDo::Term(TermDo::Paste)));
-                if !self.term_side_agent() {
+                if !agent {
                     items.push(("", MenuDo::Rule));
                     items.push((phrase("New Tab"), MenuDo::Term(TermDo::NewTab)));
-                    if self.term_panel_pty().is_some() {
+                    if self.term_pty_of(agent).is_some() {
                         items.push((phrase("Close Tab"), MenuDo::Term(TermDo::CloseTab)));
                     }
                 }
                 // What empties the screen, apart.
                 items.push(("", MenuDo::Rule));
                 items.push((phrase("Clear"), MenuDo::Term(TermDo::Clear)));
+                self.term_menu_agent = agent;
                 self.open_menu(e.position, items, cx);
                 return;
             }
-            MouseButton::Middle => return self.term_paste(cx),
+            MouseButton::Middle => return self.term_paste(agent, cx),
             _ => return,
         }
         // With Shift the selection there is runs on to the press.
-        if let Some(sel) = self.side_sel.as_mut().filter(|_| e.modifiers.shift) {
+        if let Some(sel) = self.view_mut(agent).sel.as_mut().filter(|_| e.modifiers.shift) {
             sel.head = (row, col);
-            self.side_selecting = true;
+            self.view_mut(agent).selecting = true;
             return;
         }
         // ⌥ and a drag takes the same columns of every row; ⌥ and a
         // click at a prompt takes the cursor there, when the button is
         // let go where it was pressed.
-        self.side_alt = e.modifiers.alt && want.is_none() && self.side_back == 0 && !pty.alt_screen();
-        self.side_sel = Some(Sel { anchor: (row, col), head: (row, col), unit: e.click_count.clamp(1, 3), block: e.modifiers.alt });
-        self.side_selecting = true;
+        self.view_mut(agent).alt = e.modifiers.alt && want.is_none() && self.view_mut(agent).back == 0 && !pty.alt_screen();
+        self.view_mut(agent).sel = Some(Sel { anchor: (row, col), head: (row, col), unit: e.click_count.clamp(1, 3), block: e.modifiers.alt });
+        self.view_mut(agent).selecting = true;
     }
 
     /// The cursor is taken along its row to a column, with arrow keys.
@@ -995,8 +1078,8 @@ impl Workbench {
     }
 
     /// The link the cell is part of, when it is part of one.
-    fn term_link_at(&self, pty: &Pty, row: u16, col: u16) -> Option<Link> {
-        let (rows, _) = pty.rows_back(self.side_back);
+    fn term_link_at(&self, agent: bool, pty: &Pty, row: u16, col: u16) -> Option<Link> {
+        let (rows, _) = pty.rows_back(self.view(agent).back);
         let cwd = self.term_owner().map(|r| std::path::PathBuf::from(&r.cwd)).unwrap_or_default();
         let (from, to, target) = link_at(&row_cells(rows.get(row as usize)?), col as usize, &cwd)?;
         Some(Link { row, from, to, target })
@@ -1007,9 +1090,9 @@ impl Workbench {
     /// takes for a picture (`[Image #1]`) as it does one the window sends,
     /// or files copied in the Finder as their paths. A terminal takes
     /// words alone, and a screenshot pasted there did nothing.
-    pub(crate) fn term_paste(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn term_paste(&mut self, agent: bool, cx: &mut Context<Self>) {
         use gpui::ClipboardEntry;
-        let Some(pty) = self.term_panel_pty().filter(|p| p.alive()) else { return };
+        let Some(pty) = self.term_pty_of(agent).filter(|p| p.alive()) else { return };
         let Some(item) = cx.read_from_clipboard() else { return };
         let dir = emaki_core::paths::uploads_dir(&self.term_owner().map(|r| r.session_id).unwrap_or_else(|| "terminal".into()));
         let mut said: Vec<String> = Vec::new();
@@ -1027,19 +1110,20 @@ impl Workbench {
             return cx.notify();
         }
         pty.paste(&said.join(" "));
-        self.side_back = 0;
-        self.side_sel = None;
+        self.view_mut(agent).back = 0;
+        self.view_mut(agent).sel = None;
         cx.notify();
     }
 
     /// A choice of the panel's menu.
     pub(crate) fn term_do(&mut self, what: TermDo, window: &mut Window, cx: &mut Context<Self>) {
+        let agent = self.term_menu_agent;
         match what {
             TermDo::Copy => {
-                self.term_copy(cx);
+                self.term_copy(agent, cx);
             }
-            TermDo::Paste => self.term_paste(cx),
-            TermDo::Clear => self.term_clear(),
+            TermDo::Paste => self.term_paste(agent, cx),
+            TermDo::Clear => self.term_clear(agent),
             TermDo::NewTab => self.shell_new(None, cx),
             TermDo::CloseTab => {
                 if let Some(id) = self.term_owner().and_then(|r| self.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
@@ -1047,29 +1131,29 @@ impl Workbench {
                 }
             }
         }
-        window.focus(&self.side_term_focus, cx);
+        window.focus(&self.view(agent).focus, cx);
     }
 
     /// The button let go, in the panel or outside it. A selection just
     /// made is copied, as it is in a terminal.
-    fn term_mouse_up(&mut self, e: &MouseUpEvent, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.side_selecting) {
-            let alt = std::mem::take(&mut self.side_alt);
+    fn term_mouse_up(&mut self, agent: bool, e: &MouseUpEvent, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.view_mut(agent).selecting) {
+            let alt = std::mem::take(&mut self.view_mut(agent).alt);
             // With copying on selection off, what is selected stays for ⌘C.
-            let kept = !self.cfg.terminal.copy_on_select && !self.term_sel_text().is_empty();
-            if !kept && !self.term_copy(cx) {
-                let at = self.side_sel.take().map(|s| s.anchor);
-                if let (true, Some((row, col)), Some(pty)) = (alt, at, self.term_panel_pty()) {
+            let kept = !self.cfg.terminal.copy_on_select && !self.term_sel_text(agent).is_empty();
+            if !kept && !self.term_copy(agent, cx) {
+                let at = self.view_mut(agent).sel.take().map(|s| s.anchor);
+                if let (true, Some((row, col)), Some(pty)) = (alt, at, self.term_pty_of(agent)) {
                     self.term_cursor_to(&pty, row, col);
                 }
             }
             cx.notify();
             return;
         }
-        let Some(button) = self.side_mouse.take() else { return };
-        let Some(pty) = self.term_panel_pty() else { return };
+        let Some(button) = self.view_mut(agent).mouse.take() else { return };
+        let Some(pty) = self.term_pty_of(agent) else { return };
         if let Some(want) = pty.mouse().filter(|w| w.release) {
-            let (col, row) = self.term_cell(e.position, &pty);
+            let (col, row) = self.term_cell(agent, e.position, &pty);
             pty.write(&pty::mouse_bytes(button | mod_bits(&e.modifiers), col, row, false, want.form));
         }
     }
@@ -1077,50 +1161,50 @@ impl Workbench {
     /// The pointer moved over the panel: the selection follows it, or it
     /// is told to the program a cell at a time, with a button held, or
     /// without one where the program asked for that too.
-    fn term_mouse_move(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+    fn term_mouse_move(&mut self, agent: bool, e: &MouseMoveEvent, cx: &mut Context<Self>) {
         if e.pressed_button.is_none() {
-            self.side_mouse = None;
-            self.side_selecting = false;
+            self.view_mut(agent).mouse = None;
+            self.view_mut(agent).selecting = false;
         }
-        let Some(pty) = self.term_panel_pty() else { return };
-        if self.side_selecting {
-            let (col, row) = self.term_cell(e.position, &pty);
-            if let Some(sel) = self.side_sel.as_mut().filter(|s| s.head != (row, col)) {
+        let Some(pty) = self.term_pty_of(agent) else { return };
+        if self.view_mut(agent).selecting {
+            let (col, row) = self.term_cell(agent, e.position, &pty);
+            if let Some(sel) = self.view_mut(agent).sel.as_mut().filter(|s| s.head != (row, col)) {
                 sel.head = (row, col);
                 cx.notify();
             }
             return;
         }
         // The link under the pointer is underlined, looked for a cell at a time.
-        let cell = self.term_cell(e.position, &pty);
-        if cell != self.side_hover {
-            self.side_hover = cell;
-            let link = self.term_link_at(&pty, cell.1, cell.0);
-            if link != self.side_link {
-                self.side_link = link;
+        let cell = self.term_cell(agent, e.position, &pty);
+        if cell != self.view_mut(agent).hover {
+            self.view_mut(agent).hover = cell;
+            let link = self.term_link_at(agent, &pty, cell.1, cell.0);
+            if link != self.view_mut(agent).link {
+                self.view_mut(agent).link = link;
                 cx.notify();
             }
         }
-        let Some(want) = pty.mouse().filter(|_| pty.alive() && self.side_back == 0) else { return };
-        let held = self.side_mouse;
+        let Some(want) = pty.mouse().filter(|_| pty.alive() && self.view_mut(agent).back == 0) else { return };
+        let held = self.view_mut(agent).mouse;
         if !(want.motion || want.drag && held.is_some()) {
             return;
         }
-        let cell = self.term_cell(e.position, &pty);
-        if cell == self.side_mouse_cell {
+        let cell = self.term_cell(agent, e.position, &pty);
+        if cell == self.view_mut(agent).mouse_cell {
             return;
         }
-        self.side_mouse_cell = cell;
+        self.view_mut(agent).mouse_cell = cell;
         // No button held is button 3 on the move.
         pty.write(&pty::mouse_bytes(held.unwrap_or(3) | 32 | mod_bits(&e.modifiers), cell.0, cell.1, true, want.form));
     }
 
     /// The words selected: each row's stretch without the blank at its
     /// end, a new line between rows unless one runs on into the next.
-    fn term_sel_text(&self) -> String {
-        let (Some(sel), Some(pty)) = (self.side_sel, self.term_panel_pty()) else { return String::new() };
-        let (rows, _) = pty.rows_back(self.side_back);
-        let wraps = pty.wraps_back(self.side_back);
+    fn term_sel_text(&self, agent: bool) -> String {
+        let (Some(sel), Some(pty)) = (self.view(agent).sel, self.term_pty_of(agent)) else { return String::new() };
+        let (rows, _) = pty.rows_back(self.view(agent).back);
+        let wraps = pty.wraps_back(self.view(agent).back);
         let cells: Vec<Vec<char>> = rows.iter().map(|r| row_cells(r)).collect();
         let spans = sel.spans(&cells);
         let last = spans.iter().rposition(|s| s.is_some());
@@ -1139,13 +1223,13 @@ impl Workbench {
 
     /// The selection goes to the clipboard, and the panel says so for a
     /// moment. Whether there was anything to copy.
-    fn term_copy(&mut self, cx: &mut Context<Self>) -> bool {
-        let text = self.term_sel_text();
+    fn term_copy(&mut self, agent: bool, cx: &mut Context<Self>) -> bool {
+        let text = self.term_sel_text(agent);
         if text.is_empty() {
             return false;
         }
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.side_copied = Some(Instant::now());
+        self.view_mut(agent).copied = Some(Instant::now());
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COPIED_FOR + Duration::from_millis(30)).await;
             let _ = this.update(cx, |_, cx| cx.notify());
@@ -1156,20 +1240,20 @@ impl Workbench {
 
     /// What was under the pointer is looked for again when it next moves:
     /// the rows have changed under it.
-    fn term_unhover(&mut self) {
-        self.side_link = None;
-        self.side_hover = (u16::MAX, u16::MAX);
+    fn term_unhover(&mut self, agent: bool) {
+        self.view_mut(agent).link = None;
+        self.view_mut(agent).hover = (u16::MAX, u16::MAX);
     }
 
     /// ⌘K: the screen and what has left it are forgotten, and the
     /// program is asked to draw again (^L), which a shell answers with a
     /// fresh prompt.
-    fn term_clear(&mut self) {
-        let Some(pty) = self.term_panel_pty() else { return };
+    fn term_clear(&mut self, agent: bool) {
+        let Some(pty) = self.term_pty_of(agent) else { return };
         if pty.clear_all() {
             pty.write(b"\x0c");
-            self.side_back = 0;
-            self.side_sel = None;
+            self.view_mut(agent).back = 0;
+            self.view_mut(agent).sel = None;
         }
     }
 
@@ -1184,7 +1268,13 @@ impl Workbench {
 
     /// Where the panel's screen is in the window, for the wheel.
     pub(crate) fn term_panel_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.term_panel_shown().then(|| self.side_term_bounds.get())
+        self.term_panel_shown().then(|| self.shell_view.bounds.get())
+    }
+
+    /// Where the agent terminal is in the window, in the CLI layout: its
+    /// screen and the room at the screen's sides.
+    pub(crate) fn agent_term_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.cli_shown().then(|| self.agent_view.room.get())
     }
 
     /// The panel's own keys off a Mac, as the system's terminal has them:
@@ -1192,23 +1282,23 @@ impl Workbench {
     /// Shift+Insert; on Windows Ctrl+V pastes too, and Ctrl+C copies what
     /// is selected and is the shell's Ctrl+C when nothing is. Ctrl+Tab and
     /// Ctrl+Page Down are the next shell tab. Whether it was one of them.
-    fn term_pc_key(&mut self, k: &Keystroke, cx: &mut Context<Self>) -> bool {
+    fn term_pc_key(&mut self, agent: bool, k: &Keystroke, cx: &mut Context<Self>) -> bool {
         let m = &k.modifiers;
         if cfg!(target_os = "macos") || m.alt || m.platform {
             return false;
         }
         let windows = cfg!(windows);
-        let tabs = !self.term_side_agent();
+        let tabs = !agent;
         match (m.control, m.shift, k.key.to_ascii_lowercase().as_str()) {
             (true, true, "c") | (true, false, "insert") => {
-                self.term_copy(cx);
+                self.term_copy(agent, cx);
             }
-            (true, false, "c") if windows && !self.term_sel_text().is_empty() => {
-                self.term_copy(cx);
-                self.side_sel = None;
+            (true, false, "c") if windows && !self.term_sel_text(agent).is_empty() => {
+                self.term_copy(agent, cx);
+                self.view_mut(agent).sel = None;
             }
-            (true, true, "v") | (false, true, "insert") => self.term_paste(cx),
-            (true, false, "v") if windows => self.term_paste(cx),
+            (true, true, "v") | (false, true, "insert") => self.term_paste(agent, cx),
+            (true, false, "v") if windows => self.term_paste(agent, cx),
             (true, false, "tab") | (true, false, "pagedown") if tabs => self.shell_step(1, cx),
             (true, true, "tab") | (true, false, "pageup") if tabs => self.shell_step(-1, cx),
             _ => return false,
@@ -1219,11 +1309,11 @@ impl Workbench {
     /// A key in the panel, as the bytes a terminal sends for it. ⌘V is a
     /// paste; any other key with ⌘ is the window's. Off a Mac,
     /// `term_pc_key` has the panel's own.
-    fn term_panel_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(pty) = self.term_panel_pty().filter(|p| p.alive()) else { return };
+    fn term_panel_key(&mut self, agent: bool, e: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(pty) = self.term_pty_of(agent).filter(|p| p.alive()) else { return };
         let k = &e.keystroke;
-        if self.term_pc_key(k, cx) {
-            self.term_unhover();
+        if self.term_pc_key(agent, k, cx) {
+            self.term_unhover(agent);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -1242,30 +1332,30 @@ impl Workbench {
             };
             let handled = match k.key.as_str() {
                 "v" => {
-                    self.term_paste(cx);
+                    self.term_paste(agent, cx);
                     true
                 }
-                "c" => self.term_copy(cx),
-                "[" | "{" if k.modifiers.shift && !self.term_side_agent() => {
+                "c" => self.term_copy(agent, cx),
+                "[" | "{" if k.modifiers.shift && !agent => {
                     self.shell_step(-1, cx);
                     true
                 }
-                "]" | "}" if k.modifiers.shift && !self.term_side_agent() => {
+                "]" | "}" if k.modifiers.shift && !agent => {
                     self.shell_step(1, cx);
                     true
                 }
                 _ => match line {
                     Some(bytes) => {
                         pty.write(bytes);
-                        self.side_back = 0;
-                        self.side_sel = None;
+                        self.view_mut(agent).back = 0;
+                        self.view_mut(agent).sel = None;
                         true
                     }
                     None => false,
                 },
             };
             if handled {
-                self.term_unhover();
+                self.term_unhover(agent);
                 cx.stop_propagation();
                 cx.notify();
             }
@@ -1286,11 +1376,11 @@ impl Workbench {
             bytes[1] = b'O';
         }
         pty.write(&bytes);
-        self.side_back = 0;
-        self.side_sel = None;
-        self.term_unhover();
+        self.view_mut(agent).back = 0;
+        self.view_mut(agent).sel = None;
+        self.term_unhover(agent);
         // A key begins the cursor's blink again, lit.
-        self.side_blink.1 = Instant::now();
+        self.view_mut(agent).blink.1 = Instant::now();
         cx.stop_propagation();
         cx.notify();
     }
@@ -1300,59 +1390,57 @@ impl Workbench {
     /// and the screen's readers were made for that one.
     pub(crate) fn fit_agent_pty(&self, session_id: &str) {
         let Some(pty) = self.hub.agent_screen(session_id) else { return };
-        let want = if self.term_panel_shown() && self.term_side_agent() { self.side_term_size.get() } else { (pty::ROWS, pty::COLS) };
+        let want = if self.cli_shown() { self.agent_view.size.get() } else { (pty::ROWS, pty::COLS) };
         if want.0 > 0 && want.1 > 0 && pty.size() != want {
             pty.resize(want.0, want.1);
         }
     }
 
-    /// The panel as it is drawn: the side that shows, and for a moment
-    /// the side that was showing. Beside nothing a side widens from the
-    /// window's edge and fades in, and put away it narrows and fades out;
-    /// in the other's place it fades in while the other fades out over
-    /// it, as the files and the outline do. The wrapper is there at rest
-    /// too, under the same name (`docs/panels.md`).
-    pub(crate) fn render_term_panel(&mut self, r: &SessionRef, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The shell terminal's panel as it is drawn, and for a moment as it
+    /// goes: it widens from the window's edge and fades in, and put away
+    /// it narrows and fades out, drawn as it was. The wrapper is there at
+    /// rest too, under the same name (`docs/panels.md`).
+    pub(crate) fn render_term_panel(&mut self, r: &SessionRef, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.term_stage() {
-            return Vec::new();
+            return None;
         }
         let live = self.side_term_anim.filter(|(_, _, at, _)| at.elapsed() < TERM_PANEL_ANIM);
         let serial = self.side_term_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0);
-        let w = self.term_panel_w();
-        let mut out = Vec::new();
-        let going = live.and_then(|(from, to, _, _)| from.filter(|f| to != Some(*f)).map(|f| (f, to.is_some())));
-        let coming = self.term_on();
-        for (agent, ghost, over) in going.map(|(f, over)| (f, true, over)).into_iter().chain(coming.map(|a| (a, false, false))) {
-            let panel = self.render_term_side(agent, ghost, r, window, cx);
-            // (widens or narrows, comes or goes)
-            let play = match live {
-                Some((from, _, _, _)) if !ghost => Some((from.is_none(), true)),
-                Some((_, to, _, _)) if ghost => Some((to.is_none(), false)),
-                _ => None,
-            };
-            out.push(
-                div()
-                    .h_full()
-                    .flex_shrink_0()
-                    .overflow_hidden()
-                    .when(over, |d| d.absolute().top_0().right_0())
-                    .child(panel)
-                    .with_animation(ElementId::Name(format!("term-panel-{agent}-{serial}").into()), Animation::new(TERM_PANEL_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
-                        Some((wide, comes)) => {
-                            let t = if comes { t } else { 1. - t };
-                            d.w(if wide { (w * t).round() } else { w }).opacity(t)
-                        }
-                        None => d,
-                    })
-                    .into_any_element(),
-            );
+        let on = self.term_on();
+        let going = !on && live.is_some_and(|(from, _, _, _)| from);
+        if !on && !going {
+            return None;
         }
-        out
+        let w = self.term_panel_w();
+        let panel = self.render_term_side(false, going, r, window, cx);
+        let play = live.map(|(_, to, _, _)| to);
+        Some(
+            div()
+                .h_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(panel)
+                .with_animation(ElementId::Name(format!("term-panel-{serial}").into()), Animation::new(TERM_PANEL_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
+                    Some(comes) => {
+                        let t = if comes { t } else { 1. - t };
+                        d.w((w * t).round()).opacity(t)
+                    }
+                    None => d,
+                })
+                .into_any_element(),
+        )
     }
 
-    /// One side of the panel: its head, saying what it is, with a close
-    /// button, over the screen. `leaving` is the side on its way out,
-    /// drawn as it was: nothing is started, sized or measured for it.
+    /// The agent terminal in the conversation's place, the CLI layout's.
+    /// `leaving`: on its way out, drawn as it was.
+    pub(crate) fn render_cli(&mut self, r: &SessionRef, leaving: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.render_term_side(true, leaving, r, window, cx)
+    }
+
+    /// One of the two terminals: the shell's panel, its head a row of
+    /// tabs over the screen, or the agent's screen in the CLI layout.
+    /// `leaving` is one on its way out, drawn as it was: nothing is
+    /// started, sized or measured for it.
     fn render_term_side(&mut self, agent: bool, leaving: bool, r: &SessionRef, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let w = self.term_panel_w();
@@ -1375,12 +1463,12 @@ impl Workbench {
             let run = TextRun { len: probe.len(), font: face.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
             f32::from(window.text_system().shape_line(probe.into(), px(text), &[run], None).width) / probe.len() as f32
         };
-        let room = self.side_term_bounds.get().size;
+        let room = self.view_mut(agent).bounds.get().size;
         let size = (((f32::from(room.height) - pad - pad_foot) / lh).floor().max(4.) as u16, ((f32::from(room.width) - 2. * pad) / cell_w.max(1.)).floor().max(20.) as u16);
         if room.height > px(0.) && !leaving {
-            self.side_term_size.set(size);
-            self.side_cell_w = cell_w;
-            self.side_pad = (pad, pad_foot);
+            self.view_mut(agent).size.set(size);
+            self.view_mut(agent).cell_w = cell_w;
+            self.view_mut(agent).pad = (pad, pad_foot);
         }
 
         // What shows: the shell, started when first looked at, or the
@@ -1429,24 +1517,24 @@ impl Workbench {
         }
 
         let (ground, ink) = (k.bg, k.fg);
-        let focused = self.side_term_focus.is_focused(window);
+        let focused = self.view_mut(agent).focus.is_focused(window);
         if !leaving {
-            self.side_focused = focused;
+            self.view_mut(agent).focused = focused;
         }
         // A program that hears the mouse has the arrow, a link the hand.
-        let grabbed = shown.as_ref().is_ok_and(|p| p.alive() && p.mouse().is_some()) && self.side_back == 0;
-        let pointer = if self.side_link.is_some() { CursorStyle::PointingHand } else if grabbed { CursorStyle::Arrow } else { CursorStyle::IBeam };
+        let grabbed = shown.as_ref().is_ok_and(|p| p.alive() && p.mouse().is_some()) && self.view_mut(agent).back == 0;
+        let pointer = if self.view_mut(agent).link.is_some() { CursorStyle::PointingHand } else if grabbed { CursorStyle::Arrow } else { CursorStyle::IBeam };
         let body: AnyElement = match shown {
             Err(el) => el,
             Ok(pty) => {
-                let (rows, back) = pty.rows_back(self.side_back);
-                self.side_back = back;
-                let picked = match self.side_sel {
+                let (rows, back) = pty.rows_back(self.view_mut(agent).back);
+                self.view_mut(agent).back = back;
+                let picked = match self.view_mut(agent).sel {
                     Some(sel) if !leaving => sel.spans(&rows.iter().map(|r| row_cells(r)).collect::<Vec<_>>()),
                     _ => Vec::new(),
                 };
-                let lines = screen_lines(&rows, cell_w, lh, k, &picked, self.side_link.as_ref().filter(|_| !leaving));
-                let copied = self.side_copied.filter(|at| at.elapsed() < COPIED_FOR && !leaving).map(|_| {
+                let lines = screen_lines(&rows, cell_w, lh, k, &picked, self.view_mut(agent).link.as_ref().filter(|_| !leaving));
+                let copied = self.view_mut(agent).copied.filter(|at| at.elapsed() < COPIED_FOR && !leaving).map(|_| {
                     // Kaku's toast: two cells in from the corner, a cell
                     // and a half tall, gone over its last half second.
                     div()
@@ -1470,14 +1558,14 @@ impl Workbench {
                 // off by turns from when it last moved while the panel has
                 // the keyboard, and still otherwise.
                 let at = pty.cursor().filter(|_| back == 0 && pty.alive());
-                if let Some(at) = at.filter(|at| !leaving && *at != self.side_blink.0) {
-                    self.side_blink = (at, Instant::now());
+                if let Some(at) = at.filter(|at| !leaving && *at != self.view_mut(agent).blink.0) {
+                    self.view_mut(agent).blink = (at, Instant::now());
                 }
                 if !leaving {
-                    self.side_blink_on = self.blink_on();
+                    self.view_mut(agent).blink_on = self.blink_on(agent);
                 }
                 let (shape, blinks) = (self.cfg.terminal.cursor.clone(), self.cfg.terminal.cursor_blink);
-                let cursor = at.filter(|_| !focused || !blinks || self.side_blink_on).map(|(row, col)| {
+                let cursor = at.filter(|_| !focused || !blinks || self.view_mut(agent).blink_on).map(|(row, col)| {
                     let (thin, ink) = (px((2. / scale).max(1.)), hsla(k.cursor));
                     let d = div().absolute().top(px(pad + row as f32 * lh)).left(px(pad + col as f32 * cell_w)).h(px(lh));
                     match shape.as_str() {
@@ -1528,7 +1616,7 @@ impl Workbench {
                                     this.shell_close(id, cx);
                                     this.shell_new(Some(ix), cx);
                                 }
-                                window.focus(&this.side_term_focus, cx);
+                                window.focus(&this.shell_view.focus, cx);
                             })))
                         })
                 });
@@ -1560,29 +1648,136 @@ impl Workbench {
             }
         };
 
-        let back = (self.side_back > 0).then(|| div().flex_shrink_0().pr(px(10.)).font(face.clone()).text_size(px(11.)).text_color(hsla(k.tab_off)).child(crate::i18n::count(self.side_back as usize, "{n} line back", "{n} lines back")));
-        // Both heads are a row of tabs: the agent's is its one screen,
-        // the shell's a tab a shell.
-        let head_row: AnyElement = if agent {
-            h_flex()
-                .h_full()
-                .px(px(10.))
-                .gap(px(6.))
-                .items_center()
-                .bg(hsla(k.tab_on))
-                .font(face.clone())
-                .font_weight(k.bold)
-                .text_size(px(11.5))
-                .text_color(hsla(k.fg))
-                .child(Icon::default().path(crate::workbench::agent_icon_path(r.agent)).with_size(px(12.)).text_color(crate::workbench::agent_color(r.agent, &theme)))
-                .child(r.agent.display_name())
-                .into_any_element()
-        } else {
-            self.render_shell_tabs(r, f32::from(w) - if back.is_some() { 110. } else { 0. }, cx)
-        };
-        let bounds = self.side_term_bounds.clone();
+        let lines_back = self.view(agent).back;
+        let back = (lines_back > 0).then(|| div().flex_shrink_0().pr(px(10.)).font(face.clone()).text_size(px(11.)).text_color(hsla(k.tab_off)).child(crate::i18n::count(lines_back, "{n} line back", "{n} lines back")));
+        let bounds = self.view(agent).bounds.clone();
         let entity = cx.entity().downgrade();
-        let panel = v_flex()
+        let screen = div()
+            .id(if agent { "term-agent" } else { "term-panel-shell" })
+            .key_context(TERMINAL_CONTEXT)
+            .when(!leaving, |d| d.track_focus(&self.view(agent).focus))
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .overflow_hidden()
+            .bg(hsla(ground))
+            .cursor(pointer)
+            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| this.term_panel_key(agent, e, cx)))
+            .on_action(cx.listener(move |this, _: &TermTab, _, cx| {
+                if let Some(pty) = this.term_pty_of(agent) {
+                    pty.write(b"\t");
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &TermBackTab, _, cx| {
+                if let Some(pty) = this.term_pty_of(agent) {
+                    pty.write(b"\x1b[Z");
+                }
+                cx.notify();
+            }))
+            .on_any_mouse_down(cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                window.focus(&this.view(agent).focus, cx);
+                this.term_mouse_down(agent, e, cx);
+                swallow_click(window, cx);
+                cx.notify();
+            }))
+            .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| this.term_mouse_move(agent, e, cx)))
+            .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                if !over && this.view(agent).link.is_some() {
+                    this.term_unhover(agent);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &TermClear, _, cx| {
+                this.term_clear(agent);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &TermNewTab, window, cx| {
+                if agent {
+                    return cx.propagate();
+                }
+                this.shell_new(None, cx);
+                window.focus(&this.shell_view.focus, cx);
+            }))
+            .on_action(cx.listener(move |this, _: &CloseTab, window, cx| {
+                // ⌘W, the window's own action, heard here first while the
+                // terminal has the keyboard. In the shell terminal it is
+                // the shell's and nothing else's: it closes the tab
+                // showing, and with none left puts the panel away, as its
+                // button does, so it never reaches a file shown or the
+                // session's tab. In the agent terminal it is the window's.
+                if agent {
+                    cx.propagate();
+                } else if let Some(id) = this.term_owner().and_then(|r| this.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
+                    this.shell_close(id, cx);
+                } else {
+                    this.term_go(false, cx);
+                    window.focus(&this.focus_handle, cx);
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(move |this, e: &MouseUpEvent, _, cx| this.term_mouse_up(agent, e, cx)))
+            .on_mouse_up(MouseButton::Right, cx.listener(move |this, e: &MouseUpEvent, _, cx| this.term_mouse_up(agent, e, cx)))
+            .on_mouse_up(MouseButton::Middle, cx.listener(move |this, e: &MouseUpEvent, _, cx| this.term_mouse_up(agent, e, cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(move |this, e: &MouseUpEvent, _, cx| this.term_mouse_up(agent, e, cx)))
+            // Where the screen is and how large, for the next draw.
+            .when(!leaving, |d| d.child(
+                canvas(
+                    move |b, _, cx| {
+                        if bounds.get() != b {
+                            bounds.set(b);
+                            if let Some(e) = entity.upgrade() {
+                                cx.defer(move |cx| e.update(cx, |_, cx| cx.notify()));
+                            }
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            ))
+            .child(body);
+        // The agent terminal has the conversation's room under the path
+        // bar, which names its session; how far back it is scrolled is
+        // said at the screen's top right.
+        if agent {
+            // It has the room the rendered layout gives the conversation:
+            // the screen stands in a column as wide as the conversation's
+            // words, and the room at its sides is the terminal's own ground
+            // a step deeper, so the column's edge is clear and the two read
+            // as one surface. A press in that room is the screen's
+            // keyboard, and its wheel the screen's.
+            let ground = hsla(ground);
+            // Black laid thinly over it, not its lightness taken down,
+            // which turned Kaku's cream a stronger yellow.
+            let side = ground.blend(gpui::black().opacity(if theme.mode.is_dark() { CLI_SIDE_DEEPER.1 } else { CLI_SIDE_DEEPER.0 }));
+            let room = self.agent_view.room.clone();
+            return h_flex()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .justify_center()
+                .overflow_hidden()
+                .bg(side)
+                .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    window.focus(&this.agent_view.focus, cx);
+                    swallow_click(window, cx);
+                }))
+                .when(!leaving, |d| d.child(canvas(move |b, _, _| room.set(b), |_, _, _, _| {}).absolute().size_full()))
+                .child(
+                    v_flex()
+                        .relative()
+                        .w_full()
+                        .max_w(crate::workbench::CONTENT_W + px(2. * pad))
+                        .h_full()
+                        .bg(ground)
+                        .child(screen.children(back.map(|b| div().absolute().top(px(6.)).right(px(4.)).child(b)))),
+                )
+                .into_any_element();
+        }
+        // The shell's head is a row of tabs, a tab a shell.
+        let head_row = self.render_shell_tabs(r, f32::from(w) - if back.is_some() { 110. } else { 0. }, cx);
+        v_flex()
             .w(w)
             .h_full()
             .flex_shrink_0()
@@ -1606,96 +1801,9 @@ impl Workbench {
                     .child(div().flex_1())
                     .children(back),
             )
-            .child(
-                div()
-                    .id(if agent { "term-panel-agent" } else { "term-panel-shell" })
-                    .key_context(TERMINAL_CONTEXT)
-                    .when(!leaving, |d| d.track_focus(&self.side_term_focus))
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .overflow_hidden()
-                    .bg(hsla(ground))
-                    .cursor(pointer)
-                    .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.term_panel_key(e, cx)))
-                    .on_action(cx.listener(|this, _: &TermTab, _, cx| {
-                        if let Some(pty) = this.term_panel_pty() {
-                            pty.write(b"\t");
-                        }
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(|this, _: &TermBackTab, _, cx| {
-                        if let Some(pty) = this.term_panel_pty() {
-                            pty.write(b"\x1b[Z");
-                        }
-                        cx.notify();
-                    }))
-                    .on_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, window, cx| {
-                        window.focus(&this.side_term_focus, cx);
-                        this.term_mouse_down(e, cx);
-                        swallow_click(window, cx);
-                        cx.notify();
-                    }))
-                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.term_mouse_move(e, cx)))
-                    .on_hover(cx.listener(|this, over: &bool, _, cx| {
-                        if !over && this.side_link.is_some() {
-                            this.term_unhover();
-                            cx.notify();
-                        }
-                    }))
-                    .on_action(cx.listener(|this, _: &TermClear, _, cx| {
-                        this.term_clear();
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(|this, _: &TermNewTab, window, cx| {
-                        if this.term_side_agent() {
-                            return cx.propagate();
-                        }
-                        this.shell_new(None, cx);
-                        window.focus(&this.side_term_focus, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                        // ⌘W, the window's own action, heard here first
-                        // while the panel has the keyboard. On the shell's
-                        // side it is the shell's and nothing else's: it
-                        // closes the tab showing, and with none left puts
-                        // the panel away, as its button does, so it never
-                        // reaches a file shown or the session's tab. On the
-                        // agent's side it is the window's.
-                        if this.term_side_agent() {
-                            cx.propagate();
-                        } else if let Some(id) = this.term_owner().and_then(|r| this.shells.get(&r.session_id)).and_then(|s| s.current()).map(|t| t.id) {
-                            this.shell_close(id, cx);
-                        } else {
-                            this.term_go(None, cx);
-                            window.focus(&this.focus_handle, cx);
-                        }
-                    }))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.term_mouse_up(e, cx)))
-                    .on_mouse_up(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, _, cx| this.term_mouse_up(e, cx)))
-                    .on_mouse_up(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, _, cx| this.term_mouse_up(e, cx)))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.term_mouse_up(e, cx)))
-                    // Where the screen is and how large, for the next draw.
-                    .when(!leaving, |d| d.child(
-                        canvas(
-                            move |b, _, cx| {
-                                if bounds.get() != b {
-                                    bounds.set(b);
-                                    if let Some(e) = entity.upgrade() {
-                                        cx.defer(move |cx| e.update(cx, |_, cx| cx.notify()));
-                                    }
-                                }
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    ))
-                    .child(body),
-            );
-        panel.into_any_element()
+            .child(screen)
+            .into_any_element()
     }
-
 
     /// The agent's side with no hidden terminal behind the session: why,
     /// and a button that starts one where that is ours to do.
@@ -1777,7 +1885,7 @@ impl Workbench {
                 d.child(start.on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);
                     this.start_hidden_terminal(cx);
-                    window.focus(&this.side_term_focus, cx);
+                    window.focus(&this.agent_view.focus, cx);
                     cx.notify();
                 })))
             })
@@ -2223,3 +2331,4 @@ fn block_shape(c: char) -> Option<(Vec<(f32, f32, f32, f32)>, f32)> {
         _ => (vec![ur, ll, lr], 1.),
     })
 }
+

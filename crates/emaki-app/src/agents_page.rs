@@ -211,7 +211,7 @@ impl Workbench {
         let right = if open.is_some() { vec![self.term_shell_button(cx)] } else { Vec::new() };
         let term = match self.term_owner() {
             Some(r) if open.is_some() => self.render_term_panel(&r, window, cx),
-            _ => Vec::new(),
+            _ => None,
         };
         let page = v_flex()
             .relative()
@@ -548,8 +548,8 @@ impl Workbench {
         // as the box is (its edge, its corners, no ground of its own), so
         // the two read as a pair. While the shell shows it takes the box's
         // ground, fading in and out with the panel.
-        let on = self.term_on().is_some();
-        let (was, serial) = self.side_term_anim.map(|(from, _, _, n)| (from.is_some(), n + 1)).unwrap_or((on, 0));
+        let on = self.term_on();
+        let (was, serial) = self.side_term_anim.map(|(from, _, _, n)| (from, n + 1)).unwrap_or((on, 0));
         let ground = if theme.mode.is_dark() { theme.background } else { theme.muted.opacity(0.6) };
         let fill = (on || was).then(|| {
             let (a, b) = (if was { 1. } else { 0. }, if on { 1. } else { 0. });
@@ -576,7 +576,7 @@ impl Workbench {
             .text_color(if on { lit } else { theme.muted_foreground })
             .hover(move |s| s.bg(hover).text_color(lit))
             .managed_tooltip(|window, cx| crate::workbench::tip(t("Shell Terminal in your home folder (⌘⇧S)"), window, cx))
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_term(false, window, cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_term(window, cx)))
             .children(fill)
             .child(Icon::default().path("icons/terminal.svg").with_size(px(15.)).relative());
         // Centerd on the box, however many lines the command takes.

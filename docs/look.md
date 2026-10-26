@@ -26,7 +26,9 @@ Three things are kept apart by more than a shade, because a window of creams a s
 - The page and what lies on it: in the light appearance near white with a trace of warmth, its grays (panels, tracks, bubbles, lines) the old creams with most of their color taken out. In the dark appearance the page is the darkest ground there is.
 - The accent, the one color the window wears of its own, which is why it stands out (`docs/design.md`, The accents).
 
-A track of buttons (a segmented control, the tabs' pill, the strip's two tracks, the tray under the composer) is `tab_bar.segmented.background` in the dark appearance, lighter than the page and than a card on it. It was the panels' ground, which on the darker page was the page's own shade, and a control had no edge.
+The files panel, with the structure at its foot, stands a step lighter than the other panels' gray (`look::files_ground`), so the folder reads apart from the outline beside it.
+
+A track of buttons (a segmented control, the tabs' pill, the pages' track in the strip, the tray under the composer) is `tab_bar.segmented.background` in the dark appearance, lighter than the page and than a card on it. It was the panels' ground, which on the darker page was the page's own shade, and a control had no edge.
 
 The terminal keeps Kaku's cream in the light appearance (`docs/channels.md`): it is a different thing from the page and may look it.
 
