@@ -2,6 +2,17 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.4.0
+
+1. **CLI layout**: A slider at the right of the path bar switches a session between the rendered conversation and the agent's own terminal, which takes the conversation's place in a centered column (⌘⇧A).
+2. **Outline**: The outline opens from a button at the left of the path bar and takes the left of the conversation, in the rendered layout.
+3. **Panel buttons**: The files, outline and terminal buttons are plain icons with an accent line under those that are open, and each pair stands one over the other.
+4. **Collapsed sidebar**: Put away, the sidebar folds to a rail of icons under the window's buttons: search, New Session, All Sessions, Agents, and Projects, which opens your projects beside it.
+5. **New Session**: Pressing New Session again on the new-session page takes you back to where you were.
+6. **Sidebar button**: The sidebar opens when you click its button and no longer floats in under the pointer.
+7. **Keep the display on**: The screen also stays awake while a session waits on a command or subagent it left running in the background.
+8. **Files panel**: The files panel and its structure have a lighter background, set apart from the outline.
+
 ## v0.3.2
 
 1. **Lighter and faster**: Emaki uses a fraction of the CPU and power it did while an agent works, and a long session or a large file no longer slows the window down.
