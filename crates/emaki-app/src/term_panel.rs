@@ -49,6 +49,13 @@ pub(crate) const CLI_SHUFFLE: f32 = 80.;
 const POLL: Duration = Duration::from_millis(33);
 /// How often the agents' page looks again while the shell is beside it.
 const LOOK_AGAIN: Duration = Duration::from_secs(4);
+/// A drag held past the screen's edge scrolls it this often, by so many
+/// rows a second at the edge, so many more for each pixel further out,
+/// and no more than so many.
+const EDGE_TICK: Duration = Duration::from_millis(16);
+const EDGE_ROWS: f32 = 10.;
+const EDGE_MORE: f32 = 1.2;
+const EDGE_MOST: f32 = 120.;
 /// How long the panel says a selection was copied.
 const COPIED_FOR: Duration = Duration::from_millis(2500);
 /// The head over a side, as tall as the path bar over the conversation.
@@ -95,48 +102,64 @@ impl Shells {
     }
 }
 
-/// What is selected on the screen: where the press was and where the
-/// pointer is, each (row, column), and whether by the letter, the word
-/// (a double click) or the row (a triple). A press that never moved
-/// selects nothing by the letter.
+/// What is selected: where it began and where it runs to, each (line,
+/// column). A line is counted from the screen's top row with nothing
+/// scrolled back, and is less than 0 for what has left the screen, so a
+/// selection keeps its place while the screen scrolls under it. By the
+/// letter, the word (a double click) or the row (a triple), each end a
+/// cell; or from the keyboard, each end a place between two cells, as a
+/// caret is (`unit` 0). A press that never moved selects nothing.
 #[derive(Clone, Copy)]
 pub(crate) struct Sel {
-    anchor: (u16, u16),
-    head: (u16, u16),
+    anchor: (i64, u16),
+    head: (i64, u16),
     unit: usize,
     /// The same columns of every row (a drag with ⌥), not a run of text.
     block: bool,
 }
 
+/// Kaku's `selection_word_boundary`: what a word is made of.
+fn word_char(c: char) -> bool {
+    !c.is_whitespace() && c != '\0' && !"{}[]()\"'-".contains(c)
+}
+
 impl Sel {
-    /// The columns selected in each row, from and up to, given what the
-    /// rows hold.
-    fn spans(&self, cells: &[Vec<char>]) -> Vec<Option<(usize, usize)>> {
-        let (a, b) = if self.anchor <= self.head { (self.anchor, self.head) } else { (self.head, self.anchor) };
+    /// The two ends, the earlier first.
+    fn ends(&self) -> ((i64, u16), (i64, u16)) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// The columns selected in each of `cells`, the lines from `top` on,
+    /// from and up to.
+    fn spans(&self, top: i64, cells: &[Vec<char>]) -> Vec<Option<(usize, usize)>> {
+        let (a, b) = self.ends();
         let mut out = vec![None; cells.len()];
         if self.unit <= 1 && a == b {
             return out;
         }
+        let at = |l: i64| usize::try_from(l - top).ok().filter(|i| *i < cells.len());
+        let last = top + cells.len() as i64 - 1;
         if self.block {
             let (from, to) = (self.anchor.1.min(self.head.1) as usize, self.anchor.1.max(self.head.1) as usize + 1);
-            for slot in out.iter_mut().take(b.0 as usize + 1).skip(a.0 as usize) {
-                *slot = Some((from, to));
+            for l in a.0.max(top)..=b.0.min(last) {
+                out[at(l).unwrap()] = Some((from, to));
             }
             return out;
         }
-        let len = |r: u16| cells.get(r as usize).map(|c| c.len()).unwrap_or(0);
-        // Kaku's `selection_word_boundary`.
-        let word = |c: char| !c.is_whitespace() && c != '\0' && !"{}[]()\"'-".contains(c);
-        let (mut from, mut to) = (a.1 as usize, b.1 as usize + 1);
+        let (mut from, mut to) = (a.1 as usize, b.1 as usize + (self.unit > 0) as usize);
         match self.unit {
             2 => {
-                if let Some(row) = cells.get(a.0 as usize) {
-                    while from > 0 && from <= row.len() && row.get(from).is_some_and(|c| word(*c)) && word(row[from - 1]) {
+                if let Some(row) = at(a.0).map(|i| &cells[i]) {
+                    while from > 0 && from <= row.len() && row.get(from).is_some_and(|c| word_char(*c)) && word_char(row[from - 1]) {
                         from -= 1;
                     }
                 }
-                if let Some(row) = cells.get(b.0 as usize) {
-                    while to < row.len() && word(row[to - 1]) && word(row[to]) {
+                if let Some(row) = at(b.0).map(|i| &cells[i]) {
+                    while to < row.len() && word_char(row[to - 1]) && word_char(row[to]) {
                         to += 1;
                     }
                 }
@@ -144,12 +167,13 @@ impl Sel {
             3 => (from, to) = (0, usize::MAX),
             _ => {}
         }
-        for r in a.0..=b.0 {
-            let (f, t) = (if r == a.0 { from } else { 0 }, if r == b.0 { to } else { usize::MAX });
+        for l in a.0.max(top)..=b.0.min(last) {
+            let i = at(l).unwrap();
+            let (f, t) = (if l == a.0 { from } else { 0 }, if l == b.0 { to } else { usize::MAX });
             // A row with nothing on it still shows that it is selected.
-            let t = t.min(len(r).max(1));
-            if let Some(slot) = out.get_mut(r as usize).filter(|_| f < t) {
-                *slot = Some((f, t));
+            let t = t.min(cells[i].len().max(1));
+            if f < t {
+                out[i] = Some((f, t));
             }
         }
         out
@@ -197,6 +221,14 @@ pub(crate) struct TermView {
     alt: bool,
     /// The cell the pointer was last over, column and row.
     hover: (u16, u16),
+    /// A drag that selects, held past the screen's top (less than 0) or
+    /// foot, by so many pixels, and the column it is over: the screen
+    /// scrolls on under it while it is there. What of a row is left over
+    /// from the last step, and whether the steps are running.
+    edge: f32,
+    edge_col: u16,
+    edge_rows: f32,
+    edge_run: bool,
 }
 
 impl TermView {
@@ -221,6 +253,10 @@ impl TermView {
             link: None,
             alt: false,
             hover: (u16::MAX, u16::MAX),
+            edge: 0.,
+            edge_col: 0,
+            edge_rows: 0.,
+            edge_run: false,
         }
     }
 }
@@ -230,6 +266,7 @@ impl TermView {
 pub(crate) enum TermDo {
     Copy,
     Paste,
+    SelectAll,
     Clear,
     NewTab,
     CloseTab,
@@ -240,6 +277,7 @@ impl TermDo {
         match self {
             TermDo::Copy => "icons/copy.svg",
             TermDo::Paste => "icons/clipboard.svg",
+            TermDo::SelectAll => "icons/select-all.svg",
             TermDo::Clear => "icons/eraser.svg",
             TermDo::NewTab => "icons/plus.svg",
             TermDo::CloseTab => "icons/close.svg",
@@ -291,6 +329,26 @@ fn row_cells(row: &[pty::Span]) -> Vec<char> {
         }
     }
     out
+}
+
+/// Paths as a shell reads them, a space between: each character a shell
+/// would read as its own after a backslash, as a Mac's terminals type a
+/// dropped file; in double quotes for PowerShell where one needs them.
+fn path_words(paths: &[std::path::PathBuf]) -> String {
+    let word = |p: &std::path::PathBuf| {
+        let p = p.to_string_lossy();
+        if cfg!(windows) {
+            return if p.contains([' ', '\'', '&', '(', ')', ';', ',']) { format!("\"{p}\"") } else { p.into_owned() };
+        }
+        p.chars().fold(String::new(), |mut out, c| {
+            if c.is_whitespace() || "\\'\"()[]{}&;|<>*?$`!#".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+            out
+        })
+    };
+    paths.iter().map(word).collect::<Vec<_>>().join(" ")
 }
 
 /// A shell's tab being dragged along the row.
@@ -429,7 +487,7 @@ impl Workbench {
         cx.notify();
     }
 
-    /// The layout slider was moved, or ⌘⇧A pressed: the agent terminal
+    /// The layout slider was moved, or ⌘⇧L pressed: the agent terminal
     /// takes the conversation's place, or gives it back. The keyboard
     /// goes with it, to the terminal or to the composer.
     pub(crate) fn toggle_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -535,10 +593,10 @@ impl Workbench {
             _ if step.starts_with("term:text:") => self.cfg.terminal.size = step["term:text:".len()..].parse().unwrap_or(13.),
             "term:clear" => self.term_clear(agent),
             _ if step.starts_with("term:sel:") => {
-                // term:sel:<unit>,<row>,<col>,<row>,<col>
-                let n: Vec<u16> = step["term:sel:".len()..].split(',').filter_map(|v| v.parse().ok()).collect();
-                if let [unit, r1, c1, r2, c2] = n[..] {
-                    self.view_mut(agent).sel = Some(Sel { anchor: (r1, c1), head: (r2, c2), unit: unit as usize % 4, block: unit >= 4 });
+                // term:sel:<unit>,<line>,<col>,<line>,<col>
+                let n: Vec<i64> = step["term:sel:".len()..].split(',').filter_map(|v| v.parse().ok()).collect();
+                if let [unit, l1, c1, l2, c2] = n[..] {
+                    self.view_mut(agent).sel = Some(Sel { anchor: (l1, c1 as u16), head: (l2, c2 as u16), unit: unit as usize % 4, block: unit >= 4 });
                     eprintln!("emaki: selected {:?}", self.term_sel_text(agent));
                 }
             }
@@ -577,8 +635,8 @@ impl Workbench {
     pub(crate) fn term_shell_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.term_on();
         let (was, serial) = self.side_term_anim.map(|(from, _, at, n)| (crate::workbench::pressed_from(from, on, at), n + 1)).unwrap_or((on, 0));
-        let tip = if self.term_at_agents() { t("Shell Terminal in your home folder (⌘⇧S)") } else { t("Shell Terminal (⌘⇧S)") };
-        self.toggle_button("term-shell", "icons/terminal.svg", tip, (was, on, serial), Rc::new(|this, window, cx| this.toggle_term(window, cx)), cx)
+        let tip = crate::shortcuts::keyed(if self.term_at_agents() { t("Shell Terminal in your home folder (⌘⇧S)") } else { t("Shell Terminal (⌘⇧S)") }, "terminal");
+        self.toggle_button("term-shell", "icons/terminal.svg", &tip, (was, on, serial), Rc::new(|this, window, cx| this.toggle_term(window, cx)), cx)
     }
 
     /// While the panel shows, the window is drawn again whenever the
@@ -1003,7 +1061,6 @@ impl Workbench {
             pty.write(&key.repeat(lines.unsigned_abs() as usize));
         } else {
             self.view_mut(agent).back = (self.view_mut(agent).back as i64 + lines).max(0) as usize;
-            self.view_mut(agent).sel = None;
             self.term_unhover(agent);
         }
     }
@@ -1054,6 +1111,7 @@ impl Workbench {
                     items.push((phrase("Copy"), MenuDo::Term(TermDo::Copy)));
                 }
                 items.push((phrase("Paste"), MenuDo::Term(TermDo::Paste)));
+                items.push((phrase("Select All"), MenuDo::Term(TermDo::SelectAll)));
                 if !agent {
                     items.push(("", MenuDo::Rule));
                     items.push((phrase("New Tab"), MenuDo::Term(TermDo::NewTab)));
@@ -1071,9 +1129,17 @@ impl Workbench {
             MouseButton::Middle => return self.term_paste(agent, cx),
             _ => return,
         }
-        // With Shift the selection there is runs on to the press.
+        let line = self.term_line(agent, row);
+        // With Shift the selection there is runs on to the press; one
+        // made from the keyboard is by the letter from then on.
         if let Some(sel) = self.view_mut(agent).sel.as_mut().filter(|_| e.modifiers.shift) {
-            sel.head = (row, col);
+            if sel.unit == 0 {
+                sel.unit = 1;
+                if sel.anchor > sel.head {
+                    sel.anchor.1 = sel.anchor.1.saturating_sub(1);
+                }
+            }
+            sel.head = (line, col);
             self.view_mut(agent).selecting = true;
             return;
         }
@@ -1081,7 +1147,7 @@ impl Workbench {
         // click at a prompt takes the cursor there, when the button is
         // let go where it was pressed.
         self.view_mut(agent).alt = e.modifiers.alt && want.is_none() && self.view_mut(agent).back == 0 && !pty.alt_screen();
-        self.view_mut(agent).sel = Some(Sel { anchor: (row, col), head: (row, col), unit: e.click_count.clamp(1, 3), block: e.modifiers.alt });
+        self.view_mut(agent).sel = Some(Sel { anchor: (line, col), head: (line, col), unit: e.click_count.clamp(1, 3), block: e.modifiers.alt });
         self.view_mut(agent).selecting = true;
     }
 
@@ -1122,7 +1188,7 @@ impl Workbench {
                     Ok(path) => said.push(path.to_string_lossy().to_string()),
                     Err(e) => self.notice = Some(crate::workbench::Notice::error(e)),
                 },
-                ClipboardEntry::ExternalPaths(paths) => said.extend(paths.paths().iter().map(|p| p.to_string_lossy().to_string())),
+                ClipboardEntry::ExternalPaths(paths) => said.push(path_words(paths.paths())),
                 ClipboardEntry::String(s) => said.push(s.text().to_string()),
             }
         }
@@ -1143,6 +1209,7 @@ impl Workbench {
                 self.term_copy(agent, cx);
             }
             TermDo::Paste => self.term_paste(agent, cx),
+            TermDo::SelectAll => self.term_select_all(agent),
             TermDo::Clear => self.term_clear(agent),
             TermDo::NewTab => self.shell_new(None, cx),
             TermDo::CloseTab => {
@@ -1163,8 +1230,8 @@ impl Workbench {
             let kept = !self.cfg.terminal.copy_on_select && !self.term_sel_text(agent).is_empty();
             if !kept && !self.term_copy(agent, cx) {
                 let at = self.view_mut(agent).sel.take().map(|s| s.anchor);
-                if let (true, Some((row, col)), Some(pty)) = (alt, at, self.term_pty_of(agent)) {
-                    self.term_cursor_to(&pty, row, col);
+                if let (true, Some((line, col)), Some(pty)) = (alt, at, self.term_pty_of(agent)) {
+                    self.term_cursor_to(&pty, line.max(0) as u16, col);
                 }
             }
             cx.notify();
@@ -1187,12 +1254,9 @@ impl Workbench {
             self.view_mut(agent).selecting = false;
         }
         let Some(pty) = self.term_pty_of(agent) else { return };
+        // A drag that selects follows the pointer anywhere in the window
+        // (`term_select_to`).
         if self.view_mut(agent).selecting {
-            let (col, row) = self.term_cell(agent, e.position, &pty);
-            if let Some(sel) = self.view_mut(agent).sel.as_mut().filter(|s| s.head != (row, col)) {
-                sel.head = (row, col);
-                cx.notify();
-            }
             return;
         }
         // The link under the pointer is underlined, looked for a cell at a time.
@@ -1219,14 +1283,269 @@ impl Workbench {
         pty.write(&pty::mouse_bytes(held.unwrap_or(3) | 32 | mod_bits(&e.modifiers), cell.0, cell.1, true, want.form));
     }
 
+    /// The line of the screen's `row` as it is drawn now, scrolled back
+    /// or not (`Sel`).
+    fn term_line(&self, agent: bool, row: u16) -> i64 {
+        row as i64 - self.view(agent).back as i64
+    }
+
+    /// Which terminal a drag is selecting in, if one is: the shell's
+    /// (false) or the agent's.
+    pub(crate) fn term_selecting(&self) -> Option<bool> {
+        if self.shell_view.selecting {
+            Some(false)
+        } else if self.agent_view.selecting {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// A drag that selects, wherever the pointer is in the window (the
+    /// window's own listener sends every move here while it lasts): the
+    /// selection runs to the cell under the pointer, and held past the
+    /// screen's top or foot the screen scrolls on under it, the faster
+    /// the further out (`term_edge_step`).
+    pub(crate) fn term_select_to(&mut self, agent: bool, at: Point<Pixels>, held: bool, cx: &mut Context<Self>) {
+        let view = self.view_mut(agent);
+        if !held {
+            view.selecting = false;
+            view.edge = 0.;
+            return;
+        }
+        let Some(pty) = self.term_pty_of(agent) else { return };
+        let (col, row) = self.term_cell(agent, at, &pty);
+        let b = self.view(agent).bounds.get();
+        let (y, top, foot) = (f32::from(at.y), f32::from(b.top()), f32::from(b.bottom()));
+        let edge = if y < top { y - top } else if y > foot { y - foot } else { 0. };
+        let line = self.term_line(agent, row);
+        let view = self.view_mut(agent);
+        (view.edge, view.edge_col) = (edge, col);
+        if let Some(sel) = view.sel.as_mut().filter(|s| s.head != (line, col)) {
+            sel.head = (line, col);
+            cx.notify();
+        }
+        if edge != 0. && !view.edge_run {
+            view.edge_run = true;
+            view.edge_rows = 0.;
+            cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(EDGE_TICK).await;
+                if !this.update(cx, |this, cx| this.term_edge_step(agent, cx)).unwrap_or(false) {
+                    break;
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// One step of the screen scrolling under a drag held past its edge:
+    /// a row at a time at the edge, quicker further out, and the
+    /// selection's end on the row that came in. Whether to go on.
+    fn term_edge_step(&mut self, agent: bool, cx: &mut Context<Self>) -> bool {
+        let pty = self.term_pty_of(agent);
+        let view = self.view_mut(agent);
+        let Some(pty) = pty.filter(|_| view.selecting && view.edge != 0.) else {
+            view.edge_run = false;
+            return false;
+        };
+        view.edge_rows += (EDGE_ROWS + view.edge.abs() * EDGE_MORE).min(EDGE_MOST) * EDGE_TICK.as_secs_f32();
+        let n = view.edge_rows.trunc() as usize;
+        if n == 0 {
+            return true;
+        }
+        view.edge_rows -= n as f32;
+        let rows = pty.size().0 as i64;
+        let back = if view.edge < 0. { (view.back + n).min(pty.kept_back()) } else { view.back.saturating_sub(n) };
+        let view = self.view_mut(agent);
+        view.back = back;
+        let line = if view.edge < 0. { -(back as i64) } else { rows - 1 - back as i64 };
+        let col = view.edge_col;
+        if let Some(sel) = view.sel.as_mut() {
+            sel.head = (line, col);
+        }
+        self.term_unhover(agent);
+        cx.notify();
+        true
+    }
+
+    /// ⌘A: all the terminal holds, what has left the screen with it, up
+    /// to the end of the last line with anything on it.
+    fn term_select_all(&mut self, agent: bool) {
+        let Some(pty) = self.term_pty_of(agent) else { return };
+        let (rows, _) = pty.rows_back(0);
+        let last = rows.iter().rposition(|r| r.iter().any(|s| !s.text.trim().is_empty())).unwrap_or(0);
+        let end = rows.get(last).map(|r| row_cells(r).len()).unwrap_or(0) as u16;
+        self.view_mut(agent).sel = Some(Sel { anchor: (-(pty.kept_back() as i64), 0), head: (last as i64, end), unit: 0, block: false });
+    }
+
+    /// A selection by the letter, the word or the row made one between
+    /// places, as the keyboard moves it, with its ends where it shows them.
+    fn term_caret(sel: Sel, pty: &Pty) -> Sel {
+        if sel.unit == 0 {
+            return sel;
+        }
+        let (a, b) = sel.ends();
+        let (top, lines) = pty.lines(a.0, b.0);
+        let cells: Vec<Vec<char>> = lines.iter().map(|(r, _)| row_cells(r)).collect();
+        let spans = Sel { block: false, ..sel }.spans(top, &cells);
+        let (start, end) = match (spans.iter().position(Option::is_some), spans.iter().rposition(Option::is_some)) {
+            (Some(f), Some(l)) => ((top + f as i64, spans[f].unwrap().0 as u16), (top + l as i64, spans[l].unwrap().1 as u16)),
+            _ => (a, a),
+        };
+        let on = sel.head >= sel.anchor;
+        Sel { anchor: if on { start } else { end }, head: if on { end } else { start }, unit: 0, block: false }
+    }
+
+    /// Shift with the keys that move a caret runs a selection on, from
+    /// the selection there is or from the cursor: an arrow a letter or a
+    /// row, with ⌥ a word, with ⌘ the line's start or end, as Home and
+    /// End are. Off a Mac Ctrl is the word's, and the keys select only
+    /// where something is selected already: with nothing, Shift and an
+    /// arrow are the shell's (PowerShell selects with them). Where a
+    /// program has the screen to itself the keys are its own. Whether
+    /// the key was one of them.
+    fn term_select_key(&mut self, agent: bool, k: &Keystroke) -> bool {
+        enum By {
+            Letter,
+            Word,
+            Line,
+            Row,
+        }
+        let m = &k.modifiers;
+        let mac = cfg!(target_os = "macos");
+        let word = if mac { m.alt && !m.control } else { m.control && !m.alt };
+        let by = match (k.key.as_str(), m.platform && mac, word, m.alt || m.control) {
+            _ if !m.shift => return false,
+            ("left" | "right", false, false, false) => By::Letter,
+            ("left" | "right", false, true, _) => By::Word,
+            ("left" | "right", true, false, false) | ("home" | "end", false, false, false) => By::Line,
+            ("up" | "down", false, false, false) => By::Row,
+            _ => return false,
+        };
+        let on = matches!(k.key.as_str(), "right" | "end" | "down");
+        let Some(pty) = self.term_pty_of(agent) else { return false };
+        let sel = match self.view(agent).sel {
+            Some(sel) => Self::term_caret(sel, &pty),
+            None if mac && !pty.alt_screen() => match pty.cursor() {
+                Some((row, col)) => Sel { anchor: (row as i64, col), head: (row as i64, col), unit: 0, block: false },
+                None => return false,
+            },
+            None => return false,
+        };
+        let (rows, top) = (pty.size().0 as i64, -(pty.kept_back() as i64));
+        let cells = |l: i64| pty.lines(l, l).1.first().map(|(r, _)| row_cells(r)).unwrap_or_default();
+        let (mut l, mut c) = (sel.head.0, sel.head.1 as usize);
+        let mut row = cells(l);
+        match by {
+            By::Letter if on => {
+                if c < row.len() {
+                    c += 1;
+                    // Past a wide letter's second cell too.
+                    if row.get(c) == Some(&'\0') {
+                        c += 1;
+                    }
+                } else if l < rows - 1 {
+                    (l, c) = (l + 1, 0);
+                }
+            }
+            By::Letter => {
+                if c > 0 {
+                    c -= 1;
+                    if row.get(c) == Some(&'\0') {
+                        c = c.saturating_sub(1);
+                    }
+                } else if l > top {
+                    l -= 1;
+                    c = cells(l).len();
+                }
+            }
+            By::Word if on => {
+                if c >= row.len() && l < rows - 1 {
+                    (l, c) = (l + 1, 0);
+                    row = cells(l);
+                }
+                while c < row.len() && !word_char(row[c]) {
+                    c += 1;
+                }
+                while c < row.len() && word_char(row[c]) {
+                    c += 1;
+                }
+            }
+            By::Word => {
+                if c == 0 && l > top {
+                    l -= 1;
+                    row = cells(l);
+                    c = row.len();
+                }
+                c = c.min(row.len());
+                while c > 0 && !word_char(row[c - 1]) {
+                    c -= 1;
+                }
+                while c > 0 && word_char(row[c - 1]) {
+                    c -= 1;
+                }
+            }
+            By::Line => c = if on { row.len() } else { 0 },
+            By::Row => l = (l + if on { 1 } else { -1 }).clamp(top, rows - 1),
+        }
+        let view = self.view_mut(agent);
+        view.sel = Some(Sel { head: (l, c as u16), ..sel });
+        // The end that moved stays in sight.
+        let back = view.back as i64;
+        view.back = if l < -back { -l } else if l > rows - 1 - back { rows - 1 - l } else { back }.max(0) as usize;
+        true
+    }
+
+    /// The keys that scroll back through what has left the screen, as a
+    /// Mac's terminals have them: ⌘↑ and ⌘↓ a row, ⇧ or ⌘ with Page Up
+    /// and Page Down a screen, ⌘Home and ⌘End to the top and the foot.
+    /// Off a Mac Ctrl+Shift takes ⌘'s place, and Shift with a page key is
+    /// a screen too. Not where a program has the screen to itself, which
+    /// scrolls its own. Whether the key was one of them.
+    fn term_scroll_key(&mut self, agent: bool, k: &Keystroke) -> bool {
+        let m = &k.modifiers;
+        let held = if cfg!(target_os = "macos") { m.platform && !m.shift } else { m.control && m.shift };
+        if m.alt || !(held || m.shift && !m.control && !m.platform) {
+            return false;
+        }
+        let Some(pty) = self.term_pty_of(agent).filter(|p| !p.alt_screen()) else { return false };
+        let page = pty.size().0.saturating_sub(1).max(1) as i64;
+        let by: i64 = match (k.key.as_str(), held) {
+            ("up", true) => 1,
+            ("down", true) => -1,
+            ("pageup", _) => page,
+            ("pagedown", _) => -page,
+            ("home", true) => i64::MAX / 2,
+            ("end", true) => i64::MIN / 2,
+            _ => return false,
+        };
+        let back = (self.view(agent).back as i64).saturating_add(by).clamp(0, pty.kept_back() as i64);
+        self.view_mut(agent).back = back as usize;
+        true
+    }
+
+    /// Files dropped on the terminal: their paths, as a shell reads them
+    /// and a space after, as a Mac's terminals type them.
+    fn term_drop(&mut self, agent: bool, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        let Some(pty) = self.term_pty_of(agent).filter(|p| p.alive()) else { return };
+        if paths.is_empty() {
+            return;
+        }
+        pty.paste(&format!("{} ", path_words(paths)));
+        self.view_mut(agent).back = 0;
+        self.view_mut(agent).sel = None;
+        cx.notify();
+    }
+
     /// The words selected: each row's stretch without the blank at its
     /// end, a new line between rows unless one runs on into the next.
     fn term_sel_text(&self, agent: bool) -> String {
         let (Some(sel), Some(pty)) = (self.view(agent).sel, self.term_pty_of(agent)) else { return String::new() };
-        let (rows, _) = pty.rows_back(self.view(agent).back);
-        let wraps = pty.wraps_back(self.view(agent).back);
-        let cells: Vec<Vec<char>> = rows.iter().map(|r| row_cells(r)).collect();
-        let spans = sel.spans(&cells);
+        let (a, b) = sel.ends();
+        let (top, lines) = pty.lines(a.0, b.0);
+        let wraps: Vec<bool> = lines.iter().map(|(_, w)| *w).collect();
+        let cells: Vec<Vec<char>> = lines.iter().map(|(r, _)| row_cells(r)).collect();
+        let spans = sel.spans(top, &cells);
         let last = spans.iter().rposition(|s| s.is_some());
         let mut out = String::new();
         for (r, span) in spans.iter().enumerate() {
@@ -1327,12 +1646,14 @@ impl Workbench {
     }
 
     /// A key in the panel, as the bytes a terminal sends for it. ⌘V is a
-    /// paste; any other key with ⌘ is the window's. Off a Mac,
-    /// `term_pc_key` has the panel's own.
+    /// paste, ⌘A selects all, Shift with the keys that move a caret
+    /// selects (`term_select_key`), and some keys scroll back
+    /// (`term_scroll_key`); any other key with ⌘ is the window's. Off a
+    /// Mac, `term_pc_key` has the panel's own.
     fn term_panel_key(&mut self, agent: bool, e: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(pty) = self.term_pty_of(agent).filter(|p| p.alive()) else { return };
         let k = &e.keystroke;
-        if self.term_pc_key(agent, k, cx) {
+        if self.term_pc_key(agent, k, cx) || self.term_select_key(agent, k) || self.term_scroll_key(agent, k) {
             self.term_unhover(agent);
             cx.stop_propagation();
             cx.notify();
@@ -1340,13 +1661,14 @@ impl Workbench {
         }
         if k.modifiers.platform {
             // ⌘ with the keys of a line is the line's start, its end, all
-            // of it before the cursor, and a new line that sends nothing,
-            // as a Mac's terminals have them; ⌘⇧[ and ⌘⇧] are the shell
-            // tab before and after.
+            // of it before the cursor or after it, and a new line that
+            // sends nothing, as a Mac's terminals have them; ⌘⇧[ and ⌘⇧]
+            // are the shell tab before and after.
             let line: Option<&[u8]> = match k.key.as_str() {
                 "left" => Some(b"\x01"),
                 "right" => Some(b"\x05"),
                 "backspace" => Some(b"\x15"),
+                "delete" => Some(b"\x0b"),
                 "enter" => Some(b"\x1b\r"),
                 _ => None,
             };
@@ -1356,6 +1678,10 @@ impl Workbench {
                     true
                 }
                 "c" => self.term_copy(agent, cx),
+                "a" if !k.modifiers.shift => {
+                    self.term_select_all(agent);
+                    true
+                }
                 "[" | "{" if k.modifiers.shift && !agent => {
                     self.shell_step(-1, cx);
                     true
@@ -1381,12 +1707,13 @@ impl Workbench {
             }
             return;
         }
-        // ⌥ with an arrow or Backspace is a word, as a Mac's terminals
-        // have it.
+        // ⌥ with an arrow, Backspace or Delete is a word, as a Mac's
+        // terminals have it.
         let word: Option<&[u8]> = match (k.modifiers.alt, k.key.as_str()) {
             (true, "left") => Some(b"\x1bb"),
             (true, "right") => Some(b"\x1bf"),
             (true, "backspace") => Some(b"\x1b\x7f"),
+            (true, "delete") => Some(b"\x1bd"),
             // ⇧↩ is a new line that sends nothing.
             (false, "enter") if k.modifiers.shift => Some(b"\x1b\r"),
             _ => None,
@@ -1546,7 +1873,7 @@ impl Workbench {
                 let (rows, back) = pty.rows_back(self.view_mut(agent).back);
                 self.view_mut(agent).back = back;
                 let picked = match self.view_mut(agent).sel {
-                    Some(sel) if !leaving => sel.spans(&rows.iter().map(|r| row_cells(r)).collect::<Vec<_>>()),
+                    Some(sel) if !leaving => sel.spans(-(back as i64), &rows.iter().map(|r| row_cells(r)).collect::<Vec<_>>()),
                     _ => Vec::new(),
                 };
                 let lines = screen_lines(&rows, cell_w, lh, k, &picked, self.view_mut(agent).link.as_ref().filter(|_| !leaving));
@@ -1678,6 +2005,19 @@ impl Workbench {
             .overflow_hidden()
             .bg(hsla(ground))
             .cursor(pointer)
+            // Files dragged in from the Finder are typed as their paths,
+            // the edge in the accent while they are over it, as the
+            // composer's is.
+            .border_1()
+            .border_color(transparent_black())
+            .drag_over::<ExternalPaths>({
+                let accent = theme.primary;
+                move |s, _, _, _| s.border_color(accent)
+            })
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                this.term_drop(agent, paths.paths(), cx);
+                window.focus(&this.view(agent).focus, cx);
+            }))
             .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| this.term_panel_key(agent, e, cx)))
             .on_action(cx.listener(move |this, _: &TermTab, _, cx| {
                 if let Some(pty) = this.term_pty_of(agent) {

@@ -420,6 +420,24 @@ impl Pty {
         wraps
     }
 
+    /// How many rows that have left the screen are kept, which is as far
+    /// back as it scrolls.
+    pub fn kept_back(&self) -> usize {
+        let mut parser = self.parser.lock().unwrap();
+        parser.screen_mut().set_scrollback(usize::MAX);
+        let kept = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(0);
+        kept
+    }
+
+    /// The lines from `from` to `to`, counted from the screen's top row
+    /// as it is now and less than 0 for those that have left it, each
+    /// with whether it runs on into the next. Held to the lines there
+    /// are: the first is the line it begins at, `from` or the oldest kept.
+    pub fn lines(&self, from: i64, to: i64) -> (i64, Vec<(Vec<Span>, bool)>) {
+        lines_of(&mut self.parser.lock().unwrap(), from, to)
+    }
+
     /// The screen and everything that has left it are forgotten, as a
     /// terminal's "clear" does, and what the program asked for (the
     /// mouse, pastes in brackets, the cursor) is kept. Not where a
@@ -531,6 +549,31 @@ fn named(c: vt100::Color) -> Option<u8> {
         vt100::Color::Idx(i) if i < 16 => Some(i),
         _ => None,
     }
+}
+
+/// `Pty::lines`, of a screen model.
+fn lines_of(parser: &mut vt100::Parser, from: i64, to: i64) -> (i64, Vec<(Vec<Span>, bool)>) {
+    let rows = parser.screen().size().0 as i64;
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let kept = parser.screen().scrollback() as i64;
+    let (mut at, to) = (from.max(-kept), to.min(rows - 1));
+    let first = at;
+    let mut out = Vec::new();
+    while at <= to {
+        // The look whose top row is `at`, or the screen itself.
+        let back = (-at).max(0);
+        parser.screen_mut().set_scrollback(back as usize);
+        let shown = rows_of(parser.screen());
+        for r in (at + back)..rows {
+            if at > to {
+                break;
+            }
+            out.push((shown[r as usize].clone(), parser.screen().row_wrapped(r as u16)));
+            at += 1;
+        }
+    }
+    parser.screen_mut().set_scrollback(0);
+    (first, out)
 }
 
 /// A screen as stretches of text, a row at a time, blank to the right
@@ -797,4 +840,23 @@ pub fn styled(rows: &[Vec<Span>]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_reach_back_past_the_screen() {
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        let text: String = (0..10).map(|n| format!("line {n}\r\n")).collect();
+        parser.process(text.as_bytes());
+        let words = |(first, got): (i64, Vec<(Vec<Span>, bool)>)| (first, got.iter().map(|(r, _)| plain(&[r.clone()])).collect::<Vec<_>>());
+        // Ten lines and the empty one under them: four show, seven are kept.
+        assert_eq!(words(lines_of(&mut parser, -2, 1)), (-2, vec!["line 5".into(), "line 6".into(), "line 7".into(), "line 8".into()]));
+        assert_eq!(words(lines_of(&mut parser, -100, -6)).0, -7);
+        assert_eq!(words(lines_of(&mut parser, -100, -6)).1, vec!["line 0", "line 1"]);
+        assert_eq!(words(lines_of(&mut parser, 3, 9)), (3, vec![String::new()]));
+        assert_eq!(parser.screen().scrollback(), 0);
+    }
 }

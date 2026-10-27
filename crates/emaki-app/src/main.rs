@@ -25,6 +25,7 @@ mod i18n;
 mod look;
 mod panels;
 mod pictures;
+mod shortcuts;
 mod spelling;
 mod sys;
 mod term_panel;
@@ -39,32 +40,16 @@ use workbench::{Workbench, COMPOSER_CONTEXT, FIND_CONTEXT, KEY_CONTEXT, SEARCH_C
 
 actions!(emaki_app, [Quit, CloseWindow, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-pub use workbench::{CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, ChooseFolder, OpenSettings, Refresh, ReopenTab, ToggleRaw, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
+pub use workbench::{ToggleChanges, CloseTab, Escape, FindInPage, FindNext, FindPrev, SaveFile, GoAgents, GoSessions, NewBranch, NewSession, NewSessionHere, ChooseFolder, OpenSettings, Refresh, ReopenTab, ToggleRaw, Send, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TermBackTab, TermClear, TermNewTab, TermTab, ToggleAgent, ToggleFiles, ToggleOutline, ToggleShell, ToggleSearch, ToggleSidebar};
 
 fn key_bindings() -> Vec<KeyBinding> {
-    let mut keys = vec![
-        KeyBinding::new("secondary-k", ToggleSearch, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-r", Refresh, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-n", NewSession, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-t", NewSessionHere, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-o", ChooseFolder, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-n", NewBranch, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-l", GoSessions, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-e", GoAgents, Some(KEY_CONTEXT)),
-        // ⌘⇧B, with the panels' keys (⌘⇧S is the shell terminal's), and
-        // ⌘B, as an editor has it, named nowhere. The menu names the
-        // first binding of an action, so ⌘⇧B stays first.
-        KeyBinding::new("secondary-shift-b", ToggleSidebar, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-b", ToggleSidebar, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-f", ToggleFiles, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-o", ToggleOutline, Some(KEY_CONTEXT)),
-        // A file that reads two ways, as it reads or as it is written.
-        KeyBinding::new("secondary-shift-v", ToggleRaw, Some(KEY_CONTEXT)),
-        // The two sides of the terminal at a conversation's right.
-        KeyBinding::new("secondary-shift-s", ToggleShell, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-a", ToggleAgent, Some(KEY_CONTEXT)),
-        // The tab closed last comes back, and at each press the one before it.
-        KeyBinding::new("secondary-shift-t", ReopenTab, Some(KEY_CONTEXT)),
+    // The commands whose keys Settings, Shortcuts, changes, first: a
+    // binding of the same keys after them is asked first (⌘⇧G's Find
+    // Previous, which passes it on to Changes and History while no find
+    // is open). The menu names the first binding of an action, so the
+    // sidebar's ⌘⇧B stands before its ⌘B.
+    let mut keys = shortcuts::bindings();
+    keys.extend([
         KeyBinding::new("secondary-1", Tab1, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-2", Tab2, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-3", Tab3, Some(KEY_CONTEXT)),
@@ -108,7 +93,7 @@ fn key_bindings() -> Vec<KeyBinding> {
         // One global binding: a context-bound one loses to a global one
         // whenever the focus sits deeper than the workbench, in the composer.
         KeyBinding::new("secondary-w", CloseTab, None),
-    ];
+    ]);
     if !cfg!(target_os = "macos") {
         keys.push(KeyBinding::new("win-,", OpenSettings, None));
         // Off a Mac the window's keys are Ctrl's, and Ctrl with a letter in
@@ -281,7 +266,7 @@ fn filled(b: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
 fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
     let bounds = remembered_bounds(cx).unwrap_or_else(|| Bounds::centered(None, size(px(1180.), px(760.)), cx));
     let titlebar = if cfg!(target_os = "macos") {
-        TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(17.), px(20.))) }
+        TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(point(px(sys::LIGHTS_ROW.0), px(sys::LIGHTS_ROW.1))) }
     } else {
         TitlebarOptions { title: Some("Emaki".into()), appears_transparent: false, traffic_light_position: None }
     };
@@ -378,6 +363,7 @@ fn main() {
         let cfg = emaki_core::config::Config::load();
         // The words first: the menus and the window are named in them.
         i18n::set(&i18n::chosen(&cfg.app.language));
+        shortcuts::set_chosen(&cfg.app.shortcuts);
         let app_cfg = cfg.app;
         fonts::install(&app_cfg.chat_font, cx);
         look::install(&app_cfg.accent, &cfg.terminal.font, cx);

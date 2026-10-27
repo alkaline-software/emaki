@@ -65,7 +65,7 @@ Each is here because breaking it loses data or reintroduces a bug that was alrea
 - **Everything Unix-only is gated with a stated fallback.** Windows and Linux are build targets. (`docs/platform.md`)
 - **A card that comes up while a session runs stands at the conversation's end and scrolls with it,** never over the composer. It goes in `render_cards`, its body through `card_scroll`, which caps its height and scrolls both ways. (`docs/live-turn.md`, The cards)
 - **A button is `choice_pill`,** a pill with an icon before its word, and a menu's choice has an icon. A new button is not the toolkit's `Button`. (`docs/look.md`)
-- **A shortcut is named as the Mac has it,** and its signs are drawn. For ⌘ and a key bind `secondary-<key>` (Ctrl off a Mac) and write ⌘ in the docs. Wherever the window shows a key, it goes through `key_text` (`kbd_hint`, `tip`), never as characters. (`main.rs`, `docs/look.md`)
+- **A shortcut is named as the Mac has it,** and its signs are drawn. For ⌘ and a key bind `secondary-<key>` (Ctrl off a Mac) and write ⌘ in the docs. Wherever the window shows a key, it goes through `key_text` (`kbd_hint`, `tip`), never as characters. A command a person may want other keys for is a `Command` in `shortcuts.rs`, never a binding of its own in `main.rs`, and a label naming its keys goes through `shortcuts::keyed` or `signs`. (`main.rs`, `docs/look.md`, `docs/window.md` Shortcuts)
 - **The explainer's and the outline's model calls are real Claude Code calls on the person's account.** Cache the answer, ask for no more than is looked at, and never call one from a test. (`docs/core.md`, `docs/panels.md`)
 
 ## Before you edit, read
@@ -156,6 +156,7 @@ crates/emaki-app/         the window
   src/main.rs                menus, key bindings, the window
   src/sys.rs                 open, reveal, the person's name: per OS; a session's hidden terminal by its pid
   src/ui_state.rs            ~/.emaki/state/ui.json, what the window remembers
+  src/shortcuts.rs           the commands whose keys Settings, Shortcuts, changes, the window's and the file editor's: their keys, the bindings made from them, the labels that name them
   src/i18n.rs                the window's words in the person's language; locales/words.json holds them
   assets/icon/               the icon in every size, drawn by scripts/icon/icon.html
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed

@@ -311,6 +311,7 @@ mod tests {
             include_str!("sys.rs"),
             include_str!("file_icons.rs"),
             include_str!("hub.rs"),
+            include_str!("shortcuts.rs"),
         ];
         let mut asked: Vec<String> = Vec::new();
         for src in sources {
