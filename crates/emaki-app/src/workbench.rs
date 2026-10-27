@@ -1474,6 +1474,8 @@ pub struct Workbench {
     pub(crate) shortcut_rec: Option<&'static str>,
     /// The page each section of more than one shows (`SETTINGS_PAGES`).
     pub(crate) settings_pages: HashMap<&'static str, &'static str>,
+    /// The room Panels' picture has in its card, as last drawn.
+    panels_room: Rc<Cell<f32>>,
     shortcut_held: Modifiers,
     shortcut_refused: Option<(&'static str, String, Instant)>,
     /// The scroll of a list opened in the settings window, which has no
@@ -4036,6 +4038,7 @@ impl Workbench {
             settings_focus: cx.focus_handle(),
             shortcut_rec: None,
             settings_pages,
+            panels_room: Rc::new(Cell::new(0.)),
             shortcut_held: Modifiers::default(),
             shortcut_refused: None,
             settings_pick_scroll: ScrollHandle::new(),

@@ -18,7 +18,7 @@
 use std::ops::Range;
 
 use gpui::{actions, AnyElement, Context, InteractiveElement as _, IntoElement as _, KeyBinding, ParentElement as _, Styled as _, Window, div, point, px};
-use gpui_component::input::{DeleteToBeginningOfLine, DeleteToEndOfLine, Redo};
+use gpui_component::input::{DeleteToBeginningOfLine, DeleteToEndOfLine};
 
 use crate::workbench::Workbench;
 
@@ -100,7 +100,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-k cmd-k", DeleteToEndOfLine, c),
         KeyBinding::new("ctrl-k", DeleteToEndOfLine, c),
         KeyBinding::new("cmd-k cmd-backspace", DeleteToBeginningOfLine, c),
-        KeyBinding::new("cmd-y", Redo, c),
+        KeyBinding::new("cmd-y", gpui_component::input::Redo, c),
     ];
     // Sublime Text's own keys on Windows and Linux, where the two maps
     // agree on every one of these.
