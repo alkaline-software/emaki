@@ -140,7 +140,7 @@ crates/emaki-app/         the window
   src/workbench.rs           sidebar, session list, search, composer
   src/workbench/settings.rs  the settings window: its rail, groups, rows, switches
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
-  src/panels.rs              the files panel at a conversation's left, the folder's files as a tree, and the outline panel at the left of its pane, an entry a round
+  src/panels.rs              the files panel at a conversation's left, the folder's files as a tree, and the outline in its drawer at the conversation's left, an entry a round; the conversation's margins and their seams
   src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions
   src/branches.rs            the list of branches and its remote: fetching, making a branch on its sheet, publishing one, the sign-in sheet
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets

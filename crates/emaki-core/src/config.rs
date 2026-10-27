@@ -112,11 +112,17 @@ pub struct AppConfig {
     /// `i18n::CHOICES`. On a Mac the app's own `AppleLanguages` is what
     /// counts, and this follows it.
     pub language: String,
+    /// The side of the conversation the files panel stands at, `left` or
+    /// `right`; the terminal panel stands at the other.
+    pub files_side: String,
+    /// The margin of the conversation the outline is in, `left` or
+    /// `right`; the layout switch is in the other.
+    pub outline_side: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into() }
+        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into() }
     }
 }
 

@@ -40,15 +40,39 @@ pub(crate) const PANEL_MIN: Pixels = px(200.);
 const PANEL_MAX: Pixels = px(520.);
 const PANEL_FIT_MAX: Pixels = px(380.);
 const PANEL_FOLD_AT: Pixels = px(130.);
-/// How wide the outline is to begin with, and the least it is dragged
-/// to; narrower than `PANEL_FOLD_AT` it is put away, as the files panel
-/// is.
+/// How wide the outline's drawer is, and the least and most it takes
+/// where the pane is short of room or `ui.json` says another width.
 pub(crate) const OUTLINE_W: Pixels = px(240.);
 pub(crate) const OUTLINE_MIN: Pixels = px(180.);
 const OUTLINE_MAX: Pixels = px(440.);
-/// The outline's width at a double click: its lines are sentences, cut
-/// at any width, so this is a width they read well at.
-const OUTLINE_FIT: Pixels = px(280.);
+/// The seam at each edge of the conversation's column, in the margin:
+/// the outline's at the left, the layout's at the right. The room it
+/// keeps in the margin; how far it reaches out of the column and into
+/// it, for the pointer; the room over the seams and the drawer, and
+/// between a seam's end and the composer; and the knob's size.
+pub(crate) const SEAM_ROOM: Pixels = px(20.);
+const SEAM_OUT: f32 = 18.;
+const SEAM_IN: f32 = 14.;
+const SEAM_TOP: f32 = 10.;
+const SEAM_GAP: f32 = 16.;
+const KNOB: f32 = 28.;
+/// How far into the column the pointer still shows a seam: as far as a
+/// prompt or a reply can leave the column clear at that side, the
+/// column's padding and the share of the rest a prompt keeps at its left
+/// and a reply at its right (`REPLY_INSET`); and in that band, not within
+/// `SEAM_CLEAR` of the words drawn there. The CLI layout's screen reaches
+/// the padding on both sides.
+const SEAM_PAD: f32 = 24.;
+const SEAM_CLEAR: f32 = 8.;
+/// How far out from a seam, away from the column, the pointer still shows
+/// it: further out it is in the margin for nothing.
+const SEAM_NEAR: f32 = 96.;
+/// The outline's drawer: its corners, and the room it leaves between its
+/// edge and the column's, so it reads as a card set beside the column.
+const DRAWER_R: f32 = 10.;
+const DRAWER_GAP: f32 = 8.;
+/// How long a margin's seam takes to fade in or out with the pointer.
+const SEAM_FADE: Duration = Duration::from_millis(180);
 /// How far past the outline's view, above and below, labels are asked
 /// for, and how long its scroller rests before they are.
 const LABEL_AHEAD: Pixels = px(320.);
@@ -1907,6 +1931,26 @@ impl BranchAsk {
 /// The ground of a panel's row under the pointer. A panel is on the
 /// sidebar's ground, and in a light window the theme's muted gray is all
 /// but that same color, so the row takes a wash of the ink there.
+/// Where the conversation's column stands in a pane `w` wide, with `a`
+/// of room wanted at its left (the outline's handle, and as much of its
+/// drawer as is out) and a seam's at its right: the column's left and
+/// width, and the room the conversation's list leaves at its left and
+/// right, inside which the column is centered. The column keeps the
+/// pane's center while the margins hold what they must; past that it
+/// moves right, then narrows.
+pub(crate) fn column_in(w: f32, a: f32) -> (f32, f32, f32, f32) {
+    let b = f32::from(SEAM_ROOM);
+    let most = f32::from(crate::workbench::CONTENT_W);
+    let c = most.min((w - a - b).max(0.));
+    let left = ((w - c) / 2.).max(a).min((w - b - c).max(a));
+    if w - a - b >= most {
+        let h = left.min(w - left - c);
+        (left, c, left - h, w - left - c - h)
+    } else {
+        (left, c, a, b)
+    }
+}
+
 pub(crate) fn row_hover(theme: &gpui_component::Theme, dark: bool) -> Hsla {
     if dark {
         theme.foreground.opacity(0.08)
@@ -2151,32 +2195,242 @@ impl Workbench {
     pub(crate) fn panel_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let on = self.files_on;
         let (was, serial) = self.panel_anim.map(|(from, _, at, n)| (crate::workbench::pressed_from(from, on, at), n + 1)).unwrap_or((on, 0));
-        vec![self.toggle_button("panel-files", "icons/tree-view.svg", t("Files (⌘⇧F)"), (was, on, serial), false, Rc::new(|this, _, cx| this.toggle_panel(true, cx)), cx)]
+        vec![self.toggle_button("panel-files", "icons/tree-view.svg", t("Files (⌘⇧F)"), (was, on, serial), Rc::new(|this, _, cx| this.toggle_panel(true, cx)), cx)]
     }
 
-    /// The outline's button at the path bar's left end, as the files
-    /// panel's is at the strip's, smaller. In the CLI layout, where there
-    /// is no outline, it fades out where it stands and takes no click.
-    pub(crate) fn outline_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let on = self.outline_on;
-        let (was, serial) = self.outline_anim.map(|(from, _, at, n)| (crate::workbench::pressed_from(from, on, at), n + 1)).unwrap_or((on, 0));
-        let cli = self.cli_shown();
-        let moving = self.presence("outline-button", !cli, cx).is_some();
-        let button = self.toggle_button("outline-toggle", "icons/list-bullets.svg", t("Outline (⌘⇧O)"), (was, on, serial), true, Rc::new(|this, _, cx| this.toggle_panel(false, cx)), cx);
-        // The fade's wrapper is there at rest too, under the name of the
-        // last change: taken off when the fade was over, it made the button
-        // a new element, and the plate under it played its fade again.
-        let n = self.presence_serial("outline-button");
-        div()
-            .relative()
-            .flex_shrink_0()
-            .child(button)
-            .when(cli, |d| d.child(div().absolute().inset_0().occlude()))
-            .with_animation(ElementId::Name(format!("outline-button-{n}").into()), Animation::new(crate::workbench::FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
-                let t = if moving { t } else { 1. };
-                d.opacity(if cli { 1. - t } else { t })
-            })
-            .into_any_element()
+    /// How far the outline's drawer is out, from 0 to 1, as it slides.
+    pub(crate) fn outline_out(&self) -> f32 {
+        match self.outline_anim {
+            Some((from, to, at, _)) if from != to && at.elapsed() < crate::workbench::PANEL_ANIM => {
+                let p = ease_out_quint()(at.elapsed().as_secs_f32() / crate::workbench::PANEL_ANIM.as_secs_f32());
+                if to { p } else { 1. - p }
+            }
+            _ if self.outline_on => 1.,
+            _ => 0.,
+        }
+    }
+
+    /// The room the conversation's list leaves at its left and right in
+    /// a pane `w` wide, so its column stands where `column_in` puts it
+    /// beside the outline's drawer as far out as it is.
+    pub(crate) fn conv_room(&self, w: f32) -> (f32, f32) {
+        if w <= 0. {
+            return (0., 0.);
+        }
+        let d = (f32::from(self.outline_w_now()) * self.outline_out()).round();
+        let (_, _, s, r) = column_in(w, f32::from(SEAM_ROOM) + d);
+        if self.outline_right() { (r, s) } else { (s, r) }
+    }
+
+    /// How much of a margin's seam shows, 0 to 1, as it fades with the
+    /// pointer: the left margin's is `0`, the right's `1`.
+    fn margin_seen(&self, side: usize) -> f32 {
+        let (to, at, from) = self.margin_fade[side];
+        let p = ease_out_quint()((at.elapsed().as_secs_f32() / SEAM_FADE.as_secs_f32()).min(1.));
+        from + (if to { 1. } else { 0. } - from) * p
+    }
+
+    /// The pointer moved, anywhere in the window: a margin's seam fades in
+    /// while it is over that margin, and out once it has left.
+    pub(crate) fn margin_hover(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let b = self.conv_bounds.get();
+        let inside = self.page == Page::Session && self.detail.is_some() && b.contains(&at);
+        // The edges are the outline's side first: with the outline at the
+        // right, the pointer is read across the pane mirrored.
+        let x = f32::from(at.x - b.origin.x);
+        let x = if self.outline_right() { f32::from(b.size.width) - x } else { x };
+        let inside = inside && f32::from(at.y - b.origin.y) <= self.margin_foot;
+        let [l_far, l_seam, l_in] = self.margin_edges;
+        let [r_in, r_seam, r_far] = self.margin_edges_r;
+        // On the column's side of a seam, it shows where no words are drawn
+        // near the pointer.
+        let clear = !self.margin_words || !self.words_at.borrow().iter().any(|w| w.dilate(px(SEAM_CLEAR)).contains(&at));
+        let over = [inside && x >= l_far && (x < l_seam || (x < l_in && clear)), inside && x <= r_far && (x > r_seam || (x > r_in && clear))];
+        for side in 0..2 {
+            if self.margin_fade[side].0 != over[side] {
+                let from = self.margin_seen(side);
+                self.margin_fade[side] = (over[side], std::time::Instant::now(), from);
+                cx.notify();
+            }
+        }
+    }
+
+    /// The conversation pane's margins, over a layout `w` wide and `h`
+    /// tall that is `cli` of the way to the CLI layout, the rendered one
+    /// `slide` off its place as the two trade places. At the column's
+    /// left, in the rendered layout only, the outline in a drawer that
+    /// slides out from behind the column, and its seam; at the column's
+    /// right, the layout's seam, whose knob's icon is the layout it goes
+    /// to. The two layouts' columns are one, so the right seam stays
+    /// where it is at a change. Each seam shows while the pointer is in
+    /// its margin, and ends above the composer, in the CLI layout too.
+    pub(crate) fn render_margins(&mut self, w: f32, h: f32, cli: f32, slide: (f32, f32), window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if w <= 0. {
+            return Vec::new();
+        }
+        let theme = cx.theme().clone();
+        let out = self.outline_out();
+        let d = (f32::from(self.outline_w_now()) * out).round();
+        // Worked out with the outline's margin at the left, and drawn
+        // across the pane mirrored when it is at the right (`flip`).
+        let mirrored = self.outline_right();
+        let flip = |x: f32| if mirrored { w - x } else { x };
+        let (left, c, _, _) = column_in(w, f32::from(SEAM_ROOM) + d);
+        let right = left + c;
+        let seam_l = left - d;
+        // Where the pointer shows each seam: from `SEAM_NEAR` out from it
+        // to as far into the column as words can stand off at that side;
+        // with the drawer out, the outline's rows are words, and only the
+        // seam's own reach is left on that side.
+        let band = SEAM_PAD + crate::transcript::REPLY_INSET * (c - 2. * SEAM_PAD);
+        let rendered = cli < 0.5;
+        self.margin_words = rendered;
+        self.margin_edges = if cli < 1. {
+            let inner = if out > 0.5 { seam_l + SEAM_IN } else { left + band };
+            [seam_l - SEAM_NEAR, seam_l, inner]
+        } else {
+            [-1.; 3]
+        };
+        self.margin_edges_r = [if rendered { right - band } else { right - (SEAM_PAD - SEAM_CLEAR) }, right, right + SEAM_NEAR];
+        let seen = [self.margin_seen(0), self.margin_seen(1)];
+        if (out > 0. && out < 1.) || self.margin_fade.iter().any(|(_, at, _)| at.elapsed() < SEAM_FADE) {
+            window.request_animation_frame();
+        }
+        // Where the seams end: above the composer, as far up from the
+        // pane's foot as it was last drawn.
+        let end = (h - self.seam_foot - SEAM_GAP).max(SEAM_TOP + KNOB * 2.);
+        self.margin_foot = end + SEAM_GAP;
+        let mid = (SEAM_TOP + end) / 2.;
+        let dark = theme.mode.is_dark();
+        let accent = theme.primary;
+        let mut els = Vec::new();
+
+        // The outline, moving and fading with the rendered layout: a card
+        // in the margin, rounded at every corner as the composer is, set a
+        // little off the column, and ending where the seams do, above the
+        // composer. It comes out from under its edge by the column.
+        let shown = 1. - cli;
+        if shown > 0. && d > DRAWER_GAP {
+            let body = self.render_outline_panel(cx);
+            els.push(
+                div()
+                    .absolute()
+                    .top(px(SEAM_TOP + slide.1))
+                    .h(px(end - SEAM_TOP))
+                    .left(px(if mirrored { flip(left - DRAWER_GAP) } else { left - d } + slide.0))
+                    .w(px(d - DRAWER_GAP))
+                    .overflow_hidden()
+                    // Its rows go with its outer edge, the right one when
+                    // it is at the right.
+                    .flex()
+                    .when(mirrored, |d| d.justify_end())
+                    .rounded(px(DRAWER_R))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.sidebar)
+                    .occlude()
+                    .opacity(shown)
+                    .child(body)
+                    .into_any_element(),
+            );
+        }
+        // A seam: a line down the column's edge that fades in at its top
+        // and out at its foot, and a knob halfway down holding its icons,
+        // both in the accent while the pointer is on it. `at_left` is the
+        // outline's, whose reach out of the column is at its left.
+        // `inset` draws its line in from both ends by that much: the
+        // outline's, on the drawer's edge, keeps to the edge's straight
+        // run between its rounded corners.
+        // `live` is whether it is showing for the pointer: a seam that is
+        // not takes no pointer and no press, so what is under it does.
+        let live = [self.margin_fade[0].0, self.margin_fade[1].0];
+        let seam = |id: &'static str, group: &'static str, words: &str, x: f32, at_left: bool, inset: f32, live: bool, icons: Vec<AnyElement>, cx: &mut Context<Self>| {
+            let words: SharedString = words.to_string().into();
+            let (reach_l, reach_r) = if at_left { (SEAM_OUT, SEAM_IN) } else { (SEAM_IN, SEAM_OUT) };
+            let fade = |down: bool, len: f32| {
+                let (a, b) = if down { (accent.opacity(0.), accent) } else { (accent, accent.opacity(0.)) };
+                div().w_full().h(px(len)).flex_shrink_0().bg(linear_gradient(180., linear_color_stop(a, 0.), linear_color_stop(b, 1.)))
+            };
+            // The line stops at the knob and goes on under it: a fade's
+            // opacity reaches each element by itself, so a line running
+            // behind the knob showed through it while the two faded.
+            let knob_top = mid - SEAM_TOP - KNOB / 2.;
+            let piece = |top: f32, len: f32| v_flex().absolute().top(px(top)).h(px(len.max(0.))).left(px(reach_l - 1.)).w(px(2.)).overflow_hidden().opacity(0.4).group_hover(group, |s| s.opacity(0.85));
+            let above = piece(inset, knob_top - inset).child(fade(true, 24.)).child(div().w_full().flex_1().bg(accent));
+            let below = piece(knob_top + KNOB, end - SEAM_TOP - inset - knob_top - KNOB).child(div().w_full().flex_1().bg(accent)).child(fade(false, 40.));
+            // The tooltip is the knob's, so it stands beside the knob and
+            // not at the top of a seam the pane's height.
+            let knob = div()
+                .id(SharedString::from(format!("{id}-knob")))
+                .absolute()
+                .left(px(reach_l - KNOB / 2.))
+                .top(px(knob_top))
+                .size(px(KNOB))
+                .rounded_full()
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .shadow(vec![BoxShadow { color: gpui::black().opacity(if dark { 0.35 } else { 0.08 }), offset: point(px(0.), px(1.)), blur_radius: px(4.), spread_radius: px(0.), inset: false }])
+                .text_color(theme.muted_foreground)
+                .group_hover(group, |s| s.border_color(accent).text_color(accent))
+                .when(live, |d| d.managed_tooltip(move |window, cx| crate::workbench::tip(words.clone(), window, cx)))
+                .children(icons);
+            div()
+                .id(id)
+                .group(group)
+                .absolute()
+                .top(px(SEAM_TOP))
+                .h(px(end - SEAM_TOP))
+                .left(px(x - reach_l))
+                .w(px(reach_l + reach_r))
+                // The wheel goes through to the conversation under it.
+                .when(live, |d| d.cursor_pointer().block_mouse_except_scroll().on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true)))
+                .child(above)
+                .child(below)
+                .child(knob)
+        };
+        // An icon in a knob, `dx` and `dy` from its place, and how much of
+        // it shows: the two in a knob trade places as it turns.
+        let icon = |icon: Icon, dx: f32, dy: f32, o: f32| div().absolute().left(px((KNOB - 2. - 14.) / 2. + dx)).top(px((KNOB - 2. - 14.) / 2. + dy)).opacity(o).child(icon.with_size(px(14.))).into_any_element();
+
+        // The outline's, at the drawer's outer edge as it slides.
+        if shown > 0. {
+            let icons = vec![
+                icon(Icon::default().path("icons/list-bullets.svg"), if mirrored { 6. } else { -6. } * out, 0., 1. - out),
+                icon(Icon::new(if mirrored { IconName::ChevronLeft } else { IconName::ChevronRight }), if mirrored { -6. } else { 6. } * (1. - out), 0., out),
+            ];
+            els.push(
+                seam("outline-seam", "outline-seam", t("Outline (⌘⇧O)"), flip(seam_l) + slide.0, !mirrored, out * (DRAWER_R + 8.), live[0], icons, cx)
+                    .mt(px(slide.1))
+                    .opacity(seen[0] * shown)
+                    .when(live[0], |el| el.on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.toggle_panel(false, cx);
+                    })))
+                    .into_any_element(),
+            );
+        }
+
+        // The layout's: at a change the icon leaves upward as the other
+        // rises into its place.
+        let possible = self.cli_possible();
+        let icons = vec![
+            icon(Icon::default().path("icons/square-terminal.svg"), 0., -8. * cli, 1. - cli),
+            icon(Icon::default().path("icons/messages.svg"), 0., 8. * (1. - cli), cli),
+        ];
+        els.push(
+            seam("layout-seam", "layout-seam", if cli < 0.5 { t("CLI Layout (⌘⇧A)") } else { t("Rendered Layout (⌘⇧A)") }, flip(right), mirrored, 0., live[1], icons, cx)
+                .opacity(seen[1] * if possible { 1. } else { 0.45 })
+                .when(possible && live[1], |el| {
+                    el.on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.toggle_layout(window, cx);
+                    }))
+                })
+                .into_any_element(),
+        );
+        els
     }
 
     /// Whether the files panel was showing until a moment ago and is
@@ -2225,6 +2479,14 @@ impl Workbench {
     /// content.
     fn panel_left(&self) -> Pixels {
         self.content_left()
+    }
+
+    /// A place across the row of side panels as it is drawn, from one
+    /// worked out with the files panel at the left: the row is mirrored
+    /// when the files panel stands at the right. Its own inverse, so a
+    /// pointer's place is read back the same way.
+    pub(crate) fn row_x(&self, x: Pixels) -> Pixels {
+        if self.files_right() { self.content_left() + self.view_w - crate::workbench::FRAME - x } else { x }
     }
 
     /// The widest the panel may be dragged: the conversation keeps
@@ -2329,7 +2591,7 @@ impl Workbench {
         }
         let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
         let left = self.file_pane_left();
-        let w = (e.position.x - left).clamp(FILE_MIN, (self.view_w - left - term - self.conv_min.get() - self.outline_least()).max(FILE_MIN));
+        let w = (self.row_x(e.position.x) - left).clamp(FILE_MIN, (self.view_w - left - term - self.conv_min.get() - self.outline_least()).max(FILE_MIN));
         if w != self.file_w {
             self.file_w = w;
             cx.notify();
@@ -2351,7 +2613,7 @@ impl Workbench {
                 .absolute()
                 .top(crate::workbench::TITLEBAR_H)
                 .bottom(crate::workbench::FRAME)
-                .left(self.file_pane_left() + self.file_pane_w() - PANEL_GRIP / 2.)
+                .left(self.row_x(self.file_pane_left() + self.file_pane_w()) - PANEL_GRIP / 2.)
                 .w(PANEL_GRIP)
                 .occlude()
                 .cursor(CursorStyle::ResizeLeftRight)
@@ -2393,7 +2655,7 @@ impl Workbench {
             self.panel_drag_end();
             return;
         }
-        let w = e.position.x - self.panel_left();
+        let w = self.row_x(e.position.x) - self.panel_left();
         let open = w >= PANEL_FOLD_AT;
         if open != self.files_on {
             // The button's line follows; the panel itself is under the
@@ -2414,9 +2676,6 @@ impl Workbench {
 
     pub(crate) fn panel_drag_end(&mut self) {
         if std::mem::take(&mut self.panel_drag) {
-            self.save_ui(true);
-        }
-        if std::mem::take(&mut self.outline_drag) {
             self.save_ui(true);
         }
     }
@@ -2476,7 +2735,7 @@ impl Workbench {
         if !self.panels_shown().0 {
             return None;
         }
-        Some(self.grip("panel-grip", crate::workbench::TITLEBAR_H, self.panel_left() + self.panel_w_now(), self.panel_drag, |this, twice, window, cx| {
+        Some(self.grip("panel-grip", crate::workbench::TITLEBAR_H, self.row_x(self.panel_left() + self.panel_w_now()), self.panel_drag, |this, twice, window, cx| {
             if twice {
                 this.panel_drag = false;
                 this.panel_w = this.panel_fit(window, cx);
@@ -2507,53 +2766,6 @@ impl Workbench {
     /// the pane give way first, down to their least.
     pub(crate) fn outline_w_now(&self) -> Pixels {
         self.outline_w.min(self.outline_max())
-    }
-
-    /// The outline's edge follows the pointer while it is held, as the
-    /// files panel's does: well under its least it is put away, and
-    /// comes back in the same drag.
-    pub(crate) fn outline_drag_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if !self.outline_drag {
-            return;
-        }
-        if e.pressed_button != Some(MouseButton::Left) {
-            self.panel_drag_end();
-            return;
-        }
-        let w = e.position.x - self.outline_left();
-        let open = w >= PANEL_FOLD_AT;
-        if open != self.outline_on {
-            let long_ago = std::time::Instant::now().checked_sub(crate::workbench::PANEL_ANIM).unwrap_or_else(std::time::Instant::now);
-            self.outline_anim = Some((self.outline_on, open, long_ago, self.outline_anim.map(|(_, _, _, n)| n + 1).unwrap_or(0)));
-            self.outline_on = open;
-            self.outline_at = None;
-            cx.notify();
-        }
-        if open {
-            let w = w.clamp(OUTLINE_MIN, self.outline_max());
-            if w != self.outline_w {
-                self.outline_w = w;
-                cx.notify();
-            }
-        }
-    }
-
-    /// The outline's edge. A double click goes to a width its lines read
-    /// well at.
-    pub(crate) fn render_outline_grip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.panels_shown().1 || self.file_over() {
-            return None;
-        }
-        // Under the path bar, whose ends hold the outline's button.
-        Some(self.grip("outline-grip", crate::workbench::TITLEBAR_H + HEAD_H, self.outline_left() + self.outline_w_now(), self.outline_drag, |this, twice, _, _| {
-            if twice {
-                this.outline_drag = false;
-                this.outline_w = OUTLINE_FIT.min(this.outline_max());
-                this.save_ui(true);
-            } else {
-                this.outline_drag = true;
-            }
-        }, cx))
     }
 
     // -- files ----------------------------------------------------------------
@@ -6166,7 +6378,7 @@ impl Workbench {
             if !this.tree_rename_key(e, window, cx) {
                 this.tree_key(e, cx);
             }
-        })).w(self.panel_w_now()).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(crate::look::files_ground(&theme)).child(panel_head(t("Files"), self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body).children(exists.then(|| self.render_file_structure(cx)).flatten());
+        })).w(self.panel_w_now()).h_full().flex_shrink_0().map(|d| if self.files_right() { d.border_l_1() } else { d.border_r_1() }).border_color(theme.border).bg(crate::look::files_ground(&theme)).child(panel_head(t("Files"), self.git_pills(cx), self.changes_pill(cx), &theme)).children(self.git_trouble_strip(cx)).children(self.stash_strip(cx)).children(self.publish_strip(cx)).children(self.sync_strip(cx)).children(root_row).child(body).children(exists.then(|| self.render_file_structure(cx)).flatten());
         // The structure's edge, held: the pointer anywhere over the panel
         // sets its height, and a release anywhere lets it go.
         let el = el
@@ -8806,7 +9018,8 @@ impl Workbench {
             .h_full()
             .flex_shrink_0()
             .bg(theme.background)
-            .border_r_1()
+            // Its edge by the conversation's.
+            .map(|d| if self.files_right() { d.border_l_1() } else { d.border_r_1() })
             .border_color(theme.border)
             .when(!leaving, |d| d.track_focus(&self.file_focus))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
@@ -9072,9 +9285,7 @@ impl Workbench {
                     this.open_settings(Some("conversation"), cx);
                 })))
                 .with_animation("outline-off", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t));
-            let w = self.outline_w_now();
-            let el = v_flex().w(w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(note);
-            return Self::panel_in("panel-outline", self.outline_anim, w, el);
+            return v_flex().w(self.outline_w_now() - px(DRAWER_GAP)).h_full().flex_shrink_0().child(note).into_any_element();
         }
         let Some(d) = self.detail.as_mut() else { return div().into_any_element() };
         let entries = d.outline.get_or_insert_with(|| Rc::new(outline::of(&d.session))).clone();
@@ -9264,7 +9475,11 @@ impl Workbench {
         let body = if rows.is_empty() {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child(t("Nothing said yet.")).into_any_element()
         } else {
+            // One a session: a tab's outline is another scroller, whose
+            // bar starts from where it is and does not take the change of
+            // tab for a scroll (the vendored `SETTLE`).
             v_flex()
+                .id(SharedString::from(format!("outline-{key}")))
                 .relative()
                 .flex_1()
                 .min_h_0()
@@ -9277,6 +9492,9 @@ impl Workbench {
                             .top_0()
                             .left_0()
                             .right_0()
+                            // The drawer's own corners: what is drawn in it
+                            // is clipped square, not to its rounding.
+                            .rounded_t(px(DRAWER_R - 1.))
                             .px(px(16.))
                             .pt(PIN_LEAD)
                             .pb(px(6.))
@@ -9289,14 +9507,11 @@ impl Workbench {
                             .child(day),
                     )
                 })
-                .with_animation("outline-on", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
                 .into_any_element()
         };
-        // Under the path bar, whose button says what it is: no head of
-        // its own. An entry waiting for its label breathes.
-        let w = self.outline_w_now();
-        let el = v_flex().w(w).h_full().flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).child(body);
-        Self::panel_in("panel-outline", self.outline_anim, w, el)
+        // In its drawer, whose handle says what it is: no head of its
+        // own. An entry waiting for its label breathes.
+        v_flex().w(self.outline_w_now() - px(DRAWER_GAP)).h_full().flex_shrink_0().child(body).into_any_element()
     }
 
     /// `EMAKI_GO` steps for the two panels; whether `step` was one.
@@ -9413,16 +9628,8 @@ impl Workbench {
             t if t.starts_with("panelw:") => {
                 if let (Ok(w), true) = (t["panelw:".len()..].parse::<f32>(), self.files_on) {
                     self.panel_drag = true;
-                    let at = point(self.panel_left() + px(w), px(300.));
+                    let at = point(self.row_x(self.panel_left() + px(w)), px(300.));
                     self.panel_drag_to(&MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: Modifiers::default() }, cx);
-                    self.panel_drag_end();
-                }
-            }
-            t if t.starts_with("outlinew:") => {
-                if let (Ok(w), true) = (t["outlinew:".len()..].parse::<f32>(), self.outline_on) {
-                    self.outline_drag = true;
-                    let at = point(self.outline_left() + px(w), px(300.));
-                    self.outline_drag_to(&MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: Modifiers::default() }, cx);
                     self.panel_drag_end();
                 }
             }

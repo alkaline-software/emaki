@@ -36,6 +36,8 @@ const CARD_R: Pixels = px(12.);
 /// The language list at Appearance's title: as wide as its longest
 /// choice, "ZH-CN" by its flag, or the system's name in any language.
 const LANGUAGE_W: Pixels = px(136.);
+/// How long the pieces of Panels' picture take to move to their sides.
+const SIDES_ANIM: Duration = Duration::from_millis(320);
 /// The key context of the settings window, where Escape puts a list away.
 pub const SETTINGS_CONTEXT: &str = "Settings";
 
@@ -276,6 +278,7 @@ impl Workbench {
             "fonts" => self.fonts_rows(cx),
             "text" => self.text_rows(cx),
             "conversation" => self.conversation_rows(cx),
+            "panels" => self.panels_rows(window, cx),
             "sessions" => self.sessions_rows(cx),
             "terminal" => self.terminal_rows(cx),
             "files" => self.files_rows(cx),
@@ -299,6 +302,7 @@ impl Workbench {
             "fonts" => ("title-fonts", "page-fonts"),
             "text" => ("title-text", "page-text"),
             "conversation" => ("title-conversation", "page-conversation"),
+            "panels" => ("title-panels", "page-panels"),
             "sessions" => ("title-sessions", "page-sessions"),
             "terminal" => ("title-terminal", "page-terminal"),
             "files" => ("title-files", "page-files"),
@@ -777,6 +781,129 @@ impl Workbench {
             &theme,
         ));
         groups
+    }
+
+    /// Panels: the side of the conversation each side panel stands at,
+    /// and each margin's control, over a picture of the window whose
+    /// pieces move to their places as a choice is made. Each pair is one
+    /// choice, its two in the order they stand from left to right.
+    fn panels_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let (files_right, outline_right) = (self.files_right(), self.outline_right());
+        // How far each pair has gone toward its right-hand order.
+        let mut moving = false;
+        let mut toward = |at: Option<Instant>, right: bool| {
+            let to = if right { 1. } else { 0. };
+            match at.map(|at| at.elapsed().as_secs_f32() / SIDES_ANIM.as_secs_f32()) {
+                Some(p) if p < 1. => {
+                    moving = true;
+                    (1. - to) + (2. * to - 1.) * ease_out_quint()(p)
+                }
+                _ => to,
+            }
+        };
+        let kf = toward(self.sides_anim[0], files_right);
+        let ko = toward(self.sides_anim[1], outline_right);
+        if moving {
+            window.request_animation_frame();
+        }
+        let lerp = |a: f32, b: f32, k: f32| a + (b - a) * k;
+
+        // The picture: the top strip, a side panel at either side of the
+        // conversation, and in the conversation's margins the two seams.
+        const W: f32 = 528.;
+        const H: f32 = 176.;
+        const STRIP: f32 = 20.;
+        const SIDE: f32 = 96.;
+        const COL: f32 = 168.;
+        let col_l = SIDE + (W - 2. * SIDE - COL) / 2.;
+        let col_r = col_l + COL;
+        let ink = theme.muted_foreground;
+        let bar = |x: f32, y: f32, w: f32| div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(4.)).rounded_full().bg(ink.opacity(0.22));
+        let named = |x: f32, ground: Hsla, icon: &'static str, words: &'static str| {
+            v_flex()
+                .absolute()
+                .top(px(STRIP))
+                .bottom_0()
+                .left(px(x))
+                .w(px(SIDE))
+                .items_center()
+                .justify_center()
+                .gap(px(5.))
+                .bg(ground)
+                .text_color(ink)
+                .child(Icon::default().path(icon).with_size(px(15.)))
+                .child(div().text_size(px(10.5)).child(words))
+        };
+        let strip_icon = |x: f32, icon: &'static str| div().absolute().top(px(5.)).left(px(x)).text_color(ink).child(Icon::default().path(icon).with_size(px(10.)));
+        let seam = |x: f32, icon: &'static str, words: &'static str| {
+            // The line stops for the knob and the name under it.
+            let (top, foot) = (STRIP + 12., H - 42.);
+            let mid = (top + foot) / 2. - 8.;
+            let line = |from: f32, to: f32| div().absolute().left(px(x - 0.75)).top(px(from)).h(px(to - from)).w(px(1.5)).bg(theme.primary.opacity(0.5));
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(line(top, mid - 9.))
+                .child(line(mid + 30., foot))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(x - 9.))
+                        .top(px(mid - 9.))
+                        .size(px(18.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.primary.opacity(0.7))
+                        .bg(theme.background)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.primary)
+                        .child(Icon::default().path(icon).with_size(px(10.))),
+                )
+                .child(div().absolute().left(px(x - 40.)).w(px(80.)).top(px(mid + 13.)).text_center().text_size(px(10.)).text_color(ink).child(words))
+        };
+        let picture = div()
+            .relative()
+            .w(px(W))
+            .h(px(H))
+            .mx_auto()
+            .overflow_hidden()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(div().absolute().top_0().left_0().right_0().h(px(STRIP)).border_b_1().border_color(theme.border).bg(theme.muted.opacity(0.3)))
+            .child(div().absolute().top(px(5.)).left(px(W / 2. - 40.)).w(px(80.)).h(px(10.)).rounded(px(4.)).bg(theme.muted))
+            .child(strip_icon(lerp(8., W - 20., kf), "icons/tree-view.svg"))
+            .child(strip_icon(lerp(W - 20., 8., kf), "icons/terminal.svg"))
+            .child(named(lerp(0., W - SIDE, kf), crate::look::files_ground(&theme), "icons/tree-view.svg", t("Files")))
+            .child(named(lerp(W - SIDE, 0., kf), self.term_ground(cx), "icons/terminal.svg", t("Terminal")))
+            // The conversation: a prompt, a reply, a prompt, the composer.
+            .child(div().absolute().left(px(col_r - 14. - 64.)).top(px(STRIP + 14.)).w(px(64.)).h(px(12.)).rounded(px(6.)).bg(theme.muted))
+            .child(bar(col_l + 14., STRIP + 36., 126.))
+            .child(bar(col_l + 14., STRIP + 46., 110.))
+            .child(bar(col_l + 14., STRIP + 56., 80.))
+            .child(div().absolute().left(px(col_r - 14. - 48.)).top(px(STRIP + 72.)).w(px(48.)).h(px(12.)).rounded(px(6.)).bg(theme.muted))
+            .child(div().absolute().left(px(col_l)).top(px(H - 32.)).w(px(COL)).h(px(22.)).rounded(px(8.)).border_1().border_color(theme.border))
+            .child(seam(lerp(col_l, col_r, ko), "icons/list-bullets.svg", t("Outline")))
+            .child(seam(lerp(col_r, col_l, ko), "icons/square-terminal.svg", t("Layout")));
+        // Each choice is drawn as its two by their icons (`side_pair`).
+        let files = div()
+            .w(CONTROL_W)
+            .child(self.segmented("files-side", vec![("left", String::new(), None), ("right", String::new(), None)], if files_right { "right" } else { "left" }, Rc::new(|this, side, _, cx| this.set_side(true, side, cx)), cx))
+            .into_any_element();
+        let margins = div()
+            .w(CONTROL_W)
+            .child(self.segmented("outline-side", vec![("left", String::new(), None), ("right", String::new(), None)], if outline_right { "right" } else { "left" }, Rc::new(|this, side, _, cx| this.set_side(false, side, cx)), cx))
+            .into_any_element();
+        vec![
+            group(None, None, vec![div().p(px(14.)).child(picture).into_any_element()], &theme),
+            group(None, None, vec![line(t("Side panels"), None, files, &theme), line(t("Margins"), None, margins, &theme)], &theme),
+        ]
     }
 
     /// The composer's groups, at the top of Conversation: the key that

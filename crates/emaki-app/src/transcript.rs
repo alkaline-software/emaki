@@ -30,7 +30,7 @@ const MAX_BODY_H: Pixels = px(400.);
 /// prompt, which fills the width it is given, still reads as coming from
 /// the right. It is a share of the column, which is as narrow as the
 /// panes beside the conversation leave it.
-const REPLY_INSET: f32 = 0.1;
+pub(crate) const REPLY_INSET: f32 = 0.1;
 /// How long an Explain button takes to change between off and on.
 const EXPLAIN_FLIP: Duration = Duration::from_millis(160);
 /// The line under a prompt or a reply that shows on hover: the time and
@@ -74,9 +74,13 @@ impl ConversationList {
 }
 
 impl Render for ConversationList {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some((_, list)) = self.list.clone() else { return div().into_any_element() };
         self.marks.clear();
+        // Where the rounds' words stand is taken again as they are laid out.
+        if let Some(w) = self.workbench.upgrade() {
+            w.read(cx).words_at.borrow_mut().clear();
+        }
         let (entity, kept, marks) = (self.workbench.clone(), self.kept.clone(), self.marks.clone());
         gpui::list(list, move |ix, window, cx| {
             let _here = crate::ambient::Within::enter(Some(kept.clone()), marks.clone());
@@ -85,6 +89,19 @@ impl Render for ConversationList {
         .size_full()
         .into_any_element()
     }
+}
+
+/// Where a piece of the conversation stands as it is laid out, for the
+/// seams in its margins to keep clear of (`Workbench::margin_hover`).
+pub(crate) fn words_at(rects: &std::rc::Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>) -> impl IntoElement {
+    let rects = rects.clone();
+    // Pinned to the corner: an absolute element with no place given stands
+    // where the flow would put it, after what it measures.
+    canvas(move |b, _, _| rects.borrow_mut().push(b), |_, _, _, _| {})
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// Whether the markdown crate can parse `text` without panicking. Version
@@ -521,8 +538,10 @@ impl Workbench {
                 // The bubble is in a row of its own, which it shrinks to
                 // fit. As an item of this column it took the width of
                 // its words up to its most, whatever the column had.
-                v_flex().group(group.clone()).w_full().pl(relative(REPLY_INSET)).items_end().gap(px(2.)).child(h_flex().w_full().justify_end().items_start().child(bubble)).child(
+                v_flex().group(group.clone()).w_full().pl(relative(REPLY_INSET)).items_end().gap(px(2.)).child(h_flex().w_full().justify_end().items_start().child(bubble.child(words_at(&self.words_at)))).child(
                     h_flex()
+                        .relative()
+                        .child(words_at(&self.words_at))
                         .h(HOVER_ROW_H)
                         .gap(px(6.))
                         .pr(px(2.))
@@ -660,6 +679,9 @@ impl Workbench {
             let said = rnd.items.iter().rev().find_map(|i| if let Item::Text { ts, .. } = i { Some(stamp(ts)) } else { None }).unwrap_or_default();
             let copy = rnd.has_text().then(|| {
                 h_flex()
+                    .self_start()
+                    .relative()
+                    .child(words_at(&self.words_at))
                     .h(HOVER_ROW_H)
                     .mt(px(-4.))
                     .pl(px(17.))
@@ -677,11 +699,13 @@ impl Workbench {
                     .group(group)
                     .w_full()
                     .gap(px(8.))
-                    .child(h_flex().gap(px(7.)).items_center().child(agent_icon(session.agent, px(15.), agent_color(session.agent, &theme))).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
+                    // Each part where it is drawn: the name, the words in
+                    // from it, the row under them.
+                    .child(h_flex().self_start().relative().child(words_at(&self.words_at)).gap(px(7.)).items_center().child(agent_icon(session.agent, px(15.), agent_color(session.agent, &theme))).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(speaker)))
                     // The reply stops short of the column's right edge, where
                     // the prompt bubbles end: the two voices sit at different
                     // widths, as in the Claude app, and read apart at a glance.
-                    .child(div().w_full().pl(px(22.)).pr(relative(REPLY_INSET)).child(body))
+                    .child(div().w_full().pl(px(22.)).pr(relative(REPLY_INSET)).child(div().relative().w_full().child(body).child(words_at(&self.words_at))))
                     .children(copy),
             );
         }

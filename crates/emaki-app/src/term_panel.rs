@@ -40,8 +40,11 @@ const WHEEL_ROW: f32 = 15.;
 const BLINK: Duration = Duration::from_millis(500);
 /// How long the panel takes to come and to go.
 const TERM_PANEL_ANIM: Duration = Duration::from_millis(200);
-/// How long one layout takes to fade in over the other.
-pub(crate) const CLI_ANIM: Duration = Duration::from_millis(220);
+/// How long the two layouts take to trade places, and how far each card
+/// slides as it comes or goes: the CLI layout stands to the rendered
+/// one's right.
+pub(crate) const CLI_ANIM: Duration = Duration::from_millis(320);
+pub(crate) const CLI_SHUFFLE: f32 = 80.;
 /// How often a panel that shows looks for something new on its screen.
 const POLL: Duration = Duration::from_millis(33);
 /// How often the agents' page looks again while the shell is beside it.
@@ -50,10 +53,6 @@ const LOOK_AGAIN: Duration = Duration::from_secs(4);
 const COPIED_FOR: Duration = Duration::from_millis(2500);
 /// The head over a side, as tall as the path bar over the conversation.
 const HEAD_H: f32 = 31.;
-/// How much deeper than the agent terminal's ground the room at either
-/// side of its column is, in the CLI layout: the black laid over it in
-/// the light appearance and in the dark one.
-const CLI_SIDE_DEEPER: (f32, f32) = (0.035, 0.2);
 /// A shell's tab in the head: its height, the most and the least it is
 /// wide, and the room between two.
 const TAB_H: f32 = 22.;
@@ -456,6 +455,7 @@ impl Workbench {
         self.cli_layout = cli;
         self.agent_view.back = 0;
         self.agent_view.sel = None;
+        self.end_scroll_gesture();
         if cli {
             self.term_panel_watch(cx);
             self.warm_now();
@@ -578,7 +578,7 @@ impl Workbench {
         let on = self.term_on();
         let (was, serial) = self.side_term_anim.map(|(from, _, at, n)| (crate::workbench::pressed_from(from, on, at), n + 1)).unwrap_or((on, 0));
         let tip = if self.term_at_agents() { t("Shell Terminal in your home folder (⌘⇧S)") } else { t("Shell Terminal (⌘⇧S)") };
-        self.toggle_button("term-shell", "icons/terminal.svg", tip, (was, on, serial), false, Rc::new(|this, window, cx| this.toggle_term(window, cx)), cx)
+        self.toggle_button("term-shell", "icons/terminal.svg", tip, (was, on, serial), Rc::new(|this, window, cx| this.toggle_term(window, cx)), cx)
     }
 
     /// While the panel shows, the window is drawn again whenever the
@@ -646,6 +646,23 @@ impl Workbench {
             "light" => true,
             _ => !cx.theme().mode.is_dark(),
         })
+    }
+
+    /// The room around a terminal's screen the settings ask for, at its
+    /// sides and at its foot, in the screen's own pixels as Kaku counts it.
+    pub(crate) fn term_pad(&self, window: &Window) -> (f32, f32) {
+        let scale = window.scale_factor().max(1.);
+        match self.cfg.terminal.padding.as_str() {
+            "compact" => (10., 8.),
+            "roomy" => (if scale >= 2. { 20. } else { 26. }, 16. / scale),
+            _ => (15., 8.),
+        }
+    }
+
+    /// The terminals' ground, as the settings' picture of the window
+    /// draws the terminal panel.
+    pub(crate) fn term_ground(&self, cx: &App) -> Hsla {
+        hsla(self.term_scheme(cx).bg)
     }
 
     /// The face the settings ask for, in the scheme's plain weight, with
@@ -912,7 +929,10 @@ impl Workbench {
             return;
         }
         let beside = self.left_w() + self.file_pane_least() + self.outline_least();
-        let w = (self.view_w - e.position.x).clamp(TERM_MIN, (self.pane_w - beside - self.conv_min.get()).max(TERM_MIN));
+        // Its edge is at its left, or with the side panels mirrored at
+        // its right.
+        let from = if self.files_right() { e.position.x - self.content_left() } else { self.view_w - e.position.x };
+        let w = from.clamp(TERM_MIN, (self.pane_w - beside - self.conv_min.get()).max(TERM_MIN));
         if w != self.side_term_w {
             self.side_term_w = w;
             cx.notify();
@@ -933,7 +953,7 @@ impl Workbench {
                 .absolute()
                 .top(crate::workbench::TITLEBAR_H)
                 .bottom(crate::workbench::FRAME)
-                .right(crate::workbench::FRAME + self.term_panel_w() - TERM_GRIP / 2.)
+                .map(|d| if self.files_right() { d.left(self.content_left() + self.term_panel_w() - TERM_GRIP / 2.) } else { d.right(crate::workbench::FRAME + self.term_panel_w() - TERM_GRIP / 2.) })
                 .w(TERM_GRIP)
                 .occlude()
                 .cursor(CursorStyle::ResizeLeftRight)
@@ -1453,11 +1473,7 @@ impl Workbench {
         let face = self.term_font(k, cx);
         let (text, lh) = (self.cfg.terminal.size, self.term_line_h());
         let scale = window.scale_factor().max(1.);
-        let (pad, pad_foot) = match self.cfg.terminal.padding.as_str() {
-            "compact" => (10., 8.),
-            "roomy" => (if scale >= 2. { 20. } else { 26. }, 16. / scale),
-            _ => (15., 8.),
-        };
+        let (pad, pad_foot) = self.term_pad(window);
         let cell_w = {
             let probe = "MMMMMMMMMM";
             let run = TextRun { len: probe.len(), font: face.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
@@ -1740,25 +1756,23 @@ impl Workbench {
         // bar, which names its session; how far back it is scrolled is
         // said at the screen's top right.
         if agent {
-            // It has the room the rendered layout gives the conversation:
-            // the screen stands in a column as wide as the conversation's
-            // words, and the room at its sides is the terminal's own ground
-            // a step deeper, so the column's edge is clear and the two read
-            // as one surface. A press in that room is the screen's
-            // keyboard, and its wheel the screen's.
+            // It stands where the rendered layout's column does, as wide and
+            // in the same place, on the page's own ground, so a change of
+            // layout moves nothing in the margins. A press in the margins
+            // is the screen's keyboard, and its wheel the screen's.
             let ground = hsla(ground);
-            // Black laid thinly over it, not its lightness taken down,
-            // which turned Kaku's cream a stronger yellow.
-            let side = ground.blend(gpui::black().opacity(if theme.mode.is_dark() { CLI_SIDE_DEEPER.1 } else { CLI_SIDE_DEEPER.0 }));
             let room = self.agent_view.room.clone();
+            let (room_l, room_r) = self.conv_room(f32::from(self.conv_bounds.get().size.width));
             return h_flex()
                 .relative()
                 .flex_1()
                 .min_w_0()
                 .h_full()
                 .justify_center()
+                .pl(px(room_l))
+                .pr(px(room_r))
                 .overflow_hidden()
-                .bg(side)
+                .bg(theme.background)
                 .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     window.focus(&this.agent_view.focus, cx);
                     swallow_click(window, cx);
@@ -1768,7 +1782,7 @@ impl Workbench {
                     v_flex()
                         .relative()
                         .w_full()
-                        .max_w(crate::workbench::CONTENT_W + px(2. * pad))
+                        .max_w(crate::workbench::CONTENT_W)
                         .h_full()
                         .bg(ground)
                         .child(screen.children(back.map(|b| div().absolute().top(px(6.)).right(px(4.)).child(b)))),
@@ -1781,7 +1795,7 @@ impl Workbench {
             .w(w)
             .h_full()
             .flex_shrink_0()
-            .border_l_1()
+            .map(|d| if self.files_right() { d.border_r_1() } else { d.border_l_1() })
             .border_color(theme.border)
             .bg(hsla(k.bg))
             .child(
