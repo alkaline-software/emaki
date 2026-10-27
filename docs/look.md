@@ -68,7 +68,7 @@ The accent on a wash of itself. `md_view` sets the letters to `theme.link` and `
 
 ## The faces
 
-Twelve, eleven of them built in (`fonts.rs`, `assets/fonts`), chosen in Settings, Fonts, where each is a tile drawn in itself:
+Twelve, eleven of them built in (`fonts.rs`, `assets/fonts`), chosen in Settings, Text, Fonts, where each is a tile drawn in itself:
 
 - **The chat font**, one of eight (`app.chat_font`): the serifs Source Serif, Newsreader, Literata and Lora, and the sans serifs Inter, IBM Plex Sans, Source Sans and Geist. The first serif to begin with. A file that says `serif` or `sans`, from when there were two, gets the first of each.
 - **The monospace font**, one of four (`terminal.font`, where it was the terminal's alone): JetBrains Mono, the one to begin with, then Monaco on a Mac and IBM Plex Mono elsewhere, Maple Mono and Geist Mono. Monaco is Apple's: it is used from the system on a Mac, as Optima is, and never carried, which is why Windows and Linux have another in its place. IBM Plex Mono has no medium or semibold here: its files name those as families of their own. The second place is one choice whichever face a system has in it (`mono_face`), so a settings file carried from one to the other keeps its meaning. The chosen face is every mono in the window: code in a conversation, the file's editor, the terminal. `look::install` writes it into both theme configs as `mono_font_family`, so `Theme::change` keeps it, and `Workbench::set_mono_font` installs and draws again when it changes.

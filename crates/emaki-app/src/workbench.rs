@@ -46,7 +46,7 @@ use gpui_component::checkbox::Checkbox;
 mod settings;
 pub use settings::SETTINGS_CONTEXT;
 
-actions!(emaki, [ReopenTab, ToggleRaw, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ReopenTab, ToggleRaw, ToggleChanges, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -641,23 +641,44 @@ const STRIP_PAD: Pixels = px(7.5);
 pub(crate) const CARD_R: Pixels = px(if cfg!(target_os = "macos") { 12. } else { 4. });
 /// Room for the traffic lights on a transparent title bar.
 pub const TRAFFIC_W: Pixels = px(85.);
-/// The rail the sidebar folds to, on a Mac: the traffic lights' room and
-/// a little more before the card.
-const RAIL_W: Pixels = px(86.);
+/// The rail the sidebar folds to: its icons' column and no more. On a
+/// Mac the traffic lights stand in a column at its head while it shows
+/// (`sys::fold_lights`), and its icons start under them.
+const RAIL_W: Pixels = px(56.);
+const RAIL_TOP_MAC: Pixels = px(92.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
+/// How long a live session's ended turn reads as the person's turn (the
+/// green dot) after its newest row, in seconds.
+const YOUR_TURN_FOR: f64 = 3600.;
 /// The settings panel's sections, in rail order: key, label, icon.
 pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
     ("appearance", phrase("Appearance"), "icons/palette.svg"),
-    ("fonts", phrase("Fonts"), "icons/typography.svg"),
-    ("text", phrase("Text Size"), "icons/a-large-small.svg"),
+    ("text", phrase("Text"), "icons/a-large-small.svg"),
     ("conversation", phrase("Conversation"), "icons/book-open.svg"),
-    ("panels", phrase("Panels"), "icons/layout-dashboard.svg"),
     ("sessions", phrase("New sessions"), "icons/square-terminal.svg"),
-    ("terminal", phrase("Terminal"), "icons/terminal.svg"),
+    ("panels", phrase("Panels"), "icons/layout-dashboard.svg"),
     ("files", phrase("Files"), "icons/tree-view.svg"),
+    ("terminal", phrase("Terminal"), "icons/terminal.svg"),
+    ("shortcuts", phrase("Shortcuts"), "icons/keyboard.svg"),
     ("about", phrase("About"), "icons/info.svg"),
 ];
+/// The sections that are more than one page, each page chosen at the
+/// right of the section's name: the section, and its pages, key and
+/// label, the first the one it opens on.
+pub const SETTINGS_PAGES: &[(&str, &[(&str, &str)])] = &[
+    ("text", &[("fonts", phrase("Fonts")), ("size", phrase("Size"))]),
+    ("shortcuts", &[("window", phrase("Window")), ("editor", phrase("File editor"))]),
+];
+
+/// The section a name stands for, and the page in it when it names a
+/// page: `size` is Text's Size page.
+pub fn settings_place(name: &str) -> Option<(&'static str, Option<&'static str>)> {
+    if let Some((k, _, _)) = SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == name) {
+        return Some((k, None));
+    }
+    SETTINGS_PAGES.iter().find_map(|(section, pages)| pages.iter().find(|(p, _)| *p == name).map(|(p, _)| (*section, Some(*p))))
+}
 /// What the composer says when empty: on the home page, and on a session.
 /// Drawn by `render_composer_hint`.
 pub const PLACEHOLDER_NEW: &str = phrase("Start a session…");
@@ -744,10 +765,10 @@ pub(crate) fn side_pair(control: &str, key: &str) -> Option<[(&'static str, &'st
     }
 }
 
-/// A tab's own side panels and layout (`Workbench::tab_views`).
+/// A tab's own terminal panel, outline and layout (`Workbench::tab_views`).
+/// The files panel is the window's, the same on every tab.
 #[derive(Clone, Copy, Default)]
 struct TabView {
-    files: bool,
     term: bool,
     outline: bool,
     cli: bool,
@@ -1444,9 +1465,17 @@ pub struct Workbench {
     pub search_input: Entity<InputState>,
     pub search_open: bool,
     /// The settings window, while it is open (`workbench/settings.rs`).
-    settings_window: Option<AnyWindowHandle>,
+    pub(crate) settings_window: Option<AnyWindowHandle>,
     /// What the settings window's keys are given to.
     settings_focus: FocusHandle,
+    /// The command whose tile in Settings, Shortcuts, waits for its new
+    /// keys, and the modifiers held while it waits; the tile that last
+    /// refused keys, what has them, and when (`shortcut_key`).
+    pub(crate) shortcut_rec: Option<&'static str>,
+    /// The page each section of more than one shows (`SETTINGS_PAGES`).
+    pub(crate) settings_pages: HashMap<&'static str, &'static str>,
+    shortcut_held: Modifiers,
+    shortcut_refused: Option<(&'static str, String, Instant)>,
     /// The scroll of a list opened in the settings window, which has no
     /// `route_scroll` of its own to keep one.
     settings_pick_scroll: ScrollHandle,
@@ -2213,7 +2242,7 @@ pub struct Workbench {
     pub(crate) pending_pointer: Vec<(Point<Pixels>, Option<f32>)>,
     /// A probe's drags with the left button, from and to (`dragat:`),
     /// and whether to print what is selected once they are done (`seltext`).
-    pub(crate) pending_drag: Vec<(Point<Pixels>, Point<Pixels>)>,
+    pub(crate) pending_drag: Vec<(Point<Pixels>, Point<Pixels>, bool)>,
     pub(crate) pending_seltext: bool,
     /// `EMAKI_GO=unarchive:<id>`: that session unarchived at the next draw,
     /// as its menu in the sidebar does it.
@@ -2649,7 +2678,7 @@ impl Workbench {
         let theme = Self::shell_theme(cx);
         let k = self.strip_t();
         let size = STRIP_BTN + (RAIL_ENTRY - STRIP_BTN) * (1. - k);
-        let button = |id: &'static str, icon: IconName, tip: &'static str, lit: bool| {
+        let button = |id: &'static str, icon: IconName, tip: SharedString, lit: bool| {
             let hover = theme.foreground.opacity(0.07);
             div()
                 .id(id)
@@ -2662,7 +2691,7 @@ impl Workbench {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .when(lit, |d| d.bg(hover))
                 .hover(move |s| s.bg(hover))
-                .when(!tip.is_empty(), |d| d.managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx)))
+                .when(!tip.is_empty(), |d| d.managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx)))
                 .child(Icon::new(icon).with_size(px(16.) + px(2.) * (1. - k)).text_color(theme.muted_foreground))
         };
         // In the title row the lights' centers are at 26.25: the middle
@@ -2673,7 +2702,7 @@ impl Workbench {
         let rail_x = self.rail_mid() - RAIL_ENTRY / 2.;
         let at = |i: f32| {
             let (x, y) = (self.strip_left() + STRIP_BTN * i, row_y);
-            let (rx, ry) = (rail_x, RAIL_TOP + (RAIL_ENTRY + RAIL_GAP) * i);
+            let (rx, ry) = (rail_x, self.rail_top() + (RAIL_ENTRY + RAIL_GAP) * i);
             (rx + (x - rx) * k, ry + (y - ry) * k)
         };
         let ((sx, sy), (qx, qy)) = (at(0.), at(1.));
@@ -2681,11 +2710,11 @@ impl Workbench {
             .absolute()
             .top_0()
             .left_0()
-            .child(button("strip-sidebar", IconName::PanelLeft, t("Sidebar (⌘⇧B)"), false).absolute().left(sx).top(sy).on_click(cx.listener(|this, _, window, cx| {
+            .child(button("strip-sidebar", IconName::PanelLeft, crate::shortcuts::keyed(t("Sidebar (⌘⇧B)"), "sidebar").into(), false).absolute().left(sx).top(sy).on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.toggle_sidebar(cx);
             })))
-            .child(button("strip-search", IconName::Search, t("Search (⌘K)"), false).absolute().left(qx).top(qy).on_click(cx.listener(|this, _, window, cx| {
+            .child(button("strip-search", IconName::Search, crate::shortcuts::keyed(t("Search (⌘K)"), "search").into(), false).absolute().left(qx).top(qy).on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.open_search(window, cx);
             })))
@@ -2705,9 +2734,9 @@ impl Workbench {
         let theme = Self::shell_theme(cx);
         let (page, scope) = (self.page, self.scope.clone());
         let mid = self.rail_mid();
-        let top = RAIL_TOP + (RAIL_ENTRY + RAIL_GAP) * 2. + px(12.);
+        let top = self.rail_top() + (RAIL_ENTRY + RAIL_GAP) * 2. + px(12.);
         let base = Self::drag_region(div(), cx);
-        let entry = |id: &'static str, glyph: AnyElement, words: &'static str, active: bool, i: f32, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
+        let entry = |id: &'static str, glyph: AnyElement, words: SharedString, active: bool, i: f32, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
             let hover = theme.sidebar_accent.opacity(0.6);
             div()
                 .id(id)
@@ -2722,7 +2751,7 @@ impl Workbench {
                 .cursor_pointer()
                 .when(active, |d| d.bg(theme.sidebar_accent))
                 .hover(move |s| s.bg(hover))
-                .managed_tooltip(move |window, cx| crate::workbench::tip(words, window, cx))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(words.clone(), window, cx))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
@@ -2744,11 +2773,11 @@ impl Workbench {
             .w(self.rail_w())
             .opacity(shown)
             .child(rule(top - px(7.)))
-            .child(entry("rail-new", plus, t("New Session (⌘N)"), page == Page::New, 0., Box::new(|this, window, cx| this.new_toggle(window, cx))))
-            .child(entry("rail-sessions", icon("icons/scroll.svg", sessions), t("All Sessions (⌘L)"), sessions, 1., Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
-            .child(entry("rail-agents", icon("icons/sparkles.svg", page == Page::Agents), t("Agents (⌘E)"), page == Page::Agents, 2., Box::new(|this, _, cx| this.show_agents(None, cx))))
+            .child(entry("rail-new", plus, crate::shortcuts::keyed(t("New Session (⌘N)"), "new-session").into(), page == Page::New, 0., Box::new(|this, window, cx| this.new_toggle(window, cx))))
+            .child(entry("rail-sessions", icon("icons/scroll.svg", sessions), crate::shortcuts::keyed(t("All Sessions (⌘L)"), "all-sessions").into(), sessions, 1., Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
+            .child(entry("rail-agents", icon("icons/sparkles.svg", page == Page::Agents), crate::shortcuts::keyed(t("Agents (⌘E)"), "agents").into(), page == Page::Agents, 2., Box::new(|this, _, cx| this.show_agents(None, cx))))
             .child(rule(top + (RAIL_ENTRY + RAIL_GAP) * 3. + px(3.)))
-            .child(entry("rail-projects", icon("icons/folder.svg", fly), t("Projects"), fly, 3.25, Box::new(|this, _, cx| this.rail_fly_go(cx))))
+            .child(entry("rail-projects", icon("icons/folder.svg", fly), t("Projects").into(), fly, 3.25, Box::new(|this, _, cx| this.rail_fly_go(cx))))
             .child(img("icon/app.png").absolute().left(mid - px(16.)).bottom(px(60.)).size(px(32.)))
             .child(
                 self.avatar(28., cx)
@@ -3210,9 +3239,16 @@ impl Workbench {
         if cfg!(target_os = "macos") { RAIL_W } else { RAIL_W.max(self.csd_room.get().0 + px(12.)) }
     }
 
-    /// The middle of the rail's column: under the middle traffic light.
+    /// The middle of the rail's column, and of the traffic lights' while
+    /// it shows.
     fn rail_mid(&self) -> Pixels {
-        if cfg!(target_os = "macos") { px(46.5) } else { self.rail_w() / 2. }
+        self.rail_w() / 2.
+    }
+
+    /// Where the rail's first button stands: on a Mac under the traffic
+    /// lights' column, elsewhere under the title row.
+    fn rail_top(&self) -> Pixels {
+        if cfg!(target_os = "macos") { RAIL_TOP_MAC } else { RAIL_TOP }
     }
 
     /// How far the sidebar button and search are from the rail toward
@@ -3839,10 +3875,20 @@ impl Workbench {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
                 let _ = this.update(cx, |this, cx| this.open_settings(None, cx));
                 cx.background_executor().timer(Duration::from_millis(900)).await;
+                let places: Vec<(&str, Option<&str>)> = SETTINGS_SECTIONS
+                    .iter()
+                    .flat_map(|(key, _, _)| match SETTINGS_PAGES.iter().find(|(s, _)| s == key) {
+                        Some((_, pages)) => pages.iter().map(|(p, _)| (*key, Some(*p))).collect::<Vec<_>>(),
+                        None => vec![(*key, None)],
+                    })
+                    .collect();
                 for look in ["light", "dark"] {
-                    for (key, _, _) in SETTINGS_SECTIONS {
+                    for (key, page) in places.iter().copied() {
                         let Ok(Some(h)) = this.update(cx, |this, cx| {
                             this.settings_section = key;
+                            if let Some(page) = page {
+                                this.settings_pages.insert(key, page);
+                            }
                             this.settings_scroll.set_offset(point(px(0.), px(0.)));
                             crate::look::apply(look, None, cx);
                             cx.notify();
@@ -3851,7 +3897,7 @@ impl Workbench {
                             break;
                         };
                         cx.background_executor().timer(Duration::from_millis(900)).await;
-                        let path = dir.join(format!("{key}-{look}.png"));
+                        let path = dir.join(format!("{}-{look}.png", page.unwrap_or(key)));
                         let _ = cx.update(|cx| {
                             h.update(cx, |_, window, _| {
                                 if let Err(e) = crate::sys::shoot_window(window, &path) {
@@ -3874,7 +3920,9 @@ impl Workbench {
             })
             .detach();
         }
-        let settings_section = std::env::var("EMAKI_SETTINGS").ok().and_then(|v| SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == v).map(|(k, _, _)| *k)).unwrap_or("appearance");
+        let asked = std::env::var("EMAKI_SETTINGS").ok().and_then(|v| settings_place(&v));
+        let settings_section = asked.map(|(s, _)| s).unwrap_or("appearance");
+        let settings_pages: HashMap<&'static str, &'static str> = asked.and_then(|(s, p)| Some((s, p?))).into_iter().collect();
         let page = match std::env::var("EMAKI_PAGE").as_deref() {
             Ok("sessions") => Page::Sessions,
             Ok("agents") => Page::Agents,
@@ -3887,6 +3935,15 @@ impl Workbench {
             crate::sys::keep_on_top(window);
         }
         let file_raw = cfg.app.file_view == "raw";
+        // Keys pressed while a tile in Settings, Shortcuts, waits for its
+        // new keys are the tile's, before any binding hears them.
+        let me = cx.weak_entity();
+        cx.intercept_keystrokes(move |e, window, cx| {
+            if me.update(cx, |w, cx| w.shortcut_key(&e.keystroke, window, cx)).unwrap_or(false) {
+                cx.stop_propagation();
+            }
+        })
+        .detach();
         Self {
             hub,
             cfg,
@@ -3977,6 +4034,10 @@ impl Workbench {
             search_open: false,
             settings_window: None,
             settings_focus: cx.focus_handle(),
+            shortcut_rec: None,
+            settings_pages,
+            shortcut_held: Modifiers::default(),
+            shortcut_refused: None,
             settings_pick_scroll: ScrollHandle::new(),
             settings_section,
             lang_serial: 0,
@@ -5459,15 +5520,15 @@ impl Workbench {
     /// nothing played: a change of tab moves nothing.
     fn tab_view_switch(&mut self, key: &str) {
         let Some(left) = self.selected.clone().filter(|k| k != key) else { return };
-        let view = TabView { files: self.files_on, term: self.side_term, outline: self.outline_on, cli: self.cli_layout };
+        let view = TabView { term: self.side_term, outline: self.outline_on, cli: self.cli_layout };
         if self.tabs.contains(&left) {
             self.tab_views.insert(left, view);
         }
         let tabs = &self.tabs;
         self.tab_views.retain(|k, _| tabs.contains(k));
         let to = self.tab_views.get(key).copied().unwrap_or_default();
-        (self.files_on, self.side_term, self.outline_on, self.cli_layout) = (to.files, to.term, to.outline, to.cli);
-        (self.panel_anim, self.side_term_anim, self.outline_anim) = (None, None, None);
+        (self.side_term, self.outline_on, self.cli_layout) = (to.term, to.outline, to.cli);
+        (self.side_term_anim, self.outline_anim) = (None, None);
         self.side_away.clear();
     }
 
@@ -7729,7 +7790,7 @@ impl Workbench {
                             })
                             .when(active, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary)))
                             // "Choose a folder…" has a key (`ChooseFolder`).
-                            .when(what == PickFor::Folder && key_none, |d| d.child(div().flex_1()).child(kbd_hint("⌘O", &theme))),
+                            .when(what == PickFor::Folder && key_none, |d| d.child(div().flex_1()).child(kbd_hint(&crate::shortcuts::signs("choose-folder"), &theme))),
                     )
                     // A choice's line is prose and wraps; a folder's is a
                     // path, kept to one line so the list stays short.
@@ -10463,6 +10524,14 @@ impl Workbench {
                 tool = String::new();
             }
         }
+        // A turn that ended long ago is nobody's turn any more, though the
+        // agent behind it sits idle as long as its terminal is kept: the
+        // dot said "your turn" nine hours after a reply. It is done, as a
+        // session with nothing behind it is, unless what it left running
+        // in the background still runs.
+        if matches!(phase, Phase::YourTurn | Phase::Idle) && self.now - r.active > YOUR_TURN_FOR && !self.background_running(r) {
+            return card;
+        }
         let mode = drv.map(|v| v.mode.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| st.mode.clone());
         match phase {
             Phase::NeedsYou => {
@@ -10633,9 +10702,9 @@ impl Workbench {
             .on_click(cx.listener(|this, _, window, cx| this.new_toggle(window, cx)))
             .child(div().size(px(22.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.primary_foreground)))
             .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(t(NEW_TITLE)))
-            .child(kbd_hint("⌘N", &theme));
+            .child(kbd_hint(&crate::shortcuts::signs("new-session"), &theme));
 
-        let nav = |id: &'static str, icon: Icon, label: &'static str, hint: &'static str, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
+        let nav = |id: &'static str, icon: Icon, label: &'static str, hint: String, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
             let theme = Self::shell_theme(cx);
             h_flex()
                 .id(id)
@@ -10649,14 +10718,14 @@ impl Workbench {
                 .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
                 .child(div().w(px(22.)).flex().justify_center().child(Icon::new(icon).with_size(px(16.)).text_color(if active { theme.foreground } else { theme.muted_foreground })))
                 .child(div().flex_1().min_w_0().truncate().text_size(px(13.5)).child(label))
-                .when(!hint.is_empty(), |d| d.child(kbd_hint(hint, &theme)))
+                .when(!hint.is_empty(), |d| d.child(kbd_hint(&hint, &theme)))
         };
 
         let sessions_active = page == Page::Sessions;
         let top = top
             .child(new_row)
-            .child(nav("nav-sessions", Icon::default().path("icons/scroll.svg"), t("All Sessions"), "⌘L", sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
-            .child(nav("nav-agents", Icon::default().path("icons/sparkles.svg"), t("Agents"), "⌘E", page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
+            .child(nav("nav-sessions", Icon::default().path("icons/scroll.svg"), t("All Sessions"), crate::shortcuts::signs("all-sessions"), sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
+            .child(nav("nav-agents", Icon::default().path("icons/sparkles.svg"), t("Agents"), crate::shortcuts::signs("agents"), page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
 
         // The rows sit in a column of their own inside the scroller. As
         // the scroller's children they were flex items of a column too
@@ -10900,7 +10969,7 @@ impl Workbench {
                                         // pointer: in the light theme the border's
                                         // color was that tint again.
                                         .hover(|s| s.bg(if theme.mode.is_dark() { theme.border } else { theme.foreground.opacity(0.14) }).text_color(theme.foreground))
-                                        .managed_tooltip(|window, cx| crate::workbench::tip(t("New session here (⌘T in its project)"), window, cx))
+                                        .managed_tooltip(|window, cx| crate::workbench::tip(crate::shortcuts::keyed(t("New session here (⌘T in its project)"), "new-session-here"), window, cx))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             swallow_click(window, cx);
                                             cx.stop_propagation();
@@ -13046,8 +13115,8 @@ impl Workbench {
             .rounded(px(9.))
             .bg(track_bg)
             .children(plate)
-            .child(segment(0, "page-nav-sessions", Icon::default().path("icons/scroll.svg"), format!("{} (⌘L)", t("All Sessions")), cx))
-            .child(segment(1, "page-nav-agents", Icon::default().path("icons/sparkles.svg"), format!("{} (⌘E)", t("Agents")), cx))
+            .child(segment(0, "page-nav-sessions", Icon::default().path("icons/scroll.svg"), format!("{} ({})", t("All Sessions"), crate::shortcuts::signs("all-sessions")), cx))
+            .child(segment(1, "page-nav-agents", Icon::default().path("icons/sparkles.svg"), format!("{} ({})", t("Agents"), crate::shortcuts::signs("agents")), cx))
             .into_any_element()
     }
 
@@ -14189,7 +14258,7 @@ impl Workbench {
                 .flex_1()
                 .h_full()
                 .child(self.render_topbar(String::new(), Vec::new(), cx))
-                .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child(key_text(t("Pick a session, or press ⌘K to search everything."))))
+                .child(div().flex_1().flex().items_center().justify_center().text_color(theme.muted_foreground).child(key_text(&crate::shortcuts::keyed(t("Pick a session, or press ⌘K to search everything."), "search"))))
                 .into_any_element();
         };
         self.glide_step(window);
@@ -17373,8 +17442,11 @@ impl Workbench {
     /// one picture a layer, only moved. All of it follows on a spring
     /// (`HomeFig`), a frame asked for while it moves and none at rest.
     fn home_scroll(&self, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        // The drawing's box, a roll's two ends, the sheet's two edges.
-        const W: f32 = 300.;
+        // The drawing's box, a roll's two ends, the sheet's two edges: the
+        // website's figure (emaki.lol's `_hero.html`), whose sheet is as
+        // long as the landscape's strip still covers it at the farthest
+        // wind.
+        const W: f32 = 400.;
         const H: f32 = 110.;
         const TOP: f32 = 12.;
         const FOOT: f32 = 98.;
@@ -17414,7 +17486,18 @@ impl Workbench {
         };
         // A layer of the landscape: the strip, wound past by its depth.
         let layer = |path: &'static str, depth: f32, strength: f32| svg().path(path).absolute().left(px((W - STRIP) / 2. - wind * RANGE * depth - sheet_x)).top_0().w(px(STRIP)).h(px(sheet_h)).text_color(ink(strength));
-        let sun = div().absolute().left(px(214. - wind * RANGE * 0.08 - sheet_x - 7.)).top(px(17. - lift * 5. - 7.)).size(px(14.)).rounded_full().border(px(SW)).border_color(theme.primary);
+        // Its two colors are its own, as the website has them, whatever
+        // the accent: the sun in amber, and the name in an old seal's
+        // faded red.
+        let dark = theme.mode.is_dark();
+        let (mark, seal) = if dark { (rgb(0xFFB83E), rgb(0xD49A90)) } else { (rgb(0xD99A1F), rgb(0xA8665B)) };
+        let sun = div().absolute().left(px(214. + (W - 300.) / 2. - wind * RANGE * 0.08 - sheet_x - 7.)).top(px(17. - lift * 5. - 7.)).size(px(14.)).rounded_full().border(px(SW)).border_color(mark);
+        // The name in its own characters, written down the sheet's sky at
+        // its head as a handscroll carries its title, in a heavy Mincho
+        // face. It stays while the picture winds, and the sheet's edge
+        // cuts it as the left roll takes the paper.
+        let mincho = if cfg!(target_os = "macos") { "Hiragino Mincho ProN" } else if cfg!(windows) { "Yu Mincho" } else { "Noto Serif CJK JP" };
+        let title = |ch: &'static str, y: f32| div().absolute().left(px(46. - sheet_x - 7.)).top(px(y - TOP - EDGE - 7.)).w(px(14.)).h(px(14.)).flex().items_center().justify_center().font_family(mincho).font_weight(FontWeight::BOLD).text_size(px(11.5)).line_height(px(14.)).text_color(seal).child(ch);
         let fig = self.home_fig.clone();
         div()
             .id("home-scroll")
@@ -17456,7 +17539,9 @@ impl Workbench {
                     .child(sun)
                     .child(layer("icons/home/scroll-far.svg", 0.35, 0.26))
                     .child(layer("icons/home/scroll-mid.svg", 0.65, 0.5))
-                    .child(layer("icons/home/scroll-water.svg", 1., 0.3)),
+                    .child(layer("icons/home/scroll-water.svg", 1., 0.3))
+                    .child(title("絵", 30.))
+                    .child(title("巻", 43.)),
             )
             // The sheet's two edges, from roll to roll.
             .child(div().absolute().left(px(sheet_x)).top(px(sheet_y - SW / 2.)).w(px(sheet_w)).h(px(SW)).bg(edge))
@@ -17808,6 +17893,11 @@ const KEY_SIGNS: [char; 9] = ['⌘', '⌥', '⇧', '⌃', '🌐', '↩', '⇥', 
 /// plates they are level and read as one size, which side by side on a
 /// line of words they never did, each sign coming from another face.
 fn key_cap(key: &str) -> Div {
+    key_cap_sized(key, KEY_CAP, 10.5)
+}
+
+/// `key_cap` at a size of its own: its height and its text's.
+pub(crate) fn key_cap_sized(key: &str, h: f32, text: f32) -> Div {
     let sign = key.chars().next().filter(|_| key.chars().count() == 1).and_then(key_sign);
     let word = match key {
         "⌘" => "Ctrl",
@@ -17816,19 +17906,19 @@ fn key_cap(key: &str) -> Div {
     };
     div()
         .flex_shrink_0()
-        .h(px(KEY_CAP))
-        .min_w(px(KEY_CAP))
-        .px(px(3.5))
-        .rounded(px(4.5))
+        .h(px(h))
+        .min_w(px(h))
+        .px(px(h * 0.2))
+        .rounded(px(h * 0.26))
         .bg(gpui::hsla(0., 0., 0.5, 0.17))
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(10.5))
-        .line_height(px(KEY_CAP))
+        .text_size(px(text))
+        .line_height(px(h))
         .font_weight(FontWeight::MEDIUM)
         .map(|d| match sign {
-            Some(path) => d.child(Icon::default().path(path).with_size(px(10.5))),
+            Some(path) => d.child(Icon::default().path(path).with_size(px(text))),
             None => d.child(word.to_string()),
         })
 }
@@ -18349,6 +18439,7 @@ impl PickRow {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.csd_room.set(crate::csd::room(window, cx));
+        crate::sys::fold_lights(window, self.strip_t(), f32::from(self.rail_mid()));
         if self.worded != self.lang_serial {
             self.word_inputs(window, cx);
         }
@@ -18588,15 +18679,21 @@ impl Render for Workbench {
                 }
             });
         }
-        for (from, to) in std::mem::take(&mut self.pending_drag) {
+        // A drag, let go at its end or held there (`holdat`) until a
+        // `letgo`, which is a drag from and to the same place, let go.
+        for (from, to, release) in std::mem::take(&mut self.pending_drag) {
             window.defer(cx, move |window, cx| {
-                window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: from, pressed_button: None, modifiers: Modifiers::default() }), cx);
-                window.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: from, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }), cx);
-                for step in 1..=8 {
-                    let at = from + (to - from) * (step as f32 / 8.);
-                    window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: Modifiers::default() }), cx);
+                if from != to || !release {
+                    window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: from, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                    window.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: from, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }), cx);
+                    for step in 1..=8 {
+                        let at = from + (to - from) * (step as f32 / 8.);
+                        window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: Modifiers::default() }), cx);
+                    }
                 }
-                window.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: to, modifiers: Modifiers::default(), click_count: 1 }), cx);
+                if release {
+                    window.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: to, modifiers: Modifiers::default(), click_count: 1 }), cx);
+                }
             });
         }
         if std::mem::take(&mut self.pending_seltext) {
@@ -18724,6 +18821,10 @@ impl Render for Workbench {
                                             w.panel_drag_to(e, cx);
                                         } else if w.file_drag {
                                             w.file_drag_to(e, cx);
+                                        } else if let Some(agent) = w.term_selecting() {
+                                            // A terminal's selection follows the pointer
+                                            // past the terminal, scrolling it.
+                                            w.term_select_to(agent, e.position, e.pressed_button.is_some(), cx);
                                         } else {
                                             return false;
                                         }
@@ -18819,7 +18920,8 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_step(1, cx)))
             // ⌘⇧G steps the find bar back while it is open, and is
             // the comparison's key otherwise.
-            .on_action(cx.listener(|this, _: &FindPrev, _, cx| if this.find_open { this.find_step(-1, cx) } else { this.toggle_changes(cx) }))
+            .on_action(cx.listener(|this, _: &FindPrev, _, cx| if this.find_open { this.find_step(-1, cx) } else { cx.propagate() }))
+            .on_action(cx.listener(|this, _: &ToggleChanges, _, cx| this.toggle_changes(cx)))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 if this.narrow && this.sidebar_peek {
                     this.sidebar_peek = false;
@@ -18835,11 +18937,15 @@ impl Render for Workbench {
             .text_color(theme.foreground)
             .text_size(px(13.))
             .child(
-                // The sidebar slides in from the window's edge as its
-                // room in the row opens, and out as it closes.
+                // The sidebar stands where it is and fades as its room in
+                // the row opens or closes, the card's edge passing over
+                // it: what it shares with the rail, the traffic lights
+                // and the two buttons, moves to its place there, and the
+                // rail fades in as the sidebar fades out.
                 h_flex().size_full().when(side_t > 0., |d| {
                     let w = self.sidebar_w;
-                    d.child(div().h_full().flex_shrink_0().overflow_hidden().w((w * side_t).round()).child(div().h_full().w(w).ml(w * (side_t - 1.)).child(self.kept_sidebar(cx))))
+                    let shown = ((side_t - 0.375) / 0.625).clamp(0., 1.);
+                    d.child(div().h_full().flex_shrink_0().w((w * side_t).round()).child(div().h_full().w(w).opacity(shown).child(self.kept_sidebar(cx))))
                 })
                 // The content is a card on the frame. Its corners are
                 // painted over what is in them (`card_corners`): a clip

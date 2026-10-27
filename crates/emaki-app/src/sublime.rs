@@ -7,6 +7,9 @@
 //! keyboard is in it. The find card has Find Next and Find Previous of
 //! its own (the vendored `SearchPanel`).
 //!
+//! The commands used most have their keys in `shortcuts.rs`, where
+//! Settings, Shortcuts, changes them; the rest are bound here.
+//!
 //! What needs more than one selection (⌘D's further cursors, ⇧⌘L), a
 //! project (⌘P, ⌘R, ⇧⌘F), panes, builds, macros or bookmarks is not
 //! here: the editor has one selection in one file. ⇧⌘V stays the
@@ -62,39 +65,25 @@ actions!(
 );
 
 /// The key context the editor's text stands in (`wrap`).
-const CONTEXT: &str = "FileEditor > Input";
+pub(crate) const CONTEXT: &str = "FileEditor > Input";
 
+/// Sublime Text's keys that do not change. Those of its commands used
+/// most are Settings, Shortcuts' (`shortcuts::EDITOR`), bound there.
 pub fn bindings() -> Vec<KeyBinding> {
     let c = Some(CONTEXT);
     #[cfg(target_os = "macos")]
     let keys = vec![
         KeyBinding::new("cmd-g", FindNext, c),
         KeyBinding::new("cmd-shift-g", FindPrevious, c),
-        KeyBinding::new("cmd-e", UseSelectionForFind, c),
         KeyBinding::new("cmd-alt-g", FindUnder, c),
         KeyBinding::new("cmd-alt-shift-g", FindUnderPrevious, c),
-        KeyBinding::new("cmd-d", FindUnderExpand, c),
-        KeyBinding::new("cmd-l", ExpandToLine, c),
         KeyBinding::new("cmd-alt-l", ExpandToLineUp, c),
-        KeyBinding::new("ctrl-shift-k", DeleteLine, c),
-        KeyBinding::new("cmd-enter", InsertLineAfter, c),
-        KeyBinding::new("cmd-shift-enter", InsertLineBefore, c),
-        KeyBinding::new("ctrl-cmd-up", SwapLineUp, c),
-        KeyBinding::new("ctrl-cmd-down", SwapLineDown, c),
-        KeyBinding::new("cmd-shift-d", DuplicateLine, c),
-        KeyBinding::new("cmd-shift-j", JoinLines, c),
-        KeyBinding::new("cmd-/", ToggleComment, c),
-        KeyBinding::new("cmd-alt-/", ToggleBlockComment, c),
-        KeyBinding::new("cmd-k cmd-u", UpperCase, c),
-        KeyBinding::new("cmd-k cmd-l", LowerCase, c),
-        KeyBinding::new("ctrl-m", JumpToBracket, c),
         KeyBinding::new("ctrl-shift-m", ExpandToBrackets, c),
         KeyBinding::new("ctrl-t", Transpose, c),
         KeyBinding::new("ctrl-l", ShowAtCenter, c),
         KeyBinding::new("cmd-k cmd-c", ShowAtCenter, c),
         KeyBinding::new("ctrl-alt-up", ScrollLineUp, c),
         KeyBinding::new("ctrl-alt-down", ScrollLineDown, c),
-        KeyBinding::new("f5", SortLines, c),
         KeyBinding::new("ctrl-f5", SortLinesCaseSensitive, c),
         KeyBinding::new("ctrl-left", SubwordLeft, c),
         KeyBinding::new("ctrl-right", SubwordRight, c),
@@ -106,8 +95,6 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-alt-shift-right", SelectSubwordRight, c),
         KeyBinding::new("ctrl-backspace", DeleteSubwordLeft, c),
         KeyBinding::new("ctrl-delete", DeleteSubwordRight, c),
-        KeyBinding::new("cmd-alt-[", Fold, c),
-        KeyBinding::new("cmd-alt-]", Unfold, c),
         KeyBinding::new("cmd-k cmd-0", UnfoldAll, c),
         KeyBinding::new("cmd-k cmd-j", UnfoldAll, c),
         KeyBinding::new("cmd-k cmd-k", DeleteToEndOfLine, c),
@@ -121,37 +108,19 @@ pub fn bindings() -> Vec<KeyBinding> {
     let keys = vec![
         KeyBinding::new("f3", FindNext, c),
         KeyBinding::new("shift-f3", FindPrevious, c),
-        KeyBinding::new("ctrl-e", UseSelectionForFind, c),
         KeyBinding::new("ctrl-f3", FindUnder, c),
         KeyBinding::new("ctrl-shift-f3", FindUnderPrevious, c),
-        KeyBinding::new("ctrl-d", FindUnderExpand, c),
-        KeyBinding::new("ctrl-l", ExpandToLine, c),
         KeyBinding::new("alt-l", ExpandToLineUp, c),
-        KeyBinding::new("ctrl-shift-k", DeleteLine, c),
-        KeyBinding::new("ctrl-enter", InsertLineAfter, c),
-        KeyBinding::new("ctrl-shift-enter", InsertLineBefore, c),
-        KeyBinding::new("ctrl-shift-up", SwapLineUp, c),
-        KeyBinding::new("ctrl-shift-down", SwapLineDown, c),
-        KeyBinding::new("ctrl-shift-d", DuplicateLine, c),
-        KeyBinding::new("ctrl-shift-j", JoinLines, c),
-        KeyBinding::new("ctrl-/", ToggleComment, c),
-        KeyBinding::new("ctrl-shift-/", ToggleBlockComment, c),
-        KeyBinding::new("ctrl-k ctrl-u", UpperCase, c),
-        KeyBinding::new("ctrl-k ctrl-l", LowerCase, c),
-        KeyBinding::new("ctrl-m", JumpToBracket, c),
         KeyBinding::new("ctrl-shift-m", ExpandToBrackets, c),
         KeyBinding::new("ctrl-t", Transpose, c),
         KeyBinding::new("ctrl-k ctrl-c", ShowAtCenter, c),
         KeyBinding::new("ctrl-up", ScrollLineUp, c),
         KeyBinding::new("ctrl-down", ScrollLineDown, c),
-        KeyBinding::new("f9", SortLines, c),
         KeyBinding::new("ctrl-f9", SortLinesCaseSensitive, c),
         KeyBinding::new("alt-left", SubwordLeft, c),
         KeyBinding::new("alt-right", SubwordRight, c),
         KeyBinding::new("alt-shift-left", SelectSubwordLeft, c),
         KeyBinding::new("alt-shift-right", SelectSubwordRight, c),
-        KeyBinding::new("ctrl-shift-[", Fold, c),
-        KeyBinding::new("ctrl-shift-]", Unfold, c),
         KeyBinding::new("ctrl-k ctrl-0", UnfoldAll, c),
         KeyBinding::new("ctrl-k ctrl-j", UnfoldAll, c),
         KeyBinding::new("ctrl-k ctrl-k", DeleteToEndOfLine, c),

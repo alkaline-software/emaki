@@ -4,15 +4,16 @@ Each release has a section here, and `release.yml` puts that section on the GitH
 
 ## v0.4.0
 
-1. **CLI layout**: A seam in the margin at the right of the conversation switches a session between the rendered conversation and the agent's own terminal, which takes the conversation's place in the same column (⌘⇧A).
+1. **CLI layout**: A seam in the margin at the right of the conversation switches a session between the rendered conversation and the agent's own terminal, which takes the conversation's place in the same column (⌘⇧L).
 2. **Outline**: The outline slides out of the conversation's left edge as a drawer, from a seam in the margin, in the rendered layout; the two seams show while the pointer is over their margin.
-3. **Panel buttons**: The files and terminal buttons are plain icons with an accent line under those that are open.
-4. **Collapsed sidebar**: Put away, the sidebar folds to a rail of icons under the window's buttons: search, New Session, All Sessions, Agents, and Projects, which opens your projects beside it.
+3. **Panels**: The files and terminal buttons are plain icons with an accent line under those that are open, a new Panels section in Settings puts them, the outline and the layout switch on the side you choose, and the files panel stays open or closed across every session.
+4. **Collapsed sidebar**: Put away, the sidebar fades into a narrow rail of icons, with the window's buttons stacked at its head on a Mac: search, New Session, All Sessions, Agents, and Projects, which opens your projects beside it; it opens only when you click its button.
 5. **New Session**: Pressing New Session again on the new-session page takes you back to where you were.
-6. **Sidebar button**: The sidebar opens when you click its button and no longer floats in under the pointer.
-7. **Keep the display on**: The screen also stays awake while a session waits on a command or subagent it left running in the background.
-8. **Files panel**: The files panel and its structure have a lighter background, set apart from the outline.
-9. **Panels**: A new Panels section in Settings puts the files panel and the terminal panel, and the outline and the layout switch, on the side you choose.
+6. **Keep the display on**: The screen also stays awake while a session waits on a command or subagent it left running in the background.
+7. **Shortcuts**: A new Shortcuts section in Settings changes the keys of the window's commands and of the file editor's Sublime Text commands, refuses keys already taken, and has a button to put each one back.
+8. **Shell terminal**: A drag scrolls past the terminal's edge, ⌘A selects everything, Shift with the arrows (and ⌥ or ⌘) selects from the cursor, ⌘↑, ⌘↓ and ⇧ with the page keys scroll back, and a file dropped on it is typed as its path.
+9. **Settings and home**: Settings has fewer sections in a clearer order, and the handscroll over the greeting is the website's, in its own fixed colors.
+10. **Fixes**: A session left open in its terminal no longer shows as waiting for you hours after its last turn, and the files panel has a lighter background, set apart from the outline.
 
 ## v0.3.2
 

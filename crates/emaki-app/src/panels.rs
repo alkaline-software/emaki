@@ -2195,7 +2195,7 @@ impl Workbench {
     pub(crate) fn panel_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let on = self.files_on;
         let (was, serial) = self.panel_anim.map(|(from, _, at, n)| (crate::workbench::pressed_from(from, on, at), n + 1)).unwrap_or((on, 0));
-        vec![self.toggle_button("panel-files", "icons/tree-view.svg", t("Files (⌘⇧F)"), (was, on, serial), Rc::new(|this, _, cx| this.toggle_panel(true, cx)), cx)]
+        vec![self.toggle_button("panel-files", "icons/tree-view.svg", &crate::shortcuts::keyed(t("Files (⌘⇧F)"), "files"), (was, on, serial), Rc::new(|this, _, cx| this.toggle_panel(true, cx)), cx)]
     }
 
     /// How far the outline's drawer is out, from 0 to 1, as it slides.
@@ -2401,7 +2401,7 @@ impl Workbench {
                 icon(Icon::new(if mirrored { IconName::ChevronLeft } else { IconName::ChevronRight }), if mirrored { -6. } else { 6. } * (1. - out), 0., out),
             ];
             els.push(
-                seam("outline-seam", "outline-seam", t("Outline (⌘⇧O)"), flip(seam_l) + slide.0, !mirrored, out * (DRAWER_R + 8.), live[0], icons, cx)
+                seam("outline-seam", "outline-seam", &crate::shortcuts::keyed(t("Outline (⌘⇧O)"), "outline"), flip(seam_l) + slide.0, !mirrored, out * (DRAWER_R + 8.), live[0], icons, cx)
                     .mt(px(slide.1))
                     .opacity(seen[0] * shown)
                     .when(live[0], |el| el.on_click(cx.listener(|this, _, window, cx| {
@@ -2420,7 +2420,7 @@ impl Workbench {
             icon(Icon::default().path("icons/messages.svg"), 0., 8. * (1. - cli), cli),
         ];
         els.push(
-            seam("layout-seam", "layout-seam", if cli < 0.5 { t("CLI Layout (⌘⇧A)") } else { t("Rendered Layout (⌘⇧A)") }, flip(right), mirrored, 0., live[1], icons, cx)
+            seam("layout-seam", "layout-seam", &crate::shortcuts::keyed(if cli < 0.5 { t("CLI Layout (⌘⇧L)") } else { t("Rendered Layout (⌘⇧L)") }, "layout"), flip(right), mirrored, 0., live[1], icons, cx)
                 .opacity(seen[1] * if possible { 1. } else { 0.45 })
                 .when(possible && live[1], |el| {
                     el.on_click(cx.listener(|this, _, window, cx| {
@@ -7650,7 +7650,7 @@ impl Workbench {
                         swallow_click(window, cx);
                         this.branch_new_open(Some(typed.clone()).filter(|t| !t.is_empty()), window, cx);
                     }))))
-                    .child(div().pt(px(6.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(crate::workbench::key_text_wrap(t("Press ⌘⇧N to create a branch from anywhere in the app")).w_full().justify_center())),
+                    .child(div().pt(px(6.)).text_size(px(11.5)).text_color(theme.muted_foreground).child(crate::workbench::key_text_wrap(&crate::shortcuts::keyed(t("Press ⌘⇧N to create a branch from anywhere in the app"), "new-branch")).w_full().justify_center())),
             );
         }
         let fresh = fresh.filter(|_| !rows.is_empty());
@@ -7744,7 +7744,7 @@ impl Workbench {
             ).child(choice_pill("branch-new-button", "icons/plus.svg", t("New Branch"), Press::Quiet, false, &theme)
                 .role(Role::Button)
                 .aria_label(t("New Branch"))
-                .managed_tooltip(|window, cx| crate::workbench::tip(t("New Branch (⌘⇧N)"), window, cx))
+                .managed_tooltip(|window, cx| crate::workbench::tip(crate::shortcuts::keyed(t("New Branch (⌘⇧N)"), "new-branch"), window, cx))
                 // As tall as the field it stands beside.
                 .h(px(32.))
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -7789,7 +7789,8 @@ impl Workbench {
         });
         // A button as the branch's is, lit while its sheet is up.
         let open = self.changes.is_some();
-        let tip = if n > 0 { format!("{} \u{b7} {}", count(n, "{n} changed file", "{n} changed files"), t("Changes and History (⌘⇧G)")) } else { t("Changes and History (⌘⇧G)").to_string() };
+        let changes = crate::shortcuts::keyed(t("Changes and History (⌘⇧G)"), "changes");
+        let tip = if n > 0 { format!("{} \u{b7} {}", count(n, "{n} changed file", "{n} changed files"), changes) } else { changes };
         Some(
             h_flex()
                 .id("changes-pill")
@@ -8756,7 +8757,7 @@ impl Workbench {
         // in the strip, smaller: for markdown how it shows, for a PDF
         // what stands beside its pages. `on` is the first segment, the
         // second, or neither; `was` what it was before the last press.
-        let pair = |key: &'static str, on: Option<bool>, was: Option<bool>, serial: u64, first: (&'static str, &'static str), second: (&'static str, &'static str), press: fn(&mut Self, bool, &mut Context<Self>), cx: &mut Context<Self>| {
+        let pair = |key: &'static str, on: Option<bool>, was: Option<bool>, serial: u64, first: (&'static str, String), second: (&'static str, String), press: fn(&mut Self, bool, &mut Context<Self>), cx: &mut Context<Self>| {
             let dark = theme.mode.is_dark();
             let (seg_w, seg_h, pad, gap) = (26., 20., 2., 2.);
             let x_of = |first: bool| pad + if first { 0. } else { seg_w + gap };
@@ -8772,6 +8773,7 @@ impl Workbench {
             });
             let mut row = h_flex().relative().flex_shrink_0().p(px(pad)).gap(px(gap)).rounded(px(8.)).bg(if dark { theme.tab_bar_segmented } else { theme.muted }).children(plate);
             for (which, (icon, tip)) in [(true, first), (false, second)] {
+                let tip: SharedString = tip.into();
                 row = row.child(
                     h_flex()
                         .id(SharedString::from(format!("{key}-{which}")))
@@ -8784,7 +8786,7 @@ impl Workbench {
                         .cursor_pointer()
                         .text_color(if on == Some(which) { theme.foreground } else { theme.muted_foreground })
                         .hover(|s| s.text_color(theme.foreground))
-                        .managed_tooltip(move |window, cx| crate::workbench::tip(tip, window, cx))
+                        .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                         .on_click(cx.listener(move |this, _, _, cx| press(this, which, cx)))
                         .child(Icon::default().path(icon).with_size(px(13.))),
                 );
@@ -8794,10 +8796,10 @@ impl Workbench {
         let modes = if leaving {
             None
         } else if two_ways {
-            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, if table { t("Table (⌘⇧V)") } else { t("Rendered (⌘⇧V)") }), ("icons/file-code.svg", t("Raw (⌘⇧V)")), |this, first, cx| this.set_file_raw(!first, cx), cx))
+            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, crate::shortcuts::keyed(if table { t("Table (⌘⇧V)") } else { t("Rendered (⌘⇧V)") }, "raw")), ("icons/file-code.svg", crate::shortcuts::keyed(t("Raw (⌘⇧V)"), "raw")), |this, first, cx| this.set_file_raw(!first, cx), cx))
         } else if pdf {
             let (was, serial) = self.pdf_side_anim.map(|(was, _, n)| (was, n)).unwrap_or((self.pdf_side, 0));
-            Some(pair("pdf-side", self.pdf_side, was, serial, ("icons/gallery-vertical-end.svg", t("Pages")), ("icons/list-bullets.svg", t("Contents")), |this, first, cx| this.pdf_side_toggle(first, cx), cx))
+            Some(pair("pdf-side", self.pdf_side, was, serial, ("icons/gallery-vertical-end.svg", t("Pages").into()), ("icons/list-bullets.svg", t("Contents").into()), |this, first, cx| this.pdf_side_toggle(first, cx), cx))
         } else {
             None
         };
@@ -9699,6 +9701,23 @@ impl Workbench {
             // A key pressed as the keyboard presses it, through every
             // listener and binding on the way: press:shift-up.
             t if t.starts_with("press:") => self.pending_press.push(t["press:".len()..].to_string()),
+            // Settings, Shortcuts: a command's tile waiting for its keys,
+            // as a press on it leaves it, and a key pressed in the settings
+            // window as the keyboard presses it (shortcut:files,
+            // shortcutkey:cmd-shift-e).
+            t if t.starts_with("shortcut:") => {
+                if let Some(c) = crate::shortcuts::command(&t["shortcut:".len()..]) {
+                    self.open_settings(Some(if c.editor { "editor" } else { "window" }), cx);
+                    self.shortcut_rec = Some(c.id);
+                }
+            }
+            t if t.starts_with("shortcutkey:") => {
+                if let (Ok(key), Some(h)) = (gpui::Keystroke::parse(&t["shortcutkey:".len()..]), self.settings_window) {
+                    cx.defer(move |cx| {
+                        let _ = h.update(cx, |_, window, cx| window.dispatch_keystroke(key, cx));
+                    });
+                }
+            }
             // Text Size's preset, or one place's size in points.
             t if t.starts_with("size:") => self.set_chat_size(&t["size:".len()..], cx),
             // Words typed in a place's field and ↩, as a hand types them.
@@ -9736,10 +9755,17 @@ impl Workbench {
             }
             // A drag with the left button, from one place to another:
             // dragat:<x>:<y>:<x2>:<y2>; seltext prints what is selected.
-            t if t.starts_with("dragat:") => {
+            t if t.starts_with("dragat:") || t.starts_with("holdat:") => {
                 let n: Vec<f32> = t["dragat:".len()..].split(':').filter_map(|v| v.parse().ok()).collect();
                 if let [x, y, x2, y2] = n[..] {
-                    self.pending_drag.push((point(px(x), px(y)), point(px(x2), px(y2))));
+                    self.pending_drag.push((point(px(x), px(y)), point(px(x2), px(y2)), t.starts_with("dragat:")));
+                    cx.notify();
+                }
+            }
+            t if t.starts_with("letgo:") => {
+                let n: Vec<f32> = t["letgo:".len()..].split(':').filter_map(|v| v.parse().ok()).collect();
+                if let [x, y] = n[..] {
+                    self.pending_drag.push((point(px(x), px(y)), point(px(x), px(y)), true));
                     cx.notify();
                 }
             }

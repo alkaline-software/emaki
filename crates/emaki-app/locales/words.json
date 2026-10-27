@@ -4769,15 +4769,6 @@
     "de": "Terminal",
     "es": "Terminal"
   },
-  "Text Size": {
-    "zh-Hans": "文字大小",
-    "zh-Hant": "文字大小",
-    "ja": "文字サイズ",
-    "ko": "텍스트 크기",
-    "fr": "Taille du texte",
-    "de": "Textgröße",
-    "es": "Tamaño del texto"
-  },
   "The Xcode license has not been accepted. In Terminal, run:": {
     "zh-Hans": "尚未接受 Xcode 许可协议。请在终端中运行：",
     "zh-Hant": "尚未接受 Xcode 授權合約。請在終端機中執行：",
@@ -8756,23 +8747,23 @@
     "de": "Für unterstützte Dateien.",
     "es": "Para archivos compatibles."
   },
-  "Rendered Layout (⌘⇧A)": {
-    "zh-Hans": "渲染布局 (⌘⇧A)",
-    "zh-Hant": "渲染版面 (⌘⇧A)",
-    "ja": "レンダリングレイアウト (⌘⇧A)",
-    "ko": "렌더링 레이아웃 (⌘⇧A)",
-    "fr": "Disposition rendue (⌘⇧A)",
-    "de": "Gerendertes Layout (⌘⇧A)",
-    "es": "Diseño renderizado (⌘⇧A)"
+  "Rendered Layout (⌘⇧L)": {
+    "zh-Hans": "渲染布局 (⌘⇧L)",
+    "zh-Hant": "渲染版面 (⌘⇧L)",
+    "ja": "レンダリングレイアウト (⌘⇧L)",
+    "ko": "렌더링 레이아웃 (⌘⇧L)",
+    "fr": "Disposition rendue (⌘⇧L)",
+    "de": "Gerendertes Layout (⌘⇧L)",
+    "es": "Diseño renderizado (⌘⇧L)"
   },
-  "CLI Layout (⌘⇧A)": {
-    "zh-Hans": "CLI 布局 (⌘⇧A)",
-    "zh-Hant": "CLI 版面 (⌘⇧A)",
-    "ja": "CLI レイアウト (⌘⇧A)",
-    "ko": "CLI 레이아웃 (⌘⇧A)",
-    "fr": "Disposition CLI (⌘⇧A)",
-    "de": "CLI-Layout (⌘⇧A)",
-    "es": "Diseño CLI (⌘⇧A)"
+  "CLI Layout (⌘⇧L)": {
+    "zh-Hans": "CLI 布局 (⌘⇧L)",
+    "zh-Hant": "CLI 版面 (⌘⇧L)",
+    "ja": "CLI レイアウト (⌘⇧L)",
+    "ko": "CLI 레이아웃 (⌘⇧L)",
+    "fr": "Disposition CLI (⌘⇧L)",
+    "de": "CLI-Layout (⌘⇧L)",
+    "es": "Diseño CLI (⌘⇧L)"
   },
   "Toggle CLI Layout": {
     "zh-Hans": "切换 CLI 布局",
@@ -8836,5 +8827,338 @@
     "fr": "Disposition",
     "de": "Layout",
     "es": "Diseño"
+  },
+  "Shortcuts": {
+    "zh-Hans": "快捷键",
+    "zh-Hant": "快速鍵",
+    "ja": "ショートカット",
+    "ko": "단축키",
+    "fr": "Raccourcis",
+    "de": "Tastaturkurzbefehle",
+    "es": "Atajos"
+  },
+  "Sessions": {
+    "zh-Hans": "会话",
+    "zh-Hant": "工作階段",
+    "ja": "セッション",
+    "ko": "세션",
+    "fr": "Sessions",
+    "de": "Sitzungen",
+    "es": "Sesiones"
+  },
+  "Sidebar": {
+    "zh-Hans": "边栏",
+    "zh-Hant": "側邊欄",
+    "ja": "サイドバー",
+    "ko": "사이드바",
+    "fr": "Barre latérale",
+    "de": "Seitenleiste",
+    "es": "Barra lateral"
+  },
+  "Press a shortcut": {
+    "zh-Hans": "按下快捷键",
+    "zh-Hant": "按下快速鍵",
+    "ja": "ショートカットを押す",
+    "ko": "단축키를 누르세요",
+    "fr": "Appuyez sur un raccourci",
+    "de": "Kurzbefehl drücken",
+    "es": "Pulsa un atajo"
+  },
+  "Taken by {name}": {
+    "zh-Hans": "已用于{name}",
+    "zh-Hant": "已用於{name}",
+    "ja": "{name}で使用中",
+    "ko": "{name}에서 사용 중",
+    "fr": "Déjà pris par {name}",
+    "de": "Belegt durch {name}",
+    "es": "En uso por {name}"
+  },
+  "Reset to {keys}": {
+    "zh-Hans": "重置为 {keys}",
+    "zh-Hant": "重置為 {keys}",
+    "ja": "{keys} に戻す",
+    "ko": "{keys}(으)로 재설정",
+    "fr": "Rétablir {keys}",
+    "de": "Auf {keys} zurücksetzen",
+    "es": "Restablecer a {keys}"
+  },
+  "Tabs": {
+    "zh-Hans": "标签页",
+    "zh-Hant": "標籤頁",
+    "ja": "タブ",
+    "ko": "탭",
+    "fr": "Onglets",
+    "de": "Tabs",
+    "es": "Pestañas"
+  },
+  "Send": {
+    "zh-Hans": "发送",
+    "zh-Hant": "傳送",
+    "ja": "送信",
+    "ko": "보내기",
+    "fr": "Envoyer",
+    "de": "Senden",
+    "es": "Enviar"
+  },
+  "New Session Here": {
+    "zh-Hans": "在此新建会话",
+    "zh-Hant": "在此新增工作階段",
+    "ja": "ここで新規セッション",
+    "ko": "여기서 새 세션",
+    "fr": "Nouvelle session ici",
+    "de": "Neue Sitzung hier",
+    "es": "Nueva sesión aquí"
+  },
+  "Reopen Tab": {
+    "zh-Hans": "重新打开标签页",
+    "zh-Hant": "重新打開標籤頁",
+    "ja": "タブを再度開く",
+    "ko": "탭 다시 열기",
+    "fr": "Rouvrir l’onglet",
+    "de": "Tab wieder öffnen",
+    "es": "Reabrir pestaña"
+  },
+  "Lines": {
+    "zh-Hans": "行",
+    "zh-Hant": "行",
+    "ja": "行",
+    "ko": "줄",
+    "fr": "Lignes",
+    "de": "Zeilen",
+    "es": "Líneas"
+  },
+  "Text": {
+    "zh-Hans": "文本",
+    "zh-Hant": "文字",
+    "ja": "テキスト",
+    "ko": "텍스트",
+    "fr": "Texte",
+    "de": "Text",
+    "es": "Texto"
+  },
+  "Delete Line": {
+    "zh-Hans": "删除行",
+    "zh-Hant": "刪除行",
+    "ja": "行を削除",
+    "ko": "줄 삭제",
+    "fr": "Supprimer la ligne",
+    "de": "Zeile löschen",
+    "es": "Eliminar línea"
+  },
+  "Duplicate Line": {
+    "zh-Hans": "复制行",
+    "zh-Hant": "複製行",
+    "ja": "行を複製",
+    "ko": "줄 복제",
+    "fr": "Dupliquer la ligne",
+    "de": "Zeile duplizieren",
+    "es": "Duplicar línea"
+  },
+  "Move Line Up": {
+    "zh-Hans": "上移行",
+    "zh-Hant": "上移行",
+    "ja": "行を上へ移動",
+    "ko": "줄 위로 이동",
+    "fr": "Monter la ligne",
+    "de": "Zeile nach oben",
+    "es": "Subir línea"
+  },
+  "Move Line Down": {
+    "zh-Hans": "下移行",
+    "zh-Hant": "下移行",
+    "ja": "行を下へ移動",
+    "ko": "줄 아래로 이동",
+    "fr": "Descendre la ligne",
+    "de": "Zeile nach unten",
+    "es": "Bajar línea"
+  },
+  "Insert Line After": {
+    "zh-Hans": "在下方插入行",
+    "zh-Hant": "在下方插入行",
+    "ja": "下に行を挿入",
+    "ko": "아래에 줄 삽입",
+    "fr": "Insérer une ligne après",
+    "de": "Zeile danach einfügen",
+    "es": "Insertar línea después"
+  },
+  "Insert Line Before": {
+    "zh-Hans": "在上方插入行",
+    "zh-Hant": "在上方插入行",
+    "ja": "上に行を挿入",
+    "ko": "위에 줄 삽입",
+    "fr": "Insérer une ligne avant",
+    "de": "Zeile davor einfügen",
+    "es": "Insertar línea antes"
+  },
+  "Join Lines": {
+    "zh-Hans": "合并行",
+    "zh-Hant": "合併行",
+    "ja": "行を結合",
+    "ko": "줄 합치기",
+    "fr": "Joindre les lignes",
+    "de": "Zeilen verbinden",
+    "es": "Unir líneas"
+  },
+  "Sort Lines": {
+    "zh-Hans": "排序行",
+    "zh-Hant": "排序行",
+    "ja": "行を並べ替え",
+    "ko": "줄 정렬",
+    "fr": "Trier les lignes",
+    "de": "Zeilen sortieren",
+    "es": "Ordenar líneas"
+  },
+  "Expand to Line": {
+    "zh-Hans": "扩展到整行",
+    "zh-Hant": "擴展到整行",
+    "ja": "行全体を選択",
+    "ko": "줄 전체 선택",
+    "fr": "Étendre à la ligne",
+    "de": "Auf Zeile erweitern",
+    "es": "Expandir a la línea"
+  },
+  "Toggle Comment": {
+    "zh-Hans": "切换注释",
+    "zh-Hant": "切換註解",
+    "ja": "コメントを切り替え",
+    "ko": "주석 전환",
+    "fr": "Commenter",
+    "de": "Kommentar umschalten",
+    "es": "Alternar comentario"
+  },
+  "Block Comment": {
+    "zh-Hans": "块注释",
+    "zh-Hant": "區塊註解",
+    "ja": "ブロックコメント",
+    "ko": "블록 주석",
+    "fr": "Commentaire de bloc",
+    "de": "Blockkommentar",
+    "es": "Comentario de bloque"
+  },
+  "Upper Case": {
+    "zh-Hans": "转为大写",
+    "zh-Hant": "轉為大寫",
+    "ja": "大文字に",
+    "ko": "대문자로",
+    "fr": "Majuscules",
+    "de": "Großbuchstaben",
+    "es": "Mayúsculas"
+  },
+  "Lower Case": {
+    "zh-Hans": "转为小写",
+    "zh-Hant": "轉為小寫",
+    "ja": "小文字に",
+    "ko": "소문자로",
+    "fr": "Minuscules",
+    "de": "Kleinbuchstaben",
+    "es": "Minúsculas"
+  },
+  "Select Next Match": {
+    "zh-Hans": "选择下一个匹配",
+    "zh-Hant": "選取下一個相符項",
+    "ja": "次の一致を選択",
+    "ko": "다음 일치 항목 선택",
+    "fr": "Sélectionner l’occurrence suivante",
+    "de": "Nächsten Treffer auswählen",
+    "es": "Seleccionar siguiente coincidencia"
+  },
+  "Use Selection for Find": {
+    "zh-Hans": "用所选内容查找",
+    "zh-Hant": "以所選內容尋找",
+    "ja": "選択範囲で検索",
+    "ko": "선택 항목으로 찾기",
+    "fr": "Rechercher la sélection",
+    "de": "Auswahl suchen",
+    "es": "Buscar la selección"
+  },
+  "Jump to Bracket": {
+    "zh-Hans": "跳到配对括号",
+    "zh-Hant": "跳到配對括號",
+    "ja": "対応する括弧へ",
+    "ko": "대응 괄호로 이동",
+    "fr": "Aller à la parenthèse",
+    "de": "Zur Klammer springen",
+    "es": "Ir al paréntesis"
+  },
+  "Sublime Text": {
+    "zh-Hans": "Sublime Text",
+    "zh-Hant": "Sublime Text",
+    "ja": "Sublime Text",
+    "ko": "Sublime Text",
+    "fr": "Sublime Text",
+    "de": "Sublime Text",
+    "es": "Sublime Text"
+  },
+  "Shell Terminal": {
+    "zh-Hans": "Shell 终端",
+    "zh-Hant": "Shell 終端機",
+    "ja": "シェルターミナル",
+    "ko": "셸 터미널",
+    "fr": "Terminal shell",
+    "de": "Shell-Terminal",
+    "es": "Terminal de shell"
+  },
+  "Git Changes": {
+    "zh-Hans": "Git 更改",
+    "zh-Hant": "Git 變更",
+    "ja": "Git の変更",
+    "ko": "Git 변경 사항",
+    "fr": "Modifications Git",
+    "de": "Git-Änderungen",
+    "es": "Cambios de Git"
+  },
+  "Layout Switch": {
+    "zh-Hans": "布局切换",
+    "zh-Hant": "版面切換",
+    "ja": "レイアウト切り替え",
+    "ko": "레이아웃 전환",
+    "fr": "Changer de disposition",
+    "de": "Layout wechseln",
+    "es": "Cambiar diseño"
+  },
+  "Editor Switch": {
+    "zh-Hans": "编辑器切换",
+    "zh-Hant": "編輯器切換",
+    "ja": "エディタ切り替え",
+    "ko": "편집기 전환",
+    "fr": "Changer de vue",
+    "de": "Ansicht wechseln",
+    "es": "Cambiar vista"
+  },
+  "Add ⌘ or ⌃": {
+    "zh-Hans": "加上 ⌘ 或 ⌃",
+    "zh-Hant": "加上 ⌘ 或 ⌃",
+    "ja": "⌘ か ⌃ を加える",
+    "ko": "⌘ 또는 ⌃ 추가",
+    "fr": "Ajoutez ⌘ ou ⌃",
+    "de": "⌘ oder ⌃ hinzufügen",
+    "es": "Añade ⌘ o ⌃"
+  },
+  "Add ⌘ or ⌥": {
+    "zh-Hans": "加上 ⌘ 或 ⌥",
+    "zh-Hant": "加上 ⌘ 或 ⌥",
+    "ja": "⌘ か ⌥ を加える",
+    "ko": "⌘ 또는 ⌥ 추가",
+    "fr": "Ajoutez ⌘ ou ⌥",
+    "de": "⌘ oder ⌥ hinzufügen",
+    "es": "Añade ⌘ o ⌥"
+  },
+  "Text fields": {
+    "zh-Hans": "文本框",
+    "zh-Hant": "文字欄位",
+    "ja": "テキストフィールド",
+    "ko": "텍스트 필드",
+    "fr": "Champs de texte",
+    "de": "Textfelder",
+    "es": "Campos de texto"
+  },
+  "Emaki": {
+    "zh-Hans": "Emaki",
+    "zh-Hant": "Emaki",
+    "ja": "Emaki",
+    "ko": "Emaki",
+    "fr": "Emaki",
+    "de": "Emaki",
+    "es": "Emaki"
   }
 }

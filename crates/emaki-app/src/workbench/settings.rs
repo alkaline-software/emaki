@@ -36,6 +36,14 @@ const CARD_R: Pixels = px(12.);
 /// The language list at Appearance's title: as wide as its longest
 /// choice, "ZH-CN" by its flag, or the system's name in any language.
 const LANGUAGE_W: Pixels = px(136.);
+/// How long a command in Shortcuts says what has the keys pressed.
+const REFUSED_FOR: Duration = Duration::from_millis(2200);
+/// A row of Shortcuts, two commands side by side.
+const SHORTCUT_ROW: f32 = 44.;
+/// Panels' two choices, wider than the other controls: each choice is
+/// two names with their icons, which in French and German ran to the
+/// track's edge at the controls' width.
+const SIDES_W: Pixels = px(372.);
 /// How long the pieces of Panels' picture take to move to their sides.
 const SIDES_ANIM: Duration = Duration::from_millis(320);
 /// The key context of the settings window, where Escape puts a list away.
@@ -122,11 +130,8 @@ impl Workbench {
     /// comes forward, or opens. It is opened once the update asking for
     /// it is over, since its first draw is the workbench's.
     pub(crate) fn open_settings(&mut self, section: Option<&'static str>, cx: &mut Context<Self>) {
-        if let Some(s) = section.filter(|s| SETTINGS_SECTIONS.iter().any(|(k, _, _)| k == s)) {
-            if self.settings_section != s {
-                self.settings_section = s;
-                self.settings_scroll.set_offset(point(px(0.), px(0.)));
-            }
+        if let Some(name) = section {
+            self.settings_go(name, cx);
             if self.pick.as_ref().is_some_and(|p| p.in_settings) {
                 self.close_pick(cx);
             }
@@ -143,6 +148,29 @@ impl Workbench {
             }
             open_settings_window(this, cx);
         });
+    }
+
+    /// A section, or a page of one, by its name (`settings_place`), with
+    /// the page scrolled to its top.
+    pub(crate) fn settings_go(&mut self, name: &'static str, cx: &mut Context<Self>) {
+        let Some((section, page)) = settings_place(name) else { return };
+        let moved = self.settings_section != section || page.is_some_and(|p| self.settings_page(section) != p);
+        self.settings_section = section;
+        if let Some(page) = page {
+            self.settings_pages.insert(section, page);
+        }
+        if moved {
+            self.settings_scroll.set_offset(point(px(0.), px(0.)));
+            self.close_settings_lists(cx);
+        }
+        cx.notify();
+    }
+
+    /// The page a section shows: the one chosen, else its first; none
+    /// for a section of one page.
+    pub(crate) fn settings_page(&self, section: &str) -> &'static str {
+        let Some((_, pages)) = SETTINGS_PAGES.iter().find(|(s, _)| *s == section) else { return "" };
+        self.settings_pages.get(section).copied().filter(|p| pages.iter().any(|(k, _)| k == p)).unwrap_or(pages[0].0)
     }
 
     /// Whether `window` is the settings window: a list or a menu opened
@@ -224,6 +252,7 @@ impl Workbench {
     /// The window is gone: its field, and a list or a menu it had open.
     fn settings_detach(&mut self, cx: &mut Context<Self>) {
         self.settings_window = None;
+        self.shortcut_rec = None;
         self.name_input = None;
         self.size_inputs.clear();
         if self.pick.as_ref().is_some_and(|p| p.in_settings) {
@@ -241,8 +270,12 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Put away a list or a menu open in the settings window.
+    /// Put away a list or a menu open in the settings window, and stop a
+    /// tile's wait for its keys.
     fn close_settings_lists(&mut self, cx: &mut Context<Self>) {
+        if self.shortcut_rec.take().is_some() {
+            cx.notify();
+        }
         if self.pick.as_ref().is_some_and(|p| p.in_settings) {
             self.close_pick(cx);
         }
@@ -274,15 +307,17 @@ impl Workbench {
                 self.size_commit(key, &input, window, cx);
             }
         }
-        let rows = match section {
-            "fonts" => self.fonts_rows(cx),
-            "text" => self.text_rows(cx),
-            "conversation" => self.conversation_rows(cx),
-            "panels" => self.panels_rows(window, cx),
-            "sessions" => self.sessions_rows(cx),
-            "terminal" => self.terminal_rows(cx),
-            "files" => self.files_rows(cx),
-            "about" => self.about_rows(cx),
+        let page = self.settings_page(section);
+        let rows = match (section, page) {
+            ("text", "size") => self.text_rows(cx),
+            ("text", _) => self.fonts_rows(cx),
+            ("conversation", _) => self.conversation_rows(cx),
+            ("panels", _) => self.panels_rows(window, cx),
+            ("files", _) => self.files_rows(cx),
+            ("terminal", _) => self.terminal_rows(cx),
+            ("sessions", _) => self.sessions_rows(cx),
+            ("shortcuts", _) => self.shortcut_rows(cx),
+            ("about", _) => self.about_rows(cx),
             _ => self.appearance_rows(cx),
         };
         let title = SETTINGS_SECTIONS.iter().find(|(k, _, _)| *k == section).map(|(_, name, _)| t(name)).unwrap_or(t("Appearance"));
@@ -298,15 +333,55 @@ impl Workbench {
             "language-pick",
             div().w(LANGUAGE_W).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.settings_pick_h(PickFor::Language, "language", lang_icon, PillText::plain(lang_label), CONTROL_H, cx)),
         );
-        let (title_anim, page_anim): (&'static str, &'static str) = match section {
-            "fonts" => ("title-fonts", "page-fonts"),
-            "text" => ("title-text", "page-text"),
-            "conversation" => ("title-conversation", "page-conversation"),
-            "panels" => ("title-panels", "page-panels"),
-            "sessions" => ("title-sessions", "page-sessions"),
-            "terminal" => ("title-terminal", "page-terminal"),
-            "files" => ("title-files", "page-files"),
-            "about" => ("title-about", "page-about"),
+        // A section of more than one page has its pages at the right of
+        // its name, as Appearance has its language.
+        let pages = SETTINGS_PAGES.iter().find(|(s, _)| *s == section).map(|(s, pages)| {
+            let control: &'static str = if *s == "text" { "settings-pages-text" } else { "settings-pages-shortcuts" };
+            let section: &'static str = s;
+            page_in(
+                control,
+                div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.segmented(
+                    control,
+                    pages.iter().map(|(k, name)| (*k, t(name).to_string(), None)).collect(),
+                    page,
+                    Rc::new(move |this, key, _, cx| {
+                        this.settings_pages.insert(section, key);
+                        this.settings_scroll.set_offset(point(px(0.), px(0.)));
+                        this.close_settings_lists(cx);
+                        cx.notify();
+                    }),
+                    cx,
+                )),
+            )
+        });
+        // New sessions' agents, by their marks, where Text has its pages.
+        let agents = page_in(
+            "settings-agents",
+            div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.segmented(
+                "new-sessions-agent",
+                AgentId::ALL.iter().map(|a| (a.as_str(), String::new(), None)).collect(),
+                self.settings_agent.as_str(),
+                Rc::new(|this, key, _, cx| {
+                    if let Some(agent) = AgentId::parse(key) {
+                        this.settings_agent = agent;
+                        this.close_pick(cx);
+                        cx.notify();
+                    }
+                }),
+                cx,
+            )),
+        );
+        let (title_anim, page_anim): (&'static str, &'static str) = match (section, page) {
+            ("text", "size") => ("title-text", "page-text-size"),
+            ("text", _) => ("title-text", "page-text-fonts"),
+            ("conversation", _) => ("title-conversation", "page-conversation"),
+            ("panels", _) => ("title-panels", "page-panels"),
+            ("files", _) => ("title-files", "page-files"),
+            ("terminal", _) => ("title-terminal", "page-terminal"),
+            ("sessions", _) => ("title-sessions", "page-sessions"),
+            ("shortcuts", "editor") => ("title-shortcuts", "page-shortcuts-editor"),
+            ("shortcuts", _) => ("title-shortcuts", "page-shortcuts"),
+            ("about", _) => ("title-about", "page-about"),
             _ => ("title-appearance", "page-appearance"),
         };
         div()
@@ -331,6 +406,22 @@ impl Workbench {
             .on_action(cx.listener(|_, _: &CloseTab, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &crate::CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &OpenSettings, window, _| window.activate_window()))
+            // A tile waiting for its keys shows the modifiers held, and a
+            // press anywhere else stops the wait.
+            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, _, cx| {
+                if this.shortcut_rec.is_some() {
+                    this.shortcut_held = e.modifiers;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.shortcut_rec.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .child(
                 h_flex()
                     .size_full()
@@ -352,7 +443,9 @@ impl Workbench {
                                 // where the system draws none (`csd.rs`).
                                 Self::drag_region(h_flex().h(TOP_H).flex_shrink_0().w_full().pl(PAGE_X).pr(PAGE_X + crate::csd::room(window, cx).1).items_center(), cx)
                                     .child(page_in(title_anim, div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title)))
-                                    .when(section == "appearance", |d| d.child(div().flex_1()).child(language)),
+                                    .when(section == "appearance", |d| d.child(div().flex_1()).child(language))
+                                    .when_some(pages, |d, pages| d.child(div().flex_1()).child(pages))
+                                    .when(section == "sessions", |d| d.child(div().flex_1()).child(agents)),
                             )
                             // The rows scroll under the top with the
                             // toolkit's scrollbar at their edge (it fades a
@@ -818,6 +911,10 @@ impl Workbench {
         const COL: f32 = 168.;
         let col_l = SIDE + (W - 2. * SIDE - COL) / 2.;
         let col_r = col_l + COL;
+        // The seams stand out in the margins, as the window's do, so the
+        // names under their knobs clear what the column holds.
+        const SEAM_OUT: f32 = 26.;
+        let (seam_l, seam_r) = (col_l - SEAM_OUT, col_r + SEAM_OUT);
         let ink = theme.muted_foreground;
         let bar = |x: f32, y: f32, w: f32| div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(4.)).rounded_full().bg(ink.opacity(0.22));
         let named = |x: f32, ground: Hsla, icon: &'static str, words: &'static str| {
@@ -889,15 +986,15 @@ impl Workbench {
             .child(bar(col_l + 14., STRIP + 56., 80.))
             .child(div().absolute().left(px(col_r - 14. - 48.)).top(px(STRIP + 72.)).w(px(48.)).h(px(12.)).rounded(px(6.)).bg(theme.muted))
             .child(div().absolute().left(px(col_l)).top(px(H - 32.)).w(px(COL)).h(px(22.)).rounded(px(8.)).border_1().border_color(theme.border))
-            .child(seam(lerp(col_l, col_r, ko), "icons/list-bullets.svg", t("Outline")))
-            .child(seam(lerp(col_r, col_l, ko), "icons/square-terminal.svg", t("Layout")));
+            .child(seam(lerp(seam_l, seam_r, ko), "icons/list-bullets.svg", t("Outline")))
+            .child(seam(lerp(seam_r, seam_l, ko), "icons/square-terminal.svg", t("Layout")));
         // Each choice is drawn as its two by their icons (`side_pair`).
         let files = div()
-            .w(CONTROL_W)
+            .w(SIDES_W)
             .child(self.segmented("files-side", vec![("left", String::new(), None), ("right", String::new(), None)], if files_right { "right" } else { "left" }, Rc::new(|this, side, _, cx| this.set_side(true, side, cx)), cx))
             .into_any_element();
         let margins = div()
-            .w(CONTROL_W)
+            .w(SIDES_W)
             .child(self.segmented("outline-side", vec![("left", String::new(), None), ("right", String::new(), None)], if outline_right { "right" } else { "left" }, Rc::new(|this, side, _, cx| this.set_side(false, side, cx)), cx))
             .into_any_element();
         vec![
@@ -960,22 +1057,10 @@ impl Workbench {
                 self.pick_field(PickFor::DefaultEffort, "default-effort", "icons/gauge.svg", PillText { tail: "", ..effort_pill(&options, &model, &self.next_effort, &theme) }, cx),
             )
         };
+        // Whose they are; the agent is chosen at the right of the
+        // section's name.
         let head = h_flex().gap(px(7.)).items_center().child(agent_icon(agent, px(13.), agent_color(agent, &theme))).child(agent.display_name()).into_any_element();
-        let pick = self.segmented_sized(
-            "new-sessions-agent",
-            AgentId::ALL.iter().map(|a| (a.as_str(), String::new(), None)).collect(),
-            agent.as_str(),
-            Rc::new(|this, key, _, cx| {
-                if let Some(agent) = AgentId::parse(key) {
-                    this.settings_agent = agent;
-                    this.close_pick(cx);
-                    cx.notify();
-                }
-            }),
-            true,
-            cx,
-        );
-        vec![group_with(Some(head), Some(pick), vec![line(t("Permission mode"), None, mode, &theme), line(t("Model"), None, model, &theme), line(t("Effort"), None, effort, &theme)], &theme)]
+        vec![group_with(Some(head), None, vec![line(t("Permission mode"), None, mode, &theme), line(t("Model"), None, model, &theme), line(t("Effort"), None, effort, &theme)], &theme)]
     }
 
     /// Terminal: how it looks, then how it acts, and whose design it is.
@@ -989,22 +1074,14 @@ impl Workbench {
         // The size is Text Size's terminal: shown here, set there.
         let term_size = crate::branches::small_pill("term-size", "icons/a-large-small.svg", format!("{} pt", size_words(self.cfg.app.text_sizes().terminal)), Press::Quiet, false, &theme)
             .h(CONTROL_H)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.settings_section = "text";
-                this.settings_scroll.set_offset(point(px(0.), px(0.)));
-                cx.notify();
-            }))
+            .on_click(cx.listener(|this, _, _, cx| this.settings_go("size", cx)))
             .into_any_element();
         let term_ligatures = self.switch("term-ligatures", term.ligatures, Rc::new(|this, on, _, cx| this.set_terminal(|t| t.ligatures = on, cx)), cx);
         let term_copy = self.switch("term-copy", term.copy_on_select, Rc::new(|this, on, _, cx| this.set_terminal(|t| t.copy_on_select = on, cx)), cx);
         // The face is the window's, set in Fonts.
         let fonts = crate::branches::small_pill("term-fonts", "icons/typography.svg", t("Open Fonts"), Press::Quiet, false, &theme)
             .h(CONTROL_H)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.settings_section = "fonts";
-                this.settings_scroll.set_offset(point(px(0.), px(0.)));
-                cx.notify();
-            }))
+            .on_click(cx.listener(|this, _, _, cx| this.settings_go("fonts", cx)))
             .into_any_element();
         // The marks it joins, with a zero-width mark between the two
         // letters of each, or the window's own face would join them here.
@@ -1034,6 +1111,199 @@ impl Workbench {
             group(Some(t("Behavior")), None, vec![line(t("Ligatures"), Some(joins), term_ligatures, &theme), line(t("Copy on select"), None, term_copy, &theme)], &theme),
             credit,
         ]
+    }
+
+    /// Shortcuts: the window's commands whose keys may change, or the
+    /// file editor's, a group a card of rows as every section has them,
+    /// two commands to a row: a name at the left, its keys at the right.
+    /// A press on a command waits for its new keys, and one whose keys
+    /// were changed has a button before them that puts its own back.
+    fn shortcut_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        crate::shortcuts::groups(self.settings_page("shortcuts") == "editor")
+            .iter()
+            .map(|(name, list)| {
+                let rows = list
+                    .chunks(2)
+                    .map(|pair| {
+                        let mut row = h_flex().w_full();
+                        for (i, c) in pair.iter().enumerate() {
+                            row = row.child(self.shortcut_cell(c, i > 0, cx));
+                        }
+                        // A short last row keeps its one command a half,
+                        // the empty half as a command's, room and edge alike.
+                        if pair.len() == 1 {
+                            row = row.child(div().flex_1().min_w_0().h(px(SHORTCUT_ROW)).px(px(14.)).border_l_1().border_color(theme.border));
+                        }
+                        row.into_any_element()
+                    })
+                    .collect();
+                group(Some(t(name)), None, rows, &theme)
+            })
+            .collect()
+    }
+
+    /// One command: its name, or for a moment what has the keys just
+    /// pressed; and its keys, or while it waits for new ones the
+    /// modifiers held, in a field that takes the accent.
+    fn shortcut_cell(&self, c: &'static crate::shortcuts::Command, right: bool, cx: &mut Context<Self>) -> AnyElement {
+        use crate::shortcuts;
+        let theme = cx.theme().clone();
+        let id = c.id;
+        let waiting = self.shortcut_rec == Some(id);
+        let refused = self.shortcut_refused.as_ref().filter(|(on, _, at)| *on == id && at.elapsed() < REFUSED_FOR).map(|(_, said, _)| said.clone());
+        let keys = shortcuts::keys_of(id);
+        let caps = if waiting { shortcuts::held(&self.shortcut_held) } else { shortcuts::caps(&keys) };
+        let keys_shown = if caps.is_empty() {
+            div().text_size(px(12.)).text_color(theme.primary).child(t("Press a shortcut")).into_any_element()
+        } else {
+            // A chord's strokes stand apart.
+            h_flex().gap(px(3.)).text_color(if waiting { theme.primary } else { theme.foreground }).children(caps.iter().map(|k| if k.is_empty() { div().w(px(4.)) } else { crate::workbench::key_cap_sized(k, 20., 11.) })).into_any_element()
+        };
+        // New keys, or the wait begun or ended, fade in.
+        let keys_shown = div().flex().items_center().child(keys_shown).with_animation(
+            ElementId::Name(format!("shortcut-{id}-{keys}-{waiting}-{}", caps.concat()).into()),
+            Animation::new(FOLD_ANIM).with_easing(ease_out_quint()),
+            |d, t| d.opacity(t),
+        );
+        let hover = theme.foreground.opacity(0.06);
+        let field = div()
+            .flex_shrink_0()
+            .h(px(28.))
+            .px(px(4.))
+            .flex()
+            .items_center()
+            .rounded(px(7.))
+            .border_1()
+            .border_color(if waiting { theme.primary } else { transparent_black() })
+            .when(waiting, |d| d.bg(theme.primary.opacity(0.08)))
+            .when(!waiting, |d| d.group_hover("shortcut-cell", move |s| s.bg(hover)))
+            .child(keys_shown);
+        let name = match refused {
+            Some(said) => div().flex_1().min_w_0().overflow_hidden().text_size(px(13.)).text_color(theme.danger).child(crate::workbench::key_text(&said)),
+            None => div().flex_1().min_w_0().truncate().text_size(px(13.)).child(t(c.name)),
+        };
+        h_flex()
+            .id(SharedString::from(format!("shortcut-{id}")))
+            .group("shortcut-cell")
+            .flex_1()
+            .min_w_0()
+            .h(px(SHORTCUT_ROW))
+            .px(px(14.))
+            .gap(px(8.))
+            .items_center()
+            .cursor_pointer()
+            .when(right, |d| d.border_l_1().border_color(theme.border))
+            // Its own press is not the press elsewhere that stops a wait.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                swallow_click(window, cx);
+                this.shortcut_rec = if this.shortcut_rec == Some(id) { None } else { Some(id) };
+                this.shortcut_held = window.modifiers();
+                this.shortcut_refused = None;
+                window.focus(&this.settings_focus, cx);
+                cx.notify();
+            }))
+            .child(name)
+            .children(self.shortcut_reset(c, cx))
+            .child(field)
+            .into_any_element()
+    }
+
+    /// Before the keys of a command whose keys were changed: a button
+    /// that puts its own back, coming and going in motion as Text Size's
+    /// does.
+    fn shortcut_reset(&self, c: &'static crate::shortcuts::Command, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = c.id;
+        let shown = crate::shortcuts::changed(id) && self.shortcut_rec != Some(id);
+        let key = format!("shortcut-reset-{id}");
+        let moving = self.presence(&key, shown, cx);
+        if !shown && moving.is_none() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let hover = theme.foreground.opacity(0.07);
+        let tip: SharedString = tf("Reset to {keys}", &[("keys", &crate::shortcuts::caps(c.keys).concat())]).into();
+        let button = div()
+            .id(SharedString::from(key.clone()))
+            .flex_shrink_0()
+            .size(px(22.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(shown, |d| {
+                d.cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        cx.stop_propagation();
+                        this.set_shortcut(id, None, cx);
+                    }))
+            })
+            .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
+            .child(Icon::default().path("icons/rotate.svg").with_size(px(13.)).text_color(theme.muted_foreground));
+        Some(match moving {
+            Some((coming, n)) => button.with_animation(ElementId::Name(format!("{key}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t })).into_any_element(),
+            None => button.into_any_element(),
+        })
+    }
+
+    /// A key pressed anywhere while a tile waits for its keys, before any
+    /// binding hears it (`Workbench::new`): Escape stops the wait, keys
+    /// with ⌘ or Ctrl become the command's unless something has them
+    /// already, which the tile says for a moment, and any other key is
+    /// passed over. Whether the key was the tile's.
+    pub(crate) fn shortcut_key(&mut self, k: &Keystroke, window: &Window, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.shortcut_rec else { return false };
+        if !self.is_settings_window(window) {
+            return false;
+        }
+        if k.key == "escape" && !k.modifiers.modified() {
+            self.shortcut_rec = None;
+            cx.notify();
+            return true;
+        }
+        let said = match crate::shortcuts::recorded(k) {
+            None => return true,
+            Some(Err(needs)) => t(needs).to_string(),
+            Some(Ok(keys)) => match crate::shortcuts::conflict(&keys, id, cx) {
+                Some(by) => tf("Taken by {name}", &[("name", &t(by))]),
+                None => {
+                    self.set_shortcut(id, Some(keys), cx);
+                    return true;
+                }
+            },
+        };
+        self.shortcut_refused = Some((id, said, Instant::now()));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REFUSED_FOR + Duration::from_millis(30)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        cx.notify();
+        true
+    }
+
+    /// A command's keys are these from now on, or its own with none: in
+    /// `config.json`, in the window's bindings and menus, and in every
+    /// label that names them.
+    pub(crate) fn set_shortcut(&mut self, id: &'static str, keys: Option<String>, cx: &mut Context<Self>) {
+        let Some(c) = crate::shortcuts::command(id) else { return };
+        match keys.filter(|k| !crate::shortcuts::same(k, c.keys)) {
+            Some(k) => self.cfg.app.shortcuts.insert(id.to_string(), k),
+            None => self.cfg.app.shortcuts.remove(id),
+        };
+        self.shortcut_rec = None;
+        self.shortcut_refused = None;
+        crate::shortcuts::set_chosen(&self.cfg.app.shortcuts);
+        let chosen = self.cfg.app.shortcuts.clone();
+        if let Err(e) = Config::edit(move |c| c.app.shortcuts = chosen) {
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
+        }
+        crate::shortcuts::rebind(cx);
+        cx.notify();
     }
 
     /// Files: how a file that shows two ways opens; one switch, and the
