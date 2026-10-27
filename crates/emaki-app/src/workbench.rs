@@ -495,13 +495,8 @@ fn nav_index(page: Page) -> Option<usize> {
 /// The width of either end of the top strip on every page: two buttons
 /// on one track, as the pages' are.
 const STRIP_END: f32 = NAV_PAD * 2. + NAV_SEG_W * 2. + NAV_GAP;
-/// Each end of the path bar under the tabs: as wide as the layout slider
-/// at its right, the wider of the two controls it holds.
-const BAND_END: f32 = QUIET_W * 2. + QUIET_GAP;
-/// A panel's button, in the top strip and in the path bar alike, and
-/// what stands between the layout slider's two.
+/// A panel's button in the top strip.
 const QUIET_W: f32 = 28.;
-const QUIET_GAP: f32 = 2.;
 const NAV_SEG_W: f32 = 30.;
 const NAV_PAD: f32 = 3.;
 const NAV_GAP: f32 = 2.;
@@ -657,6 +652,7 @@ pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
     ("fonts", phrase("Fonts"), "icons/typography.svg"),
     ("text", phrase("Text Size"), "icons/a-large-small.svg"),
     ("conversation", phrase("Conversation"), "icons/book-open.svg"),
+    ("panels", phrase("Panels"), "icons/layout-dashboard.svg"),
     ("sessions", phrase("New sessions"), "icons/square-terminal.svg"),
     ("terminal", phrase("Terminal"), "icons/terminal.svg"),
     ("files", phrase("Files"), "icons/tree-view.svg"),
@@ -730,6 +726,31 @@ pub struct Notice {
     pub text: String,
     pub error: bool,
     pub at: f64,
+}
+
+/// The two of a side's choice in Settings, Panels, in the order they
+/// stand from left to right, each by its icon and its name.
+pub(crate) fn side_pair(control: &str, key: &str) -> Option<[(&'static str, &'static str); 2]> {
+    const FILES: (&str, &str) = ("icons/tree-view.svg", phrase("Files"));
+    const TERMINAL: (&str, &str) = ("icons/terminal.svg", phrase("Terminal"));
+    const OUTLINE: (&str, &str) = ("icons/list-bullets.svg", phrase("Outline"));
+    const LAYOUT: (&str, &str) = ("icons/square-terminal.svg", phrase("Layout"));
+    match (control, key) {
+        ("files-side", "left") => Some([FILES, TERMINAL]),
+        ("files-side", _) => Some([TERMINAL, FILES]),
+        ("outline-side", "left") => Some([OUTLINE, LAYOUT]),
+        ("outline-side", _) => Some([LAYOUT, OUTLINE]),
+        _ => None,
+    }
+}
+
+/// A tab's own side panels and layout (`Workbench::tab_views`).
+#[derive(Clone, Copy, Default)]
+struct TabView {
+    files: bool,
+    term: bool,
+    outline: bool,
+    cli: bool,
 }
 
 /// The two panes a trackpad gesture can belong to. Momentum events keep
@@ -1883,6 +1904,15 @@ pub struct Workbench {
     /// The conversations of the other open tabs, kept as they were left
     /// so that going back to one draws it at once; see `open_session`.
     stashed: HashMap<String, Detail>,
+    /// The region the lightbox fits its picture in, as last laid out: a
+    /// click there outside the picture itself closes it (`lightbox_on`).
+    lightbox_region: Rc<Cell<Bounds<Pixels>>>,
+    /// Each tab's own files panel, terminal panel, outline and layout,
+    /// while the app runs; the tab showing has its in the fields
+    /// (`files_on`, `side_term`, `outline_on`, `cli_layout`). A tab never
+    /// shown, and every tab at a launch, has all four closed and the
+    /// rendered layout.
+    tab_views: HashMap<String, TabView>,
     /// A conversation read for a tab and shown for the first time, with
     /// when and a serial: its page fades and rises into place under the
     /// tabs (`render_detail`), where the read had left it empty.
@@ -1901,13 +1931,36 @@ pub struct Workbench {
     pub(crate) panel_w: Pixels,
     pub(crate) panel_drag: bool,
     pub(crate) panel_fit_wanted: bool,
-    /// The outline at the left of the conversation's own pane, as its
-    /// button left it, and its last change of being drawn, as
-    /// `panel_anim`; its width as dragged, and whether its edge is held.
+    /// The outline in its drawer at the conversation column's left, as
+    /// its handle left it, and its last change of being drawn, as
+    /// `panel_anim`; its width.
     pub(crate) outline_on: bool,
     pub(crate) outline_anim: Option<(bool, bool, Instant, u32)>,
     pub(crate) outline_w: Pixels,
-    pub(crate) outline_drag: bool,
+    /// The conversation's pane as last laid out; and for each margin's
+    /// seam, whether the pointer is near it, since when, and how much of it
+    /// showed then (`margin_hover`).
+    pub(crate) conv_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Where the composer's top was last drawn, and so how far up from
+    /// the pane's foot the seams in its margins end.
+    pub(crate) composer_top: Rc<Cell<Pixels>>,
+    pub(crate) seam_foot: f32,
+    /// Where the pointer shows each seam, across the pane from its left:
+    /// at the left, how far out, the seam, how far in; at the right, how
+    /// far in, the seam, how far out; and how far down, the seams' foot.
+    pub(crate) margin_edges: [f32; 3],
+    pub(crate) margin_edges_r: [f32; 3],
+    pub(crate) margin_foot: f32,
+    /// When the side panels' sides and the margins' last changed, for
+    /// the picture in Settings, Panels.
+    pub(crate) sides_anim: [Option<Instant>; 2],
+    /// Where the conversation's words stand, each prompt, the row under it
+    /// and each reply, as the list last laid them out, and the foot under
+    /// the conversation: the seams keep clear of them, and whether they
+    /// count, in the rendered layout (`margin_hover`).
+    pub(crate) words_at: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    pub(crate) margin_words: bool,
+    pub(crate) margin_fade: [(bool, Instant, f32); 2],
     /// The CLI layout: the agent terminal in the conversation's place
     /// (kept in `ui.json`), and the last change, to it or back, when,
     /// and its number.
@@ -4059,16 +4112,25 @@ impl Workbench {
             home_fig: Default::default(),
             sidebar_peek: false,
             sidebar_w: ui.sidebar_w.map(px).unwrap_or(SIDEBAR_W).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
-            files_on: ui.files_on.unwrap_or(false),
+            files_on: false,
             panel_anim: None,
             panel_w: ui.panel_w.map(px).unwrap_or(crate::panels::PANEL_W),
             panel_drag: false,
             panel_fit_wanted: false,
-            outline_on: ui.outline_on.unwrap_or(true),
+            outline_on: false,
             outline_anim: None,
             outline_w: ui.outline_w.map(px).unwrap_or(crate::panels::OUTLINE_W),
-            outline_drag: false,
-            cli_layout: ui.cli_layout.unwrap_or(false),
+            conv_bounds: Rc::new(Cell::new(Bounds::default())),
+            composer_top: Rc::new(Cell::new(px(0.))),
+            seam_foot: 180.,
+            margin_edges: [-1.; 3],
+            margin_edges_r: [f32::MAX; 3],
+            margin_foot: 0.,
+            sides_anim: [None; 2],
+            words_at: Rc::new(std::cell::RefCell::new(Vec::new())),
+            margin_words: false,
+            margin_fade: [(false, Instant::now(), 0.); 2],
+            cli_layout: false,
             cli_anim: None,
             cli_seen: None,
             side_term: false,
@@ -4270,6 +4332,8 @@ impl Workbench {
             rail_fly: None,
             new_from: None,
             stashed: HashMap::new(),
+            lightbox_region: Rc::new(Cell::new(Bounds::default())),
+            tab_views: HashMap::new(),
             detail_in: None,
             tabs_row_w: Rc::new(std::cell::Cell::new(0.)),
             tabs_scroll: ScrollHandle::new(),
@@ -4749,6 +4813,40 @@ impl Workbench {
     /// The switch for folding runs of tool calls. The conversation's items
     /// are drawn from the setting at every frame and measured again as
     /// they draw, so nothing is spliced (`docs/conversation.md`).
+    /// Whether the files panel stands at the conversation's right, the
+    /// terminal panel at its left: the row of side panels mirrored.
+    pub(crate) fn files_right(&self) -> bool {
+        self.cfg.app.files_side == "right"
+    }
+
+    /// Whether the outline is in the conversation's right margin, the
+    /// layout switch in its left: the margins mirrored.
+    pub(crate) fn outline_right(&self) -> bool {
+        self.cfg.app.outline_side == "right"
+    }
+
+    /// A side chosen in Settings, Panels: `files` the side panels', else
+    /// the margins'. The change is drawn in the settings' picture
+    /// (`sides_anim`).
+    pub(crate) fn set_side(&mut self, files: bool, side: &'static str, cx: &mut Context<Self>) {
+        let now = if files { &self.cfg.app.files_side } else { &self.cfg.app.outline_side };
+        if now == side {
+            return;
+        }
+        let i = if files { 0 } else { 1 };
+        self.sides_anim[i] = Some(Instant::now());
+        if files {
+            self.cfg.app.files_side = side.into();
+        } else {
+            self.cfg.app.outline_side = side.into();
+        }
+        let side = side.to_string();
+        if let Err(e) = Config::edit(move |c| if files { c.app.files_side = side } else { c.app.outline_side = side }) {
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
+        }
+        cx.notify();
+    }
+
     fn set_fold_runs(&mut self, on: bool, cx: &mut Context<Self>) {
         self.cfg.app.fold_runs = on;
         if let Err(e) = Config::edit(move |c| c.app.fold_runs = on) {
@@ -5348,14 +5446,36 @@ impl Workbench {
             self.drafts.insert(key.clone(), kept);
         }
         self.stashed.remove(&old);
+        if let Some(view) = self.tab_views.remove(&old) {
+            self.tab_views.insert(key.clone(), view);
+        }
         self.detail = None;
         self.open_session(&key, cx);
+    }
+
+    /// The tab showing becomes `key`: the one left keeps its panels and
+    /// layout, and the one arrived at has its own, or all closed and the
+    /// rendered layout when it has none yet. Taken up as they are, with
+    /// nothing played: a change of tab moves nothing.
+    fn tab_view_switch(&mut self, key: &str) {
+        let Some(left) = self.selected.clone().filter(|k| k != key) else { return };
+        let view = TabView { files: self.files_on, term: self.side_term, outline: self.outline_on, cli: self.cli_layout };
+        if self.tabs.contains(&left) {
+            self.tab_views.insert(left, view);
+        }
+        let tabs = &self.tabs;
+        self.tab_views.retain(|k, _| tabs.contains(k));
+        let to = self.tab_views.get(key).copied().unwrap_or_default();
+        (self.files_on, self.side_term, self.outline_on, self.cli_layout) = (to.files, to.term, to.outline, to.cli);
+        (self.panel_anim, self.side_term_anim, self.outline_anim) = (None, None, None);
+        self.side_away.clear();
     }
 
     pub fn open_session(&mut self, key: &str, cx: &mut Context<Self>) {
         if !self.tabs.iter().any(|t| t == key) {
             self.tabs.push(key.to_string());
         }
+        self.tab_view_switch(key);
         self.page = Page::Session;
         self.selected = Some(key.to_string());
         self.last_session = Some(key.to_string());
@@ -6079,7 +6199,6 @@ impl Workbench {
             window: self.window_rect,
             sidebar_open: Some(self.sidebar_open),
             sidebar_w: Some(f32::from(self.sidebar_w)),
-            files_on: Some(self.files_on),
             panel_w: Some(f32::from(self.panel_w)),
             term_w: Some(f32::from(self.side_term_w)),
             file_w: Some(f32::from(self.file_w)),
@@ -6091,9 +6210,7 @@ impl Workbench {
                 None => "",
             }
             .to_string()),
-            outline_on: Some(self.outline_on),
             outline_w: Some(f32::from(self.outline_w)),
-            cli_layout: Some(self.cli_layout),
             branches_by_name: Some(self.branch_by_name),
             new_agent: Some(self.new_agent.as_str().to_string()),
             mode_cycle: Some(self.mode_cycle.clone()).filter(|c| !c.is_empty()),
@@ -6651,13 +6768,10 @@ impl Workbench {
     /// with a short line of the accent under it. `state` is whether the
     /// panel showed before the last press, whether it shows now, and that
     /// press's number: the line grows out from its middle and shrinks
-    /// back. `small` is the path bar's size, where the top strip's is the
-    /// taller; the two are one width, so with the panel between them away
-    /// the bar's button stands under the strip's.
+    /// back.
     #[allow(clippy::type_complexity)]
-    pub(crate) fn toggle_button(&self, id: &'static str, icon: &'static str, tip: &str, (was, on, serial): (bool, bool, u32), small: bool, click: Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn toggle_button(&self, id: &'static str, icon: &'static str, tip: &str, (was, on, serial): (bool, bool, u32), click: Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let (h, icon_size, mark_w) = if small { (24., 14., 12.) } else { (28., 15., 14.) };
         let lit = theme.foreground;
         let wash = crate::panels::row_hover(&theme, theme.mode.is_dark());
         let words: SharedString = tip.to_string().into();
@@ -6665,11 +6779,11 @@ impl Workbench {
             .id(id)
             .relative()
             .w(px(QUIET_W))
-            .h(px(h))
+            .h(px(28.))
             .flex_shrink_0()
             .items_center()
             .justify_center()
-            .rounded(px(if small { 6. } else { 7. }))
+            .rounded(px(7.))
             .cursor_pointer()
             .text_color(if on { lit } else { theme.muted_foreground })
             // On the lit one too, where it changes nothing: gpui keeps
@@ -6683,58 +6797,8 @@ impl Workbench {
                 swallow_click(window, cx);
                 click(this, window, cx);
             }))
-            .child(Icon::default().path(icon).with_size(px(icon_size)))
-            .children((on || was).then(|| quiet_mark(format!("{id}-mark-{serial}"), (was, on), mark_w, theme.primary)))
-            .into_any_element()
-    }
-
-    /// The layout slider at the path bar's right end: the rendered
-    /// conversation and the agent's own terminal, each by its icon, as
-    /// the panels' buttons are; the one in use is in the accent with the
-    /// accent's line under it, which shrinks under the one left as it
-    /// grows under the one chosen.
-    pub(crate) fn layout_slider(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let wash = crate::panels::row_hover(&theme, theme.mode.is_dark());
-        // What is drawn: a session begun here with nothing sent has no
-        // agent's terminal yet, and its CLI half is dimmed.
-        let cli = self.cli_shown();
-        let possible = self.cli_possible();
-        // Without a change since launch there is nothing to move from.
-        let (from, serial) = self.cli_anim.map(|(to, _, n)| (!to, n + 1)).unwrap_or((cli, 0));
-        let accent = theme.primary;
-        let segment = |id: &'static str, icon: &'static str, words: &str, which: bool, cx: &mut Context<Self>| {
-            let words: SharedString = words.to_string().into();
-            let can = possible || !which;
-            let (was, now) = (from == which, cli == which);
-            h_flex()
-                .id(id)
-                .relative()
-                .w(px(QUIET_W))
-                .h(px(24.))
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .text_color(if now { accent } else { theme.muted_foreground })
-                .when(!can, |d| d.opacity(0.45))
-                .when(can, |d| d.cursor_pointer().hover(move |s| s.bg(wash).text_color(accent)))
-                .managed_tooltip(move |window, cx| crate::workbench::tip(words.clone(), window, cx))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    swallow_click(window, cx);
-                    if this.cli_shown() != which {
-                        this.toggle_layout(window, cx);
-                    }
-                }))
-                .child(Icon::default().path(icon).with_size(px(14.)))
-                .children((was || now).then(|| quiet_mark(format!("{id}-mark-{serial}"), (was, now), 12., accent)))
-        };
-        h_flex()
-            .flex_shrink_0()
-            .gap(px(QUIET_GAP))
-            .child(segment("layout-rendered", "icons/messages.svg", t("Rendered Layout (⌘⇧A)"), false, cx))
-            .child(segment("layout-cli", "icons/square-terminal.svg", t("CLI Layout (⌘⇧A)"), true, cx))
+            .child(Icon::default().path(icon).with_size(px(15.)))
+            .children((on || was).then(|| quiet_mark(format!("{id}-mark-{serial}"), (was, on), 14., theme.primary)))
             .into_any_element()
     }
 
@@ -6764,7 +6828,7 @@ impl Workbench {
         // A choice that fills takes the width it is given, the choices
         // sharing it: the settings' rows, whose controls start and end
         // together, and the languages, which stand under their entry.
-        let fill = matches!(control, "writing-language" | "appearance" | "size" | "send-key" | "file-view" | "term-theme" | "term-cursor");
+        let fill = matches!(control, "writing-language" | "appearance" | "size" | "send-key" | "file-view" | "term-theme" | "term-cursor" | "files-side" | "outline-side");
         let (from, to) = {
             let mut st = self.seg_state.borrow_mut();
             let e = st.entry(control).or_insert((current, current, None));
@@ -6871,8 +6935,15 @@ impl Workbench {
                     // A language has its flag before its name, in its
                     // own colors.
                     .when_some(flag_of(control, key), |d, flag| d.gap(px(6.)).child(img(flag).w(px(17.)).h(px(12.)).flex_shrink_0()))
-                    // Keys are drawn on their caps.
-                    .map(|d| if control == "send-key" { d.child(key_text(&label)) } else { d.child(label) })
+                    // Keys are drawn on their caps, and a pair of sides as
+                    // the two in their order, each by its icon.
+                    .map(|d| match side_pair(control, key) {
+                        Some(pair) => d.child(h_flex().gap(px(6.)).items_center().children(pair.iter().enumerate().map(|(i, (icon, word))| {
+                            h_flex().gap(px(4.)).items_center().when(i > 0, |d| d.child(div().pr(px(2.)).text_color(theme.muted_foreground).child("·"))).child(Icon::default().path(*icon).with_size(seg_text + px(1.))).child(t(word))
+                        }))),
+                        None if control == "send-key" => d.child(key_text(&label)),
+                        None => d.child(label),
+                    })
             }));
         h_flex()
             .id(SharedString::from(format!("{control}-track")))
@@ -8834,6 +8905,16 @@ impl Workbench {
             .into_any_element()
     }
 
+    /// The gesture under way is over, with what it has left of its
+    /// momentum: a change of layout took its pane out of sight, and the
+    /// rest went on moving the conversation where it could not be seen,
+    /// which stood that much further on when it came back. The rest goes
+    /// nowhere; the next gesture is a new one.
+    pub(crate) fn end_scroll_gesture(&mut self) {
+        self.scroll_owner = Some(Pane::Nowhere);
+        self.scroll_inner = None;
+    }
+
     fn route_scroll(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
         if std::env::var("EMAKI_SCROLL_DEBUG").is_ok() {
             eprintln!("scroll {:?} at ({:.0},{:.0}) delta {:?} owner {:?}", e.touch_phase, f32::from(e.position.x), f32::from(e.position.y), e.delta, self.scroll_owner);
@@ -8924,6 +9005,11 @@ impl Workbench {
             });
         }
         let Some(owner) = self.scroll_owner else { return };
+        // What is left of a gesture that was ended moves nothing.
+        if owner == Pane::Nowhere {
+            cx.stop_propagation();
+            return;
+        }
         if let Some((own, kind, began_at)) = self.scroll_inner.clone() {
             let inside = own.bounds().contains(&e.position);
             if kind == Inner::Chained && (inside || own.offset().y == began_at) {
@@ -11815,12 +11901,6 @@ impl Workbench {
         (p.2 > 0 && p.1.elapsed() < FOLD_ANIM).then_some((on, p.2))
     }
 
-    /// The number of the last change `presence` saw for `id`: what names
-    /// an element that plays it and is kept at rest under that name.
-    pub(crate) fn presence_serial(&self, id: &str) -> u32 {
-        self.presences.borrow().get(id).map(|p| p.2).unwrap_or(0)
-    }
-
     /// Whether something `presence` keeps is there or still going.
     fn lingering(&self, id: &str) -> bool {
         self.presences.borrow().get(id).is_some_and(|p| p.0 || p.1.elapsed() < FOLD_ANIM)
@@ -14124,7 +14204,8 @@ impl Workbench {
         // word to flash by.
         let Some(detail) = &self.detail else {
             let tabs = self.render_tabs(cx);
-            return v_flex().flex_1().h_full().child(self.render_topbar_ends(self.panel_buttons(cx), tabs, Vec::new(), cx)).into_any_element();
+            let (left, right) = if self.files_right() { (Vec::new(), self.panel_buttons(cx)) } else { (self.panel_buttons(cx), Vec::new()) };
+            return v_flex().flex_1().h_full().child(self.render_topbar_ends(left, tabs, right, cx)).into_any_element();
         };
         let session = detail.session.clone();
         let list = detail.list.clone();
@@ -14135,10 +14216,17 @@ impl Workbench {
         }
         // The shell terminal is the panel at the right (`term_panel.rs`);
         // the person's own terminal app is on the session's menu.
-        right.push(self.term_shell_button(cx));
+        // Each button at the end of the strip over its panel's side.
+        let left = if self.files_right() {
+            right.extend(self.panel_buttons(cx));
+            vec![self.term_shell_button(cx)]
+        } else {
+            right.push(self.term_shell_button(cx));
+            self.panel_buttons(cx)
+        };
         let folder_tip = if Self::folder_exists(&r) { t("Open the project folder") } else { t(FOLDER_GONE) };
         let tabs = self.render_tabs(cx);
-        let topbar = self.render_topbar_ends(self.panel_buttons(cx), tabs, right, cx);
+        let topbar = self.render_topbar_ends(left, tabs, right, cx);
 
         // Under the tabs, where the session lives and nothing else: a band
         // across the pane, as a file manager's path bar is, so it reads as
@@ -14150,9 +14238,6 @@ impl Workbench {
         let cwd = session.cwd.clone();
         let name_len = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().len()).filter(|n| cwd.len() >= *n).unwrap_or(0);
         let (parents, name) = cwd.split_at(cwd.len() - name_len);
-        // Its two ends hold the outline's button at the left and the
-        // layout slider at the right, each end as wide as the wider, so
-        // the path keeps the pane's center.
         let path_bar = (!cwd.is_empty()).then(|| {
             let hover_bg = theme.muted;
             h_flex()
@@ -14182,18 +14267,13 @@ impl Workbench {
             .w_full()
             .h(px(31.))
             .flex_shrink_0()
-            // The strip's own inset, so its buttons and the bar's stand
-            // one over the other.
             .px(STRIP_PAD)
-            .gap(px(8.))
             .items_center()
             .bg(theme.muted.opacity(0.3))
             .border_t_1()
             .border_b_1()
             .border_color(theme.border)
-            .child(h_flex().w(px(BAND_END)).flex_shrink_0().child(self.outline_button(cx)))
-            .child(h_flex().flex_1().min_w_0().justify_center().children(path_bar))
-            .child(h_flex().w(px(BAND_END)).flex_shrink_0().justify_end().child(self.layout_slider(cx)));
+            .child(h_flex().flex_1().min_w_0().justify_center().children(path_bar));
 
         let chat_font = crate::fonts::chat_family(&self.cfg.app.chat_font, cx);
         // The list is a view the window keeps between frames
@@ -14218,7 +14298,9 @@ impl Workbench {
             .when_some(chat_font, |d, f| d.font_family(f))
             .child(list_view)
             .child(canvas(move |_, window, cx| kept.keep(window, cx), move |_, _, window, cx| marks.paint(window, cx)).absolute().size_0())
-            .vertical_scrollbar(&list)
+            // Not while the layouts trade places: the bar would travel
+            // with the conversation's card.
+            .when(cli_live.is_none(), |d| d.vertical_scrollbar(&list))
             .children(unread)
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.conversation_menu(ev.position, window, cx)));
 
@@ -14413,8 +14495,8 @@ impl Workbench {
             self.render_cards(&r, cx)
         });
         // At the conversation's left, under the top strip: the folder's
-        // files or the outline, one at a time (`panels.rs`).
-        let (files_shown, outline_shown) = self.panels_shown();
+        // files (`panels.rs`).
+        let (files_shown, _) = self.panels_shown();
         self.fit_agent_pty(&r.session_id);
         let term_panel = self.render_term_panel(&r, window, cx);
         // A file from the tree, shown between the tree and the conversation.
@@ -14442,13 +14524,16 @@ impl Workbench {
         }
         let file_pane = self.render_file_pane(cx);
         let files_panel = (files_shown || self.panel_leaving()).then(|| self.render_files_panel(cx));
-        // At the left of the conversation's own pane, under the path bar.
-        // It belongs to the rendered layout and fades with it.
-        let outline_panel = (outline_shown || self.outline_leaving() || (cli_live.is_some() && self.outline_on)).then(|| self.render_outline_panel(cx));
+        // The column keeps the pane's center, and moves over for the
+        // outline's drawer where the margin is too narrow for it.
+        let pane_w = f32::from(self.conv_bounds.get().size.width);
+        let (room_l, room_r) = self.conv_room(pane_w);
         let conversation = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
+            .pl(px(room_l))
+            .pr(px(room_r))
             // The find bar opens down from the strip, what is under it
             // moving with it.
             .when(self.find_open, |d| d.child(div().w_full().flex_shrink_0().overflow_hidden().child(self.render_find_bar(cx)).with_animation("find-bar-in", Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| if t >= 1. { d } else { d.max_h(px(FIND_BAR_MOST * t)).opacity(t) })))
@@ -14458,10 +14543,12 @@ impl Workbench {
             // goes, so the column has no gap.
             .child(
                 v_flex()
+                    .relative()
                     .w_full()
                     .items_center()
                     .px(px(24.))
                     .pb(px(14.))
+                    .child(crate::transcript::words_at(&self.words_at))
                     .children(artifacts)
                     .children(agents)
                     .children(shells)
@@ -14469,24 +14556,76 @@ impl Workbench {
                     .children(waiting)
                     .children(behind)
                     .children(foot_cards)
-                    .child(v_flex().w_full().items_center().pt(px(8.)).child(self.render_composer(cx))),
+                    .child({
+                        // Where the composer stands, for the seams beside
+                        // it to end above.
+                        let top = self.composer_top.clone();
+                        v_flex()
+                            .relative()
+                            .w_full()
+                            .items_center()
+                            .pt(px(8.))
+                            .child(self.render_composer(cx))
+                            .child(canvas(move |b, _, _| top.set(b.top() + px(8.)), |_, _, _, _| {}).absolute().size_full())
+                    }),
             );
-        // The rendered layout, the outline and the conversation, or the
-        // CLI's: the agent terminal in their place. A change fades the one
-        // in where it stands while the other fades out over it, out of the
-        // row's layout. The fade is drawn off the clock, on wrappers with
-        // no name: a named animation over the outline was a new element at
-        // each change, and the outline's own fade-in began again under it,
-        // leaving an empty gray column for the first frames.
-        let rendered = h_flex().flex_1().min_w_0().h_full().items_stretch().children(outline_panel).child(conversation);
+        // The rendered layout, the conversation, or the CLI's: the agent
+        // terminal in its place. A change fades the one in where it stands
+        // while the other fades out over it, out of the row's layout. The
+        // fade is drawn off the clock, on wrappers with no name: a named
+        // animation over the outline was a new element at each change, and
+        // the outline's own fade-in began again under it, leaving an empty
+        // gray column for the first frames.
+        let rendered = h_flex().flex_1().min_w_0().h_full().items_stretch().child(conversation);
+        // How far the layout is from the rendered one to the CLI's.
+        let cli_k = match cli_live {
+            Some((to_cli, at, _)) => {
+                let t = ease_out_quint()((at.elapsed().as_secs_f32() / crate::term_panel::CLI_ANIM.as_secs_f32()).min(1.));
+                if to_cli { t } else { 1. - t }
+            }
+            None if self.cli_shown() => 1.,
+            None => 0.,
+        };
+        let pane = self.conv_bounds.get();
+        // Read only with the rendered layout at rest: while the layouts
+        // trade places the composer moves with its card, and the seams
+        // came out longer in the CLI layout.
+        if cli_live.is_none() && cli_k == 0. && self.composer_top.get() > pane.top() {
+            self.seam_foot = f32::from(pane.bottom() - self.composer_top.get());
+        }
+        // Where the rendered layout's card is as the two trade places
+        // (below), the CLI's standing to its right: the outline goes with it.
+        let shuffle = crate::term_panel::CLI_SHUFFLE;
+        let rendered_at = if cli_live.is_some() { (-shuffle * cli_k, 0.) } else { (0., 0.) };
+        let margins = self.render_margins(pane_w, f32::from(pane.size.height), cli_k, rendered_at, window, cx);
         let content: AnyElement = match cli_live {
             Some((to_cli, at, _)) => {
                 window.request_animation_frame();
                 let t = ease_out_quint()((at.elapsed().as_secs_f32() / crate::term_panel::CLI_ANIM.as_secs_f32()).min(1.));
                 let cli = self.render_cli(&r, !to_cli, window, cx);
-                let layer = |el: AnyElement, opacity: f32, over: bool| div().flex().flex_1().min_w_0().h_full().when(over, |d| d.absolute().inset_0()).opacity(opacity).child(el);
+                // The two trade places as two cards do: each layout is a
+                // card of the page's ground, the one going slides away to
+                // its side and fades, and the other slides in from its own
+                // over it, lifted by a shadow. The CLI's card stands to the
+                // rendered one's right.
+                let ground = theme.background;
+                let lift = crate::workbench::float_shadow(&theme);
+                let card = |el: AnyElement, opacity: f32, (dx, dy): (f32, f32), over: bool| {
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .bg(ground)
+                        .map(|d| if over { d.absolute().top(px(dy)).w_full().h_full().left(px(dx)).shadow(lift.clone()) } else { d.relative().left(px(dx)).top(px(dy)) })
+                        .opacity(opacity)
+                        .child(el)
+                };
+                let side = if to_cli { 1. } else { -1. };
                 let (coming, going) = if to_cli { (cli, rendered.into_any_element()) } else { (rendered.into_any_element(), cli) };
-                div().relative().flex().flex_1().min_w_0().h_full().child(layer(coming, t, false)).child(layer(going, 1. - t, true)).into_any_element()
+                let away = (-side * shuffle * t, 0.);
+                let toward = (side * shuffle * (1. - t), 0.);
+                div().relative().flex().flex_1().min_w_0().h_full().overflow_hidden().child(card(going, 1. - t, away, false)).child(card(coming, t, toward, true)).into_any_element()
             }
             None if self.cli_shown() => self.render_cli(&r, false, window, cx),
             None => rendered.into_any_element(),
@@ -14496,7 +14635,31 @@ impl Workbench {
             .min_w_0()
             .h_full()
             .child(path_line)
-            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().child(content));
+            .child({
+                // The pane measured as it is laid out, for its margins.
+                let bounds = self.conv_bounds.clone();
+                h_flex()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .items_stretch()
+                    .child(content)
+                    .child(
+                        canvas(
+                            move |b, window, _| {
+                                if bounds.get() != b {
+                                    bounds.set(b);
+                                    window.refresh();
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .children(margins)
+            });
         // A tab's first read come in: what it left empty under the tabs
         // fades and rises into place, as a page's content does (`page_in`).
         let main = match arriving {
@@ -14509,7 +14672,16 @@ impl Workbench {
             .h_full()
             .bg(theme.background)
             .child(topbar)
-            .child(h_flex().flex_1().min_h_0().w_full().items_stretch().children(files_panel).children(file_pane).children(self.beside_file(main)).children(term_panel))
+            .child({
+                // The side panels in their order, mirrored when the files
+                // panel stands at the right.
+                let row = h_flex().flex_1().min_h_0().w_full().items_stretch();
+                if self.files_right() {
+                    row.children(term_panel).children(self.beside_file(main)).children(file_pane).children(files_panel)
+                } else {
+                    row.children(files_panel).children(file_pane).children(self.beside_file(main)).children(term_panel)
+                }
+            })
             .into_any_element()
     }
 
@@ -16845,6 +17017,32 @@ impl Workbench {
     }
     // -- lightbox --------------------------------------------------------------
 
+    /// Whether `at` is on the picture the lightbox shows: in its region,
+    /// within the part the picture fills as it fits itself whole. A
+    /// picture whose size cannot be read is taken as the whole region.
+    fn lightbox_on(&self, at: Point<Pixels>) -> bool {
+        let region = self.lightbox_region.get();
+        if !region.contains(&at) {
+            return false;
+        }
+        let shown = if self.lightbox_set.is_empty() { self.lightbox.as_ref() } else { self.lightbox_set.get(self.lightbox_at.min(self.lightbox_set.len() - 1)) };
+        let dims = shown.and_then(|pic| match &pic.source {
+            ImageSource::Resource(Resource::Path(p)) => crate::pictures::dims(p),
+            ImageSource::Image(image) => image_dims(&image.bytes),
+            ImageSource::Render(image) => {
+                let s = image.size(0);
+                Some((s.width.0 as u32, s.height.0 as u32))
+            }
+            _ => None,
+        });
+        let Some((w, h)) = dims.filter(|(w, h)| *w > 0 && *h > 0) else { return true };
+        let (rw, rh) = (f32::from(region.size.width), f32::from(region.size.height));
+        let scale = (rw / w as f32).min(rh / h as f32);
+        let (dw, dh) = (w as f32 * scale, h as f32 * scale);
+        let picture = Bounds { origin: point(region.origin.x + px((rw - dw) / 2.), region.origin.y + px((rh - dh) / 2.)), size: size(px(dw), px(dh)) };
+        picture.contains(&at)
+    }
+
     fn render_lightbox(&self, lb: Lightbox, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let path_open = lb.path.clone();
@@ -16863,7 +17061,14 @@ impl Workbench {
             .items_center()
             .justify_center()
             .gap(px(12.))
-            .on_click(cx.listener(|this, _, _, cx| {
+            // A click anywhere but on the picture closes it: the picture
+            // fills its region only one way, and the bands beside it are
+            // the backdrop's.
+            .on_click(cx.listener(|this, e: &ClickEvent, window, cx| {
+                if this.lightbox_on(e.position()) {
+                    swallow_click(window, cx);
+                    return;
+                }
                 this.lightbox = None;
                 cx.notify();
             }))
@@ -16878,18 +17083,14 @@ impl Workbench {
                 let mut order: Vec<(usize, Lightbox)> = set.into_iter().enumerate().collect();
                 let top = order.remove(at);
                 order.push(top);
-                div().relative().w(gpui::relative(0.88)).h(gpui::relative(0.8)).children(order.into_iter().map(move |(i, pic)| {
+                let region = self.lightbox_region.clone();
+                div().relative().w(gpui::relative(0.88)).h(gpui::relative(0.8)).child(canvas(move |b, _, _| region.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full()).children(order.into_iter().map(move |(i, pic)| {
                     let shown = i == at;
                     // The picture is the region's size and fits itself in
                     // it whole, rounded where it is drawn. Held to a share of
                     // a box whose height was its own, a tall one was never
                     // held and was cut off at the region's foot.
-                    let frame = img(pic.source)
-                        .id(("lightbox-img", i))
-                        .size_full()
-                        .object_fit(ObjectFit::Contain)
-                        .rounded(px(12.))
-                        .when(shown, |d| d.occlude().on_click(|_, window, cx| swallow_click(window, cx)));
+                    let frame = img(pic.source).id(("lightbox-img", i)).size_full().object_fit(ObjectFit::Contain).rounded(px(12.));
                     let place = div().absolute().inset_0().flex().items_center().justify_center();
                     let step = Animation::new(LIGHTBOX_STEP);
                     if shown && from.is_some() {
@@ -18501,6 +18702,12 @@ impl Render for Workbench {
                                 let _ = scroll.update(cx, |w, cx| w.route_scroll(e, cx));
                             }
                         });
+                        let hover = this.clone();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = hover.update(cx, |w, cx| w.margin_hover(e.position, cx));
+                            }
+                        });
                         let (mover, lifter) = (this.clone(), this.clone());
                         // The sidebar's edge, once held, follows the
                         // pointer wherever it goes, and nothing under
@@ -18515,8 +18722,6 @@ impl Render for Workbench {
                                             w.term_drag_to(e, cx);
                                         } else if w.panel_drag {
                                             w.panel_drag_to(e, cx);
-                                        } else if w.outline_drag {
-                                            w.outline_drag_to(e, cx);
                                         } else if w.file_drag {
                                             w.file_drag_to(e, cx);
                                         } else {
@@ -18660,7 +18865,6 @@ impl Render for Workbench {
             .when(sidebar_open, |d| d.child(self.render_side_grip(cx)))
             .children(self.render_panel_grip(cx))
             .children(self.render_file_grip(cx))
-            .children(self.render_outline_grip(cx))
             .children(self.render_term_grip(cx))
             .when(sidebar_peek, |d| d.child(self.render_sidebar_overlay(cx)))
             .child(self.render_strip(cx))

@@ -339,6 +339,8 @@ upstream revision finds them.
 
 62. `crates/base/src/input/base/state.rs` (`cursor_wrap_row`, `start_of_line`, `end_of_line`), `movement.rs` (`update_preferred_column`, `end`, `vertical_offset`): ⌘→ on a row that wraps stops after its last word, the spaces it broke at left; and a caret at a soft wrap put there as a row's end is on that row, as it is drawn, for ⌘←, ⌘→, and the column and row ↑ and ↓ start from. Upstream went past the spaces to the next row's start, where the caret was drawn a space past the word, ⌘← went to the start of the whole line and ↓ two rows down.
 
+63. `crates/base/src/scrollbar.rs` (`SETTLE`, `born`, the state's first value): a bar drawn anew starts from its scroller's offset, and for `SETTLE` after it takes a change of the offset as where it starts, not as a scroll. A scroller kept between draws (Emaki's outline, in a drawer that comes and goes) showed its bar each time it came, and again as it moved itself to the entry in view.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

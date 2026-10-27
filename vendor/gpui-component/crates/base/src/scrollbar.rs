@@ -29,6 +29,11 @@ const THUMB_ACTIVE_INSET: Pixels = px(4.);
 // second (upstream: two seconds, then a one-second fade). (Emaki addition.)
 const FADE_OUT_DURATION: f32 = 1.5;
 const FADE_OUT_DELAY: f32 = 1.0;
+// How long after a bar is first drawn a change of its offset is where it
+// starts, not a scroll: a scroller drawn again keeps its offset, and one
+// that moves itself into place as it comes would show its bar unasked.
+// (Emaki addition.)
+const SETTLE: f32 = 0.5;
 
 fn clamp_thumb_radius(radius: Pixels, bounds: Bounds<Pixels>) -> Pixels {
     radius
@@ -153,6 +158,8 @@ struct ScrollbarStateInner {
     // Last update offset
     last_update: Instant,
     idle_timer_scheduled: bool,
+    // When the bar was first drawn. (Emaki addition.)
+    born: Instant,
 }
 
 impl Default for ScrollbarState {
@@ -166,6 +173,7 @@ impl Default for ScrollbarState {
             last_scroll_time: None,
             last_update: Instant::now(),
             idle_timer_scheduled: false,
+            born: Instant::now(),
         })))
     }
 }
@@ -885,8 +893,14 @@ impl Element for Scrollbar {
             window.insert_hitbox(bounds, HitboxBehavior::Normal)
         });
 
+        // A new bar starts from where its scroller is. (Emaki addition.)
+        let start = self.scroll_handle.offset();
         let state = window
-            .use_state(cx, |_, _| ScrollbarState::default())
+            .use_state(cx, move |_, _| {
+                let state = ScrollbarState::default();
+                state.set(state.get().with_last_scroll(start, None));
+                state
+            })
             .read(cx)
             .clone();
 
@@ -962,7 +976,8 @@ impl Element for Scrollbar {
             let is_hover_to_show = mode.is_hover();
             let is_hovered_on_bar = state.get().hovered_axis == Some(axis);
             let is_hovered_on_thumb = state.get().hovered_on_thumb == Some(axis);
-            let is_offset_changed = state.get().last_scroll_offset != self.scroll_handle.offset();
+            let settling = state.get().born.elapsed().as_secs_f32() < SETTLE;
+            let is_offset_changed = !settling && state.get().last_scroll_offset != self.scroll_handle.offset();
 
             let (thumb_bg, bar_bg, bar_border, thumb_width, inset, radius, min_length) =
                 if state.get().dragged_axis == Some(axis) {
@@ -1131,13 +1146,12 @@ impl Element for Scrollbar {
         let is_visible = scrollbar_state.get().is_scrollbar_visible() || mode.is_always();
         let is_hover_to_show = mode.is_hover();
 
-        // Update last_scroll_time when offset is changed.
+        // Update last_scroll_time when offset is changed; while the bar
+        // settles, only the offset. (Emaki addition.)
         if self.scroll_handle.offset() != scrollbar_state.get().last_scroll_offset {
-            scrollbar_state.set(
-                scrollbar_state
-                    .get()
-                    .with_last_scroll(self.scroll_handle.offset(), Some(Instant::now())),
-            );
+            let settling = scrollbar_state.get().born.elapsed().as_secs_f32() < SETTLE;
+            let time = if settling { scrollbar_state.get().last_scroll_time } else { Some(Instant::now()) };
+            scrollbar_state.set(scrollbar_state.get().with_last_scroll(self.scroll_handle.offset(), time));
             cx.notify(view_id);
         }
 

@@ -22,16 +22,12 @@ pub struct UiState {
     pub sidebar_open: Option<bool>,
     /// How wide the sidebar was dragged to.
     pub sidebar_w: Option<f32>,
-    /// The files panel beside a conversation, and how wide it was
-    /// dragged to.
-    pub files_on: Option<bool>,
+    /// How wide the files panel was dragged to. Whether it shows, as the
+    /// outline, the layout and the terminal panel, is each tab's and is not
+    /// kept past a launch (`Workbench::tab_view`).
     pub panel_w: Option<f32>,
-    /// The outline at the conversation's left, and how wide it was
-    /// dragged to.
-    pub outline_on: Option<bool>,
+    /// How wide the outline's drawer is.
     pub outline_w: Option<f32>,
-    /// The agent terminal in the conversation's place.
-    pub cli_layout: Option<bool>,
     /// The list of branches in the order of their names, not by when
     /// each was last committed to.
     pub branches_by_name: Option<bool>,

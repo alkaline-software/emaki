@@ -8791,5 +8791,50 @@
     "fr": "Ouvrir dans la disposition CLI",
     "de": "Im CLI-Layout öffnen",
     "es": "Abrir en el diseño CLI"
+  },
+  "Panels": {
+    "zh-Hans": "面板",
+    "zh-Hant": "面板",
+    "ja": "パネル",
+    "ko": "패널",
+    "fr": "Panneaux",
+    "de": "Bereiche",
+    "es": "Paneles"
+  },
+  "Side panels": {
+    "zh-Hans": "侧边面板",
+    "zh-Hant": "側邊面板",
+    "ja": "サイドパネル",
+    "ko": "사이드 패널",
+    "fr": "Panneaux latéraux",
+    "de": "Seitenbereiche",
+    "es": "Paneles laterales"
+  },
+  "Margins": {
+    "zh-Hans": "对话两侧",
+    "zh-Hant": "對話兩側",
+    "ja": "会話の両脇",
+    "ko": "대화 양옆",
+    "fr": "Marges",
+    "de": "Ränder",
+    "es": "Márgenes"
+  },
+  "Outline": {
+    "zh-Hans": "大纲",
+    "zh-Hant": "大綱",
+    "ja": "アウトライン",
+    "ko": "개요",
+    "fr": "Plan",
+    "de": "Gliederung",
+    "es": "Esquema"
+  },
+  "Layout": {
+    "zh-Hans": "布局",
+    "zh-Hant": "版面",
+    "ja": "レイアウト",
+    "ko": "레이아웃",
+    "fr": "Disposition",
+    "de": "Layout",
+    "es": "Diseño"
   }
 }
