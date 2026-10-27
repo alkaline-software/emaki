@@ -904,12 +904,16 @@ impl Workbench {
 
         // The picture: the top strip, a side panel at either side of the
         // conversation, and in the conversation's margins the two seams.
-        const W: f32 = 528.;
+        // No wider than the room its card has, measured as it is drawn:
+        // on GNOME the page came out narrower than the window's width
+        // says, and a picture of a set width ran out of its card.
+        let room = self.panels_room.get();
+        let w: f32 = if room > 0. { room.clamp(440., 528.) } else { 528. };
         const H: f32 = 176.;
         const STRIP: f32 = 20.;
         const SIDE: f32 = 96.;
         const COL: f32 = 168.;
-        let col_l = SIDE + (W - 2. * SIDE - COL) / 2.;
+        let col_l = SIDE + (w - 2. * SIDE - COL) / 2.;
         let col_r = col_l + COL;
         // The seams stand out in the margins, as the window's do, so the
         // names under their knobs clear what the column holds.
@@ -965,7 +969,7 @@ impl Workbench {
         };
         let picture = div()
             .relative()
-            .w(px(W))
+            .w(px(w))
             .h(px(H))
             .mx_auto()
             .overflow_hidden()
@@ -974,11 +978,11 @@ impl Workbench {
             .border_color(theme.border)
             .bg(theme.background)
             .child(div().absolute().top_0().left_0().right_0().h(px(STRIP)).border_b_1().border_color(theme.border).bg(theme.muted.opacity(0.3)))
-            .child(div().absolute().top(px(5.)).left(px(W / 2. - 40.)).w(px(80.)).h(px(10.)).rounded(px(4.)).bg(theme.muted))
-            .child(strip_icon(lerp(8., W - 20., kf), "icons/tree-view.svg"))
-            .child(strip_icon(lerp(W - 20., 8., kf), "icons/terminal.svg"))
-            .child(named(lerp(0., W - SIDE, kf), crate::look::files_ground(&theme), "icons/tree-view.svg", t("Files")))
-            .child(named(lerp(W - SIDE, 0., kf), self.term_ground(cx), "icons/terminal.svg", t("Terminal")))
+            .child(div().absolute().top(px(5.)).left(px(w / 2. - 40.)).w(px(80.)).h(px(10.)).rounded(px(4.)).bg(theme.muted))
+            .child(strip_icon(lerp(8., w - 20., kf), "icons/tree-view.svg"))
+            .child(strip_icon(lerp(w - 20., 8., kf), "icons/terminal.svg"))
+            .child(named(lerp(0., w - SIDE, kf), crate::look::files_ground(&theme), "icons/tree-view.svg", t("Files")))
+            .child(named(lerp(w - SIDE, 0., kf), self.term_ground(cx), "icons/terminal.svg", t("Terminal")))
             // The conversation: a prompt, a reply, a prompt, the composer.
             .child(div().absolute().left(px(col_r - 14. - 64.)).top(px(STRIP + 14.)).w(px(64.)).h(px(12.)).rounded(px(6.)).bg(theme.muted))
             .child(bar(col_l + 14., STRIP + 36., 126.))
@@ -988,6 +992,21 @@ impl Workbench {
             .child(div().absolute().left(px(col_l)).top(px(H - 32.)).w(px(COL)).h(px(22.)).rounded(px(8.)).border_1().border_color(theme.border))
             .child(seam(lerp(seam_l, seam_r, ko), "icons/list-bullets.svg", t("Outline")))
             .child(seam(lerp(seam_r, seam_l, ko), "icons/square-terminal.svg", t("Layout")));
+        let held = self.panels_room.clone();
+        let measure = canvas(
+            move |bounds, window, _| {
+                let room = f32::from(bounds.size.width);
+                if (held.get() - room).abs() > 0.5 {
+                    held.set(room);
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         // Each choice is drawn as its two by their icons (`side_pair`).
         let files = div()
             .w(SIDES_W)
@@ -998,7 +1017,7 @@ impl Workbench {
             .child(self.segmented("outline-side", vec![("left", String::new(), None), ("right", String::new(), None)], if outline_right { "right" } else { "left" }, Rc::new(|this, side, _, cx| this.set_side(false, side, cx)), cx))
             .into_any_element();
         vec![
-            group(None, None, vec![div().p(px(14.)).child(picture).into_any_element()], &theme),
+            group(None, None, vec![div().p(px(14.)).child(div().relative().w_full().child(measure).child(picture)).into_any_element()], &theme),
             group(None, None, vec![line(t("Side panels"), None, files, &theme), line(t("Margins"), None, margins, &theme)], &theme),
         ]
     }
