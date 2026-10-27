@@ -80,7 +80,7 @@ The MSVC target cannot be checked from a Mac (bundled SQLite wants the Windows h
 
 `docs/release.md` is the procedure, scripts included. The shape behind it:
 
-- `rust.yml`, every push: the core tests, an app build and the CLI on all three OSes, Windows and Linux on ARM too, with `Swatinem/rust-cache` because a cold GPUI build is long.
+- `rust.yml`, every push to `main`: the core tests, an app build and the CLI on all three OSes, Windows and Linux on ARM too, with `Swatinem/rust-cache` because a cold GPUI build is long. It runs on `main` and not on a working branch on purpose: the runs listed are one per change merged, and a release waits for the run of the commit it tags. Running it on every branch push was considered and turned down.
 - `release.yml`, on a `v*` tag: six package jobs build with `cargo-packager` (Velopack on Windows), then one `release` job makes the GitHub Release with the tag's section of `CHANGELOG.md` as its notes and the installers under stable names.
 - Until the signing secrets are in the repository, CI's Mac images are ad-hoc. The notarized ones are built on this machine (`scripts/release-mac.sh`) and uploaded over them (`scripts/release-publish.sh`), which is why CI leaves the release a draft.
 
