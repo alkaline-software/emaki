@@ -649,8 +649,9 @@ const RAIL_TOP_MAC: Pixels = px(92.);
 /// The reading column: conversation, composer, the sessions list, the home page.
 pub const CONTENT_W: Pixels = px(768.);
 /// How long a live session's ended turn reads as the person's turn (the
-/// green dot) after its newest row, in seconds.
-const YOUR_TURN_FOR: f64 = 3600.;
+/// green dot), in seconds: from its newest row, or from when its dot was
+/// last blue, whichever is later.
+const YOUR_TURN_FOR: f64 = 1800.;
 /// The settings panel's sections, in rail order: key, label, icon.
 pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
     ("appearance", phrase("Appearance"), "icons/palette.svg"),
@@ -1679,6 +1680,12 @@ pub struct Workbench {
     /// The session that was showing and working at the last index, to
     /// notice the moment it is stopped.
     was_working: Option<String>,
+    /// The live sessions' dots as last drawn: an hour after a reply the
+    /// green one goes by the clock alone, which draws nothing by itself
+    /// (`dots_now`).
+    dots_drawn: u64,
+    /// When each session's dot was last seen blue, while the app runs.
+    blue_at: HashMap<String, f64>,
     /// The prompt handed back to the composer while it was still a round
     /// in the transcript: the session's key and the round's `uuid`.
     handed_back: Option<(String, String)>,
@@ -3472,6 +3479,11 @@ fn effort_pill(options: &Options, model: &str, effort: &str, theme: &gpui_compon
     PillText { value: options.effort_label(model, effort), tint: effort_color(options, model, effort, theme), tail: phrase("{value} effort") }
 }
 
+/// The app's one hub (`Workbench::new`).
+struct AppHub(Arc<Hub>);
+
+impl Global for AppHub {}
+
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut cfg = Config::load();
@@ -3484,7 +3496,37 @@ impl Workbench {
         cfg.terminal.spacing = "normal".into();
         cfg.terminal.padding = "medium".into();
         cfg.terminal.size = cfg.app.text_sizes().terminal;
-        let (hub, mut rx) = Hub::start(cfg.clone());
+        // One hub for as long as the app runs. A window closed and opened
+        // again from the Dock takes up the one there is: each had made its
+        // own, and the one left behind went on scanning, with hidden
+        // terminals no window knew were its own, so a message sent to such
+        // a session started a second Claude Code on it.
+        // A probe's steps are the first window's (`reopen`).
+        let reopened = cx.has_global::<AppHub>();
+        let (hub, mut rx) = match cx.try_global::<AppHub>() {
+            Some(AppHub(hub)) => {
+                let hub = Arc::clone(hub);
+                let rx = hub.attach(cfg.clone());
+                (hub, rx)
+            }
+            None => {
+                let (hub, rx) = Hub::start(cfg.clone());
+                cx.set_global(AppHub(Arc::clone(&hub)));
+                // Every headless child is ours to close: a driver left
+                // running after the app is gone would keep writing to a
+                // transcript nobody reads. The app's, not a window's: a
+                // window closed before the quit is gone by then.
+                let hub_for_quit = Arc::clone(&hub);
+                let app: &App = cx;
+                app.on_app_quit(move |_| {
+                    hub_for_quit.stop_all();
+                    hub_for_quit.archive_all();
+                    async {}
+                })
+                .detach();
+                (hub, rx)
+            }
+        };
 
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS).searchable(true));
         let search_input = cx.new(|cx| InputState::new(window, cx));
@@ -3507,15 +3549,6 @@ impl Workbench {
         })
         .detach();
 
-        // Every headless child is ours to close: a driver left running after
-        // the window is gone would keep writing to a transcript nobody reads.
-        let hub_for_quit = Arc::clone(&hub);
-        cx.on_app_quit(move |_, _| {
-            hub_for_quit.stop_all();
-            hub_for_quit.archive_all();
-            async {}
-        })
-        .detach();
         // The window's state outlives it: tabs, page, sidebar, bounds.
         cx.on_app_quit(|this, _| {
             this.save_ui(true);
@@ -3541,6 +3574,15 @@ impl Workbench {
             if this
                 .update(cx, |this, cx| {
                     this.now = now_secs();
+                    // What a session's dot and the display go by changes
+                    // with the clock too, not only with what is written.
+                    this.note_blue();
+                    this.hold_display();
+                    let dots = this.dots_now();
+                    if dots != this.dots_drawn {
+                        this.dots_drawn = dots;
+                        cx.notify();
+                    }
                     this.read_shell_tails();
                     this.read_agent_steps();
                     this.tick_files(cx);
@@ -3931,8 +3973,14 @@ impl Workbench {
             })
             .detach();
         }
-        // The settings window goes with the window whose settings it draws.
-        cx.on_release(|this: &mut Self, cx| this.close_settings(cx)).detach();
+        // The settings window goes with the window whose settings it draws,
+        // and the display is let go: nothing would look at it again, and a
+        // window closed mid-turn kept it on for as long as the app ran.
+        cx.on_release(|this: &mut Self, cx| {
+            this.close_settings(cx);
+            crate::sys::hold_display(false);
+        })
+        .detach();
         // `EMAKI_SETTINGS=<section>` opens the settings on that section.
         if std::env::var_os("EMAKI_SETTINGS").is_some() {
             cx.spawn(async move |this, cx| {
@@ -4113,8 +4161,8 @@ impl Workbench {
             term_focus: cx.focus_handle(),
             term_focus_due: None,
             screen_due: false,
-            go_probe: std::env::var("EMAKI_GO").ok(),
-            send_probe: std::env::var("EMAKI_GO").ok().and_then(|g| g.strip_prefix("send:").map(str::to_string)),
+            go_probe: std::env::var("EMAKI_GO").ok().filter(|_| !reopened),
+            send_probe: std::env::var("EMAKI_GO").ok().filter(|_| !reopened).and_then(|g| g.strip_prefix("send:").map(str::to_string)),
             term_keys_probe: std::env::var("EMAKI_TERM_KEYS").ok(),
             mode_read_again: None,
             mode_pressed: None,
@@ -4149,6 +4197,8 @@ impl Workbench {
             last_sent: None,
             outgoing: HashMap::new(),
             was_working: None,
+            dots_drawn: 0,
+            blue_at: HashMap::new(),
             handed_back: None,
             issues: Vec::new(),
             issues_for: String::new(),
@@ -4647,6 +4697,7 @@ impl Workbench {
                     }
                 }
                 self.was_working = working;
+                self.note_blue();
                 self.hold_display();
                 if self.page == Page::New && self.new_cwd.is_empty() {
                     self.new_cwd = self.recent_cwds().first().cloned().unwrap_or_default();
@@ -4951,13 +5002,22 @@ impl Workbench {
         cx.notify();
     }
 
-    /// The display held on while a session works, the sidebar's blue dot,
-    /// or waits on a command or a subagent it left running in the
-    /// background, when the setting says so (`sys::hold_display`). Looked
-    /// at with each pass of the index, and when the setting changes.
+    /// The display held on while any session's dot is blue (`dot_of`),
+    /// when the setting says so (`sys::hold_display`). Looked at with each
+    /// pass of the index, each second, and when the setting changes.
     fn hold_display(&self) {
-        let working = self.cfg.app.keep_display_on && self.refs.iter().any(|r| !self.is_draft(&r.session_id) && self.hub.is_live(r, self.now) && (self.is_working(r) || self.background_running(r)));
+        let working = self.cfg.app.keep_display_on && self.refs.iter().any(|r| self.is_blue(r));
         crate::sys::hold_display(working);
+    }
+
+    /// The live sessions' dots, as one number to tell a change by.
+    fn dots_now(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for r in self.refs.iter().filter(|r| !self.is_draft(&r.session_id) && self.hub.is_live(r, self.now)) {
+            (r.session_id.as_str(), self.dot_of(r).map(|c| c as u8)).hash(&mut h);
+        }
+        h.finish()
     }
 
     /// Whether something the agent left running in the background is
@@ -5939,6 +5999,15 @@ impl Workbench {
             Some("panes") => {
                 self.pending_panes = true;
                 cx.notify();
+            }
+            // The main window closed and opened again, as a click on the
+            // Dock does after the last window was closed.
+            Some("reopen") => {
+                let Some(handle) = cx.try_global::<crate::MainWorkbench>().map(|m| m.1) else { return };
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    cx.defer(crate::reopen);
+                });
             }
             Some("termfocus") => {
                 self.pending_term_focus = true;
@@ -10617,12 +10686,15 @@ impl Workbench {
                 tool = String::new();
             }
         }
-        // A turn that ended long ago is nobody's turn any more, though the
-        // agent behind it sits idle as long as its terminal is kept: the
-        // dot said "your turn" nine hours after a reply. It is done, as a
-        // session with nothing behind it is, unless what it left running
-        // in the background still runs.
-        if matches!(phase, Phase::YourTurn | Phase::Idle) && self.now - r.active > YOUR_TURN_FOR && !self.background_running(r) {
+        // A turn that ended a while ago is nobody's turn any more, though
+        // the agent behind it sits idle as long as its terminal is kept:
+        // the dot said "your turn" nine hours after a reply. It is done,
+        // as a session with nothing behind it is. The while runs from the
+        // newest row or from the dot's last blue, so a background command
+        // ending with nothing written is still followed by the person's
+        // turn.
+        let since = self.blue_at.get(&r.session_id).copied().unwrap_or(0.).max(r.active);
+        if matches!(phase, Phase::YourTurn | Phase::Idle) && self.now - since > YOUR_TURN_FOR {
             return card;
         }
         let mode = drv.map(|v| v.mode.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| st.mode.clone());
@@ -10692,12 +10764,40 @@ impl Workbench {
 
     /// The color a live session's dot takes, or none when nothing is behind it.
     pub(crate) fn live_color(&self, r: &SessionRef, cx: &App) -> Option<Hsla> {
+        self.dot_of(r).map(|col| self.column_color(col, cx))
+    }
+
+    /// What a live session's dot says, or none when nothing is behind it
+    /// or its turn has been over a while. Blue is the agent at work or
+    /// something it left running in the background still running, after
+    /// it a turn's end the person's (green), then nothing. A question
+    /// waiting comes before all.
+    pub(crate) fn dot_of(&self, r: &SessionRef) -> Option<Column> {
         // A session begun here with nothing sent is new, not live.
         if self.is_draft(&r.session_id) || !self.hub.is_live(r, self.now) {
             return None;
         }
-        let col = self.card_for(r).column;
-        (col != Column::Done).then(|| self.column_color(col, cx))
+        match self.card_for(r).column {
+            Column::NeedsYou => Some(Column::NeedsYou),
+            col @ (Column::Working | Column::Planning) => Some(col),
+            _ if self.background_running(r) => Some(Column::Working),
+            Column::YourTurn => Some(Column::YourTurn),
+            Column::Done => None,
+        }
+    }
+
+    /// Whether a session's dot is blue now.
+    fn is_blue(&self, r: &SessionRef) -> bool {
+        matches!(self.dot_of(r), Some(Column::Working | Column::Planning))
+    }
+
+    /// The sessions whose dot is blue now are marked so, for the green
+    /// that follows (`card_for`).
+    fn note_blue(&mut self) {
+        let blue: Vec<String> = self.refs.iter().filter(|r| self.is_blue(r)).map(|r| r.session_id.clone()).collect();
+        for sid in blue {
+            self.blue_at.insert(sid, self.now);
+        }
     }
 
     // -- sidebar --------------------------------------------------------------
@@ -10921,7 +11021,7 @@ impl Workbench {
             let above = marked && at > 0 && lit[at - 1].0 && lit[at - 1].1 == lit[at].1 && !lit[at - 1].2;
             let below = marked && at + 1 < lit.len() && lit[at + 1].0 && lit[at + 1].1 == lit[at].1 && !lit[at].2;
             let open = self.folder_open(&p);
-            let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
+            let live: Vec<(&SessionRef, Column)> = list.iter().filter_map(|r| self.dot_of(r).map(|col| (r, col))).collect();
             let dot = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| self.column_color(*c, cx));
             let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
             let name = p.clone();
@@ -13753,7 +13853,7 @@ impl Workbench {
                 // most pressing of their states as a chip.
                 let theme = cx.theme().clone();
                 let newest = list.iter().map(|r| r.active).fold(0., f64::max);
-                let live: Vec<(&SessionRef, Column)> = list.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| (r, self.card_for(r).column)).collect();
+                let live: Vec<(&SessionRef, Column)> = list.iter().filter_map(|r| self.dot_of(r).map(|col| (r, col))).collect();
                 let chip = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| (*c, self.column_color(*c, cx)));
                 let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
                 let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());

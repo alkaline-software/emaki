@@ -207,7 +207,7 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
 }
 
 /// The main window and its workbench, for an action that reached no view.
-struct MainWorkbench(WeakEntity<Workbench>, AnyWindowHandle);
+pub(crate) struct MainWorkbench(pub(crate) WeakEntity<Workbench>, pub(crate) AnyWindowHandle);
 
 impl Global for MainWorkbench {}
 
@@ -320,6 +320,18 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
     )
 }
 
+/// A click on the Dock icon, or a second launch: the main window opened
+/// again when it was closed, and brought forward.
+pub(crate) fn reopen(cx: &mut App) {
+    let main = cx.try_global::<MainWorkbench>().map(|m| m.1);
+    if !main.is_some_and(|h| cx.windows().contains(&h)) {
+        if let Err(e) = open_main_window(cx) {
+            eprintln!("emaki: could not open a window: {e}");
+        }
+    }
+    cx.activate(true);
+}
+
 fn main() {
     // Velopack's installer and updater start the app with a hook to answer,
     // and it leaves at once. What NSIS's installer left goes once
@@ -342,15 +354,7 @@ fn main() {
     // A click on the Dock icon, or a second launch, after the window was
     // closed (⌘W on the last tab): open it again, or bring it forward.
     // The settings window alone is no main window.
-    app.on_reopen(|cx| {
-        let main = cx.try_global::<MainWorkbench>().map(|m| m.1);
-        if !main.is_some_and(|h| cx.windows().contains(&h)) {
-            if let Err(e) = open_main_window(cx) {
-                eprintln!("emaki: could not open a window: {e}");
-            }
-        }
-        cx.activate(true);
-    });
+    app.on_reopen(reopen);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         cx.set_http_client(std::sync::Arc::new(fetch::Fetcher));

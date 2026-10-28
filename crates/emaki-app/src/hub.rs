@@ -110,7 +110,10 @@ pub enum UpdateEvent {
 }
 
 pub struct Hub {
-    tx: UnboundedSender<HubEvent>,
+    /// Where events go: the window's. One hub serves the app while it
+    /// runs, and a window opened again after the last was closed takes
+    /// the events from then on (`attach`).
+    tx: Arc<Mutex<UnboundedSender<HubEvent>>>,
     wake: Mutex<mpsc::Sender<()>>,
     search_tx: Mutex<mpsc::Sender<Vec<SessionRef>>>,
     drivers: Mutex<HashMap<String, Arc<dyn Drive>>>,
@@ -167,13 +170,14 @@ pub struct Hub {
 impl Hub {
     pub fn start(cfg: Config) -> (Arc<Hub>, UnboundedReceiver<HubEvent>) {
         let (tx, rx) = unbounded();
+        let tx = Arc::new(Mutex::new(tx));
         let (wake_tx, wake_rx) = mpsc::channel::<()>();
         let (search_tx, search_rx) = mpsc::channel::<Vec<SessionRef>>();
-        let etx = tx.clone();
+        let etx = Arc::clone(&tx);
         let explainer = Explainer::new(
             cfg.explain.clone(),
             Arc::new(move |call_id: &str, text: &str| {
-                let _ = etx.unbounded_send(HubEvent::Explained { call_id: call_id.to_string(), text: text.to_string() });
+                let _ = etx.lock().unwrap_or_else(|e| e.into_inner()).unbounded_send(HubEvent::Explained { call_id: call_id.to_string(), text: text.to_string() });
             }),
         );
         let hub = Arc::new(Hub {
@@ -211,7 +215,19 @@ impl Hub {
     }
 
     fn send(&self, ev: HubEvent) {
-        let _ = self.tx.unbounded_send(ev);
+        let _ = self.tx.lock().unwrap_or_else(|e| e.into_inner()).unbounded_send(ev);
+    }
+
+    /// A window opened again takes the hub's events, with the settings
+    /// as they are now, and a pass of the index follows at once. What
+    /// went on while no window was open went on here: the hidden
+    /// terminals, the drivers, the turns they run.
+    pub fn attach(&self, cfg: Config) -> UnboundedReceiver<HubEvent> {
+        let (tx, rx) = unbounded();
+        *self.tx.lock().unwrap_or_else(|e| e.into_inner()) = tx;
+        *self.cfg.write().unwrap_or_else(|e| e.into_inner()) = cfg;
+        self.refresh();
+        rx
     }
 
     pub fn refresh(&self) {
