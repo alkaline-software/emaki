@@ -327,7 +327,7 @@ fn normalize(p: &Path) -> PathBuf {
 /// Where a session's markdown lives:
 /// `<logs>/<project-slug>/<YYYY-MM-DD>-<title-slug>-<sid8>.md`.
 pub fn log_path(cwd: &str, session_id: &str, title: &str, started: &str) -> PathBuf {
-    let day = if started.len() >= 10 { &started[..10] } else { "0000-00-00" };
+    let day = started.get(..10).unwrap_or("0000-00-00");
     let sid = safe_component(session_id);
     let sid8: String = sid.chars().take(8).collect();
     let name = format!("{day}-{}-{sid8}.md", slugify(title, 48));

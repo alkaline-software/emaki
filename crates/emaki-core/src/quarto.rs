@@ -772,7 +772,7 @@ pub fn bibtex(text: &str) -> Vec<Work> {
                 None => (a.to_string(), String::new()),
             },
         }).collect();
-        let year = Some(get("year")).filter(|y| !y.is_empty()).or_else(|| Some(get("date")).filter(|d| d.len() >= 4).map(|d| d[..4].to_string())).unwrap_or_else(|| "n.d.".into());
+        let year = Some(get("year")).filter(|y| !y.is_empty()).or_else(|| get("date").get(..4).map(str::to_string)).unwrap_or_else(|| "n.d.".into());
         let container = [get("journal"), get("journaltitle"), get("booktitle"), get("publisher")].into_iter().find(|c| !c.is_empty()).unwrap_or_default();
         out.push(Work {
             key: key.trim().to_string(),

@@ -341,6 +341,12 @@ upstream revision finds them.
 
 63. `crates/base/src/scrollbar.rs` (`SETTLE`, `born`, the state's first value): a bar drawn anew starts from its scroller's offset, and for `SETTLE` after it takes a change of the offset as where it starts, not as a scroll. A scroller kept between draws (Emaki's outline, in a drawer that comes and goes) showed its bar each time it came, and again as it moved itself to the entry in view.
 
+64. `crates/base/src/input/base/movement.rs` (`move_to`, `vertical_offset`): the caret is put on a character's first byte, whatever offset it is moved to. ↑ or ↓ onto a line not laid out kept the line before's column in bytes, which could fall inside a character (CJK, an emoji, an accent), and the next letter typed or Enter sliced the text there and the app aborted.
+
+65. `crates/ui/src/text/state.rs` (`parse_content`, `parse_unguarded`, `SYNC_PARSE_MOST`, `ParseMode::Replace`): the parse runs under `catch_unwind`, and a text the markdown crate panics on is parsed again as one block of code; a full replacement longer than `SYNC_PARSE_MOST` is parsed by the background task and shown when done, not on the main thread. A panic in the parse aborted the app from either thread, and a long table in a markdown file held the window for seconds as it opened.
+
+66. `crates/base/src/input/base/state.rs` (`replace_text_in_range`, the input method's `replace_and_mark_text_in_range`, `replace_bytes`, `on_chars`): before any text goes in, the selection and the marked range are put on characters' starts, and so is the range a caller replaces. A caret inside a character (one left by ↑ or ↓ onto a line not laid out, number 64) made the next letter typed slice the text there; the panic could not unwind out of AppKit's `insertText:`, and the app aborted. This was the crash a v0.3.2 user hit while typing in the file's editor.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

@@ -368,7 +368,8 @@ pub fn run_child(agent: crate::model::AgentId, argv: &[String], env: &[(&str, &s
         let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
         buf
     });
-    let deadline = Instant::now() + timeout;
+    // A time set by hand past what a clock holds waits as long as it can.
+    let deadline = Instant::now().checked_add(timeout).unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),

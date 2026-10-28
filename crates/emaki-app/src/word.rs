@@ -208,9 +208,11 @@ impl WordPane {
             cx.emit(WordEvent::Said(t("This kind of file is shown and not written in. Save it as .docx in Word to change it.").into()));
             return false;
         }
-        let done = self.session.run(id, &params);
+        // The engine runs here, on the main thread, where a panic aborts
+        // the app: a command that panics does nothing.
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.session.run(id, &params).is_ok())).unwrap_or(false);
         self.after(cx);
-        done.is_ok()
+        done
     }
 
     /// After anything that may have moved the caret or changed the
@@ -513,7 +515,8 @@ impl WordPane {
             if !stale {
                 continue;
             }
-            let shot = wordcraft_render::render_page(&self.session.doc, page, px_w as f32 / page.w.max(1.), &how);
+            // A page the renderer panics on is left undrawn, not the app.
+            let Ok(shot) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wordcraft_render::render_page(&self.session.doc, page, px_w as f32 / page.w.max(1.), &how))) else { continue };
             let mut pixels = shot.pixels;
             // The toolkit's pixels are blue first.
             for p in pixels.chunks_exact_mut(4) {

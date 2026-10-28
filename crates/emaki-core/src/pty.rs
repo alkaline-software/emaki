@@ -31,6 +31,7 @@ use std::time::Instant;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 use crate::driver;
+use crate::held;
 
 /// The screen's size. Wide enough that Claude Code's pickers are not
 /// cut, narrow enough to draw in the window's column.
@@ -132,7 +133,7 @@ static LIVE: Mutex<Vec<Arc<Pty>>> = Mutex::new(Vec::new());
 
 /// The hidden terminal whose child is `pid`, when there is one.
 pub fn for_pid(pid: i32) -> Option<Arc<Pty>> {
-    LIVE.lock().unwrap().iter().find(|p| p.pid == pid && p.alive()).cloned()
+    held(&LIVE).iter().find(|p| p.pid == pid && p.alive()).cloned()
 }
 
 /// The command for an interactive Claude Code on `session_id`: resumed,
@@ -232,7 +233,7 @@ pub fn take_osc52(pending: &mut Vec<u8>) -> Option<String> {
 
 /// The copy any live terminal of ours asked for, if one did.
 pub fn take_copied() -> Option<String> {
-    LIVE.lock().unwrap().iter().filter_map(|p| p.take_copied()).last()
+    held(&LIVE).iter().filter_map(|p| p.take_copied()).last()
 }
 
 impl Pty {
@@ -265,7 +266,7 @@ impl Pty {
             last_output: Mutex::new(Instant::now()),
             copied: Mutex::new(None),
         });
-        LIVE.lock().unwrap().push(Arc::clone(&pty));
+        held(&LIVE).push(Arc::clone(&pty));
         let log = std::env::var_os("EMAKI_PTY_LOG").and_then(|p| std::fs::File::create(p).ok());
         let me = Arc::clone(&pty);
         std::thread::Builder::new()
@@ -285,13 +286,13 @@ impl Pty {
                     if let Some(f) = log.as_mut() {
                         let _ = f.write_all(&buf[..n]);
                     }
-                    me.parser.lock().unwrap().process(&buf[..n]);
-                    *me.last_output.lock().unwrap() = Instant::now();
+                    me.feed(&buf[..n]);
+                    *held(&me.last_output) = Instant::now();
                     tail.extend_from_slice(&buf[..n]);
                     me.answer_queries(&tail);
                     osc.extend_from_slice(&buf[..n]);
                     if let Some(text) = take_osc52(&mut osc) {
-                        *me.copied.lock().unwrap() = Some(text);
+                        *held(&me.copied) = Some(text);
                     }
                     let keep = tail.len().saturating_sub(8);
                     tail.drain(..keep);
@@ -302,7 +303,7 @@ impl Pty {
                     on_output();
                 }
                 me.alive.store(false, Ordering::SeqCst);
-                LIVE.lock().unwrap().retain(|p| !Arc::ptr_eq(p, &me));
+                held(&LIVE).retain(|p| !Arc::ptr_eq(p, &me));
                 on_output();
             })
             .map_err(|e| e.to_string())?;
@@ -321,7 +322,7 @@ impl Pty {
     fn answer_queries(&self, recent: &[u8]) {
         let has = |needle: &[u8]| recent.windows(needle.len()).any(|w| w == needle);
         if has(b"\x1b[6n") {
-            let (row, col) = self.parser.lock().unwrap().screen().cursor_position();
+            let (row, col) = held(&self.parser).screen().cursor_position();
             self.write(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
         }
         if has(b"\x1b[c") || has(b"\x1b[0c") {
@@ -333,7 +334,7 @@ impl Pty {
     /// asked, once. A terminal with no window has no clipboard of its
     /// own: the window puts it on the system's.
     pub fn take_copied(&self) -> Option<String> {
-        self.copied.lock().unwrap().take()
+        held(&self.copied).take()
     }
 
     pub fn alive(&self) -> bool {
@@ -342,7 +343,7 @@ impl Pty {
 
     /// How long ago the screen last changed.
     pub fn quiet_for(&self) -> std::time::Duration {
-        self.last_output.lock().unwrap().elapsed()
+        held(&self.last_output).elapsed()
     }
 
     pub fn age(&self) -> std::time::Duration {
@@ -351,7 +352,7 @@ impl Pty {
 
     /// Keys, as bytes.
     pub fn write(&self, bytes: &[u8]) {
-        let mut w = self.writer.lock().unwrap();
+        let mut w = held(&self.writer);
         let _ = w.write_all(bytes);
         let _ = w.flush();
     }
@@ -359,7 +360,7 @@ impl Pty {
     /// Words put in the prompt the way a paste arrives, so new lines in
     /// them stay new lines and send nothing.
     pub fn paste(&self, text: &str) {
-        let bracketed = self.parser.lock().unwrap().screen().bracketed_paste();
+        let bracketed = held(&self.parser).screen().bracketed_paste();
         if bracketed {
             self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
         } else {
@@ -368,18 +369,34 @@ impl Pty {
     }
 
     pub fn resize(&self, rows: u16, cols: u16) {
-        let _ = self.master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-        self.parser.lock().unwrap().screen_mut().set_size(rows, cols);
+        let _ = held(&self.master).resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        let mut parser = held(&self.parser);
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.screen_mut().set_size(rows, cols))).is_err() {
+            *parser = vt100::Parser::new(rows, cols, SCROLLBACK);
+        }
+    }
+
+    /// The program's output to the screen. The screen model is another's
+    /// (vt100), and a panic in it here, on the thread that reads the pty,
+    /// left its lock poisoned and the window's next look at the screen
+    /// aborted the app: a screen that panics is begun again at its size,
+    /// and the program's next drawing fills it.
+    fn feed(&self, bytes: &[u8]) {
+        let mut parser = held(&self.parser);
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.process(bytes))).is_err() {
+            let (rows, cols) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.screen().size())).unwrap_or((ROWS, COLS));
+            *parser = vt100::Parser::new(rows, cols, SCROLLBACK);
+        }
     }
 
     /// The screen's size: rows, columns.
     pub fn size(&self) -> (u16, u16) {
-        self.parser.lock().unwrap().screen().size()
+        held(&self.parser).screen().size()
     }
 
     /// Where the cursor is, row and column, unless the program hid it.
     pub fn cursor(&self) -> Option<(u16, u16)> {
-        let parser = self.parser.lock().unwrap();
+        let parser = held(&self.parser);
         let screen = parser.screen();
         (!screen.hide_cursor()).then(|| screen.cursor_position())
     }
@@ -387,13 +404,13 @@ impl Pty {
     /// Whether the program asked for the arrow keys in their application
     /// form (`ESC O A`), as a full-screen editor does.
     pub fn app_cursor(&self) -> bool {
-        self.parser.lock().unwrap().screen().application_cursor()
+        held(&self.parser).screen().application_cursor()
     }
 
     /// Whether the program has the screen to itself (an editor, a
     /// pager), where there is nothing to scroll back to.
     pub fn alt_screen(&self) -> bool {
-        self.parser.lock().unwrap().screen().alternate_screen()
+        held(&self.parser).screen().alternate_screen()
     }
 
     /// The screen as it was `back` rows ago, and how far back that
@@ -401,7 +418,7 @@ impl Pty {
     /// the screen put back at once: the readers of `rows`, `text` and
     /// `styled` always see it as it is now.
     pub fn rows_back(&self, back: usize) -> (Vec<Vec<Span>>, usize) {
-        let mut parser = self.parser.lock().unwrap();
+        let mut parser = held(&self.parser);
         parser.screen_mut().set_scrollback(back);
         let at = parser.screen().scrollback();
         let rows = rows_of(parser.screen());
@@ -412,7 +429,7 @@ impl Pty {
     /// Which rows of that look run on into the next, a long line and
     /// not two: copied, such rows are one line.
     pub fn wraps_back(&self, back: usize) -> Vec<bool> {
-        let mut parser = self.parser.lock().unwrap();
+        let mut parser = held(&self.parser);
         parser.screen_mut().set_scrollback(back);
         let rows = parser.screen().size().0;
         let wraps = (0..rows).map(|r| parser.screen().row_wrapped(r)).collect();
@@ -423,7 +440,7 @@ impl Pty {
     /// How many rows that have left the screen are kept, which is as far
     /// back as it scrolls.
     pub fn kept_back(&self) -> usize {
-        let mut parser = self.parser.lock().unwrap();
+        let mut parser = held(&self.parser);
         parser.screen_mut().set_scrollback(usize::MAX);
         let kept = parser.screen().scrollback();
         parser.screen_mut().set_scrollback(0);
@@ -435,7 +452,7 @@ impl Pty {
     /// with whether it runs on into the next. Held to the lines there
     /// are: the first is the line it begins at, `from` or the oldest kept.
     pub fn lines(&self, from: i64, to: i64) -> (i64, Vec<(Vec<Span>, bool)>) {
-        lines_of(&mut self.parser.lock().unwrap(), from, to)
+        lines_of(&mut held(&self.parser), from, to)
     }
 
     /// The screen and everything that has left it are forgotten, as a
@@ -445,7 +462,7 @@ impl Pty {
     /// The program is not told; a redraw is the caller's to ask for.
     pub fn clear_all(&self) -> bool {
         use vt100::{MouseProtocolEncoding as E, MouseProtocolMode as M};
-        let mut parser = self.parser.lock().unwrap();
+        let mut parser = held(&self.parser);
         let screen = parser.screen();
         if screen.alternate_screen() {
             return false;
@@ -475,7 +492,7 @@ impl Pty {
     /// What the program asked to be told of the mouse, when anything.
     pub fn mouse(&self) -> Option<MouseWant> {
         use vt100::{MouseProtocolEncoding as E, MouseProtocolMode as M};
-        let parser = self.parser.lock().unwrap();
+        let parser = held(&self.parser);
         let screen = parser.screen();
         let mode = screen.mouse_protocol_mode();
         if mode == M::None {
@@ -495,14 +512,14 @@ impl Pty {
 
     /// Let the child go, as closing a terminal's window does.
     pub fn kill(&self) {
-        let _ = self.killer.lock().unwrap().kill();
+        let _ = held(&self.killer).kill();
         self.alive.store(false, Ordering::SeqCst);
-        LIVE.lock().unwrap().retain(|p| p.pid != self.pid);
+        held(&LIVE).retain(|p| p.pid != self.pid);
     }
 
     /// The screen as stretches of text, a row at a time.
     pub fn rows(&self) -> Vec<Vec<Span>> {
-        rows_of(self.parser.lock().unwrap().screen())
+        rows_of(held(&self.parser).screen())
     }
 
     /// The screen as plain text, a line a row.
@@ -693,7 +710,10 @@ pub fn hits(rows: &[Vec<Span>]) -> Vec<Hit> {
         (!digits.is_empty() && line.get(after) == Some(&'.') && line.get(after + 1).is_some_and(|c| c.is_whitespace())).then(|| (pointed, digits.parse().unwrap_or(0), start))
     };
     // To the choice, and Return on it: a click picks, as it does anywhere.
-    let arrows = |steps: i64, back: &str, on: &str| -> Vec<u8> { format!("{}\r", (if steps < 0 { back } else { on }).repeat(steps.unsigned_abs() as usize)).into_bytes() };
+    // No list is longer than `MOST_STEPS`: a number read off another line
+    // ("1730000000. done") asked for gigabytes of arrows.
+    const MOST_STEPS: u64 = 99;
+    let arrows = |steps: i64, back: &str, on: &str| -> Vec<u8> { format!("{}\r", (if steps < 0 { back } else { on }).repeat(steps.unsigned_abs().min(MOST_STEPS) as usize)).into_bytes() };
     let pointed = lines.iter().find_map(|l| choice(l).filter(|c| c.0).map(|c| c.1));
     let mut out = Vec::new();
     // Choices with no numbers ("❯ No, exit" over "Yes, I trust this
@@ -845,6 +865,23 @@ pub fn styled(rows: &[Vec<Span>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wide_character_cut_by_a_narrower_screen_is_no_crash() {
+        // A CJK character in the last two columns, the screen made a
+        // column narrower, then a letter written in that column: vt100
+        // 0.16.2 as published panicked here (`vendor/vt100/UPSTREAM.md`).
+        let mut p = vt100::Parser::new(10, 20, 1000);
+        p.process("\x1b[1;19H日".as_bytes());
+        p.screen_mut().set_size(10, 19);
+        p.process(b"\x1b[1;19Hx");
+        assert_eq!(p.screen().cell(0, 18).map(|c| c.contents()), Some("x"));
+        // Its alternate screen too.
+        let mut p = vt100::Parser::new(10, 20, 1000);
+        p.process("\x1b[?1049h\x1b[1;19H中".as_bytes());
+        p.screen_mut().set_size(10, 19);
+        p.process(b"\x1b[1;19Hy");
+    }
 
     #[test]
     fn lines_reach_back_past_the_screen() {

@@ -287,6 +287,11 @@ pub struct Tree {
     /// (`git::trouble`), and the folder.
     git_trouble: Option<(PathBuf, git::Trouble)>,
     git_reading: bool,
+    /// How many times the folders were listed here and now, and whether
+    /// one listing is being made off the main thread (`list_later`): one
+    /// that ends after a listing here is older than it and is let go.
+    listed: u64,
+    listing: bool,
 }
 
 /// The comparison showing over the window: which file of the changed
@@ -367,6 +372,14 @@ fn git_read(dir: &Path) -> GitRead {
 /// The file pane's find: the card's own height and the room around it.
 const FIND_CARD_H: f32 = 6. + 4. + 40.;
 
+/// Git's words as a sentence begins: the first letter a capital. Git
+/// speaks the person's language, so the first letter may be more than a
+/// byte, and a refusal may say nothing.
+pub(crate) fn as_sentence(why: &str) -> String {
+    let mut chars = why.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
 /// VS Code's color for a git state, light then dark: the GitHub
 /// theme's where it names one, else VS Code's own default.
 fn git_rgb(state: git::State) -> (u32, u32) {
@@ -406,7 +419,9 @@ fn list_dir(dir: &Path) -> (Vec<Node>, usize) {
             Some(Node { path, name, dir })
         })
         .collect();
-    nodes.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    // Each name made small once, not at every comparison: a folder of a
+    // hundred thousand entries is listed again every few seconds.
+    nodes.sort_by_cached_key(|n| (!n.dir, n.name.to_lowercase()));
     let dropped = nodes.len().saturating_sub(DIR_MAX);
     nodes.truncate(DIR_MAX);
     (nodes, dropped)
@@ -494,13 +509,29 @@ impl Tree {
     }
 
     /// Read `root` and every folder open under it again; whether anything
-    /// differs from what was drawn.
+    /// differs from what was drawn. Here and now, after something done in
+    /// the tree, which shows at once.
     pub(crate) fn refresh(&mut self, root: &Path) -> bool {
-        let mut changed = false;
-        self.open.retain(|p| !p.starts_with(root) || p.is_dir());
-        let dirs: Vec<PathBuf> = std::iter::once(root.to_path_buf()).chain(self.open.iter().filter(|p| p.starts_with(root)).cloned()).collect();
-        for dir in dirs {
+        self.listed += 1;
+        let listed = self.dirs_under(root).into_iter().map(|dir| {
             let now = list_dir(&dir);
+            (dir, now)
+        });
+        self.take_listed(listed.collect())
+    }
+
+    /// `root` and every folder open under it, the ones a folder gone from
+    /// the disk let go.
+    fn dirs_under(&mut self, root: &Path) -> Vec<PathBuf> {
+        self.open.retain(|p| !p.starts_with(root) || p.is_dir());
+        std::iter::once(root.to_path_buf()).chain(self.open.iter().filter(|p| p.starts_with(root)).cloned()).collect()
+    }
+
+    /// Folders as just listed taken in; whether anything differs from
+    /// what was drawn.
+    fn take_listed(&mut self, listed: Vec<(PathBuf, (Vec<Node>, usize))>) -> bool {
+        let mut changed = false;
+        for (dir, now) in listed {
             if self.kids.get(&dir).is_none_or(|was| **was != now) {
                 self.kids.insert(dir, Rc::new(now));
                 changed = true;
@@ -671,7 +702,7 @@ fn heads_of(text: &str) -> Vec<FileHead> {
         Some((_, rest)) => (rest, text[..text.len() - rest.len()].matches('\n').count()),
         None => (text, 0),
     };
-    // The parser panics on some inputs (`transcript::markdown_is_safe`).
+    // The parser panics on some inputs (the vendored `parse_content`).
     let opts = markdown::ParseOptions::gfm();
     let Ok(Ok(tree)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(rest, &opts))) else { return Vec::new() };
     let mut heads = Vec::new();
@@ -997,7 +1028,7 @@ pub struct FileView {
     /// of it and it is UTF-8: what the editor may change and write back.
     /// A file cut for the preview, or one with bytes that are no text,
     /// has none and is read only.
-    source: Option<Rc<str>>,
+    source: Option<Arc<str>>,
     /// What each column of a table holds, where the file says: a
     /// Parquet file's. Shown over the columns in place of their letters.
     kinds: Vec<String>,
@@ -1136,9 +1167,9 @@ const PARKED_CLEAN: usize = 8;
 struct EditorWant {
     key: String,
     path: PathBuf,
-    text: Rc<str>,
+    text: Arc<str>,
     lang: &'static str,
-    saved: Option<Rc<str>>,
+    saved: Option<Arc<str>>,
     mtime: Option<std::time::SystemTime>,
 }
 
@@ -1191,7 +1222,7 @@ pub(crate) struct FileEditor {
     pub(crate) state: Entity<gpui_component::input::EditorState>,
     /// What the file held when it was read or last saved here, and when
     /// it was written; None when the file is read only.
-    pub(crate) saved: Option<Rc<str>>,
+    pub(crate) saved: Option<Arc<str>>,
     mtime: Option<std::time::SystemTime>,
     /// What git has of the file (`git::base_text`), which the marks in
     /// the margin compare the editor's text with; none for a file git
@@ -1274,6 +1305,8 @@ enum FileBody {
     Sheets(Vec<(String, Vec<Vec<String>>, Vec<usize>, bool)>),
     /// Not something the window shows, or not readable: why.
     None(String),
+    /// Still being read off the main thread (`show_file`): nothing yet.
+    Reading,
 }
 
 /// What a right click in the files panel can ask for.
@@ -1399,6 +1432,39 @@ fn human_size(n: u64) -> String {
     }
 }
 
+/// `text` as its formatter writes it (`emaki_core::format`). The
+/// formatters are other people's (Air, dprint) and run here, on the main
+/// thread, where a panic aborts the app: one that panics is a file left
+/// as typed, and said.
+fn formatted(lang: &str, path: &Path, text: &str, on: &[String]) -> Result<Option<String>, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| emaki_core::format::format(lang, path, text, on))).unwrap_or_else(|_| Err(t("its formatter could not read it").to_string()))
+}
+
+/// How long `show_file` waits on a file's reading before letting the
+/// window go on: about a frame and a half at most, so a file read in that
+/// time shows as soon as it is clicked.
+const READ_WAIT: std::time::Duration = std::time::Duration::from_millis(24);
+/// How long the structure waits on a text's headings before drawing
+/// without them (`file_heads_now`): it is worked out in a draw.
+const HEADS_WAIT: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// `read_file` off the main thread. The readers are other people's
+/// (calamine, Parquet, the LaTeX and Typst converters, the markdown
+/// parser), and a panic in a task of gpui's aborts the app, so a file
+/// one of them cannot take is one Emaki cannot show.
+fn read_file_safe(path: &Path, root: &Path) -> FileView {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_file(path, root))).unwrap_or_else(|_| FileView {
+        path: path.to_path_buf(),
+        rel: path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string(),
+        size: 0,
+        mtime: None,
+        body: FileBody::None(t("This document could not be read.").into()),
+        source: None,
+        kinds: Vec::new(),
+        rows_all: None,
+    })
+}
+
 fn read_file(path: &Path, root: &Path) -> FileView {
     use std::io::Read as _;
     let meta = std::fs::metadata(path).ok();
@@ -1506,7 +1572,7 @@ fn pictures_from(text: &str, dir: &Path, root: Option<&Path>) -> String {
         (Some(rest), Some(root)) => format!("file://{}", root.join(rest).display()),
         _ => format!("file://{}", dir.join(url).display()),
     };
-    // The parser panics on some inputs (`transcript::markdown_is_safe`).
+    // The parser panics on some inputs (the vendored `parse_content`).
     let opts = markdown::ParseOptions::gfm();
     let Ok(Ok(tree)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(text, &opts))) else { return text.to_string() };
     let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
@@ -1558,11 +1624,11 @@ fn pictures_from(text: &str, dir: &Path, root: Option<&Path>) -> String {
 /// What the pane shows for a file that holds `bytes`, and its source
 /// when it can be edited. The bytes are the file's, or what its editor
 /// holds when that is to be read before it is saved (`edited_body`).
-fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Rc<str>>) {
+fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Arc<str>>) {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     // All of the file, and all of it text: it can be edited.
     let whole = bytes.len() <= PREVIEW_BYTES && std::str::from_utf8(&bytes).is_ok();
-    let mut source: Option<Rc<str>> = None;
+    let mut source: Option<Arc<str>> = None;
     let body = match () {
         () if bytes.iter().take(8192).any(|b| *b == 0) => FileBody::None(t("Emaki cannot show this kind of file.").into()),
         () if ext == "csv" || ext == "tsv" => {
@@ -2774,7 +2840,7 @@ impl Workbench {
     /// showing read again when it has changed on disk.
     pub(crate) fn tick_files(&mut self, cx: &mut Context<Self>) {
         self.keep_drafts(cx);
-        if let Some(v) = &self.file_view {
+        if let Some(v) = self.file_view.as_ref().filter(|_| !self.file_reading) {
             let now = std::fs::metadata(&v.path).ok().and_then(|m| m.modified().ok());
             if now.is_some() && now != v.mtime {
                 let path = v.path.clone();
@@ -2788,14 +2854,34 @@ impl Workbench {
         self.tree.read_at = self.now;
         self.load_diff(cx);
         if let Some(root) = self.files_root() {
-            if self.tree.refresh(&root) {
-                cx.notify();
-            }
+            self.list_later(&root, cx);
             self.read_git(root, cx);
         }
         if let Some(path) = self.file_editor.as_ref().map(|ed| ed.path.clone()) {
             self.read_file_base(path, cx);
         }
+    }
+
+    /// The tree's folders listed again off the main thread, every few
+    /// seconds while it shows: a folder of a hundred thousand files took
+    /// the window a moment each time, and a folder on a network share as
+    /// long as the share took to answer.
+    fn list_later(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if self.tree.listing {
+            return;
+        }
+        self.tree.listing = true;
+        let (dirs, listed) = (self.tree.dirs_under(root), self.tree.listed);
+        cx.spawn(async move |this, cx| {
+            let got = cx.background_executor().spawn(async move { dirs.into_iter().map(|dir| { let now = list_dir(&dir); (dir, now) }).collect::<Vec<_>>() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.tree.listing = false;
+                if this.tree.listed == listed && this.tree.take_listed(got) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Ask git about the folder, off the main thread, one asking at a
@@ -2999,12 +3085,55 @@ impl Workbench {
         .detach();
     }
 
-    /// Reads the file for the pane. A PDF's pages are drawn off the main
-    /// thread and put in when they are done, if the file is still the
-    /// one showing.
+    /// Reads the file for the pane, off the main thread. One read in
+    /// `READ_WAIT` shows at once, as if read here; a longer one (a large
+    /// workbook, a long table in markdown, which its parser takes
+    /// seconds over) shows when it is done, if it is still the last
+    /// asked for, and the window goes on meanwhile: the file as it was
+    /// stays, and a file not shown yet is a blank pane. Read here, it
+    /// held the window, and again each second while an agent wrote the
+    /// file.
     fn show_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(root) = self.files_root() else { return };
-        let view = read_file(path, &root);
+        self.file_reads += 1;
+        let serial = self.file_reads;
+        let from = path.to_path_buf();
+        let task = cx.background_executor().spawn(async move { read_file_safe(&from, &root) });
+        match cx.foreground_executor().block_with_timeout(READ_WAIT, task) {
+            Ok(view) => {
+                self.file_reading = false;
+                self.put_file(view, cx);
+            }
+            Err(rest) => {
+                self.file_reading = true;
+                if self.file_view.as_ref().is_none_or(|v| v.path != path) {
+                    let rel = self.files_root().and_then(|r| path.strip_prefix(r).ok().map(|p| p.to_string_lossy().to_string())).unwrap_or_default();
+                    self.file_view = Some(FileView { path: path.to_path_buf(), rel, size: 0, mtime: None, body: FileBody::Reading, source: None, kinds: Vec::new(), rows_all: None });
+                }
+                cx.spawn(async move |this, cx| {
+                    let view = rest.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.file_reads != serial {
+                            return;
+                        }
+                        this.file_reading = false;
+                        // What shows fades in, as another file does.
+                        if this.file_view.as_ref().is_some_and(|v| matches!(v.body, FileBody::Reading)) {
+                            this.file_serial += 1;
+                        }
+                        this.put_file(view, cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// The file read for the pane put there, as `show_file` reads it.
+    fn put_file(&mut self, view: FileView, cx: &mut Context<Self>) {
+        let path = view.path.clone();
+        let path = path.as_path();
         let pdf = matches!(view.body, FileBody::Pages(None));
         // The pages drawn so far stay while a changed file is drawn again.
         let kept = self.file_view.take().filter(|was| pdf && was.path == path).map(|was| was.body);
@@ -3994,7 +4123,7 @@ impl Workbench {
     /// markdown or a table as it is written.
     fn file_editor_want(&self) -> Option<EditorWant> {
         let v = self.file_view.as_ref()?;
-        let (text, lang): (Rc<str>, &'static str) = match &v.body {
+        let (text, lang): (Arc<str>, &'static str) = match &v.body {
             FileBody::Code(text, lang, _) => (v.source.clone().unwrap_or_else(|| text.as_str().into()), *lang),
             // A LaTeX or Typst file is its own words, not the markdown it
             // reads as.
@@ -4073,7 +4202,7 @@ impl Workbench {
                 let kept = self.file_parked.iter().find(|p| p.path == ask.path).map(|p| (p.state.read(cx).value().to_string(), p.lang));
                 let lang = emaki_core::render_md::lang_for_path(&ask.path.to_string_lossy());
                 let Some((text, lang)) = kept.or_else(|| self.file_drafts.get(&ask.path).map(|d| (d.text.clone(), lang))) else { return };
-                let text = if self.cfg.app.format_on_save { emaki_core::format::format(lang, &ask.path, &text, &self.cfg.app.format_langs).ok().flatten().unwrap_or(text) } else { text };
+                let text = if self.cfg.app.format_on_save { formatted(lang, &ask.path, &text, &self.cfg.app.format_langs).ok().flatten().unwrap_or(text) } else { text };
                 if let Err(e) = std::fs::write(&ask.path, &text) {
                     let name = ask.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     self.notice = Some(Notice::error(tf("could not save {name}: {e}", &[("name", &name), ("e", &e)])));
@@ -4241,7 +4370,7 @@ impl Workbench {
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut unformatted = None;
         // Off in Settings, a file is saved as typed.
-        match if self.cfg.app.format_on_save { emaki_core::format::format(ed.lang, &path, &text, &self.cfg.app.format_langs) } else { Ok(None) } {
+        match if self.cfg.app.format_on_save { formatted(ed.lang, &path, &text, &self.cfg.app.format_langs) } else { Ok(None) } {
             Ok(Some(formed)) => {
                 ed.state.update(cx, |s, cx| {
                     let caret = s.cursor().min(formed.len());
@@ -4266,7 +4395,14 @@ impl Workbench {
             return;
         }
         self.file_conflict = None;
-        self.show_file(&path, cx);
+        // Read here and now, not as `show_file` reads: what follows takes
+        // the editor's key from the file as saved, and a key from before
+        // it would make the editor again.
+        if let Some(root) = self.files_root() {
+            self.file_reads += 1;
+            self.file_reading = false;
+            self.put_file(read_file_safe(&path, &root), cx);
+        }
         // The editor is the one for what the file now holds: it is not
         // made again, and the caret and the undo history stay.
         let want = self.file_editor_want();
@@ -5724,17 +5860,49 @@ impl Workbench {
     fn discard_now(&mut self, cx: &mut Context<Self>) {
         let Some((paths, _)) = self.discard_ask.take() else { return };
         let Some(root) = self.changes.as_ref().map(|c| c.root.clone()) else { return };
+        // Git and the trash are asked off the main thread, a file at a
+        // time, and git's status read again after; then the window takes
+        // what was done. Here, a repository of many files held the window
+        // for each.
+        let asks: Vec<(PathBuf, PathBuf)> = paths.iter().map(|p| (p.clone(), self.repo_of(p).unwrap_or(root.clone()))).collect();
+        let folder = self.files_root().unwrap_or(root.clone());
+        cx.spawn(async move |this, cx| {
+            let (done, read) = cx
+                .background_executor()
+                .spawn(async move {
+                    let named = |path: &Path| path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let done: Vec<(PathBuf, Result<String, String>)> = asks
+                        .into_iter()
+                        .map(|(path, repo)| {
+                            let name = named(&path);
+                            let did = git::discard(&repo, &path).and_then(|did| match did {
+                                git::Discarded::New if path.exists() => crate::sys::trash_path(&path).map(|_| if cfg!(target_os = "windows") { tf("{name} is in the Recycle Bin", &[("name", &name)]) } else { tf("{name} is in the Trash", &[("name", &name)]) }),
+                                _ => Ok(tf("the changes to {name} are discarded", &[("name", &name)])),
+                            });
+                            (path, did)
+                        })
+                        .collect();
+                    let read = done.iter().any(|(_, did)| did.is_ok()).then(|| (git_read(&folder), folder));
+                    (done, read)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| this.discarded(done, read, cx));
+        })
+        .detach();
+    }
+
+    /// What Discard did, taken in: the editors and drafts of the files
+    /// it put back let go, the tree and the comparison as git now says,
+    /// and a word on it.
+    fn discarded(&mut self, done: Vec<(PathBuf, Result<String, String>)>, read: Option<(GitRead, PathBuf)>, cx: &mut Context<Self>) {
         let named = |path: &Path| path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let (mut said, mut failed, mut done) = (Vec::new(), Vec::new(), 0);
-        for path in &paths {
+        let (mut said, mut failed, mut done_n) = (Vec::new(), Vec::new(), 0);
+        for (path, did) in done {
+            let path = &path;
             let name = named(path);
-            let did = git::discard(&self.repo_of(path).unwrap_or(root.clone()), path).and_then(|did| match did {
-                git::Discarded::New if path.exists() => crate::sys::trash_path(path).map(|_| if cfg!(target_os = "windows") { tf("{name} is in the Recycle Bin", &[("name", &name)]) } else { tf("{name} is in the Trash", &[("name", &name)]) }),
-                _ => Ok(tf("the changes to {name} are discarded", &[("name", &name)])),
-            });
             match did {
                 Ok(words) => {
-                    done += 1;
+                    done_n += 1;
                     said.push(words);
                     self.file_editor.take_if(|ed| ed.path == *path);
                     self.file_parked.retain(|ed| ed.path != *path);
@@ -5746,11 +5914,9 @@ impl Workbench {
                 Err(why) => failed.push(tf("{name} was not discarded: {why}", &[("name", &name), ("why", &why)])),
             }
         }
-        if done > 0 {
-            // Git is asked again here and now, so the list is right
+        if let Some(((status, _, _, changed, _), folder)) = read.filter(|(_, folder)| self.files_root().as_ref() == Some(folder)) {
+            // Git's status read after the discard, so the list is right
             // at the next draw.
-            let folder = self.files_root().unwrap_or(root.clone());
-            let (status, _, _, changed, _) = git_read(&folder);
             self.tree.changed = Rc::new(changed);
             self.tree.git = Some((folder.clone(), Rc::new(status)));
             self.tree.refresh(&folder);
@@ -5762,7 +5928,7 @@ impl Workbench {
             }
         }
         let nfailed = failed.len();
-        self.notice = Some(match (failed.first(), done) {
+        self.notice = Some(match (failed.first(), done_n) {
             (Some(why), _) if failed.len() == 1 => Notice::error(why.clone()),
             (Some(_), _) => Notice::error(count(nfailed, "{n} file was not discarded", "{n} files were not discarded")),
             (None, 1) => Notice::said(said.remove(0)),
@@ -6407,7 +6573,7 @@ impl Workbench {
     /// The headings of the file shown, when it is markdown: of what its
     /// editor holds when there is one for it (as written, or with changes
     /// not saved), else of the file as read. Made once a text.
-    fn file_heads_now(&mut self, cx: &App) -> Option<Rc<Vec<FileHead>>> {
+    fn file_heads_now(&mut self, cx: &mut Context<Self>) -> Option<Rc<Vec<FileHead>>> {
         use std::hash::{Hash, Hasher};
         let v = self.file_view.as_ref()?;
         let FileBody::Markdown(read) = &v.body else { return None };
@@ -6429,12 +6595,45 @@ impl Workbench {
                 return Some(heads.clone());
             }
         }
-        let heads = Rc::new(match written {
-            Some(w) => heads_written(&text, w),
-            None => heads_of(&text),
+        // Worked out off the main thread: markdown's parser takes seconds
+        // over a long table, and this ran at every key typed. A text read
+        // in `HEADS_WAIT` is shown at once; a longer one keeps the
+        // headings it had until its own are in.
+        let path = v.path.clone();
+        let asked = Some((key, path.clone()));
+        if self.file_heads_asked == asked {
+            return self.file_heads.as_ref().filter(|_| self.file_heads_of.as_ref() == Some(&path)).map(|(_, h)| h.clone());
+        }
+        self.file_heads_asked = asked.clone();
+        let task = cx.background_executor().spawn(async move {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match written {
+                Some(w) => heads_written(&text, w),
+                None => heads_of(&text),
+            }))
+            .unwrap_or_default()
         });
-        self.file_heads = Some((key, heads.clone()));
-        Some(heads)
+        match cx.foreground_executor().block_with_timeout(HEADS_WAIT, task) {
+            Ok(heads) => {
+                let heads = Rc::new(heads);
+                self.file_heads = Some((key, heads.clone()));
+                self.file_heads_of = Some(path);
+                Some(heads)
+            }
+            Err(rest) => {
+                cx.spawn(async move |this, cx| {
+                    let heads = rest.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.file_heads_asked == asked {
+                            this.file_heads = Some((key, Rc::new(heads)));
+                            this.file_heads_of = asked.map(|(_, p)| p);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+                self.file_heads.as_ref().filter(|_| self.file_heads_of.as_ref() == Some(&path)).map(|(_, h)| h.clone())
+            }
+        }
     }
 
     /// Where the reader is in the file, as the structure marks it: the last
@@ -7230,7 +7429,7 @@ impl Workbench {
                     // A refusal is also said where it cannot be missed: the
                     // row under the composer may be under a sheet.
                     Err(why) => {
-                        let why = format!("{}{}", why[..1].to_uppercase(), &why[1..]);
+                        let why = as_sentence(&why);
                         this.branch_ask = Some(BranchAsk::stop(if create { t("Not created") } else { t("Not switched") }, tf("Nothing was changed. {why}.", &[("why", &why)])));
                     }
                 }
@@ -7851,13 +8050,28 @@ impl Workbench {
         if self.changes.as_ref().is_some_and(|c| c.closing.is_none()) {
             return self.close_changes(cx);
         }
-        let Some(root) = self.files_root().filter(|r| git::inside(r) || !git::repos_under(r).is_empty()) else {
-            self.notice = Some(Notice::error(t("open a session in a git repository to see its changes")));
-            cx.notify();
-            return;
-        };
-        self.read_git(root, cx);
-        self.open_changes(None, cx);
+        // Whether the folder is in a repository, or holds some, is asked
+        // off the main thread: a folder of fifty checkouts was a hundred
+        // calls to git before the comparison came.
+        let root = self.files_root();
+        cx.spawn(async move |this, cx| {
+            let asked = root.clone();
+            let found = cx.background_executor().spawn(async move { asked.filter(|r| git::inside(r) || !git::repos_under(r).is_empty()) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.files_root() != root || this.changes.as_ref().is_some_and(|c| c.closing.is_none()) {
+                    return;
+                }
+                match found {
+                    Some(root) => {
+                        this.read_git(root, cx);
+                        this.open_changes(None, cx);
+                    }
+                    None => this.notice = Some(Notice::error(t("open a session in a git repository to see its changes"))),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Put the comparison away: it fades where it is for a moment, then
@@ -8573,6 +8787,7 @@ impl Workbench {
             FileBody::Word if self.word.is_some() => div().into_any_element(),
             FileBody::Word => v_flex().py(px(60.)).items_center().child(quiet(t("Opening the document…").into())).into_any_element(),
             FileBody::Pages(None) => v_flex().py(px(60.)).items_center().child(quiet(t("Drawing the pages…").into())).into_any_element(),
+            FileBody::Reading => div().into_any_element(),
             FileBody::Pages(Some(doc)) => {
                 let (sel, hits, on) = (self.pdf_sel, std::rc::Rc::new(self.pdf_hits.clone()), self.pdf_hits.get(self.pdf_hit).copied());
                 let showing = self.pdf_find_open;

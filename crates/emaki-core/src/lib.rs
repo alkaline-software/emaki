@@ -64,3 +64,11 @@ pub(crate) fn on_deep_stack<T: Send>(read: impl FnOnce() -> T + Send) -> T {
         Err(e) => panic!("a reading thread could not be started: {e}"),
     })
 }
+
+/// A lock's guard, past its poison. A lock a thread of ours shares with
+/// the window (a child's reader, the pty's) is whole between any two of
+/// its uses, and a panic that poisoned it is no reason to take the
+/// window down at its next look.
+pub(crate) fn held<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}

@@ -89,3 +89,5 @@ stylo_derive = { path = "vendor/stylo_derive" }
 # Two crates at the end of their line, each changed in a line or two so a future Rust still compiles them without a word (`vendor/block/UPSTREAM.md`, `vendor/proc-macro-error2/UPSTREAM.md`): the Objective-C blocks crate cocoa pulls in under gpui's Mac backend, and the proc-macro helper biome's derives pull in under Air.
 block = { path = "vendor/block" }
 proc-macro-error2 = { path = "vendor/proc-macro-error2" }
+# The terminal screen model, with a wide character cut by a resize cleared (`vendor/vt100/UPSTREAM.md`).
+vt100 = { path = "vendor/vt100" }

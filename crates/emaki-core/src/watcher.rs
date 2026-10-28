@@ -50,8 +50,9 @@ impl Watcher {
                         }
                     }
                     if last.len() > 4096 {
-                        let cutoff = Instant::now() - Duration::from_secs(60);
-                        last.retain(|_, t| *t > cutoff);
+                        if let Some(cutoff) = Instant::now().checked_sub(Duration::from_secs(60)) {
+                            last.retain(|_, t| *t > cutoff);
+                        }
                     }
                 }
             })

@@ -2264,16 +2264,18 @@ fn link_at(cells: &[char], col: usize, cwd: &std::path::Path) -> Option<(usize, 
     let mut from = cells[..col].iter().rposition(|c| edge(*c)).map(|i| i + 1).unwrap_or(0);
     let mut to = cells[col..].iter().position(|c| edge(*c)).map(|i| col + i).unwrap_or(cells.len());
     // The brackets around it and the stop after it are not part of it.
-    while from < to && "([{".contains(cells[from]) {
+    while from < to && "([{“‘".contains(cells[from]) {
         from += 1;
     }
-    while to > from && ".,;:!?)]}".contains(cells[to - 1]) && !(cells[to - 1] == ')' && cells[from..to].contains(&'(')) {
+    while to > from && ".,;:!?)]}”’".contains(cells[to - 1]) && !(cells[to - 1] == ')' && cells[from..to].contains(&'(')) {
         to -= 1;
     }
     let word: String = cells[from..to].iter().collect();
     let target = if let Some(at) = word.find("://") {
         // From where the scheme's name begins.
-        let start = word[..at].rfind(|c: char| !c.is_alphanumeric() && c != '_').map(|i| i + 1).unwrap_or(0);
+        // Past the character that is not one of its letters, which may be
+        // more than a byte (“, →).
+        let start = word[..at].char_indices().rfind(|(_, c)| !c.is_alphanumeric() && *c != '_').map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
         if start == at {
             return None;
         }
@@ -2686,3 +2688,19 @@ fn block_shape(c: char) -> Option<(Vec<(f32, f32, f32, f32)>, f32)> {
     })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{link_at, Target};
+
+    #[test]
+    fn a_link_after_a_quote_mark_of_more_than_a_byte() {
+        for (line, url) in [("“https://example.com”", "https://example.com"), ("→https://a.io", "https://a.io"), ("see (https://b.dev).", "https://b.dev")] {
+            let cells: Vec<char> = line.chars().collect();
+            let col = cells.iter().position(|c| *c == ':').unwrap();
+            let (from, _, target) = link_at(&cells, col, std::path::Path::new("/")).unwrap();
+            assert!(target == Target::Url(url.to_string()), "{line}");
+            assert_eq!(cells[from], 'h', "{line}");
+        }
+    }
+}

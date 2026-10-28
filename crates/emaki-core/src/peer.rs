@@ -31,7 +31,7 @@
 //! `registry` is empty and `send` refuses, and the window falls through to
 //! the driver: how Claude Code exposes an inbox on Windows is not known yet.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -163,14 +163,33 @@ pub fn registry() -> HashMap<String, Peer> {
 /// app that started it is gone and it runs on. An interactive Claude Code
 /// like that has no terminal anyone can reach, which is what a hidden
 /// terminal's becomes when Emaki ends without ending it.
-#[cfg(unix)]
 pub fn adrift(pid: i32) -> bool {
-    crate::process::command("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().ok().is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+    adrift_of(&[pid]).contains(&pid)
+}
+
+/// Which of these processes are adrift, asked of the system once for all
+/// of them: one `ps` a process, on the window's thread, held it a moment
+/// for each Claude Code running in a terminal of the person's.
+#[cfg(unix)]
+pub fn adrift_of(pids: &[i32]) -> HashSet<i32> {
+    if pids.is_empty() {
+        return HashSet::new();
+    }
+    let list = pids.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    let Ok(out) = crate::process::command("ps").args(["-o", "pid=,ppid=", "-p", &list]).output() else { return HashSet::new() };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let (pid, ppid) = (it.next()?.parse::<i32>().ok()?, it.next()?);
+            (ppid == "1").then_some(pid)
+        })
+        .collect()
 }
 
 #[cfg(not(unix))]
-pub fn adrift(_pid: i32) -> bool {
-    false
+pub fn adrift_of(_pids: &[i32]) -> HashSet<i32> {
+    HashSet::new()
 }
 
 /// End a process left adrift, and wait until it is gone: asked first,

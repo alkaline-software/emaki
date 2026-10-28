@@ -445,20 +445,20 @@ impl CodexDriver {
             if id.is_empty() {
                 return Err(DriverError("codex named no session".into()));
             }
-            *driver.session_id.lock().unwrap() = id;
+            *crate::held(&driver.session_id) = id;
             driver.absorb_settings(&reply);
-            if mode == PLAN && !driver.inner.lock().unwrap().plan {
+            if mode == PLAN && !crate::held(&driver.inner).plan {
                 driver.set_mode(PLAN)?;
             }
             Ok(())
         })();
         if let Err(e) = ready {
-            let tail = driver.inner.lock().unwrap().stderr_tail.back().cloned().unwrap_or_default();
+            let tail = crate::held(&driver.inner).stderr_tail.back().cloned().unwrap_or_default();
             driver.stop();
             return Err(DriverError(if tail.is_empty() { e.0 } else { format!("{} ({tail})", e.0) }));
         }
         {
-            let mut g = driver.inner.lock().unwrap();
+            let mut g = crate::held(&driver.inner);
             g.state = State::Idle;
             g.idle_since = Instant::now();
         }
@@ -553,7 +553,7 @@ impl CodexDriver {
                         match ws::read(&mut stream)? {
                             ws::Message::Text(t) => return Some(t),
                             ws::Message::Ping(p) => {
-                                if let Some(Wire::Socket(w)) = pinged.wire.lock().unwrap().as_mut() {
+                                if let Some(Wire::Socket(w)) = crate::held(&pinged.wire).as_mut() {
                                     let _ = ws::pong(w, &p);
                                 }
                             }
@@ -570,7 +570,7 @@ impl CodexDriver {
                     if line.is_empty() {
                         continue;
                     }
-                    let mut g = d.inner.lock().unwrap();
+                    let mut g = crate::held(&d.inner);
                     g.stderr_tail.push_back(line.chars().take(400).collect());
                     if g.stderr_tail.len() > 40 {
                         g.stderr_tail.pop_front();
@@ -586,7 +586,7 @@ impl CodexDriver {
         let reply = self.request("initialize", hello, Duration::from_secs(15)).map_err(|e| DriverError(format!("codex did not answer: {e}")))?;
         // "emaki/0.162.0 (Mac OS ...)": the release is after the slash.
         let version = str_of(&reply, "userAgent").split('/').nth(1).and_then(|s| s.split_whitespace().next()).unwrap_or("").to_string();
-        self.inner.lock().unwrap().caps.version = version;
+        crate::held(&self.inner).caps.version = version;
         self.notify("initialized", json!({}));
         Ok(())
     }
@@ -599,7 +599,7 @@ impl CodexDriver {
         let profiles = ask("permissionProfile/list", json!({}));
         let collab = ask("collaborationMode/list", json!({}));
         let skills = if cwd.is_empty() { Value::Null } else { ask("skills/list", json!({"cwds": [cwd]})) };
-        let mut g = self.inner.lock().unwrap();
+        let mut g = crate::held(&self.inner);
         g.caps.options = options_from(&models, &profiles, &collab);
         g.caps.commands = commands_from(&skills);
         g.caps.slash_commands = g.caps.commands.iter().map(|c| c.name.clone()).collect();
@@ -609,7 +609,7 @@ impl CodexDriver {
 
     /// What a reply or a notice says the session is set to.
     fn absorb_settings(&self, v: &Value) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = crate::held(&self.inner);
         let model = str_of(v, "model");
         if !model.is_empty() {
             g.model = model.into();
@@ -637,7 +637,7 @@ impl CodexDriver {
     }
 
     fn write(&self, frame: &Value) -> Result<(), DriverError> {
-        let mut guard = self.wire.lock().unwrap();
+        let mut guard = crate::held(&self.wire);
         let wire = guard.as_mut().ok_or_else(|| DriverError("codex is not running".into()))?;
         let mut line = serde_json::to_string(frame).map_err(|e| DriverError(e.to_string()))?;
         match wire {
@@ -659,7 +659,7 @@ impl CodexDriver {
     pub fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, DriverError> {
         let (tx, rx) = mpsc::channel();
         let id = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             if g.exited {
                 return Err(DriverError("codex is not running".into()));
             }
@@ -669,14 +669,14 @@ impl CodexDriver {
             id
         };
         if let Err(e) = self.write(&json!({"id": id, "method": method, "params": params})) {
-            self.inner.lock().unwrap().waiting.remove(&id);
+            crate::held(&self.inner).waiting.remove(&id);
             return Err(e);
         }
         match rx.recv_timeout(timeout) {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => Err(DriverError(error_words(&e))),
             Err(_) => {
-                self.inner.lock().unwrap().waiting.remove(&id);
+                crate::held(&self.inner).waiting.remove(&id);
                 Err(DriverError(format!("codex did not answer {method}")))
             }
         }
@@ -703,7 +703,7 @@ impl CodexDriver {
             if method.is_empty() {
                 // An answer to something we asked.
                 let Some(id) = msg.get("id").and_then(Value::as_u64) else { continue };
-                let Some(tx) = self.inner.lock().unwrap().waiting.remove(&id) else { continue };
+                let Some(tx) = crate::held(&self.inner).waiting.remove(&id) else { continue };
                 let _ = tx.send(match msg.get("error") {
                     Some(e) => Err(str_of(e, "message").to_string()),
                     None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
@@ -716,7 +716,7 @@ impl CodexDriver {
         }
         // The child is gone: whoever waits on it is told, once. One that
         // closed its socket and stayed is ended here.
-        let code = self.child.lock().unwrap().as_mut().and_then(|c| {
+        let code = crate::held(&self.child).as_mut().and_then(|c| {
             if self.socket.is_some() {
                 end_child(c);
             }
@@ -724,7 +724,7 @@ impl CodexDriver {
         }).and_then(|s| s.code());
         self.forget_socket();
         let error = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             let was_stopped = g.exited;
             g.exited = true;
             g.state = State::Exited;
@@ -744,7 +744,7 @@ impl CodexDriver {
     /// sub-agent) are threads too.
     fn ours(&self, params: &Value) -> bool {
         let thread = str_of(params, "threadId");
-        thread.is_empty() || thread == self.session_id.lock().unwrap().as_str()
+        thread.is_empty() || thread == crate::held(&self.session_id).as_str()
     }
 
     fn on_notice(&self, method: &str, params: &Value) {
@@ -756,7 +756,7 @@ impl CodexDriver {
                 // A go-ahead still waiting was answered where the turn
                 // began: in Codex's terminal.
                 let answered: Vec<String> = {
-                    let mut g = self.inner.lock().unwrap();
+                    let mut g = crate::held(&self.inner);
                     g.state = State::Running;
                     g.turn_id = params.get("turn").map(|t| str_of(t, "id").to_string()).unwrap_or_default();
                     g.turn_started = Some(Instant::now());
@@ -773,20 +773,20 @@ impl CodexDriver {
                 }
                 // Said for a turn begun in Codex's terminal too, which
                 // nothing here sent.
-                let queued = self.inner.lock().unwrap().queue.len();
+                let queued = crate::held(&self.inner).queue.len();
                 self.emit(Event::Turn { text: String::new(), queued });
             }
             "item/started" => {
                 if let Some(item) = params.get("item") {
                     let id = str_of(item, "id").to_string();
                     if !id.is_empty() {
-                        self.inner.lock().unwrap().items.insert(id, item.clone());
+                        crate::held(&self.inner).items.insert(id, item.clone());
                     }
                 }
             }
             "item/completed" => {
                 if let Some(item) = params.get("item") {
-                    let mut g = self.inner.lock().unwrap();
+                    let mut g = crate::held(&self.inner);
                     g.items.remove(str_of(item, "id"));
                     if str_of(item, "type") == "plan" {
                         g.plan_text = str_of(item, "text").to_string();
@@ -806,14 +806,14 @@ impl CodexDriver {
             }
             "serverRequest/resolved" => {
                 let id = request_key(params.get("requestId").unwrap_or(&Value::Null));
-                if self.inner.lock().unwrap().pending.remove(&id).is_some() {
+                if crate::held(&self.inner).pending.remove(&id).is_some() {
                     self.emit(Event::PermissionSettled(id));
                 }
             }
             "error" => {
                 let words = params.get("error").map(|e| error_words(str_of(e, "message"))).unwrap_or_default();
                 if !words.is_empty() && params.get("willRetry").and_then(Value::as_bool) != Some(true) {
-                    self.inner.lock().unwrap().error = words;
+                    crate::held(&self.inner).error = words;
                 }
             }
             "turn/completed" => self.turn_over(params),
@@ -827,7 +827,7 @@ impl CodexDriver {
         let turn = params.get("turn").cloned().unwrap_or(Value::Null);
         let status = str_of(&turn, "status").to_string();
         let (result, plan, next) = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             g.turn_id.clear();
             g.turn_started = None;
             g.items.clear();
@@ -854,14 +854,14 @@ impl CodexDriver {
             let mut input = Map::new();
             input.insert("plan".into(), json!(plan));
             let req = PermissionRequest { request_id: id.clone(), tool_name: "ExitPlanMode".into(), tool_use_id: id.clone(), input, description: "Implement this plan?".into(), asked_at: now_secs() };
-            self.inner.lock().unwrap().pending.insert(id, Pending { rpc_id: Value::Null, kind: Ask::Plan, req: req.clone(), question_ids: Vec::new(), permissions: Value::Null });
+            crate::held(&self.inner).pending.insert(id, Pending { rpc_id: Value::Null, kind: Ask::Plan, req: req.clone(), question_ids: Vec::new(), permissions: Value::Null });
             self.emit(Event::Permission(req));
         }
         if let Some((text, input)) = next {
-            let queued = self.inner.lock().unwrap().queue.len();
+            let queued = crate::held(&self.inner).queue.len();
             self.emit(Event::Turn { text, queued });
             if let Err(e) = self.start_turn(input) {
-                let mut g = self.inner.lock().unwrap();
+                let mut g = crate::held(&self.inner);
                 g.state = State::Idle;
                 g.error = e.0;
             }
@@ -874,7 +874,7 @@ impl CodexDriver {
     /// `AskUserQuestion`.
     fn on_request(&self, method: &str, rpc_id: Value, params: &Value) {
         let key = request_key(&rpc_id);
-        let item = self.inner.lock().unwrap().items.get(str_of(params, "itemId")).cloned().unwrap_or(Value::Null);
+        let item = crate::held(&self.inner).items.get(str_of(params, "itemId")).cloned().unwrap_or(Value::Null);
         let mut input = Map::new();
         let mut question_ids = Vec::new();
         let mut permissions = Value::Null;
@@ -947,14 +947,14 @@ impl CodexDriver {
         };
         let description = if kind == Ask::Question { String::new() } else { reason };
         let req = PermissionRequest { request_id: key.clone(), tool_name: tool.into(), tool_use_id: str_of(params, "itemId").into(), input, description, asked_at: now_secs() };
-        self.inner.lock().unwrap().pending.insert(key, Pending { rpc_id, kind, req: req.clone(), question_ids, permissions });
+        crate::held(&self.inner).pending.insert(key, Pending { rpc_id, kind, req: req.clone(), question_ids, permissions });
         self.emit(Event::Permission(req));
     }
 
     fn start_turn(&self, input: Value) -> Result<(), DriverError> {
-        let thread = self.session_id.lock().unwrap().clone();
+        let thread = crate::held(&self.session_id).clone();
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             g.state = State::Running;
             g.turn_started = Some(Instant::now());
             g.error.clear();
@@ -969,7 +969,7 @@ impl CodexDriver {
         let words = text.trim();
         if let Some(rest) = words.strip_prefix('/') {
             let name = rest.split_whitespace().next().unwrap_or("");
-            let path = self.inner.lock().unwrap().skills.iter().find(|(n, _)| n == name).map(|(_, p)| p.clone());
+            let path = crate::held(&self.inner).skills.iter().find(|(n, _)| n == name).map(|(_, p)| p.clone());
             if let Some(path) = path {
                 input.push(json!({"type": "skill", "name": name, "path": path}));
             }
@@ -995,9 +995,9 @@ impl CodexDriver {
     /// Everything the session is set to, sent whole: the collaboration
     /// mode carries a model and an effort that win over the plain ones.
     fn push_settings(&self, profile: Option<&str>) -> Result<(), DriverError> {
-        let thread = self.session_id.lock().unwrap().clone();
+        let thread = crate::held(&self.session_id).clone();
         let (plan, model, effort) = {
-            let g = self.inner.lock().unwrap();
+            let g = crate::held(&self.inner);
             (g.plan, g.model.clone(), g.effort.clone())
         };
         let effort_v = if effort.is_empty() { Value::Null } else { json!(effort) };
@@ -1080,7 +1080,7 @@ impl Drive for CodexDriver {
     }
 
     fn session_id(&self) -> String {
-        self.session_id.lock().unwrap().clone()
+        crate::held(&self.session_id).clone()
     }
 
     fn cwd(&self) -> String {
@@ -1088,35 +1088,35 @@ impl Drive for CodexDriver {
     }
 
     fn state(&self) -> State {
-        self.inner.lock().unwrap().state
+        crate::held(&self.inner).state
     }
 
     fn alive(&self) -> bool {
-        !self.inner.lock().unwrap().exited
+        !crate::held(&self.inner).exited
     }
 
     fn caps(&self) -> Caps {
-        self.inner.lock().unwrap().caps.clone()
+        crate::held(&self.inner).caps.clone()
     }
 
     fn mode(&self) -> String {
-        self.inner.lock().unwrap().mode()
+        crate::held(&self.inner).mode()
     }
 
     fn model(&self) -> String {
-        self.inner.lock().unwrap().model.clone()
+        crate::held(&self.inner).model.clone()
     }
 
     fn effort(&self) -> String {
-        self.inner.lock().unwrap().effort.clone()
+        crate::held(&self.inner).effort.clone()
     }
 
     fn error(&self) -> String {
-        self.inner.lock().unwrap().error.clone()
+        crate::held(&self.inner).error.clone()
     }
 
     fn idle_for(&self) -> Duration {
-        let g = self.inner.lock().unwrap();
+        let g = crate::held(&self.inner);
         // One waiting on the person is not idle, however long they take.
         if g.state == State::Idle && g.pending.is_empty() {
             g.idle_since.elapsed()
@@ -1126,26 +1126,26 @@ impl Drive for CodexDriver {
     }
 
     fn turn_elapsed(&self) -> Option<Duration> {
-        self.inner.lock().unwrap().turn_started.map(|t| t.elapsed())
+        crate::held(&self.inner).turn_started.map(|t| t.elapsed())
     }
 
     fn queued(&self) -> Vec<String> {
-        self.inner.lock().unwrap().queue.iter().map(|(text, _)| text.clone()).collect()
+        crate::held(&self.inner).queue.iter().map(|(text, _)| text.clone()).collect()
     }
 
     fn drop_queued(&self, index: usize) -> bool {
-        self.inner.lock().unwrap().queue.remove(index).is_some()
+        crate::held(&self.inner).queue.remove(index).is_some()
     }
 
     fn pending_permissions(&self) -> Vec<PermissionRequest> {
-        let mut out: Vec<PermissionRequest> = self.inner.lock().unwrap().pending.values().map(|p| p.req.clone()).collect();
+        let mut out: Vec<PermissionRequest> = crate::held(&self.inner).pending.values().map(|p| p.req.clone()).collect();
         out.sort_by(|a, b| a.asked_at.partial_cmp(&b.asked_at).unwrap_or(std::cmp::Ordering::Equal));
         out
     }
 
     fn attach(&self) -> Option<Vec<String>> {
         let socket = self.socket.as_ref()?;
-        let id = self.session_id.lock().unwrap().clone();
+        let id = crate::held(&self.session_id).clone();
         if id.is_empty() || !self.alive() {
             return None;
         }
@@ -1154,7 +1154,7 @@ impl Drive for CodexDriver {
 
     fn stop(&self) {
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             if g.exited {
                 return;
             }
@@ -1164,9 +1164,9 @@ impl Drive for CodexDriver {
         // Closing its stdin is how the app server is told to go; it
         // finishes writing the rollout first. One on a socket goes on
         // listening with nobody joined, so it is asked to end.
-        self.wire.lock().unwrap().take();
+        crate::held(&self.wire).take();
         self.forget_socket();
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        if let Some(mut child) = crate::held(&self.child).take() {
             if self.socket.is_some() {
                 end_child(&mut child);
             }
@@ -1195,12 +1195,12 @@ impl Drive for CodexDriver {
             if self.state() == State::Running {
                 return Err(DriverError("wait for the turn to end before compacting".into()));
             }
-            self.inner.lock().unwrap().state = State::Running;
-            return self.request("thread/compact/start", json!({"threadId": thread}), REQUEST_TIMEOUT).map(|_| false).inspect_err(|_| self.inner.lock().unwrap().state = State::Idle);
+            crate::held(&self.inner).state = State::Running;
+            return self.request("thread/compact/start", json!({"threadId": thread}), REQUEST_TIMEOUT).map(|_| false).inspect_err(|_| crate::held(&self.inner).state = State::Idle);
         }
         let input = self.input_of(text, images);
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             if g.state == State::Running || g.pending.values().any(|p| p.kind == Ask::Plan) {
                 // A new message while a plan waits is the answer "not
                 // this plan": the question goes, the message is sent.
@@ -1219,12 +1219,12 @@ impl Drive for CodexDriver {
                 }
             }
         }
-        self.start_turn(input).inspect_err(|_| self.inner.lock().unwrap().state = State::Idle)?;
+        self.start_turn(input).inspect_err(|_| crate::held(&self.inner).state = State::Idle)?;
         Ok(false)
     }
 
     fn interrupt(&self) -> Result<(), DriverError> {
-        let (thread, turn) = (self.session_id(), self.inner.lock().unwrap().turn_id.clone());
+        let (thread, turn) = (self.session_id(), crate::held(&self.inner).turn_id.clone());
         if turn.is_empty() {
             return Ok(());
         }
@@ -1233,11 +1233,11 @@ impl Drive for CodexDriver {
 
     fn set_mode(&self, mode: &str) -> Result<String, DriverError> {
         let before = {
-            let g = self.inner.lock().unwrap();
+            let g = crate::held(&self.inner);
             (g.plan, g.profile.clone())
         };
         let profile = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             if mode == PLAN {
                 g.plan = true;
                 None
@@ -1248,18 +1248,18 @@ impl Drive for CodexDriver {
             }
         };
         if let Err(e) = self.push_settings(profile.as_deref()) {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             (g.plan, g.profile) = before;
             return Err(e);
         }
         let now = self.mode();
-        self.inner.lock().unwrap().caps.mode = now.clone();
+        crate::held(&self.inner).caps.mode = now.clone();
         Ok(now)
     }
 
     fn set_model(&self, model: &str) -> Result<(), DriverError> {
         let before = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             let before = (g.model.clone(), g.effort.clone());
             g.model = model.to_string();
             // A level the new model does not take becomes the nearest
@@ -1272,28 +1272,28 @@ impl Drive for CodexDriver {
             before
         };
         if let Err(e) = self.push_settings(None) {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             (g.model, g.effort) = before;
             return Err(e);
         }
-        let mut g = self.inner.lock().unwrap();
+        let mut g = crate::held(&self.inner);
         g.caps.model = g.model.clone();
         g.caps.effort = g.effort.clone();
         Ok(())
     }
 
     fn set_effort(&self, effort: &str) -> Result<bool, DriverError> {
-        let before = std::mem::replace(&mut self.inner.lock().unwrap().effort, effort.to_string());
+        let before = std::mem::replace(&mut crate::held(&self.inner).effort, effort.to_string());
         if let Err(e) = self.push_settings(None) {
-            self.inner.lock().unwrap().effort = before;
+            crate::held(&self.inner).effort = before;
             return Err(e);
         }
-        self.inner.lock().unwrap().caps.effort = effort.to_string();
+        crate::held(&self.inner).caps.effort = effort.to_string();
         Ok(false)
     }
 
     fn answer_permission(&self, request_id: &str, allow: bool, _message: &str) {
-        let Some(p) = self.inner.lock().unwrap().pending.remove(request_id) else { return };
+        let Some(p) = crate::held(&self.inner).pending.remove(request_id) else { return };
         match p.kind {
             Ask::Command | Ask::Files => self.answer(&p.rpc_id, json!({"decision": if allow { "accept" } else { "decline" }})),
             Ask::Permissions => self.answer(&p.rpc_id, json!({"permissions": if allow { p.permissions.clone() } else { json!({}) }, "scope": "turn"})),
@@ -1304,7 +1304,7 @@ impl Drive for CodexDriver {
                 if allow {
                     // Out of plan, back on the profile the session had,
                     // and told to go, as Codex's terminal does it.
-                    let profile = self.inner.lock().unwrap().profile.clone();
+                    let profile = crate::held(&self.inner).profile.clone();
                     let left = if profile.is_empty() { self.set_mode("workspace") } else { self.set_mode(&profile) };
                     match left {
                         Ok(now) => {
@@ -1312,12 +1312,12 @@ impl Drive for CodexDriver {
                             let input = self.input_of(IMPLEMENT, Vec::new());
                             self.emit(Event::Turn { text: IMPLEMENT.into(), queued: 0 });
                             if let Err(e) = self.start_turn(input) {
-                                let mut g = self.inner.lock().unwrap();
+                                let mut g = crate::held(&self.inner);
                                 g.state = State::Idle;
                                 g.error = e.0;
                             }
                         }
-                        Err(e) => self.inner.lock().unwrap().error = e.0,
+                        Err(e) => crate::held(&self.inner).error = e.0,
                     }
                 }
             }
@@ -1326,7 +1326,7 @@ impl Drive for CodexDriver {
     }
 
     fn answer_question(&self, request_id: &str, answers: Map<String, Value>) {
-        let Some(p) = self.inner.lock().unwrap().pending.remove(request_id) else { return };
+        let Some(p) = crate::held(&self.inner).pending.remove(request_id) else { return };
         let mut out = Map::new();
         for (question, id) in &p.question_ids {
             let said: Vec<String> = match answers.get(question) {

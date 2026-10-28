@@ -2408,6 +2408,12 @@ fn at_names_files_under_the_folder() {
     let inside: Vec<&str> = files::matches(&all, "src/", 20).iter().map(|e| e.path.as_str()).collect();
     assert_eq!(inside, ["src/deep/", "src/main.rs", "src/deep/mainframe.rs"]);
     assert_eq!(files::matches(&all, "smr", 20)[0].path, "src/main.rs");
+    // A folder whose name is longer in small letters (İ is two bytes, i̇
+    // three): the name is found in the small form at its own place.
+    std::fs::create_dir_all(root.join("İİ")).unwrap();
+    std::fs::write(root.join("İİ/日本.md"), "x").unwrap();
+    let all = files::list(&cwd);
+    assert_eq!(files::matches(&all, "日本", 20)[0].path, "İİ/日本.md");
 
     let text = "see @src/main.rs. and (@README.md) not a@b.com or @nope, @\"my file.txt\"";
     let toks: Vec<String> = files::at_tokens(text).into_iter().map(|(_, _, p)| p).collect();

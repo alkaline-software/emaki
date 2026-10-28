@@ -19,15 +19,20 @@ const SKIPPED: &[&str] = &["node_modules", "target", "dist", "build", "__pycache
 pub struct Entry {
     pub path: String,
     lower: String,
-    /// Where the last part begins in `path`.
+    /// Where the last part begins in `path`, and in `lower`: a letter's
+    /// small form can be longer or shorter than it (İ, K for Kelvin), so
+    /// the one place does not stand for both.
     name_at: usize,
+    lower_name_at: usize,
 }
 
 impl Entry {
     fn new(path: String) -> Self {
         let body = path.trim_end_matches('/');
         let name_at = body.rfind('/').map(|i| i + 1).unwrap_or(0);
-        Entry { lower: path.to_lowercase(), path, name_at }
+        let (parent, name) = path.split_at(name_at);
+        let parent = parent.to_lowercase();
+        Entry { lower: format!("{parent}{}", name.to_lowercase()), lower_name_at: parent.len(), path, name_at }
     }
 
     pub fn is_dir(&self) -> bool {
@@ -108,7 +113,7 @@ pub fn matches<'a>(entries: &'a [Entry], typed: &str, limit: usize) -> Vec<&'a E
     }
     let mut ranked: Vec<(u8, usize, &Entry)> = Vec::new();
     for e in entries {
-        let name = &e.lower[e.name_at..];
+        let name = &e.lower[e.lower_name_at..];
         let rank = if needle.ends_with('/') {
             // Inside a folder: what it holds directly, then the rest.
             match e.lower.strip_prefix(&needle) {

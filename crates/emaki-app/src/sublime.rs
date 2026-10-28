@@ -294,7 +294,10 @@ pub(crate) fn toggle_comment(text: &str, sel: Range<usize>, mark: &str) -> Optio
     if filled.is_empty() {
         return None;
     }
-    let all = filled.iter().all(|l| l.trim_start().starts_with(mark));
+    // The mark is looked for after the indent `indent_of` sees, which is
+    // where it is cut from: past any other space (a no-break space, an
+    // ideographic one) the cut fell inside it.
+    let all = filled.iter().all(|l| l[indent_of(l).len()..].starts_with(mark));
     let col = filled.iter().map(|l| indent_of(l).len()).min().unwrap_or(0);
     let mut caret_shift: isize = 0;
     let caret_line = line_start(text, sel.start);
@@ -341,7 +344,8 @@ pub(crate) fn block_comment(text: &str, sel: Range<usize>, (open, close): (&str,
         let (a, b) = lines_of(text, &sel);
         let line = &text[a..b];
         let ind = indent_of(line).len();
-        a + ind..a + line.trim_end().len()
+        // A line of spaces alone ends before its indent does.
+        a + ind..a + line.trim_end().len().max(ind)
     } else {
         sel.clone()
     };
@@ -835,6 +839,22 @@ mod tests {
         assert_eq!(apply(&on, &e), "<p>hi</p>");
         assert_eq!(comment_marks(std::path::Path::new("a.rs")).0, Some("//"));
         assert_eq!(comment_marks(std::path::Path::new("a.qmd")).1, Some(("<!--", "-->")));
+    }
+
+    #[test]
+    fn a_comment_on_odd_lines_is_no_crash() {
+        // A line of spaces alone, with the caret on it.
+        let t = "- a\n    \n- b";
+        let e = block_comment(t, 6..6, ("<!--", "-->"));
+        assert_eq!(apply(t, &e), "- a\n    <!--  -->\n- b");
+        let e = block_comment("  \r\n", 0..0, ("<!--", "-->"));
+        assert_eq!(e.range, 2..2);
+        // A mark after a no-break space or an ideographic one is not
+        // where the indent ends: the line is commented, not cut inside.
+        for t in ["\u{a0}# x", "\u{3000}# x"] {
+            let e = toggle_comment(t, 0..0, "#").unwrap();
+            assert_eq!(apply(t, &e), format!("# {t}"));
+        }
     }
 
     #[test]

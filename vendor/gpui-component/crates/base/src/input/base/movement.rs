@@ -1,5 +1,6 @@
 use crate::input::InputModeKind;
 use gpui::{Context, Point, Window};
+use sum_tree::Bias;
 
 use crate::input::{
     InputBaseState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,
@@ -57,7 +58,10 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         self.undo_manager.break_transaction_coalescing();
-        let offset = offset.clamp(0, self.text.len());
+        // On a character's first byte, whatever the caller worked out: an
+        // offset inside one panicked at the next slice of the text. (Emaki
+        // addition.)
+        let offset = self.text.clip_offset(offset.min(self.text.len()), Bias::Left);
         self.cursor_line_end_affinity = false;
         self.selected_range = (offset..offset).into();
         self.scroll_to(offset, direction, cx);
@@ -160,8 +164,10 @@ impl<M: InputModeKind> InputBaseState<M> {
                 }
             } else {
                 // Not in visible range, use column directly.
+                // The column is the line before's, in bytes, so it can
+                // fall inside a character of this one. (Emaki addition.)
                 let max_line_len = self.text.slice_line(next_point.row).len();
-                new_offset = line_start_offset + column.min(max_line_len);
+                new_offset = self.text.clip_offset(line_start_offset + column.min(max_line_len), Bias::Left);
             }
         }
         Some(new_offset)

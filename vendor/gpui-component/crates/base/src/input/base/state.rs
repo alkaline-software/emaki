@@ -946,6 +946,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         if range.end > self.text.len() || range.start > range.end {
             return;
         }
+        // On characters' starts, as a caller's arithmetic may not leave
+        // it. (Emaki addition.)
+        let range = self.text.clip_offset(range.start, Bias::Left)..self.text.clip_offset(range.end, Bias::Right);
         self.with_edits_allowed(|this| {
             this.undo_manager.commit_transaction();
             this.undo_manager.pending_intent = Some(EditIntent::Atomic);
@@ -2605,6 +2608,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.text.offset_to_offset_utf16(offset)
     }
 
+    /// A selection moved onto characters' starts and into the text: its
+    /// start back to the one it is in, its end on to the next. (Emaki
+    /// addition.)
+    fn on_chars(&self, sel: Selection) -> Selection {
+        let len = self.text.len();
+        let start = self.text.clip_offset(sel.start.min(len), Bias::Left);
+        let end = self.text.clip_offset(sel.end.min(len), if sel.end == sel.start { Bias::Left } else { Bias::Right });
+        Selection::new(start, end.max(start))
+    }
+
     #[inline]
     pub(crate) fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
@@ -3044,6 +3057,12 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         if !self.is_editable() {
             return;
         }
+        // The selection and what an input method marks on characters'
+        // starts, whatever put them where they are: an offset inside a
+        // character panicked at the slices below as a letter was typed,
+        // and the app aborted. (Emaki addition.)
+        self.selected_range = self.on_chars(self.selected_range);
+        self.ime_marked_range = self.ime_marked_range.map(|r| self.on_chars(r));
         let selection_before = self.selected_range;
 
         if self.blink_cursor.read(cx).visible() {
@@ -3251,6 +3270,12 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         if !self.is_editable() {
             return;
         }
+        // The selection and what an input method marks on characters'
+        // starts, whatever put them where they are: an offset inside a
+        // character panicked at the slices below as a letter was typed,
+        // and the app aborted. (Emaki addition.)
+        self.selected_range = self.on_chars(self.selected_range);
+        self.ime_marked_range = self.ime_marked_range.map(|r| self.on_chars(r));
         let selection_before = self.selected_range;
 
         let starts_composition = self.ime_marked_range.is_none();

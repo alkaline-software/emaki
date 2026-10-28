@@ -104,41 +104,6 @@ pub(crate) fn words_at(rects: &std::rc::Rc<std::cell::RefCell<Vec<Bounds<Pixels>
     .size_full()
 }
 
-/// Whether the markdown crate can parse `text` without panicking. Version
-/// 1.0.0, the one the toolkit's text view uses, aborts on some inputs
-/// ("Cannot push to non-parent" in `to_mdast`); the smallest one found is a
-/// paragraph followed by two `---` lines, which YAML front matter quoted in
-/// a Codex tool result produces. A panic inside an element's layout takes
-/// the app down, so every text is tried here first, under `catch_unwind`,
-/// once per distinct text (the answer is kept by hash).
-fn markdown_is_safe(text: &str, chat: bool) -> bool {
-    use std::collections::HashMap;
-    use std::hash::{Hash, Hasher};
-    thread_local! {
-        static SEEN: std::cell::RefCell<HashMap<u64, bool>> = std::cell::RefCell::new(HashMap::new());
-    }
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (text, chat).hash(&mut h);
-    let key = h.finish();
-    if let Some(known) = SEEN.with(|s| s.borrow().get(&key).copied()) {
-        return known;
-    }
-    // The options the view parses with, or the check proves nothing.
-    let mut opts = markdown::ParseOptions::gfm();
-    if chat {
-        chat_parse_options(&mut opts);
-    }
-    let safe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(text, &opts).is_ok())).unwrap_or(false);
-    SEEN.with(|s| {
-        let mut s = s.borrow_mut();
-        if s.len() > 4096 {
-            s.clear();
-        }
-        s.insert(key, safe);
-    });
-    safe
-}
-
 /// What a conversation reads as markdown: GFM, less what chat sets
 /// down by accident. A prompt is typed as plain text, and a reply is
 /// read in a terminal as well, where none of these are drawn; so a sign
@@ -238,9 +203,8 @@ pub(crate) fn md_view_fields(state: Entity<gpui_component::text::TextViewState>,
 /// place of one kept by the view's `id` where it is drawn.
 fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, state: Option<Entity<gpui_component::text::TextViewState>>, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
-    // A text the parser cannot take is shown as it is, in a code block,
-    // rather than taking the window down.
-    let text = if markdown_is_safe(&text, chat) { text } else { code_block(&text, "text") };
+    // A text the parser cannot take is shown by the view as it is, in a
+    // block of code (the vendored `parse_content`).
     // In the conversation's list, kept with the list's other text.
     let kept = kept.or_else(crate::ambient::kept_here);
     let dark = theme.mode.is_dark();

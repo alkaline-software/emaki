@@ -92,7 +92,7 @@ impl Workbench {
                 let (text, british) = (text.clone(), language == "en-GB");
                 cx.background_spawn(async move { check::english(&text, british) }).await
             } else {
-                crate::sys::spelling(&text, &language)
+                crate::sys::spelling(&text, &language).await
             };
             found.extend(check::capitals(&text));
             let shown = this.update(cx, |this, cx| {
@@ -165,7 +165,7 @@ impl Workbench {
             return Vec::new();
         }
         let offset = state.offset_at(at);
-        ed.issues.iter().find(|i| i.range.start <= offset && offset <= i.range.end).map(|issue| Self::issue_items(issue, &ed.issues_for, true)).unwrap_or_default()
+        ed.issues.iter().find(|i| i.range.start <= offset && offset <= i.range.end).map(|issue| Self::issue_items(issue, &ed.issues_for, true, &self.cfg.app.writing_language)).unwrap_or_default()
     }
 
     /// A correction chosen from the menu goes where the marked words

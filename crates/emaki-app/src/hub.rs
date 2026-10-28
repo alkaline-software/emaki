@@ -139,6 +139,9 @@ pub struct Hub {
     /// Whether a registered process that is not ours has no parent, by
     /// its pid, and when that was asked (`peer::adrift`).
     adrift: Mutex<HashMap<i32, (bool, Instant)>>,
+    /// Sessions whose hidden terminal is on its way: the Claude Code
+    /// left adrift on it being ended first, off the window's thread.
+    terminals_starting: Mutex<HashSet<String>>,
     /// Claude Code's own session registry: every terminal session with an
     /// inbox, refreshed on each scan.
     peers: Mutex<HashMap<String, Peer>>,
@@ -187,6 +190,7 @@ impl Hub {
             typing: Mutex::new(HashSet::new()),
             ended: Mutex::new(HashMap::new()),
             adrift: Mutex::new(HashMap::new()),
+            terminals_starting: Mutex::new(HashSet::new()),
             peers: Mutex::new(HashMap::new()),
             inbox_last: Mutex::new(HashMap::new()),
             cfg: RwLock::new(cfg),
@@ -418,13 +422,19 @@ impl Hub {
         let ours: Vec<i32> = self.terminals.lock().unwrap().values().map(|p| p.pid).collect();
         // Which of the others has no parent: asked of the system, so
         // once a while for each and not on every look.
-        {
+        // One `ps` for all that are due, and not with the lock held: the
+        // window takes it to draw.
+        let due: Vec<i32> = {
             let mut adrift = self.adrift.lock().unwrap();
             adrift.retain(|pid, _| all.iter().any(|p| p.pid == *pid));
-            for p in all.iter().filter(|p| p.kind == "interactive" && !ours.contains(&p.pid)) {
-                if adrift.get(&p.pid).is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(10)) {
-                    adrift.insert(p.pid, (peer::adrift(p.pid), Instant::now()));
-                }
+            all.iter().filter(|p| p.kind == "interactive" && !ours.contains(&p.pid) && adrift.get(&p.pid).is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(10))).map(|p| p.pid).collect()
+        };
+        if !due.is_empty() {
+            let found = peer::adrift_of(&due);
+            let now = Instant::now();
+            let mut adrift = self.adrift.lock().unwrap();
+            for pid in due {
+                adrift.insert(pid, (found.contains(&pid), now));
             }
         }
         // Of several records on one session, ours first, then a job of
@@ -696,16 +706,44 @@ impl Hub {
     /// changing arrives as `HubEvent::Screen`, a moment after it does,
     /// so a burst of drawing is one event.
     pub fn start_terminal(self: &Arc<Self>, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str, effort: &str) -> Result<(), String> {
-        if self.terminal_for(session_id).is_some() {
+        if self.terminal_for(session_id).is_some() || self.terminal_starting(session_id) {
             return Ok(());
         }
         // One writer: a Claude Code left on this session with no
-        // terminal is ended before another is started on it.
+        // terminal is ended before another is started on it. Ending it
+        // waits on it to go, up to seconds, so it is done on a thread of
+        // its own and the terminal started after; what types into the
+        // terminal meanwhile waits on it (`type_message_now`).
         if let Some(pid) = self.adrift_for(session_id) {
-            peer::end(pid);
-            self.adrift.lock().unwrap().remove(&pid);
-            self.peers.lock().unwrap().remove(session_id);
+            self.terminals_starting.lock().unwrap().insert(session_id.to_string());
+            let hub = Arc::clone(self);
+            let (sid, cwd, mode, model, effort) = (session_id.to_string(), cwd.to_string(), mode.to_string(), model.to_string(), effort.to_string());
+            thread::spawn(move || {
+                peer::end(pid);
+                hub.adrift.lock().unwrap().remove(&pid);
+                hub.peers.lock().unwrap().remove(&sid);
+                let started = hub.spawn_terminal(&sid, &cwd, resume, &mode, &model, &effort);
+                hub.terminals_starting.lock().unwrap().remove(&sid);
+                if let Err(e) = started {
+                    hub.say(tf("could not start it: {e}", &[("e", &e)]));
+                }
+                hub.send(HubEvent::Screen(sid));
+                hub.refresh();
+            });
+            return Ok(());
         }
+        self.spawn_terminal(session_id, cwd, resume, mode, model, effort)
+    }
+
+    /// Whether the session's hidden terminal is on its way
+    /// (`start_terminal`).
+    pub fn terminal_starting(&self, session_id: &str) -> bool {
+        self.terminals_starting.lock().unwrap().contains(session_id)
+    }
+
+    /// The hidden terminal started, with nothing left adrift on its
+    /// session.
+    fn spawn_terminal(self: &Arc<Self>, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str, effort: &str) -> Result<(), String> {
         let (tx, rx) = mpsc::channel::<()>();
         let tx = Mutex::new(tx);
         let argv = emaki_core::pty::claude_argv(session_id, resume, mode, model, effort);
@@ -807,6 +845,10 @@ impl Hub {
     }
 
     fn type_message_now(&self, sid: &str, text: &str, images: &[PathBuf], ask: bool) -> Result<(), String> {
+        // A terminal on its way is waited for (`start_terminal`).
+        while self.terminal_for(sid).is_none() && self.terminal_starting(sid) {
+            thread::sleep(Duration::from_millis(60));
+        }
         let Some(pty) = self.terminal_for(sid) else { return Err(t("claude is not running; try again").into()) };
         let look = Duration::from_millis(60);
         let started = Instant::now();
@@ -1217,8 +1259,12 @@ impl Hub {
         for k in stale {
             self.stop_driver(&k);
         }
-        let cutoff = Instant::now() - Duration::from_secs(1800);
-        self.ended.lock().unwrap().retain(|_, t| *t > cutoff);
+        // Within half an hour of the machine's start there is nothing so
+        // old, and `Instant` cannot go back past it (Windows counts from
+        // the boot).
+        if let Some(cutoff) = Instant::now().checked_sub(Duration::from_secs(1800)) {
+            self.ended.lock().unwrap().retain(|_, t| *t > cutoff);
+        }
     }
 
     // -- search -----------------------------------------------------------

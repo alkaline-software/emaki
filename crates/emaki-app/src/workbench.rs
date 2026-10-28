@@ -23,7 +23,7 @@ use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, OutdentInline, Textarea, TextareaState};
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Disableable as _, Sizable as _};
+use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Disableable as _, Placement, Sizable as _};
 
 use crate::ui_state::{Rect, UiState};
 use emaki_core::adapters;
@@ -2135,6 +2135,10 @@ pub struct Workbench {
     pub(crate) file_big_at: Option<Instant>,
     pub(crate) file_gone: Option<crate::panels::FileView>,
     pub(crate) file_serial: u64,
+    /// The file's pane's readings asked for, and whether the last is
+    /// still being read off the main thread (`show_file`).
+    pub(crate) file_reads: u64,
+    pub(crate) file_reading: bool,
     /// How wide the pane was dragged to, whether its edge is held, and
     /// whether the window is too narrow to draw it.
     pub(crate) file_w: Pixels,
@@ -2167,6 +2171,10 @@ pub struct Workbench {
     pub(crate) side_view: Entity<SideView>,
     pub(crate) file_structure_scroll: ScrollHandle,
     pub(crate) file_heads: Option<(u64, std::rc::Rc<Vec<crate::panels::FileHead>>)>,
+    /// The text whose headings are being worked out off the main thread,
+    /// by its hash, and the file it is (`file_heads_now`).
+    pub(crate) file_heads_asked: Option<(u64, PathBuf)>,
+    pub(crate) file_heads_of: Option<PathBuf>,
     pub(crate) file_structure_at: Option<usize>,
     /// The heading last clicked in the file as it reads, its file and
     /// the glide it began: lit while no wheel has moved the file since.
@@ -2680,6 +2688,9 @@ impl Workbench {
         let theme = Self::shell_theme(cx);
         let k = self.strip_t();
         let size = STRIP_BTN + (RAIL_ENTRY - STRIP_BTN) * (1. - k);
+        // In the rail a tip goes beside its button, as the rail's own do:
+        // above it, it is under the traffic lights.
+        let side = (k < 0.5).then_some(Placement::Right);
         let button = |id: &'static str, icon: IconName, tip: SharedString, lit: bool| {
             let hover = theme.foreground.opacity(0.07);
             div()
@@ -2693,7 +2704,10 @@ impl Workbench {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .when(lit, |d| d.bg(hover))
                 .hover(move |s| s.bg(hover))
-                .when(!tip.is_empty(), |d| d.managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx)))
+                .when(!tip.is_empty(), |d| match side {
+                    Some(side) => d.managed_tooltip_at(side, move |window, cx| crate::workbench::tip(tip.clone(), window, cx)),
+                    None => d.managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx)),
+                })
                 .child(Icon::new(icon).with_size(px(16.) + px(2.) * (1. - k)).text_color(theme.muted_foreground))
         };
         // In the title row the lights' centers are at 26.25: the middle
@@ -2753,7 +2767,7 @@ impl Workbench {
                 .cursor_pointer()
                 .when(active, |d| d.bg(theme.sidebar_accent))
                 .hover(move |s| s.bg(hover))
-                .managed_tooltip(move |window, cx| crate::workbench::tip(words.clone(), window, cx))
+                .managed_tooltip_at(Placement::Right, move |window, cx| crate::workbench::tip(words.clone(), window, cx))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
@@ -2789,7 +2803,7 @@ impl Workbench {
                     .bottom(px(18.))
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.85))
-                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Your picture and name"), window, cx))
+                    .managed_tooltip_at(Placement::Right, |window, cx| crate::workbench::tip(t("Your picture and name"), window, cx))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
@@ -3065,6 +3079,11 @@ impl Workbench {
     /// and goes no further than the pill's ends. The one tab of a pill
     /// takes the pill with it.
     fn drag_tab_to(&mut self, key: &str, x: Pixels, row: Bounds<Pixels>, cx: &mut Context<Self>) {
+        // The pills as the tabs stand now: a move before this one has not
+        // been drawn yet, and the pills drawn last frame are from before
+        // it. Taken from those, two moves between frames put a tab past
+        // the row's end and the app aborted.
+        self.group_tabs();
         let Some(g) = self.tab_groups.iter().position(|(_, keys)| keys.iter().any(|k| k == key)) else { return };
         let (project, keys) = self.tab_groups[g].clone();
         if keys.len() == 1 {
@@ -3072,9 +3091,9 @@ impl Workbench {
         }
         let Some(&(left, _)) = self.pill_spans(row).get(g) else { return };
         let Some(from) = self.tabs.iter().position(|t| t == key) else { return };
-        let first = from - keys.iter().position(|k| k == key).unwrap_or(0);
+        let Some(first) = keys.iter().position(|k| k == key).and_then(|i| from.checked_sub(i)) else { return };
         let w = self.tab_widths.get(key).map(|w| w.to).unwrap_or(TAB_MAX);
-        let to = first + (((f32::from(x) - left - PILL_LEAD) / (w + TAB_GAP)).floor().max(0.) as usize).min(keys.len() - 1);
+        let to = (first + (((f32::from(x) - left - PILL_LEAD) / (w + TAB_GAP)).floor().max(0.) as usize).min(keys.len() - 1)).min(self.tabs.len() - 1);
         if self.drag_tab.as_deref() != Some(key) {
             self.drag_tab = Some(key.to_string());
             cx.notify();
@@ -3087,7 +3106,7 @@ impl Workbench {
             // still on its way there.
             let now = Instant::now();
             for (old, k) in keys.iter().enumerate() {
-                let new = self.tabs.iter().position(|t| t == k).unwrap_or(first + old) - first;
+                let new = self.tabs.iter().position(|t| t == k).unwrap_or(first + old).saturating_sub(first);
                 if new != old {
                     let rest = self.tab_shift.get(k).map(|s| s.now()).unwrap_or(0.);
                     self.tab_shift.insert(k.clone(), TabShift { from: (old as f32 - new as f32) * (w + TAB_GAP) + rest, at: now });
@@ -3264,7 +3283,7 @@ impl Workbench {
     /// from as far as the one before had got.
     fn turn(anim: &mut Option<(bool, Instant)>, coming: bool) {
         let done = match *anim {
-            Some((_, at)) if at.elapsed() < FLOAT_ANIM => FLOAT_ANIM - at.elapsed(),
+            Some((_, at)) => FLOAT_ANIM.saturating_sub(at.elapsed()),
             _ => Duration::ZERO,
         };
         *anim = Some((coming, Instant::now().checked_sub(done).unwrap_or_else(Instant::now)));
@@ -3782,7 +3801,7 @@ impl Workbench {
                             let _ = this.update(cx, |w, cx| {
                                 let at = w.composer.read(cx).input_bounds().origin;
                                 if let Some(issue) = w.issues.first() {
-                                    let items = Self::issue_items(issue, &w.issues_for, false);
+                                    let items = Self::issue_items(issue, &w.issues_for, false, &w.cfg.app.writing_language);
                                     w.open_menu(at, items, cx);
                                 }
                             });
@@ -4259,6 +4278,8 @@ impl Workbench {
             file_big_at: None,
             file_gone: None,
             file_serial: 0,
+            file_reads: 0,
+            file_reading: false,
             file_w: px(ui.file_w.unwrap_or(f32::from(crate::panels::FILE_W))),
             file_drag: false,
             csd_room: Default::default(),
@@ -4274,6 +4295,8 @@ impl Workbench {
             side_view: { let wb = cx.entity(); cx.new(|cx| SideView::new(wb, cx)) },
             file_structure_scroll: ScrollHandle::new(),
             file_heads: None,
+            file_heads_asked: None,
+            file_heads_of: None,
             file_structure_at: None,
             file_structure_pick: None,
             fold_file: false,
@@ -6357,8 +6380,13 @@ impl Workbench {
             Some((k, rows)) if k == key && rows.path() == r.path => rows,
             _ => emaki_core::build::LiveRows::new(&r.path),
         });
+        // Cached explanations are free and belong to every session they
+        // match, however old. Found here, off the main thread: each call's
+        // input is hashed to look one up, and a Write carries a whole
+        // file, so a long session took the window a moment at every read.
+        let explainer = self.hub.explainer.clone();
         let task = cx.background_spawn(async move {
-            match rows {
+            let (mut session, rows) = match rows {
                 Some(mut rows) => {
                     let mut session = rows.build(&r.cwd);
                     if session.title.is_empty() {
@@ -6367,10 +6395,12 @@ impl Workbench {
                     (session, Some(rows))
                 }
                 None => (adapters::for_agent(r.agent).load(&r), None),
-            }
+            };
+            explainer.attach(&mut session);
+            (session, rows)
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let (mut session, rows) = task.await;
+            let (session, rows) = task.await;
             let loaded = started.elapsed();
             this.update(cx, |this, cx| {
                 this.loading = None;
@@ -6382,9 +6412,6 @@ impl Workbench {
                 }
                 let rounds = session.rounds.len();
                 let t = std::time::Instant::now();
-                // Cached explanations are free and belong to every session
-                // they match, however old.
-                this.hub.explainer.attach(&mut session);
                 let reload = this.detail.as_ref().map(|d| d.key == key).unwrap_or(false);
                 this.set_detail(key.clone(), path, session);
                 if reload {
@@ -14308,8 +14335,11 @@ impl Workbench {
         // tool calls, tokens, the model and the id used to follow the path
         // on one long line nobody read.
         let cwd = session.cwd.clone();
-        let name_len = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().len()).filter(|n| cwd.len() >= *n).unwrap_or(0);
-        let (parents, name) = cwd.split_at(cwd.len() - name_len);
+        // The last folder's name ends the path less any slash after it,
+        // which `file_name` passes over.
+        let bare = cwd.trim_end_matches(['/', '\\']);
+        let name_len = std::path::Path::new(bare).file_name().map(|n| n.to_string_lossy().len()).filter(|n| bare.len() >= *n && bare.is_char_boundary(bare.len() - *n)).unwrap_or(0);
+        let (parents, name) = (&cwd[..bare.len() - name_len], &cwd[bare.len() - name_len..]);
         let path_bar = (!cwd.is_empty()).then(|| {
             let hover_bg = theme.muted;
             h_flex()
@@ -16245,7 +16275,7 @@ impl Workbench {
                 let (text, british) = (text.clone(), language == "en-GB");
                 cx.background_spawn(async move { check::english(&text, british) }).await
             } else {
-                crate::sys::spelling(&text, &language)
+                crate::sys::spelling(&text, &language).await
             };
             // A sentence left small, in any of the languages.
             found.extend(check::capitals(&text));
@@ -16323,18 +16353,23 @@ impl Workbench {
         if self.issues_for.as_str() != state.value().as_ref() {
             return Vec::new();
         }
-        self.issues.iter().find(|i| i.range.start <= offset && offset <= i.range.end).map(|issue| Self::issue_items(issue, &self.issues_for, false)).unwrap_or_default()
+        self.issues.iter().find(|i| i.range.start <= offset && offset <= i.range.end).map(|issue| Self::issue_items(issue, &self.issues_for, false, &self.cfg.app.writing_language)).unwrap_or_default()
     }
 
     /// A mark's menu: its corrections, Learn Spelling for a spelling,
     /// and Ignore. `text` is what the mark's bytes are of; `file` says
-    /// the correction goes in the file's editor, not the composer.
-    pub(crate) fn issue_items(issue: &emaki_core::check::Issue, text: &str, file: bool) -> Vec<(&'static str, MenuDo)> {
+    /// the correction goes in the file's editor, not the composer. A
+    /// word the system's checker marked (a language Harper does not
+    /// know, `language`) is given its corrections now, as its menu opens
+    /// (`sys::spelling_fixes`).
+    pub(crate) fn issue_items(issue: &emaki_core::check::Issue, text: &str, file: bool, language: &str) -> Vec<(&'static str, MenuDo)> {
         use emaki_core::check::Kind;
         let fix = |with: &String| if file { MenuDo::FixFile(issue.range.clone(), with.clone()) } else { MenuDo::Fix(issue.range.clone(), with.clone()) };
-        let mut items: Vec<(&'static str, MenuDo)> = issue.fixes.iter().take(5).map(|with| ("", fix(with))).collect();
         let words = text[issue.range.clone()].to_string();
-        if issue.kind == Kind::Spelling && issue.fixes.is_empty() {
+        let asked = (issue.kind == Kind::Spelling && issue.fixes.is_empty() && !emaki_core::check::is_english(language)).then(|| crate::sys::spelling_fixes(&words, language));
+        let fixes = asked.as_ref().unwrap_or(&issue.fixes);
+        let mut items: Vec<(&'static str, MenuDo)> = fixes.iter().take(5).map(|with| ("", fix(with))).collect();
+        if issue.kind == Kind::Spelling && fixes.is_empty() {
             items.push(("", MenuDo::Note(t("No spelling found").to_string())));
         }
         items.push(("", MenuDo::Rule));
@@ -18526,7 +18561,7 @@ impl Render for Workbench {
         }
         if std::mem::take(&mut self.file_spell_menu_probe) {
             let at = self.file_view_scroll.bounds().origin + point(px(86.), px(23.));
-            if let Some(items) = self.file_editor.as_ref().and_then(|ed| ed.issues.first().map(|i| Self::issue_items(i, &ed.issues_for, true))) {
+            if let Some(items) = self.file_editor.as_ref().and_then(|ed| ed.issues.first().map(|i| Self::issue_items(i, &ed.issues_for, true, &self.cfg.app.writing_language))) {
                 self.open_menu(at, items, cx);
             }
         }

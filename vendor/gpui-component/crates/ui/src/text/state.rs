@@ -25,6 +25,11 @@ use crate::{
 const CONTEXT: &'static str = "TextView";
 // Keep coalescing bounded so sustained streams still render intermediate updates.
 const MAX_COALESCED_UPDATES_PER_PARSE: usize = 64;
+/// The longest text a full replacement parses on the main thread. Longer,
+/// it is parsed by the background task and shown when that is done: a
+/// markdown table of ten thousand rows took the parser over a second,
+/// a frame the window could not draw. (Emaki addition.)
+const SYNC_PARSE_MOST: usize = 256 * 1024;
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys(vec![
@@ -338,13 +343,16 @@ impl TextViewState {
         if !append {
             self.selection_revision = self.selection_revision.wrapping_add(1);
         }
+        let sync = !append && text.len() <= SYNC_PARSE_MOST;
         let update_options = UpdateOptions {
             revision: self.revision,
             append,
             mode: if append {
                 ParseMode::Compatible
-            } else {
+            } else if sync {
                 ParseMode::BaselineAck
+            } else {
+                ParseMode::Replace
             },
             pending_text: text.to_string(),
             markdown_extensions: self.markdown_extensions.clone(),
@@ -359,7 +367,7 @@ impl TextViewState {
         // content height keeps growing as items scroll into view; the scrollbar
         // thumb jitters. Streaming appends stay async to avoid re-parsing the
         // whole document on every chunk.
-        if !append {
+        if sync {
             match parse_content(self.format, ParsedContent::default(), &update_options) {
                 Ok(content) => {
                     self.parsed_content = content;
@@ -720,6 +728,9 @@ struct ParsedUpdate {
 enum ParseMode {
     BaselineAck,
     Compatible,
+    /// A full replacement too long to parse on the main thread, parsed
+    /// here and shown when done (`SYNC_PARSE_MOST`). (Emaki addition.)
+    Replace,
 }
 
 fn merge_pending_options(options: &mut UpdateOptions, rx: &Receiver<UpdateOptions>) -> bool {
@@ -738,7 +749,48 @@ fn merge_pending_options(options: &mut UpdateOptions, rx: &Receiver<UpdateOption
     true
 }
 
+/// `parse_unguarded`, under `catch_unwind`. The markdown crate panics on
+/// some inputs, and a panic here, on the main thread or in the parse
+/// task (gpui runs a task through `extern "C"`), aborts the app. A text
+/// the parser cannot take is shown as it is, in a block of code.
+/// (Emaki addition.)
 fn parse_content(
+    format: TextViewFormat,
+    content: ParsedContent,
+    options: &UpdateOptions,
+) -> Result<ParsedContent, SharedString> {
+    let before = content.document.source.clone();
+    let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parse_unguarded(format, content, options)
+    }));
+    match parsed {
+        Ok(result) => result,
+        Err(_) => {
+            let whole = if options.append {
+                format!("{before}{}", options.pending_text)
+            } else {
+                options.pending_text.clone()
+            };
+            let run = whole
+                .split(|c| c != '`')
+                .map(str::len)
+                .max()
+                .unwrap_or(0);
+            let fence = "`".repeat(run.max(2) + 1);
+            let fenced = UpdateOptions {
+                append: false,
+                pending_text: format!("{fence}text\n{whole}\n{fence}\n"),
+                ..options.clone()
+            };
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_unguarded(TextViewFormat::Markdown, ParsedContent::default(), &fenced)
+            }))
+            .unwrap_or_else(|_| Err("This text could not be read.".into()))
+        }
+    }
+}
+
+fn parse_unguarded(
     format: TextViewFormat,
     mut content: ParsedContent,
     options: &UpdateOptions,

@@ -1002,7 +1002,7 @@ impl Workbench {
                     }
                     Err((false, why)) if here => {
                         this.notice = Some(Notice::error(tf("{branch} was not deleted: {why}", &[("branch", &name), ("why", &why)])));
-                        let said = format!("{}{}", why[..1].to_uppercase(), &why[1..]);
+                        let said = crate::panels::as_sentence(&why);
                         this.branch_ask = Some(BranchAsk::stop(t("Not deleted"), tf("Nothing was changed. {why}.", &[("why", &said)])));
                     }
                     Err((false, why)) => {

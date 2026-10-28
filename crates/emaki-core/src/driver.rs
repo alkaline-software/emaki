@@ -1431,7 +1431,7 @@ impl Driver {
         if let Some(out) = stdout {
             let d = Arc::clone(&driver);
             thread::Builder::new()
-                .name(format!("emaki-driver-{}", &session_id[..session_id.len().min(8)]))
+                .name(format!("emaki-driver-{}", session_id.chars().take(8).collect::<String>()))
                 .spawn(move || d.read_loop(out))
                 .ok();
         }
@@ -1443,7 +1443,7 @@ impl Driver {
                     if line.is_empty() {
                         continue;
                     }
-                    let mut g = d.inner.lock().unwrap();
+                    let mut g = crate::held(&d.inner);
                     g.stderr_tail.push_back(line.chars().take(400).collect());
                     if g.stderr_tail.len() > 40 {
                         g.stderr_tail.pop_front();
@@ -1460,7 +1460,7 @@ impl Driver {
             }
         }
         {
-            let mut g = driver.inner.lock().unwrap();
+            let mut g = crate::held(&driver.inner);
             if g.state == State::Starting {
                 g.state = State::Idle;
                 g.idle_since = Instant::now();
@@ -1470,31 +1470,31 @@ impl Driver {
     }
 
     pub fn state(&self) -> State {
-        self.inner.lock().unwrap().state
+        crate::held(&self.inner).state
     }
 
     pub fn alive(&self) -> bool {
-        !self.inner.lock().unwrap().exited
+        !crate::held(&self.inner).exited
     }
 
     pub fn caps(&self) -> Caps {
-        self.inner.lock().unwrap().caps.clone()
+        crate::held(&self.inner).caps.clone()
     }
 
     pub fn mode(&self) -> String {
-        self.inner.lock().unwrap().mode.clone()
+        crate::held(&self.inner).mode.clone()
     }
 
     pub fn model(&self) -> String {
-        self.inner.lock().unwrap().model.clone()
+        crate::held(&self.inner).model.clone()
     }
 
     pub fn error(&self) -> String {
-        self.inner.lock().unwrap().error.clone()
+        crate::held(&self.inner).error.clone()
     }
 
     pub fn idle_for(&self) -> Duration {
-        let g = self.inner.lock().unwrap();
+        let g = crate::held(&self.inner);
         if g.state != State::Idle {
             return Duration::ZERO;
         }
@@ -1502,20 +1502,20 @@ impl Driver {
     }
 
     pub fn turn_elapsed(&self) -> Option<Duration> {
-        self.inner.lock().unwrap().turn_started.map(|t| t.elapsed())
+        crate::held(&self.inner).turn_started.map(|t| t.elapsed())
     }
 
     pub fn queued(&self) -> Vec<String> {
-        self.inner.lock().unwrap().queue.iter().map(|q| q.text.clone()).collect()
+        crate::held(&self.inner).queue.iter().map(|q| q.text.clone()).collect()
     }
 
     pub fn drop_queued(&self, index: usize) -> bool {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = crate::held(&self.inner);
         g.queue.remove(index).is_some()
     }
 
     pub fn pending_permissions(&self) -> Vec<PermissionRequest> {
-        let g = self.inner.lock().unwrap();
+        let g = crate::held(&self.inner);
         let mut v: Vec<PermissionRequest> = g.pending_permissions.values().cloned().collect();
         v.sort_by(|a, b| a.asked_at.partial_cmp(&b.asked_at).unwrap_or(std::cmp::Ordering::Equal));
         v
@@ -1524,10 +1524,10 @@ impl Driver {
     /// Close stdin and let the child finish; kill it if it will not.
     pub fn stop(&self) {
         {
-            let mut s = self.stdin.lock().unwrap();
+            let mut s = crate::held(&self.stdin);
             *s = None;
         }
-        let mut child = self.child.lock().unwrap();
+        let mut child = crate::held(&self.child);
         if let Some(mut c) = child.take() {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -1570,7 +1570,7 @@ impl Driver {
             "session_id": self.session_id,
         });
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             if g.state == State::Running {
                 g.queue.push_back(Queued { text: text.into(), frame });
                 return Ok(true);
@@ -1589,7 +1589,7 @@ impl Driver {
         }
         let rid = short_id();
         let (tx, rx) = mpsc::channel();
-        self.inner.lock().unwrap().waiting.insert(rid.clone(), tx);
+        crate::held(&self.inner).waiting.insert(rid.clone(), tx);
         fields.insert("subtype".into(), Value::String(subtype.into()));
         self.write(&json!({"type": "control_request", "request_id": rid, "request": fields}))?;
         match rx.recv_timeout(timeout) {
@@ -1601,7 +1601,7 @@ impl Driver {
                 Ok(reply.get("response").cloned().unwrap_or(Value::Object(Map::new())))
             }
             Err(_) => {
-                self.inner.lock().unwrap().waiting.remove(&rid);
+                crate::held(&self.inner).waiting.remove(&rid);
                 Err(DriverError(format!("{subtype}: no answer in {}s", timeout.as_secs())))
             }
         }
@@ -1617,7 +1617,7 @@ impl Driver {
         let reply = self.request("set_permission_mode", f, REQUEST_TIMEOUT)?;
         let now = str_of(&reply, "mode");
         let now = if now.is_empty() { mode.to_string() } else { now.to_string() };
-        let mut g = self.inner.lock().unwrap();
+        let mut g = crate::held(&self.inner);
         g.caps.mode = now.clone();
         g.mode = now.clone();
         Ok(now)
@@ -1627,7 +1627,7 @@ impl Driver {
         let mut f = Map::new();
         f.insert("model".into(), if model.is_empty() || model == "default" { Value::Null } else { Value::String(model.into()) });
         self.request("set_model", f, REQUEST_TIMEOUT)?;
-        let mut g = self.inner.lock().unwrap();
+        let mut g = crate::held(&self.inner);
         g.model = model.into();
         g.caps.model = if model == "default" { String::new() } else { model.into() };
         Ok(())
@@ -1647,7 +1647,7 @@ impl Driver {
 
     /// Answer a `can_use_tool` card. Unknown ids are ignored.
     pub fn answer_permission(&self, request_id: &str, allow: bool, message: &str) {
-        let req = self.inner.lock().unwrap().pending_permissions.remove(request_id);
+        let req = crate::held(&self.inner).pending_permissions.remove(request_id);
         let Some(req) = req else { return };
         let decision = if allow {
             json!({"behavior": "allow", "updatedInput": req.input})
@@ -1663,7 +1663,7 @@ impl Driver {
     /// words typed), which is how Claude Code's own dialog answers it. An
     /// empty map is "the user did not answer". Unknown ids are ignored.
     pub fn answer_question(&self, request_id: &str, answers: Map<String, Value>) {
-        let req = self.inner.lock().unwrap().pending_permissions.remove(request_id);
+        let req = crate::held(&self.inner).pending_permissions.remove(request_id);
         let Some(req) = req else { return };
         let decision = question_decision(&req.input, answers);
         let _ = self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": decision}}));
@@ -1680,14 +1680,14 @@ impl Driver {
     fn write(&self, frame: &Value) -> Result<(), DriverError> {
         let mut line = serde_json::to_string(frame).map_err(|e| DriverError(e.to_string()))?;
         line.push('\n');
-        let mut guard = self.stdin.lock().unwrap();
+        let mut guard = crate::held(&self.stdin);
         let Some(stdin) = guard.as_mut() else {
             return Err(DriverError(self.error_or("claude has exited")));
         };
         if let Err(e) = stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()) {
             let msg = format!("claude closed its input: {e}");
             {
-                let mut g = self.inner.lock().unwrap();
+                let mut g = crate::held(&self.inner);
                 if g.error.is_empty() {
                     g.error = msg.clone();
                 }
@@ -1711,7 +1711,7 @@ impl Driver {
             }
         }
         let code = {
-            let mut child = self.child.lock().unwrap();
+            let mut child = crate::held(&self.child);
             child.as_mut().and_then(|c| c.try_wait().ok().flatten()).and_then(|s| s.code())
         };
         self.mark_exited(code);
@@ -1722,7 +1722,7 @@ impl Driver {
             "control_response" => {
                 let reply = frame.get("response").cloned().unwrap_or(Value::Null);
                 let rid = str_of(&reply, "request_id").to_string();
-                let waiter = self.inner.lock().unwrap().waiting.remove(&rid);
+                let waiter = crate::held(&self.inner).waiting.remove(&rid);
                 if let Some(tx) = waiter {
                     let _ = tx.send(reply);
                 }
@@ -1739,12 +1739,12 @@ impl Driver {
                         description: str_of(&request, "description").into(),
                         asked_at: now_secs(),
                     };
-                    self.inner.lock().unwrap().pending_permissions.insert(rid.clone(), req.clone());
+                    crate::held(&self.inner).pending_permissions.insert(rid.clone(), req.clone());
                     let _ = self.events.send(Event::Permission(req));
                     let d = Arc::clone(self);
                     thread::spawn(move || {
                         thread::sleep(PERMISSION_TIMEOUT);
-                        if d.inner.lock().unwrap().pending_permissions.contains_key(&rid) {
+                        if crate::held(&d.inner).pending_permissions.contains_key(&rid) {
                             d.answer_permission(&rid, false, "emaki: nobody answered");
                         }
                     });
@@ -1761,7 +1761,7 @@ impl Driver {
                 "status" if !str_of(&frame, "permissionMode").is_empty() => {
                     let mode = str_of(&frame, "permissionMode").to_string();
                     {
-                        let mut g = self.inner.lock().unwrap();
+                        let mut g = crate::held(&self.inner);
                         g.caps.mode = mode.clone();
                         g.mode = mode.clone();
                     }
@@ -1790,7 +1790,7 @@ impl Driver {
             let hint = if hint.is_empty() { str_of(item, "argument_hint") } else { hint };
             commands.push(CommandInfo { name: name.into(), description: str_of(item, "description").into(), argument_hint: hint.into(), builtin: item.get("builtin").and_then(Value::as_bool).unwrap_or(false) });
         }
-        let mut g = self.inner.lock().unwrap();
+        let mut g = crate::held(&self.inner);
         if !commands.is_empty() {
             if g.caps.slash_commands.is_empty() {
                 g.caps.slash_commands = commands.iter().map(|c| c.name.clone()).collect();
@@ -1809,7 +1809,7 @@ impl Driver {
     }
 
     fn absorb_init(&self, frame: &Value) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = crate::held(&self.inner);
         if !str_of(frame, "model").is_empty() {
             g.caps.model = str_of(frame, "model").into();
         }
@@ -1849,7 +1849,7 @@ impl Driver {
             model_usage: result.get("modelUsage").cloned().unwrap_or(Value::Null),
         };
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             next = g.queue.pop_front();
             if next.is_some() {
                 g.state = State::Running;
@@ -1873,7 +1873,7 @@ impl Driver {
         let waiting;
         let error;
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = crate::held(&self.inner);
             if g.exited {
                 return;
             }
@@ -2142,7 +2142,7 @@ mod tests {
             }
             other => panic!("expected Permission, got {other:?}"),
         }
-        assert!(d.inner.lock().unwrap().pending_permissions.contains_key("req-7"));
+        assert!(crate::held(&d.inner).pending_permissions.contains_key("req-7"));
 
         // A question comes down the same wire and is answered in its input.
         d.on_frame(json!({
@@ -2164,7 +2164,7 @@ mod tests {
             other => panic!("expected Permission, got {other:?}"),
         }
         assert!(matches!(rx.recv().unwrap(), Event::PermissionSettled(id) if id == "req-8"));
-        assert!(!d.inner.lock().unwrap().pending_permissions.contains_key("req-8"));
+        assert!(!crate::held(&d.inner).pending_permissions.contains_key("req-8"));
 
         d.on_frame(json!({"type": "system", "subtype": "status", "permissionMode": "plan"}));
         assert!(matches!(rx.recv().unwrap(), Event::Mode(m) if m == "plan"));

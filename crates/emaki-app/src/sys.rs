@@ -376,41 +376,83 @@ pub fn shoot_window(_window: &gpui::Window, _path: &std::path::Path) -> Result<(
 /// Harper does not know are the system's, where it has a checker.
 pub const SYSTEM_SPELLING: bool = cfg!(target_os = "macos");
 
-/// The words of `text` the system's checker does not know in `language`,
-/// each with what it would put there. The system's checker is the Mac's
-/// (`NSSpellChecker`); Windows and Linux mark nothing. Call it on the
-/// main thread.
+/// The words of `text` the system's checker does not know in `language`.
+/// The system's checker is the Mac's (`NSSpellChecker`); Windows and
+/// Linux mark nothing. Asked on the main thread and found off it, by the
+/// checker's own request in the background: checked here, word by word
+/// with what each would be, a long text held the window at every pause
+/// in typing. What a word would be is asked when its menu opens
+/// (`spelling_fixes`).
 #[cfg(target_os = "macos")]
-pub fn spelling(text: &str, language: &str) -> Vec<emaki_core::check::Issue> {
+pub fn spelling(text: &str, language: &str) -> impl std::future::Future<Output = Vec<emaki_core::check::Issue>> + use<> {
     use emaki_core::check::{Issue, Kind};
-    use objc2_app_kit::NSSpellChecker;
-    use objc2_foundation::{NSRange, NSString};
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSSpellChecker, NSTextCheckingOrthographyKey};
+    use objc2_foundation::{NSDictionary, NSOrthography, NSRange, NSString, NSTextCheckingResult, NSTextCheckingType};
     const MOST: usize = 60;
+    let (tx, rx) = futures::channel::oneshot::channel::<Vec<(usize, usize)>>();
+    let tx = std::sync::Mutex::new(Some(tx));
+    let handler = block2::RcBlock::new(move |_: isize, found: std::ptr::NonNull<objc2_foundation::NSArray<NSTextCheckingResult>>, _: std::ptr::NonNull<NSOrthography>, _: isize| {
+        // SAFETY: the checker hands the results it found, alive for the call.
+        let found = unsafe { found.as_ref() };
+        let ranges = found.iter().filter(|r| r.resultType() == NSTextCheckingType::Spelling).map(|r| r.range()).map(|r| (r.location, r.length)).take(MOST).collect();
+        if let Some(tx) = tx.lock().ok().and_then(|mut t| t.take()) {
+            let _ = tx.send(ranges);
+        }
+    });
+    let string = NSString::from_str(text);
+    let orthography = NSOrthography::defaultOrthographyForLanguage(&NSString::from_str(language));
+    // SAFETY: the key is AppKit's, and an orthography is what it takes.
+    let options: objc2::rc::Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::from_slices(&[unsafe { NSTextCheckingOrthographyKey }], &[orthography.as_ref() as &AnyObject]);
+    let length = text.encode_utf16().count();
     let checker = NSSpellChecker::sharedSpellChecker();
-    let (string, language) = (NSString::from_str(text), NSString::from_str(language));
+    // The language asked for and no other: left to tell the language
+    // itself, the checker let a word pass that is one in another of the
+    // person's languages ("tres", Spanish, in French). Emaki is the
+    // only one in this process that asks it anything.
+    checker.setAutomaticallyIdentifiesLanguages(false);
+    checker.setLanguage(&NSString::from_str(language));
+    // SAFETY: the options are the documented key with its type, and the
+    // handler is called once, from any thread, which it is fit for.
+    unsafe {
+        checker.requestCheckingOfString_range_types_options_inSpellDocumentWithTag_completionHandler(&string, NSRange::new(0, length), NSTextCheckingType::Spelling.0, Some(&options), 0, Some(&handler));
+    }
     // The checker counts UTF-16 units; the window counts bytes.
     let mut bytes = Vec::with_capacity(text.len() + 1);
     for (i, c) in text.char_indices() {
         bytes.extend(std::iter::repeat_n(i, c.len_utf16()));
     }
     bytes.push(text.len());
-    let mut out = Vec::new();
-    let mut from = 0isize;
-    while out.len() < MOST {
-        let found: NSRange = unsafe { checker.checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount(&string, from, Some(&language), false, 0, std::ptr::null_mut()) };
-        if found.length == 0 || found.location >= bytes.len() {
-            break;
-        }
-        let (Some(&start), Some(&end)) = (bytes.get(found.location), bytes.get(found.location + found.length)) else { break };
-        let fixes = checker.guessesForWordRange_inString_language_inSpellDocumentWithTag(found, &string, Some(&language), 0).map(|guesses| guesses.iter().take(5).map(|g| g.to_string()).collect()).unwrap_or_default();
-        out.push(Issue { range: start..end, kind: Kind::Spelling, message: String::new(), fixes, rule: String::new() });
-        from = (found.location + found.length) as isize;
+    async move {
+        let ranges = rx.await.unwrap_or_default();
+        ranges
+            .into_iter()
+            .filter_map(|(at, len)| Some((*bytes.get(at)?, *bytes.get(at + len)?)))
+            .filter(|(start, end)| start < end)
+            .map(|(start, end)| Issue { range: start..end, kind: Kind::Spelling, message: String::new(), fixes: Vec::new(), rule: String::new() })
+            .collect()
     }
-    out
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn spelling(_text: &str, _language: &str) -> Vec<emaki_core::check::Issue> {
+pub fn spelling(_text: &str, _language: &str) -> impl std::future::Future<Output = Vec<emaki_core::check::Issue>> + use<> {
+    std::future::ready(Vec::new())
+}
+
+/// What the system's checker would put in place of `word`, in
+/// `language`: the five it likes best. One word, as its menu opens.
+#[cfg(target_os = "macos")]
+pub fn spelling_fixes(word: &str, language: &str) -> Vec<String> {
+    use objc2_app_kit::NSSpellChecker;
+    use objc2_foundation::{NSRange, NSString};
+    let checker = NSSpellChecker::sharedSpellChecker();
+    let string = NSString::from_str(word);
+    let range = NSRange::new(0, word.encode_utf16().count());
+    checker.guessesForWordRange_inString_language_inSpellDocumentWithTag(range, &string, Some(&NSString::from_str(language)), 0).map(|guesses| guesses.iter().take(5).map(|g| g.to_string()).collect()).unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn spelling_fixes(_word: &str, _language: &str) -> Vec<String> {
     Vec::new()
 }
 
@@ -526,16 +568,19 @@ mod lights {
         // Each button's left and its top under the window's top.
         let at = |i: f64| (col_x + (row_x + pitch * i - col_x) * k, row_y + pitch * i * (1. - k));
         // The container holds the buttons, which take a click only
-        // inside it: as tall as the column, and while the column is
-        // there no wider than it, so it is not over the card's top.
+        // inside it: as tall as the column. It stays the window's width,
+        // as gpui leaves it: on some systems it draws the window's rim
+        // and corner at its own edge, which narrower stood as a notch
+        // and a line on the rail. A click on the card under it passes
+        // through to the window, as it does under gpui's own row.
         let window = native.frame().size;
         let height = at(2.).1 + h + row_y;
-        let width = if k >= 1. { window.width } else { at(2.).0 + w + row_x };
         MOVING.set(true);
         let mut moved = false;
         let mut frame: NSRect = container.frame();
-        if (frame.size.height - height).abs() > 0.01 || (frame.origin.y - (window.height - height)).abs() > 0.01 || (frame.size.width - width).abs() > 0.01 {
-            frame.size = NSSize::new(width, height);
+        if (frame.size.height - height).abs() > 0.01 || (frame.origin.y - (window.height - height)).abs() > 0.01 || (frame.size.width - window.width).abs() > 0.01 || frame.origin.x.abs() > 0.01 {
+            frame.size = NSSize::new(window.width, height);
+            frame.origin.x = 0.;
             frame.origin.y = window.height - height;
             container.setFrame(frame);
             moved = true;

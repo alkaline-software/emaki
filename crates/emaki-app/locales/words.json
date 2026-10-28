@@ -7640,6 +7640,15 @@
     "de": "{name} ist im Papierkorb",
     "es": "{name} está en la papelera"
   },
+  "its formatter could not read it": {
+    "zh-Hans": "它的格式化工具无法读取它",
+    "zh-Hant": "它的格式化工具無法讀取它",
+    "ja": "フォーマッタがこのファイルを読み取れませんでした",
+    "ko": "포맷터가 이 파일을 읽지 못했습니다",
+    "fr": "son outil de mise en forme n’a pas pu le lire",
+    "de": "sein Formatierer konnte sie nicht lesen",
+    "es": "su formateador no pudo leerlo"
+  },
   "{name} is saved but not formatted: {why}.": {
     "zh-Hans": "{name} 已存储，但未格式化：{why}。",
     "zh-Hant": "{name} 已儲存，但未格式化：{why}。",

@@ -92,9 +92,15 @@ fn only_joins(was: &str, fix: &str) -> bool {
 /// a prompt is not an essay. Building the checker takes a moment the
 /// first time, so call this off the main thread.
 pub fn english(text: &str, british: bool) -> Vec<Issue> {
-    let Ok(mut checker) = english_checker().lock() else { return Vec::new() };
-    let document = Document::new(text, &PlainEnglish, &checker.dictionary);
-    let by_rule = if british { checker.british.organized_lints(&document) } else { checker.american.organized_lints(&document) };
+    let mut checker = crate::held(english_checker());
+    // Harper is another's, and this runs in a task of gpui's, where a
+    // panic aborts the app: a text it panics on is marked nowhere.
+    let Ok(by_rule) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let document = Document::new(text, &PlainEnglish, &checker.dictionary);
+        if british { checker.british.organized_lints(&document) } else { checker.american.organized_lints(&document) }
+    })) else {
+        return Vec::new();
+    };
     drop(checker);
     // Harper counts characters; the window counts bytes.
     let mut at: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
