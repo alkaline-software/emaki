@@ -751,23 +751,33 @@ fn is_rule(line: &str) -> bool {
 }
 
 /// Whether Claude Code's prompt is on the screen and empty: the line
-/// between its two rules, after "❯", with nothing typed on it (a
-/// suggestion or a hint, written dim, is not typing). `text` is the
-/// screen with its colors. This is when keys sent there are words for
-/// the prompt, not answers to a dialog or a screen still being drawn.
+/// between its two rules, after "❯" (or "!" in its shell mode), with
+/// nothing typed on it (a suggestion or a hint, written dim, is not
+/// typing). `text` is the screen with its colors. This is when keys sent
+/// there are words for the prompt, not answers to a dialog or a screen
+/// still being drawn.
 pub fn prompt_on_screen(text: &str) -> Option<bool> {
     let lines: Vec<&str> = text.lines().collect();
     let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
     let below = (0..plain.len()).rev().find(|i| is_rule(&plain[*i]))?;
     let above = (0..below).rev().find(|i| is_rule(&plain[*i]))?;
-    if below - above < 2 || !plain[above + 1].trim_start().starts_with('❯') {
+    if below - above < 2 || !plain[above + 1].trim_start().starts_with(['❯', '!']) {
         return None;
     }
     let typed: String = lines[above + 1..below].iter().enumerate().map(|(ix, l)| {
         let lit = dim_text(l).1;
-        if ix == 0 { lit.trim_start().trim_start_matches('❯').to_string() } else { lit }
+        if ix == 0 { lit.trim_start().trim_start_matches(['❯', '!']).to_string() } else { lit }
     }).collect();
     Some(typed.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}').is_empty())
+}
+
+/// Whether Claude Code's prompt is in its shell mode: "!" where "❯" is,
+/// and what is typed there runs as a command, not a message.
+pub fn shell_on_screen(text: &str) -> bool {
+    let plain: Vec<String> = text.lines().map(strip_sgr).collect();
+    let Some(below) = (0..plain.len()).rev().find(|i| is_rule(&plain[*i])) else { return false };
+    let Some(above) = (0..below).rev().find(|i| is_rule(&plain[*i])) else { return false };
+    below - above >= 2 && plain[above + 1].trim_start().starts_with('!')
 }
 
 /// A line's text in two: what was written dim, and what was not.

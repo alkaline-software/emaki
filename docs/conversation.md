@@ -42,6 +42,10 @@ The bubble stops short of the column's left edge and a reply as short of its rig
 
 The bubble is the one item of a row, which shrinks it to the room there is (`min_w_0`). As an item of a column aligned to its end it took the width of its words up to its most, and in a column narrower than that ran off the left edge, with its height still that of the narrow wrap.
 
+## A shell command
+
+A command the person ran in the agent's shell (`Source::Shell`) is a bubble with the command as it was typed in the composer, in the mono face, its first `!` in the link's ink as the composer marks it; under the bubble is what it printed: its output and its stderr, each a block of code as a tool card's body has them, bounded and scrolling in itself. The agent said nothing, so the round has no reply under it. Tried and dropped: the output in a card of its own, a box around the blocks' boxes; the mark in a column of its own beside the command, as Claude Code's terminal sets it, which put a `!` the command itself begins a line with a step right of the mark.
+
 ## Code blocks
 
 A block of code does not wrap its lines: one wider than its room scrolls sideways (the vendored `node.rs`, listed in `UPSTREAM.md`). Wrapped, anything set out in columns (a table, a mock of a screen) came apart, and the terminal was where it could be read. The scroller is the toolkit's own, the one a table has, and takes a sideways gesture only, so a wheel over a block still moves the conversation. Where more lies past an edge the text fades out there: cut off clean, a line read as all there was. A selection dragged to a block's edge scrolls it that way, as a field does (`code_drag`, vendored `node.rs`).

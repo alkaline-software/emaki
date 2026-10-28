@@ -95,6 +95,33 @@ fn builder_makes_rounds_and_closes_tool_calls() {
     assert_eq!(s.title, "fix the bug");
 }
 
+/// A command run in the terminal's shell mode (`!`) is written as two user
+/// rows, the command and then what it printed, as Claude Code writes them:
+/// a round of its own, not a prompt waited on or named after.
+#[test]
+fn a_shell_command_is_a_round_with_its_output() {
+    let said = |text: &str, ts: &str| row(json!({"type": "user", "uuid": format!("u-{ts}"), "timestamp": ts, "sessionId": "s1", "cwd": "/tmp/proj", "message": {"role": "user", "content": text}}));
+    let rows = vec![
+        user("hello", "2026-01-01T10:00:00Z"),
+        assistant(vec![json!({"type": "text", "text": "Hi."})], "end_turn", "2026-01-01T10:00:02Z"),
+        said("<bash-input> git status</bash-input>", "2026-01-01T10:01:00Z"),
+        said("<bash-stdout>On branch main\u{1b}[0m\n</bash-stdout><bash-stderr>warning: x</bash-stderr>", "2026-01-01T10:01:01Z"),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.rounds.len(), 2);
+    let r = &s.rounds[1];
+    assert_eq!((r.source, r.prompt.as_str()), (Source::Shell, " git status"), "as typed after the mark");
+    let call = r.tool_calls().next().unwrap();
+    assert_eq!((call.status, call.stdout.as_str(), call.stderr.as_str()), (CallStatus::Ok, "On branch main", "warning: x"));
+    assert_eq!(turn_state(&rows, "").phase, Phase::YourTurn, "the command is no prompt waiting on a reply");
+    assert_eq!(s.title, "hello");
+    assert_eq!(strip_wrappers("<bash-input> ls</bash-input>").0, "");
+    // A session of shell commands alone is named after its first.
+    let alone = &rows[2..];
+    assert_eq!(first_prompt_title(alone, 72), "! git status");
+    assert_eq!(build(BuildInput { rows: alone, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false }).title, "! git status");
+}
+
 #[test]
 fn turn_state_reads_the_tail() {
     let mut rows = vec![user("go", "2026-01-01T10:00:00Z")];
@@ -636,6 +663,17 @@ fn a_terminal_color_is_answered_in_both_themes() {
     // The mark's color is one shade in both.
     assert_eq!(theme_pair(0xD77757), Some([0xD77757, 0xD77757]));
     assert_eq!(theme_pair(0x123456), None);
+}
+
+/// The prompt in its shell mode is still the prompt: "!" where "❯" is.
+#[test]
+fn the_prompt_in_shell_mode_is_a_prompt() {
+    use emaki_core::driver::{prompt_on_screen, shell_on_screen};
+    let rule = "─".repeat(40);
+    let screen = |line: &str| format!("{rule}\n{line}\n{rule}\n  ! for shell mode\n");
+    assert_eq!((prompt_on_screen(&screen("! echo hi")), shell_on_screen(&screen("! echo hi"))), (Some(false), true));
+    assert_eq!((prompt_on_screen(&screen("! \x1b[2mTry \"ls\"\x1b[22m")), shell_on_screen(&screen("!"))), (Some(true), true));
+    assert_eq!((prompt_on_screen(&screen("❯ ")), shell_on_screen(&screen("❯ "))), (Some(true), false));
 }
 
 #[test]

@@ -917,7 +917,21 @@ impl Hub {
             pty.paste(&path.to_string_lossy());
             until(&|screen| marks(screen) > before);
         }
-        let words = text.trim();
+        // The prompt's shell mode runs what is typed as a command. A
+        // command (`!ls`) pasted whole puts the prompt in it; one typed
+        // while it is in it already goes without its mark, which the
+        // shell would read as its own. Words for the agent leave it
+        // first, with the one key that does.
+        let mut words = text.trim();
+        if driver::shell_on_screen(&pty.styled()) {
+            match words.strip_prefix('!') {
+                Some(command) => words = command.trim_start(),
+                None => {
+                    pty.write(b"\x7f");
+                    until(&|screen| !driver::shell_on_screen(screen));
+                }
+            }
+        }
         if !words.is_empty() {
             pty.paste(words);
         }

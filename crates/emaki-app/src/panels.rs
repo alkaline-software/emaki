@@ -2081,7 +2081,7 @@ impl Workbench {
     /// Which of the side panels asked for do not fit beside the
     /// conversation in `room`, the content's width with the sidebar
     /// away: each from the top of the rank down takes its least while
-    /// the conversation keeps its own (`conv_need`), and those left over
+    /// the conversation keeps its own (`CONVERSATION_MIN`), and those left over
     /// do not fit. The one at the top always fits: a panel asked for is
     /// shown, whatever else gives way, and in the narrowest window the
     /// conversation is what is left (`main::MIN_W` keeps that at least
@@ -2093,9 +2093,8 @@ impl Workbench {
         if self.page != Page::Session || self.detail.is_none() {
             return (unfit, fits);
         }
-        let need = self.conv_need.get();
         for side in self.side_rank.into_iter().filter(|s| self.side_wanted(*s)) {
-            if fits == px(0.) || need + fits + side.least() <= room {
+            if fits == px(0.) || CONVERSATION_MIN + fits + side.least() <= room {
                 fits += side.least();
             } else {
                 unfit.push(side);
@@ -2178,7 +2177,7 @@ impl Workbench {
             return false;
         }
         let wanted = self.side_rank.into_iter().filter(|s| self.side_wanted(*s)).fold(px(0.), |a, s| a + s.least());
-        self.side_away.iter().any(|s| self.conv_need.get() + wanted + s.least() + crate::workbench::FOLD_SLACK <= room)
+        self.side_away.iter().any(|s| CONVERSATION_MIN + wanted + s.least() + crate::workbench::FOLD_SLACK <= room)
     }
 
     /// The side panels put away for the window's width that fit again in
@@ -2191,7 +2190,7 @@ impl Workbench {
                 continue;
             }
             let wanted = rank.into_iter().filter(|s| self.side_wanted(*s)).fold(px(0.), |a, s| a + s.least());
-            if self.conv_need.get() + wanted + side.least() + crate::workbench::FOLD_SLACK > room {
+            if CONVERSATION_MIN + wanted + side.least() + crate::workbench::FOLD_SLACK > room {
                 continue;
             }
             match side {
@@ -2559,7 +2558,7 @@ impl Workbench {
     /// `CONVERSATION_MIN` beside it, and the other panels their least.
     fn panel_max(&self) -> Pixels {
         let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
-        PANEL_MAX.min(self.pane_w - self.conv_min.get() - term - self.file_pane_least() - self.outline_least()).max(PANEL_MIN)
+        PANEL_MAX.min(self.pane_w - CONVERSATION_MIN - term - self.file_pane_least() - self.outline_least()).max(PANEL_MIN)
     }
 
     /// What the files panel takes of the row as drawn, none when it is away.
@@ -2595,7 +2594,7 @@ impl Workbench {
     pub(crate) fn file_pane_w(&self) -> Pixels {
         let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
         let all = self.view_w - self.file_pane_left() - term;
-        let own = self.file_w.min(all - self.conv_min.get() - self.outline_least()).max(FILE_MIN);
+        let own = self.file_w.min(all - CONVERSATION_MIN - self.outline_least()).max(FILE_MIN);
         let t = self.file_big_t();
         (own + (all.max(own) - own) * t).round()
     }
@@ -2643,7 +2642,7 @@ impl Workbench {
         }
         let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
         let all = self.view_w - self.file_pane_left() - term;
-        let own = self.file_w.min(all - self.conv_min.get() - self.outline_least()).max(FILE_MIN);
+        let own = self.file_w.min(all - CONVERSATION_MIN - self.outline_least()).max(FILE_MIN);
         Some(div().flex_1().min_w_0().h_full().overflow_hidden().opacity(1. - t).child(conversation.flex_none().w((all - own).max(px(0.)))).into_any_element())
     }
 
@@ -2657,7 +2656,7 @@ impl Workbench {
         }
         let term = if self.term_panel_shown() { crate::term_panel::TERM_MIN } else { px(0.) };
         let left = self.file_pane_left();
-        let w = (self.row_x(e.position.x) - left).clamp(FILE_MIN, (self.view_w - left - term - self.conv_min.get() - self.outline_least()).max(FILE_MIN));
+        let w = (self.row_x(e.position.x) - left).clamp(FILE_MIN, (self.view_w - left - term - CONVERSATION_MIN - self.outline_least()).max(FILE_MIN));
         if w != self.file_w {
             self.file_w = w;
             cx.notify();
@@ -2824,7 +2823,7 @@ impl Workbench {
     /// beside it in their pane.
     fn outline_max(&self) -> Pixels {
         let term = if self.term_panel_shown() { self.term_panel_w() } else { px(0.) };
-        OUTLINE_MAX.min(self.view_w - self.outline_left() - term - self.conv_min.get()).max(OUTLINE_MIN)
+        OUTLINE_MAX.min(self.view_w - self.outline_left() - term - CONVERSATION_MIN).max(OUTLINE_MIN)
     }
 
     /// The outline's width as drawn: what it was dragged to, less when

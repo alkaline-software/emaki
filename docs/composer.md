@@ -102,6 +102,10 @@ After a turn Claude Code sets dim, untyped words in its input. The composer show
 - `Workbench::slash_pick` (↩ or a click) follows the rule above; anything it does not run goes into the text at the caret with a space after (`slash_insert`). ⌘↩ on a message that is only a command sends it as that command, a skill with its arguments included.
 - Every command named wears the accent: in the composer by ranges on the textarea (`Workbench::mark_slash`, on every change, through the vendored toolkit's `set_marks`), in a sent prompt as inline code (`driver::mark_commands`, which leaves code spans and fenced blocks alone). A token counts when `driver::slash_tokens` finds it as a word of its own (`/usr/bin` and `a/b` are not) and its name acts alone or is in the folder's catalog (`Hub::knows_command`, cache only; the catalog is read when a Claude session of that folder is opened).
 
+## Shell commands
+
+A message that starts with `!` is a command for the agent's shell, as Claude Code's prompt takes one: the mark wears the link's ink as it is typed, the send button the terminal's icon, and no spelling, grammar or capital is asked of it. It is typed into the session's own terminal (`Hub::type_message`), the one place it can run: a session behind the headless child goes on in its terminal, and one in a terminal of the person's, or another agent's, says where it can run instead. Until the transcript has it, it stands at the conversation's end as it will read, the command and "running…".
+
 ## "@" files
 
 "@" at the start of a word opens the slash list's card, with its keys, on the folder's files and folders, as Claude Code's own prompt does. `files.rs` is all of it:

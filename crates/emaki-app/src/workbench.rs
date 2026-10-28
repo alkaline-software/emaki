@@ -1481,6 +1481,9 @@ pub struct Workbench {
     /// The scroll of a list opened in the settings window, which has no
     /// `route_scroll` of its own to keep one.
     settings_pick_scroll: ScrollHandle,
+    /// How wide a pill's list was last drawn, which sets how far it
+    /// moves in from the window's edge (`render_pick`).
+    pick_w: Rc<Cell<Pixels>>,
     /// Which section of the settings is showing; see `SETTINGS_SECTIONS`.
     pub settings_section: &'static str,
     /// How many times the window's language was changed, so the settings
@@ -1730,18 +1733,15 @@ pub struct Workbench {
     /// The content pane's width as of the last draw, for layouts that
     /// choose their column count from it (the board).
     pub(crate) pane_w: Pixels,
-    /// The least the conversation is drawn at: what the composer's row
-    /// of pills and its send button take, measured where they are drawn
-    /// (`render_composer`), and never under `panels::CONVERSATION_MIN`.
-    pub(crate) conv_min: Rc<Cell<Pixels>>,
-    /// How wide the composer's row was last drawn.
+    /// How wide the composer's row was last drawn, and how wide each
+    /// pill's words are (mode, effort, model): where they do not all fit,
+    /// the pills fold to round buttons (`pills_fold`).
     composer_row_w: Rc<Cell<Pixels>>,
-    /// What the conversation needs, as last measured with room to
-    /// spare. `conv_min` is raised while the row is squeezed, which it
-    /// is for a moment whenever two panes are in motion at once; what
-    /// puts a pane away for good goes by this one, which that does not
-    /// move.
-    pub(crate) conv_need: Rc<Cell<Pixels>>,
+    pill_words_w: Rc<[Cell<Pixels>; 3]>,
+    /// The pills folded or not: how far they were folded when the last
+    /// change began (0 open, 1 folded), whether they fold, and when. No
+    /// time is the first draw, which plays nothing.
+    pills_fold: Rc<Cell<(f32, bool, Option<Instant>)>>,
     /// The side panels put away because the window was dragged too
     /// narrow for them. Each comes back when the window is wide enough
     /// again, and until then its room counts against the sidebar, or the
@@ -1938,11 +1938,10 @@ pub struct Workbench {
     /// The region the lightbox fits its picture in, as last laid out: a
     /// click there outside the picture itself closes it (`lightbox_on`).
     lightbox_region: Rc<Cell<Bounds<Pixels>>>,
-    /// Each tab's own files panel, terminal panel, outline and layout,
-    /// while the app runs; the tab showing has its in the fields
-    /// (`files_on`, `side_term`, `outline_on`, `cli_layout`). A tab never
-    /// shown, and every tab at a launch, has all four closed and the
-    /// rendered layout.
+    /// Each tab's own terminal panel, outline and layout, while the app
+    /// runs; the tab showing has its in the fields (`side_term`,
+    /// `outline_on`, `cli_layout`). A tab never shown, and every tab at a
+    /// launch, has all three closed and the rendered layout.
     tab_views: HashMap<String, TabView>,
     /// A conversation read for a tab and shown for the first time, with
     /// when and a serial: its page fades and rises into place under the
@@ -4061,6 +4060,7 @@ impl Workbench {
             shortcut_held: Modifiers::default(),
             shortcut_refused: None,
             settings_pick_scroll: ScrollHandle::new(),
+            pick_w: Rc::new(Cell::new(px(380.))),
             settings_section,
             lang_serial: 0,
             worded: u32::MAX,
@@ -4172,9 +4172,9 @@ impl Workbench {
             narrow: false,
             win_w: px(0.),
             pane_w: px(1180.),
-            conv_min: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
             composer_row_w: Rc::new(Cell::new(px(0.))),
-            conv_need: Rc::new(Cell::new(crate::panels::CONVERSATION_MIN)),
+            pill_words_w: Rc::new(Default::default()),
+            pills_fold: Rc::new(Cell::new((0., false, None))),
             side_away: Vec::new(),
             side_rank: crate::panels::Side::RANK,
             pending_panes: false,
@@ -4195,7 +4195,7 @@ impl Workbench {
             home_fig: Default::default(),
             sidebar_peek: false,
             sidebar_w: ui.sidebar_w.map(px).unwrap_or(SIDEBAR_W).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
-            files_on: false,
+            files_on: ui.files_open.unwrap_or(false),
             panel_anim: None,
             panel_w: ui.panel_w.map(px).unwrap_or(crate::panels::PANEL_W),
             panel_drag: false,
@@ -5555,7 +5555,8 @@ impl Workbench {
         let to = self.tab_views.get(key).copied().unwrap_or_default();
         (self.side_term, self.outline_on, self.cli_layout) = (to.term, to.outline, to.cli);
         (self.side_term_anim, self.outline_anim) = (None, None);
-        self.side_away.clear();
+        // The files panel is the window's, so it stays away for the width.
+        self.side_away.retain(|s| *s == crate::panels::Side::Left);
     }
 
     pub fn open_session(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -6286,6 +6287,9 @@ impl Workbench {
             window: self.window_rect,
             sidebar_open: Some(self.sidebar_open),
             sidebar_w: Some(f32::from(self.sidebar_w)),
+            // Put away for the window's width, it is still open: only its
+            // button and its edge close it.
+            files_open: Some(self.files_on || self.side_away.contains(&crate::panels::Side::Left)),
             panel_w: Some(f32::from(self.panel_w)),
             term_w: Some(f32::from(self.side_term_w)),
             file_w: Some(f32::from(self.file_w)),
@@ -6461,13 +6465,18 @@ impl Workbench {
             return;
         }
         let ts = chrono::DateTime::from_timestamp_millis((out.at * 1000.0) as i64).map(|t| t.to_rfc3339()).unwrap_or_default();
+        // A shell command stands as the transcript will have it.
+        let (prompt, source) = match shell_command(&out.text) {
+            Some(_) => (out.text.trim_start()[1..].trim_end().to_string(), emaki_core::model::Source::Shell),
+            None => (out.text.clone(), emaki_core::model::Source::Web),
+        };
         session.rounds.push(emaki_core::model::Round {
             index: session.rounds.len(),
             uuid: OUTGOING.into(),
             end_ts: ts.clone(),
             ts,
-            prompt: out.text.clone(),
-            source: emaki_core::model::Source::Web,
+            prompt,
+            source,
             attachments: as_sent(&out.attached),
             ..Default::default()
         });
@@ -7386,11 +7395,11 @@ impl Workbench {
 
     /// A pill that opens a list of choices (`PickFor`). Where it is drawn
     /// is kept, for the list to hang off.
-    fn pick_pill(&self, what: PickFor, id: &'static str, icon: &'static str, label: PillText, cx: &Context<Self>) -> AnyElement {
+    fn pick_pill(&self, what: PickFor, id: &'static str, icon: &'static str, label: PillText, fold: &PillFold, cx: &Context<Self>) -> AnyElement {
         div()
             .relative()
             .flex_shrink_0()
-            .child(composer_pill(id, icon, label, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            .child(composer_pill(id, icon, label, fold, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 swallow_click(window, cx);
                 this.pick_toggle(what, cx);
             })))
@@ -7750,11 +7759,14 @@ impl Workbench {
     fn render_pick(&self, menu: PickMenu, gone: bool, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let view = window.viewport_size();
-        // Its left edge on the pill's, unless it would not fit that way.
+        // Its left edge on the pill's, moved in from the window's edge by
+        // as much as it does not fit there, by its width as last drawn: a
+        // folded pill is a small button, and a list ending on its right
+        // edge hung out over the panel beside the conversation.
         // The folders' list always drops down: its strip is under the
         // composer with the page's empty half below it.
         let up = menu.what != PickFor::Folder && menu.by.center().y > view.height * 0.5;
-        let right = menu.by.left() + px(380.) > view.width - px(8.);
+        let left = menu.by.left().min(view.width - px(8.) - self.pick_w.get()).max(px(8.));
         let gap = px(6.);
         // The list is as long as the agent makes it (a dozen models), so
         // it scrolls past the room there is.
@@ -7780,8 +7792,19 @@ impl Workbench {
             .border_1()
             .border_color(theme.border)
             .shadow(float_shadow(&theme))
-            .map(|d| if right { d.right(view.width - menu.by.right()) } else { d.left(menu.by.left()) })
-            .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx));
+            .left(left)
+            .on_mouse_down(MouseButton::Left, |_, window, cx| swallow_click(window, cx))
+            .child({
+                let w = self.pick_w.clone();
+                canvas(move |b, window, _| {
+                    if (w.get() - b.size.width).abs() > px(0.5) {
+                        w.set(b.size.width);
+                        window.refresh();
+                    }
+                }, |_, _, _, _| {})
+                .absolute()
+                .inset_0()
+            });
         let dark = theme.mode.is_dark();
         for (ix, PickRow { key, name, detail, tint, mark, rule, flag }) in menu.rows.iter().enumerate() {
             let active = *key == menu.current && !key.is_empty();
@@ -9297,12 +9320,43 @@ impl Workbench {
             return;
         }
         let (via, why) = self.reply_via();
+        // A command for the agent's shell (`!ls`), as its terminal takes
+        // one: it runs there and nowhere else. A session behind the
+        // headless child goes on in its terminal; one in a terminal of
+        // the person's, or another agent's, says where it can run.
+        let shell = shell_command(&typed).is_some() && self.attachments.is_empty();
+        let via = if !shell {
+            via
+        } else if self.agent_now() != AgentId::ClaudeCode {
+            self.notice = Some(Notice::error(tf("that needs {agent}'s own terminal, which Emaki does not run yet", &[("agent", &self.agent_now().display_name())])));
+            cx.notify();
+            return;
+        } else if via == "inbox" {
+            self.notice = Some(Notice::error(tf("this session runs in a terminal of yours: type {text} there", &[("text", &typed.trim())])));
+            cx.notify();
+            return;
+        } else if !self.hub.hidden_terminals() {
+            self.notice = Some(Notice::error(t("the hidden terminal is off (driver.hidden_terminal in config.json)")));
+            cx.notify();
+            return;
+        } else if via == "driver" {
+            if let Some(sid) = self.selected_ref().map(|r| r.session_id.clone()) {
+                if self.drivers.remove(&sid).is_some() {
+                    self.hub.stop_driver(&sid);
+                }
+            }
+            "spawn"
+        } else {
+            via
+        };
         // A slash command reaches a headless session as the command it is
         // (`/compact` runs; Claude Code marks it as fine without a
         // terminal). A terminal session's inbox hands everything to the
         // model as words from a peer, checked on the wire: there the
         // command is refused here rather than spent as a prompt.
-        if slash_command(typed.trim()).is_some() {
+        if shell {
+            // It is typed into the terminal below, as any message is.
+        } else if slash_command(typed.trim()).is_some() {
             if via == "inbox" || via == "pty" {
                 self.run_in_terminal(typed.trim().to_string(), cx);
                 self.composer.update(cx, |s, cx| s.set_value("", window, cx));
@@ -9343,7 +9397,16 @@ impl Workbench {
                 None => (new_id.clone(), new_cwd, false),
             };
             let started = self.agent_now() == AgentId::ClaudeCode && self.hub.hidden_terminals() && self.hub.start_terminal(&sid, &cwd, resume, &self.next_mode, &self.next_model, &self.next_effort).is_ok();
-            if started { "pty" } else { "spawn" }
+            if started {
+                "pty"
+            } else if shell {
+                // The headless child has no shell to run it in.
+                self.notice = Some(Notice::error(t("claude is not running; try again")));
+                cx.notify();
+                return;
+            } else {
+                "spawn"
+            }
         };
         let (text, images) = self.fold_attachments(&typed, via == "driver" || via == "spawn");
         match via {
@@ -16216,8 +16279,9 @@ impl Workbench {
         let old = std::mem::replace(&mut self.last_text, new.clone());
         self.issues = check::carry(&self.issues_for, &new, &self.issues);
         self.issues_for = new.clone();
-        // An input method's letters are not yet what was typed.
-        if self.cfg.app.auto_capitalize && !composing {
+        // An input method's letters are not yet what was typed, and a
+        // shell command keeps the case it is typed in.
+        if self.cfg.app.auto_capitalize && !composing && shell_command(&new).is_none() && !new.trim_start().starts_with('!') {
             match check::typed(&old, &new, caret) {
                 Typed::In(c, end) => {
                     let at = end - c.len_utf8();
@@ -16261,7 +16325,8 @@ impl Workbench {
         self.check_serial += 1;
         let serial = self.check_serial;
         let text = self.composer.read(cx).value().to_string();
-        if !self.cfg.app.check_writing || text.trim().is_empty() {
+        // A shell command is no writing to check: `git` is no misspelling.
+        if !self.cfg.app.check_writing || text.trim().is_empty() || shell_command(&text).is_some() {
             self.issues.clear();
             return;
         }
@@ -16446,6 +16511,12 @@ impl Workbench {
         let (via, _) = self.reply_via();
         let text = self.composer.read(cx).value().to_string();
         let mut marks = Vec::new();
+        // A command for the agent's shell wears its mark in the link's
+        // ink, as Claude Code's prompt wears it in shell mode.
+        if text.trim_start().starts_with('!') {
+            let at = text.len() - text.trim_start().len();
+            marks.push(gpui_component::input::TextDecoration::new(at..at + 1, HighlightStyle { color: Some(cx.theme().link), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() }));
+        }
         if text.contains('/') {
             let (known, _) = self.slash_rows("", via, true);
             let style = HighlightStyle { color: Some(cx.theme().link), ..Default::default() };
@@ -16667,11 +16738,14 @@ impl Workbench {
             }
             (w, theme.muted_foreground)
         };
-        // What the button does now, with its key.
+        // What the button does now, with its key. A command for the
+        // agent's shell wears the terminal's icon in place of the arrow.
         let send_tip = if running { t("Stop (Esc)") } else if self.cfg.app.send_key == "enter" { t("Send (↩)") } else { t("Send (⌘↩)") };
+        let shell = shell_command(&self.composer.read(cx).value()).is_some();
+        let send_icon = |color: Hsla| if shell { Icon::default().path("icons/terminal.svg").with_size(px(15.)).text_color(color) } else { Icon::new(IconName::ArrowUp).with_size(px(16.)).text_color(color) };
         let send = div()
             .id("send")
-            .size(px(32.))
+            .size(px(COMPOSER_SEND))
             .rounded_full()
             .flex()
             .items_center()
@@ -16682,7 +16756,7 @@ impl Workbench {
                 if running {
                     d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))).child(Icon::new(IconName::Pause).with_size(px(15.)).text_color(theme.primary_foreground))
                 } else if can_send {
-                    d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, window, cx| this.send_pressed(window, cx))).child(Icon::new(IconName::ArrowUp).with_size(px(16.)).text_color(theme.primary_foreground))
+                    d.bg(theme.primary).cursor_pointer().hover(|s| s.bg(theme.primary_hover)).on_click(cx.listener(|this, _, window, cx| this.send_pressed(window, cx))).child(send_icon(theme.primary_foreground))
                 } else if self.page == Page::New {
                     // With nothing typed on the new-session page it is
                     // ⌘↩ there: a session begun with nothing said.
@@ -16908,15 +16982,11 @@ impl Workbench {
                 h_flex()
                     .relative()
                     .items_center()
-                    .gap(px(8.))
-                    .child({
-                        let row_w = self.composer_row_w.clone();
-                        canvas(move |bounds, _, _| row_w.set(bounds.size.width), |_, _, _, _| {}).absolute().inset_0()
-                    })
+                    .gap(px(COMPOSER_GAP))
                     .child(
                         div()
                             .id("attach")
-                            .size(px(30.))
+                            .size(px(COMPOSER_ATTACH))
                             .rounded_full()
                             .flex()
                             .items_center()
@@ -16952,56 +17022,67 @@ impl Workbench {
                         // are what one starts in, the lists Settings has.
                         let fresh = !on_session && !codex;
                         let on_session = on_session || codex;
+                        // Where the three do not fit the row with their
+                        // words, they fold to round buttons, and open
+                        // again once they do (`pills_fold`).
+                        let state = self.pills_fold.get();
+                        let fold = |ix| PillFold { k: pills_k(state), folds: state.1, words: self.pill_words_w.clone(), ix };
                         let effort_el: AnyElement = if fresh && !options.efforts_for(&model).is_empty() {
-                            self.pick_pill(PickFor::DefaultEffort, "effort", "icons/gauge.svg", effort_text.clone(), cx)
+                            self.pick_pill(PickFor::DefaultEffort, "effort", "icons/gauge.svg", effort_text.clone(), &fold(1), cx)
                         } else if on_session && !options.efforts_for(&model).is_empty() {
-                            self.pick_pill(PickFor::Effort, "effort", "icons/gauge.svg", effort_text.clone(), cx)
+                            self.pick_pill(PickFor::Effort, "effort", "icons/gauge.svg", effort_text.clone(), &fold(1), cx)
                         } else {
-                            composer_pill("effort", "icons/gauge.svg", effort_text.clone(), cx).on_click(to(Pill::Effort)).into_any_element()
+                            composer_pill("effort", "icons/gauge.svg", effort_text.clone(), &fold(1), cx).on_click(to(Pill::Effort)).into_any_element()
                         };
                         let model_el: AnyElement = if fresh && !options.models.is_empty() {
-                            self.pick_pill(PickFor::DefaultModel, "model", "icons/box.svg", model_text, cx)
+                            self.pick_pill(PickFor::DefaultModel, "model", "icons/box.svg", model_text, &fold(2), cx)
                         } else if on_session && !options.models.is_empty() {
-                            self.pick_pill(PickFor::Model, "model", "icons/box.svg", model_text, cx)
+                            self.pick_pill(PickFor::Model, "model", "icons/box.svg", model_text, &fold(2), cx)
                         } else {
-                            composer_pill("model", "icons/box.svg", model_text, cx).on_click(to(Pill::Model)).into_any_element()
+                            composer_pill("model", "icons/box.svg", model_text, &fold(2), cx).on_click(to(Pill::Model)).into_any_element()
                         };
                         let mode_el: AnyElement = if fresh && !options.modes.is_empty() {
-                            self.pick_pill(PickFor::DefaultMode, "mode", "icons/shield.svg", mode_text, cx)
+                            self.pick_pill(PickFor::DefaultMode, "mode", "icons/shield.svg", mode_text, &fold(0), cx)
                         } else if on_session && !options.modes.is_empty() {
-                            self.pick_pill(PickFor::Mode, "mode", "icons/shield.svg", mode_text, cx)
+                            self.pick_pill(PickFor::Mode, "mode", "icons/shield.svg", mode_text, &fold(0), cx)
                         } else {
-                            composer_pill("mode", "icons/shield.svg", mode_text, cx).on_click(to(Pill::Mode)).into_any_element()
+                            composer_pill("mode", "icons/shield.svg", mode_text, &fold(0), cx).on_click(to(Pill::Mode)).into_any_element()
                         };
-                        // The room left between the pills is what says
-                        // how wide the row has to be: its width less
-                        // that. With none left the row has spilled, by
-                        // how much is not known, and the least is raised
-                        // a step at a time until there is some.
-                        let (row_w, conv_min, conv_need) = (self.composer_row_w.clone(), self.conv_min.clone(), self.conv_need.clone());
-                        let slack = canvas(
+                        // The row's width and the words' say whether the
+                        // pills fold, neither of which their folding
+                        // changes. Laid last over the row, so the words
+                        // have been measured in the same frame. The first
+                        // draw plays nothing.
+                        let (row_w, words, pills) = (self.composer_row_w.clone(), self.pill_words_w.clone(), self.pills_fold.clone());
+                        let decide = canvas(
                             move |bounds, window, _| {
-                                let (row, spare) = (row_w.get(), bounds.size.width);
-                                if row <= px(0.) {
+                                let row = bounds.size.width;
+                                let first = row_w.get() <= px(0.);
+                                row_w.set(row);
+                                let said: Pixels = words.iter().map(Cell::get).sum();
+                                if said <= px(0.) {
                                     return;
                                 }
-                                if spare >= px(0.5) {
-                                    conv_need.set((row - spare + COMPOSER_AROUND).max(crate::panels::CONVERSATION_MIN));
-                                }
-                                let need = if spare < px(0.5) { row + px(24.) } else { row - spare };
-                                let least = (need + COMPOSER_AROUND).max(crate::panels::CONVERSATION_MIN);
-                                if (least - conv_min.get()).abs() > px(0.5) {
-                                    conv_min.set(least);
+                                let around = COMPOSER_ATTACH + COMPOSER_SEND + 5. * COMPOSER_GAP + PILLS_AIR;
+                                let open = 3. * (2. * PILL_END + PILL_ICON + PILL_ICON_GAP);
+                                let folds = row < said + px(around + open);
+                                let now = pills.get();
+                                if folds != now.1 {
+                                    pills.set((pills_k(now), folds, (!first).then(Instant::now)));
                                     window.refresh();
+                                } else if now.2.is_some_and(|at| at.elapsed() < PANEL_ANIM) {
+                                    window.request_animation_frame();
                                 }
                             },
                             |_, _, _, _| {},
                         )
-                        .size_full();
+                        .absolute()
+                        .inset_0();
                         d.child(arrow_over(mode_el))
                             .child(arrow_over(effort_el))
-                            .child(div().flex_1().h(px(1.)).child(slack))
+                            .child(div().flex_1())
                             .child(arrow_over(model_el))
+                            .child(decide)
                     })
                     .when(!settable, |d| d.child(div().flex_1()))
                     .child(send),
@@ -18088,6 +18169,12 @@ enum SlashKey {
 
 /// The name of the slash command `text` is, when it is one: a first line
 /// starting with "/" and a name after it.
+/// The command a message for the agent's shell runs: what follows its
+/// "!", as Claude Code's terminal takes one at its prompt.
+pub fn shell_command(text: &str) -> Option<&str> {
+    text.trim_start().strip_prefix('!').map(str::trim).filter(|c| !c.is_empty())
+}
+
 pub fn slash_command(text: &str) -> Option<String> {
     let first = text.lines().next().unwrap_or("").trim();
     let name = first.strip_prefix('/')?.split_whitespace().next()?;
@@ -18354,29 +18441,84 @@ fn folder_parent(cwd: &str) -> String {
     std::path::Path::new(cwd).parent().map(|p| emaki_core::paths::tilde(&p.to_string_lossy())).filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into())
 }
 
-/// What stands between the conversation's edges and the composer's row
-/// of pills: the page's gutters, the card's border and its padding, and
-/// a little air so the send button does not touch the card's edge.
-const COMPOSER_AROUND: Pixels = px(84.);
-
 /// The pill itself: light gray with its icon in front, darker under the
 /// pointer, darker again while pressed or open. No tooltip and no caret.
 /// (The toolkit draws a custom color at a fifth of its strength, so the
 /// resting gray is the ink's own, thinned.)
-fn composer_pill(id: &'static str, icon: &'static str, label: PillText, cx: &App) -> Button {
+///
+/// Folded (`fold.k` 1) it is a round button with the icon alone, in the
+/// choice's color where it has one; on the way its words narrow and fade
+/// and its ends and the gap close, each in step with the one clock. Its
+/// words are laid out whole either way, and say how wide they are.
+fn composer_pill(id: &'static str, icon: &'static str, label: PillText, fold: &PillFold, cx: &App) -> Button {
     let theme = cx.theme();
     let look = ButtonCustomVariant::new(cx).color(theme.muted_foreground.opacity(0.65)).foreground(theme.muted_foreground).hover(theme.muted_foreground.opacity(0.22)).active(theme.muted_foreground.opacity(0.34));
+    let k = fold.k;
+    // The sentence's own spaces part the words; a language that has
+    // none sets them together.
+    let words = if label.tail.is_empty() {
+        h_flex().child(tinted(&label.value, &label.tint))
+    } else {
+        crate::i18n::weave(t(label.tail), vec![("value", tinted(&label.value, &label.tint).into_any_element())], h_flex().whitespace_nowrap())
+    };
+    let measure = {
+        let (cells, ix) = (fold.words.clone(), fold.ix);
+        canvas(move |bounds, window, _| {
+            if (cells[ix].get() - bounds.size.width).abs() > px(0.5) {
+                cells[ix].set(bounds.size.width);
+                window.refresh();
+            }
+        }, |_, _, _, _| {})
+        .absolute()
+        .inset_0()
+    };
+    let shown = fold.words[fold.ix].get() * (1. - k);
+    let words = h_flex().opacity(1. - k).overflow_hidden().when(k > 0., |d| d.w(shown)).child(div().flex_shrink_0().relative().child(words).child(measure));
+    let tint = match &label.tint {
+        Tint::Plain => None,
+        Tint::Solid(c) => Some(*c),
+        Tint::Spectrum(colors) => colors.get(colors.len() / 2).copied(),
+    };
+    let mark = Icon::default().path(icon).with_size(px(PILL_ICON)).when_some(tint.filter(|_| k > 0.), |i, c| i.text_color(theme.muted_foreground.blend(c.opacity(k))));
+    let end = PILL_END - (PILL_END - (PILL_H - PILL_ICON) / 2.) * k;
+    let said = if label.tail.is_empty() { label.value.clone() } else { crate::i18n::tf(label.tail, &[("value", &label.value)]) };
     Button::new(SharedString::from(format!("{id}-trigger"))).custom(look).small().rounded(ButtonRounded::Size(px(999.)))
-        .icon(Icon::default().path(icon))
-        .child(
-            // The sentence's own spaces part the words; a language
-            // that has none sets them together.
-            if label.tail.is_empty() {
-                h_flex().child(tinted(&label.value, &label.tint))
-            } else {
-                crate::i18n::weave(t(label.tail), vec![("value", tinted(&label.value, &label.tint).into_any_element())], h_flex().whitespace_nowrap())
-            },
-        )
+        .px(px(end))
+        .when(fold.folds, |b| b.tooltip(said))
+        .child(h_flex().items_center().gap(px(PILL_ICON_GAP * (1. - k))).child(mark).child(words))
+}
+
+/// The composer's pills as the toolkit's small button has them: the
+/// height, the room at either end, the icon and the gap after it.
+const PILL_H: f32 = 24.;
+const PILL_END: f32 = 8.;
+const PILL_ICON: f32 = 14.;
+const PILL_ICON_GAP: f32 = 4.;
+/// The composer's row around the pills: the attach button, the send
+/// button and the gap between any two, and the least room kept between
+/// the effort's pill and the model's.
+const COMPOSER_ATTACH: f32 = 30.;
+const COMPOSER_SEND: f32 = 32.;
+const COMPOSER_GAP: f32 = 8.;
+const PILLS_AIR: f32 = 16.;
+
+/// How far a pill is folded (`k`), whether the pills are folding or
+/// folded (and so name their choice on a hover), and where its words'
+/// width is kept.
+struct PillFold {
+    k: f32,
+    folds: bool,
+    words: Rc<[Cell<Pixels>; 3]>,
+    ix: usize,
+}
+
+/// How far the pills are folded now, from `pills_fold`.
+fn pills_k((from, folds, at): (f32, bool, Option<Instant>)) -> f32 {
+    let to = if folds { 1. } else { 0. };
+    match at {
+        Some(at) if at.elapsed() < PANEL_ANIM => from + (to - from) * ease_out_quint()(at.elapsed().as_secs_f32() / PANEL_ANIM.as_secs_f32()),
+        _ => to,
+    }
 }
 
 /// A button under which the pointer is the arrow and nothing else. The
@@ -18648,7 +18790,7 @@ impl Render for Workbench {
         // (`side_away`), leave it no room.
         let held = if sides > px(0.) { self.side_away.iter().fold(px(0.), |a, s| a + s.least()) } else { px(0.) };
         self.win_w = vw + FRAME;
-        self.narrow = vw < NARROW_W || (sides > px(0.) && vw < self.sidebar_w + self.conv_min.get() + sides + held);
+        self.narrow = vw < NARROW_W || (sides > px(0.) && vw < self.sidebar_w + crate::panels::CONVERSATION_MIN + sides + held);
         if !self.narrow {
             self.sidebar_peek = false;
         }

@@ -570,17 +570,23 @@ pub fn pick_title(rows: &[Value]) -> String {
 }
 
 pub fn first_prompt_title(rows: &[Value], limit: usize) -> String {
+    // A session that has only had a shell command run in it (`!ls`) is
+    // named after the first, as it reads in the conversation.
+    let mut ran = String::new();
     for row in rows {
         if str_of(row, "type") != "user" || bool_of(row, "isSidechain") || crate::build::machine_authored(row) {
             continue;
         }
         let text = user_prompt_text(row);
         if text.is_empty() {
+            if let (true, Some(crate::build::ShellRow::Ran(command))) = (ran.is_empty(), crate::build::shell_of(&crate::build::text_blocks_joined(&crate::json::blocks(row)))) {
+                ran = format!("!{command}");
+            }
             continue;
         }
         return crate::build::one_line(&text, limit);
     }
-    String::new()
+    crate::build::one_line(&ran, limit)
 }
 
 /// Every Claude Code transcript under `projects_root`, newest first. Stubs

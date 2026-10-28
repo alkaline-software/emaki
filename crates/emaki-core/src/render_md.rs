@@ -279,7 +279,10 @@ impl<'a> MarkdownRenderer<'a> {
         }
         out.push(format!("*{}*", meta.join(" · ")));
         out.push(String::new());
-        if !rnd.prompt.is_empty() {
+        if rnd.source == Source::Shell {
+            out.push(format!("```sh\n!{}\n```", rnd.prompt));
+            out.push(String::new());
+        } else if !rnd.prompt.is_empty() {
             out.push(self.r(&rnd.prompt));
             out.push(String::new());
         }

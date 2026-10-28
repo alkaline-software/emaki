@@ -34,6 +34,10 @@ A command run before anything was said is the conversation's first message: a ro
 
 Only that command's output goes. `RoundBuilder::command` is the command the next output belongs to: a `/model` run later, still in the `/compact` round because no prompt came between, keeps its "Set model to …" line. Tried and dropped: dropping every output in a round that began with `/compact`.
 
+## Shell commands
+
+A command run in the terminal's shell mode (`!ls`) is written as two user rows: `<bash-input>ls</bash-input>`, then `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>`, and no assistant row. Neither is a prompt: `strip_wrappers` takes both blocks out, so `turn_state` passes over them as it does a slash command's rows and a session is not working after one. The builder makes the first a round of its own (`Source::Shell`, its prompt the command) holding a Bash call that the second fills (`build::shell_of`). A session that has only had commands run in it is named after its first, as `! ls`.
+
 ## The rule over the prompt
 
 Once a session has a name (`/rename`), Claude Code writes it on the rule above its prompt ("──── My session ─"). A reader that takes a rule to be a line of "─" and nothing else finds no prompt on a renamed session: `type_message` waits for one that is already there, and a message sent from the window leaves the composer and goes nowhere. `driver::is_rule` is the one test, for the prompt, the suggestion and the dialog: a line that begins and ends as a rule and is mostly one.

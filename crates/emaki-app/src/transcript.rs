@@ -484,7 +484,13 @@ impl Workbench {
             } else if rnd.images > 0 {
                 bubble = bubble.child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(count(rnd.images as usize, "+ {n} pasted image", "+ {n} pasted images")));
             }
-            if has_text {
+            if has_text && rnd.source == Source::Shell {
+                // A command run in the agent's shell, as it was typed in
+                // the composer: in the mono face, its mark in the link's
+                // ink, as the composer marks it.
+                let mark = HighlightStyle { color: Some(theme.link), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+                bubble = bubble.child(h_flex().font_family(theme.mono_font_family.clone()).text_size(px(body_px - 2.)).child(div().min_w_0().child(StyledText::new(format!("!{}", rnd.prompt)).with_highlights([(0..1, mark)]))));
+            } else if has_text {
                 // A command the prompt names (`/compact`, or a skill in a
                 // sentence) is set as inline code, so it wears the accent.
                 let cwd = &session.cwd;
@@ -498,11 +504,12 @@ impl Workbench {
             // laid out, so nothing moves when they appear.
             let group = SharedString::from(format!("prompt-{ix}"));
             let copy = has_text.then(|| self.copy_button(ix, false, cx));
+            let printed = (rnd.source == Source::Shell).then(|| self.render_shell_output(ix, rnd, cx));
             column = column.child(
                 // The bubble is in a row of its own, which it shrinks to
                 // fit. As an item of this column it took the width of
                 // its words up to its most, whatever the column had.
-                v_flex().group(group.clone()).w_full().pl(relative(REPLY_INSET)).items_end().gap(px(2.)).child(h_flex().w_full().justify_end().items_start().child(bubble.child(words_at(&self.words_at)))).child(
+                v_flex().group(group.clone()).w_full().pl(relative(REPLY_INSET)).items_end().gap(px(2.)).child(h_flex().w_full().justify_end().items_start().child(bubble.child(words_at(&self.words_at)))).children(printed).child(
                     h_flex()
                         .relative()
                         .child(words_at(&self.words_at))
@@ -541,6 +548,11 @@ impl Workbench {
             column = column.child(h_flex().gap(px(8.)).text_size(px(11.)).text_color(theme.muted_foreground).children(who.map(|w| div().child(w))).child(div().child(sent)));
         }
 
+        // A shell command's round is the command and what it printed,
+        // both under the bubble: the agent said nothing.
+        if rnd.source == Source::Shell {
+            return h_flex().w_full().justify_center().child(column).into_any_element();
+        }
         // The agent's items, on the left. Consecutive tool calls (thoughts
         // between them included) fold into one row when there are three or
         // more: the trace is kept, the page is not buried in it.
@@ -677,6 +689,51 @@ impl Workbench {
         // nothing to push against; an explicit centring parent keeps the
         // column in the middle of a wide pane.
         h_flex().w_full().justify_center().child(column).into_any_element()
+    }
+
+    /// What a shell command printed, under its bubble: its output and
+    /// what it wrote to stderr, each a block of code as a tool card's
+    /// body has them, bounded and scrolling in itself; a word while it
+    /// runs or when it printed nothing.
+    fn render_shell_output(&mut self, ix: usize, rnd: &Round, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let call = rnd.items.iter().find_map(Item::as_tool);
+        let quiet = |words: &'static str, color: Hsla| div().pt(px(4.)).pr(px(4.)).text_size(px(11.5)).text_color(color).child(words).into_any_element();
+        let Some(call) = call.filter(|c| c.status != CallStatus::Pending) else { return quiet(t("running…"), theme.primary) };
+        if call.status == CallStatus::NoResult {
+            return quiet(t("not run"), theme.muted_foreground);
+        }
+        let (out, err) = (call.stdout.trim_end(), call.stderr.trim_end());
+        if out.is_empty() && err.is_empty() {
+            return quiet(t("no output"), theme.muted_foreground);
+        }
+        let mut parts = v_flex().w_full().gap(px(8.)).text_size(px(12.5));
+        if !out.is_empty() {
+            parts = parts.child(mono_block(format!("shell-out-{ix}"), out, "text", cx));
+        }
+        if !err.is_empty() {
+            parts = parts.child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("stderr"));
+            parts = parts.child(mono_block(format!("shell-err-{ix}"), err, "text", cx));
+        }
+        let scroll = self.detail.as_mut().map(|d| d.body_scrolls.entry((ix, 0)).or_default().clone()).unwrap_or_default();
+        let handle = scroll.handle.clone();
+        self.inner_scroller(&handle, crate::workbench::Inner::Chained);
+        div()
+            .relative()
+            .w_full()
+            .pt(px(4.))
+            .on_scroll_wheel(crate::workbench::chain_wheel(handle.clone(), scroll.stroke.clone()))
+            .child(
+                div()
+                    .id(SharedString::from(format!("shell-body-{ix}")))
+                    .w_full()
+                    .max_h(MAX_BODY_H)
+                    .overflow_y_scroll()
+                    .track_scroll(&handle)
+                    .child(parts),
+            )
+            .vertical_scrollbar(&handle)
+            .into_any_element()
     }
 
     /// The copy button under a prompt or a reply. It copies the markdown as

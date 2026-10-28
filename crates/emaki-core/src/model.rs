@@ -426,6 +426,10 @@ pub enum Source {
     /// Another agent session, through the inbox.
     Peer,
     Command,
+    /// A command the person ran in the agent's own shell (Claude Code's
+    /// `!`): the prompt is the command as typed after the mark, and its
+    /// one item the call that holds what it printed.
+    Shell,
     System,
 }
 

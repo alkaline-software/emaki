@@ -975,7 +975,7 @@ impl Workbench {
     /// conversation would be left with too little.
     pub(crate) fn term_panel_w(&self) -> Pixels {
         let beside = self.left_w() + self.file_pane_least() + self.outline_least();
-        self.side_term_w.min(self.pane_w - beside - self.conv_min.get()).max(TERM_MIN)
+        self.side_term_w.min(self.pane_w - beside - crate::panels::CONVERSATION_MIN).max(TERM_MIN)
     }
 
     /// The pointer moved with the panel's edge held.
@@ -990,7 +990,7 @@ impl Workbench {
         // Its edge is at its left, or with the side panels mirrored at
         // its right.
         let from = if self.files_right() { e.position.x - self.content_left() } else { self.view_w - e.position.x };
-        let w = from.clamp(TERM_MIN, (self.pane_w - beside - self.conv_min.get()).max(TERM_MIN));
+        let w = from.clamp(TERM_MIN, (self.pane_w - beside - crate::panels::CONVERSATION_MIN).max(TERM_MIN));
         if w != self.side_term_w {
             self.side_term_w = w;
             cx.notify();

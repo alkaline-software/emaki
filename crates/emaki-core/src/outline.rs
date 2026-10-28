@@ -216,12 +216,12 @@ fn entry(ix: usize, rnd: &Round) -> Entry {
         Kind::Compact
     } else if rnd.source == Source::Peer {
         Kind::Peer
-    } else if matches!(rnd.source, Source::Command | Source::System) || rnd.prompt.trim_start().starts_with('/') {
+    } else if matches!(rnd.source, Source::Command | Source::Shell | Source::System) || rnd.prompt.trim_start().starts_with('/') {
         Kind::Command
     } else {
         Kind::Prompt
     };
-    let mut title = first_line(&rnd.prompt);
+    let mut title = if rnd.source == Source::Shell { first_line(&format!("!{}", rnd.prompt)) } else { first_line(&rnd.prompt) };
     if title.is_empty() {
         title = match rnd.attachments.first() {
             Some(a) => a.name.clone(),

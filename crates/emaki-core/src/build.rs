@@ -49,6 +49,9 @@ re!(RE_COMMAND_NAME, r"(?s)<command-name>(.*?)</command-name>");
 re!(RE_COMMAND_ARGS, r"(?s)<command-args>(.*?)</command-args>");
 re!(RE_COMMAND_STDOUT, r"(?s)<local-command-stdout>(.*?)</local-command-stdout>");
 re!(RE_COMMAND_MESSAGE, r"(?s)<command-message>.*?</command-message>\s*");
+re!(RE_BASH_INPUT, r"(?s)<bash-input>(.*?)</bash-input>\s*");
+re!(RE_BASH_STDOUT, r"(?s)<bash-stdout>(.*?)</bash-stdout>\s*");
+re!(RE_BASH_STDERR, r"(?s)<bash-stderr>(.*?)</bash-stderr>\s*");
 re!(
     RE_ANY_TAG_BLOCK,
     r"</?(?:command-name|command-args|command-message|local-command-stdout|local-command-caveat|system-reminder|task-notification)>"
@@ -201,6 +204,25 @@ pub fn peer_message(row: &Value) -> Option<(String, Source)> {
     Some((text.trim().to_string(), source))
 }
 
+/// A user row of the terminal's shell mode (`!`): the command the person
+/// ran, or what it printed, which Claude Code writes as a row after it.
+/// Neither is a prompt (`strip_wrappers` takes both out), so neither is
+/// waited on (`turn_state`) or names the session.
+pub enum ShellRow {
+    Ran(String),
+    Printed(String, String),
+}
+
+pub fn shell_of(text: &str) -> Option<ShellRow> {
+    if let Some(c) = RE_BASH_INPUT.captures(text) {
+        // As it was typed after the mark, the space after it too.
+        return Some(ShellRow::Ran(c[1].trim_end().to_string()));
+    }
+    let out = RE_BASH_STDOUT.captures(text).map(|c| c[1].to_string());
+    let err = RE_BASH_STDERR.captures(text).map(|c| c[1].to_string());
+    (out.is_some() || err.is_some()).then(|| ShellRow::Printed(out.unwrap_or_default(), err.unwrap_or_default()))
+}
+
 /// Split raw user text into (prompt, slash-commands, command-output).
 pub fn strip_wrappers(text: &str) -> (String, Vec<String>, Vec<String>) {
     if text.is_empty() {
@@ -223,7 +245,7 @@ pub fn strip_wrappers(text: &str) -> (String, Vec<String>, Vec<String>) {
         RE_COMMAND_STDOUT.captures_iter(text).map(|c| c[1].trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     let mut cleaned = text.to_string();
-    for re in [&*RE_SYSTEM_REMINDER, &*RE_CAVEAT, &*RE_TASK_NOTIFICATION, &*RE_HOOK_OUTPUT, &*RE_COMMAND_MESSAGE, &*RE_PASTED_TAG] {
+    for re in [&*RE_SYSTEM_REMINDER, &*RE_CAVEAT, &*RE_TASK_NOTIFICATION, &*RE_HOOK_OUTPUT, &*RE_COMMAND_MESSAGE, &*RE_PASTED_TAG, &*RE_BASH_INPUT, &*RE_BASH_STDOUT, &*RE_BASH_STDERR] {
         cleaned = re.replace_all(&cleaned, "").into_owned();
     }
     cleaned = RE_COMMAND_NAME.replace_all(&cleaned, "").into_owned();
@@ -651,11 +673,13 @@ struct RoundBuilder {
     mode: String,
     /// The effort level a command last set, when one did.
     effort: Option<String>,
+    /// The call of the shell command whose output comes next.
+    shell: Option<String>,
 }
 
 impl RoundBuilder {
     fn new() -> Self {
-        Self { rounds: Vec::new(), current: None, calls: HashMap::new(), pending_notices: Vec::new(), last_ts: String::new(), command: String::new(), withdrawn: None, mode: String::new(), effort: None }
+        Self { rounds: Vec::new(), current: None, calls: HashMap::new(), pending_notices: Vec::new(), last_ts: String::new(), command: String::new(), withdrawn: None, mode: String::new(), effort: None, shell: None }
     }
 
     fn open_round(&mut self, ts: &str, uuid: &str, prompt: String, source: Source) -> &mut Round {
@@ -686,6 +710,29 @@ impl RoundBuilder {
         }
         self.open_round(ts, uuid, command.to_string(), Source::Command);
         true
+    }
+
+    /// A shell command the person ran: a round of its own, its prompt the
+    /// command, holding a Bash call that its output fills
+    /// (`shell_printed`). One that never printed has nothing to wait on
+    /// once another is run.
+    fn shell_ran(&mut self, command: String, ts: &str, uuid: &str) {
+        if let Some(call) = self.shell.take().and_then(|id| self.call_mut(&id)) {
+            call.status = CallStatus::NoResult;
+        }
+        self.open_round(ts, uuid, command.clone(), Source::Shell);
+        let mut input = Map::new();
+        input.insert("command".into(), Value::String(command.clone()));
+        let id = format!("shell-{uuid}");
+        self.add_call(ToolCall { uuid: uuid.into(), ts: ts.into(), id: id.clone(), name: "Bash".into(), tool_kind: tool_kind("Bash"), subject: command, input, status: CallStatus::Pending, ..Default::default() });
+        self.shell = Some(id);
+    }
+
+    fn shell_printed(&mut self, out: &str, err: &str) {
+        let Some(call) = self.shell.take().and_then(|id| self.call_mut(&id)) else { return };
+        call.stdout = strip_ansi(out).trim_end().to_string();
+        call.stderr = strip_ansi(err).trim_end().to_string();
+        call.status = CallStatus::Ok;
     }
 
     fn ensure_round(&mut self, ts: &str) -> &mut Round {
@@ -1404,6 +1451,11 @@ fn handle_user(b: &mut RoundBuilder, row: &Value, ts: &str) {
 
     let images = bl.iter().filter(|x| block_type(x) == "image").count() as u32;
     let raw = text_blocks_joined(&bl);
+    match shell_of(&raw) {
+        Some(ShellRow::Ran(command)) => return b.shell_ran(command, ts, uuid),
+        Some(ShellRow::Printed(out, err)) => return b.shell_printed(&out, &err),
+        None => {}
+    }
     let (prompt, commands, outputs) = strip_wrappers(&raw);
     let (prompt, attached) = attachments_of(&prompt, &bl, uuid);
 
@@ -1741,12 +1793,12 @@ fn finalize(b: RoundBuilder, session: &mut Session) {
 }
 
 pub fn fallback_title(rounds: &[Round], limit: usize) -> String {
-    for rnd in rounds {
-        if !rnd.prompt.is_empty() {
-            return one_line(&rnd.prompt, limit);
-        }
+    let said = |rnd: &&Round| !rnd.prompt.is_empty();
+    match rounds.iter().find(|r| said(r) && r.source != Source::Shell).or_else(|| rounds.iter().find(said)) {
+        Some(rnd) if rnd.source == Source::Shell => one_line(&format!("!{}", rnd.prompt), limit),
+        Some(rnd) => one_line(&rnd.prompt, limit),
+        None => "Untitled session".into(),
     }
-    "Untitled session".into()
 }
 
 /// A session read as it grows: the rows read so far, kept, and the file

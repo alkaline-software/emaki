@@ -22,9 +22,10 @@ pub struct UiState {
     pub sidebar_open: Option<bool>,
     /// How wide the sidebar was dragged to.
     pub sidebar_w: Option<f32>,
-    /// How wide the files panel was dragged to. Whether it shows, as the
-    /// outline, the layout and the terminal panel, is each tab's and is not
-    /// kept past a launch (`Workbench::tab_view`).
+    /// Whether the files panel shows, on every tab, and how wide it was
+    /// dragged to. The outline, the layout and the terminal panel are each
+    /// tab's and are not kept past a launch (`Workbench::tab_views`).
+    pub files_open: Option<bool>,
     pub panel_w: Option<f32>,
     /// How wide the outline's drawer is.
     pub outline_w: Option<f32>,
