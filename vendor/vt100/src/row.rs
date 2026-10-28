@@ -14,6 +14,17 @@ impl Row {
         }
     }
 
+    /// A row of these cells, which wraps onto the next or does not.
+    /// (Emaki addition, for `Grid::reflow`.)
+    pub fn from_cells(cells: Vec<crate::Cell>, wrapped: bool) -> Self {
+        Self { cells, wrapped }
+    }
+
+    /// Its cells, all of them. (Emaki addition, for `Grid::reflow`.)
+    pub fn all_cells(&self) -> &[crate::Cell] {
+        &self.cells
+    }
+
     fn cols(&self) -> u16 {
         self.cells
             .len()

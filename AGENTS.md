@@ -38,6 +38,8 @@ Emaki is an elegant app, held to the bar of the work that wins Awwwards, the Web
 - **A motion that repeats runs on the window's clock** (`ambient::phase`), never on `Animation::repeat`, which draws the whole window at the display's rate for as long as it runs. The conversation's list, the sidebar and a markdown file are views the window keeps between frames: what they are drawn from must reach them. (`docs/window.md`, Frames)
 - **Words are few.** Say what to do once, to someone who can use a computer: no line on how to paste or type a password, and no note that repeats what the control above it already shows.
 - **Look before saying it is done:** at all the change shows, hides or moves, and at the layout in a narrow window.
+- **Intuition is the only standard.** What a person does in one place works the same in every place like it: what the composer does with a click, a drag past the edge, ⌥⌫, ⌘⌫, ⌘A and Backspace on a selection, the terminal does too, and so does every field, list and pane, now and later. Another app's way (Kaku's, iTerm's) is a reference, never the goal.
+- **What looks wrong or feels awkward is a bug,** whatever the cause: another program's output, a convention, a platform's habit. Fix what the person sees, and do not answer with why it is so or that it is meant to be.
 
 ## Rules that hold everywhere
 
@@ -78,7 +80,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, the notice and limits row in `workbench.rs`; `a11y.rs`; `pictures.rs`; `emaki-core/src/files.rs`, `check.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
 | The pills, pickers, mode/model/effort notices; `emaki-core/src/options.rs`; `mode_*`, `effort_*`, `model_*`, `options_from` in `driver.rs` | `docs/modes.md` |
 | The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
-| `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
+| `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `shell_marks.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `sublime.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `quarto.rs`, `math.rs`, `latex.rs`, `typst_doc.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs`; the vendored `text/format/quarto.rs` and `text/math.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs`; `i18n.rs`, `locales/words.json`, any word the window shows | `docs/window.md` |
@@ -132,6 +134,7 @@ crates/emaki-core/        everything without a window
   src/statusline.rs          scripts/statusline.sh built in, installed to ~/.emaki/bin at launch, and the one setting
   src/terminal.rs            the agent's resume command as a script a terminal can be handed
   src/pty.rs                 a terminal of our own with no window: an interactive `claude` on a pty, its screen kept in memory
+  src/shell_marks.rs         the shell terminal's shell, started so its prompt marks where what is typed begins (OSC 133)
   src/watcher.rs             notify over every agent's data roots
   src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | shells | outline | git | files | peers | inbox | options | explain | update | statusline | agents | drive | pty
   tests/core.rs

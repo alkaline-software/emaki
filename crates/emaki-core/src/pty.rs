@@ -57,9 +57,31 @@ pub struct Span {
     pub italic: bool,
     pub underline: bool,
     pub inverse: bool,
+    /// Where each of its cells begins in `text`, and how many columns it
+    /// takes, as the screen model laid them out. A cell may hold more
+    /// than one character (a letter and its accent, an emoji and its
+    /// variation selector), and which are wide is the model's to say:
+    /// counted again by a table of our own, an emoji the table did not
+    /// have put everything after it a column off where the cursor was.
+    pub cells: Vec<(usize, u8)>,
 }
 
 impl Span {
+    /// Its cells, each what it holds and how many columns it takes. One
+    /// made with no cells is a column a character.
+    pub fn each_cell(&self) -> Vec<(&str, u8)> {
+        if self.cells.is_empty() {
+            return self.text.char_indices().map(|(at, c)| (&self.text[at..at + c.len_utf8()], 1)).collect();
+        }
+        (0..self.cells.len())
+            .map(|i| {
+                let (at, w) = self.cells[i];
+                let end = self.cells.get(i + 1).map(|c| c.0).unwrap_or(self.text.len());
+                (self.text.get(at..end).unwrap_or(""), w)
+            })
+            .collect()
+    }
+
     fn same_look(&self, o: &Span) -> bool {
         self.fg == o.fg && self.bg == o.bg && self.fg_ix == o.fg_ix && self.bg_ix == o.bg_ix && self.bold == o.bold && self.dim == o.dim && self.italic == o.italic && self.underline == o.underline && self.inverse == o.inverse
     }
@@ -69,6 +91,8 @@ pub struct Pty {
     /// The child's pid: Claude Code's registry names the session by it.
     pub pid: i32,
     parser: Mutex<vt100::Parser>,
+    /// Whether a resize reflows its lines (`reflow_on_resize`).
+    reflows: std::sync::atomic::AtomicBool,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
@@ -241,13 +265,18 @@ impl Pty {
     /// from the reading thread whenever the screen changed, and once more
     /// when the child is gone.
     pub fn spawn(argv: &[String], cwd: &str, on_output: Arc<dyn Fn() + Send + Sync>) -> Result<Arc<Pty>, String> {
+        Self::spawn_with(argv, &[], cwd, on_output)
+    }
+
+    /// `spawn`, with more in the child's environment (`shell_marks`).
+    pub fn spawn_with(argv: &[String], more_env: &[(String, String)], cwd: &str, on_output: Arc<dyn Fn() + Send + Sync>) -> Result<Arc<Pty>, String> {
         let (bin, rest) = argv.split_first().ok_or("nothing to run")?;
         let pair = native_pty_system().openpty(PtySize { rows: ROWS, cols: COLS, pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string())?;
         let mut cmd = CommandBuilder::new(bin);
         cmd.args(rest);
         cmd.cwd(cwd);
         cmd.env_clear();
-        for (k, v) in child_env() {
+        for (k, v) in child_env().into_iter().chain(more_env.iter().cloned()) {
             cmd.env(k, v);
         }
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
@@ -258,6 +287,7 @@ impl Pty {
         let pty = Arc::new(Pty {
             pid,
             parser: Mutex::new(vt100::Parser::new(ROWS, COLS, SCROLLBACK)),
+            reflows: std::sync::atomic::AtomicBool::new(false),
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             killer: Mutex::new(child.clone_killer()),
@@ -360,18 +390,33 @@ impl Pty {
     /// Words put in the prompt the way a paste arrives, so new lines in
     /// them stay new lines and send nothing.
     pub fn paste(&self, text: &str) {
-        let bracketed = held(&self.parser).screen().bracketed_paste();
-        if bracketed {
-            self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+        self.write(&self.paste_bytes(text));
+    }
+
+    /// What `paste` sends for these words.
+    pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
+        if held(&self.parser).screen().bracketed_paste() {
+            format!("\x1b[200~{text}\x1b[201~").into_bytes()
         } else {
-            self.write(text.replace('\n', " ").as_bytes());
+            text.replace('\n', " ").into_bytes()
         }
     }
 
+    /// From now on a resize reflows the lines, as a terminal window's
+    /// does: a shell's. The agent's terminal does not: Claude Code draws
+    /// its whole input again at a resize, from as many rows up as it had
+    /// drawn, and reflowed under it that left its rows twice.
+    pub fn reflow_on_resize(&self) {
+        self.reflows.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn resize(&self, rows: u16, cols: u16) {
+        // Asked before the program hears of the new size.
+        let keep = self.edits_its_line();
         let _ = held(&self.master).resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         let mut parser = held(&self.parser);
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.screen_mut().set_size(rows, cols))).is_err() {
+        let reflows = self.reflows.load(std::sync::atomic::Ordering::Relaxed);
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| if reflows { parser.screen_mut().set_size_reflowed(rows, cols, keep) } else { parser.screen_mut().set_size(rows, cols) })).is_err() {
             *parser = vt100::Parser::new(rows, cols, SCROLLBACK);
         }
     }
@@ -405,6 +450,36 @@ impl Pty {
     /// form (`ESC O A`), as a full-screen editor does.
     pub fn app_cursor(&self) -> bool {
         held(&self.parser).screen().application_cursor()
+    }
+
+    /// Whether the program reading the keys now edits its own line: a
+    /// shell at its prompt, Claude Code, Python's or node's prompt, a
+    /// program in the shell as much as the shell. Each takes the terminal
+    /// out of its line-at-a-time mode and takes the arrow keys a click or
+    /// a deletion is made of. A command that reads whole lines, or none,
+    /// leaves that mode on, and would print them. Off Unix, always.
+    pub fn edits_its_line(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let Some(fd) = held(&self.master).as_raw_fd() else { return true };
+            // SAFETY: a termios is plain data, filled by the call.
+            let mut t: libc::termios = unsafe { std::mem::zeroed() };
+            if unsafe { libc::tcgetattr(fd, &mut t) } != 0 {
+                return true;
+            }
+            t.c_lflag & libc::ICANON == 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    }
+
+    /// Where what is typed at the prompt begins, as the shell marked it
+    /// (OSC 133 `B`, `shell_marks`): a line counted from the screen's top
+    /// row, less than 0 for one that has left it, and a column.
+    pub fn typing_start(&self) -> Option<(i64, u16)> {
+        held(&self.parser).screen().typing_start()
     }
 
     /// Whether the program has the screen to itself (an editor, a
@@ -616,9 +691,14 @@ pub fn rows_of(screen: &vt100::Screen) -> Vec<Vec<Span>> {
                     italic: cell.italic(),
                     underline: cell.underline(),
                     inverse: cell.inverse(),
+                    cells: vec![(0, if cell.is_wide() { 2 } else { 1 })],
                 };
                 match out.last_mut() {
-                    Some(last) if last.same_look(&span) => last.text.push_str(&span.text),
+                    Some(last) if last.same_look(&span) => {
+                        let base = last.text.len();
+                        last.text.push_str(&span.text);
+                        last.cells.push((base, span.cells[0].1));
+                    }
                     _ => out.push(span),
                 }
             }
@@ -627,7 +707,9 @@ pub fn rows_of(screen: &vt100::Screen) -> Vec<Vec<Span>> {
                 out.pop();
             }
             if let Some(last) = out.last_mut().filter(|s| s.bg.is_none() && !s.inverse && !s.underline) {
-                last.text.truncate(last.text.trim_end_matches(' ').len());
+                let n = last.text.trim_end_matches(' ').len();
+                last.text.truncate(n);
+                last.cells.retain(|(at, _)| *at < n);
             }
             out
         })
@@ -865,6 +947,132 @@ pub fn styled(rows: &[Vec<Span>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The screen's rows and the scrollback above them, as text.
+    fn everything(p: &mut vt100::Parser) -> Vec<String> {
+        let (_, cols) = p.screen().size();
+        p.screen_mut().set_scrollback(usize::MAX);
+        let back = p.screen().scrollback();
+        let mut out = Vec::new();
+        for b in (1..=back).rev() {
+            p.screen_mut().set_scrollback(b);
+            out.push(p.screen().rows(0, cols).next().unwrap_or_default());
+        }
+        p.screen_mut().set_scrollback(0);
+        out.extend(p.screen().rows(0, cols));
+        while out.last().is_some_and(|r| r.is_empty()) {
+            out.pop();
+        }
+        out
+    }
+
+    #[test]
+    fn a_wrapped_line_joins_up_when_the_screen_widens() {
+        let mut p = vt100::Parser::new(4, 10, 100);
+        p.process(b"0123456789abcde\r\n$ ");
+        assert_eq!(everything(&mut p), vec!["0123456789", "abcde", "$ "]);
+        p.screen_mut().set_size_reflowed(4, 20, false);
+        assert_eq!(everything(&mut p), vec!["0123456789abcde", "$ "]);
+        assert_eq!(p.screen().cursor_position(), (1, 2));
+        // And it wraps again when it narrows, with nothing cut.
+        p.screen_mut().set_size_reflowed(4, 6, false);
+        assert_eq!(everything(&mut p), vec!["012345", "6789ab", "cde", "$ "]);
+        assert_eq!(p.screen().cursor_position(), (3, 2));
+        p.screen_mut().set_size_reflowed(4, 10, false);
+        assert_eq!(everything(&mut p), vec!["0123456789", "abcde", "$ "]);
+        // What is typed after the resize goes where the cursor is.
+        p.process(b"ls");
+        assert_eq!(everything(&mut p).last().map(String::as_str), Some("$ ls"));
+    }
+
+    #[test]
+    fn the_line_being_typed_keeps_its_rows_for_the_shell() {
+        // Output above reflows; the prompt's line, wrapped over two rows,
+        // keeps them, cut to the new width, for the shell to draw again
+        // from its first row.
+        let mut p = vt100::Parser::new(5, 10, 100);
+        p.process(b"0123456789abc\r\n$ echo 1234567");
+        assert_eq!(everything(&mut p), vec!["0123456789", "abc", "$ echo 123", "4567"]);
+        p.screen_mut().set_size_reflowed(5, 6, true);
+        assert_eq!(everything(&mut p), vec!["012345", "6789ab", "c", "$ echo", "4567"]);
+        assert_eq!(p.screen().cursor_position(), (4, 4));
+    }
+
+    #[test]
+    fn the_prompts_marks_keep_their_rows() {
+        let mut p = vt100::Parser::new(3, 10, 100);
+        p.process(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n");
+        assert_eq!(p.screen().typing_start(), Some((0, 2)));
+        // A command begun lets them go.
+        p.process(b"\x1b]133;C\x07a\r\nb\r\nc\r\n");
+        assert_eq!(p.screen().typing_start(), None);
+        // Marked again, and the screen scrolls under it.
+        p.process(b"\x1b]133;A\x07$ \x1b]133;B\x07one\r\ntwo");
+        assert_eq!(p.screen().typing_start(), Some((1, 2)));
+        p.process(b"\r\nthree");
+        assert_eq!(p.screen().typing_start(), Some((0, 2)));
+        p.process(b"\r\nfour");
+        assert_eq!(p.screen().typing_start(), Some((-1, 2)));
+    }
+
+    #[test]
+    fn what_is_typed_keeps_its_rows_from_the_prompts_mark() {
+        // Two paragraphs typed at a marked prompt keep their rows; the
+        // output above reflows.
+        let mut p = vt100::Parser::new(6, 10, 100);
+        p.process(b"0123456789abc\r\n\x1b]133;A\x07$ \x1b]133;B\x07first\r\nsecond");
+        p.screen_mut().set_size_reflowed(6, 20, true);
+        assert_eq!(everything(&mut p), vec!["0123456789abc", "$ first", "second"]);
+        assert_eq!(p.screen().typing_start(), Some((1, 2)));
+        assert_eq!(p.screen().cursor_position(), (2, 6));
+    }
+
+    #[test]
+    fn a_shorter_screen_keeps_its_foot() {
+        let mut p = vt100::Parser::new(4, 10, 100);
+        p.process(b"one\r\ntwo\r\nthree\r\n$ ");
+        p.screen_mut().set_size_reflowed(2, 10, false);
+        let rows: Vec<String> = p.screen().rows(0, 10).collect();
+        assert_eq!(rows, vec!["three", "$ "]);
+        assert_eq!(p.screen().cursor_position(), (1, 2));
+        assert_eq!(everything(&mut p), vec!["one", "two", "three", "$ "]);
+    }
+
+    #[test]
+    fn a_wide_letter_is_not_split_by_a_reflow() {
+        // Written wide, then narrowed so the wide letter meets the edge:
+        // it goes to the next row whole, and comes back up whole.
+        let mut p = vt100::Parser::new(4, 10, 100);
+        p.process("abcde\u{4e2d}x".as_bytes());
+        p.screen_mut().set_size_reflowed(4, 6, false);
+        assert_eq!(everything(&mut p), vec!["abcde", "\u{4e2d}x"]);
+        p.screen_mut().set_size_reflowed(4, 10, false);
+        assert_eq!(everything(&mut p), vec!["abcde\u{4e2d}x"]);
+    }
+
+    #[test]
+    fn a_full_screen_program_is_not_reflowed() {
+        let mut p = vt100::Parser::new(4, 10, 100);
+        p.process(b"\x1b[?1049h0123456789abc");
+        p.screen_mut().set_size_reflowed(4, 20, false);
+        let rows: Vec<String> = p.screen().rows(0, 20).collect();
+        assert_eq!(&rows[..2], &["0123456789".to_string(), "abc".to_string()]);
+    }
+
+    #[test]
+    fn a_row_carries_the_screen_models_own_cells() {
+        // 🚀 is two columns to the model, and a letter with its accent
+        // mark is one cell: a table of our own had 🚀 as one.
+        let rows = rows_after("\u{1f680} e\u{301}x$".as_bytes(), 2, 20);
+        let cells: Vec<(String, u8)> = rows[0].iter().flat_map(|s| s.each_cell()).map(|(c, w)| (c.to_string(), w)).collect();
+        assert_eq!(cells, vec![("\u{1f680}".into(), 2), (" ".into(), 1), ("e\u{301}".into(), 1), ("x".into(), 1), ("$".into(), 1)]);
+        let p = {
+            let mut p = vt100::Parser::new(2, 20, 0);
+            p.process("\u{1f680} e\u{301}x$".as_bytes());
+            p
+        };
+        assert_eq!(p.screen().cursor_position(), (0, 6));
+    }
 
     #[test]
     fn a_wide_character_cut_by_a_narrower_screen_is_no_crash() {

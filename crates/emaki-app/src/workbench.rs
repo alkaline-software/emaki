@@ -5796,7 +5796,7 @@ impl Workbench {
             // The terminal panel: `term` brings it, `term:agent` and
             // `term:shell` choose what it shows, `termtype:<words>` types
             // them there with Return.
-            Some(t) if t == "term" || t.starts_with("term:") || t.starts_with("termtype:") || t.starts_with("layout:") => self.term_panel_probe(t, cx),
+            Some(t) if t == "term" || t == "termcursor" || t.starts_with("term:") || t.starts_with("termtype:") || t.starts_with("termput:") || t.starts_with("layout:") => self.term_panel_probe(t, cx),
             // The handscroll on the home page, wound as the pointer at
             // that place across and down it (-1 to 1) would wind it.
             Some(t) if t.starts_with("homewind:") => {

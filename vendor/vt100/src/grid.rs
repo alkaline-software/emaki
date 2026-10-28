@@ -13,6 +13,11 @@ pub struct Grid {
     scrollback: std::collections::VecDeque<crate::row::Row>,
     scrollback_len: usize,
     scrollback_offset: usize,
+    /// How many rows have left the screen's top, ever, and the prompt's
+    /// marks as rows so counted (`mark_prompt`). (Emaki addition.)
+    scrolled: u64,
+    prompt_mark: Option<(u64, u16)>,
+    typing_mark: Option<(u64, u16)>,
 }
 
 impl Grid {
@@ -29,6 +34,9 @@ impl Grid {
             scrollback: std::collections::VecDeque::new(),
             scrollback_len,
             scrollback_offset: 0,
+            scrolled: 0,
+            prompt_mark: None,
+            typing_mark: None,
         }
     }
 
@@ -97,6 +105,240 @@ impl Grid {
         if self.saved_pos.col > self.size.cols - 1 {
             self.saved_pos.col = self.size.cols - 1;
         }
+    }
+
+    /// The size changed as a terminal that reflows changes it: the rows a
+    /// long line wrapped onto are one line again, wrapped anew at the new
+    /// width, the scrollback with them; the cursor, the saved cursor and
+    /// the prompt's marks stay where they were in their lines; and the
+    /// bottom of what was written stays at the bottom, rows from the top
+    /// going into the scrollback when there are fewer. Cut or padded a row
+    /// at a time instead, a line wrapped in a narrow window stayed in
+    /// pieces when the window widened, and one in a wide window lost its
+    /// end when it narrowed. With `keep_typing` what is being typed keeps
+    /// its rows, each cut or padded to the new width, for the program to
+    /// draw again (`Screen::set_size_reflowed`): from the prompt's mark to
+    /// the foot where the prompt marks itself, else the cursor's line.
+    /// (Emaki addition.)
+    pub fn reflow(&mut self, size: Size, keep_typing: bool) {
+        if self.rows.is_empty() || size.cols == 0 || size.rows == 0 {
+            self.set_size(size);
+            return;
+        }
+        let blank = |c: &crate::Cell| !c.has_contents() && *c.attrs() == crate::attrs::Attrs::default();
+        // A row runs on into the next when its text did. One that wraps
+        // only for the blanks it was filled with does not: zsh fills the
+        // row after output with no newline at its end, and the prompt
+        // under it was taken for that output's last line.
+        let runs_on = |r: &crate::row::Row| r.wrapped() && !r.all_cells().iter().rev().take(2).all(|c| !c.has_contents() || c.contents() == " ");
+        let at_screen = self.scrollback.len();
+        // The row the first of all of them is, counted as `scrolled` is.
+        let base = self.scrolled.saturating_sub(at_screen as u64);
+        let mut all: Vec<crate::row::Row> = self.scrollback.drain(..).collect();
+        all.extend(self.rows.drain(..));
+        let mark = |m: Option<(u64, u16)>| m.and_then(|(abs, col)| abs.checked_sub(base).map(|i| (i as usize, usize::from(col))));
+        // The places a reflow keeps: the cursor, the saved cursor, the
+        // prompt's start and the typing's.
+        let points = [
+            Some((at_screen + usize::from(self.pos.row), usize::from(self.pos.col))),
+            Some((at_screen + usize::from(self.saved_pos.row), usize::from(self.saved_pos.col))),
+            mark(self.prompt_mark),
+            mark(self.typing_mark),
+        ];
+        let cursor = points[0].unwrap_or_default();
+        let last = all.iter().rposition(|r| r.all_cells().iter().any(|c| !blank(c))).unwrap_or(0).max(cursor.0);
+        all.truncate(last + 1);
+
+        // What is being typed, as rows.
+        let kept: Option<(usize, usize)> = keep_typing.then(|| match points[2].or(points[3]).filter(|(r, _)| *r <= cursor.0) {
+            Some((from, _)) => (from, all.len() - 1),
+            None => {
+                let (mut from, mut to) = (cursor.0, cursor.0);
+                while from > 0 && runs_on(&all[from - 1]) {
+                    from -= 1;
+                }
+                while to + 1 < all.len() && runs_on(&all[to]) {
+                    to += 1;
+                }
+                (from, to)
+            }
+        });
+
+        // The lines, each its cells and where the places are in it, and
+        // what is being typed kept as its rows.
+        enum Piece {
+            Flow(Vec<crate::Cell>, [Option<usize>; 4]),
+            Kept(usize, Vec<crate::row::Row>),
+        }
+        let mut pieces: Vec<Piece> = Vec::new();
+        let mut cells: Vec<crate::Cell> = Vec::new();
+        let mut at: [Option<usize>; 4] = [None; 4];
+        for (i, row) in all.iter().enumerate() {
+            if let Some((from, to)) = kept.filter(|(f, t)| (*f..=*t).contains(&i)) {
+                if i == from {
+                    pieces.push(Piece::Kept(from, all[from..=to].iter().map(|r| {
+                        let mut r = r.clone();
+                        r.resize(size.cols, crate::Cell::new());
+                        r
+                    }).collect()));
+                }
+                continue;
+            }
+            let start = cells.len();
+            for (k, p) in points.iter().enumerate() {
+                if let Some((_, c)) = p.filter(|(r, _)| *r == i) {
+                    at[k] = Some(start + c);
+                }
+            }
+            let mut own = row.all_cells().to_vec();
+            if runs_on(row) && i + 1 < all.len() {
+                // A wide letter that did not fit at a row's end left its
+                // last cell empty and went on the next.
+                if own.last().is_some_and(blank) && all.get(i + 1).and_then(|n| n.all_cells().first()).is_some_and(crate::Cell::is_wide) {
+                    own.pop();
+                }
+                cells.extend(own);
+                continue;
+            }
+            while own.last().is_some_and(blank) {
+                own.pop();
+            }
+            cells.extend(own);
+            // A place past the line's end (the cursor after a prompt's
+            // last space) keeps its column.
+            let want = at.iter().flatten().max().copied().unwrap_or(0);
+            while cells.len() < want {
+                cells.push(crate::Cell::new());
+            }
+            pieces.push(Piece::Flow(std::mem::take(&mut cells), std::mem::take(&mut at)));
+        }
+
+        // Each line wrapped at the new width.
+        let cols = usize::from(size.cols);
+        let mut out: Vec<crate::row::Row> = Vec::new();
+        let mut now: [Option<(usize, usize)>; 4] = [None; 4];
+        for piece in pieces {
+            let (line, at) = match piece {
+                Piece::Kept(from, mut rows) => {
+                    for (k, p) in points.iter().enumerate() {
+                        if let Some((r, c)) = p.filter(|(r, _)| (from..from + rows.len()).contains(r)) {
+                            now[k] = Some((out.len() + r - from, c.min(cols)));
+                        }
+                    }
+                    out.append(&mut rows);
+                    continue;
+                }
+                Piece::Flow(line, at) => (line, at),
+            };
+            let mut row: Vec<crate::Cell> = Vec::with_capacity(cols);
+            let mut i = 0;
+            loop {
+                for k in 0..4 {
+                    if at[k] == Some(i) {
+                        now[k] = Some((out.len(), row.len()));
+                    }
+                }
+                let Some(cell) = line.get(i) else { break };
+                let width = if cell.is_wide() { 2 } else { 1 };
+                if row.len() + width > cols {
+                    while row.len() < cols {
+                        row.push(crate::Cell::new());
+                    }
+                    out.push(crate::row::Row::from_cells(std::mem::take(&mut row), true));
+                    // A place on the cell that went to the next row goes
+                    // with it.
+                    for k in 0..4 {
+                        if at[k] == Some(i) {
+                            now[k] = Some((out.len(), 0));
+                        }
+                    }
+                }
+                row.push(cell.clone());
+                if width == 2 {
+                    row.push(line.get(i + 1).cloned().unwrap_or_else(crate::Cell::new));
+                    i += 1;
+                }
+                i += 1;
+            }
+            while row.len() < cols {
+                row.push(crate::Cell::new());
+            }
+            out.push(crate::row::Row::from_cells(row, false));
+        }
+
+        // The screen is the rows at the bottom, the cursor's in sight; what
+        // is above them is the scrollback.
+        let new_cursor = now[0].unwrap_or((out.len().saturating_sub(1), 0));
+        let rows = usize::from(size.rows);
+        let bottom = out.len().max(new_cursor.0 + 1);
+        let mut top = bottom.saturating_sub(rows);
+        if new_cursor.0 < top {
+            top = new_cursor.0;
+        }
+        let mut screen: Vec<crate::row::Row> = out.drain(top.min(out.len())..).take(rows).collect();
+        while screen.len() < rows {
+            screen.push(crate::row::Row::new(size.cols));
+        }
+        let keep = out.len().saturating_sub(self.scrollback_len);
+        self.scrollback = out.into_iter().skip(keep).collect();
+        self.rows = screen;
+        self.scrollback_offset = self.scrollback_offset.min(self.scrollback.len());
+        self.scrolled = base + top as u64;
+        let as_mark = |p: Option<(usize, usize)>| p.map(|(r, c)| (base + r as u64, u16::try_from(c).unwrap_or(0)));
+        self.prompt_mark = as_mark(now[2]);
+        self.typing_mark = as_mark(now[3]);
+
+        let old = self.size;
+        self.size = size;
+        self.pos = Pos { row: u16::try_from(new_cursor.0 - top).unwrap_or(0), col: u16::try_from(new_cursor.1).unwrap_or(0).min(size.cols) };
+        self.saved_pos = match now[1] {
+            Some((r, c)) if r >= top => Pos { row: u16::try_from(r - top).unwrap_or(0), col: u16::try_from(c).unwrap_or(0) },
+            _ => Pos::default(),
+        };
+        if self.scroll_bottom == old.rows - 1 {
+            self.scroll_bottom = size.rows - 1;
+        }
+        if self.scroll_bottom >= size.rows {
+            self.scroll_bottom = size.rows - 1;
+        }
+        if self.scroll_bottom < self.scroll_top {
+            self.scroll_top = 0;
+        }
+        self.row_clamp_top(false);
+        self.row_clamp_bottom(false);
+        if self.saved_pos.row > self.size.rows - 1 {
+            self.saved_pos.row = self.size.rows - 1;
+        }
+        if self.saved_pos.col > self.size.cols - 1 {
+            self.saved_pos.col = self.size.cols - 1;
+        }
+    }
+
+    /// The prompt marked where the cursor is (OSC 133): `A` its start,
+    /// `B` where what is typed begins; `C`, a command begun, lets both go.
+    /// Kept as rows counted from the first that ever was (`scrolled`), so
+    /// they stay on their rows as the screen scrolls. (Emaki addition.)
+    pub fn mark_prompt(&mut self, kind: u8) {
+        let at = (self.scrolled + u64::from(self.pos.row), self.pos.col);
+        match kind {
+            b'A' => {
+                self.prompt_mark = Some(at);
+                self.typing_mark = None;
+            }
+            b'B' => self.typing_mark = Some(at),
+            b'C' => {
+                self.prompt_mark = None;
+                self.typing_mark = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Where what is typed begins, by the prompt's mark: a line counted
+    /// from the screen's top row, less than 0 above it, and a column.
+    /// (Emaki addition.)
+    pub fn typing_start(&self) -> Option<(i64, u16)> {
+        self.typing_mark.map(|(abs, col)| (abs as i64 - self.scrolled as i64, col))
     }
 
     pub fn pos(&self) -> Pos {
@@ -563,6 +805,9 @@ impl Grid {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
             let removed = self.rows.remove(usize::from(self.scroll_top));
+            if !self.scroll_region_active() {
+                self.scrolled += 1;
+            }
             if self.scrollback_len > 0 && !self.scroll_region_active() {
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {

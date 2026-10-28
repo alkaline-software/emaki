@@ -7750,7 +7750,7 @@ impl Workbench {
         // The outline is a thinned ink, not the border color: that is the
         // row's own ground under the pointer, and the pill went with it.
         let chip = |word: &'static str| div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.muted_foreground.opacity(0.4)).text_size(px(10.5)).text_color(theme.muted_foreground).child(word);
-        let origin = b.origin.clone().unwrap_or_else(|| "origin".into());
+        let there = self.push_where();
         let mut list = v_flex().w_full();
         for (ix, (name, remote)) in rows.iter().enumerate() {
             let here = b.current.as_deref() == Some(name.as_str());
@@ -7797,7 +7797,7 @@ impl Workbench {
                             // Both in the accent, since it is the one row
                             // with something left to do.
                             let busy = self.branch_publishing.as_deref() == Some(name.as_str());
-                            let (to, tip) = (name.clone(), if busy { tf("Publishing to {origin}…", &[("origin", &origin)]) } else { tf("Publish this branch to {origin}", &[("origin", &origin)]) });
+                            let (to, tip) = (name.clone(), if busy { tf("Pushing to {where}…", &[("where", &there)]) } else { tf("Push to {where}", &[("where", &there)]) });
                             d.gap(px(4.)).child(div().flex_shrink_0().px(px(6.)).rounded_full().border_1().border_color(theme.primary.opacity(0.6)).text_size(px(10.5)).text_color(theme.primary).child(t("local"))).child(
                                 div()
                                     .id(("branch-publish", ix))
@@ -9823,7 +9823,7 @@ impl Workbench {
             // that refused.
             "branchnew" => self.branch_new_probe = Some(String::new()),
             t if t.starts_with("branchnew:") => self.branch_new_probe = Some(t["branchnew:".len()..].to_string()),
-            "gitgate" => self.open_gate(tf("{host} did not take this machine's sign-in, so Emaki could not publish {branch}. Nothing was changed.", &[("branch", &"v2")]), "could not read Username for 'https://github.com': terminal prompts disabled".into(), cx),
+            "gitgate" => self.open_gate(tf("{host} did not take this machine's sign-in, so Emaki could not push {branch}. Nothing was changed.", &[("branch", &"v2")]), "could not read Username for 'https://github.com': terminal prompts disabled".into(), cx),
             "branchfetch" => self.branch_fetch(true, cx),
             // Create Branch on that sheet, and Publish on the branch
             // checked out.

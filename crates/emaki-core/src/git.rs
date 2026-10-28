@@ -467,6 +467,9 @@ pub struct Branches {
     /// The repository's page on the web (`repo_url`), where its remote
     /// is on a host; read here so no button asks git on every draw.
     pub web: Option<String>,
+    /// Where a push goes, the same way: the remote's push address, which
+    /// is its address unless it was given one of its own.
+    pub push_web: Option<String>,
 }
 
 /// A name in pieces that order as a person reads it: a run of digits
@@ -568,6 +571,7 @@ pub fn branches(dir: &Path) -> Option<Branches> {
     }
     b.origin = remote(dir);
     b.web = b.origin.as_ref().and_then(|r| line(dir, &["remote", "get-url", r])).and_then(|url| web_of(&url));
+    b.push_web = b.origin.as_ref().and_then(|r| line(dir, &["remote", "get-url", "--push", r])).and_then(|url| web_of(&url));
     if b.origin.is_some() {
         b.unpublished = b.local.iter().filter(|l| !b.remote.contains(l)).cloned().collect();
     }

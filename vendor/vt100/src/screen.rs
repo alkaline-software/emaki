@@ -91,6 +91,33 @@ impl Screen {
             .set_size(crate::grid::Size { rows, cols });
     }
 
+    /// Resizes the terminal as one that reflows does (`Grid::reflow`):
+    /// the main screen's lines are wrapped anew at the new width, and the
+    /// alternate screen is a program's to draw again at the new size.
+    /// With `keep_typing`, the line the cursor is on keeps its rows: a
+    /// shell at its prompt draws that line again itself, from where its
+    /// rows began, and reflowed under it the line came out twice or a
+    /// line above it was lost. (Emaki addition.)
+    pub fn set_size_reflowed(&mut self, rows: u16, cols: u16, keep_typing: bool) {
+        self.grid.reflow(crate::grid::Size { rows, cols }, keep_typing);
+        self.alternate_grid
+            .set_size(crate::grid::Size { rows, cols });
+    }
+
+    /// The prompt's mark where the cursor is (OSC 133 `A`, `B`, `C`), on
+    /// the main screen. (Emaki addition.)
+    pub(crate) fn mark_prompt(&mut self, kind: u8) {
+        self.grid.mark_prompt(kind);
+    }
+
+    /// Where what is typed at the prompt begins, by its mark (OSC 133
+    /// `B`): a line counted from the screen's top row, less than 0 for
+    /// one that has left it, and a column. (Emaki addition.)
+    #[must_use]
+    pub fn typing_start(&self) -> Option<(i64, u16)> {
+        self.grid.typing_start()
+    }
+
     /// Returns the current size of the terminal.
     ///
     /// The return value will be (rows, cols).

@@ -1088,10 +1088,10 @@ impl Workbench {
             this.update(cx, |this, cx| {
                 this.branch_publishing = None;
                 match done {
-                    Ok(()) => this.notice = Some(Notice::said(tf("published {branch} to {origin}", &[("branch", &name), ("origin", &origin)]))),
+                    Ok(()) => this.notice = Some(Notice::said(tf("pushed {branch} to {origin}", &[("branch", &name), ("origin", &origin)]))),
                     Err(why) => {
-                        this.notice = Some(Notice::error(tf("{branch} was not published: {why}", &[("branch", &name), ("why", &why)])));
-                        this.net_failed(t("Not published"), tf("{host} did not take this machine's sign-in, so Emaki could not publish {branch}. Nothing was changed.", &[("branch", &name)]), why, cx);
+                        this.notice = Some(Notice::error(tf("{branch} was not pushed: {why}", &[("branch", &name), ("why", &why)])));
+                        this.net_failed(t("Not pushed"), tf("{host} did not take this machine's sign-in, so Emaki could not push {branch}. Nothing was changed.", &[("branch", &name)]), why, cx);
                     }
                 }
                 this.read_git(root, cx);
@@ -1102,8 +1102,18 @@ impl Workbench {
         .detach();
     }
 
+    /// Where a push goes, as short as says it: the remote's push address
+    /// as a page without its scheme (`github.com/acme/app`), else the
+    /// remote's name. "Publish"
+    /// read as making a private repository public; the push goes only
+    /// where the repository already is, and the hover says where.
+    pub(crate) fn push_where(&self) -> String {
+        let Some(b) = self.branches() else { return "origin".into() };
+        b.push_web.as_deref().map(|w| w.trim_start_matches("https://").to_string()).or_else(|| b.origin.clone()).unwrap_or_else(|| "origin".into())
+    }
+
     /// Under the files' head, on a branch no remote has: one line
-    /// saying so, and the button that publishes it.
+    /// saying so, and the button that pushes it, which names where.
     pub(crate) fn publish_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
         let b = self.branches()?;
@@ -1122,8 +1132,11 @@ impl Workbench {
                 .bg(theme.primary.opacity(0.07))
                 .text_size(px(11.5))
                 .child(Icon::default().path("icons/git-branch.svg").with_size(px(12.)).text_color(theme.link).flex_shrink_0())
-                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child(t("Not published yet")))
-                .child(small_pill("branch-publish", "icons/arrow-up.svg", if busy { t("Publishing…") } else { t("Publish") }, Press::Primary, self.branch_publishing.is_some(), &theme).when(self.branch_publishing.is_none(), |d| {
+                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground).child(t("Not pushed yet")))
+                .child(small_pill("branch-publish", "icons/arrow-up.svg", if busy { t("Pushing…") } else { t("Push") }, Press::Primary, self.branch_publishing.is_some(), &theme).managed_tooltip({
+                    let tip = tf("To {where}", &[("where", &self.push_where())]);
+                    move |window, cx| crate::workbench::tip(tip.clone(), window, cx)
+                }).when(self.branch_publishing.is_none(), |d| {
                     d.on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
                         this.branch_publish(cur.clone(), cx)

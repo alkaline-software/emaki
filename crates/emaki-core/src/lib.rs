@@ -34,6 +34,7 @@ pub mod paths;
 pub mod peer;
 pub mod process;
 pub mod pty;
+pub mod shell_marks;
 pub mod quarto;
 pub mod redact;
 pub mod render_md;

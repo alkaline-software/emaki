@@ -12,7 +12,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
@@ -180,6 +180,122 @@ impl Sel {
     }
 }
 
+/// What is being typed, as the composer's text is to its caret: the
+/// rows from where it begins to where it ends, every line of it, where
+/// the typing begins on the first (after the prompt), and which rows run
+/// on into the next as one paragraph. Rows are lines counted from the
+/// screen's top row. Claude Code's input is one paragraph: its rows
+/// carry no sign of which were wrapped.
+struct Typing {
+    first: i64,
+    rows: Vec<Vec<char>>,
+    start: (i64, u16),
+    runs: Vec<bool>,
+    boxed: bool,
+}
+
+impl Typing {
+    /// Whether a place of the screen is in what is being typed.
+    fn holds(&self, at: (i64, u16)) -> bool {
+        at.0 >= self.first && at.0 < self.first + self.rows.len() as i64 && at >= self.start
+    }
+
+    /// The paragraph a line is in, from its start to its end.
+    fn para(&self, line: i64) -> ((i64, u16), (i64, u16)) {
+        let at = (line - self.first).clamp(0, self.rows.len() as i64 - 1).max(0) as usize;
+        let (mut i, mut j) = (at, at);
+        while i > 0 && self.runs[i - 1] {
+            i -= 1;
+        }
+        while j + 1 < self.rows.len() && self.runs[j] {
+            j += 1;
+        }
+        let ends = |k: usize| (self.first + k as i64, self.rows.get(k).map_or(0, Vec::len) as u16);
+        ((ends(i).0, 0).max(self.start), ends(j))
+    }
+}
+
+/// Where the cursor is once the program has drawn it after what was
+/// sent: looked at until it has moved and holds still, or for long enough
+/// that it will not move.
+fn settled(pty: &Pty, was: (u16, u16)) -> (u16, u16) {
+    let began = Instant::now();
+    let (mut last, mut still) = (was, 0);
+    while began.elapsed() < Duration::from_millis(250) {
+        std::thread::sleep(Duration::from_millis(6));
+        let now = pty.cursor().unwrap_or(last);
+        if now != last {
+            (last, still) = (now, 0);
+        } else if now != was || began.elapsed() > Duration::from_millis(80) {
+            still += 1;
+            if still >= 3 {
+                break;
+            }
+        }
+    }
+    last
+}
+
+/// The cursor steered to a place with arrow keys, as the composer's caret
+/// goes to a click: sent, looked at, and sent again until it is there or
+/// goes no further. A letter is an arrow, but the program says where its
+/// letters are (a new line, a wrapped row, an indented one), so where the
+/// cursor goes is read, not worked out. Left and Right only: Up at the
+/// first line is the shell's history. Where it ended.
+fn steer(pty: &Pty, to: (u16, u16)) -> (u16, u16) {
+    let Some(mut at) = pty.cursor() else { return to };
+    let row_len = |r: u16| pty.rows_back(0).0.get(r as usize).map(|row| row_cells(row).len() as u16).unwrap_or(0);
+    for _ in 0..64 {
+        if at == to {
+            break;
+        }
+        let on = at < to;
+        // Along a row by its cells; to another row, past the end of this
+        // one, or back past its start.
+        let n = if at.0 == to.0 { at.1.abs_diff(to.1) } else if on { row_len(at.0).saturating_sub(at.1) + 1 } else { at.1 + 1 };
+        let key: &[u8] = match (on, pty.app_cursor()) {
+            (true, false) => b"\x1b[C",
+            (true, true) => b"\x1bOC",
+            (false, false) => b"\x1b[D",
+            (false, true) => b"\x1bOD",
+        };
+        pty.write(&key.repeat(n.max(1) as usize));
+        let now = settled(pty, at);
+        if now == at {
+            break;
+        }
+        at = now;
+    }
+    at
+}
+
+/// How many letters lie from the cursor to a place after it, counted
+/// by walking there with Right, in steps that stay inside the text: half
+/// the cells to it on its row (a letter takes one or two), else half of
+/// what is left of the cursor's row, and one at a time near it. Each step
+/// that moved is that many letters, a new line or a wrapped row's end
+/// one. The cursor ends there, or where the text ends before it.
+fn letters_to(pty: &Pty, to: (u16, u16)) -> usize {
+    let Some(mut at) = pty.cursor() else { return 0 };
+    let row_len = |r: u16| pty.rows_back(0).0.get(r as usize).map(|row| row_cells(row).len() as u16).unwrap_or(0);
+    let mut letters = 0;
+    for _ in 0..2000 {
+        if at >= to {
+            break;
+        }
+        let n = if at.0 == to.0 { (to.1 - at.1) / 2 } else { row_len(at.0).saturating_sub(at.1) / 2 }.max(1);
+        let key: &[u8] = if pty.app_cursor() { b"\x1bOC" } else { b"\x1b[C" };
+        pty.write(&key.repeat(n as usize));
+        let now = settled(pty, at);
+        if now == at || now > to && n > 1 {
+            break;
+        }
+        letters += n as usize;
+        at = now;
+    }
+    letters
+}
+
 /// What one terminal on the screen keeps of its own: the shell terminal
 /// at the right and the agent terminal in the CLI layout are one each,
 /// and both can show at once.
@@ -197,6 +313,9 @@ pub(crate) struct TermView {
     wheel: f32,
     /// A cell's width, as last drawn.
     cell_w: f32,
+    /// What was typed while the cursor was being steered (`term_edit`),
+    /// sent once it is there; None while nothing is.
+    edit: Arc<Mutex<Option<Vec<u8>>>>,
     /// The button held on a program that hears the mouse, and the cell
     /// last told to it.
     mouse: Option<u8>,
@@ -217,8 +336,6 @@ pub(crate) struct TermView {
     focused: bool,
     /// The link under the pointer.
     link: Option<Link>,
-    /// A press with ⌥ that has not moved: let go, it takes the cursor there.
-    alt: bool,
     /// The cell the pointer was last over, column and row.
     hover: (u16, u16),
     /// A drag that selects, held past the screen's top (less than 0) or
@@ -241,6 +358,7 @@ impl TermView {
             back: 0,
             wheel: 0.,
             cell_w: 0.,
+            edit: Arc::new(Mutex::new(None)),
             mouse: None,
             mouse_cell: (0, 0),
             sel: None,
@@ -251,7 +369,6 @@ impl TermView {
             blink_on: true,
             focused: false,
             link: None,
-            alt: false,
             hover: (u16::MAX, u16::MAX),
             edge: 0.,
             edge_col: 0,
@@ -313,18 +430,27 @@ pub(crate) struct CardLook {
     pub(crate) cell_w: f32,
 }
 
-/// How many cells of a row stand before its `chars`-th character.
+/// How many columns of a row stand before its `chars`-th character, by
+/// the screen model's own cells.
 pub(crate) fn cells_before(row: &[pty::Span], chars: usize) -> usize {
-    row.iter().flat_map(|s| s.text.chars()).take(chars).map(|c| if wide(c) { 2 } else { 1 }).sum()
+    let (mut seen, mut cols) = (0usize, 0usize);
+    for (cell, w) in row.iter().flat_map(|s| s.each_cell()) {
+        seen += cell.chars().count();
+        if seen > chars {
+            break;
+        }
+        cols += w as usize;
+    }
+    cols
 }
 
-/// A row as its cells hold it: a character a cell, and a wide one's
-/// second cell a NUL.
+/// A row as its cells hold it: a cell's first character, and a wide
+/// one's second column a NUL.
 fn row_cells(row: &[pty::Span]) -> Vec<char> {
     let mut out = Vec::new();
-    for c in row.iter().flat_map(|s| s.text.chars()) {
-        out.push(c);
-        if wide(c) {
+    for (cell, w) in row.iter().flat_map(|s| s.each_cell()) {
+        out.push(cell.chars().next().unwrap_or(' '));
+        if w > 1 {
             out.push('\0');
         }
     }
@@ -611,6 +737,20 @@ impl Workbench {
                     self.shell_pick(id, cx);
                 }
             }
+            // termput:<text> types without Return; termcursor prints where
+            // the cursor is, the row it is on and where the cells are.
+            _ if step.starts_with("termput:") => {
+                if let Some(pty) = self.term_pty_of(agent) {
+                    pty.write(step["termput:".len()..].as_bytes());
+                }
+            }
+            "termcursor" => {
+                if let Some(pty) = self.term_pty_of(agent) {
+                    let row = pty.cursor().map(|(r, _)| r as usize).and_then(|r| pty.rows_back(0).0.get(r).map(|s| s.iter().map(|x| x.text.as_str()).collect::<String>()));
+                    let v = self.view(agent);
+                    eprintln!("emaki: term cursor {:?} row {:?} bounds {:?} pad {:?} cell_w {} line_h {} edits {} typing {:?}", pty.cursor(), row, v.bounds.get(), v.pad, v.cell_w, self.term_line_h(), pty.edits_its_line(), pty.typing_start());
+                }
+            }
             _ => {
                 if let Some(pty) = step.strip_prefix("termtype:").and_then(|_| self.term_pty_of(agent)) {
                     // Return comes a moment after the words: Codex's
@@ -775,7 +915,9 @@ impl Workbench {
     pub(crate) fn shell_new(&mut self, at: Option<usize>, cx: &mut Context<Self>) {
         let Some(r) = self.term_owner() else { return };
         let cwd = if Self::folder_exists(&r) { r.cwd.clone() } else { emaki_core::paths::home().to_string_lossy().to_string() };
-        let made = Pty::spawn(&pty::shell_argv(), &cwd, Arc::new(|| {}));
+        // A shell whose prompt marks where what is typed begins.
+        let (argv, env) = emaki_core::shell_marks::shell_command();
+        let made = Pty::spawn_with(&argv, &env, &cwd, Arc::new(|| {})).inspect(|p| p.reflow_on_resize());
         let set = self.shells.entry(r.session_id.clone()).or_default();
         set.begun = true;
         match made {
@@ -1079,8 +1221,8 @@ impl Workbench {
     /// mouse is told, unless Shift is held, which keeps the press for
     /// the panel as terminals do. Otherwise the left button begins a
     /// selection (by the letter, and by the word or the row on a double
-    /// or triple click), opens the link under it with ⌘, and with ⌥ at
-    /// a prompt takes the cursor to the column pressed.
+    /// or triple click; a click that selects nothing puts the cursor
+    /// there, `term_mouse_up`), and opens the link under it with ⌘.
     fn term_mouse_down(&mut self, agent: bool, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let Some(pty) = self.term_pty_of(agent) else { return };
         let (col, row) = self.term_cell(agent, e.position, &pty);
@@ -1143,24 +1285,165 @@ impl Workbench {
             self.view_mut(agent).selecting = true;
             return;
         }
-        // ⌥ and a drag takes the same columns of every row; ⌥ and a
-        // click at a prompt takes the cursor there, when the button is
-        // let go where it was pressed.
-        self.view_mut(agent).alt = e.modifiers.alt && want.is_none() && self.view_mut(agent).back == 0 && !pty.alt_screen();
+        // ⌥ and a drag takes the same columns of every row.
         self.view_mut(agent).sel = Some(Sel { anchor: (line, col), head: (line, col), unit: e.click_count.clamp(1, 3), block: e.modifiers.alt });
         self.view_mut(agent).selecting = true;
     }
 
-    /// The cursor is taken along its row to a column, with arrow keys.
-    fn term_cursor_to(&self, pty: &Pty, row: u16, col: u16) {
-        let Some((_, at)) = pty.cursor().filter(|(r, _)| *r == row) else { return };
-        let key: &[u8] = match (col > at, pty.app_cursor()) {
-            (true, false) => b"\x1b[C",
-            (true, true) => b"\x1bOC",
-            (false, false) => b"\x1b[D",
-            (false, true) => b"\x1bOD",
+    /// What is being typed, when the program reading the keys edits its
+    /// own line (`Pty::edits_its_line`): not where a program has the
+    /// screen to itself, a command takes whole lines or none, or the
+    /// screen is scrolled back. It begins where the prompt marked it
+    /// (`shell_marks`) and runs to the last row written after it, every
+    /// line of it; where nothing marked it, it is what stands between
+    /// the rules over and under the cursor (Claude Code's input), else
+    /// the cursor's line and the rows it wraps on.
+    fn term_typing(&self, agent: bool, pty: &Pty) -> Option<Typing> {
+        if !pty.alive() || self.view(agent).back != 0 || !pty.edits_its_line() {
+            return None;
+        }
+        // A program with the screen to itself (an editor, a pager) has its
+        // own keys for all of this, but for an input between two rules,
+        // as Claude Code draws one there.
+        let own_screen = pty.alt_screen();
+        let (row, _) = pty.cursor()?;
+        let (rows, cols) = pty.size();
+        let cur = row as i64;
+        let cells = |l: i64| pty.lines(l, l).1.first().map(|(r, _)| row_cells(r)).unwrap_or_default();
+        let blank = |l: i64| cells(l).iter().all(|c| c.is_whitespace() || *c == '\0');
+        let rule = |l: i64| cells(l).iter().filter(|c| **c == '─').count() >= 8;
+        // A row runs on into the next when its text did, not when it
+        // wraps for the blanks it was filled with (zsh's mark after output
+        // with no newline): as the screen model reflows it.
+        let wraps = |l: i64| pty.lines(l, l).1.first().is_some_and(|(r, w)| *w && row_cells(r).len() + 1 >= cols as usize);
+        let foot = |mut l: i64| {
+            while l + 1 < rows as i64 && !blank(l + 1) && !rule(l + 1) {
+                l += 1;
+            }
+            l
         };
-        pty.write(&key.repeat(col.abs_diff(at) as usize));
+        let mut boxed = false;
+        let (first, last, start) = match pty.typing_start().filter(|(l, _)| *l <= cur && !own_screen) {
+            Some((l, c)) => (l, foot(cur), (l, c)),
+            None => {
+                let mut top = cur;
+                while top > -(pty.kept_back() as i64) && !blank(top - 1) && !rule(top - 1) {
+                    top -= 1;
+                }
+                if top > -(pty.kept_back() as i64) && rule(top - 1) && rule(foot(cur) + 1) {
+                    boxed = true;
+                    (top, foot(cur), (top, 0))
+                } else if own_screen {
+                    return None;
+                } else {
+                    let (mut first, mut last) = (cur, cur);
+                    while first > 0 && wraps(first - 1) {
+                        first -= 1;
+                    }
+                    while last < rows as i64 - 1 && wraps(last) {
+                        last += 1;
+                    }
+                    (first, last, (first, 0))
+                }
+            }
+        };
+        let (first, lines) = pty.lines(first, last);
+        let rows: Vec<Vec<char>> = lines.iter().map(|(r, _)| row_cells(r)).collect();
+        let runs = (0..rows.len() as i64).map(|i| boxed || wraps(first + i)).collect();
+        Some(Typing { first, rows, start, runs, boxed })
+    }
+
+    /// Something done to what is being typed by steering the cursor, off
+    /// the window's thread: what is typed meanwhile waits and is sent
+    /// once it is done, after `then`.
+    fn term_edit(&mut self, agent: bool, pty: Arc<Pty>, job: impl FnOnce(&Pty) + Send + 'static, then: Vec<u8>) {
+        let queue = Arc::clone(&self.view(agent).edit);
+        {
+            let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+            if q.is_some() {
+                // One already under way: this one follows it.
+                q.get_or_insert_with(Vec::new).extend(then);
+                return;
+            }
+            *q = Some(Vec::new());
+        }
+        std::thread::spawn(move || {
+            job(&pty);
+            pty.write(&then);
+            let waiting = queue.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+            pty.write(&waiting);
+        });
+    }
+
+    /// Bytes for the terminal, or for after the cursor is where it is
+    /// being steered to.
+    fn term_send(&self, agent: bool, pty: &Pty, bytes: &[u8]) {
+        let mut q = self.view(agent).edit.lock().unwrap_or_else(|e| e.into_inner());
+        match q.as_mut() {
+            Some(waiting) => waiting.extend_from_slice(bytes),
+            None => pty.write(bytes),
+        }
+    }
+
+    /// The cursor taken to a place in what is being typed, as the
+    /// composer's caret goes to a click.
+    fn term_caret_to(&mut self, agent: bool, pty: Arc<Pty>, to: (u16, u16)) {
+        self.term_edit(agent, pty, move |p| {
+            steer(p, to);
+        }, Vec::new());
+    }
+
+    /// What is selected of what is being typed goes, as Backspace takes a
+    /// selection in the composer, and `then` is typed in its place: a
+    /// whole paragraph by the program's own keys for one (^E, ^U), as
+    /// Kaku's ⌘A and Backspace, and part of one by steering the cursor to
+    /// its start and counting the letters to its end. What the program
+    /// will not delete (its prompt) stays. A selection over more than one
+    /// paragraph is only copied: a terminal's line editors know a line at
+    /// a time. Whether it went.
+    fn term_delete_sel(&mut self, agent: bool, then: Vec<u8>) -> bool {
+        let (Some(sel), Some(pty)) = (self.view(agent).sel, self.term_pty_of(agent)) else { return false };
+        let Some(typing) = self.term_typing(agent, &pty) else { return false };
+        let spans = sel.spans(typing.first, &typing.rows);
+        let (Some(i), Some(j)) = (spans.iter().position(Option::is_some), spans.iter().rposition(Option::is_some)) else { return false };
+        let a = (typing.first + i as i64, spans[i].unwrap().0 as u16).max(typing.start);
+        let b = (typing.first + j as i64, (spans[j].unwrap().1.min(typing.rows[j].len().max(1))) as u16);
+        let (from, to) = typing.para(a.0);
+        if a >= b || !typing.holds(b) || typing.para(b.0) != (from, to) {
+            return false;
+        }
+        let on_screen = |(l, c): (i64, u16)| (l.max(0) as u16, c);
+        let here = pty.cursor().is_some_and(|(r, _)| (from.0..=to.0).contains(&(r as i64)));
+        let (a, b) = (on_screen(a), on_screen(b));
+        self.view_mut(agent).sel = None;
+        if a <= on_screen(from) && b >= on_screen(to) {
+            // Claude Code's ^U takes a row: each, from the input's end,
+            // and the Backspace that joins it to the one before.
+            let rows = typing.rows.len();
+            let boxed = typing.boxed;
+            self.term_edit(agent, pty, move |p| {
+                if boxed {
+                    steer(p, b);
+                    p.write(&b"\x15\x7f".repeat(rows));
+                } else {
+                    if !here {
+                        steer(p, a);
+                    }
+                    p.write(b"\x05\x15");
+                }
+            }, then);
+            return true;
+        }
+        // Counted from its start to its end, then taken back by that many:
+        // a program may move what it shows as the text changes (Claude
+        // Code's input grows and shrinks from its foot), and a place on
+        // the screen aimed at while deleting was another letter by then.
+        self.term_edit(agent, pty, move |p| {
+            steer(p, a);
+            let n = letters_to(p, b);
+            p.write(&b"\x7f".repeat(n));
+        }, then);
+        true
     }
 
     /// The link the cell is part of, when it is part of one.
@@ -1195,7 +1478,11 @@ impl Workbench {
         if said.is_empty() {
             return cx.notify();
         }
-        pty.paste(&said.join(" "));
+        // A selection in what is being typed is what the paste replaces.
+        let words = pty.paste_bytes(&said.join(" "));
+        if !self.term_delete_sel(agent, words.clone()) {
+            self.term_send(agent, &pty, &words);
+        }
         self.view_mut(agent).back = 0;
         self.view_mut(agent).sel = None;
         cx.notify();
@@ -1225,13 +1512,26 @@ impl Workbench {
     /// made is copied, as it is in a terminal.
     fn term_mouse_up(&mut self, agent: bool, e: &MouseUpEvent, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.view_mut(agent).selecting) {
-            let alt = std::mem::take(&mut self.view_mut(agent).alt);
             // With copying on selection off, what is selected stays for ⌘C.
             let kept = !self.cfg.terminal.copy_on_select && !self.term_sel_text(agent).is_empty();
             if !kept && !self.term_copy(agent, cx) {
-                let at = self.view_mut(agent).sel.take().map(|s| s.anchor);
-                if let (true, Some((line, col)), Some(pty)) = (alt, at, self.term_pty_of(agent)) {
-                    self.term_cursor_to(&pty, line.max(0) as u16, col);
+                // A click that selected nothing puts the cursor where it
+                // was, in the line being typed, as it does in the
+                // composer. A double click's word is a selection.
+                let at = self.view_mut(agent).sel.take().filter(|s| s.unit == 1).map(|s| s.anchor.0);
+                if let (Some(line), Some(pty)) = (at, self.term_pty_of(agent)) {
+                    // To the gap between two letters nearest the pointer,
+                    // as a caret goes.
+                    let b = self.view(agent).bounds.get();
+                    let x = (f32::from(e.position.x - b.left()) - self.view(agent).pad.0) / self.view(agent).cell_w.max(1.);
+                    let col = x.round().clamp(0., pty.size().1 as f32) as u16;
+                    if let Some(typing) = self.term_typing(agent, &pty) {
+                        let to = (line, col).max(typing.start);
+                        if typing.holds(to) {
+                            self.term_caret_to(agent, pty, (to.0.max(0) as u16, to.1));
+                            self.view_mut(agent).blink.1 = Instant::now();
+                        }
+                    }
                 }
             }
             cx.notify();
@@ -1368,10 +1668,23 @@ impl Workbench {
         true
     }
 
-    /// ⌘A: all the terminal holds, what has left the screen with it, up
-    /// to the end of the last line with anything on it.
+    /// ⌘A: at a prompt, the paragraph the cursor is in, as Kaku has it;
+    /// else, or with nothing typed at all, all the terminal holds, what has left
+    /// the screen with it, up to the end of the last line with anything
+    /// on it.
     fn term_select_all(&mut self, agent: bool) {
         let Some(pty) = self.term_pty_of(agent) else { return };
+        if let (Some(typing), Some((row, _))) = (self.term_typing(agent, &pty), pty.cursor()) {
+            let (from, to) = typing.para(row as i64);
+            if from < to {
+                self.view_mut(agent).sel = Some(Sel { anchor: from, head: to, unit: 0, block: false });
+            }
+            // An empty line among others has nothing to select.
+            let typed = typing.rows.iter().zip(typing.first..).any(|(r, l)| r.iter().zip(0..).any(|(c, i)| (l, i) >= typing.start && !c.is_whitespace() && *c != '\0'));
+            if from < to || typed {
+                return;
+            }
+        }
         let (rows, _) = pty.rows_back(0);
         let last = rows.iter().rposition(|r| r.iter().any(|s| !s.text.trim().is_empty())).unwrap_or(0);
         let end = rows.get(last).map(|r| row_cells(r).len()).unwrap_or(0) as u16;
@@ -1659,6 +1972,16 @@ impl Workbench {
             cx.notify();
             return;
         }
+        // With part of the line being typed selected, Backspace and Delete,
+        // with ⌥ or ⌘ too, take the selection, as they do in the composer,
+        // and a letter typed takes its place.
+        let typed = k.key_char.clone().filter(|c| !k.modifiers.platform && !k.modifiers.control && !c.is_empty() && !c.chars().any(char::is_control));
+        if self.view(agent).sel.is_some() && (matches!(k.key.as_str(), "backspace" | "delete") || typed.is_some()) && self.term_delete_sel(agent, typed.map(String::into_bytes).unwrap_or_default()) {
+            self.term_unhover(agent);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if k.modifiers.platform {
             // ⌘ with the keys of a line is the line's start, its end, all
             // of it before the cursor or after it, and a new line that
@@ -1678,6 +2001,17 @@ impl Workbench {
                     true
                 }
                 "c" => self.term_copy(agent, cx),
+                // ⌘X cuts what is selected of the line being typed.
+                "x" => {
+                    let cut = self.term_copy(agent, cx);
+                    self.term_delete_sel(agent, Vec::new()) || cut
+                }
+                // ⌘Z takes back the last change to the line, as the
+                // shell's own undo (Ctrl-_).
+                "z" if !k.modifiers.shift => {
+                    pty.write(b"\x1f");
+                    true
+                }
                 "a" if !k.modifiers.shift => {
                     self.term_select_all(agent);
                     true
@@ -1722,7 +2056,7 @@ impl Workbench {
         if pty.app_cursor() && bytes.len() == 3 && bytes.starts_with(b"\x1b[") && matches!(bytes[2], b'A'..=b'D' | b'H' | b'F') {
             bytes[1] = b'O';
         }
-        pty.write(&bytes);
+        self.term_send(agent, &pty, &bytes);
         self.view_mut(agent).back = 0;
         self.view_mut(agent).sel = None;
         self.term_unhover(agent);
@@ -1856,6 +2190,9 @@ impl Workbench {
         if let Ok(pty) = &shown {
             if !agent && !leaving && room.height > px(0.) && pty.size() != size {
                 pty.resize(size.0, size.1);
+                // The rows reflow under a selection, which no longer
+                // names what it did.
+                self.view_mut(agent).sel = None;
             }
         }
 
@@ -2479,6 +2816,14 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
         // Whether a cell is selected, and whether it is part of the link
         // under the pointer: either changes how its letter is drawn.
         let marks = |col: usize| (sel.is_some_and(|(f, t)| (f..t).contains(&col)), linked.is_some_and(|(f, t)| (f..t).contains(&col)));
+        // The letters, as runs of plain ones each set at the column it
+        // starts at. A cell the face may draw wider or narrower than its
+        // columns (an emoji, a symbol from a fallback face) stands by
+        // itself at its own: laid out by the face's advances, one row of
+        // text drifted off the columns the cursor, the grounds and the
+        // selection are drawn at.
+        let mut pieces: Vec<(usize, String, Vec<(std::ops::Range<usize>, HighlightStyle)>)> = Vec::new();
+        let mut piece_col = 0usize;
         let mut text = String::new();
         let mut looks = Vec::new();
         // What is drawn under the letters, a cell at a time: each
@@ -2539,7 +2884,7 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
             };
             let from = col;
             let mut run = (text.len(), marks(col));
-            for c in s.text.chars() {
+            for (cell, w) in s.each_cell() {
                 let now = marks(col);
                 if now != run.1 {
                     if run.0 < text.len() {
@@ -2547,7 +2892,11 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
                     }
                     run = (text.len(), now);
                 }
+                if text.is_empty() {
+                    piece_col = col;
+                }
                 let x0 = col as f32 * cell_w;
+                let c = cell.chars().next().unwrap_or(' ');
                 if let Some((shapes, strength)) = block_shape(c) {
                     for (x, y, bw, bh) in shapes {
                         under.push(div().absolute().left(px(x0 + x * cell_w)).top(px(y * lh)).w(px(bw * cell_w + 0.5)).h(px(bh * lh)).bg(shape.opacity(strength)).into_any_element());
@@ -2556,10 +2905,20 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
                 } else if let Some(parts) = line_shape(c) {
                     under.extend(line_parts(parts, x0, cell_w, lh, shape));
                     text.push(' ');
+                } else if cell.len() == 1 {
+                    text.push_str(cell);
                 } else {
-                    text.push(c);
+                    if run.0 < text.len() {
+                        looks.push((run.0..text.len(), look(run.1)));
+                    }
+                    if !text.is_empty() {
+                        pieces.push((piece_col, std::mem::take(&mut text), std::mem::take(&mut looks)));
+                    }
+                    let shown = cell_face(cell, w);
+                    pieces.push((col, shown.to_string(), vec![(0..shown.len(), look(now))]));
+                    run = (0, now);
                 }
-                col += if wide(c) { 2 } else { 1 };
+                col += w as usize;
             }
             if run.0 < text.len() {
                 looks.push((run.0..text.len(), look(run.1)));
@@ -2571,12 +2930,25 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
         if let Some((from, to)) = sel {
             grounds.push(div().absolute().left(px(from as f32 * cell_w)).top_0().w(px((to - from) as f32 * cell_w)).h(px(lh)).bg(hsla(k.sel.0).opacity(k.sel.1)).into_any_element());
         }
-        if text.is_empty() {
-            text.push(' ');
+        if !text.is_empty() {
+            pieces.push((piece_col, text, looks));
         }
-        lines.push(div().h(px(lh)).relative().flex_shrink_0().whitespace_nowrap().children(grounds).children(under).child(div().relative().child(StyledText::new(text).with_highlights(looks))).into_any_element());
+        let letters = pieces.into_iter().map(|(at, text, looks)| div().absolute().top_0().left(px(at as f32 * cell_w)).child(StyledText::new(text).with_highlights(looks)));
+        lines.push(div().h(px(lh)).relative().flex_shrink_0().whitespace_nowrap().children(grounds).children(under).children(letters).into_any_element());
     }
     lines
+}
+
+/// What a cell draws: a character the emoji selector (U+FE0F) follows
+/// in a cell of one column is drawn in its text form. The screen model
+/// and the shell count it as one column, and its emoji is two wide:
+/// drawn so, ☁️ covered the space after it.
+fn cell_face(cell: &str, w: u8) -> std::borrow::Cow<'_, str> {
+    if w == 1 && cell.contains('\u{fe0f}') {
+        cell.replace('\u{fe0f}', "").into()
+    } else {
+        cell.into()
+    }
 }
 
 /// A line-drawing character (U+2500 on) as the arms it has from the
@@ -2644,11 +3016,6 @@ fn line_parts((l, r, u, d, thick, round): (bool, bool, bool, bool, f32, bool), x
     out
 }
 
-/// Whether a character takes two cells, as East Asian wide ones do.
-fn wide(c: char) -> bool {
-    matches!(c as u32, 0x1100..=0x115f | 0x2e80..=0x303e | 0x3041..=0x33ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xa000..=0xa4cf | 0xac00..=0xd7a3 | 0xf900..=0xfaff | 0xfe30..=0xfe4f | 0xff00..=0xff60 | 0xffe0..=0xffe6 | 0x1f300..=0x1f64f | 0x1f900..=0x1f9ff | 0x20000..=0x3fffd)
-}
-
 /// A block character (U+2580 to U+259F) as the parts of its cell it
 /// fills, each (left, top, width, height) in cells, and how strong the
 /// ink is. A font draws these to its own letter height, which is less
@@ -2691,7 +3058,16 @@ fn block_shape(c: char) -> Option<(Vec<(f32, f32, f32, f32)>, f32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{link_at, Target};
+    use super::{cell_face, link_at, Target};
+
+    #[test]
+    fn an_emoji_in_one_column_is_drawn_as_text() {
+        assert_eq!(cell_face("\u{2601}\u{fe0f}", 1), "\u{2601}");
+        assert_eq!(cell_face("1\u{fe0f}\u{20e3}", 1), "1\u{20e3}");
+        // Two columns have room for the emoji.
+        assert_eq!(cell_face("\u{2764}\u{fe0f}", 2), "\u{2764}\u{fe0f}");
+        assert_eq!(cell_face("\u{1f680}", 2), "\u{1f680}");
+    }
 
     #[test]
     fn a_link_after_a_quote_mark_of_more_than_a_byte() {

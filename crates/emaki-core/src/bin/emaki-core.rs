@@ -403,6 +403,7 @@ fn main() {
             println!("suggestion: {:?}", emaki_core::driver::suggestion_on_screen(&styled));
             println!("prompt: {:?}", emaki_core::driver::prompt_on_screen(&styled));
             println!("dialog: {:?}", emaki_core::driver::dialog_on_screen(&styled));
+            println!("cursor: {:?} edits its line: {}", pty.cursor(), pty.edits_its_line());
             pty.kill();
         }
         "drive" => {

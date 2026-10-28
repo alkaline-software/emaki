@@ -3050,24 +3050,6 @@
     "de": "Nicht installiert; richte ihn auf der Seite „Agents“ ein",
     "es": "No instalado; configúralo en la página Agents"
   },
-  "Not published": {
-    "zh-Hans": "未发布",
-    "zh-Hant": "未發佈",
-    "ja": "公開しませんでした",
-    "ko": "게시하지 않음",
-    "fr": "Non publiée",
-    "de": "Nicht veröffentlicht",
-    "es": "No se publicó"
-  },
-  "Not published yet": {
-    "zh-Hans": "尚未发布",
-    "zh-Hant": "尚未發佈",
-    "ja": "未公開",
-    "ko": "아직 게시 안 됨",
-    "fr": "Pas encore publiée",
-    "de": "Noch nicht veröffentlicht",
-    "es": "Aún sin publicar"
-  },
   "Not pulled": {
     "zh-Hans": "未拉取",
     "zh-Hant": "未拉取",
@@ -3634,42 +3616,6 @@
     "fr": "Projets",
     "de": "Projekte",
     "es": "Proyectos"
-  },
-  "Publish": {
-    "zh-Hans": "发布",
-    "zh-Hant": "發佈",
-    "ja": "公開",
-    "ko": "게시",
-    "fr": "Publier",
-    "de": "Veröffentlichen",
-    "es": "Publicar"
-  },
-  "Publish this branch to {origin}": {
-    "zh-Hans": "将此分支发布到 {origin}",
-    "zh-Hant": "將此分支發佈到 {origin}",
-    "ja": "このブランチを {origin} に公開",
-    "ko": "이 브랜치를 {origin}에 게시",
-    "fr": "Publier cette branche sur {origin}",
-    "de": "Diesen Branch auf {origin} veröffentlichen",
-    "es": "Publicar esta rama en {origin}"
-  },
-  "Publishing to {origin}…": {
-    "zh-Hans": "正在发布到 {origin}…",
-    "zh-Hant": "正在發佈到 {origin}…",
-    "ja": "{origin} に公開中…",
-    "ko": "{origin}에 게시하는 중…",
-    "fr": "Publication sur {origin}…",
-    "de": "Wird auf {origin} veröffentlicht …",
-    "es": "Publicando en {origin}…"
-  },
-  "Publishing…": {
-    "zh-Hans": "正在发布…",
-    "zh-Hant": "正在發佈…",
-    "ja": "公開中…",
-    "ko": "게시 중…",
-    "fr": "Publication…",
-    "de": "Veröffentliche …",
-    "es": "Publicando…"
   },
   "Pull": {
     "zh-Hans": "拉取",
@@ -6551,15 +6497,6 @@
     "de": "plant",
     "es": "planificando"
   },
-  "published {branch} to {origin}": {
-    "zh-Hans": "已将 {branch} 发布到 {origin}",
-    "zh-Hant": "已將 {branch} 發佈到 {origin}",
-    "ja": "{branch} を {origin} に公開しました",
-    "ko": "{branch}을(를) {origin}에 게시했습니다",
-    "fr": "{branch} publiée sur {origin}",
-    "de": "{branch} auf {origin} veröffentlicht",
-    "es": "se publicó {branch} en {origin}"
-  },
   "pulled {branch} from {origin}": {
     "zh-Hans": "已从 {origin} 拉取 {branch}",
     "zh-Hant": "已從 {origin} 拉取 {branch}",
@@ -7433,15 +7370,6 @@
     "de": "{branch} wurde nicht gelöscht: {why}",
     "es": "{branch} no se eliminó: {why}"
   },
-  "{branch} was not published: {why}": {
-    "zh-Hans": "未发布 {branch}：{why}",
-    "zh-Hant": "未發佈 {branch}：{why}",
-    "ja": "{branch} を公開できませんでした：{why}",
-    "ko": "{branch}을(를) 게시하지 못했습니다: {why}",
-    "fr": "{branch} n’a pas été publiée : {why}",
-    "de": "{branch} wurde nicht veröffentlicht: {why}",
-    "es": "{branch} no se publicó: {why}"
-  },
   "{commits} to pull": {
     "zh-Hans": "{commits}待拉取",
     "zh-Hant": "{commits}待拉取",
@@ -7504,15 +7432,6 @@
     "fr": "{host} n’a pas accepté la connexion de cette machine, donc Emaki n’a pas pu récupérer. Rien n’a été modifié.",
     "de": "{host} hat die Anmeldung dieses Rechners nicht angenommen, daher konnte Emaki nicht abrufen. Nichts wurde geändert.",
     "es": "{host} no aceptó el inicio de sesión de este equipo, así que Emaki no pudo recuperar. No se cambió nada."
-  },
-  "{host} did not take this machine's sign-in, so Emaki could not publish {branch}. Nothing was changed.": {
-    "zh-Hans": "{host} 未接受这台电脑的登录信息，因此 Emaki 无法发布 {branch}。没有做任何更改。",
-    "zh-Hant": "{host} 未接受這台電腦的登入資訊，因此 Emaki 無法發佈 {branch}。沒有做任何變更。",
-    "ja": "{host} がこのマシンのサインインを受け付けなかったため、Emaki は {branch} を公開できませんでした。何も変更していません。",
-    "ko": "{host}이(가) 이 컴퓨터의 로그인을 받아들이지 않아 Emaki가 {branch}을(를) 게시하지 못했습니다. 아무것도 바뀌지 않았습니다.",
-    "fr": "{host} n’a pas accepté la connexion de cette machine, donc Emaki n’a pas pu publier {branch}. Rien n’a été modifié.",
-    "de": "{host} hat die Anmeldung dieses Rechners nicht angenommen, daher konnte Emaki {branch} nicht veröffentlichen. Nichts wurde geändert.",
-    "es": "{host} no aceptó el inicio de sesión de este equipo, así que Emaki no pudo publicar {branch}. No se cambió nada."
   },
   "{host} did not take this machine's sign-in, so Emaki could not push {branch}. Nothing was changed.": {
     "zh-Hans": "{host} 未接受这台电脑的登录信息，因此 Emaki 无法推送 {branch}。没有做任何更改。",
@@ -9169,5 +9088,50 @@
     "fr": "Emaki",
     "de": "Emaki",
     "es": "Emaki"
+  },
+  "Not pushed yet": {
+    "zh-Hans": "尚未推送",
+    "zh-Hant": "尚未推送",
+    "ja": "まだプッシュしていません",
+    "ko": "아직 푸시 안 됨",
+    "fr": "Pas encore envoyée",
+    "de": "Noch nicht gepusht",
+    "es": "Aún sin insertar"
+  },
+  "To {where}": {
+    "zh-Hans": "推送到 {where}",
+    "zh-Hant": "推送到 {where}",
+    "ja": "{where} へ",
+    "ko": "{where}(으)로",
+    "fr": "Vers {where}",
+    "de": "Nach {where}",
+    "es": "A {where}"
+  },
+  "Push to {where}": {
+    "zh-Hans": "推送到 {where}",
+    "zh-Hant": "推送到 {where}",
+    "ja": "{where} にプッシュ",
+    "ko": "{where}에 푸시",
+    "fr": "Envoyer vers {where}",
+    "de": "Nach {where} pushen",
+    "es": "Insertar en {where}"
+  },
+  "Pushing to {where}…": {
+    "zh-Hans": "正在推送到 {where}…",
+    "zh-Hant": "正在推送到 {where}…",
+    "ja": "{where} にプッシュ中…",
+    "ko": "{where}에 푸시하는 중…",
+    "fr": "Envoi vers {where}…",
+    "de": "Pushe nach {where} …",
+    "es": "Insertando en {where}…"
+  },
+  "{branch} was not pushed: {why}": {
+    "zh-Hans": "未推送 {branch}：{why}",
+    "zh-Hant": "未推送 {branch}：{why}",
+    "ja": "{branch} をプッシュできませんでした：{why}",
+    "ko": "{branch}을(를) 푸시하지 못했습니다: {why}",
+    "fr": "{branch} n’a pas été envoyée : {why}",
+    "de": "{branch} wurde nicht gepusht: {why}",
+    "es": "{branch} no se insertó: {why}"
   }
 }

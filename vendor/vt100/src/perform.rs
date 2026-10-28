@@ -207,6 +207,11 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             [b"2", s] => {
                 self.callbacks.set_window_title(&mut self.screen, s);
             }
+            // The prompt's marks (OSC 133), as Emaki's shells send them.
+            // (Emaki addition.)
+            [b"133", kind, ..] if !kind.is_empty() => {
+                self.screen.mark_prompt(kind[0]);
+            }
             [b"52", ty, data] => {
                 match (
                     ty.iter().all(|c| CLIPBOARD_SELECTOR.contains(c)),
