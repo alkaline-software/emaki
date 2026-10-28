@@ -2,6 +2,18 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.4.1
+
+1. **Shell commands**: A message that starts with "!" runs as a shell command in the session's folder, and the conversation shows it with its output.
+2. **Editing in the terminal**: In the shell terminal a click moves the cursor in what you are typing, ⌘A selects the paragraph you are typing, and Backspace or a letter replaces a selection inside it, as in the composer.
+3. **Terminal text**: The cursor sits right after the last letter on lines with emoji or prompt symbols, and an emoji no longer covers the character after it.
+4. **Terminal resizing**: Widening the shell terminal joins lines that wrapped back into one, as other terminals do.
+5. **Composer**: In a narrow window the mode, model and effort pills fold into round buttons, so the send button stays inside the composer, and their lists open beside them.
+6. **Status dots**: A session shows blue while it works or runs something in the background, green for 30 minutes after it finishes, then gray, and Keep the display on holds only while one is blue.
+7. **Files panel**: The files panel stays open or closed across launches.
+8. **Branches**: The publish button is now Push, and pointing at it shows where it pushes to.
+9. **Fixes**: Fixed a crash in the editor after paging through non-ASCII text, a crash in the terminal on resize with wide characters, and freezes while reading large files, running git or checking spelling; the folded sidebar's edge and tooltips are fixed, and closing and reopening the window no longer starts its background work a second time.
+
 ## v0.4.0
 
 1. **CLI layout**: A seam in the margin at the right of the conversation switches a session between the rendered conversation and the agent's own terminal, which takes the conversation's place in the same column (⌘⇧L).
