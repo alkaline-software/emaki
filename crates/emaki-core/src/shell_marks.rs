@@ -161,7 +161,10 @@ mod tests {
 
     /// Each file a shell reads is one it can read: a slip in one would
     /// break every shell the panel opens. Checked by each shell that is
-    /// here (`-n`, read without running).
+    /// here (`-n`, read without running). Not on Windows, which starts
+    /// PowerShell: the `bash` a Windows runner finds fails on them with
+    /// nothing said.
+    #[cfg(unix)]
     #[test]
     fn each_shell_reads_its_files() {
         let dir = std::env::temp_dir().join(format!("emaki-shell-marks-{}", std::process::id()));
