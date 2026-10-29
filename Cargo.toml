@@ -81,6 +81,13 @@ gpui-base = { path = "vendor/gpui-component/crates/base" }
 gpui-component-macros = { path = "vendor/gpui-component/crates/macros" }
 gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
 
+# gpui itself, from the revision Cargo.lock pins, built from vendor/gpui so
+# its line wrapper can be changed (`vendor/gpui/UPSTREAM.md`). The patch
+# covers every crate that takes gpui from the zed git source, the vendored
+# toolkit included, so there is still one copy.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "vendor/gpui/crates/gpui" }
+
 # Stylo's derive, with one line changed so it builds beside gpui
 # (`vendor/stylo_derive/UPSTREAM.md`). Blitz, which draws an HTML file,
 # is built on Stylo.

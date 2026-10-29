@@ -494,7 +494,9 @@ pub struct DialogOption {
 /// ✔ Submit →"), the question, the numbered choices each with its lines
 /// of description under it, and at the foot "Enter to select · … · Esc
 /// to cancel"; an approval has its command over "Do you want to
-/// proceed?" and "Esc to cancel · Tab to amend". A digit picks a choice
+/// proceed?" and "Esc to cancel · Tab to amend"; the question a cold
+/// resume asks (2.1.312, "Resume this conversation?") ends "Enter to
+/// confirm · Esc to resume". A digit picks a choice
 /// (on a question that takes several it ticks it, and Tab moves on), so
 /// the number is what a click in the window sends. None when the foot
 /// of the screen is the prompt, not a dialog.
@@ -583,7 +585,7 @@ pub fn dialog_on_screen(text: &str) -> Option<Dialog> {
             _ => l,
         };
         let t = l.trim();
-        if t.is_empty() || is_rule(l) || t.chars().all(|c| c == '╌') || t.contains("Esc to cancel") {
+        if t.is_empty() || is_rule(l) || t.chars().all(|c| c == '╌') || t.contains("Esc to ") {
             continue;
         }
         if d.options.is_empty() && d.body.is_empty() && (t.contains('☐') || t.contains('☒')) {

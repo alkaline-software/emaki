@@ -8488,8 +8488,15 @@ impl Workbench {
             return;
         }
         // What a typed command opens (a picker, or the question
-        // `/model fable` asks) is the terminal's to draw, on its card.
-        let picking = self.come_back.as_ref().is_some_and(|cb| cb.typed.is_some());
+        // `/model fable` asks) is the terminal's to draw, on its card:
+        // `watch_terminal` marks the command's own wait (`picking`), the
+        // registry saying `waiting` since it was typed. A wait that was
+        // there before the command (the question a cold resume asks,
+        // 2.1.312, which the command's typing is stuck behind) is read
+        // here as any other. Gated on the typing alone, the reader took
+        // the question's card down the moment a command was typed and
+        // showed nothing until the typing had waited five seconds.
+        let picking = self.come_back.as_ref().is_some_and(|cb| cb.typed.is_some() && cb.picking);
         // A wait the registry says, or one it does not: our own
         // terminal with no record yet (a folder to trust is asked
         // before Claude Code writes one, 2.1.296) or with one that says

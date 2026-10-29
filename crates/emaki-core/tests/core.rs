@@ -735,6 +735,12 @@ fn dialog_on_screen_is_the_question_and_its_choices() {
     let d = dialog_on_screen(&screen).unwrap();
     assert_eq!(d.body, vec!["Bash command", "touch x", "Do you want to proceed?"]);
     assert_eq!(d.options[1].detail, "from this project");
+    // The question a cold resume asks (2.1.312): its foot names Esc as
+    // resume, not cancel, and is no choice's detail.
+    let screen = format!("✻ Cogitated for 6m 44s · done 7:07 PM\n\n{rule}\n  Resume this conversation?\n\n  This conversation has been inactive for 1h 45m and is 777.1k tokens long.\n\n  ❯ 1. Resume\n    2. Start a new conversation  Claude can look this one up if you refer to it later\n\n  Enter to confirm · Esc to resume\n");
+    let d = dialog_on_screen(&screen).unwrap();
+    assert_eq!(d.body[0], "Resume this conversation?");
+    assert_eq!(d.options.iter().map(|o| (o.n, o.detail.as_str(), o.cursor)).collect::<Vec<_>>(), vec![(1, "", true), (2, "", false)]);
     // The prompt is not a dialog.
     assert_eq!(dialog_on_screen(&format!("⏺ 1. one\n  2. two\n{rule}\n❯ \n{rule}\n  Context 16%\n  ⏵⏵ auto mode on\n")), None);
     // A named session has a rule under the dialog with its name on it,

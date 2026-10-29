@@ -399,8 +399,19 @@ fn main() {
             let mut up = false;
             let mut sent_at = std::time::Instant::now();
             let mut keys = keys.into_iter();
+            // How still the screen is: the longest stretch with no output,
+            // and how many 100 ms looks found output in the last 10 s.
+            let (mut longest, mut bursts, mut looks) = (std::time::Duration::ZERO, 0u32, 0u32);
             while started.elapsed().as_secs_f64() < secs && pty.alive() {
                 std::thread::sleep(std::time::Duration::from_millis(100));
+                let q = pty.quiet_for();
+                longest = longest.max(q);
+                if started.elapsed().as_secs_f64() > secs - 10.0 {
+                    looks += 1;
+                    if q < std::time::Duration::from_millis(100) {
+                        bursts += 1;
+                    }
+                }
                 let peer = emaki_core::peer::registry_all().into_iter().find(|p| p.pid == pty.pid);
                 let mode = emaki_core::driver::mode_on_screen(&pty.text(), &modes);
                 let line = format!("registry {:?} mode {:?}", peer.as_ref().map(|p| p.status.clone()), mode);
@@ -424,6 +435,7 @@ fn main() {
             println!("prompt: {:?}", emaki_core::driver::prompt_on_screen(&styled));
             println!("dialog: {:?}", emaki_core::driver::dialog_on_screen(&styled));
             println!("cursor: {:?} edits its line: {}", pty.cursor(), pty.edits_its_line());
+            println!("quiet now: {:?} longest: {:?} output in {bursts} of the last {looks} looks", pty.quiet_for(), longest);
             pty.kill();
         }
         "drive" => {
