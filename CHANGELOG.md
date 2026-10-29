@@ -2,6 +2,16 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.4.2
+
+1. **Outline summaries**: A switch of its own in Settings, Model calls turns off the outline's labels and summaries while keeping the outline, and each agent has a model to choose for them, from the agent's own list.
+2. **Outline labels**: Each round is labeled by what came of it, not by repeating what was asked.
+3. **Session summary**: Summarize session, under the outline, writes a summary in bullets and heads the outline's rounds with sections; Update brings it up to date from the new rounds alone, and Hide puts it away.
+4. **Sticky days**: In the outline, the next day pushes the one pinned at the top up and out as it comes.
+5. **Comparing changes**: The lines can be selected and copied, and a right click expands the whole file or collapses it again.
+6. **Bullets**: Lists in the conversation and in files show a thin line in place of a dot.
+7. **Fixes**: Find in the file's editor goes straight to a single match in a long wrapped line, and the window can no longer be made too short to show the outline.
+
 ## v0.4.1
 
 1. **Shell commands**: A message that starts with "!" runs as a shell command in the session's folder, and the conversation shows it with its output.
