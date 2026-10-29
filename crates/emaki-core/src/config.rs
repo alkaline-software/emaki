@@ -95,10 +95,13 @@ pub struct AppConfig {
     /// The languages a save formats, by `format::LANGS`' keys, while
     /// `format_on_save` is on.
     pub format_langs: Vec<String>,
-    /// The outline panel lists a conversation's messages, a long one by a
-    /// label a small model writes on the person's account. Off, the panel
-    /// says so and asks nothing.
+    /// The outline panel lists a conversation's rounds. Off, the panel
+    /// says so.
     pub outline: bool,
+    /// A small model on the person's account labels the outline's rounds
+    /// by what came of each, and summarizes a session when asked. Off, no
+    /// call is made and nothing it wrote before is shown.
+    pub outline_summaries: bool,
     /// Three or more tool calls in a row fold into one row of the
     /// conversation that opens; off, each call is a card of its own.
     pub fold_runs: bool,
@@ -126,7 +129,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
+        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
     }
 }
 
@@ -265,7 +268,12 @@ pub struct Explain {
     /// The switch in Settings, Conversation: off, no call is explained by
     /// a model, and tool cards have no Explain button.
     pub enabled: bool,
+    /// The model a Claude Code session's explanations and outline are
+    /// written by. Empty, or the old default, is the agent's fast one
+    /// (`explain::helper_model`).
     pub model: String,
+    /// The same for a Codex session.
+    pub codex_model: String,
     /// `off`, `permission` (calls waiting on a card) or `all` (every new
     /// call in the conversation showing).
     pub scope: String,
@@ -280,7 +288,8 @@ impl Default for Explain {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: "claude-haiku-4-5".into(),
+            model: String::new(),
+            codex_model: String::new(),
             scope: "permission".into(),
             min_chars: 60,
             timeout_s: 25,
@@ -289,11 +298,27 @@ impl Default for Explain {
     }
 }
 
+/// Claude Code's model for the window's own asking when none is chosen,
+/// while Claude Code still lists it.
+pub const FAST_CLAUDE: &str = "claude-haiku-4-5";
+
 impl Explain {
     /// Whether any call may reach a model at all.
     pub fn active(&self) -> bool {
         self.enabled && self.scope != "off"
     }
+
+    /// The model chosen for `agent`'s sessions, or empty for the agent's
+    /// fast one. `FAST_CLAUDE` was written into every settings file as the
+    /// default before there was a choice, so it reads as none chosen.
+    pub fn chosen(&self, agent: crate::model::AgentId) -> &str {
+        match agent {
+            crate::model::AgentId::Codex => self.codex_model.as_str(),
+            _ if self.model == FAST_CLAUDE => "",
+            _ => self.model.as_str(),
+        }
+    }
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

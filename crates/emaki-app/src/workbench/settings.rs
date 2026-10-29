@@ -312,6 +312,7 @@ impl Workbench {
             ("text", "size") => self.text_rows(cx),
             ("text", _) => self.fonts_rows(cx),
             ("conversation", _) => self.conversation_rows(cx),
+            ("models", _) => self.model_call_rows(cx),
             ("panels", _) => self.panels_rows(window, cx),
             ("files", _) => self.files_rows(cx),
             ("terminal", _) => self.terminal_rows(cx),
@@ -375,6 +376,7 @@ impl Workbench {
             ("text", "size") => ("title-text", "page-text-size"),
             ("text", _) => ("title-text", "page-text-fonts"),
             ("conversation", _) => ("title-conversation", "page-conversation"),
+            ("models", _) => ("title-models", "page-models"),
             ("panels", _) => ("title-panels", "page-panels"),
             ("files", _) => ("title-files", "page-files"),
             ("terminal", _) => ("title-terminal", "page-terminal"),
@@ -857,23 +859,34 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// Conversation: how its tool calls are drawn, what is typed (the
-    /// composer's rows), and the two helpers a small model writes for,
-    /// each a call on the person's account, so each can be turned off.
+    /// Conversation: how its tool calls are drawn and whether it has an
+    /// outline, then what is typed (the composer's rows).
     fn conversation_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let fold = self.switch("fold-runs", self.cfg.app.fold_runs, Rc::new(|this, on, _, cx| this.set_fold_runs(on, cx)), cx);
-        let mut groups = vec![group(Some(t("Agent")), None, vec![line(t("Fold runs of tool calls"), Some(div().child(t("Three or more in a row show as one row that opens.")).into_any_element()), fold, &theme)], &theme)];
-        groups.extend(self.composer_rows(cx));
-        let explain = self.switch("explain-on", self.cfg.explain.enabled, Rc::new(|this, on, _, cx| this.set_explain(on, cx)), cx);
         let outline = self.switch("outline-on", self.cfg.app.outline, Rc::new(|this, on, _, cx| this.set_outline(on, cx)), cx);
-        groups.push(group(
-            Some(t("On-demand model calls")),
-            None,
-            vec![line(t("Explain tool calls"), None, explain, &theme), line(t("Outline panel"), None, outline, &theme)],
-            &theme,
-        ));
+        let mut groups = vec![group(Some(t("Agent")), None, vec![line(t("Fold runs of tool calls"), Some(div().child(t("Three or more in a row show as one row that opens.")).into_any_element()), fold, &theme), line(t("Outline panel"), None, outline, &theme)], &theme)];
+        groups.extend(self.composer_rows(cx));
         groups
+    }
+
+    /// Model calls: what the window asks a small model for, each a call
+    /// on the person's account, so each can be turned off, and which
+    /// model each agent's sessions are asked of.
+    fn model_call_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let explain = self.switch("explain-on", self.cfg.explain.enabled, Rc::new(|this, on, _, cx| this.set_explain(on, cx)), cx);
+        let summaries = self.switch("summaries-on", self.cfg.app.outline_summaries, Rc::new(|this, on, _, cx| this.set_summaries(on, cx)), cx);
+        let model = |agent: AgentId, what: PickFor, id: &'static str| line(agent.display_name(), None, self.pick_field(what, id, "icons/box.svg", PillText::plain(self.helper_model_name(agent)), cx), &theme);
+        vec![
+            group(None, None, vec![line(t("Explain tool calls"), None, explain, &theme), line(t("Outline summaries"), None, summaries, &theme)], &theme),
+            group(
+                Some(t("Model")),
+                None,
+                vec![model(AgentId::ClaudeCode, PickFor::HelperClaude, "helper-claude"), model(AgentId::Codex, PickFor::HelperCodex, "helper-codex")],
+                &theme,
+            ),
+        ]
     }
 
     /// Panels: the side of the conversation each side panel stands at,

@@ -170,11 +170,11 @@ pub fn key_for(tool_name: &str, input: &Map<String, Value>) -> String {
 /// getting these wrong is how the app ends up recursively logging its own
 /// explainer.
 pub fn build_argv(cfg: &Explain, tool_name: &str, input: &Map<String, Value>) -> Vec<String> {
-    let model = if cfg.model.is_empty() { "claude-haiku-4-5" } else { cfg.model.as_str() };
+    let model = helper_model(cfg, crate::model::AgentId::ClaudeCode).unwrap_or_else(|| crate::config::FAST_CLAUDE.to_string());
     let mut argv: Vec<String> = vec![
         "-p".into(),
         "--model".into(),
-        model.into(),
+        model,
         // No user settings, no MCP servers, no tools: this must be a single
         // cheap completion and nothing else.
         "--setting-sources".into(),
@@ -278,12 +278,35 @@ pub fn helper(agent: crate::model::AgentId) -> Option<Helper> {
     }
 }
 
-/// Codex's light model, by what Codex says of its own: the first it
-/// calls fast, of the list it last gave (`cache/options.json`). None
-/// leaves the choice to Codex, which is its default model.
-pub fn codex_light_model() -> Option<String> {
-    let options = crate::options::Options::cached(crate::model::AgentId::Codex);
-    light_of(options.models.iter().map(|m| (m.key.as_str(), m.detail.as_str())))
+/// The model `agent`'s helper calls run on: the one chosen in Settings
+/// while the agent's own list, as it last gave it (`cache/options.json`),
+/// still has it, else the agent's fast one (`fast_model`). A model the
+/// agent no longer offers, retired or not on the person's plan, is never
+/// asked for. None leaves the choice to the agent.
+pub fn helper_model(cfg: &Explain, agent: crate::model::AgentId) -> Option<String> {
+    let options = crate::options::Options::cached(agent);
+    let chosen = cfg.chosen(agent);
+    if !chosen.is_empty() && (options.models.is_empty() || options.model(chosen).is_some()) {
+        return Some(chosen.to_string());
+    }
+    fast_model(agent, &options)
+}
+
+/// An agent's fast model, by its own list. Claude Code's is `FAST_CLAUDE`
+/// while the list has it (by its id, which the list gives with a date
+/// after it), else the first the list calls fast, else its `haiku`.
+/// Codex's is the first its list calls fast, since its names change with
+/// every release; with no list yet, none, which is Codex's default.
+pub fn fast_model(agent: crate::model::AgentId, options: &crate::options::Options) -> Option<String> {
+    let fast = light_of(options.models.iter().map(|m| (m.key.as_str(), m.detail.as_str())));
+    match agent {
+        crate::model::AgentId::Codex => fast,
+        _ => {
+            let kept = crate::config::FAST_CLAUDE;
+            let listed = options.models.is_empty() || options.models.iter().any(|m| m.key == kept || m.resolved.starts_with(kept));
+            Some(if listed { kept.to_string() } else { fast.unwrap_or_else(|| "haiku".to_string()) })
+        }
+    }
 }
 
 /// The first of those models whose own description says it is fast.
@@ -313,14 +336,15 @@ pub fn codex_argv(argv: &[String], model: Option<&str>, out: &std::path::Path) -
     cmd
 }
 
-/// `run_child`, asked of Codex. It is slower to start than Claude Code,
-/// so it gets a minute at the least.
-fn run_codex(argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
+/// `run_child`, asked of Codex, of `model`, or its own default with
+/// none. It is slower to start than Claude Code, so it gets a minute at
+/// the least.
+fn run_codex(model: Option<String>, argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let codex = crate::codex::codex_binary()?;
     let out = workdir().join(format!("codex-{}-{}.txt", std::process::id(), SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let mut cmd = crate::process::command(codex);
-    cmd.args(codex_argv(argv, codex_light_model().as_deref(), &out)).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(codex_argv(argv, model.as_deref(), &out)).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     cmd.env_clear();
     cmd.envs(driver::child_env());
     cmd.env("EMAKI_DISABLE", "1");
@@ -347,12 +371,13 @@ fn run_codex(argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option
 /// printed, or nothing when it failed or took longer than `timeout`. The
 /// child is isolated as every explainer child is: our scratch folder, no
 /// `CLAUDE*` variable of a parent session, `EMAKI_DISABLE` set, and
-/// whatever `env` adds.
-pub fn run_child(agent: crate::model::AgentId, argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
+/// whatever `env` adds. Claude Code's model is in `argv`; Codex's is
+/// `helper_model`'s.
+pub fn run_child(cfg: &Explain, agent: crate::model::AgentId, argv: &[String], env: &[(&str, &str)], timeout: Duration) -> Option<String> {
     // The small model of the session's own agent (`helper`).
     let claude = match helper(agent)? {
         Helper::Claude => driver::claude_binary()?,
-        Helper::Codex => return run_codex(argv, env, timeout),
+        Helper::Codex => return run_codex(helper_model(cfg, crate::model::AgentId::Codex), argv, env, timeout),
     };
     let mut cmd = crate::process::command(claude);
     cmd.args(argv).current_dir(workdir()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -534,7 +559,7 @@ impl Explainer {
     fn ask_model(&self, agent: crate::model::AgentId, tool_name: &str, input: &Map<String, Value>) -> String {
         let cfg = self.cfg();
         let argv = build_argv(&cfg, tool_name, input);
-        run_child(agent, &argv, &[], Duration::from_secs(cfg.timeout_s.max(1))).map(|out| clean(&out)).unwrap_or_default()
+        run_child(&cfg, agent, &argv, &[], Duration::from_secs(cfg.timeout_s.max(1))).map(|out| clean(&out)).unwrap_or_default()
     }
 
     /// Fill in every tool call in a session that has a cached explanation.

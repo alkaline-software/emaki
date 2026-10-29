@@ -2511,14 +2511,16 @@ fn outline_says_what_was_asked_and_what_came_of_it() {
     assert_eq!((o[0].round, o[0].title.as_str(), o[0].gist.as_str(), o[0].tools), (0, "fix the tabs please they blink", "Done", 1));
     assert_eq!((o[1].title.as_str(), o[1].gist.as_str()), ("and the sidebar?", "1 tool call"));
     assert_eq!(emaki_core::outline::first_line("```\ncode\n```\n---\n- see [the note](https://x.y) now"), "see the note now");
-    // A short message is its own line and is not put to a model; a long
-    // one is, under a name made from its words; a command never is.
-    assert!(!o[0].wants_summary() && o[0].key.is_empty());
+    // A round with a reply is put to a model with the agent's last words,
+    // under a name made from both; a short message with none is its own
+    // line; a long one is put to a model alone; a command never is.
+    assert!(o[0].wants_summary() && o[0].reply.starts_with("## Done The tabs no longer blink") && o[0].key == emaki_core::outline::key_for(&o[0].prompt, &o[0].reply));
+    assert!(!o[1].wants_summary() && o[1].key.is_empty());
     let long = "please look at the sidebar again, the two cards scroll together and I would like each to scroll by itself\nAttached file: /x/a.png";
     let rows = vec![user(long, "2026-10-06T03:00:00.000Z"), user("/compact", "2026-10-06T03:01:00.000Z")];
     let s = build(BuildInput { rows: &rows, transcript_path: "/x/s2.jsonl", cwd_hint: "", subagents: None, nested: false });
     let o = emaki_core::outline::of(&s);
-    assert!(o[0].wants_summary() && !o[0].prompt.contains("Attached file") && o[0].key == emaki_core::outline::key_for(&o[0].prompt));
+    assert!(o[0].wants_summary() && !o[0].prompt.contains("Attached file") && o[0].reply.is_empty() && o[0].key == emaki_core::outline::key_for(&o[0].prompt, ""));
     assert!(!o[1].wants_summary());
     // The child's reply: a line a message behind its number.
     let got = emaki_core::outline::parse_summaries("1: Fix sidebar scrolling\n\n2. \"Rename the tabs.\"", 3);
@@ -2530,9 +2532,39 @@ fn outline_says_what_was_asked_and_what_came_of_it() {
     assert_eq!(emaki_core::outline::parse_summaries("1: Fix it\n2: **If you have code to review**, I can help with that", 2), vec![None, None]);
     assert_eq!(emaki_core::outline::parse_summaries("1: Fix it\n9: out of range", 2), vec![None, None]);
     assert_eq!(emaki_core::outline::parse_summaries("Please run /login", 2), vec![None, None]);
-    let argv = emaki_core::outline::summary_argv("", &["one", "two"]);
+    let argv = emaki_core::outline::summary_argv("claude-haiku-4-5", &[("one", "did it"), ("two", "")]);
     assert!(argv.contains(&"claude-haiku-4-5".to_string()) && argv.contains(&"--strict-mcp-config".to_string()));
-    assert!(argv.last().unwrap().contains("<message n=\"2\">two</message>"));
+    assert!(argv.last().unwrap().contains("<round n=\"1\"><asked>one</asked><reply>did it</reply></round>\n<round n=\"2\"><asked>two</asked></round>"));
+}
+
+#[test]
+fn an_overview_is_a_summary_and_sections_built_on_the_last() {
+    use emaki_core::outline::{parse_overview, Overview};
+    // The first: every section, each starting at a round it was given.
+    let first = parse_overview("Summary:\n- Fixed the find bar.\n- Then made summaries a choice.\n1: Find scroll fix\n4: Settings for summaries", None, 0, 6).unwrap();
+    assert_eq!(first, Overview { covered: 6, summary: "Fixed the find bar.\nThen made summaries a choice.".into(), sections: vec![(0, "Find scroll fix".into()), (3, "Settings for summaries".into())], hidden: false });
+    // An update keeps the sections before and adds those among the new
+    // rounds; one that carries on the last adds none.
+    let next = parse_overview("Summary: All of it, again.\n9: Release", Some(&first), 6, 10).unwrap();
+    assert_eq!((next.covered, next.sections.len(), next.sections[2].clone()), (10, 3, (8, "Release".to_string())));
+    let same = parse_overview("Summary: More of the same.", Some(&first), 6, 8).unwrap();
+    assert_eq!((same.covered, same.sections), (8, first.sections.clone()));
+    // One put away stays put away when brought up to date, and one shown, shown.
+    let hidden = Overview { hidden: true, ..first.clone() };
+    assert!(parse_overview("Summary: More.", Some(&hidden), 6, 8).unwrap().hidden);
+    assert!(!same.hidden);
+    // A section from before said again is left as it was; one past the
+    // new rounds, out of order, too long, or no summary at all, and
+    // nothing is taken.
+    assert_eq!(parse_overview("Summary: x\nRound 4: Renamed\nRound 9: Release", Some(&first), 6, 10).unwrap().sections, next.sections);
+    assert_eq!(parse_overview("Summary: x\n11: Past the end", Some(&first), 6, 10), None);
+    assert_eq!(parse_overview("Summary: x\n3: B\n2: A", None, 0, 5), None);
+    assert_eq!(parse_overview("Summary: x\n1: a title that runs on for far more words than any heading has", None, 0, 5), None);
+    assert_eq!(parse_overview("1: Find scroll fix", None, 0, 5), None);
+    assert_eq!(parse_overview("Please run /login", None, 0, 5), None);
+    // Bullets a line; a paragraph from before the bullets, a sentence each.
+    assert_eq!(emaki_core::outline::summary_bullets(&first.summary), vec!["Fixed the find bar.", "Then made summaries a choice."]);
+    assert_eq!(emaki_core::outline::summary_bullets("Fixed v0.4.2. Then 1.5x faster. Done"), vec!["Fixed v0.4.2.", "Then 1.5x faster.", "Done"]);
 }
 
 #[test]
@@ -4708,4 +4740,61 @@ fn quarto_cross_references_and_citations_resolve() {
     assert!(out.contains("![Figure 1: A [map](m.html) after [@lee]](a.png){#fig-a}"), "{out}");
     // A converted document's headings lose the ids it was given.
     assert_eq!(quarto::bare_headings("# One {#sec-one}\n\n## Two {#sec-two .unnumbered}\n\n```\n# kept {#x}\n```\nText {#y}\n"), "# One\n\n## Two\n\n```\n# kept {#x}\n```\nText {#y}\n");
+}
+
+#[test]
+fn a_helper_runs_on_a_model_its_agent_still_lists() {
+    use emaki_core::config::{Explain, FAST_CLAUDE};
+    use emaki_core::explain::helper_model;
+    use emaki_core::model::AgentId;
+    use emaki_core::options::{ModelChoice, Options};
+    let (_home, _g) = isolated();
+    let model = |key: &str, detail: &str| ModelChoice { key: key.into(), label: key.into(), detail: detail.into(), resolved: key.into(), efforts: vec![] };
+    let chose = |claude: &str, codex: &str| Explain { model: claude.into(), codex_model: codex.into(), ..Explain::default() };
+    // No list heard yet: the fast one Emaki knows, and what was chosen.
+    assert_eq!(helper_model(&Explain::default(), AgentId::ClaudeCode).as_deref(), Some(FAST_CLAUDE));
+    assert_eq!(helper_model(&chose("opus", ""), AgentId::ClaudeCode).as_deref(), Some("opus"));
+    assert_eq!(helper_model(&Explain::default(), AgentId::Codex), None);
+    // A list that no longer has Haiku 4.5: its own fast one, and a model
+    // chosen once and gone from it falls back to that.
+    Options { models: vec![model("opus", "For complex work"), model("haiku", "Fastest for quick answers")], ..Options::default() }.remember(AgentId::ClaudeCode);
+    assert_eq!(helper_model(&Explain::default(), AgentId::ClaudeCode).as_deref(), Some("haiku"));
+    assert_eq!(helper_model(&chose(FAST_CLAUDE, ""), AgentId::ClaudeCode).as_deref(), Some("haiku"));
+    assert_eq!(helper_model(&chose("opus", ""), AgentId::ClaudeCode).as_deref(), Some("opus"));
+    assert_eq!(helper_model(&chose("claude-opus-3", ""), AgentId::ClaudeCode).as_deref(), Some("haiku"));
+    // One that still has it, listed by its dated id: Haiku 4.5 stays.
+    Options { models: vec![ModelChoice { resolved: format!("{FAST_CLAUDE}-20251001"), ..model(&format!("{FAST_CLAUDE}-20251001"), "Fastest") }, model("haiku", "Fastest")], ..Options::default() }.remember(AgentId::ClaudeCode);
+    assert_eq!(helper_model(&Explain::default(), AgentId::ClaudeCode).as_deref(), Some(FAST_CLAUDE));
+    // Codex: the first it calls fast, and a chosen one while listed.
+    Options { models: vec![model("gpt-big", "Most capable"), model("gpt-small", "Fast and affordable")], ..Options::default() }.remember(AgentId::Codex);
+    assert_eq!(helper_model(&Explain::default(), AgentId::Codex).as_deref(), Some("gpt-small"));
+    assert_eq!(helper_model(&chose("", "gpt-big"), AgentId::Codex).as_deref(), Some("gpt-big"));
+    assert_eq!(helper_model(&chose("", "gpt-retired"), AgentId::Codex).as_deref(), Some("gpt-small"));
+}
+
+#[test]
+fn a_comparison_expanded_has_every_line() {
+    use emaki_core::git::{self, Row, State};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&root).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap().status.success());
+    let lines = |changed: Option<usize>| (1..=30).map(|n| if Some(n) == changed { "changed".to_string() } else { format!("line {n}") }).collect::<Vec<_>>().join("\n") + "\n";
+    git(&["init", "-q"]);
+    std::fs::write(root.join("f.txt"), lines(None)).unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "one"]);
+    std::fs::write(root.join("f.txt"), lines(Some(15))).unwrap();
+    // As it is, the stretch around the change under its head.
+    let d = git::diff(&root, &root.join("f.txt"), State::Modified);
+    assert!(matches!(d.rows[0], Row::Hunk(_)) && d.rows.len() < 10, "{:?}", d.rows);
+    // Expanded, every line and no head, the changed words where they are.
+    let w = git::diff_in(&root, &root.join("f.txt"), State::Modified, true);
+    assert_eq!(w.rows.len(), 30);
+    assert!(!w.rows.iter().any(|r| matches!(r, Row::Hunk(_))));
+    assert_eq!(w.rows[0], Row::Same { old: 1, new: 1, text: "line 1".into() });
+    assert_eq!(w.rows[14], Row::Changed { left: Some((15, "line 15".into())), right: Some((15, "changed".into())) });
+    assert!(w.words.contains_key(&14), "{:?}", w.words);
+    git(&["commit", "-q", "-am", "two"]);
+    let sha = git::log(&root, 1)[0].sha.clone();
+    assert_eq!(git::commit_diff_in(&root, &sha, "f.txt", true).rows, w.rows);
 }

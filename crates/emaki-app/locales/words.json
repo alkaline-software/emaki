@@ -3239,15 +3239,6 @@
     "de": "Auf dem Mac kommt git mit Apples Befehlszeilenprogrammen. Im Terminal ausführen:",
     "es": "En Mac, git viene con las herramientas de línea de comandos de Apple. Ejecuta en el terminal:"
   },
-  "On-demand model calls": {
-    "zh-Hans": "按需 model 调用",
-    "zh-Hant": "按需 model 呼叫",
-    "ja": "オンデマンドの model 呼び出し",
-    "ko": "온디맨드 model 호출",
-    "fr": "Appels au model à la demande",
-    "de": "Model-Aufrufe auf Abruf",
-    "es": "Llamadas al model bajo demanda"
-  },
   "Once a day. Nothing is installed without you.": {
     "zh-Hans": "每天一次。未经你同意不会安装任何东西。",
     "zh-Hant": "每天一次。未經你同意不會安裝任何東西。",
@@ -9133,5 +9124,86 @@
     "fr": "{branch} n’a pas été envoyée : {why}",
     "de": "{branch} wurde nicht gepusht: {why}",
     "es": "{branch} no se insertó: {why}"
+  },
+  "Could not summarize this session.": {
+    "zh-Hans": "无法总结这个会话。",
+    "zh-Hant": "無法總結這個工作階段。",
+    "ja": "このセッションを要約できませんでした。",
+    "ko": "이 세션을 요약하지 못했습니다.",
+    "fr": "Impossible de résumer cette session.",
+    "de": "Diese Sitzung konnte nicht zusammengefasst werden.",
+    "es": "No se pudo resumir esta sesión."
+  },
+  "Model calls": {
+    "zh-Hans": "Model 调用",
+    "zh-Hant": "Model 呼叫",
+    "ja": "Model の呼び出し",
+    "ko": "Model 호출",
+    "fr": "Appels au model",
+    "de": "Model-Aufrufe",
+    "es": "Llamadas al model"
+  },
+  "Outline summaries": {
+    "zh-Hans": "大纲摘要",
+    "zh-Hant": "大綱摘要",
+    "ja": "アウトラインの要約",
+    "ko": "아웃라인 요약",
+    "fr": "Résumés du plan",
+    "de": "Zusammenfassungen in der Gliederung",
+    "es": "Resúmenes del esquema"
+  },
+  "Summarize session": {
+    "zh-Hans": "总结会话",
+    "zh-Hant": "總結工作階段",
+    "ja": "セッションを要約",
+    "ko": "세션 요약",
+    "fr": "Résumer la session",
+    "de": "Sitzung zusammenfassen",
+    "es": "Resumir la sesión"
+  },
+  "Show summary": {
+    "zh-Hans": "显示摘要",
+    "zh-Hant": "顯示摘要",
+    "ja": "要約を表示",
+    "ko": "요약 보기",
+    "fr": "Afficher le résumé",
+    "de": "Zusammenfassung zeigen",
+    "es": "Mostrar el resumen"
+  },
+  "Hide": {
+    "zh-Hans": "隐藏",
+    "zh-Hant": "隱藏",
+    "ja": "隠す",
+    "ko": "숨기기",
+    "fr": "Masquer",
+    "de": "Ausblenden",
+    "es": "Ocultar"
+  },
+  "Expand Whole File": {
+    "zh-Hans": "展开整个文件",
+    "zh-Hant": "展開整個檔案",
+    "ja": "ファイル全体を展開",
+    "ko": "파일 전체 펼치기",
+    "fr": "Développer tout le fichier",
+    "de": "Ganze Datei ausklappen",
+    "es": "Expandir todo el archivo"
+  },
+  "Collapse Expanded Lines": {
+    "zh-Hans": "收起展开的行",
+    "zh-Hant": "收合展開的行",
+    "ja": "展開した行を折りたたむ",
+    "ko": "펼친 줄 접기",
+    "fr": "Replier les lignes développées",
+    "de": "Ausgeklappte Zeilen einklappen",
+    "es": "Contraer las líneas expandidas"
+  },
+  "Update summary": {
+    "zh-Hans": "更新摘要",
+    "zh-Hant": "更新摘要",
+    "ja": "要約を更新",
+    "ko": "요약 업데이트",
+    "fr": "Mettre à jour le résumé",
+    "de": "Zusammenfassung aktualisieren",
+    "es": "Actualizar el resumen"
   }
 }

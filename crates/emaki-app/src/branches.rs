@@ -448,13 +448,16 @@ impl Workbench {
         let Some(sha) = c.commit.clone() else { return };
         c.commit_file = Some(path.clone());
         let (root, key) = (c.root.clone(), history_key(c));
+        let whole = key.is_some() && c.whole == key;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let of = path.clone();
-            let diff = cx.background_executor().spawn(async move { git::commit_diff(&root, &sha, &of) }).await;
+            let diff = cx.background_executor().spawn(async move { git::commit_diff_in(&root, &sha, &of, whole) }).await;
             this.update(cx, |this, cx| {
                 let Some(c) = this.changes.as_mut().filter(|c| c.history && history_key(c) == key) else { return };
                 c.list.reset(diff.rows.len());
+                crate::panels::keep_line_at_top(c, &diff);
+                c.sel = None;
                 c.pictures = crate::panels::picture_sides(std::path::Path::new(&path), &diff);
                 c.diff = key.map(|k| (k, Rc::new(diff)));
                 cx.notify();

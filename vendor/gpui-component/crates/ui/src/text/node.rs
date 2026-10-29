@@ -2415,8 +2415,33 @@ impl BlockNode {
             .relative()
             .items_start()
             .content_start()
-            .when(!options.todo && checked.is_none(), |this| {
+            .when(!options.todo && checked.is_none() && options.ordered, |this| {
                 this.child(list_item_prefix(ix, options.ordered, options.depth))
+            })
+            // Emaki: an item of a list that is not numbered is marked by a
+            // hairline, a short thin line at the middle of its first line,
+            // shorter at each depth, in the quiet ink: lines only, as the
+            // window's own drawings are. The empty character makes the
+            // mark's box one line of the item's text tall. Upstream drew
+            // "•", "◦" and "▪".
+            .when(!options.todo && checked.is_none() && !options.ordered, |this| {
+                let long = if options.depth == 0 { 0.55 } else { 0.35 };
+                this.child(
+                    div()
+                        .relative()
+                        .flex_shrink_0()
+                        .w(rems(1.05))
+                        .child("\u{200B}")
+                        .child(
+                            div()
+                                .absolute()
+                                .left(rems(0.1))
+                                .top(relative(0.54))
+                                .w(rems(long))
+                                .h(px(1.))
+                                .bg(cx.theme().muted_foreground),
+                        ),
+                )
             })
             .when_some(checked, |this, checked| {
                 // Todo list checkbox

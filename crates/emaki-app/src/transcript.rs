@@ -192,6 +192,12 @@ pub(crate) fn md_view_file(state: Entity<gpui_component::text::TextViewState>, t
     md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), Some(state), cx)
 }
 
+/// `md_view` drawn from `state`, which the caller keeps: words it can
+/// select all of (the outline's summary).
+pub(crate) fn md_view_state(state: Entity<gpui_component::text::TextViewState>, text: String, cx: &App) -> impl IntoElement {
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, Some(state), cx)
+}
+
 /// A file's YAML header as its fields: `text` is the header written as a
 /// table (`files::front_matter_table`), drawn a field a row in the mono
 /// face, for the band over the file.

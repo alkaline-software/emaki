@@ -2194,8 +2194,16 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         let row = point.row;
 
-        // Calculate row offset by multiplying the number of lines before it with the line height
-        let mut row_offset_y = line_height * self.display_map.buffer_line_to_display_row(row);
+        // Emaki: the row the offset is drawn on, its line's soft wraps
+        // counted, from the display map. Upstream took the wraps from the
+        // last layout, which has only the lines in view, so an offset deep
+        // in a long paragraph out of view scrolled to the paragraph's first
+        // row: a find's first step stopped short of its match.
+        let row_offset_y = line_height
+            * self
+                .display_map
+                .buffer_pos_to_display_pos(crate::input::BufferPoint::new(row, point.column))
+                .row;
 
         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
         // in layout_cursor, so shifting the text here would cause a first-click visual jump.
@@ -2212,7 +2220,6 @@ impl<M: InputModeKind> InputBaseState<M> {
             if let Some(pos) = line.position_for_index(point.column, last_layout, false) {
                 let bounds_width = bounds.size.width - last_layout.line_number_width;
                 let col_offset_x = pos.x;
-                row_offset_y += pos.y;
                 if col_offset_x - safety_margin < -scroll_offset.x {
                     // If the position is out of the visible area, scroll to make it visible
                     scroll_offset.x = -col_offset_x + safety_margin;
@@ -3883,6 +3890,52 @@ mod tests {
                      — paint would jitter (Bug C regression)",
                     deferred.y,
                     safe_y_min,
+                );
+            });
+        });
+    }
+
+    /// An offset deep in a soft-wrapped paragraph out of view scrolls to the
+    /// wrapped row it is on, not to the paragraph's first row: the find's
+    /// first step to a single match stopped a few rows short of it.
+    #[gpui::test]
+    fn test_scroll_to_offset_in_wrapped_line_out_of_view(cx: &mut TestAppContext) {
+        let input_view = InputView::new(cx);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                let mut text: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+                text.push_str(&"word ".repeat(2000));
+                state.set_value(text, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                let line = 200;
+                let offset = state.text.len() - 3;
+                let rows = state.display_map.buffer_line_to_display_row_range(line).unwrap();
+                assert!(rows.len() > 2, "the last line should wrap, got {rows:?}");
+                let last_layout = state.last_layout.as_ref().unwrap();
+                assert!(
+                    !last_layout.visible_range.contains(&line),
+                    "the last line should start out of view"
+                );
+                let line_height = last_layout.line_height;
+                let height = state.last_bounds.unwrap().size.height;
+
+                state.scroll_to(offset, None, cx);
+
+                let deferred = state.deferred_scroll_offset.expect("scroll_to should scroll");
+                let row_top = line_height * (rows.end - 1);
+                assert!(
+                    row_top >= -deferred.y && row_top + line_height <= -deferred.y + height,
+                    "the offset's row at {row_top:?} should be in view from {:?} to {:?}",
+                    -deferred.y,
+                    -deferred.y + height,
                 );
             });
         });

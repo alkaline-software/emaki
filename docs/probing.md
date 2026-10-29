@@ -94,7 +94,7 @@ A variable that steers one launch (`EMAKI_PAGE`, `EMAKI_GO`, `EMAKI_SHOT` and th
 
 ## The core from a terminal
 
-`emaki-core` has a subcommand for most of what the window does, and none needs a window: `list`, `render`, `build`, `archive`, `sync`, `search`, `bench`, `shells`, `outline` (`--summarize` makes real model calls), `git`, `files`, `peers`, `inbox`, `options`, `explain`, `update`, `statusline`, `drive`, `pty`, `screen < text` (what a terminal screen holds).
+`emaki-core` has a subcommand for most of what the window does, and none needs a window: `list`, `render`, `build`, `archive`, `sync`, `search`, `bench`, `shells`, `outline` (`--summarize` labels every round and `--overview [n]` makes the overview, the first n rounds and then the rest as an update does; both make real model calls), `git`, `files`, `peers`, `inbox`, `options`, `explain`, `update`, `statusline`, `drive`, `pty`, `screen < text` (what a terminal screen holds).
 
 ## What a synthetic event reaches
 

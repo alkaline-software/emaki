@@ -175,6 +175,10 @@ pub(crate) enum MenuDo {
     Term(crate::term_panel::TermDo),
     /// Copy or select all in the PDF shown beside the conversation.
     Pdf(crate::panels::PdfDo),
+    /// Copy, select all, expand or collapse in the comparison's lines.
+    Diff(crate::panels::DiffDo),
+    /// Select every word of this text view (the outline's summary).
+    SelectText(Entity<gpui_component::text::TextViewState>),
     /// Cut, copy, paste or select all in the input that has this focus.
     Edit(EditDo, gpui::FocusHandle),
     /// Put these words where the composer's bytes are: a correction.
@@ -247,6 +251,10 @@ impl MenuDo {
             MenuDo::Term(what) => what.icon(),
             MenuDo::Pdf(crate::panels::PdfDo::Copy) | MenuDo::Edit(EditDo::Copy, _) => "icons/copy.svg",
             MenuDo::Pdf(crate::panels::PdfDo::SelectAll) | MenuDo::Edit(EditDo::SelectAll, _) => "icons/select-all.svg",
+            MenuDo::Diff(crate::panels::DiffDo::Copy) => "icons/copy.svg",
+            MenuDo::Diff(crate::panels::DiffDo::SelectAll) | MenuDo::SelectText(_) => "icons/select-all.svg",
+            MenuDo::Diff(crate::panels::DiffDo::Expand) => "icons/unfold.svg",
+            MenuDo::Diff(crate::panels::DiffDo::Collapse) => "icons/fold.svg",
             MenuDo::Edit(EditDo::Cut, _) => "icons/scissors.svg",
             MenuDo::Edit(EditDo::Paste, _) => "icons/clipboard.svg",
             // A correction puts its words in place of the marked ones.
@@ -657,6 +665,7 @@ pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
     ("appearance", phrase("Appearance"), "icons/palette.svg"),
     ("text", phrase("Text"), "icons/a-large-small.svg"),
     ("conversation", phrase("Conversation"), "icons/book-open.svg"),
+    ("models", phrase("Model calls"), "icons/sparkles.svg"),
     ("sessions", phrase("New sessions"), "icons/square-terminal.svg"),
     ("panels", phrase("Panels"), "icons/layout-dashboard.svg"),
     ("files", phrase("Files"), "icons/tree-view.svg"),
@@ -2091,6 +2100,16 @@ pub struct Workbench {
     pub(crate) outline_failed: HashSet<String>,
     /// The labels that landed a moment ago, and when: each fades in once.
     pub(crate) outline_fresh: HashMap<String, Instant>,
+    /// Each session's overview, by its key, kept in `cache/overviews.json`;
+    /// and the sessions one is being made for.
+    pub(crate) overviews: std::collections::BTreeMap<String, emaki_core::outline::Overview>,
+    pub(crate) overview_asking: HashSet<String>,
+    /// Each summary's text view, by session and appearance, kept so its
+    /// menu's Select All can select it.
+    pub(crate) overview_text: HashMap<(String, bool), Entity<gpui_component::text::TextViewState>>,
+    /// The outline's drawer's height as last drawn: the summary in it
+    /// takes no more than a share of it.
+    pub(crate) outline_drawer_h: f32,
     pub(crate) outline_pick: Option<usize>,
     /// The entry chosen is a round the list's end holds short of the top:
     /// how many rounds there were when the move to it ended there.
@@ -4304,6 +4323,10 @@ impl Workbench {
             outline_rest: None,
             outline_failed: HashSet::new(),
             outline_fresh: HashMap::new(),
+            overviews: emaki_core::outline::load_overviews(),
+            overview_asking: HashSet::new(),
+            overview_text: HashMap::new(),
+            outline_drawer_h: 0.,
             outline_pick: None,
             outline_pick_end: None,
             outline_gliding: false,
@@ -4900,14 +4923,72 @@ impl Workbench {
         cx.notify();
     }
 
-    /// The Outline switch: off, the outline panel says so and asks the
-    /// model for no label.
+    /// The Outline switch: off, the outline panel says so.
     fn set_outline(&mut self, on: bool, cx: &mut Context<Self>) {
         self.cfg.app.outline = on;
         if let Err(e) = Config::edit(move |c| c.app.outline = on) {
             self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
         }
         cx.notify();
+    }
+
+    /// The Outline summaries switch: off, the outline asks a model for no
+    /// label and no overview, and shows none made before.
+    fn set_summaries(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.cfg.app.outline_summaries = on;
+        if let Err(e) = Config::edit(move |c| c.app.outline_summaries = on) {
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
+        }
+        cx.notify();
+    }
+
+    /// The model `agent`'s sessions are asked of for explanations and
+    /// the outline, `key` off its list, or empty for its fast one.
+    fn set_helper_model(&mut self, agent: AgentId, key: &str, cx: &mut Context<Self>) {
+        let key = key.to_string();
+        let set = move |e: &mut emaki_core::config::Explain| match agent {
+            AgentId::Codex => e.codex_model = key.clone(),
+            _ => e.model = key.clone(),
+        };
+        set(&mut self.cfg.explain);
+        self.hub.explainer.set_cfg(self.cfg.explain.clone());
+        if let Err(e) = Config::edit(move |c| set(&mut c.explain)) {
+            self.notice = Some(Notice::error(tf("could not save settings: {e}", &[("e", &e)])));
+        }
+        cx.notify();
+    }
+
+    /// The model an agent's default stands for (`explain::fast_model`),
+    /// by its name on the agent's list: Claude Code's id is listed with a
+    /// date after it.
+    fn helper_fast_name(&self, agent: AgentId) -> String {
+        let options = self.new_options(agent);
+        let Some(fast) = emaki_core::explain::fast_model(agent, &options) else { return String::new() };
+        options.models.iter().find(|m| m.key == fast || m.resolved.starts_with(&fast)).map(|m| plain_default(&m.label)).unwrap_or(fast)
+    }
+
+    /// The model chosen for `agent`'s helper calls while its list still
+    /// offers it; empty for the default, which a model it no longer
+    /// offers falls back to (`explain::helper_model`).
+    fn helper_chosen(&self, agent: AgentId) -> String {
+        let options = self.new_options(agent);
+        match self.cfg.explain.chosen(agent) {
+            "" => String::new(),
+            c if options.models.is_empty() => c.to_string(),
+            c => options.model(c).map(|m| m.key.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// What the model field says for `agent`: the model chosen, or the
+    /// default with the model it stands for.
+    fn helper_model_name(&self, agent: AgentId) -> String {
+        match self.helper_chosen(agent).as_str() {
+            "" => match self.helper_fast_name(agent) {
+                fast if fast.is_empty() => t("Default").to_string(),
+                fast => format!("{} ({fast})", t("Default")),
+            },
+            chosen => model_name(&self.new_options(agent), chosen),
+        }
     }
 
     /// The window's language set to `choice` (`system`, or a code of
@@ -5185,6 +5266,15 @@ impl Workbench {
         } else if over > px(0.5) && room > px(0.5) {
             d.list.scroll_by(over.min(room));
             cx.notify();
+        }
+    }
+
+    /// A fold first seen open plays nothing. One that is to arrive, a
+    /// thing a model wrote that has just come, is seen shut first, so
+    /// its next draw opens it.
+    pub(crate) fn fold_arrive(&self, what: (u8, usize, usize), cx: &mut Context<Self>) {
+        if !self.folds.borrow().contains_key(&what) {
+            self.fold_state(what, false, cx);
         }
     }
 
@@ -7627,7 +7717,8 @@ impl Workbench {
         // agent the composer is on.
         let options = match what {
             PickFor::DefaultMode | PickFor::DefaultModel | PickFor::DefaultEffort => self.new_options(AgentId::ClaudeCode),
-            PickFor::CodexMode | PickFor::CodexModel | PickFor::CodexEffort => self.new_options(AgentId::Codex),
+            PickFor::CodexMode | PickFor::CodexModel | PickFor::CodexEffort | PickFor::HelperCodex => self.new_options(AgentId::Codex),
+            PickFor::HelperClaude => self.new_options(AgentId::ClaudeCode),
             _ => self.options(),
         };
         let theme = cx.theme();
@@ -7718,6 +7809,15 @@ impl Workbench {
                 let now = options.model(&model).map(|m| m.key.clone()).unwrap_or(model);
                 (options.models.iter().map(|m| PickRow::plain(m.key.clone(), plain_default(&m.label), m.detail.clone())).collect(), now)
             }
+            // The agent's fast model first, as the default, then its list
+            // but for the stand-in for its own default model.
+            PickFor::HelperClaude | PickFor::HelperCodex => {
+                let agent = if what == PickFor::HelperCodex { AgentId::Codex } else { AgentId::ClaudeCode };
+                let now = self.helper_chosen(agent);
+                let fast = PickRow::plain(String::new(), t("Default").into(), self.helper_fast_name(agent));
+                let rows = std::iter::once(fast).chain(options.models.iter().filter(|m| m.key != options.default_model).enumerate().map(|(ix, m)| PickRow { rule: ix == 0, ..PickRow::plain(m.key.clone(), plain_default(&m.label), m.detail.clone()) })).collect();
+                (rows, now)
+            }
         }
     }
 
@@ -7802,6 +7902,8 @@ impl Workbench {
                 cx.notify();
             }
             PickFor::Language => self.set_language(key, cx),
+            PickFor::HelperClaude => self.set_helper_model(AgentId::ClaudeCode, key, cx),
+            PickFor::HelperCodex => self.set_helper_model(AgentId::Codex, key, cx),
         }
     }
 
@@ -12512,6 +12614,8 @@ impl Workbench {
             MenuDo::Fix(range, with) => self.fix_writing(range, with, window, cx),
             MenuDo::FixFile(range, with) => self.file_fix(range, with, window, cx),
             MenuDo::Pdf(what) => self.pdf_do(what, cx),
+            MenuDo::Diff(what) => self.diff_do(what, cx),
+            MenuDo::SelectText(state) => state.update(cx, |s, cx| s.select_all(cx)),
             MenuDo::Learn(word) => self.learn_word(word, cx),
             MenuDo::Ignore(rule, words) => self.ignore_writing(rule, words, cx),
             MenuDo::Term(what) => self.term_do(what, window, cx),
@@ -18675,6 +18779,10 @@ pub(crate) enum PickFor {
     Folder,
     /// The window's language, in Settings at Appearance's title.
     Language,
+    /// The model each agent's sessions are asked of for explanations and
+    /// the outline, in Settings, Model calls.
+    HelperClaude,
+    HelperCodex,
 }
 
 /// A pill's list while it is open: every choice with a line on what it

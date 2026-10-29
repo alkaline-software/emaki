@@ -231,10 +231,13 @@ fn with_workbench(cx: &mut App, f: impl FnOnce(&mut Workbench, &mut Window, &mut
 /// with one pane beside it, the wider of the two there are, so a pane
 /// asked for always has room, and the frame at both sides of them.
 pub(crate) const MIN_W: Pixels = px(794.);
+/// The least the window's height is dragged to: room for the outline's
+/// entries, its summary and its buttons above the composer.
+pub(crate) const MIN_H: Pixels = px(600.);
 
 fn remembered_bounds(cx: &App) -> Option<Bounds<Pixels>> {
     let r = ui_state::UiState::load().window?;
-    let b = Bounds { origin: point(px(r.x), px(r.y)), size: size(px(r.w).max(MIN_W), px(r.h.max(480.))) };
+    let b = Bounds { origin: point(px(r.x), px(r.y)), size: size(px(r.w).max(MIN_W), px(r.h).max(MIN_H)) };
     let center = point(b.origin.x + b.size.width / 2., b.origin.y + b.size.height / 2.);
     let display = cx.displays().into_iter().find(|d| d.bounds().contains(&center))?;
     Some(filled(b, display.visible_bounds()))
@@ -276,7 +279,7 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             titlebar: Some(titlebar),
             // Narrow enough for the sidebar to fold away (see NARROW_W) and
             // the conversation to run edge to edge, like the Claude app.
-            window_min_size: Some(size(MIN_W, px(480.))),
+            window_min_size: Some(size(MIN_W, MIN_H)),
             // The Linux packages' desktop file is `Emaki.desktop`: the shell
             // finds the window's icon by this name, else a blank one.
             app_id: Some("Emaki".into()),

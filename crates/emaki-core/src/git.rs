@@ -917,13 +917,38 @@ pub fn commit_files(dir: &Path, sha: &str) -> Vec<(String, State)> {
 
 /// One file's lines as a commit changed them, or a picture's two sides.
 pub fn commit_diff(dir: &Path, sha: &str, path: &str) -> Diff {
+    commit_diff_in(dir, sha, path, false)
+}
+
+/// `commit_diff`, with `whole` every line of the file around the changes
+/// (`whole_view`), as a comparison expanded shows it.
+pub fn commit_diff_in(dir: &Path, sha: &str, path: &str, whole: bool) -> Diff {
     if is_picture(Path::new(path)) {
         // Before is the first parent's, none for a first commit.
         let (before, after) = (blob(dir, &format!("{sha}^:{path}")), blob(dir, &format!("{sha}:{path}")));
         return Diff { binary: true, pictures: Some(Pictures { before, after }), ..Default::default() };
     }
-    let out = command().arg("-C").arg(dir).args(["show", "--no-color", "--no-ext-diff", "--first-parent", "--format=", sha, "--", &format!(":/{path}")]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success());
-    out.map(|o| parse_diff(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
+    let context: &[&str] = if whole { &[WHOLE_CONTEXT] } else { &[] };
+    let out = command().arg("-C").arg(dir).args(["show", "--no-color", "--no-ext-diff", "--first-parent", "--format="]).args(context).args([sha, "--", &format!(":/{path}")]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success());
+    let d = out.map(|o| parse_diff(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+    if whole { whole_view(d) } else { d }
+}
+
+/// The context that takes in every line of a file: git counts it in
+/// lines, and no file it shows here is longer.
+const WHOLE_CONTEXT: &str = "-U100000000";
+
+/// A comparison with every line of the file: the head git writes over
+/// the one stretch left, which says nothing then, taken out.
+fn whole_view(mut d: Diff) -> Diff {
+    let heads: Vec<usize> = d.rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::Hunk(_))).map(|(ix, _)| ix).collect();
+    if heads.is_empty() {
+        return d;
+    }
+    let before = |ix: usize| heads.iter().filter(|h| **h < ix).count();
+    d.words = std::mem::take(&mut d.words).into_iter().map(|(ix, w)| (ix - before(ix), w)).collect();
+    d.rows.retain(|r| !matches!(r, Row::Hunk(_)));
+    d
 }
 
 /// A new commit that takes back what `sha` changed. Git refuses when
@@ -1340,6 +1365,12 @@ fn blob(dir: &Path, spec: &str) -> Option<std::sync::Arc<[u8]>> {
 /// What `path` holds now against what the last commit has. A file git
 /// does not track yet is all new lines.
 pub fn diff(dir: &Path, path: &Path, state: State) -> Diff {
+    diff_in(dir, path, state, false)
+}
+
+/// `diff`, with `whole` every line of the file around the changes, as a
+/// comparison expanded shows it.
+pub fn diff_in(dir: &Path, path: &Path, state: State, whole: bool) -> Diff {
     if is_picture(path) {
         // The last commit's copy, else the one staged before the first
         // commit; and the file as it is, unless it has gone.
@@ -1351,13 +1382,15 @@ pub fn diff(dir: &Path, path: &Path, state: State) -> Diff {
     if state == State::Untracked {
         return whole_file(path);
     }
-    let run = |base: &[&str]| command().arg("-C").arg(dir).args(["diff", "--no-color", "--no-ext-diff"]).args(base).arg("--").arg(path).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+    let context: &[&str] = if whole { &[WHOLE_CONTEXT] } else { &[] };
+    let run = |base: &[&str]| command().arg("-C").arg(dir).args(["diff", "--no-color", "--no-ext-diff"]).args(context).args(base).arg("--").arg(path).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
     // Before the first commit there is no HEAD to compare with, and
     // what is staged is all there is.
-    match run(&["HEAD"]).or_else(|| run(&["--cached"])) {
+    let d = match run(&["HEAD"]).or_else(|| run(&["--cached"])) {
         Some(text) => parse_diff(&text),
         None => Diff::default(),
-    }
+    };
+    if whole { whole_view(d) } else { d }
 }
 
 fn whole_file(path: &Path) -> Diff {

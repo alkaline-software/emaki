@@ -29,7 +29,7 @@ use emaki_core::outline::{self, Kind};
 
 use crate::format::clock;
 use crate::i18n::{count, t, tf};
-use crate::workbench::{choice_pill, float_shadow, Press, swallow_click, MenuDo, Notice, Page, Workbench};
+use crate::workbench::{choice_pill, float_shadow, Column, Press, swallow_click, MenuDo, Notice, Page, Workbench};
 
 /// How wide the files panel is to begin with.
 pub const PANEL_W: Pixels = px(264.);
@@ -79,8 +79,33 @@ const LABEL_AHEAD: Pixels = px(320.);
 const LABEL_REST: Duration = Duration::from_millis(300);
 /// How long a label that has just landed takes to fade in.
 const LABEL_FADE: Duration = Duration::from_millis(320);
+/// The folds of a session's overview (`fold_state`): its parts, and the
+/// head of each section by the round it starts at.
+const OVERVIEW_FOLD: u8 = 7;
+/// How far a long summary fades into the ground at an edge it is cut at.
+const SUMMARY_FADE: f32 = 18.;
+
+/// The most of the drawer, `drawer` tall, a summary takes before it
+/// scrolls: a share of it, so the entries and the buttons keep their room
+/// in a short window, and no more than a reading's worth in a tall one.
+fn summary_most(drawer: f32) -> f32 {
+    (drawer * 0.3).min(240.)
+}
+const SECTION_FOLD: u8 = 8;
+
+/// A session's key as a fold's number.
+fn outline_hash(key: &str) -> usize {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    h.finish() as usize
+}
 /// The room over the pinned day's words.
 const PIN_LEAD: Pixels = px(10.);
+/// A day's words, one line tall in the list and pinned alike, and the
+/// pinned head's height: the room over its words, the line, and under.
+const DAY_LINE: Pixels = px(14.);
+const PIN_H: Pixels = px(30.);
 /// The least the conversation keeps beside the panels at its sides: the
 /// width at which the composer's row of pills and its send button still
 /// fit inside the card.
@@ -338,6 +363,136 @@ pub struct Changes {
     /// Since when the sheet has been going: it is drawn that moment
     /// more, fading, and takes no click.
     pub(crate) closing: Option<std::time::Instant>,
+    /// The lines shown with every line of the file around the changes,
+    /// by the name `diff` is kept under; any other file, as git cuts it.
+    pub(crate) whole: Option<PathBuf>,
+    /// The line to keep at the top once the lines expand or collapse:
+    /// its number in the file as it is now.
+    keep_line: Option<u32>,
+    /// Words selected in the lines, and whether the keyboard's ⌘A and ⌘C
+    /// are theirs: a press in the lines gives them to the lines, one in
+    /// the files back to the files.
+    pub(crate) sel: Option<DiffSel>,
+    lines_active: bool,
+}
+
+/// Words selected in the comparison's lines: on one side (0 the last
+/// commit's, 1 what is there now), from where the press was to where the
+/// pointer is or a ⇧ press reached, each a row and a byte in its line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffSel {
+    pub side: usize,
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+}
+
+impl DiffSel {
+    fn span(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.head { (self.anchor, self.head) } else { (self.head, self.anchor) }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+
+    /// The bytes of row `ix`'s line, `len` long, the selection covers.
+    fn on_row(&self, ix: usize, len: usize) -> Option<std::ops::Range<usize>> {
+        let (a, b) = self.span();
+        if ix < a.0 || ix > b.0 {
+            return None;
+        }
+        let from = if ix == a.0 { a.1.min(len) } else { 0 };
+        let to = if ix == b.0 { b.1.min(len) } else { len };
+        (from < to).then_some(from..to)
+    }
+}
+
+/// A row's place in the file as it is now, or as it was for a line taken
+/// out.
+fn row_line(row: &git::Row) -> Option<u32> {
+    match row {
+        git::Row::Same { new, .. } => Some(*new),
+        git::Row::Changed { right: Some((n, _)), .. } | git::Row::Changed { left: Some((n, _)), .. } => Some(*n),
+        _ => None,
+    }
+}
+
+/// After the lines expand or collapse, the line that was at the top is
+/// put there again, or the nearest after it the new lines have.
+pub(crate) fn keep_line_at_top(c: &mut Changes, diff: &git::Diff) {
+    let Some(line) = c.keep_line.take() else { return };
+    if let Some(ix) = diff.rows.iter().position(|r| row_line(r).is_some_and(|n| n >= line)) {
+        c.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+    }
+}
+
+/// A row's line on one side of the comparison: none on a stretch's head,
+/// or where that side has no line.
+fn side_text(row: &git::Row, side: usize) -> Option<&str> {
+    match row {
+        git::Row::Same { text, .. } => Some(text),
+        git::Row::Changed { left, right } => if side == 0 { left } else { right }.as_ref().map(|(_, t)| t.as_str()),
+        git::Row::Hunk(_) => None,
+    }
+}
+
+/// The words a selection covers, a line each, as copied.
+fn diff_sel_text(d: &git::Diff, s: &DiffSel) -> String {
+    let (a, b) = s.span();
+    (a.0..=b.0)
+        .filter_map(|ix| {
+            let t = side_text(d.rows.get(ix)?, s.side)?;
+            let from = if ix == a.0 { a.1.min(t.len()) } else { 0 };
+            let to = if ix == b.0 { b.1.min(t.len()) } else { t.len() };
+            Some(t.get(from..to.max(from)).unwrap_or("").to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The word around byte `at` of `t`, as a double click takes it: a run of
+/// letters, digits and `_`, or the one other character there.
+fn word_at(t: &str, at: usize) -> std::ops::Range<usize> {
+    let is = |c: char| c.is_alphanumeric() || c == '_';
+    // The character at `at`, or the last one when `at` is the line's end.
+    let Some((start, c)) = t.char_indices().filter(|(i, _)| *i <= at).last() else { return 0..0 };
+    if !is(c) {
+        return start..start + c.len_utf8();
+    }
+    let from = t[..start].char_indices().rev().take_while(|(_, c)| is(*c)).last().map_or(start, |(i, _)| i);
+    let to = t[start..].char_indices().find(|(_, c)| !is(*c)).map_or(t.len(), |(i, _)| start + i);
+    from..to
+}
+
+/// A line's own marks with the selection laid over them: the selection's
+/// ground where it is, the marks' around it, in order and apart.
+fn with_selection(marks: Vec<(std::ops::Range<usize>, HighlightStyle)>, sel: Option<std::ops::Range<usize>>, color: Hsla) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    let Some(sel) = sel else { return marks };
+    let mut out = Vec::new();
+    for (r, style) in marks {
+        if r.end <= sel.start || r.start >= sel.end {
+            out.push((r, style));
+            continue;
+        }
+        if r.start < sel.start {
+            out.push((r.start..sel.start, style));
+        }
+        if r.end > sel.end {
+            out.push((sel.end..r.end, style));
+        }
+    }
+    out.push((sel, HighlightStyle { background_color: Some(color), ..Default::default() }));
+    out.sort_by_key(|(r, _)| r.start);
+    out
+}
+
+/// Something asked of the comparison's lines, from their menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffDo {
+    Copy,
+    SelectAll,
+    Expand,
+    Collapse,
 }
 
 /// What git says of a folder: its status, its branches, the checkouts
@@ -2376,6 +2531,7 @@ impl Workbench {
         // composer. It comes out from under its edge by the column.
         let shown = 1. - cli;
         if shown > 0. && d > DRAWER_GAP {
+            self.outline_drawer_h = end - SEAM_TOP;
             let body = self.render_outline_panel(cx);
             els.push(
                 div()
@@ -8033,7 +8189,7 @@ impl Workbench {
             files.scroll_to_item(at, ScrollStrategy::Center);
         }
         let marked: Vec<PathBuf> = picked.iter().cloned().collect();
-        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, pictures: [None, None], list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), drafts: HashMap::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, top: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None });
+        self.changes = Some(Changes { root, anchor: picked.clone(), marked, picked, diff: None, pictures: [None, None], list: ListState::new(0, ListAlignment::Top, px(600.)), files, reading: false, band: None, band_live: false, band_at: None, left_out: HashSet::new(), drafts: HashMap::new(), history: false, commits: None, commit: None, commit_files: None, commit_file: None, top: None, commits_scroll: ScrollHandle::new(), cfiles_scroll: ScrollHandle::new(), closing: None, whole: None, keep_line: None, sel: None, lines_active: false });
         self.changes_focus_due = true;
         // How the branch stands against the remote's, for the buttons
         // that push and pull.
@@ -8231,6 +8387,110 @@ impl Workbench {
         self.open_menu(at, items, cx);
     }
 
+    /// The lines showing in the comparison, and the name they are kept
+    /// under.
+    fn diff_shown(&self) -> Option<(PathBuf, Rc<git::Diff>)> {
+        let c = self.changes.as_ref()?;
+        let showing = if c.history { crate::branches::history_key(c) } else { c.picked.clone() };
+        c.diff.clone().filter(|(of, _)| Some(of) == showing.as_ref())
+    }
+
+    /// A press on the comparison's lines, on row `ix` of side `side` at
+    /// byte `at`: the selection starts there, or with ⇧ reaches there; a
+    /// second press takes the word, a third the line. The keyboard's ⌘A
+    /// and ⌘C are the lines' from here.
+    pub(crate) fn diff_press(&mut self, ix: usize, side: usize, at: usize, clicks: usize, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.changes_focus, cx);
+        let text = self.diff_shown().and_then(|(_, d)| d.rows.get(ix).and_then(|r| side_text(r, side)).map(str::to_string));
+        let Some(c) = &mut self.changes else { return };
+        c.lines_active = true;
+        let Some(text) = text else { return };
+        let at = at.min(text.len());
+        c.sel = Some(match (clicks, c.sel) {
+            (1, Some(s)) if shift && s.side == side => DiffSel { head: (ix, at), ..s },
+            (2, _) => {
+                let w = word_at(&text, at);
+                DiffSel { side, anchor: (ix, w.start), head: (ix, w.end) }
+            }
+            (n, _) if n >= 3 => DiffSel { side, anchor: (ix, 0), head: (ix, text.len()) },
+            _ => DiffSel { side, anchor: (ix, at), head: (ix, at) },
+        });
+        cx.notify();
+    }
+
+    /// The pointer moved with the button down over row `ix` of side
+    /// `side`, at byte `at` there: the selection reaches it. Over the
+    /// other side, it reaches the row's end going down, its start going up.
+    pub(crate) fn diff_drag(&mut self, ix: usize, side: usize, at: usize, cx: &mut Context<Self>) {
+        let len = self.diff_shown().and_then(|(_, d)| d.rows.get(ix).and_then(|r| self.changes.as_ref().and_then(|c| c.sel).and_then(|s| side_text(r, s.side))).map(str::len));
+        let Some(s) = self.changes.as_mut().and_then(|c| c.sel.as_mut()) else { return };
+        let at = if side == s.side { at } else if ix >= s.anchor.0 { usize::MAX } else { 0 };
+        let head = (ix, at.min(len.unwrap_or(0)));
+        if s.head != head {
+            s.head = head;
+            cx.notify();
+        }
+    }
+
+    /// A right click on the lines: Copy for what is selected, Select All,
+    /// and the whole file shown or cut back to the changes.
+    pub(crate) fn diff_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.changes_focus, cx);
+        let Some((of, d)) = self.diff_shown() else { return };
+        let Some(c) = &mut self.changes else { return };
+        c.lines_active = true;
+        let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
+        if c.sel.is_some_and(|s| !s.is_empty()) {
+            items.push((t("Copy"), MenuDo::Diff(DiffDo::Copy)));
+        }
+        items.push((t("Select All"), MenuDo::Diff(DiffDo::SelectAll)));
+        // A file whose lines all show has nothing to expand.
+        let whole = c.whole.as_ref() == Some(&of);
+        if whole {
+            items.extend([("", MenuDo::Rule), (t("Collapse Expanded Lines"), MenuDo::Diff(DiffDo::Collapse))]);
+        } else if d.rows.iter().any(|r| matches!(r, git::Row::Hunk(_))) {
+            items.extend([("", MenuDo::Rule), (t("Expand Whole File"), MenuDo::Diff(DiffDo::Expand))]);
+        }
+        self.open_menu(at, items, cx);
+    }
+
+    pub(crate) fn diff_do(&mut self, what: DiffDo, cx: &mut Context<Self>) {
+        let Some((of, d)) = self.diff_shown() else { return };
+        let Some(c) = &mut self.changes else { return };
+        match what {
+            DiffDo::Copy => {
+                if let Some(s) = c.sel.filter(|s| !s.is_empty()) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(diff_sel_text(&d, &s)));
+                }
+            }
+            // The side the selection is on, else what is there now; the
+            // last commit's for a file that is gone.
+            DiffDo::SelectAll => {
+                let side = c.sel.map(|s| s.side).unwrap_or(if d.rows.iter().any(|r| side_text(r, 1).is_some()) { 1 } else { 0 });
+                let lines: Vec<(usize, usize)> = d.rows.iter().enumerate().filter_map(|(ix, r)| side_text(r, side).map(|t| (ix, t.len()))).collect();
+                if let (Some(first), Some(last)) = (lines.first(), lines.last()) {
+                    c.sel = Some(DiffSel { side, anchor: (first.0, 0), head: *last });
+                }
+            }
+            DiffDo::Expand | DiffDo::Collapse => {
+                // The line at the top stays there as the lines around it
+                // come and go.
+                let top = c.list.logical_scroll_top().item_ix;
+                c.keep_line = d.rows.get(top..).and_then(|rows| rows.iter().find_map(row_line));
+                c.whole = (what == DiffDo::Expand).then_some(of);
+                c.sel = None;
+                if c.history {
+                    if let Some(file) = c.commit_file.clone() {
+                        self.history_file(file, cx);
+                    }
+                } else {
+                    self.load_diff(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// Read the picked file's lines against the last commit, off the
     /// main thread. Run again on the clock while the comparison shows;
     /// the lines are replaced only when they differ, so reading on does
@@ -8245,10 +8505,11 @@ impl Workbench {
         }
         c.reading = true;
         let root = c.root.clone();
+        let whole = c.whole.as_ref() == Some(&path);
         let state = self.tree.changed.iter().find(|(p, _)| *p == path).map(|(_, s)| *s).unwrap_or(git::State::Modified);
         cx.spawn(async move |this, cx| {
             let of = path.clone();
-            let diff = cx.background_executor().spawn(async move { git::diff(&root, &of, state) }).await;
+            let diff = cx.background_executor().spawn(async move { git::diff_in(&root, &of, state, whole) }).await;
             this.update(cx, |this, cx| {
                 let Some(c) = &mut this.changes else { return };
                 if c.picked.as_ref() != Some(&path) {
@@ -8261,8 +8522,15 @@ impl Workbench {
                 if c.history {
                     return;
                 }
+                // Expanded or collapsed while this was read: read again.
+                if (c.whole.as_ref() == Some(&path)) != whole {
+                    this.load_diff(cx);
+                    return;
+                }
                 if c.diff.as_ref().is_none_or(|(was, d)| *was != path || **d != diff) {
                     c.list.reset(diff.rows.len());
+                    keep_line_at_top(c, &diff);
+                    c.sel = None;
                     c.pictures = picture_sides(&path, &diff);
                     c.diff = Some((path, Rc::new(diff)));
                     cx.notify();
@@ -8394,33 +8662,60 @@ impl Workbench {
                 let lone = |pick: fn(&git::Row) -> bool| rows.rows.iter().all(pick);
                 let (all_new, all_gone) = (lone(|r| matches!(r, git::Row::Changed { left: None, .. })), lone(|r| matches!(r, git::Row::Changed { right: None, .. })));
                 let (border, band, mono) = (theme.border, theme.muted.opacity(0.5), mono.clone());
+                let (sel, sel_color, entity) = (c.sel, theme.selection, cx.weak_entity());
                 let lines = gpui::list(c.list.clone(), move |ix, _, _| {
                     let Some(row) = rows.rows.get(ix) else { return div().into_any_element() };
                     // The words that changed on each side of the row.
                     let changed = rows.words.get(&ix);
                     let words = |side: usize, color: Hsla| changed.map(|m| m[side].iter().map(|r| (r.clone(), HighlightStyle { background_color: Some(color), ..Default::default() })).collect::<Vec<_>>()).unwrap_or_default();
-                    // One side of a row: the number on its ground, a mark, the words.
-                    let side = |cell: Option<(&u32, &str)>, mark: &'static str, ground: Option<(Hsla, Hsla)>, marks: Vec<(std::ops::Range<usize>, HighlightStyle)>| {
+                    // One side of a row: the number on its ground, a mark,
+                    // the words. A press anywhere on it selects in its
+                    // words, as a drag over it does: the place is read off
+                    // the words as they were laid out in this frame.
+                    let side = |which: usize, cell: Option<(&u32, &str)>, mark: &'static str, ground: Option<(Hsla, Hsla)>, marks: Vec<(std::ops::Range<usize>, HighlightStyle)>| {
+                        let text = cell.map(|(_, t)| {
+                            let lit = sel.filter(|s| s.side == which).and_then(|s| s.on_row(ix, t.len()));
+                            if t.is_empty() { StyledText::new(" ") } else { StyledText::new(t.to_string()).with_highlights(with_selection(marks, lit, sel_color)) }
+                        });
+                        let layout = text.as_ref().map(|s| s.layout().clone());
+                        let place = move |at: Point<Pixels>| layout.as_ref().map_or(0, |l| l.index_for_position(at).unwrap_or_else(|i| i));
+                        let (press_entity, drag_entity, menu_entity, drag_place) = (entity.clone(), entity.clone(), entity.clone(), place.clone());
                         h_flex()
+                            .id(("diff-side", ix * 2 + which))
                             .flex_1()
                             .min_w_0()
                             .items_start()
+                            .cursor_text()
                             .when_some(ground, |el, (bg, _)| el.bg(bg))
                             .when(cell.is_none(), |el| el.bg(band.opacity(0.35)))
+                            .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, window, cx| {
+                                let at = place(e.position);
+                                press_entity.update(cx, |this, cx| this.diff_press(ix, which, at, e.click_count, e.modifiers.shift, window, cx)).ok();
+                            })
+                            .on_mouse_move(move |e: &MouseMoveEvent, _, cx| {
+                                if e.pressed_button == Some(MouseButton::Left) {
+                                    let at = drag_place(e.position);
+                                    drag_entity.update(cx, |this, cx| this.diff_drag(ix, which, at, cx)).ok();
+                                }
+                            })
+                            .on_mouse_down(MouseButton::Right, move |e: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                menu_entity.update(cx, |this, cx| this.diff_menu(e.position, window, cx)).ok();
+                            })
                             .child(div().w(px(46.)).h_full().flex_shrink_0().pr(px(8.)).text_right().text_color(quiet).when_some(ground, |el, (_, no)| el.bg(no)).children(cell.map(|(n, _)| n.to_string())))
                             .child(div().w(px(18.)).flex_shrink_0().text_center().text_color(quiet).child(if cell.is_some() { mark } else { "" }))
-                            .child(div().flex_1().min_w_0().pr(px(8.)).text_color(ink).children(cell.map(|(_, t)| if t.is_empty() { StyledText::new(" ") } else { StyledText::new(t.to_string()).with_highlights(marks) })))
+                            .child(div().flex_1().min_w_0().pr(px(8.)).text_color(ink).children(text))
                     };
                     let line = h_flex().w_full().items_stretch().font_family(mono.clone()).text_size(px(12.)).line_height(px(19.));
                     match row {
                         git::Row::Hunk(head) => h_flex().w_full().h(px(28.)).px(px(14.)).items_center().bg(band).border_t_1().border_b_1().border_color(border).font_family(mono.clone()).text_size(px(11.5)).text_color(quiet).child(div().truncate().child(head.clone())).into_any_element(),
-                        git::Row::Same { old, new, text } => line.child(side(Some((old, text)), "", None, Vec::new())).child(div().w(px(1.)).flex_shrink_0().bg(border)).child(side(Some((new, text)), "", None, Vec::new())).into_any_element(),
-                        git::Row::Changed { right: Some((n, t)), .. } if all_new => line.child(side(Some((n, t.as_str())), "+", Some((add, add_no)), Vec::new())).into_any_element(),
-                        git::Row::Changed { left: Some((n, t)), .. } if all_gone => line.child(side(Some((n, t.as_str())), "-", Some((del, del_no)), Vec::new())).into_any_element(),
+                        git::Row::Same { old, new, text } => line.child(side(0, Some((old, text)), "", None, Vec::new())).child(div().w(px(1.)).flex_shrink_0().bg(border)).child(side(1, Some((new, text)), "", None, Vec::new())).into_any_element(),
+                        git::Row::Changed { right: Some((n, t)), .. } if all_new => line.child(side(1, Some((n, t.as_str())), "+", Some((add, add_no)), Vec::new())).into_any_element(),
+                        git::Row::Changed { left: Some((n, t)), .. } if all_gone => line.child(side(0, Some((n, t.as_str())), "-", Some((del, del_no)), Vec::new())).into_any_element(),
                         git::Row::Changed { left, right } => line
-                            .child(side(left.as_ref().map(|(n, t)| (n, t.as_str())), "-", left.as_ref().map(|_| (del, del_no)), words(0, del_word)))
+                            .child(side(0, left.as_ref().map(|(n, t)| (n, t.as_str())), "-", left.as_ref().map(|_| (del, del_no)), words(0, del_word)))
                             .child(div().w(px(1.)).flex_shrink_0().bg(border))
-                            .child(side(right.as_ref().map(|(n, t)| (n, t.as_str())), "+", right.as_ref().map(|_| (add, add_no)), words(1, add_word)))
+                            .child(side(1, right.as_ref().map(|(n, t)| (n, t.as_str())), "+", right.as_ref().map(|_| (add, add_no)), words(1, add_word)))
                             .into_any_element(),
                     }
                 })
@@ -8485,6 +8780,14 @@ impl Workbench {
                             if this.sync_words().is_some_and(|(_, what)| what == Some(false)) {
                                 this.sync_go(false, cx);
                             }
+                            cx.stop_propagation();
+                            return;
+                        }
+                        // After a press in the lines, ⌘A and ⌘C are theirs.
+                        let lines = this.changes.as_ref().is_some_and(|c| c.lines_active) && this.changes_focus.is_focused(window);
+                        let plain = keys.modifiers.secondary() && !keys.modifiers.shift && !keys.modifiers.alt;
+                        if lines && plain && matches!(keys.key.as_str(), "a" | "c") {
+                            this.diff_do(if keys.key == "a" { DiffDo::SelectAll } else { DiffDo::Copy }, cx);
                             cx.stop_propagation();
                             return;
                         }
@@ -8578,7 +8881,12 @@ impl Workbench {
                                     )
                                     // A press on the files gives the sheet the
                                     // keyboard back from a field of the commit's.
-                                    .capture_any_mouse_down(cx.listener(|this, _, window, cx| window.focus(&this.changes_focus, cx)))
+                                    .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                                        window.focus(&this.changes_focus, cx);
+                                        if let Some(c) = &mut this.changes {
+                                            c.lines_active = false;
+                                        }
+                                    }))
                                     .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                                         if e.pressed_button == Some(MouseButton::Left) {
                                             this.changes_band_to(e.position, cx);
@@ -9444,11 +9752,11 @@ impl Workbench {
         .detach();
     }
 
-    /// Ask a small model for a label on each of those entries, off the
-    /// main thread. What comes back is
+    /// Ask a small model for a label on each of those entries (what was
+    /// asked, the reply), off the main thread. What comes back is
     /// kept for good; what does not is left as the message's own words
     /// until the next launch.
-    fn ask_labels(&mut self, asked: Vec<(String, String)>, cx: &mut Context<Self>) {
+    fn ask_labels(&mut self, asked: Vec<(String, (String, String))>, cx: &mut Context<Self>) {
         for (key, _) in &asked {
             self.outline_asking.insert(key.clone());
         }
@@ -9456,7 +9764,7 @@ impl Workbench {
         // The labels are the session's own agent's to write.
         let Some(agent) = self.detail.as_ref().map(|d| d.session.agent) else { return };
         cx.spawn(async move |this, cx| {
-            let prompts: Vec<String> = asked.iter().map(|(_, p)| p.clone()).collect();
+            let prompts: Vec<(String, String)> = asked.iter().map(|(_, p)| p.clone()).collect();
             let lines = cx.background_executor().spawn(async move { outline::summarize(&cfg, agent, &prompts) }).await;
             let saved = this
                 .update(cx, |this, cx| {
@@ -9483,6 +9791,245 @@ impl Workbench {
         .detach();
     }
 
+    /// Whether the conversation showing has a turn running, or waiting
+    /// on the person: its last round is still being written.
+    fn outline_running(&self) -> bool {
+        let Some(d) = self.detail.as_ref() else { return false };
+        self.selected_ref().filter(|r| r.session_id == d.session.id).is_some_and(|r| matches!(self.card_for(r).column, Column::Working | Column::Planning | Column::NeedsYou))
+    }
+
+    /// How many of the entries are rounds that are over: not one still
+    /// queued, nor the one a running turn is writing.
+    fn outline_done(&self, entries: &[outline::Entry]) -> usize {
+        let taken = entries.iter().position(|e| e.kind == Kind::Queued).unwrap_or(entries.len());
+        if self.outline_running() { taken.saturating_sub(1) } else { taken }
+    }
+
+    /// Ask the session's own agent's small model for its overview, built
+    /// on the one kept, from the rounds that are over: each what was
+    /// asked and what came of it, by its label where it has one. Off the
+    /// main thread; what comes opens into the outline.
+    pub(crate) fn overview_go(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.detail.as_mut() else { return };
+        let entries = d.outline.get_or_insert_with(|| Rc::new(outline::of(&d.session))).clone();
+        let (key, agent) = (d.key.clone(), d.session.agent);
+        let done = self.outline_done(&entries);
+        if self.overview_asking.contains(&key) || self.overviews.get(&key).is_some_and(|o| o.covered >= done) {
+            return;
+        }
+        let lines: Vec<(usize, String)> = entries[..done].iter().map(|e| (e.round, outline::overview_line(e, self.outline_labels.get(&e.key).and_then(|v| v.as_str())))).collect();
+        let prev = self.overviews.get(&key).cloned();
+        let cfg = self.hub.explainer.cfg();
+        let h = outline_hash(&key);
+        // The bars that breathe while it is made open where there was
+        // nothing to update.
+        if prev.is_none() {
+            self.fold_arrive((OVERVIEW_FOLD, h, 0), cx);
+            self.fold_arrive((OVERVIEW_FOLD, h, 5), cx);
+        }
+        self.overview_asking.insert(key.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let made = cx.background_executor().spawn(async move { outline::overview(&cfg, agent, prev, &lines) }).await;
+            let kept = this
+                .update(cx, |this, cx| {
+                    this.overview_asking.remove(&key);
+                    cx.notify();
+                    match made {
+                        Some(mut o) => {
+                            // Shown or put away as it is now, whatever it
+                            // was when it was asked for.
+                            o.hidden = this.overviews.get(&key).is_some_and(|k| k.hidden);
+                            // The summary and each new section open as they come.
+                            this.fold_arrive((OVERVIEW_FOLD, h, 1), cx);
+                            for (round, _) in &o.sections {
+                                this.fold_arrive((SECTION_FOLD, h, *round), cx);
+                            }
+                            this.overviews.insert(key, o);
+                            Some(this.overviews.clone())
+                        }
+                        None => {
+                            this.notice = Some(Notice::error(t("Could not summarize this session.").to_string()));
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten();
+            if let Some(all) = kept {
+                cx.background_executor().spawn(async move { outline::save_overviews(&all) }).await;
+            }
+        })
+        .detach();
+    }
+
+    /// A right click on the summary: Copy for the words selected, as in
+    /// the conversation (the press has selected the word under it by
+    /// the time it is asked), and Select All.
+    fn summary_menu(&mut self, at: Point<Pixels>, state: Entity<gpui_component::text::TextViewState>, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.defer(cx, move |window, cx| {
+            let text = gpui_base::TextSelection::selected_text(window, cx);
+            let mut items: Vec<(&'static str, MenuDo)> = Vec::new();
+            if !text.trim().is_empty() {
+                items.push((crate::i18n::phrase("Copy"), MenuDo::Copy(text)));
+            }
+            items.push((crate::i18n::phrase("Select All"), MenuDo::SelectText(state)));
+            this.update(cx, |this, cx| this.open_menu(at, items, cx));
+        });
+    }
+
+    /// The overview put away, or brought back as it was: no call.
+    fn overview_hide(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        let Some(key) = self.detail.as_ref().map(|d| d.key.clone()) else { return };
+        let Some(o) = self.overviews.get_mut(&key) else { return };
+        o.hidden = hidden;
+        let all = self.overviews.clone();
+        cx.background_executor().spawn(async move { outline::save_overviews(&all) }).detach();
+        cx.notify();
+    }
+
+    /// Under the outline, over a hairline, the session's overview: its
+    /// summary in bullets, selectable as the conversation's words are,
+    /// over one row of buttons centered in the drawer, which stands in
+    /// one place whatever it holds: Summarize session; then Hide, and
+    /// Update once rounds have come since; put away, Show summary. Bars
+    /// breathe in the summary's place while the first is made. The
+    /// summary and the bars come and go as folds, the outline over them
+    /// giving way.
+    fn render_overview(&mut self, key: &str, done: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let h = outline_hash(key);
+        let kept = self.overviews.get(key).cloned();
+        let asking = self.overview_asking.contains(key);
+        let shown = kept.as_ref().is_some_and(|o| !o.hidden);
+        let stale = kept.as_ref().is_some_and(|o| o.covered < done);
+        let breathe = crate::ambient::pulse(0.35, 1.0, crate::ambient::phase(Duration::from_millis(1100)));
+        // The summary's card: a shade lighter than the drawer, as a card
+        // inside a card is on the website.
+        let ground = if theme.mode.is_dark() { theme.sidebar.blend(theme.foreground.opacity(0.05)) } else { theme.sidebar.blend(theme.background.opacity(0.6)) };
+        let mut parts: Vec<AnyElement> = Vec::new();
+        if let Some(f) = self.fold_state((OVERVIEW_FOLD, h, 0), kept.is_none() && asking, cx) {
+            let bar = |w: f32| div().h(px(8.)).w(relative(w)).rounded_full().bg(theme.muted_foreground.opacity(0.22));
+            let bars = v_flex().py(px(12.)).gap(px(7.)).child(bar(0.94)).child(bar(0.88)).child(bar(0.52)).opacity(breathe);
+            parts.push(self.fold_wrap(f, 0., bars.into_any_element(), cx));
+        }
+        if let Some(f) = self.fold_state((OVERVIEW_FOLD, h, 1), shown, cx) {
+            let bullets = kept.as_ref().map(|o| outline::summary_bullets(&o.summary)).unwrap_or_default();
+            let md: String = bullets.iter().map(|b| format!("- {}\n", b.replace('\n', " "))).collect();
+            // A long summary scrolls in a third of the window or so, and
+            // fades into the ground at an edge with more past it, the
+            // fade growing as the scroll leaves that edge.
+            let (scroll, _) = self.kept_scroll(format!("overview-scroll-{h}").into(), crate::workbench::Inner::Held);
+            let state = self.overview_text.entry((key.to_string(), theme.mode.is_dark())).or_insert_with(|| cx.new(|cx| gpui_component::text::TextViewState::markdown("", cx))).clone();
+            let (off, most) = (-f32::from(scroll.offset().y), f32::from(scroll.max_offset().y));
+            let fade = |top: bool, k: f32| {
+                let (from, to) = if top { (ground, ground.opacity(0.)) } else { (ground.opacity(0.), ground) };
+                div().absolute().left_0().right_0().h(px(SUMMARY_FADE)).map(|d| if top { d.top_0() } else { d.bottom_0() }).opacity(k).bg(linear_gradient(180., linear_color_stop(from, 0.), linear_color_stop(to, 1.)))
+            };
+            let words = div()
+                .relative()
+                .my(px(8.))
+                .text_size(px(12.5))
+                .text_color(theme.foreground)
+                .when(asking, |d| d.opacity(breathe))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("overview-words-{h}")))
+                        .max_h(px(summary_most(self.outline_drawer_h)))
+                        .overflow_y_scroll()
+                        .track_scroll(&scroll)
+                        .child(crate::transcript::md_view_state(state.clone(), md, cx)),
+                )
+                // Copy what is selected, or select it all.
+                .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.summary_menu(e.position, state.clone(), window, cx);
+                }))
+                .child(fade(true, (off / SUMMARY_FADE).clamp(0., 1.)))
+                .child(fade(false, ((most - off) / SUMMARY_FADE).clamp(0., 1.)))
+                .vertical_scrollbar(&scroll);
+            parts.push(self.fold_wrap(f, 0., words.into_any_element(), cx));
+        }
+        let pill = |id: &'static str, icon: &'static str, words: &'static str, off: bool| crate::branches::small_pill(id, icon, t(words), Press::Quiet, off, &theme);
+        // One button in the middle: Hide, Show summary or Summarize
+        // session. Update, a round button with its icon alone, stands
+        // at the row's right end while rounds have come since.
+        let (state, button) = if shown {
+            let hide = pill("outline-summary-hide", "icons/eye-off.svg", crate::i18n::phrase("Hide"), false).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                swallow_click(window, cx);
+                this.overview_hide(true, cx);
+            }));
+            ("shown", hide)
+        } else if kept.is_some() {
+            let show = pill("outline-summary-show", "icons/eye.svg", crate::i18n::phrase("Show summary"), false).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                swallow_click(window, cx);
+                this.overview_hide(false, cx);
+            }));
+            ("hidden", show)
+        } else {
+            let ask = pill("outline-summarize", "icons/sparkles.svg", crate::i18n::phrase("Summarize session"), asking || done == 0).when(!asking && done > 0, |d| {
+                d.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    swallow_click(window, cx);
+                    this.overview_go(cx);
+                }))
+            });
+            ("none", ask)
+        };
+        // Out of date, shown or put away, while a summary is kept.
+        let due = kept.is_some() && (stale || asking);
+        let moving = self.presence(&format!("overview-update-{h}"), due, cx);
+        let update = (due || moving.is_some()).then(|| {
+            // The pills' edge and hover, round, the icon alone in its middle.
+            let ink = theme.foreground;
+            let update = div()
+                .id("outline-overview-update")
+                .size(px(24.))
+                .flex_shrink_0()
+                .rounded_full()
+                .border_1()
+                .border_color(ink.opacity(0.16))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::default().path("icons/refresh.svg").with_size(px(13.)).text_color(ink))
+                .managed_tooltip(|window, cx| crate::workbench::tip(t("Update summary"), window, cx))
+                .map(|d| if asking { d.opacity(0.4) } else { d.cursor_pointer().hover(move |s| s.bg(ink.opacity(0.06))) })
+                .when(!asking, |d| {
+                    d.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        swallow_click(window, cx);
+                        this.overview_go(cx);
+                    }))
+                });
+            let at = div().absolute().right_0().top_0().bottom_0().flex().items_center().child(update);
+            match moving {
+                Some((coming, n)) => at.with_animation(ElementId::Name(format!("overview-update-{h}-{n}").into()), Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t })).into_any_element(),
+                None => at.into_any_element(),
+            }
+        });
+        // What the middle holds fades in as it changes.
+        let row = div()
+            .relative()
+            .py(px(10.))
+            .child(h_flex().justify_center().child(button).with_animation(ElementId::Name(format!("overview-row-{h}-{state}").into()), Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()), |d, t| d.opacity(t)))
+            .children(update);
+        // The card stands while it holds the summary or the bars, its
+        // height going with theirs; the buttons stand under it on the
+        // drawer's own ground.
+        let any = shown || (kept.is_none() && asking);
+        let card = self.fold_state((OVERVIEW_FOLD, h, 5), any, cx).map(|f| {
+            let card = v_flex().px(px(12.)).rounded(px(10.)).border_1().border_color(theme.border).bg(ground).children(parts);
+            self.fold_wrap(f, 8., card.into_any_element(), cx)
+        });
+        v_flex()
+            .flex_shrink_0()
+            .w_full()
+            .px(px(8.))
+            .children(card)
+            .child(row)
+.into_any_element()
+    }
+
     pub(crate) fn render_outline_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         // Turned off in Settings: no entries and no label asked for, and a
@@ -9503,6 +10050,8 @@ impl Workbench {
                 .with_animation("outline-off", Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |d, t| d.opacity(t));
             return v_flex().w(self.outline_w_now() - px(DRAWER_GAP)).h_full().flex_shrink_0().child(note).into_any_element();
         }
+        let summaries = self.cfg.app.outline_summaries;
+        let running = self.outline_running();
         let Some(d) = self.detail.as_mut() else { return div().into_any_element() };
         let entries = d.outline.get_or_insert_with(|| Rc::new(outline::of(&d.session))).clone();
         let key = d.key.clone();
@@ -9522,13 +10071,21 @@ impl Workbench {
 
         // The entries with no label yet, and which child of the scroller
         // each is, for asking about the ones in sight.
-        let mut unlabeled: Vec<(usize, usize, String, String)> = Vec::new();
+        let mut unlabeled: Vec<(usize, usize, String, (String, String))> = Vec::new();
         // The day heads, and which child of the scroller each is.
         // with the room over its words.
         let mut heads: Vec<(usize, f32, String)> = Vec::new();
 
         let dark = theme.mode.is_dark();
         let mut rows: Vec<AnyElement> = Vec::new();
+        // The session's overview stands over the entries, and its sections
+        // head the rounds they start at.
+        let h = outline_hash(&key);
+        let sections: HashMap<usize, String> = if summaries { self.overviews.get(&key).map(|o| o.sections.iter().cloned().collect()).unwrap_or_default() } else { HashMap::new() };
+        let footer = (summaries && !entries.is_empty()).then(|| {
+            let done = self.outline_done(&entries);
+            self.render_overview(&key, done, cx)
+        });
         let mut current_child = 0;
         let mut day = String::new();
         for e in entries.iter() {
@@ -9538,8 +10095,25 @@ impl Workbench {
                 if !this_day.is_empty() {
                     let lead = if rows.is_empty() { 4. } else { 14. };
                     heads.push((rows.len(), lead, this_day.to_uppercase()));
-                    rows.push(div().flex_shrink_0().px(px(10.)).pt(px(lead)).pb(px(4.)).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground.opacity(0.8)).child(this_day.to_uppercase()).into_any_element());
+                    rows.push(div().flex_shrink_0().px(px(10.)).pt(px(lead)).pb(px(4.)).text_size(px(10.5)).line_height(DAY_LINE).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground.opacity(0.8)).child(this_day.to_uppercase()).into_any_element());
                 }
+            }
+            if let Some(f) = sections.get(&e.round).and_then(|_| self.fold_state((SECTION_FOLD, h, e.round), true, cx)) {
+                let round = e.round;
+                let head = div()
+                    .id(("outline-section", round))
+                    .px(px(10.))
+                    .pt(px(8.))
+                    .pb(px(3.))
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.link))
+                    .on_click(cx.listener(move |this, _, _, cx| this.outline_go(round, cx)))
+                    .child(sections[&round].clone());
+                // The scroller squeezes what may shrink, and a fold's box may.
+                rows.push(div().flex_shrink_0().child(self.fold_wrap(f, 0., head.into_any_element(), cx)).into_any_element());
             }
             let is_current = e.round == current;
             if is_current {
@@ -9549,10 +10123,13 @@ impl Workbench {
             // What the entry says: a command as it is, a short message
             // as it is, a long one by its label, or while that is being
             // made, two bars that breathe.
-            let label = e.wants_summary().then(|| self.outline_labels.get(&e.key).and_then(|v| v.as_str()).map(str::to_string)).flatten();
-            let pending = e.wants_summary() && label.is_none() && !self.outline_failed.contains(&e.key);
+            // A round a running turn is still writing is labeled once it
+            // is over, by the reply it ends with.
+            let wants = summaries && e.wants_summary() && !(running && e.round + 1 == entries.len());
+            let label = wants.then(|| self.outline_labels.get(&e.key).and_then(|v| v.as_str()).map(str::to_string)).flatten();
+            let pending = wants && label.is_none() && !self.outline_failed.contains(&e.key);
             if pending && !self.outline_asking.contains(&e.key) {
-                unlabeled.push((rows.len(), e.round, e.key.clone(), e.prompt.clone()));
+                unlabeled.push((rows.len(), e.round, e.key.clone(), (e.prompt.clone(), e.reply.clone())));
             }
             let fresh = label.is_some() && self.outline_fresh.get(&e.key).is_some_and(|at| at.elapsed() < LABEL_FADE);
             let words = label.unwrap_or_else(|| e.title.clone());
@@ -9665,7 +10242,7 @@ impl Workbench {
                 // scroller's offset is taken: the offset is added here.
                 let (view, off) = (self.outline_scroll.bounds(), self.outline_scroll.offset().y);
                 let (top, bottom) = (view.top() - LABEL_AHEAD, view.bottom() + LABEL_AHEAD);
-                let wanted: Vec<(String, String)> = unlabeled
+                let wanted: Vec<(String, (String, String))> = unlabeled
                     .into_iter()
                     .filter(|(child, round, _, _)| match self.outline_scroll.bounds_for_item(*child) {
                         Some(b) => b.bottom() + off >= top && b.top() + off <= bottom,
@@ -9683,10 +10260,20 @@ impl Workbench {
         // its own head has scrolled up to there: the last head whose
         // words have reached the place the pinned ones are drawn at
         // (`PIN_LEAD` under the view's top), so the two are in one place
-        // at the change and nothing jumps.
+        // at the change. The next day's head pushes it up and out as it
+        // comes, the pinned head's room ahead of it, so at the change the
+        // old one has just gone; its hairline comes in as its own head
+        // goes under it. Both go by the scroll, with nothing timed.
         let pinned = {
             let (view, off) = (self.outline_scroll.bounds(), self.outline_scroll.offset().y);
-            heads.iter().rev().find(|(child, lead, _)| self.outline_scroll.bounds_for_item(*child).is_some_and(|b| b.top() + off + px(*lead) < view.top() + PIN_LEAD - px(0.5))).map(|(_, _, day)| day.clone())
+            let words_y = |child: usize, lead: f32| self.outline_scroll.bounds_for_item(child).map(|b| b.top() + off + px(lead) - view.top());
+            let at = heads.iter().rposition(|(child, lead, _)| words_y(*child, *lead).is_some_and(|y| y < PIN_LEAD - px(0.5)));
+            at.map(|i| {
+                let (child, lead, day) = &heads[i];
+                let push = heads.get(i + 1).and_then(|(c, l, _)| words_y(*c, *l)).map_or(0., |y| f32::from(PIN_LEAD + PIN_H - y).clamp(0., f32::from(PIN_H)));
+                let line = words_y(*child, *lead).map_or(1., |y| (f32::from(PIN_LEAD - y) / f32::from(PIN_H)).clamp(0., 1.));
+                (day.clone(), push, line)
+            })
         };
         let body = if rows.is_empty() {
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child(t("Nothing said yet.")).into_any_element()
@@ -9701,11 +10288,12 @@ impl Workbench {
                 .min_h_0()
                 .child(v_flex().id("outline-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.outline_scroll).px(px(6.)).py(px(6.)).children(rows))
                 .vertical_scrollbar(&self.outline_scroll)
-                .when_some(pinned, |d, day| {
+                .when_some(pinned, |d, (day, push, line)| {
                     d.child(
                         div()
                             .absolute()
-                            .top_0()
+                            .top(px(-push))
+                            .h(PIN_H)
                             .left_0()
                             .right_0()
                             // The drawer's own corners: what is drawn in it
@@ -9716,8 +10304,9 @@ impl Workbench {
                             .pb(px(6.))
                             .bg(theme.sidebar)
                             .border_b_1()
-                            .border_color(theme.border.opacity(0.6))
+                            .border_color(theme.border.opacity(0.6 * line))
                             .text_size(px(10.5))
+                            .line_height(DAY_LINE)
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground.opacity(0.8))
                             .child(day),
@@ -9727,7 +10316,7 @@ impl Workbench {
         };
         // In its drawer, whose handle says what it is: no head of its
         // own. An entry waiting for its label breathes.
-        v_flex().w(self.outline_w_now() - px(DRAWER_GAP)).h_full().flex_shrink_0().child(body).into_any_element()
+        v_flex().w(self.outline_w_now() - px(DRAWER_GAP)).h_full().flex_shrink_0().child(body).children(footer).into_any_element()
     }
 
     /// `EMAKI_GO` steps for the two panels; whether `step` was one.
@@ -10254,4 +10843,53 @@ mod draft_tests {
 /// whole.
 fn shows_two_ways(v: &FileView) -> bool {
     matches!(v.body, FileBody::Markdown(_) | FileBody::Html(_) | FileBody::Notebook(_)) || (matches!(v.body, FileBody::Table(..) | FileBody::Picture(..)) && v.source.is_some())
+}
+
+#[cfg(test)]
+mod diff_selection_tests {
+    use super::{diff_sel_text, with_selection, word_at, DiffSel};
+    use emaki_core::git::{Diff, Row};
+    use gpui::{HighlightStyle, Hsla};
+
+    #[test]
+    fn a_selection_copies_its_side_a_line_each() {
+        let d = Diff {
+            rows: vec![
+                Row::Hunk("@@ -1,3 +1,3 @@".into()),
+                Row::Same { old: 1, new: 1, text: "let a = 1;".into() },
+                Row::Changed { left: Some((2, "let b = 2;".into())), right: Some((2, "let b = 20;".into())) },
+                Row::Changed { left: Some((3, "gone();".into())), right: None },
+                Row::Same { old: 4, new: 3, text: "end".into() },
+            ],
+            ..Default::default()
+        };
+        // From "a = 1;" to "e" of "end", on the new side: the line taken
+        // out has no new side and is left out, as the head is.
+        let s = DiffSel { side: 1, anchor: (1, 4), head: (4, 1) };
+        assert_eq!(diff_sel_text(&d, &s), "a = 1;\nlet b = 20;\ne");
+        // Made upward, the same; on the old side, its own lines.
+        assert_eq!(diff_sel_text(&d, &DiffSel { anchor: (4, 1), head: (1, 4), ..s }), "a = 1;\nlet b = 20;\ne");
+        assert_eq!(diff_sel_text(&d, &DiffSel { side: 0, anchor: (2, 0), head: (3, 4) }), "let b = 2;\ngone");
+        assert_eq!(s.on_row(2, 11), Some(0..11));
+        assert_eq!(s.on_row(4, 3), Some(0..1));
+        assert_eq!(s.on_row(0, 5), None);
+    }
+
+    #[test]
+    fn a_double_click_takes_a_word() {
+        assert_eq!(word_at("let line_40 = x;", 6), 4..11);
+        assert_eq!(word_at("let line_40 = x;", 12), 12..13);
+        assert_eq!(word_at("let line_40 = x;", 16), 15..16);
+        assert_eq!(word_at("caf\u{e9} au lait", 2), 0..5);
+        assert_eq!(word_at("", 0), 0..0);
+    }
+
+    #[test]
+    fn the_selection_lies_over_a_lines_marks() {
+        let mark = HighlightStyle { background_color: Some(Hsla::red()), ..Default::default() };
+        let out = with_selection(vec![(2..6, mark), (8..10, mark)], Some(4..9), Hsla::blue());
+        let ranges: Vec<_> = out.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(ranges, vec![2..4, 4..9, 9..10]);
+        assert_eq!(out[1].1.background_color, Some(Hsla::blue()));
+    }
 }

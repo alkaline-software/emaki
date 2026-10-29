@@ -66,7 +66,7 @@ fn main() {
             let entries = emaki_core::outline::of(&session);
             if args.get(2).map(String::as_str) == Some("--summarize") {
                 // What the window would ask a small model, and how long it takes.
-                let asked: Vec<String> = entries.iter().filter(|e| e.wants_summary()).map(|e| e.prompt.clone()).collect();
+                let asked: Vec<(String, String)> = entries.iter().filter(|e| e.wants_summary()).map(|e| (e.prompt.clone(), e.reply.clone())).collect();
                 let began = std::time::Instant::now();
                 let lines = emaki_core::outline::summarize(&cfg.explain, session.agent, &asked);
                 let took = began.elapsed();
@@ -76,6 +76,26 @@ fn main() {
                     println!("{:>4}  {}  {}", e.round + 1, if e.wants_summary() { "*" } else { " " }, line);
                 }
                 println!("{} of {} entries asked about, {:.1}s", asked.len(), entries.len(), took.as_secs_f32());
+                return;
+            }
+            if args.get(2).map(String::as_str) == Some("--overview") {
+                // The overview the window would make: in one go, or with
+                // `--overview <n>`, the first n rounds and then the rest
+                // on top of them, as an update does.
+                let lines: Vec<(usize, String)> = entries.iter().map(|e| (e.round, emaki_core::outline::overview_line(e, None))).collect();
+                let began = std::time::Instant::now();
+                let first = args.get(3).and_then(|n| n.parse::<usize>().ok()).map(|n| emaki_core::outline::overview(&cfg.explain, session.agent, None, &lines[..n.min(lines.len())]));
+                let made = emaki_core::outline::overview(&cfg.explain, session.agent, first.flatten(), &lines);
+                match made {
+                    Some(o) => {
+                        println!("{}\n", o.summary);
+                        for (round, title) in &o.sections {
+                            println!("{:>4}  {title}", round + 1);
+                        }
+                        println!("covers {} of {} rounds, {:.1}s", o.covered, entries.len(), began.elapsed().as_secs_f32());
+                    }
+                    None => println!("nothing came back, {:.1}s", began.elapsed().as_secs_f32()),
+                }
                 return;
             }
             for e in entries {
