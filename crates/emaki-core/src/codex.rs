@@ -58,6 +58,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::model::{UsageBucket, UsageWindow};
 use serde_json::{json, Map, Value};
 
 use crate::agents;
@@ -462,7 +463,42 @@ impl CodexDriver {
             g.state = State::Idle;
             g.idle_since = Instant::now();
         }
+        driver.read_limits();
         Ok(driver)
+    }
+
+    /// Every limit the account has, asked of the app server
+    /// (`account/rateLimits/read`): the plan's shared bucket and each
+    /// model's own, with whether ordinary usage is allowed now. The
+    /// rollout's rows carry one bucket at a time, whichever the last
+    /// response named, so a model's own could go unseen there. Asked
+    /// when the child is up, after each turn, and when Codex says they
+    /// changed. On a thread of its own: an answer comes through the
+    /// read loop, which would wait on itself.
+    fn read_limits(self: &Arc<Self>) {
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            let Ok(reply) = me.request("account/rateLimits/read", json!({"excludeResetCreditDetails": true}), REQUEST_TIMEOUT) else { return };
+            let now = now_secs();
+            let mut buckets: Vec<UsageBucket> = Vec::new();
+            let mut take = |v: &Value| {
+                if let Some(b) = bucket_of(v, now) {
+                    if !buckets.iter().any(|k| k.id == b.id) {
+                        buckets.push(b);
+                    }
+                }
+            };
+            if let Some(by_id) = reply.get("rateLimitsByLimitId").and_then(Value::as_object) {
+                by_id.values().for_each(&mut take);
+            }
+            if let Some(one) = reply.get("rateLimits") {
+                take(one);
+            }
+            let ordinary = reply.get("ordinaryUsageAllowed").and_then(Value::as_bool);
+            if !buckets.is_empty() || ordinary.is_some() {
+                me.emit(Event::Buckets { buckets, ordinary });
+            }
+        });
     }
 
     /// The child and its two readers, with nothing said to it yet.
@@ -747,7 +783,7 @@ impl CodexDriver {
         thread.is_empty() || thread == crate::held(&self.session_id).as_str()
     }
 
-    fn on_notice(&self, method: &str, params: &Value) {
+    fn on_notice(self: &Arc<Self>, method: &str, params: &Value) {
         if !self.ours(params) {
             return;
         }
@@ -817,13 +853,14 @@ impl CodexDriver {
                 }
             }
             "turn/completed" => self.turn_over(params),
+            "account/rateLimits/updated" => self.read_limits(),
             _ => {}
         }
     }
 
     /// A turn ended: say how, ask for the go-ahead when it left a plan,
     /// and start what was queued behind it.
-    fn turn_over(&self, params: &Value) {
+    fn turn_over(self: &Arc<Self>, params: &Value) {
         let turn = params.get("turn").cloned().unwrap_or(Value::Null);
         let status = str_of(&turn, "status").to_string();
         let (result, plan, next) = {
@@ -849,6 +886,7 @@ impl CodexDriver {
             (result, plan, next)
         };
         self.emit(Event::Result(result));
+        self.read_limits();
         if let Some(plan) = plan {
             let id = format!("plan-{}", str_of(&turn, "id"));
             let mut input = Map::new();
@@ -1065,6 +1103,27 @@ fn end_child(child: &mut Child) {
     }
     #[cfg(not(unix))]
     let _ = child.kill();
+}
+
+/// A limit as the app server reports it (camel case, v2): its id,
+/// which model it is for, and its windows, the shorter first.
+fn bucket_of(v: &Value, at: f64) -> Option<UsageBucket> {
+    let text = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let windows: Vec<UsageWindow> = ["primary", "secondary"]
+        .iter()
+        .filter_map(|k| v.get(*k).filter(|w| !w.is_null()))
+        .filter_map(|w| {
+            let used = w.get("usedPercent").and_then(Value::as_f64)?;
+            // 0.162 writes `windowDurationMins`; the protocol's source says `windowMinutes`.
+            let minutes = ["windowDurationMins", "windowMinutes"].iter().find_map(|k| w.get(*k).and_then(Value::as_u64)).unwrap_or(0);
+            Some(UsageWindow { minutes, used: used / 100.0, resets_at: w.get("resetsAt").and_then(Value::as_f64).unwrap_or(0.0) })
+        })
+        .collect();
+    if windows.is_empty() {
+        return None;
+    }
+    let id = Some(text("limitId")).filter(|i| !i.is_empty()).unwrap_or_else(|| crate::model::SHARED_LIMIT.to_string());
+    Some(UsageBucket { id, name: text("limitName"), alias_of: text("normalModelSlug"), windows, at })
 }
 
 fn request_key(id: &Value) -> String {
@@ -1419,5 +1478,18 @@ mod tests {
         let wrapped = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5' model is not supported."}}"#;
         assert_eq!(error_words(wrapped), "The 'gpt-5' model is not supported.");
         assert_eq!(error_words("plain words"), "plain words");
+    }
+
+    /// A limit as 0.162's app server answers `account/rateLimits/read`:
+    /// camel case, the window's length under `windowDurationMins`.
+    #[test]
+    fn a_bucket_is_read_off_the_app_servers_answer() {
+        let v: Value = serde_json::from_str(r#"{"limitId":"codex_bengalfox","limitName":"gpt-5.2-codex-sonic","normalModelSlug":null,"primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":1795912912},"secondary":{"usedPercent":6,"windowDurationMins":10080,"resetsAt":1796000000}}"#).unwrap();
+        let b = bucket_of(&v, 1.0).unwrap();
+        assert_eq!((b.id.as_str(), b.name.as_str(), b.windows.len()), ("codex_bengalfox", "gpt-5.2-codex-sonic", 2));
+        assert_eq!((b.windows[0].minutes, b.windows[0].used, b.windows[1].minutes), (300, 0.12, 10080));
+        let shared: Value = serde_json::from_str(r#"{"limitId":"codex","limitName":null,"primary":{"usedPercent":0,"windowDurationMins":43200,"resetsAt":1},"secondary":null}"#).unwrap();
+        assert_eq!(bucket_of(&shared, 1.0).unwrap().id, crate::model::SHARED_LIMIT);
+        assert!(bucket_of(&serde_json::json!({"limitId":"x"}), 1.0).is_none());
     }
 }

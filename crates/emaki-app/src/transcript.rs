@@ -221,6 +221,9 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, q
         None => TextView::markdown(SharedString::from(format!("{id}-{}", if dark { "d" } else { "l" })), text),
     }
         .selectable(true)
+        // A link to a file of the person's opens in the pane; an address
+        // goes to the system (`workbench::link_clicked`).
+        .on_link_click(|url, ev, window, cx| crate::workbench::link_clicked(url, ev, window, cx))
         .find(find)
         .headings(headings)
         .kept(kept)

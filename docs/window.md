@@ -68,7 +68,7 @@ Two sections stand under the last project that shows, each a heading with its co
 
 A folder with a live session is open without being asked (`sync_folders`): it opens when one of its sessions goes live and closes when the last stops, if it was opened that way and not clicked since. A click is the person's choice and stays until the folder next goes live or quiet.
 
-A session's mark is in the muted ink unless it is live, so many rows do not read as many colors, and then in its agent's color (`docs/agents.md`, Marks) with a dot in its phase's color. A folder with a live session is in the accent, whichever agent's it is. A folder wears the most pressing of its sessions' (needs you, then working, then your turn).
+A session's mark is in the muted ink unless it is live, so many rows do not read as many colors, and then in its agent's color (`docs/agents.md`, Marks) with a dot in its phase's color. A folder wears the most pressing of its sessions' phases (needs you, then working, then your turn) as its own color, whichever agent's the session is, and the muted ink with none live: one mark a row. It was the accent with any session live and the phase a dot at the row's right, two marks for one thing. Within a session the same order holds: a question waiting is orange over everything, the agent at work blue, the turn over green for its half hour, then nothing.
 
 A folder lists its `FOLDER_ROWS` newest sessions, and under them any older one that has a tab: opened from further back it is in the list while its tab is, and goes with it, growing in and shrinking out as any row does (`side_rows_changed`). The rows have no headings by when ("Today", "Yesterday"); those are the sessions page's.
 

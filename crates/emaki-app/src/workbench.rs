@@ -1547,6 +1547,10 @@ pub struct Workbench {
     suggestion: Option<(String, String)>,
     suggestion_reading: bool,
     dialog_seen: Option<(String, emaki_core::driver::Dialog)>,
+    /// A Codex session whose last turn was refused because its model's
+    /// servers were full ("Selected model is at capacity"), and the
+    /// model it was on: the limits row says so until the next turn.
+    codex_capped: HashMap<String, String>,
     /// The plan the dialog asks about, by session, when the dialog is a
     /// plan's (`plan_for_dialog`). Kept after the dialog is gone, for
     /// the card to close with what it showed.
@@ -4149,6 +4153,7 @@ impl Workbench {
             suggestion: None,
             suggestion_reading: false,
             dialog_seen: None,
+            codex_capped: HashMap::new(),
             view_h: px(0.),
             dialog_plan: None,
             dialog_shown: std::cell::RefCell::new(DialogShown::default()),
@@ -5424,6 +5429,7 @@ impl Workbench {
             driver::Event::Turn { queued, .. } => {
                 view.state = "running".into();
                 view.queued = queued;
+                self.codex_capped.remove(&session_id);
             }
             driver::Event::Result(r) => {
                 view.queued = r.queued;
@@ -5431,12 +5437,28 @@ impl Workbench {
                 if r.is_error {
                     self.notice = Some(Notice::error(tf("turn ended: {why}", &[("why", &r.subtype)])));
                 }
+                // Codex's words for its model's servers being full, which
+                // no limit of the person's shows (`ServerOverloaded`).
+                if r.is_error && r.subtype.contains("at capacity") {
+                    self.codex_capped.insert(session_id.clone(), view.model.clone());
+                } else {
+                    self.codex_capped.remove(&session_id);
+                }
                 if self.limits.absorb_model_usage(&r.model_usage) {
                     let _ = self.limits.save();
                 }
             }
             driver::Event::RateLimit(info) => {
                 if self.limits.absorb_rate_limit(&info, self.now) {
+                    let _ = self.limits.save();
+                }
+            }
+            driver::Event::Buckets { buckets, ordinary } => {
+                let learned = self.limits.absorb_codex(&buckets);
+                if ordinary.is_some() && self.limits.codex_ordinary != ordinary {
+                    self.limits.codex_ordinary = ordinary;
+                }
+                if learned || ordinary.is_some() {
                     let _ = self.limits.save();
                 }
             }
@@ -9090,6 +9112,33 @@ impl Workbench {
         matches!(self.reply_via_for(r).0, "inbox" | "pty")
     }
 
+    /// A link followed. An address is the system's. A file is shown in
+    /// the pane, as a click in the tree shows it: named outright, or from
+    /// the folder of the file showing in the pane, else the session's.
+    /// A folder is shown in the file manager. A path at neither is said
+    /// under the composer. Before this every link went to the system as
+    /// an address, and a path with no scheme was an error of the Mac's
+    /// ("The application can't be opened. -50") over the window.
+    pub(crate) fn open_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match link_target(url) {
+            LinkTarget::Here => {}
+            LinkTarget::Url(u) => cx.open_url(&u),
+            LinkTarget::Path(p) => {
+                let p = emaki_core::paths::expand_tilde(&p.to_string_lossy());
+                let roots: Vec<PathBuf> = self.file_view.as_ref().and_then(|v| v.path.parent().map(|d| d.to_path_buf())).into_iter().chain(self.files_root()).collect();
+                let found = if p.is_absolute() { Some(p.clone()).filter(|p| p.exists()) } else { roots.iter().map(|r| r.join(&p)).find(|c| c.exists()) };
+                match found {
+                    Some(f) if f.is_dir() => crate::sys::reveal_path(&f),
+                    Some(f) => self.file_preview(&f, window, cx),
+                    None => {
+                        self.notice = Some(Notice::error(tf("There is no file at {path}", &[("path", &p.display())])));
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
     /// Put `text` on the clipboard, and have the button `key` show a tick
     /// for a moment.
     pub fn copy_text(&mut self, key: SharedString, text: String, cx: &mut Context<Self>) {
@@ -10365,17 +10414,66 @@ impl Workbench {
             row = row.child(part(t("Context").into(), ctx_pct, ctx_color, String::new()));
         }
         let usage_color = |pct: u64| if pct >= 90 { theme.danger } else if pct >= 70 { theme.magenta } else { theme.blue };
-        let windows: Vec<(String, Option<emaki_core::limits::Window>)> = match s.agent {
-            AgentId::ClaudeCode => vec![("5h:".into(), self.limits.five_hour), ("7d:".into(), self.limits.seven_day)],
-            // The limit the session's model draws on: its own where it
-            // has one, else the plan's shared one, each window named by
-            // its own length.
-            AgentId::Codex => emaki_core::model::bucket_for(&self.limits.codex_limits, model).map(|b| b.windows.iter().map(|w| (format!("{}:", w.label()), Some(emaki_core::limits::Window { utilization: w.used, resets_at: w.resets_at }))).collect()).unwrap_or_default(),
+        // A Codex session's model is the driver's word when it has one.
+        let model = self.drivers.get(&s.id).map(|v| v.model.as_str()).filter(|m| !m.is_empty() && s.agent == AgentId::Codex).unwrap_or(model);
+        let windows_of = |b: &emaki_core::model::UsageBucket| b.windows.iter().map(|w| (format!("{}:", w.label()), Some(emaki_core::limits::Window { utilization: w.used, resets_at: w.resets_at }))).collect::<Vec<_>>();
+        // What the row answers is how much further this model goes. For
+        // Codex that is the model's own bucket where it has one, first
+        // and under the model's name, and the plan's shared bucket after
+        // it, under "all models"; a model with no bucket of its own
+        // draws on the shared one, which then stands alone. A model
+        // whose last turn was refused for its servers being full says
+        // "at capacity" before any number, since the numbers read fine
+        // while the model would not answer; and a plan whose ordinary
+        // usage Codex says is blocked says so after its numbers.
+        let (windows, mut heads): (Vec<(String, Option<emaki_core::limits::Window>)>, Vec<(usize, String, bool)>) = match s.agent {
+            AgentId::ClaudeCode => (vec![("5h:".into(), self.limits.five_hour), ("7d:".into(), self.limits.seven_day)], Vec::new()),
+            AgentId::Codex => {
+                let buckets = &self.limits.codex_limits;
+                let shared = buckets.iter().find(|b| b.id == emaki_core::model::SHARED_LIMIT);
+                let own = emaki_core::model::bucket_for(buckets, model).filter(|b| b.id != emaki_core::model::SHARED_LIMIT);
+                let name = model_name(&self.hub.options_for(AgentId::Codex, &s.cwd), model);
+                let mut windows = Vec::new();
+                let mut heads = Vec::new();
+                if self.codex_capped.get(&s.id).is_some_and(|m| m.is_empty() || m == model) {
+                    heads.push((0, format!("{name} {}", t("at capacity")), true));
+                }
+                if let Some(b) = own {
+                    if heads.is_empty() {
+                        heads.push((0, name.clone(), false));
+                    }
+                    windows.extend(windows_of(b));
+                    if let Some(sh) = shared {
+                        heads.push((windows.len(), t("all models").to_string(), false));
+                        windows.extend(windows_of(sh));
+                    }
+                } else if let Some(sh) = shared {
+                    windows.extend(windows_of(sh));
+                }
+                if self.limits.codex_ordinary == Some(false) && shared.is_some() {
+                    heads.push((windows.len(), t("blocked").to_string(), true));
+                }
+                (windows, heads)
+            }
         };
-        if !ctx_known && windows.is_empty() {
+        if !ctx_known && windows.is_empty() && heads.is_empty() {
             return None;
         }
+        let total = windows.len();
+        heads.reverse();
+        let head_at = |row: Div, at: usize, first: bool, heads: &mut Vec<(usize, String, bool)>| {
+            let mut row = row;
+            while heads.last().is_some_and(|(i, _, _)| *i == at) {
+                let (_, words, warn) = heads.pop().unwrap();
+                if !first || ctx_known {
+                    row = row.child(bar());
+                }
+                row = row.child(div().text_color(if warn { theme.danger } else { muted }).when(warn, |d| d.font_weight(FontWeight::MEDIUM)).child(words));
+            }
+            row
+        };
         for (i, (label, w)) in windows.into_iter().enumerate() {
+            row = head_at(row, i, i == 0, &mut heads);
             if i > 0 || ctx_known {
                 row = row.child(bar());
             }
@@ -10391,6 +10489,7 @@ impl Workbench {
                 }
             }
         }
+        row = head_at(row, total, total == 0, &mut heads);
         Some(row)
     }
 
@@ -11130,9 +11229,14 @@ impl Workbench {
             let above = marked && at > 0 && lit[at - 1].0 && lit[at - 1].1 == lit[at].1 && !lit[at - 1].2;
             let below = marked && at + 1 < lit.len() && lit[at + 1].0 && lit[at + 1].1 == lit[at].1 && !lit[at].2;
             let open = self.folder_open(&p);
+            // The folder wears the most pressing of its sessions' phases
+            // (needs you, then working, then your turn), in that phase's
+            // color, and the muted ink with none live. It used to be the
+            // accent with any session live, with the phase as a dot at
+            // the row's right: two marks for one thing.
             let live: Vec<(&SessionRef, Column)> = list.iter().filter_map(|r| self.dot_of(r).map(|col| (r, col))).collect();
-            let dot = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| self.column_color(*c, cx));
-            let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
+            let phase = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| self.column_color(*c, cx));
+            let tint = phase.unwrap_or(theme.muted_foreground);
             let name = p.clone();
             // The folder itself, from the newest session that still has it.
             let folder_cwd = list.iter().map(|r| r.cwd.clone()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
@@ -11210,7 +11314,6 @@ impl Workbench {
                     })
                     .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(p.clone()))
-                    .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c).flex_shrink_0()))
                     // The count, and in its place under the pointer a
                     // plus: a new session in this folder. Both are
                     // always there, one of them clear, so nothing moves.
@@ -19409,6 +19512,27 @@ impl Render for Workbench {
 }
 
 #[cfg(test)]
+mod link_tests {
+    use super::{link_target, LinkTarget};
+    use std::path::PathBuf;
+
+    /// An address with a scheme is the system's; anything else is a path,
+    /// a `file:` address and its percent signs included.
+    #[test]
+    fn a_links_target_is_an_address_or_a_path() {
+        assert_eq!(link_target("https://emaki.lol/x"), LinkTarget::Url("https://emaki.lol/x".into()));
+        assert_eq!(link_target("mailto:a@b.c"), LinkTarget::Url("mailto:a@b.c".into()));
+        assert_eq!(link_target("docs/a b.svg"), LinkTarget::Path(PathBuf::from("docs/a b.svg")));
+        assert_eq!(link_target("/Users/me/x%20y.png"), LinkTarget::Path(PathBuf::from("/Users/me/x y.png")));
+        assert_eq!(link_target("file:///Users/me/a%20b.svg#top"), LinkTarget::Path(PathBuf::from("/Users/me/a b.svg")));
+        assert_eq!(link_target("file://localhost/tmp/x"), LinkTarget::Path(PathBuf::from("/tmp/x")));
+        assert_eq!(link_target("C:\\work\\a.txt"), LinkTarget::Path(PathBuf::from("C:\\work\\a.txt")));
+        assert_eq!(link_target("100%"), LinkTarget::Path(PathBuf::from("100%")));
+        assert_eq!(link_target("#heading"), LinkTarget::Here);
+    }
+}
+
+#[cfg(test)]
 mod term_key_tests {
     use super::term_bytes;
     use gpui::Keystroke;
@@ -19446,6 +19570,77 @@ mod term_key_tests {
 /// A right click's menu on a link, when the click was on one: the address
 /// first, then the words it shows, then the markdown it was written as
 /// (not offered for a link that came from HTML, which has none).
+/// Where a link in the conversation or in a file leads.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LinkTarget {
+    /// An address with a scheme (`https:`, `mailto:`): the system's.
+    Url(String),
+    /// A file or folder, as the link wrote it: outright, from a folder,
+    /// or as a `file:` address, decoded.
+    Path(PathBuf),
+    /// A place in the page (`#heading`): nothing to open.
+    Here,
+}
+
+/// What a link's address is. A scheme is two or more letters before a
+/// colon, so a Windows drive (`C:\\`) is a path; `file:` is a path too,
+/// with its host and its percent signs undone.
+pub(crate) fn link_target(url: &str) -> LinkTarget {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with('#') {
+        return LinkTarget::Here;
+    }
+    let scheme = url.split_once(':').map(|(s, _)| s).filter(|s| s.len() > 1 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')));
+    match scheme {
+        Some(s) if s.eq_ignore_ascii_case("file") => {
+            let rest = &url["file:".len()..];
+            let rest = rest.strip_prefix("//localhost").or_else(|| rest.strip_prefix("//")).unwrap_or(rest);
+            let rest = rest.split(['#', '?']).next().unwrap_or(rest);
+            LinkTarget::Path(PathBuf::from(percent_decoded(rest)))
+        }
+        Some(_) => LinkTarget::Url(url.to_string()),
+        None => LinkTarget::Path(PathBuf::from(percent_decoded(url))),
+    }
+}
+
+/// `%20` and its kind undone; a `%` that begins no such pair stays.
+fn percent_decoded(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let pair = (bytes[i] == b'%' && i + 2 < bytes.len()).then(|| std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())).flatten();
+        match pair {
+            Some(b) => {
+                out.push(b);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A click on a link in the conversation or in a file, from the markdown
+/// view (`transcript::md_view_in`). A left or middle click, a key or a
+/// tap opens it; a right click is the menu's. The window's workbench
+/// opens it (`open_link`); with none, the system does.
+pub(crate) fn link_clicked(url: &SharedString, ev: &ClickEvent, window: &mut Window, cx: &mut App) {
+    let opens = match ev {
+        ClickEvent::Mouse(c) => matches!(c.up.button, MouseButton::Left | MouseButton::Middle),
+        ClickEvent::Keyboard(_) => true,
+        ClickEvent::Touch(c) => !c.long_press,
+    };
+    if !opens {
+        return;
+    }
+    let Some(wb) = cx.try_global::<crate::MainWorkbench>().and_then(|m| m.0.upgrade()) else { return cx.open_url(url) };
+    wb.update(cx, |this, cx| this.open_link(url, window, cx));
+}
+
 pub(crate) fn link_menu_items() -> Option<Vec<(&'static str, MenuDo)>> {
     let (link, words) = gpui_component::text::right_clicked_link()?;
     let mut items = vec![(t("Copy Link"), MenuDo::CopyAs("icons/link.svg", link.url.to_string()))];

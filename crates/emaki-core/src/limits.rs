@@ -65,6 +65,9 @@ pub struct Limits {
     /// Codex's limits for the account, each by its id, with when a
     /// rollout last recorded it (`model::UsageBucket`).
     pub codex_limits: Vec<crate::model::UsageBucket>,
+    /// Whether Codex's plan allows ordinary usage now, as its app server
+    /// last said (`ordinaryUsageAllowed`); none until it has.
+    pub codex_ordinary: Option<bool>,
 }
 
 /// What the status line was last handed about one session:

@@ -1044,6 +1044,10 @@ pub enum Event {
     /// The `rate_limit_info` of a `rate_limit_event` frame: the account's
     /// five-hour and seven-day windows.
     RateLimit(Value),
+    /// Codex's limits, every bucket its app server reports
+    /// (`account/rateLimits/read`), and whether the plan's ordinary
+    /// usage is allowed now, when it said.
+    Buckets { buckets: Vec<crate::model::UsageBucket>, ordinary: Option<bool> },
     Permission(PermissionRequest),
     PermissionSettled(String),
     Exit { code: Option<i32>, error: String },

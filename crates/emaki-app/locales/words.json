@@ -9205,5 +9205,41 @@
     "fr": "Mettre à jour le résumé",
     "de": "Zusammenfassung aktualisieren",
     "es": "Actualizar el resumen"
+  },
+  "There is no file at {path}": {
+    "zh-Hans": "{path} 处没有文件",
+    "zh-Hant": "{path} 處沒有檔案",
+    "ja": "{path} にファイルはありません",
+    "ko": "{path}에 파일이 없습니다",
+    "fr": "Il n’y a pas de fichier à {path}",
+    "de": "Unter {path} gibt es keine Datei",
+    "es": "No hay ningún archivo en {path}"
+  },
+  "at capacity": {
+    "zh-Hans": "已满载",
+    "zh-Hant": "已滿載",
+    "ja": "満杯",
+    "ko": "용량 초과",
+    "fr": "saturé",
+    "de": "ausgelastet",
+    "es": "saturado"
+  },
+  "all models": {
+    "zh-Hans": "所有模型",
+    "zh-Hant": "所有模型",
+    "ja": "全モデル",
+    "ko": "모든 모델",
+    "fr": "tous les modèles",
+    "de": "alle Modelle",
+    "es": "todos los modelos"
+  },
+  "blocked": {
+    "zh-Hans": "已阻止",
+    "zh-Hant": "已封鎖",
+    "ja": "停止中",
+    "ko": "차단됨",
+    "fr": "bloqué",
+    "de": "gesperrt",
+    "es": "bloqueado"
   }
 }

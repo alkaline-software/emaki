@@ -1054,7 +1054,7 @@ impl Builder {
                         let text = |k: &str| limits.get(k).and_then(Value::as_str).unwrap_or("").to_string();
                         let id = Some(text("limit_id")).filter(|i| !i.is_empty()).unwrap_or_else(|| crate::model::SHARED_LIMIT.to_string());
                         let at = crate::build::parse_ts(ts).map(|t| t.timestamp() as f64).unwrap_or(0.0);
-                        let bucket = crate::model::UsageBucket { id, name: text("limit_name"), windows, at };
+                        let bucket = crate::model::UsageBucket { id, name: text("limit_name"), alias_of: text("normal_model_slug"), windows, at };
                         match self.s.usage_buckets.iter_mut().find(|b| b.id == bucket.id) {
                             Some(b) => *b = bucket,
                             None => self.s.usage_buckets.push(bucket),

@@ -165,6 +165,9 @@ pub struct UsageBucket {
     pub id: String,
     /// The model the limit is for, empty for the shared one.
     pub name: String,
+    /// For a reserve bucket, the ordinary model it stands in for
+    /// (Codex's `normal_model_slug`); empty otherwise.
+    pub alias_of: String,
     /// Its windows, the shorter first.
     pub windows: Vec<UsageWindow>,
     /// When a rollout recorded them, Unix seconds.
