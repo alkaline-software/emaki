@@ -12,7 +12,8 @@
 //! every platform. A variable font handed over as bytes is held as its
 //! regular alone, and every bold drawn as regular.
 
-use gpui::{App, Global, SharedString};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{div, px, App, Global, ParentElement as _, SharedString, Styled as _};
 
 /// A face Settings offers: what `config.json` names it by, the name
 /// shown, and the family the text system knows it by.
@@ -57,6 +58,11 @@ pub fn monos() -> &'static [Face] {
 /// come with macOS and are the system's, not carried here). With none of
 /// them, the window's face.
 const WORDMARK_FACES: &[&str] = &["Optima", "Avenir Next", "Avenir", WORDMARK_OWN];
+
+/// The faces 絵巻 is set in beside the name, as the site has it: a Mincho,
+/// the first the system has. Each system's own and never carried: a face
+/// with kanji in it is a large file for two characters.
+const KANJI_FACES: &[&str] = &["Hiragino Mincho ProN", "Hiragino Mincho Pro", "Yu Mincho", "YuMincho", "Noto Serif JP", "Noto Serif CJK JP"];
 
 /// The face of that kind the window carries, for a system with none of
 /// the Mac's: Belleza (etunni/belleza), a sans with Optima's flared
@@ -312,6 +318,8 @@ pub fn mono_face(choice: &str) -> &'static Face {
 pub struct ChatFonts {
     /// The first of `WORDMARK_FACES` the system has.
     pub wordmark: Option<String>,
+    /// The first of `KANJI_FACES` the system has.
+    pub kanji: Option<String>,
     /// The family titles and the greeting are set in: the chat's.
     pub display: String,
     /// The smaller cuts of the monospace faces that were made
@@ -342,7 +350,8 @@ pub fn install(chat: &str, cx: &mut App) {
     // at the one Windows and Linux get.
     let asked = std::env::var("EMAKI_WORDMARK").ok();
     let wordmark = asked.or_else(|| WORDMARK_FACES.iter().find(|f| names.iter().any(|n| n == *f)).map(|f| f.to_string()));
-    cx.set_global(ChatFonts { wordmark, display: chat_face(chat).family.to_string(), inline });
+    let kanji = KANJI_FACES.iter().find(|f| names.iter().any(|n| n == *f)).map(|f| f.to_string());
+    cx.set_global(ChatFonts { wordmark, kanji, display: chat_face(chat).family.to_string(), inline });
 }
 
 /// The chat font changed: titles go with it.
@@ -360,6 +369,22 @@ pub fn term_family(choice: &str, _: &App) -> SharedString {
 /// the window's own face.
 pub fn wordmark_family(cx: &App) -> Option<SharedString> {
     cx.global::<ChatFonts>().wordmark.clone().map(SharedString::from)
+}
+
+/// 絵巻, to stand after the name set at `size`: in a Mincho, at 0.78 of the
+/// name, the two a little apart and a little off it, as the site has them.
+/// gpui has no letter spacing, so each character is drawn on its own.
+pub fn kanji(size: f32, cx: &App) -> gpui::Div {
+    let at = size * 0.78;
+    div()
+        .flex()
+        .flex_shrink_0()
+        .ml(px(size * 0.18))
+        .gap(px(at * 0.06))
+        .text_size(px(at))
+        .when_some(cx.global::<ChatFonts>().kanji.clone(), |d, f| d.font_family(SharedString::from(f)))
+        .child("絵")
+        .child("巻")
 }
 
 /// The face titles and the greeting are set in: the conversation's, so a

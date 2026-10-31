@@ -1457,7 +1457,7 @@ impl Workbench {
             )
         });
         let auto_check = self.switch("update-auto", self.cfg.app.check_updates, Rc::new(|this, on, _, cx| this.set_check_updates(on, cx)), cx);
-        group(None, None, vec![line(t("Updates"), has_note.then(|| version_note.into_any_element()), button, &theme), line(t("Check automatically"), Some(div().child(t("Once a day. Nothing is installed without you.")).into_any_element()), auto_check, &theme)], &theme)
+        group(None, None, vec![line(t("Updates"), has_note.then(|| version_note.into_any_element()), button, &theme), line(t("Check automatically"), None, auto_check, &theme)], &theme)
     }
 
     /// Who makes Emaki: the app on a title card, a sentence naming the
@@ -1497,20 +1497,21 @@ impl Workbench {
                 .border_1()
                 .border_color(theme.border)
                 .bg(card_ground(&theme))
-                .child(crate::i18n::weave(t("{studio} presents"), vec![("studio", link("about-studio", "Alkaline Software", "https://github.com/alkaline-software").into_any_element())], prose().text_size(px(12.5))))
+                .child(crate::i18n::weave(t("{studio} presents"), vec![("studio", link("about-studio", "Alkaline Software", "https://github.com/alkaline-software").into_any_element())], prose().text_size(px(14.))))
                 .child(div().id("about-icon").mt(px(18.)).cursor_pointer().hover(|s| s.opacity(0.82)).on_click(|_, _, cx| cx.open_url("https://emaki.lol")).child(img("icon/app-large.png").size(px(88.)).flex_shrink_0()))
                 .child(
                     div()
                         .id("about-name")
                         .mt(px(6.))
+                        .flex()
+                        .items_center()
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.82))
                         .on_click(|_, _, cx| cx.open_url("https://emaki.lol"))
-                        .text_size(px(42.))
                         .line_height(px(48.))
                         .text_color(theme.primary)
-                        .when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f))
-                        .child("Emaki"),
+                        .child(div().text_size(px(42.)).when_some(crate::fonts::wordmark_family(cx), |d, f| d.font_family(f)).child("Emaki"))
+                        .child(crate::fonts::kanji(42., cx)),
                 )
                 .child(div().mt(px(4.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(tf("Version {version}", &[("version", &current)])))
                 .into_any_element(),
@@ -1519,7 +1520,6 @@ impl Workbench {
                 .items_center()
                 .gap(px(16.))
                 .pt(px(4.))
-                .child(crate::i18n::weave(t("A studio by {jp} and {pingfan}."), vec![("jp", link("about-jp", "Dr. John Paul Helveston", "https://www.jhelvy.com").into_any_element()), ("pingfan", link("about-pingfan", "Dr. Pingfan Hu", "https://pingfan.org").into_any_element())], prose()))
                 .child(
                     h_flex()
                         .gap(px(8.))

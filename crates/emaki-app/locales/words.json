@@ -53,15 +53,6 @@
     "de": "Eine Sitzung braucht Claude Code oder Codex. Installiere eines davon, um zu beginnen.",
     "es": "Una sesión necesita Claude Code o Codex. Instala uno de los dos para empezar."
   },
-  "A studio by {jp} and {pingfan}.": {
-    "zh-Hans": "由 {jp} 和 {pingfan} 创立的工作室。",
-    "zh-Hant": "由 {jp} 和 {pingfan} 創立的工作室。",
-    "ja": "{jp} と {pingfan} のスタジオ。",
-    "ko": "{jp}와 {pingfan}의 스튜디오.",
-    "fr": "Un studio de {jp} et {pingfan}.",
-    "de": "Ein Studio von {jp} und {pingfan}.",
-    "es": "Un estudio de {jp} y {pingfan}."
-  },
   "A turn is running in a terminal of yours. When it is over, {agent} can be started here.": {
     "zh-Hans": "一轮正在你自己的终端中运行。结束后，可以在这里启动 {agent}。",
     "zh-Hant": "一輪正在你自己的終端機中執行。結束後，可以在這裡啟動 {agent}。",
@@ -3238,15 +3229,6 @@
     "fr": "Sur Mac, git est fourni avec les outils de ligne de commande d’Apple. Exécutez dans le terminal :",
     "de": "Auf dem Mac kommt git mit Apples Befehlszeilenprogrammen. Im Terminal ausführen:",
     "es": "En Mac, git viene con las herramientas de línea de comandos de Apple. Ejecuta en el terminal:"
-  },
-  "Once a day. Nothing is installed without you.": {
-    "zh-Hans": "每天一次。未经你同意不会安装任何东西。",
-    "zh-Hant": "每天一次。未經你同意不會安裝任何東西。",
-    "ja": "1 日 1 回。あなたの許可なくインストールはしません。",
-    "ko": "하루 한 번. 허락 없이 설치하지 않습니다.",
-    "fr": "Une fois par jour. Rien ne s’installe sans vous.",
-    "de": "Einmal am Tag. Nichts wird ohne dich installiert.",
-    "es": "Una vez al día. Nada se instala sin ti."
   },
   "Only the beginning of this comparison is shown.": {
     "zh-Hans": "只显示了此比较的开头部分。",

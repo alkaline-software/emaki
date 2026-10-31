@@ -5978,6 +5978,10 @@ impl Workbench {
             // An update to `version` begins as the settings' button begins
             // one, whatever the release says (with `EMAKI_UPDATE_FEED` on
             // Windows, from a feed of one's own).
+            Some(t) if t.starts_with("updatefound:") => {
+                self.update.available = Some(t["updatefound:".len()..].to_string());
+                cx.notify();
+            }
             Some(t) if t.starts_with("update:") => {
                 self.update.available = Some(t["update:".len()..].to_string());
                 self.install_update_now(cx);
@@ -11775,6 +11779,10 @@ impl Workbench {
             }
         }
 
+        // A newer Emaki waiting: a dot on the gear, seen with the settings
+        // shut, as About's in the rail is with them open.
+        let update_waiting = self.update.available.is_some();
+        let gear_dot = self.presence("gear-dot", update_waiting, cx);
         let footer = h_flex()
             .flex_shrink_0()
             .px(px(14.))
@@ -11820,6 +11828,7 @@ impl Workbench {
             .child(
                 div()
                     .id("settings-gear")
+                    .relative()
                     .size(px(26.))
                     .flex_shrink_0()
                     .rounded(px(6.))
@@ -11830,6 +11839,13 @@ impl Workbench {
                     .hover(|s| s.bg(theme.sidebar_accent))
                     .managed_tooltip(|window, cx| crate::workbench::tip(t("Settings (⌘,)"), window, cx))
                     .child(Icon::new(IconName::Settings).with_size(px(16.)).text_color(theme.muted_foreground))
+                    .children((update_waiting || gear_dot.is_some()).then(|| {
+                        let dot = div().absolute().top(px(3.)).right(px(3.)).size(px(7.)).rounded_full().bg(theme.primary);
+                        match gear_dot {
+                            Some((coming, n)) => dot.with_animation(ElementId::Name(format!("gear-dot-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t })).into_any_element(),
+                            None => dot.into_any_element(),
+                        }
+                    }))
                     .on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.open_settings(None, cx);
