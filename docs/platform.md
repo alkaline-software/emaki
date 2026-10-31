@@ -98,7 +98,7 @@ The app was called scribe, and before that there was a Python CLI, daemon and we
 
 ## The app icon
 
-`scripts/icon/icon.html` is the source, drawn on a canvas: a handscroll (絵巻) seen from the front with a conversation on its sheet, in the Alkaline Software organization icon's colors, the rolls in periwinkle (`docs/design.md`, The icon). It was designed outside this repository; this copy is the app's source.
+`scripts/icon/icon.html` is the source, drawn on a canvas: a handscroll (絵巻) seen from the front with a conversation on its sheet, in the Alkaline Software organization icon's colors, the rolls in periwinkle, on the studio's cream with a fifth of periwinkle in it (`docs/design.md`, The icon, which says what the ground is and why). It was designed outside this repository; this copy is the app's source.
 
 - `drawIcon(canvas, icon, px, bleed)` draws any pixel size, as the full square (`bleed`) or the rounded app icon with its inset and shadow. The page itself is the proof sheet.
 - `scripts/icon/render.swift` loads the page in a `WKWebView` with no window and writes what `exportIcon(size, bleed)` returns, so every size is drawn on its own pixels and none is a scaled copy. `scripts/icon/ico.py` packs the `.ico`; `scripts/make-icon.sh` runs it all on a Mac alone. `docs/release.md` says how to regenerate.
