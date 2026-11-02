@@ -833,15 +833,13 @@ pub fn cover_on_screen(text: &str) -> Option<String> {
 }
 
 /// A line Claude Code puts up beside its prompt for a moment, a word on
-/// the account or a tip, and not part of the conversation.
+/// the account, and not part of the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenNote {
     pub text: String,
     /// The color it is drawn in, `0xRRGGBB`, when the screen was read
     /// with its colors.
     pub color: Option<u32>,
-    /// A tip on how to use Claude Code, not news.
-    pub tip: bool,
 }
 
 /// Whether a line set to the right says what the session is set to:
@@ -857,9 +855,10 @@ fn says_a_setting(words: &str) -> bool {
 /// The lines over the prompt that are Claude Code's own and not the
 /// conversation's, read off 2.1.316: what it says of the account stands
 /// straight over the prompt's rule, set to the right ("You've used 90%
-/// of your Fable limit · resets Nov 3 at 12am (Australia/Melbourne)"),
-/// and a tip hangs under the working line ("⎿  Tip: Use /btw to ask a
-/// quick side question…"). None of it is in any transcript.
+/// of your Fable limit · resets Nov 3 at 12am (Australia/Melbourne)"). A
+/// tip hangs under the working line ("⎿  Tip: Use /btw to ask a quick
+/// side question…") and is left out: it teaches the terminal. None of it
+/// is in any transcript.
 pub fn notes_on_screen(text: &str) -> Vec<ScreenNote> {
     let lines: Vec<&str> = text.lines().collect();
     let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
@@ -876,14 +875,14 @@ pub fn notes_on_screen(text: &str) -> Vec<ScreenNote> {
         if words.is_empty() {
             break;
         }
-        let tip = words.trim_start_matches(['⎿', '└', 'L']).trim_start();
         let indent = line.chars().count() - words.chars().count();
         let color = sgr_spans(lines[ix].trim_end_matches('\r')).into_iter().find(|(t, _)| !t.trim().is_empty()).and_then(|(_, c)| c);
-        if tip.starts_with("Tip:") {
-            notes.push(ScreenNote { text: tip.to_string(), color, tip: true });
-        } else if indent >= 6 && line.chars().count() + 3 >= right {
+        if words.trim_start_matches(['⎿', '└', 'L']).trim_start().starts_with("Tip:") {
+            continue;
+        }
+        if indent >= 6 && line.chars().count() + 3 >= right {
             if !says_a_setting(words) {
-                notes.push(ScreenNote { text: words.to_string(), color, tip: false });
+                notes.push(ScreenNote { text: words.to_string(), color });
             }
         } else if !words.starts_with(SPINNER_MARKS) {
             break;

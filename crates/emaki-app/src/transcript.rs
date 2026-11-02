@@ -331,7 +331,7 @@ pub(crate) fn tile_caption(w: f32, name: String, theme: &gpui_component::Theme) 
 }
 
 /// Straight-line mix of two colors, for a state change drawn over a moment.
-fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+pub(crate) fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     Hsla { h: a.h + (b.h - a.h) * t, s: a.s + (b.s - a.s) * t, l: a.l + (b.l - a.l) * t, a: a.a + (b.a - a.a) * t }
 }
 

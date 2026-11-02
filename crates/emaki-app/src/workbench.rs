@@ -1668,7 +1668,9 @@ pub struct Workbench {
     /// has put away.
     notes: HashMap<String, tray::Notes>,
     notes_reading: bool,
-    notes_kept: std::cell::RefCell<[Option<emaki_core::driver::ScreenNote>; 2]>,
+    notes_kept: std::cell::RefCell<Option<emaki_core::driver::ScreenNote>>,
+    /// The session whose note's card is open.
+    notes_open: Option<String>,
     notes_gone: HashSet<String>,
     /// What the decision line last asked, for the moment it closes.
     bar_kept: std::cell::RefCell<Option<tray::Asked>>,
@@ -4265,6 +4267,7 @@ impl Workbench {
             notes: HashMap::new(),
             notes_reading: false,
             notes_kept: Default::default(),
+            notes_open: None,
             notes_gone: HashSet::new(),
             bar_kept: Default::default(),
             artifacts_open: None,
@@ -6057,17 +6060,17 @@ impl Workbench {
                     self.side_drag_end();
                 }
             }
-// A click on the row of background commands.
+// A click on a toggle of what runs in the background.
             Some("agents") => {
                 self.agents_open = self.selected_ref().map(|r| r.session_id.clone());
                 self.read_agent_steps();
             }
-            // A click on the line of published artifacts.
+            // A click on the toggle of published artifacts.
             Some("artifacts") => {
                 self.artifacts_open = self.selected_ref().map(|r| r.session_id.clone());
                 cx.notify();
             }
-            // A click on the line of monitors.
+            // A click on the toggle of monitors.
             Some("monitors") => {
                 self.monitors_open = self.selected_ref().map(|r| r.session_id.clone());
                 cx.notify();
@@ -6404,6 +6407,12 @@ impl Workbench {
                 let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
                 let now = self.now;
                 self.note_probe(sid, &t["note:".len()..], now);
+                cx.notify();
+            }
+            // A click on the bell.
+            Some("notes") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                self.notes_toggle(&sid);
                 cx.notify();
             }
             // The turn's words, as if a message had not gone.
@@ -10626,7 +10635,12 @@ impl Workbench {
                 .when(!tail.is_empty(), |d| d.child(div().text_color(muted).child(tail)))
         };
         let bar = || div().text_color(muted.opacity(0.6)).child("|");
-        let mut row = h_flex().flex_shrink_0().gap(px(8.)).items_center();
+        // A figure and the bar before it are one piece. The toggles beside
+        // the row keep their room, so in a narrow column the last pieces
+        // wrap to a second line the row's height hides: they go whole,
+        // and nothing is cut through.
+        let piece = |first: bool, what: AnyElement| h_flex().h(NOTICE_H).gap(px(8.)).items_center().when(!first, |d| d.child(bar())).child(what);
+        let mut row = h_flex().min_w_0().h(NOTICE_H).flex_wrap().overflow_hidden().gap_x(px(8.)).items_center();
         let model = s.models.last().map(String::as_str).unwrap_or("");
         let own = self.session_ctx.as_ref().filter(|(id, _)| *id == s.id).map(|(_, c)| c);
         let window = match s.agent {
@@ -10639,7 +10653,7 @@ impl Workbench {
         // of its context rather than a share of a guess.
         let ctx_known = s.agent == AgentId::ClaudeCode || window > 0;
         if ctx_known {
-            row = row.child(part(t("Context").into(), ctx_pct, ctx_color, String::new()));
+            row = row.child(piece(true, part(t("Context").into(), ctx_pct, ctx_color, String::new()).into_any_element()));
         }
         let usage_color = |pct: u64| if pct >= 90 { theme.danger } else if pct >= 70 { theme.magenta } else { theme.blue };
         // A Codex session's model is the driver's word when it has one.
@@ -10693,29 +10707,22 @@ impl Workbench {
             let mut row = row;
             while heads.last().is_some_and(|(i, _, _)| *i == at) {
                 let (_, words, warn) = heads.pop().unwrap();
-                if !first || ctx_known {
-                    row = row.child(bar());
-                }
-                row = row.child(div().text_color(if warn { theme.danger } else { muted }).when(warn, |d| d.font_weight(FontWeight::MEDIUM)).child(words));
+                row = row.child(piece(first && !ctx_known, div().text_color(if warn { theme.danger } else { muted }).when(warn, |d| d.font_weight(FontWeight::MEDIUM)).child(words).into_any_element()));
             }
             row
         };
         for (i, (label, w)) in windows.into_iter().enumerate() {
             row = head_at(row, i, i == 0, &mut heads);
-            if i > 0 || ctx_known {
-                row = row.child(bar());
-            }
-            match w {
+            let figure = match w {
                 Some(w) => {
                     let w = w.at(now);
                     let pct = (w.utilization * 100.0).round().max(0.0) as u64;
                     let left = emaki_core::limits::until(w.resets_at, now);
-                    row = row.child(part(label, pct, usage_color(pct), if left.is_empty() { String::new() } else { format!("({left})") }));
+                    part(label, pct, usage_color(pct), if left.is_empty() { String::new() } else { format!("({left})") }).into_any_element()
                 }
-                None => {
-                    row = row.child(h_flex().gap(px(4.)).text_color(muted).child(label).child("--"));
-                }
-            }
+                None => h_flex().gap(px(4.)).text_color(muted).child(label).child("--").into_any_element(),
+            };
+            row = row.child(piece(i == 0 && !ctx_known, figure));
         }
         row = head_at(row, total, total == 0, &mut heads);
         Some(row)
@@ -12678,7 +12685,7 @@ impl Workbench {
         })
     }
 
-    /// What that line opens: a card at the conversation's end with each
+    /// What its toggle opens: a card at the conversation's end with each
     /// published page, newest first, its title, where it is and when it
     /// was last published, and the way to it.
     fn render_artifacts_card(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -14997,7 +15004,6 @@ impl Workbench {
             h_flex()
                 .w_full()
                 .h(px(26.))
-                .px(px(8.))
                 .gap(px(8.))
                 .items_center()
                 .text_size(px(12.))
@@ -15013,30 +15019,16 @@ impl Workbench {
                         .child(div().child(elapsed_since(from, self.now))),
                 })
                 .child(
-                    // Stop, as Escape is in the terminal: a square on a
-                    // pill that fills with the danger color under the
-                    // pointer, so it is found without shouting.
-                    h_flex()
-                        .id("stop-turn")
-                        .occlude()
-                        .h(px(24.))
-                        .px(px(10.))
-                        .gap(px(6.))
-                        .items_center()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_size(px(12.))
-                        .text_color(theme.foreground)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)).text_color(theme.danger))
+                    // Stop, as Escape is in the terminal: a pill as any
+                    // other beside it, its square where their icon is.
+                    tray::tray_pill("stop-turn", "", "", Press::Halt, false, &theme)
                         .active(|s| s.bg(theme.danger.opacity(0.18)))
                         .managed_tooltip(|window, cx| crate::workbench::tip(t("Stop this turn (Esc)"), window, cx))
                         .on_click(cx.listener(|this, _, window, cx| {
                             swallow_click(window, cx);
                             this.interrupt(cx);
                         }))
-                        .child(div().size(px(7.)).rounded(px(1.5)).bg(theme.danger))
+                        .child(div().size(px(14.)).flex().items_center().justify_center().child(div().size(px(8.)).rounded(px(1.5)).bg(theme.danger)))
                         .child(t("Stop")),
                 )
         });
@@ -15090,18 +15082,19 @@ impl Workbench {
                 })
                 .into_iter()
                 .collect();
-            let row = tray::tray_row("waiting-row", agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false), said, None, where_, Some(elapsed_since(&from, self.now)), pills, &theme);
+            let row = tray::tray_row("waiting-row", agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false), said, where_, Some(elapsed_since(&from, self.now)), pills, &theme);
             tray::Line { key: waiting_key.clone(), on: waiting_on, moving: waiting_moving, row: row.into_any_element(), free: false }
         });
 
+        // A list that has emptied is shut, so the next thing to start
+        // stays behind its toggle.
         let running = self.shells_running(&r, &session);
-        let of = |kind: TaskKind| -> Vec<_> { running.iter().filter(|sh| task_of(sh) == kind).cloned().collect() };
-        let mut lines: Vec<tray::Line> = self.note_lines(&r, cx);
-        lines.extend(self.artifacts_line(&r, &session.artifacts, cx));
-        lines.extend(self.shells_line(&r, &of(TaskKind::Agents), TaskKind::Agents, cx));
-        lines.extend(self.shells_line(&r, &of(TaskKind::Monitors), TaskKind::Monitors, cx));
-        lines.extend(self.shells_line(&r, &of(TaskKind::Commands), TaskKind::Commands, cx));
-        lines.extend(self.held_line(&r, cx));
+        for kind in [TaskKind::Agents, TaskKind::Monitors, TaskKind::Commands] {
+            if !running.iter().any(|sh| task_of(sh) == kind) && self.task_open(kind).as_deref() == Some(r.session_id.as_str()) {
+                self.task_toggle(kind, &r.session_id);
+            }
+        }
+        let mut lines: Vec<tray::Line> = self.held_line(&r, cx).into_iter().collect();
         // The decision line says what is asked; the terminal's own
         // screen on its card has no choices to stand here, and when the
         // reader has left it behind, a line of its own goes to it.
@@ -15122,7 +15115,7 @@ impl Workbench {
                     }))
                 })
                 .into_any_element()];
-            let row = tray::tray_row("behind-row", agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false), self.behind_said.borrow().clone(), None, t("below"), None, pills, &theme);
+            let row = tray::tray_row("behind-row", agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false), self.behind_said.borrow().clone(), t("below"), None, pills, &theme);
             lines.push(tray::Line { key: "behind-line".into(), on: behind_on, moving: behind_moving, row: row.into_any_element(), free: false });
         }
         self.tabs_glide_step(window);
@@ -15380,45 +15373,6 @@ impl Workbench {
         self.agent_steps = steps;
     }
 
-    /// The row over the composer that says commands, or subagents, are
-    /// running in the background, and, opened with a click, what each
-    /// one is: a command with the last of what it has printed, an agent
-    /// with what it was last seen doing.
-    fn render_shells(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], kind: TaskKind, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if shells.is_empty() {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let open = self.task_open(kind).as_deref() == Some(r.session_id.as_str());
-        let label = |sh: &emaki_core::model::Shell| if sh.description.is_empty() { sh.command.lines().next().unwrap_or("").to_string() } else { sh.description.clone() };
-        let first = &shells[0];
-        let shells_n = shells.len();
-        let sid = r.session_id.clone();
-        let pulse = div().size(px(7.)).rounded_full().bg(theme.blue).opacity({
-            let t = crate::ambient::phase(Duration::from_millis(1400));
-            0.35 + 0.65 * (1. - (2. * t - 1.).abs())
-        });
-        let said = match kind {
-            TaskKind::Agents => count(shells_n, "{n} agent running in the background", "{n} agents running in the background"),
-            TaskKind::Commands => count(shells_n, "{n} command running in the background", "{n} commands running in the background"),
-            TaskKind::Monitors => count(shells_n, "{n} monitor running in the background", "{n} monitors running in the background"),
-        };
-        let one = shells.len() == 1;
-        let row = tray::tray_row(SharedString::from(format!("{}-row", kind.word())), pulse, said, Some(open), if one { label(first) } else { String::new() }, one.then(|| elapsed_since(&first.started, self.now)), Vec::new(), &theme)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.muted.opacity(0.5)))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                swallow_click(window, cx);
-                this.task_toggle(kind, &sid);
-                // The card opens at the conversation's end.
-                if this.task_open(kind).is_some() {
-                    this.cards_show();
-                }
-                cx.notify();
-            }));
-        Some(row.into_any_element())
-    }
-
     /// The session whose list of that kind of thing is open.
     fn task_open(&self, kind: TaskKind) -> &Option<String> {
         match kind {
@@ -15541,6 +15495,7 @@ impl Workbench {
         v_flex()
             .w_full()
             .items_center()
+            .children(self.render_notes_card(r, cx))
             .children(self.render_artifacts_card(r, cx))
             .children(self.render_shells_card(r, &of(TaskKind::Agents), TaskKind::Agents, cx))
             .children(self.render_shells_card(r, &of(TaskKind::Monitors), TaskKind::Monitors, cx))
@@ -17137,9 +17092,9 @@ impl Workbench {
         let effort_text = effort_pill(&options, &model, &effort, &theme);
         // The right of the row under the composer: a notice while one is
         // showing (what the last send or action did, an error in red), else
-        // why nothing can send, else empty. The row always takes `NOTICE_H`,
-        // so the composer stays put as a notice comes and goes, and it is
-        // the only thing under the card: the limits sit on its left.
+        // why nothing can send, else empty, with the toggles after it. The
+        // row always takes `NOTICE_H`, so the composer stays put as a notice
+        // comes and goes: the limits sit on its left.
         let (hint, hint_color) = if let Some(n) = &self.notice {
             (n.text.clone(), if n.error { theme.danger } else { theme.muted_foreground })
         } else if can_send {
@@ -17519,7 +17474,8 @@ impl Workbench {
                 div().min_w_0().overflow_hidden().text_color(hint_color).child(key_text(&hint)).into_any_element()
             } else {
                 div().min_w_0().truncate().text_color(hint_color).child(hint).into_any_element()
-            });
+            })
+            .children(self.render_toggles(cx));
         // A message that is a slash command being typed opens the list of
         // commands over the card; it closes as soon as a space or a line
         // follows the name.
@@ -18281,6 +18237,9 @@ pub(crate) fn paint_agent_glyph(agent: AgentId, color: Hsla, bounds: Bounds<Pixe
 pub(crate) enum Press {
     /// One of several, or the way out: an outline.
     Quiet,
+    /// What stops something running: an outline that fills with the
+    /// danger color under the pointer, so it is found without shouting.
+    Halt,
     /// What cannot be taken back: the danger's ink and outline.
     Danger,
     /// The answer the card is for: filled with the accent.
@@ -18298,7 +18257,7 @@ pub(crate) fn choice_pill(id: impl Into<ElementId>, icon: &'static str, label: i
         Press::Danger => theme.danger,
         Press::Primary => theme.primary_foreground,
         Press::Solid => theme.background,
-        Press::Quiet => theme.foreground,
+        Press::Quiet | Press::Halt => theme.foreground,
     };
     let (ground, edge, hover) = match kind {
         Press::Danger => (None, theme.danger.opacity(0.35), theme.danger.opacity(0.1)),
@@ -18307,7 +18266,9 @@ pub(crate) fn choice_pill(id: impl Into<ElementId>, icon: &'static str, label: i
         // An edge of the ink, not the border's color: on a card the
         // border is the card's own shade and the pill had no outline.
         Press::Quiet => (None, theme.foreground.opacity(0.16), theme.foreground.opacity(0.06)),
+        Press::Halt => (None, theme.foreground.opacity(0.16), theme.danger.opacity(0.1)),
     };
+    let danger = theme.danger;
     h_flex()
         .id(id)
         .h(px(28.))
@@ -18326,7 +18287,13 @@ pub(crate) fn choice_pill(id: impl Into<ElementId>, icon: &'static str, label: i
             let label: SharedString = label.into();
             if label.is_empty() { d } else { d.child(label) }
         })
-        .map(|d| if off { d.opacity(0.4) } else { d.cursor_pointer().hover(move |s| s.bg(hover)) })
+        .map(|d| {
+            if off {
+                d.opacity(0.4)
+            } else {
+                d.cursor_pointer().hover(move |s| if kind == Press::Halt { s.bg(hover).border_color(danger.opacity(0.45)).text_color(danger) } else { s.bg(hover) })
+            }
+        })
 }
 
 /// The icon a key's sign is drawn with: none for a character that is

@@ -4860,9 +4860,8 @@ fn claude_codes_own_notes_are_told_from_the_conversation() {
     let limit = format!("{:>90}", "You've used 90% of your Fable limit · resets Nov 3 at 12am (Australia/Melbourne)");
     let working = format!("* Catapulting… (3m 53s · ↓ 18.4k tokens)\n  ⎿  Tip: Use /btw to ask a quick side question\n{limit}\n{rule}\n❯ \n{rule}\n");
     let notes = notes_on_screen(&working);
-    assert_eq!(notes.len(), 2);
-    assert!(notes[0].tip && notes[0].text.starts_with("Tip: Use /btw"));
-    assert!(!notes[1].tip && notes[1].text.starts_with("You've used 90%"));
+    assert_eq!(notes.len(), 1, "a tip is left out");
+    assert!(notes[0].text.starts_with("You've used 90%"));
 
     // The agent's own words over the prompt are the conversation.
     let plain = format!("● The row code is in place.\n\n{rule}\n❯ \n{rule}\n");

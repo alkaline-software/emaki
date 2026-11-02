@@ -1,24 +1,40 @@
-//! The tray over the composer: one card that holds what a session has
-//! going on beside the conversation, a line each. Claude Code's own notes,
-//! the published pages, what runs in the background, a message that
-//! cannot get through, and what the agent waits for the person to
-//! decide. It is there only while it holds something. The agent's own
-//! line stands under it, by itself (`foot_line`).
-//! `docs/live-turn.md`, The tray.
+//! What stands around the composer besides the composer. Over it, the tray:
+//! one card that holds what waits on the person, a message that cannot
+//! get through and what the agent asks them to decide, and is there only
+//! while something does. Under the tray, the agent's own line
+//! (`foot_line`). Under the composer, the toggles (`render_toggles`): the
+//! rest of what a session has going on, a small button each, shut until
+//! pressed. `docs/live-turn.md`, The tray and The toggles.
 
 use super::*;
 
-/// A line of the tray that is one row tall, and the row in it.
-const LINE_H: f32 = 32.;
+/// A line of the tray that is one row tall, and the row in it. A button
+/// in it has the same air above, below and at the card's edge, and the
+/// card is rounded with it.
+const LINE_H: f32 = 38.;
 const ROW_H: f32 = 26.;
+/// How far in the tray's card stands from the composer's edges, and how
+/// far in from those the rows' and the composer's buttons all end. A
+/// tray as wide as the composer had its buttons further from the side
+/// than from the top.
+const TRAY_IN: f32 = 7.;
+const ROWS_IN: f32 = 15.;
 /// The air over the agent's own line.
 const FOOT_AIR: f32 = 6.;
 
+/// A toggle's height and its width with nothing but its icon; a number
+/// beside the icon adds to that.
+const TOGGLE_H: f32 = 22.;
+const TOGGLE_W: f32 = 26.;
+const TOGGLE_DIGIT: f32 = 7.;
+const TOGGLE_GAP: f32 = 3.;
+/// In from the row's end the last toggle stands under the middle of the
+/// composer's send button.
+const TOGGLES_END: f32 = 12.;
+
 /// How long a note stays after Claude Code takes it off its screen: it
-/// shows one for moments, and a limit is worth the time to read it. A
-/// tip is not.
-const NOTE_KEPT_SECS: f64 = 45.0;
-const TIP_KEPT_SECS: f64 = 6.0;
+/// shows one for moments, and the toggle may not be pressed for a while.
+const NOTE_KEPT_SECS: f64 = 3600.0;
 
 /// A line as `render_tray` lays it out.
 pub(super) struct Line {
@@ -32,12 +48,12 @@ pub(super) struct Line {
     pub free: bool,
 }
 
-/// What Claude Code last said beside a session's prompt, and when it
-/// last showed each.
+/// What Claude Code last said beside a session's prompt, when it last
+/// showed it, and whether the person has looked since it changed.
 #[derive(Default, Clone)]
 pub(super) struct Notes {
     said: Option<(emaki_core::driver::ScreenNote, f64)>,
-    tip: Option<(emaki_core::driver::ScreenNote, f64)>,
+    read: bool,
 }
 
 /// What the decision line answers.
@@ -54,7 +70,7 @@ pub(super) enum Asked {
 /// over it part of what moves.
 pub(super) fn foot_line(line: Line) -> AnyElement {
     let tall = ROW_H + FOOT_AIR;
-    let wrap = v_flex().w_full().max_w(CONTENT_W).px(px(7.)).justify_end().overflow_hidden().child(div().w_full().h(px(ROW_H)).flex_shrink_0().child(line.row));
+    let wrap = v_flex().w_full().max_w(CONTENT_W).px(px(ROWS_IN)).justify_end().overflow_hidden().child(div().w_full().h(px(ROW_H)).flex_shrink_0().child(line.row));
     match line.moving {
         Some((coming, n)) => wrap
             .with_animation(ElementId::Name(format!("{}-{n}", line.key).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
@@ -68,23 +84,18 @@ pub(super) fn foot_line(line: Line) -> AnyElement {
 
 /// A row of the tray. Every row has this one shape, so what can be
 /// pressed stands at one right edge whatever the row is: its mark, what
-/// it is, the chevron when it opens out (beside its name, so it takes
-/// nothing from that edge), a line on it that gives way first, how long,
-/// and its buttons.
-pub(super) fn tray_row(id: impl Into<ElementId>, mark: impl IntoElement, title: impl IntoElement, open: Option<bool>, detail: impl Into<SharedString>, time: Option<String>, pills: Vec<AnyElement>, theme: &gpui_component::Theme) -> Stateful<Div> {
+/// it is, a line on it that gives way first, how long, and its buttons.
+pub(super) fn tray_row(id: impl Into<ElementId>, mark: impl IntoElement, title: impl IntoElement, detail: impl Into<SharedString>, time: Option<String>, pills: Vec<AnyElement>, theme: &gpui_component::Theme) -> Stateful<Div> {
     h_flex()
         .id(id)
         .w_full()
         .h(px(ROW_H))
-        .px(px(8.))
         .gap(px(8.))
         .items_center()
-        .rounded(px(7.))
         .text_size(px(12.))
         .text_color(theme.muted_foreground)
         .child(div().size(px(16.)).flex_shrink_0().flex().items_center().justify_center().child(mark))
         .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title))
-        .when_some(open, |d, open| d.child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronUp }).with_size(px(12.)).flex_shrink_0()))
         .child(div().flex_1().min_w_0().truncate().child(detail.into()))
         .when_some(time, |d, time| d.child(div().flex_shrink_0().child(time)))
         .children(pills)
@@ -110,75 +121,25 @@ impl Workbench {
         }
         let body = v_flex().w_full().children(lines.into_iter().enumerate().map(|(i, line)| {
             let free = line.free;
-            let row = div().w_full().flex_shrink_0().px(px(6.)).py(px(3.)).when(i > 0, |d| d.border_t_1().border_color(theme.border.opacity(0.6))).child(line.row);
+            let row = div().w_full().flex_shrink_0().px(px(ROWS_IN - TRAY_IN)).py(px(6.)).when(i > 0, |d| d.border_t_1().border_color(theme.border.opacity(0.6))).child(line.row);
             if free {
                 // It says for itself how tall it is (`decision_line`).
                 return row.into_any_element();
             }
-            let wrap = v_flex().w_full().justify_end().overflow_hidden().child(row.h(px(LINE_H)));
+            let tall = LINE_H + if i > 0 { 1. } else { 0. };
+            let wrap = v_flex().w_full().justify_end().overflow_hidden().child(row.h(px(tall)));
             match line.moving.filter(|_| !whole) {
                 Some((coming, n)) => wrap
                     .with_animation(ElementId::Name(format!("{}-{n}", line.key).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
                         let t = if coming { t } else { 1. - t };
-                        d.h(px((LINE_H * t).round())).opacity(t)
+                        d.h(px((tall * t).round())).opacity(t)
                     })
                     .into_any_element(),
-                None => wrap.h(px(LINE_H)).into_any_element(),
+                None => wrap.h(px(tall)).into_any_element(),
             }
         }));
-        let card = div().w_full().pt(px(8.)).child(div().w_full().rounded(px(12.)).border_1().border_color(if deciding { theme.primary } else { theme.border }).bg(theme.popover).child(body));
+        let card = div().w_full().pt(px(8.)).px(px(TRAY_IN)).child(div().w_full().rounded(px(LINE_H / 2.)).border_1().border_color(if deciding { theme.primary } else { theme.border }).bg(theme.popover).child(body));
         self.fold_with(key, on, 0., card.into_any_element(), cx)
-    }
-
-    /// The line for what runs in the background, one kind of thing to a
-    /// line.
-    pub(super) fn shells_line(&self, r: &SessionRef, list: &[emaki_core::model::Shell], kind: TaskKind, cx: &mut Context<Self>) -> Option<Line> {
-        let key = format!("line-{}-{}", kind.word(), r.session_id);
-        let on = !list.is_empty();
-        if on {
-            self.shells_kept.borrow_mut()[kind as usize] = list.to_vec();
-        }
-        let moving = self.presence(&key, on, cx);
-        if !on && moving.is_none() {
-            return None;
-        }
-        let kept = self.shells_kept.borrow()[kind as usize].clone();
-        let row = self.render_shells(r, if on { list } else { &kept }, kind, cx)?;
-        Some(Line { key, on, moving, row, free: false })
-    }
-
-    /// The pages the agent published as claude.ai artifacts in this
-    /// session: how many, the newest's title, and with one, the way to
-    /// it. A click opens the list of them at the conversation's end
-    /// (`render_artifacts_card`). It is there while the session has any.
-    pub(super) fn artifacts_line(&self, r: &SessionRef, list: &[emaki_core::model::Artifact], cx: &mut Context<Self>) -> Option<Line> {
-        let key = format!("line-artifacts-{}", r.session_id);
-        let on = !list.is_empty();
-        let moving = self.presence(&key, on, cx);
-        let newest = list.iter().max_by(|a, b| a.last.cmp(&b.last))?;
-        let theme = cx.theme().clone();
-        let open = self.artifacts_open.as_deref() == Some(r.session_id.as_str());
-        let sid = r.session_id.clone();
-        let pills = (list.len() == 1).then(|| newest.url.clone()).map(|url| {
-            tray_pill("artifact-open", "icons/external-link.svg", t("Open"), Press::Quiet, false, &theme)
-                .on_click(move |_, window, cx| {
-                    swallow_click(window, cx);
-                    cx.open_url(&url);
-                })
-                .into_any_element()
-        });
-        let row = tray_row("artifacts-row", Icon::default().path("icons/app-window.svg").with_size(px(14.)).text_color(theme.muted_foreground), count(list.len(), "{n} artifact", "{n} artifacts"), Some(open), newest.title.clone(), None, pills.into_iter().collect(), &theme)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.muted.opacity(0.5)))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                swallow_click(window, cx);
-                this.artifacts_open = if this.artifacts_open.as_deref() == Some(sid.as_str()) { None } else { Some(sid.clone()) };
-                if this.artifacts_open.is_some() {
-                    this.cards_show();
-                }
-                cx.notify();
-            }));
-        Some(Line { key, on, moving, row: row.into_any_element(), free: false })
     }
 
     /// A message that cannot get to the prompt: what stands in its way,
@@ -221,7 +182,7 @@ impl Workbench {
                 })
                 .into_any_element()
         });
-        let row = tray_row("held-row", Icon::default().path("icons/triangle-alert.svg").with_size(px(14.)).text_color(theme.warning), t("Your message is waiting"), None, detail, None, pills.into_iter().collect(), &theme);
+        let row = tray_row("held-row", Icon::default().path("icons/triangle-alert.svg").with_size(px(14.)).text_color(theme.warning), t("Your message is waiting"), detail, None, pills.into_iter().collect(), &theme);
         Some(Line { key, on, moving, row: row.into_any_element(), free: false })
     }
 
@@ -241,15 +202,18 @@ impl Workbench {
                 this.notes_reading = false;
                 let now = this.now;
                 let gone = this.notes_gone.clone();
-                let notes = this.notes.entry(sid).or_default();
-                let before = (notes.said.as_ref().map(|n| n.0.text.clone()), notes.tip.as_ref().map(|n| n.0.text.clone()));
-                for note in seen.into_iter().filter(|n| !gone.contains(&n.text)) {
-                    let slot = if note.tip { &mut notes.tip } else { &mut notes.said };
-                    *slot = Some((note, now));
+                let notes = this.notes.entry(sid.clone()).or_default();
+                let before = notes.said.as_ref().map(|n| n.0.text.clone());
+                if let Some(note) = seen.into_iter().rfind(|n| !gone.contains(&n.text)) {
+                    notes.read &= before.as_deref() == Some(note.text.as_str());
+                    notes.said = Some((note, now));
                 }
                 notes.said = notes.said.take().filter(|(_, at)| now - at < NOTE_KEPT_SECS);
-                notes.tip = notes.tip.take().filter(|(_, at)| now - at < TIP_KEPT_SECS);
-                if before != (notes.said.as_ref().map(|n| n.0.text.clone()), notes.tip.as_ref().map(|n| n.0.text.clone())) {
+                let after = notes.said.as_ref().map(|n| n.0.text.clone());
+                if after.is_none() && this.notes_open.as_deref() == Some(sid.as_str()) {
+                    this.notes_open = None;
+                }
+                if before != after {
                     cx.notify();
                 }
             });
@@ -260,67 +224,196 @@ impl Workbench {
     /// A note as if it had been read, for a probe (`note:`, a word for
     /// the space that a probe's value cannot hold).
     pub(super) fn note_probe(&mut self, sid: String, text: &str, now: f64) {
-        let tip = text.starts_with("Tip:");
-        let note = emaki_core::driver::ScreenNote { text: text.replace('_', " "), color: Some(0xFFC107), tip };
-        let notes = self.notes.entry(sid).or_default();
-        if tip {
-            notes.tip = Some((note, now + 600.));
-        } else {
-            notes.said = Some((note, now + 600.));
+        let note = emaki_core::driver::ScreenNote { text: text.replace('_', " "), color: Some(0xFFC107) };
+        self.notes.insert(sid, Notes { said: Some((note, now + 600.)), read: false });
+    }
+
+    /// Opens or shuts the note's card, which reads the note.
+    pub(super) fn notes_toggle(&mut self, sid: &str) {
+        self.notes_open = if self.notes_open.as_deref() == Some(sid) { None } else { Some(sid.to_string()) };
+        if self.notes_open.is_some() {
+            if let Some(n) = self.notes.get_mut(sid) {
+                n.read = true;
+            }
+            self.cards_show();
         }
     }
 
-    /// Claude Code's notes as lines: what it says of the account, in the
-    /// color it says it in, and a tip, quieter. Either goes at a press.
-    pub(super) fn note_lines(&self, r: &SessionRef, cx: &mut Context<Self>) -> Vec<Line> {
-        let notes = self.notes.get(&r.session_id).cloned().unwrap_or_default();
+    /// One toggle under the composer: an icon, how many when there is
+    /// more than one, and what it is when pointed at. It comes and goes
+    /// sideways, what stands beside it moving over, and being on or off
+    /// is in the accent, over a moment. `press` is what it does.
+    #[allow(clippy::too_many_arguments)]
+    fn foot_toggle(&self, name: &str, r: &SessionRef, there: bool, open: bool, icon: &'static str, n: usize, ink: Option<Hsla>, dot: Option<(Hsla, f32)>, words: String, press: impl Fn(&mut Self) + 'static, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let key = format!("toggle-{name}-{}", r.session_id);
+        let moving = self.presence(&key, there, cx);
+        if !there && moving.is_none() {
+            return None;
+        }
+        let flip = self.presence(&format!("{key}-open"), open, cx);
         let theme = cx.theme().clone();
-        [notes.tip.map(|n| n.0), notes.said.map(|n| n.0)]
-            .into_iter()
-            .enumerate()
-            .filter_map(|(slot, live)| {
-                let key = format!("line-note-{slot}-{}", r.session_id);
-                let on = live.is_some();
-                if let Some(n) = &live {
-                    self.notes_kept.borrow_mut()[slot] = Some(n.clone());
+        let (rest, lit, plate) = (ink.unwrap_or(theme.muted_foreground), theme.primary, theme.primary.opacity(0.14));
+        let number = (n > 1).then(|| n.to_string());
+        let wide = TOGGLE_W + number.as_ref().map_or(0., |s| TOGGLE_GAP + TOGGLE_DIGIT * s.len() as f32);
+        let mark = div()
+            .relative()
+            .size(px(14.))
+            .flex_shrink_0()
+            .child(Icon::default().path(icon).with_size(px(14.)))
+            .when_some(dot, |d, (color, strength)| {
+                let spot = div().size(px(5.)).rounded_full().bg(color).opacity(strength);
+                d.child(div().absolute().top(px(-2.)).right(px(-2.)).size(px(7.)).rounded_full().bg(theme.background).flex().items_center().justify_center().child(spot))
+            });
+        let face = h_flex()
+            .id(SharedString::from(key.clone()))
+            .w(px(wide))
+            .h(px(TOGGLE_H))
+            .flex_shrink_0()
+            .gap(px(TOGGLE_GAP))
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .text_size(px(11.5))
+            .text_color(if open { lit } else { rest })
+            .when(open, |d| d.bg(plate))
+            .cursor_pointer()
+            .hover(|s| if open { s.bg(theme.primary.opacity(0.2)) } else { s.bg(theme.muted) })
+            .child(mark)
+            .children(number)
+            .managed_tooltip(move |window, cx| crate::workbench::tip(words.clone(), window, cx))
+            .when(there, |d| {
+                d.on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    press(this);
+                    cx.notify();
+                }))
+            });
+        let face = match flip {
+            Some((coming, step)) => face
+                .with_animation(ElementId::Name(format!("{key}-open-{step}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    let k = if coming { t } else { 1. - t };
+                    d.bg(Hsla { a: plate.a * k, ..plate }).text_color(crate::transcript::mix(rest, lit, k))
+                })
+                .into_any_element(),
+            None => face.into_any_element(),
+        };
+        Some(match moving {
+            Some((coming, step)) => div()
+                .h(px(TOGGLE_H))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(face)
+                .with_animation(ElementId::Name(format!("{key}-{step}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    let t = if coming { t } else { 1. - t };
+                    d.w(px((wide * t).round())).opacity(t)
+                })
+                .into_any_element(),
+            None => face,
+        })
+    }
+
+    /// The toggles: what a session has going on that does not wait on
+    /// the person, each shut until pressed, and its card at the
+    /// conversation's end when it is on. A dot breathes on what is
+    /// running, and a dot in the note's own color stands on a note not
+    /// yet read.
+    pub(super) fn render_toggles(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let r = self.selected_ref().filter(|_| self.page == Page::Session)?.clone();
+        let session = &self.detail.as_ref().filter(|d| d.session.id == r.session_id)?.session;
+        let sid = r.session_id.clone();
+        let theme = cx.theme().clone();
+        let mut toggles: Vec<AnyElement> = Vec::new();
+
+        let pages = &session.artifacts;
+        let newest = pages.iter().max_by(|a, b| a.last.cmp(&b.last)).map(|a| a.title.clone()).unwrap_or_default();
+        let id = sid.clone();
+        toggles.extend(self.foot_toggle("artifacts", &r, !pages.is_empty(), self.artifacts_open.as_deref() == Some(sid.as_str()), "icons/app-window.svg", pages.len(), None, None, format!("{} · {newest}", count(pages.len(), "{n} artifact", "{n} artifacts")), move |this| {
+            this.artifacts_open = if this.artifacts_open.as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+            if this.artifacts_open.is_some() {
+                this.cards_show();
+            }
+        }, cx));
+
+        let running = self.shells_running(&r, session);
+        let breath = crate::ambient::pulse(0.35, 1., crate::ambient::phase(Duration::from_millis(1400)));
+        for (kind, icon) in [(TaskKind::Agents, "icons/bot.svg"), (TaskKind::Monitors, "icons/eye.svg"), (TaskKind::Commands, "icons/terminal.svg")] {
+            let list: Vec<_> = running.iter().filter(|sh| task_of(sh) == kind).cloned().collect();
+            if !list.is_empty() {
+                self.shells_kept.borrow_mut()[kind as usize] = list.clone();
+            }
+            let n = list.len();
+            let said = match kind {
+                TaskKind::Agents => count(n, "{n} agent running in the background", "{n} agents running in the background"),
+                TaskKind::Commands => count(n, "{n} command running in the background", "{n} commands running in the background"),
+                TaskKind::Monitors => count(n, "{n} monitor running in the background", "{n} monitors running in the background"),
+            };
+            let words = match list.as_slice() {
+                [one] => format!("{said} · {}", if one.description.is_empty() { one.command.lines().next().unwrap_or("") } else { one.description.as_str() }),
+                _ => said,
+            };
+            let id = sid.clone();
+            toggles.extend(self.foot_toggle(kind.word(), &r, n > 0, self.task_open(kind).as_deref() == Some(sid.as_str()), icon, n, None, Some((theme.blue, breath)), words, move |this| {
+                this.task_toggle(kind, &id);
+                if this.task_open(kind).is_some() {
+                    this.cards_show();
                 }
-                let moving = self.presence(&key, on, cx);
-                if !on && moving.is_none() {
-                    return None;
-                }
-                let note = self.notes_kept.borrow()[slot].clone()?;
-                let ink = if note.tip { theme.muted_foreground } else { screen_ink(note.color, &theme) };
-                let (sid, text) = (r.session_id.clone(), note.text.clone());
-                let close = div()
-                    .id(SharedString::from(format!("note-close-{slot}")))
-                    .occlude()
-                    .size(px(24.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.muted))
-                    .child(Icon::new(IconName::Close).with_size(px(12.)).text_color(theme.muted_foreground))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        swallow_click(window, cx);
-                        this.notes_gone.insert(text.clone());
-                        if let Some(n) = this.notes.get_mut(&sid) {
-                            if slot == 0 {
-                                n.tip = None;
-                            } else {
-                                n.said = None;
-                            }
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element();
-                let mark = Icon::default().path(if note.tip { "icons/info.svg" } else { "icons/bell.svg" }).with_size(px(14.)).text_color(ink);
-                let row = tray_row(SharedString::from(format!("note-row-{slot}")), mark, div().text_color(ink).font_weight(if note.tip { FontWeight::NORMAL } else { FontWeight::MEDIUM }).child(note.text.clone()), None, "", None, vec![close], &theme);
-                Some(Line { key, on, moving, row: row.into_any_element(), free: false })
-            })
-            .collect()
+            }, cx));
+        }
+
+        let notes = self.notes.get(&sid).cloned().unwrap_or_default();
+        let note = notes.said.map(|n| n.0);
+        let kept = {
+            if let Some(n) = &note {
+                *self.notes_kept.borrow_mut() = Some(n.clone());
+            }
+            self.notes_kept.borrow().clone()
+        };
+        let ink = (!notes.read && note.is_some()).then(|| screen_ink(kept.as_ref().and_then(|n| n.color), &theme));
+        let words = kept.map(|n| n.text).unwrap_or_default();
+        let id = sid.clone();
+        toggles.extend(self.foot_toggle("notes", &r, note.is_some(), self.notes_open.as_deref() == Some(sid.as_str()), "icons/bell.svg", 1, ink, ink.map(|c| (c, 1.)), words, move |this| this.notes_toggle(&id), cx));
+
+        (!toggles.is_empty()).then(|| h_flex().flex_shrink_0().mr(px(TOGGLES_END)).items_center().children(toggles).into_any_element())
+    }
+
+    /// What the bell opens: Claude Code's note in its own color, at the
+    /// conversation's end, and its ×.
+    pub(super) fn render_notes_card(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let live = self.notes.get(&r.session_id).is_some_and(|n| n.said.is_some());
+        let on = live && self.notes_open.as_deref() == Some(r.session_id.as_str());
+        let key = format!("fold-notes-{}", r.session_id);
+        if !on && !self.lingering(&key) {
+            return None;
+        }
+        let note = self.notes_kept.borrow().clone()?;
+        let theme = cx.theme().clone();
+        let ink = screen_ink(note.color, &theme);
+        let (sid, text) = (r.session_id.clone(), note.text.clone());
+        let close = div()
+            .id("note-close")
+            .size(px(24.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .when(on, |d| d.cursor_pointer().hover(|s| s.bg(theme.muted)))
+            .child(Icon::new(IconName::Close).with_size(px(12.)).text_color(theme.muted_foreground))
+            .when(on, |d| {
+                d.on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.notes_gone.insert(text.clone());
+                    this.notes_open = None;
+                    if let Some(n) = this.notes.get_mut(&sid) {
+                        n.said = None;
+                    }
+                    cx.notify();
+                }))
+            });
+        let row = h_flex().w_full().px(px(8.)).py(px(2.)).gap(px(10.)).items_center().child(Icon::default().path("icons/bell.svg").with_size(px(15.)).text_color(ink).flex_shrink_0()).child(div().flex_1().min_w_0().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(ink).child(note.text)).child(close);
+        // The card's own words are the window's face, not the chat's.
+        let card = v_flex().w_full().p(px(6.)).rounded(px(10.)).border_1().border_color(theme.border).bg(theme.muted.opacity(0.25)).font_family(theme.font_family.clone()).child(row);
+        self.card_fold(key, on, card.into_any_element(), cx)
     }
 
     /// What the agent waits for the person to decide, under everything
@@ -381,7 +474,6 @@ impl Workbench {
             .w_full()
             .min_h(px(ROW_H))
             .flex_wrap()
-            .px(px(8.))
             .gap_x(px(8.))
             .gap_y(px(6.))
             .items_center()
