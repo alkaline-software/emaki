@@ -2,6 +2,19 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.4.3
+
+1. **The tray**: What waits on you, a message that cannot get through or a decision the agent asks for, stands in one card over the composer with its buttons always in view, and the agent's working line stands under it.
+2. **Toggles**: Artifacts, background agents, monitors, commands and Claude Code's notices are small toggles under the composer, off until pressed, each opening its card at the end of the conversation, with a dot on what is running or unread.
+3. **Monitors and notices**: Monitors the agent starts are shown with what they report, and Claude Code's own notices, such as a usage limit coming up, wait behind the bell.
+4. **Sending**: A message shows as sent only once it has left Claude Code's input, and one held behind an open panel says so, with a button back to the input.
+5. **Codex limits**: The limits row reads Codex's limits for every model, the chosen model first, and says when a model is at capacity or usage is blocked.
+6. **Folders**: A project folder in the sidebar takes the color of its most pressing session, in place of a separate dot.
+7. **File links**: A link to a file in the conversation opens the file beside it.
+8. **Changes**: The divider beside the changed files can be dragged, or double-clicked to fit, long names end in an ellipsis, and a file that cannot be shown says so.
+9. **Icon and About**: The icon's background carries a touch of periwinkle, About shows 絵巻 beside the name, and the settings gear wears a dot while an update waits.
+10. **Fixes**: Cards scroll from anywhere without jumping back, a picture that failed to load is tried again, a question Claude Code asks when a session resumes is shown, and line wrapping keeps punctuation with its words.
+
 ## v0.4.2
 
 1. **Outline summaries**: A switch of its own in Settings, Model calls turns off the outline's labels and summaries while keeping the outline, and each agent has a model to choose for them, from the agent's own list.
