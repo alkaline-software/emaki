@@ -15102,8 +15102,6 @@ impl Workbench {
         lines.extend(self.shells_line(&r, &of(TaskKind::Monitors), TaskKind::Monitors, cx));
         lines.extend(self.shells_line(&r, &of(TaskKind::Commands), TaskKind::Commands, cx));
         lines.extend(self.held_line(&r, cx));
-        lines.extend(status);
-        lines.extend(waiting);
         // The decision line says what is asked; the terminal's own
         // screen on its card has no choices to stand here, and when the
         // reader has left it behind, a line of its own goes to it.
@@ -15192,6 +15190,8 @@ impl Workbench {
                     .child(crate::transcript::words_at(&self.words_at))
                     .children(foot_cards)
                     .children(tray)
+                    .children(status.map(tray::foot_line))
+                    .children(waiting.map(tray::foot_line))
                     .child({
                         // Where the composer stands, for the seams beside
                         // it to end above.

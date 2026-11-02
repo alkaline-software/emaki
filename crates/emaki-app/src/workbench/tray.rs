@@ -1,8 +1,9 @@
 //! The tray over the composer: one card that holds what a session has
 //! going on beside the conversation, a line each. Claude Code's own notes,
 //! the published pages, what runs in the background, a message that
-//! cannot get through, the agent at work, and what the agent waits for
-//! the person to decide. It is there only while it holds something.
+//! cannot get through, and what the agent waits for the person to
+//! decide. It is there only while it holds something. The agent's own
+//! line stands under it, by itself (`foot_line`).
 //! `docs/live-turn.md`, The tray.
 
 use super::*;
@@ -10,6 +11,8 @@ use super::*;
 /// A line of the tray that is one row tall, and the row in it.
 const LINE_H: f32 = 32.;
 const ROW_H: f32 = 26.;
+/// The air over the agent's own line.
+const FOOT_AIR: f32 = 6.;
 
 /// How long a note stays after Claude Code takes it off its screen: it
 /// shows one for moments, and a limit is worth the time to read it. A
@@ -42,6 +45,25 @@ pub(super) struct Notes {
 pub(super) enum Asked {
     Dialog(emaki_core::driver::Dialog),
     Permission(PermissionRequest),
+}
+
+/// The agent's own line, at work or waiting: not in the tray but under
+/// it, on its own over the composer, and in from the sides as far as
+/// the tray's rows are, so its mark and its button stand in their
+/// columns. It opens up from the composer and closes back to it, the air
+/// over it part of what moves.
+pub(super) fn foot_line(line: Line) -> AnyElement {
+    let tall = ROW_H + FOOT_AIR;
+    let wrap = v_flex().w_full().max_w(CONTENT_W).px(px(7.)).justify_end().overflow_hidden().child(div().w_full().h(px(ROW_H)).flex_shrink_0().child(line.row));
+    match line.moving {
+        Some((coming, n)) => wrap
+            .with_animation(ElementId::Name(format!("{}-{n}", line.key).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                let t = if coming { t } else { 1. - t };
+                d.h(px((tall * t).round())).opacity(t)
+            })
+            .into_any_element(),
+        None => wrap.h(px(tall)).into_any_element(),
+    }
 }
 
 /// A row of the tray. Every row has this one shape, so what can be

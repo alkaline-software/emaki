@@ -4869,4 +4869,12 @@ fn claude_codes_own_notes_are_told_from_the_conversation() {
     assert!(notes_on_screen(&plain).is_empty());
     let indented = format!("      a line of a table the agent wrote\n{rule}\n❯ \n{rule}\n");
     assert!(notes_on_screen(&indented).is_empty(), "not set to the right");
+
+    // What the composer's pills already show is not news.
+    for setting in ["● high · /effort", "Max effort · Fable · /effort to change", "Opus 5.5 · /model", "auto mode on (shift+tab to cycle)"] {
+        let screen = format!("{setting:>90}\n{rule}\n❯ \n{rule}\n");
+        assert!(notes_on_screen(&screen).is_empty(), "{setting}");
+    }
+    let usage = format!("{:>90}\n{rule}\n❯ \n{rule}\n", "Approaching usage limit · resets Nov 3 · Run /usage-credits to raise the cap");
+    assert_eq!(notes_on_screen(&usage).len(), 1, "a command named in news is still news");
 }

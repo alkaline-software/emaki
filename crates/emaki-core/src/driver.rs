@@ -844,6 +844,16 @@ pub struct ScreenNote {
     pub tip: bool,
 }
 
+/// Whether a line set to the right says what the session is set to:
+/// its effort, model or mode, which end in the command that changes them
+/// ("● high · /effort", "Max effort · … · /effort to change") or name its
+/// key. The composer's pills show all three.
+fn says_a_setting(words: &str) -> bool {
+    let last = words.rsplit(" · ").next().unwrap_or(words).trim();
+    let command = last.split_whitespace().next().unwrap_or("");
+    matches!(command, "/effort" | "/model" | "/mode") || words.contains("shift+tab")
+}
+
 /// The lines over the prompt that are Claude Code's own and not the
 /// conversation's, read off 2.1.316: what it says of the account stands
 /// straight over the prompt's rule, set to the right ("You've used 90%
@@ -872,7 +882,9 @@ pub fn notes_on_screen(text: &str) -> Vec<ScreenNote> {
         if tip.starts_with("Tip:") {
             notes.push(ScreenNote { text: tip.to_string(), color, tip: true });
         } else if indent >= 6 && line.chars().count() + 3 >= right {
-            notes.push(ScreenNote { text: words.to_string(), color, tip: false });
+            if !says_a_setting(words) {
+                notes.push(ScreenNote { text: words.to_string(), color, tip: false });
+            }
         } else if !words.starts_with(SPINNER_MARKS) {
             break;
         }

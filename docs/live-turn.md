@@ -47,10 +47,11 @@ One card over the composer that holds what a session has going on beside the con
 2. The published pages (`artifacts_line`).
 3. What runs in the background: agents, monitors, commands (`shells_line`), a line each.
 4. A message that cannot get to the prompt (`held_line`).
-5. The agent at work, or waiting.
-6. What the agent waits for the person to decide (`decision_line`).
+5. What the agent waits for the person to decide (`decision_line`).
 
-- **One shape.** Every row is `tray_row`: its mark in one column, what it is, the chevron beside that name when the row opens out, a line that gives way first, how long, and the buttons last. So what can be pressed stands at one right edge, level with the composer's send button, whatever the row is and whether or not it has a chevron. The chevron at the row's end pushed Open in from where Stop was.
+The agent at work, or waiting, is not in it. That line is the turn's own and stands by itself under the tray, over the composer (`foot_line`), its mark and its Stop in the columns of the rows above it.
+
+- **One shape.** Every row in it is `tray_row`: its mark in one column, what it is, the chevron beside that name when the row opens out, a line that gives way first, how long, and the buttons last. So what can be pressed stands at one right edge, level with the composer's send button, whatever the row is and whether or not it has a chevron. The chevron at the row's end pushed Open in from where Stop was.
 - **A button of a row is `tray_pill`,** which takes the press for itself: without `occlude` Open also opened the list.
 - **Motion.** A line comes and goes by its height (`render_tray`). The first in and the last out take the card with them instead, opening up from the composer (`fold_with`), so the two never run at once. The card and each card at the conversation's end bring their own air.
 - **A new thing to show beside the conversation is a line here,** in the place its urgency gives it, not another row of its own over the composer.
@@ -65,7 +66,7 @@ What the agent asks the person to decide stands here, in a row, in view wherever
 
 ### Claude Code's notes
 
-Claude Code says things beside its prompt that are in no transcript: a limit coming up ("You've used 90% of your Fable limit · resets Nov 3 at 12am (Australia/Melbourne)", straight over the prompt's rule and set to the right, in a color), and a tip under the working line. `driver::notes_on_screen` reads them (2.1.316), `read_notes` once a second for the session showing, from a hidden terminal of ours only. A line is one of these by where it stands: touching the rule and reaching the rule's right end, or beginning "Tip:". The conversation's own words are neither. Claude Code shows a note for moments, so one stays `NOTE_KEPT_SECS` after it goes (a tip, `TIP_KEPT_SECS`), and goes at a press of its ×.
+Claude Code says things beside its prompt that are in no transcript: a limit coming up ("You've used 90% of your Fable limit · resets Nov 3 at 12am (Australia/Melbourne)", straight over the prompt's rule and set to the right, in a color), and a tip under the working line. `driver::notes_on_screen` reads them (2.1.316), `read_notes` once a second for the session showing, from a hidden terminal of ours only. A line is one of these by where it stands: touching the rule and reaching the rule's right end, or beginning "Tip:". The conversation's own words are neither. What says the session's effort, model or mode stands there too ("● high · /effort") and is left out (`says_a_setting`): the composer's pills show it. Claude Code shows a note for moments, so one stays `NOTE_KEPT_SECS` after it goes (a tip, `TIP_KEPT_SECS`), and goes at a press of its ×.
 
 ## The working row
 
