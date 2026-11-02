@@ -44,6 +44,7 @@ re!(RE_TASK_ID, r"<task-id>(.*?)</task-id>");
 re!(RE_TASK_STATUS, r"<status>(.*?)</status>");
 re!(RE_TASK_SUMMARY, r"(?s)<summary>(.*?)</summary>");
 re!(RE_TASK_OUTPUT, r"written to: (\S+\.output)");
+re!(RE_TASK_EVENT, r"(?s)<event>(.*?)</event>");
 re!(RE_HOOK_OUTPUT, r"(?s)<[a-z-]*hook[a-z-]*>.*?</[a-z-]*hook[a-z-]*>\s*");
 re!(RE_COMMAND_NAME, r"(?s)<command-name>(.*?)</command-name>");
 re!(RE_COMMAND_ARGS, r"(?s)<command-args>(.*?)</command-args>");
@@ -1073,6 +1074,9 @@ pub fn build(input: BuildInput) -> Session {
 /// own `Agent` call. A command still running
 /// when its Claude Code went away gets no row at all, so whether one
 /// without an end is running is for the caller to say, from the process.
+/// How many of a monitor's reports are kept for its card.
+const MONITOR_EVENTS: usize = 12;
+
 fn shells_of(rows: &[&Value]) -> Vec<Shell> {
     let mut calls: HashMap<String, (String, String)> = HashMap::new();
     // Every subagent seen, by its id: its kind and its task, for one
@@ -1080,7 +1084,9 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
     let mut agents: HashMap<String, (String, String)> = HashMap::new();
     let mut shells: Vec<Shell> = Vec::new();
     let end = |shells: &mut Vec<Shell>, id: &str, status: &str, summary: &str, ts: &str| {
-        if let Some(sh) = shells.iter_mut().find(|sh| sh.id == id && sh.ended.is_empty()) {
+        // What a monitor reports as it runs comes as a notification too,
+        // with no status: only the one that ends it says one.
+        if let Some(sh) = shells.iter_mut().find(|sh| sh.id == id && sh.ended.is_empty() && !(sh.monitor && status.is_empty())) {
             sh.ended = ts.into();
             sh.status = status.into();
             sh.summary = summary.trim().into();
@@ -1094,7 +1100,7 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
                     let input = block.get("input");
                     let field = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str).unwrap_or("").to_string();
                     match str_of(block, "name") {
-                        "Bash" => {
+                        "Bash" | "Monitor" => {
                             calls.insert(str_of(block, "id").into(), (field("command"), field("description")));
                         }
                         "Agent" | "Task" => {
@@ -1121,6 +1127,17 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
                 }
                 let side = row.get("toolUseResult");
                 let call_of = || blocks(row).into_iter().find(|x| block_type(x) == "tool_result").map(|x| str_of(&x, "tool_use_id").to_string()).unwrap_or_default();
+                // A monitor started: a `Monitor` result's sidecar names
+                // the task and how long it has (2.1.316).
+                if let Some(id) = side.filter(|r| r.get("timeoutMs").is_some()).and_then(|r| r.get("taskId")).and_then(Value::as_str) {
+                    let (command, description) = calls.get(&call_of()).cloned().unwrap_or_default();
+                    if !shells.iter().any(|sh| sh.id == id) {
+                        let forever = side.and_then(|r| r.get("persistent")).and_then(Value::as_bool) == Some(true);
+                        let timeout_ms = if forever { 0 } else { side.and_then(|r| r.get("timeoutMs")).and_then(Value::as_u64).unwrap_or(0) };
+                        shells.push(Shell { id: id.into(), monitor: true, timeout_ms, command, description, started: ts.into(), ..Default::default() });
+                    }
+                    continue;
+                }
                 if let Some(id) = side.and_then(|r| r.get("agentId")).and_then(Value::as_str) {
                     let (kind, mut description) = calls.get(&call_of()).cloned().unwrap_or_default();
                     if description.is_empty() {
@@ -1166,7 +1183,17 @@ fn shells_of(rows: &[&Value]) -> Vec<Shell> {
                 for note in RE_TASK_NOTIFICATION.find_iter(text) {
                     let note = note.as_str();
                     let part = |re: &Regex| re.captures(note).map(|c| c[1].to_string()).unwrap_or_default();
-                    end(&mut shells, &part(&RE_TASK_ID), &part(&RE_TASK_STATUS), &part(&RE_TASK_SUMMARY), ts);
+                    let id = part(&RE_TASK_ID);
+                    let event = part(&RE_TASK_EVENT);
+                    // A message's queue row and its prompt both carry
+                    // it: one event once.
+                    if let Some(sh) = shells.iter_mut().find(|sh| sh.monitor && sh.id == id).filter(|sh| !event.trim().is_empty() && sh.events.last().map(String::as_str) != Some(event.trim())) {
+                        sh.events.push(event.trim().to_string());
+                        if sh.events.len() > MONITOR_EVENTS {
+                            sh.events.remove(0);
+                        }
+                    }
+                    end(&mut shells, &id, &part(&RE_TASK_STATUS), &part(&RE_TASK_SUMMARY), ts);
                 }
             }
             _ => {}

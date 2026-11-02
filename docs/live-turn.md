@@ -1,6 +1,6 @@
 # A turn in progress
 
-About `crates/emaki-app/src/workbench.rs` (the working row, Stop, the question, dialog, shells and permission cards), the screen readers in `crates/emaki-core/src/driver.rs`, and the turn state and stop handling in `crates/emaki-core/src/build.rs`.
+About `crates/emaki-app/src/workbench.rs` and `workbench/tray.rs` (the tray over the composer, the working row, Stop, the question, dialog, shells and permission cards), the screen readers in `crates/emaki-core/src/driver.rs`, and the turn state and stop handling in `crates/emaki-core/src/build.rs`.
 
 ## Rules
 
@@ -23,7 +23,8 @@ About `crates/emaki-app/src/workbench.rs` (the working row, Stop, the question, 
 - A click on "Type something" on the terminal card goes there and does not press Return (`pty::hits`): Return on the empty field ended the question unanswered.
 - A background command with no end counts as running only while a process that registered before it began is behind the session (`Workbench::shells_running`, `Peer::started_at`): one whose Claude Code went away gets no end row.
 - Nothing here stops a background command. That is the agent's or the terminal's to do.
-- No card is held over the composer. A card there took the conversation's room for as long as it was up: with a long question in a low window a few lines of the conversation were left, and nothing the reader did gave them more.
+- No card is held over the composer. A card there took the conversation's room for as long as it was up: with a long question in a low window a few lines of the conversation were left, and nothing the reader did gave them more. What answers a card stands in the tray, a line and not a card (The tray).
+- A scroller drawn inside the conversation's list is named and kept by the list's own drawing (`list_draw`, `in_list`), never by the window's frames. The list is a view the window keeps: a frame from the cache draws none of its scrollers, and kept by the window's frames a card's scroller was forgotten at the second such frame and made anew at its top. That is what took the reader back up a card a second or two after they had scrolled it, and only while something else (a countdown on the card, a dot, the turning mark) was drawing frames.
 - A scroller inside a card's body is made before the body's own (`card_scroll`): `route_scroll` takes the first one under the pointer.
 
 ## The cards
@@ -33,10 +34,38 @@ Whatever comes up for the person to read or answer while a session runs is a car
 - The column is drawn under the last round, inside the list's last item (`render_list_item`), so it scrolls with the conversation: going up leaves the cards behind and the conversation has its whole room. The list is told of no item more, so nothing is spliced (`docs/conversation.md`). A conversation with no round yet has no item to stand them in, and there they stand over the composer.
 - What a card holds is drawn through `card_scroll`: no taller than `card_most`, a share of the window's height, and past that it scrolls inside the card, its head and its buttons staying. It scrolls sideways too, for what cannot wrap: `wide` is that width (the terminal's rows). Words wrap and need none. A text's least width in gpui is its whole line, so a body cannot be sized by what it holds: one that was would never wrap.
 - The body is `Inner::Chained`, as a tool call's is: a stroke begun at its edge is the conversation's, so the wheel over a card still leaves it behind.
-- A dialog's tabs are a strip of their own that scrolls sideways and is brought to the tab showing when that changes. A sideways scroller in a card takes a sideways stroke only (`restrict_scroll_to_axis`): without it gpui turns the wheel's up and down into across, and the strip moved together with the conversation. While the strip has more tabs than show, an arrow stands at each end, lit where more lies that way, and the tabs fade into the card's ground at that end; a click on the arrow goes there. An arrow with no more its way keeps its room, so the tabs do not shift. All of it is in motion: the strip runs to where it is going (`tabs_glide_step`), also when it is brought to the tab showing, and the arrows and fades come and go by `presence`.
-- The column has no gap: each card carries the room under it, which moves with it as it opens and closes (`render_terminal`, `card_fold`). The lines under the conversation are the same, each with the air over it (`foot_line`; `docs/window.md`, Motion).
-- The reader is left where they are when the agent asks. While a card is up neither the working line nor the waiting line is shown: the transcript still reads as working while a question waits, and the line said "Claude is working…" over a card the agent was held on. With the card left behind, a line of its own says the agent is waiting, with a "Show" pill that goes to the end (`cards_show`), run from where the reader is (`end_glide_step`). The line opens up from the composer and closes back to it, in the column with no gap. What the person asked for themselves (a pill's picker, a typed command, the background commands' row) goes there at once.
+- A dialog's tabs stand in the decision line (`dialog_tabs`), a strip of their own that scrolls sideways and is brought to the tab showing when that changes. A sideways scroller in a card takes a sideways stroke only (`restrict_scroll_to_axis`): without it gpui turns the wheel's up and down into across, and the strip moved together with the conversation. While the strip has more tabs than show, an arrow stands at each end, lit where more lies that way, and the tabs fade into the card's ground at that end; a click on the arrow goes there. An arrow with no more its way keeps its room, so the tabs do not shift. All of it is in motion: the strip runs to where it is going (`tabs_glide_step`), also when it is brought to the tab showing, and the arrows and fades come and go by `presence`.
+- The column has no gap: each card carries the room under it, which moves with it as it opens and closes (`render_terminal`, `card_fold`).
+- The reader is left where they are when the agent asks. While a card is up neither the working line nor the waiting line is shown: the transcript still reads as working while a question waits, and the line said "Claude is working…" over a card the agent was held on. With the card left behind, the decision line carries a "Show" pill that goes to the end (`cards_show`), run from where the reader is (`end_glide_step`); the terminal card, which has no decision line, gets a line of its own for that. What the person asked for themselves (a pill's picker, a typed command, the background commands' row) goes there at once.
 - The terminal card holds the keyboard, and a card far above the view is not drawn. The keyboard then goes to the composer (`cards_drawn`).
+
+## The tray
+
+One card over the composer that holds what a session has going on beside the conversation, a line each (`workbench/tray.rs`, `render_tray`). It is there only while it holds something, and most of the time it is not. Top to bottom:
+
+1. Claude Code's own notes (`note_lines`): a tip, and what it says of the account.
+2. The published pages (`artifacts_line`).
+3. What runs in the background: agents, monitors, commands (`shells_line`), a line each.
+4. A message that cannot get to the prompt (`held_line`).
+5. The agent at work, or waiting.
+6. What the agent waits for the person to decide (`decision_line`).
+
+- **One shape.** Every row is `tray_row`: its mark in one column, what it is, the chevron beside that name when the row opens out, a line that gives way first, how long, and the buttons last. So what can be pressed stands at one right edge, level with the composer's send button, whatever the row is and whether or not it has a chevron. The chevron at the row's end pushed Open in from where Stop was.
+- **A button of a row is `tray_pill`,** which takes the press for itself: without `occlude` Open also opened the list.
+- **Motion.** A line comes and goes by its height (`render_tray`). The first in and the last out take the card with them instead, opening up from the composer (`fold_with`), so the two never run at once. The card and each card at the conversation's end bring their own air.
+- **A new thing to show beside the conversation is a line here,** in the place its urgency gives it, not another row of its own over the composer.
+
+### The decision line
+
+What the agent asks the person to decide stands here, in a row, in view wherever the conversation is scrolled to and however long what is asked: the card at the conversation's end says what is asked and scrolls, and the choices are not on it. On the card they scrolled away from under the pointer, and the composer cut them off. The tray's edge wears the accent while it is up.
+
+- An approval, a review and a plan's go-ahead have their choices here as buttons, in the terminal's order and sending the same digits (`dialog_bar`). A choice's words are as long as the agent makes them: a button is cut at `bar_pill`'s width, with the whole of them under the pointer, and buttons that do not fit go under what is asked.
+- A question keeps its choices on its card, since they carry descriptions. Here are its tabs, Next, Choose and Cancel: what moves through it.
+- A driver's permission, plan and question are the same (`permission_bar`): Allow and Deny with their keys, for the oldest waiting, and Allow all when several wait.
+
+### Claude Code's notes
+
+Claude Code says things beside its prompt that are in no transcript: a limit coming up ("You've used 90% of your Fable limit · resets Nov 3 at 12am (Australia/Melbourne)", straight over the prompt's rule and set to the right, in a color), and a tip under the working line. `driver::notes_on_screen` reads them (2.1.316), `read_notes` once a second for the session showing, from a hidden terminal of ours only. A line is one of these by where it stands: touching the rule and reaching the rule's right end, or beginning "Tip:". The conversation's own words are neither. Claude Code shows a note for moments, so one stays `NOTE_KEPT_SECS` after it goes (a tip, `TIP_KEPT_SECS`), and goes at a press of its ×.
 
 ## The working row
 
@@ -106,7 +135,7 @@ A command started with `Bash` `run_in_background` may outlive the turn. The tran
 - Start: a `Bash` result's sidecar carries `backgroundTaskId`, its words naming the output file.
 - End: the first `<task-notification>` for that id, which Claude Code writes into the queue (`queue-operation` `enqueue`) when the command exits and again as the prompt of the turn that starts, or a stop the agent asks for (`KillShell`, `TaskStop`).
 
-The row (`render_shells`) sits where the working line does, above it when both are there: the count, the agent's line on what the command is for, how long it has run. A click opens a card at the conversation's end (`render_shells_card`) with each command and the last `SHELL_TAIL_LINES` of its output, read from the output file on the clock while the card is open (`file_tail`: color sequences out, a progress line that rewrites itself kept as it last read).
+The row (`render_shells`) is a line of the tray: the count, the agent's line on what the command is for, how long it has run. A click opens a card at the conversation's end (`render_shells_card`) with each command and the last `SHELL_TAIL_LINES` of its output, read from the output file on the clock while the card is open (`file_tail`: color sequences out, a progress line that rewrites itself kept as it last read).
 
 The command and the output are both code and are drawn alike (`shell_box`): a labeled box, every line wrapped and none cut short, a copy button at its top right under the pointer. Past `SHELL_BOX_H` each scrolls, with the bar every scroller has (`docs/window.md`): the command from its start, the output from its foot, where it stays as more is printed unless the reader has scrolled up.
 
@@ -119,20 +148,31 @@ A subagent launched without waiting for it (`Agent`, 2.1.292) is the same kind o
 - Resumed: a `SendMessage` whose result says `resumedAgentId` starts the agent again, until its next notification, which comes each time it stops. One that ran before is its row again from the resume; one that first ran in the foreground gets a row from its own `Agent` call. Taken as ended at its first notification, an agent sent more work showed no row while it did it.
 - `Shell::command` is the kind of agent (`subagent_type`, often empty) and there is no output file. The path Claude Code names as the output file is the agent's whole transcript and is never read here.
 
-The row is a second `render_shells` (`agents: true`), over the commands' row: "N agents running in the background", and for one agent its task and how long it has run. The card lists each agent with one line on what it was last seen doing (`build::agent_step`): the last tool call, or the first line of the last thing it said, from the end of the agent's own transcript (`build::agent_transcript`, `<session>/subagents/agent-<id>.jsonl`), read on the clock while the card is open (`read_agent_steps`). The same rule says whether one with no end is running (`shells_running`).
+The row is another `render_shells` (`TaskKind::Agents`): "N agents running in the background", and for one agent its task and how long it has run. The card lists each agent with one line on what it was last seen doing (`build::agent_step`): the last tool call, or the first line of the last thing it said, from the end of the agent's own transcript (`build::agent_transcript`, `<session>/subagents/agent-<id>.jsonl`), read on the clock while the card is open (`read_agent_steps`). The same rule says whether one with no end is running (`shells_running`).
+
+## Monitors
+
+A `Monitor` (2.1.316) watches with a script of its own and reports each line it prints. It is a thing that runs in the background like a command, and is kept in the same list as a `Shell` with `monitor` set.
+
+- Start: a `Monitor` result whose sidecar names `taskId` and `timeoutMs`, and `persistent` for one that runs for the session.
+- A report is a `<task-notification>` with no `<status>`, its words in `<event>`, kept in `Shell::events`. It ends nothing: taken as an end, a monitor was gone at its first report.
+- End: the notification that says a status (`completed`, "stream ended"), or its time running out, which leaves no row (`shells_running`, `Shell::timeout_ms`).
+
+The row is a line of the tray (`TaskKind::Monitors`), and its card has the script and what it has reported. The output file is named only by the notification that ends it, and the reports are its contents.
 
 ## Artifacts
 
 A page the agent published with Claude's Artifact tool is the session's (`build::artifacts_of`, into `Session::artifacts`): an `Artifact` result whose sidecar names the page (`url`, `artifact_id`, `title`, `icon`, `path`), from a call that publishes (no `action`, or `publish`) and does not upload an asset. A read or a list names a page too and is not one. A page published again is the same one, its title and time the newest.
 
-The line (`artifacts_line`) heads the column over the composer, for as long as the session has any: how many, the newest's title, and with one an Open pill. It is not the background rows' kind of thing, which come and go with what runs; it stays. A click opens a card at the conversation's end (`render_artifacts_card`) with each page, newest first: its title, where it is, when it was last published, and Open. A click anywhere on a page's row opens it too.
+The line (`artifacts_line`) is in the tray for as long as the session has any: how many, the newest's title, and with one an Open pill. It is not the background rows' kind of thing, which come and go with what runs; it stays. A click opens a card at the conversation's end (`render_artifacts_card`) with each page, newest first: its title, where it is, when it was last published, and Open. A click anywhere on a page's row opens it too.
 
 ## The permission card's keys
 
-↩ on an empty composer allows the oldest card waiting on the session showing, ⇧↩ denies it, and that card says so on its buttons. With words typed, ↩ is a new line. The textarea inserts the newline before it reports `PressEnter`, so `answer_pending_by_key` clears the composer after answering. Stacked cards: the first also offers "Allow all".
+↩ on an empty composer allows the oldest card waiting on the session showing, ⇧↩ denies it, and the decision line says so on its buttons. With words typed, ↩ is a new line. The textarea inserts the newline before it reports `PressEnter`, so `answer_pending_by_key` clears the composer after answering. Stacked cards: the first also offers "Allow all".
 
 ## Probing
 
+- `EMAKI_GO=dialogdemo:approval` holds an approval whose command is longer than a card shows. `held:<name>` says a message waits on that panel (`held:asked`, `held:other`, `held:off`), `note:<words>` puts up a note, `Tip:` first for a tip, `_` for a space, `undelivered:<words>` shows a message that did not go, `heldfix` is a click on Back to the input, `heldshow` prints what holds a message and how its bubble stands. `monitors` opens the monitors' card.
 - `EMAKI_GO=dialogdemo:preview` holds a sample question with previews on the card. `dialogdemo:long` holds one with six tabs and more choices than a card shows; `termdemo:tall` draws the terminal card on a screen taller than a card. `cards:<across>:<down>` moves every card's body as a wheel would and prints where each is and how far it can go. `scroll:` from the conversation's end moves nothing until it is more than the view's height. `tabs:left` and `tabs:right` are clicks on the strip's arrows, `cardsshow` one on "Show".
 - `EMAKI_GO=dialogdemo:plan` holds a plan's dialog, with the plan the session showing last wrote. For the real one: `emaki-core pty <cwd> --keys "/plan" --keys "\r" --keys "<a prompt>" --keys "\r"` prints the screen and what the reader makes of it (a real model call).
 - `EMAKI_GO=dialog:<digit>` or `dialog:tab` presses that in the terminal's dialog; `answer:<words>` types an answer; `goto:<n>` goes to that tab.

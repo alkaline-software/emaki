@@ -9223,5 +9223,158 @@
     "fr": "bloqué",
     "de": "gesperrt",
     "es": "bloqueado"
+  },
+  "Your message is waiting": {
+    "zh-Hans": "你的消息正在等待",
+    "zh-Hant": "你的訊息正在等待",
+    "ja": "メッセージは待機中です",
+    "ko": "메시지가 대기 중입니다",
+    "fr": "Votre message attend",
+    "de": "Deine Nachricht wartet",
+    "es": "Tu mensaje está esperando"
+  },
+  "Back to the input": {
+    "zh-Hans": "回到输入框",
+    "zh-Hant": "回到輸入框",
+    "ja": "入力欄に戻る",
+    "ko": "입력란으로 돌아가기",
+    "fr": "Revenir à la saisie",
+    "de": "Zurück zur Eingabe",
+    "es": "Volver a la entrada"
+  },
+  "something is open over {agent}'s input": {
+    "zh-Hans": "{agent} 的输入框被其他内容遮住了",
+    "zh-Hant": "{agent} 的輸入框被其他內容遮住了",
+    "ja": "{agent} の入力欄が別の画面で隠れています",
+    "ko": "{agent}의 입력란이 다른 화면에 가려져 있습니다",
+    "fr": "quelque chose recouvre la saisie de {agent}",
+    "de": "etwas verdeckt die Eingabe von {agent}",
+    "es": "algo cubre la entrada de {agent}"
+  },
+  "“{what}” is open over {agent}'s input": {
+    "zh-Hans": "“{what}”遮住了 {agent} 的输入框",
+    "zh-Hant": "「{what}」遮住了 {agent} 的輸入框",
+    "ja": "「{what}」が {agent} の入力欄を隠しています",
+    "ko": "“{what}”이(가) {agent}의 입력란을 가리고 있습니다",
+    "fr": "« {what} » recouvre la saisie de {agent}",
+    "de": "„{what}“ verdeckt die Eingabe von {agent}",
+    "es": "«{what}» cubre la entrada de {agent}"
+  },
+  "it goes once {agent}'s question is answered": {
+    "zh-Hans": "回答 {agent} 的问题后就会发送",
+    "zh-Hant": "回答 {agent} 的問題後就會傳送",
+    "ja": "{agent} の質問に答えると送信されます",
+    "ko": "{agent}의 질문에 답하면 전송됩니다",
+    "fr": "il partira une fois la question de {agent} répondue",
+    "de": "sie geht raus, sobald die Frage von {agent} beantwortet ist",
+    "es": "se enviará al responder la pregunta de {agent}"
+  },
+  "{agent} is not at its input": {
+    "zh-Hans": "{agent} 目前不在输入框",
+    "zh-Hant": "{agent} 目前不在輸入框",
+    "ja": "{agent} は入力欄を表示していません",
+    "ko": "{agent}이(가) 입력란에 있지 않습니다",
+    "fr": "{agent} n'est pas à sa saisie",
+    "de": "{agent} ist nicht bei seiner Eingabe",
+    "es": "{agent} no está en su entrada"
+  },
+  "the message is still in Claude Code's input": {
+    "zh-Hans": "消息还留在 Claude Code 的输入框里",
+    "zh-Hant": "訊息還留在 Claude Code 的輸入框裡",
+    "ja": "メッセージは Claude Code の入力欄に残っています",
+    "ko": "메시지가 아직 Claude Code 입력란에 남아 있습니다",
+    "fr": "le message est encore dans la saisie de Claude Code",
+    "de": "die Nachricht steht noch in der Eingabe von Claude Code",
+    "es": "el mensaje sigue en la entrada de Claude Code"
+  },
+  "the message did not reach Claude Code's input": {
+    "zh-Hans": "消息没有到达 Claude Code 的输入框",
+    "zh-Hant": "訊息沒有到達 Claude Code 的輸入框",
+    "ja": "メッセージは Claude Code の入力欄に届きませんでした",
+    "ko": "메시지가 Claude Code 입력란에 도달하지 못했습니다",
+    "fr": "le message n'a pas atteint la saisie de Claude Code",
+    "de": "die Nachricht hat die Eingabe von Claude Code nicht erreicht",
+    "es": "el mensaje no llegó a la entrada de Claude Code"
+  },
+  "Send again": {
+    "zh-Hans": "重新发送",
+    "zh-Hant": "重新傳送",
+    "ja": "再送信",
+    "ko": "다시 보내기",
+    "fr": "Renvoyer",
+    "de": "Erneut senden",
+    "es": "Enviar de nuevo"
+  },
+  "Delivered": {
+    "zh-Hans": "已送达",
+    "zh-Hant": "已送達",
+    "ja": "配信済み",
+    "ko": "전달됨",
+    "fr": "Remis",
+    "de": "Zugestellt",
+    "es": "Entregado"
+  },
+  "Sending…": {
+    "zh-Hans": "正在发送…",
+    "zh-Hant": "正在傳送…",
+    "ja": "送信中…",
+    "ko": "보내는 중…",
+    "fr": "Envoi…",
+    "de": "Wird gesendet…",
+    "es": "Enviando…"
+  },
+  "Reading the picture…": {
+    "zh-Hans": "正在读取图片…",
+    "zh-Hant": "正在讀取圖片…",
+    "ja": "画像を読み込み中…",
+    "ko": "그림을 읽는 중…",
+    "fr": "Lecture de l'image…",
+    "de": "Bild wird gelesen…",
+    "es": "Leyendo la imagen…"
+  },
+  "Events": {
+    "zh-Hans": "事件",
+    "zh-Hant": "事件",
+    "ja": "イベント",
+    "ko": "이벤트",
+    "fr": "Événements",
+    "de": "Ereignisse",
+    "es": "Eventos"
+  },
+  "nothing reported yet": {
+    "zh-Hans": "还没有任何报告",
+    "zh-Hant": "還沒有任何回報",
+    "ja": "まだ報告はありません",
+    "ko": "아직 보고된 내용이 없습니다",
+    "fr": "rien de signalé pour l'instant",
+    "de": "noch nichts gemeldet",
+    "es": "nada reportado todavía"
+  },
+  "{n} monitor running in the background": {
+    "zh-Hans": "{n} 个 monitor 在后台运行",
+    "zh-Hant": "{n} 個 monitor 在背景執行",
+    "ja": "{n} 個の monitor がバックグラウンドで実行中",
+    "ko": "monitor {n}개가 백그라운드에서 실행 중",
+    "fr": "{n} monitor en arrière-plan",
+    "de": "{n} Monitor läuft im Hintergrund",
+    "es": "{n} monitor en segundo plano"
+  },
+  "{n} monitors running in the background": {
+    "zh-Hans": "{n} 个 monitor 在后台运行",
+    "zh-Hant": "{n} 個 monitor 在背景執行",
+    "ja": "{n} 個の monitor がバックグラウンドで実行中",
+    "ko": "monitor {n}개가 백그라운드에서 실행 중",
+    "fr": "{n} monitors en arrière-plan",
+    "de": "{n} Monitore laufen im Hintergrund",
+    "es": "{n} monitores en segundo plano"
+  },
+  "This picture could not be read.": {
+    "zh-Hans": "无法读取这张图片。",
+    "zh-Hant": "無法讀取這張圖片。",
+    "ja": "この画像を読み込めませんでした。",
+    "ko": "이 그림을 읽을 수 없습니다.",
+    "fr": "Cette image n'a pas pu être lue.",
+    "de": "Dieses Bild konnte nicht gelesen werden.",
+    "es": "No se pudo leer esta imagen."
   }
 }

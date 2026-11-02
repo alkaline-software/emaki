@@ -430,6 +430,8 @@ fn main() {
             }
             let styled = pty.styled();
             println!("---\n{}\n---", pty.text());
+            println!("cover: {:?}", emaki_core::driver::cover_on_screen(&styled));
+            println!("notes: {:?}", emaki_core::driver::notes_on_screen(&styled));
             println!("working: {:?}", emaki_core::driver::working_on_screen(&styled));
             println!("suggestion: {:?}", emaki_core::driver::suggestion_on_screen(&styled));
             println!("prompt: {:?}", emaki_core::driver::prompt_on_screen(&styled));

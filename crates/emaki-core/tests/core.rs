@@ -4804,3 +4804,69 @@ fn a_comparison_expanded_has_every_line() {
     let sha = git::log(&root, 1)[0].sha.clone();
     assert_eq!(git::commit_diff_in(&root, &sha, "f.txt", true).rows, w.rows);
 }
+
+#[test]
+fn a_monitor_runs_through_its_events_and_ends_at_its_status() {
+    let mut rows = vec![
+        json!({"type": "user", "uuid": "u1", "sessionId": "s1", "timestamp": "2026-01-01T10:00:00Z", "message": {"role": "user", "content": "watch it"}}),
+        json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "sessionId": "s1", "timestamp": "2026-01-01T10:00:01Z", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Monitor", "input": {"command": "until done; do sleep 3; done", "description": "the build finishing", "timeout_ms": 600000}}
+        ]}}),
+        json!({"type": "user", "uuid": "u2", "parentUuid": "a1", "sessionId": "s1", "timestamp": "2026-01-01T10:00:02Z",
+            "toolUseResult": {"taskId": "bm1", "timeoutMs": 600000, "persistent": false},
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Monitor started (task bm1, expires in 10m)"}]}}),
+        json!({"type": "queue-operation", "operation": "enqueue", "sessionId": "s1", "timestamp": "2026-01-01T10:01:00Z",
+            "content": "<task-notification>\n<task-id>bm1</task-id>\n<summary>Monitor event: \"the build finishing\"</summary>\n<event>step one passed</event>\n</task-notification>"}),
+    ];
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.shells.len(), 1);
+    let m = &s.shells[0];
+    assert!(m.monitor && !m.agent);
+    assert_eq!((m.description.as_str(), m.timeout_ms), ("the build finishing", 600000));
+    assert!(m.ended.is_empty(), "an event does not end it");
+    assert_eq!(m.events, vec!["step one passed".to_string()]);
+
+    rows.push(json!({"type": "queue-operation", "operation": "enqueue", "sessionId": "s1", "timestamp": "2026-01-01T10:02:00Z",
+        "content": "<task-notification>\n<task-id>bm1</task-id>\n<output-file>/tmp/bm1.output</output-file>\n<status>completed</status>\n<summary>Monitor \"the build finishing\" stream ended</summary>\n<event>all done</event>\n</task-notification>"}));
+    let s = build(BuildInput { rows: &rows, transcript_path: "/x/s1.jsonl", cwd_hint: "", subagents: None, nested: false });
+    assert_eq!(s.shells[0].status, "completed");
+    assert!(!s.shells[0].ended.is_empty());
+    assert_eq!(s.shells[0].events.last().map(String::as_str), Some("all done"));
+}
+
+#[test]
+fn what_covers_the_prompt_is_named_and_says_what_esc_does() {
+    use emaki_core::driver::{cover_on_screen, held_on_screen, prompt_words, Held};
+    let rule = "─".repeat(70);
+    let background = format!("  conversation above\n{rule}\n  Background\n  1 active shell\n\n  ❯ ● the speech and post-processing test run finishing   running\n\n  ↑/↓ to select · Enter to view · x to stop · Esc to close\n");
+    assert_eq!(cover_on_screen(&background).as_deref(), Some("Background"));
+    assert_eq!(held_on_screen(&background), Held::Covered("Background".into()));
+    let details = format!("{rule}\n  Monitor details\n\n  Status:  running\n\n  ← to go back · Esc/Enter/Space to close\n");
+    assert_eq!(cover_on_screen(&details).as_deref(), Some("Monitor details"));
+    let prompt = format!("  hello\n{rule}\n❯ \n{rule}\n  auto mode on (shift+tab to cycle) · Esc to close\n");
+    assert_eq!(cover_on_screen(&prompt), None, "a prompt on the screen is not covered");
+    assert_eq!(held_on_screen("  something nobody has seen\n"), Held::Other);
+
+    let typed = format!("{rule}\n❯ [Image #4][Pasted text #5 +15 lines]\n{rule}\n");
+    assert_eq!(prompt_words(&typed).as_deref(), Some("[Image #4][Pasted text #5 +15 lines]"));
+    assert_eq!(prompt_words(&prompt).as_deref(), Some(""));
+    assert_eq!(prompt_words(&background), None);
+}
+
+#[test]
+fn claude_codes_own_notes_are_told_from_the_conversation() {
+    use emaki_core::driver::notes_on_screen;
+    let rule = "─".repeat(90);
+    let limit = format!("{:>90}", "You've used 90% of your Fable limit · resets Nov 3 at 12am (Australia/Melbourne)");
+    let working = format!("* Catapulting… (3m 53s · ↓ 18.4k tokens)\n  ⎿  Tip: Use /btw to ask a quick side question\n{limit}\n{rule}\n❯ \n{rule}\n");
+    let notes = notes_on_screen(&working);
+    assert_eq!(notes.len(), 2);
+    assert!(notes[0].tip && notes[0].text.starts_with("Tip: Use /btw"));
+    assert!(!notes[1].tip && notes[1].text.starts_with("You've used 90%"));
+
+    // The agent's own words over the prompt are the conversation.
+    let plain = format!("● The row code is in place.\n\n{rule}\n❯ \n{rule}\n");
+    assert!(notes_on_screen(&plain).is_empty());
+    let indented = format!("      a line of a table the agent wrote\n{rule}\n❯ \n{rule}\n");
+    assert!(notes_on_screen(&indented).is_empty(), "not set to the right");
+}

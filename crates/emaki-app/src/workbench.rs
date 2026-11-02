@@ -44,6 +44,7 @@ use emaki_core::update::{self, UpdateState};
 use gpui_component::checkbox::Checkbox;
 
 mod settings;
+mod tray;
 pub use settings::SETTINGS_CONTEXT;
 
 actions!(emaki, [ReopenTab, ToggleRaw, ToggleChanges, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
@@ -830,6 +831,67 @@ pub enum Inner {
     Over,
 }
 
+/// What can run in the background of a session, each with its line in
+/// the tray and its card at the conversation's end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskKind {
+    Commands,
+    Agents,
+    Monitors,
+}
+
+impl TaskKind {
+    fn word(self) -> &'static str {
+        match self {
+            TaskKind::Commands => "shells",
+            TaskKind::Agents => "agents",
+            TaskKind::Monitors => "monitors",
+        }
+    }
+}
+
+fn task_of(sh: &emaki_core::model::Shell) -> TaskKind {
+    if sh.agent {
+        TaskKind::Agents
+    } else if sh.monitor {
+        TaskKind::Monitors
+    } else {
+        TaskKind::Commands
+    }
+}
+
+/// A color off Claude Code's screen as the window's appearance has it.
+/// The screen is in whichever theme Claude Code is set to, so the color
+/// is looked up in its two themes and the window takes its own side:
+/// read as written, a dark theme's bright yellow sat on a light window.
+/// Gray is the muted ink, and a color in neither theme is only kept
+/// readable.
+pub(crate) fn screen_ink(c: Option<u32>, theme: &gpui_component::Theme) -> Hsla {
+    match c {
+        Some(v) if (v >> 16) & 0xff == (v >> 8) & 0xff && (v >> 8) & 0xff == v & 0xff => theme.muted_foreground,
+        Some(v) => match driver::theme_pair(v) {
+            Some(pair) => shade(pair, theme),
+            None => {
+                let mut c: Hsla = rgb(v).into();
+                c.l = if theme.mode.is_dark() { c.l.max(0.6) } else { c.l.min(0.36) };
+                c
+            }
+        },
+        None => theme.muted_foreground,
+    }
+}
+
+/// A scroller's handle kept by name (`Workbench::kept_scroll`).
+#[derive(Default)]
+pub struct KeptScroll {
+    handle: ScrollHandle,
+    /// Used by the last drawing of what it stands in.
+    used: bool,
+    stroke: Rc<std::cell::RefCell<Stroke>>,
+    /// It stands inside the conversation's list.
+    in_list: bool,
+}
+
 /// A wheel event this long after the previous one begins a new gesture: a
 /// mouse wheel sends no phases, and momentum comes at frame rate.
 const SCROLL_GAP: Duration = Duration::from_millis(150);
@@ -915,15 +977,19 @@ pub const OUTGOING: &str = "outgoing";
 /// An agent takes a moment to write a prompt down, and one that has to
 /// be started first takes a second or more: the conversation showed
 /// nothing for that long, and a new session a bare pane.
+#[derive(Clone)]
 pub struct Outgoing {
     text: String,
     attached: Vec<Attachment>,
     /// When it was sent, and how many rounds the conversation had then:
     /// a round after those is the message, written.
-    at: f64,
+    pub at: f64,
     base: usize,
     /// Why it did not go, when it did not.
     pub error: String,
+    /// Claude Code has it: the prompt let it go, or the wire took it.
+    /// Until the transcript has it too, the bubble says so.
+    pub delivered: bool,
 }
 
 /// Why nothing that needs Claude Code is done on a session begun here
@@ -1095,29 +1161,6 @@ pub(crate) fn chain_wheel(handle: ScrollHandle, stroke: Rc<std::cell::RefCell<St
 /// A card at the conversation's end shows this much of what it holds
 /// however low the window is (`Workbench::card_most`).
 const CARD_LEAST: Pixels = px(150.);
-
-/// A line under the conversation (the agent at work, waiting, commands
-/// in the background), and the air over it.
-const LINE_H: f32 = 26.;
-const LINE_AIR: f32 = 10.;
-
-/// A line under the conversation as it comes and goes: it opens up from
-/// the composer and closes back to it, the air over it part of what
-/// moves, so it stands in a column with no gap (`render_terminal`).
-/// `moving` is its `presence`.
-fn foot_line(moving: Option<(bool, u32)>, id: &str, row: impl IntoElement) -> AnyElement {
-    let tall = LINE_H + LINE_AIR;
-    let wrap = v_flex().w_full().max_w(CONTENT_W).justify_end().overflow_hidden().child(h_flex().w_full().h(px(LINE_H)).flex_shrink_0().items_center().child(row));
-    match moving {
-        Some((coming, n)) => wrap
-            .with_animation(ElementId::Name(format!("{id}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
-                let t = if coming { t } else { 1. - t };
-                d.h(px((tall * t).round())).opacity(t)
-            })
-            .into_any_element(),
-        None => wrap.h(px(tall)).into_any_element(),
-    }
-}
 
 /// How far in from an end of the strip its tabs fade.
 const TABS_FADE: f32 = 28.;
@@ -1579,7 +1622,7 @@ pub struct Workbench {
     waiting_kept: std::cell::RefCell<Option<(String, String, bool, bool, String)>>,
     /// The background commands and agents last running, for drawing
     /// their line and card as they go: commands first, then agents.
-    shells_kept: std::cell::RefCell<[Vec<emaki_core::model::Shell>; 2]>,
+    shells_kept: std::cell::RefCell<[Vec<emaki_core::model::Shell>; 3]>,
     /// The permission cards last drawn, a session each, for drawing one
     /// as it goes once it is answered.
     asks_kept: std::cell::RefCell<Vec<(String, PermissionRequest)>>,
@@ -1611,8 +1654,24 @@ pub struct Workbench {
     /// whose list is open, and what each agent was last seen doing.
     agents_open: Option<String>,
     agent_steps: HashMap<String, String>,
+    /// The same for the monitors watching in the background: the
+    /// session whose list is open.
+    monitors_open: Option<String>,
     /// The session whose list of published artifacts is open.
     artifacts_open: Option<String>,
+    /// What keeps a message from each session's prompt, while one waits
+    /// (`HubEvent::Held`), and what the tray's line last said of it.
+    held: HashMap<String, emaki_core::driver::Held>,
+    held_kept: std::cell::RefCell<Option<emaki_core::driver::Held>>,
+    /// What Claude Code has last put up beside the prompt of each
+    /// session, read off its screen (`read_notes`), and what the person
+    /// has put away.
+    notes: HashMap<String, tray::Notes>,
+    notes_reading: bool,
+    notes_kept: std::cell::RefCell<[Option<emaki_core::driver::ScreenNote>; 2]>,
+    notes_gone: HashSet<String>,
+    /// What the decision line last asked, for the moment it closes.
+    bar_kept: std::cell::RefCell<Option<tray::Asked>>,
     /// It was put there by the window, for a screen it could not read,
     /// and goes when the terminal stops waiting.
     term_auto: bool,
@@ -1784,8 +1843,18 @@ pub struct Workbench {
     /// handles of those that have no field of their own, by name, with
     /// whether this draw used each. See `Inner`.
     inner_live: std::cell::RefCell<Vec<(ScrollHandle, Inner)>>,
+    /// The same for what is drawn inside the conversation's list. The
+    /// list is a view the window keeps between frames, and a frame that
+    /// replays it draws none of its scrollers: they stay named until it
+    /// is drawn afresh (`list_draw`). Going by the window's frames, a
+    /// card's scroller was forgotten at the second frame from the cache
+    /// and came back at its top, which took the reader back up a card
+    /// they had scrolled down a second or two later.
+    inner_list: std::cell::RefCell<Vec<(ScrollHandle, Inner)>>,
+    /// The list's items are being drawn now.
+    in_list: std::cell::Cell<bool>,
     scroll_inner: Option<(ScrollHandle, Inner, Pixels)>,
-    inner_kept: std::cell::RefCell<HashMap<SharedString, (ScrollHandle, bool, Rc<std::cell::RefCell<Stroke>>)>>,
+    inner_kept: std::cell::RefCell<HashMap<SharedString, KeptScroll>>,
     /// The scroll positions momentum may be forwarded to.
     side_scroll: ScrollHandle,
     /// The pinned projects' own scroller, over the rest, and whether the
@@ -1980,6 +2049,18 @@ pub struct Workbench {
     /// fitted width at the next draw.
     pub(crate) panel_w: Pixels,
     pub(crate) panel_drag: bool,
+    /// How wide the changed files' column of the comparison is, whether
+    /// its divider is held, where the sheet's two columns stand, and a
+    /// double click on the divider, which has to measure in a draw.
+    pub(crate) changes_w: Pixels,
+    pub(crate) changes_drag: bool,
+    pub(crate) changes_sheet: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    pub(crate) changes_fit_wanted: bool,
+    /// The picture showing that would not read, and for each picture
+    /// looked at, the file's time as it was read and how many times it
+    /// has been read again (`picture_tick`).
+    pub(crate) picture_failed: Rc<std::cell::RefCell<Option<PathBuf>>>,
+    pub(crate) picture_read: HashMap<PathBuf, (Option<std::time::SystemTime>, u32)>,
     pub(crate) panel_fit_wanted: bool,
     /// The outline in its drawer at the conversation column's left, as
     /// its handle left it, and its last change of being drawn, as
@@ -3631,6 +3712,7 @@ impl Workbench {
                     this.read_working(cx);
                     this.read_dialog(cx);
                     this.read_suggestion(cx);
+                    this.read_notes(cx);
                     if this.now < this.ctx_watch_until {
                         if let Some(id) = this.shown_session().map(|s| s.id.clone()) {
                             if this.refresh_context(&id) {
@@ -4177,6 +4259,14 @@ impl Workbench {
             shells_open: None,
             shell_tails: HashMap::new(),
             agents_open: None,
+            monitors_open: None,
+            held: HashMap::new(),
+            held_kept: Default::default(),
+            notes: HashMap::new(),
+            notes_reading: false,
+            notes_kept: Default::default(),
+            notes_gone: HashSet::new(),
+            bar_kept: Default::default(),
             artifacts_open: None,
             agent_steps: HashMap::new(),
             term_auto: false,
@@ -4259,6 +4349,8 @@ impl Workbench {
             scroll_owner: None,
             last_scroll: Instant::now(),
             inner_live: Default::default(),
+            inner_list: Default::default(),
+            in_list: Default::default(),
             scroll_inner: None,
             inner_kept: Default::default(),
             side_scroll: ScrollHandle::new(),
@@ -4273,6 +4365,12 @@ impl Workbench {
             panel_anim: None,
             panel_w: ui.panel_w.map(px).unwrap_or(crate::panels::PANEL_W),
             panel_drag: false,
+            changes_w: ui.changes_w.map(px).unwrap_or(crate::panels::CHANGES_LIST_W),
+            changes_drag: false,
+            changes_sheet: Default::default(),
+            changes_fit_wanted: false,
+            picture_failed: Default::default(),
+            picture_read: HashMap::new(),
             panel_fit_wanted: false,
             outline_on: false,
             outline_anim: None,
@@ -4816,14 +4914,18 @@ impl Workbench {
                 cx.notify();
             }
             HubEvent::Sent { session_id, queued, error } => {
+                self.held.remove(&session_id);
                 // A message that went through shows up in the transcript,
                 // which says it better than a "sent" would; only what did
                 // not go, or is waiting, is worth a line.
                 if !error.is_empty() {
                     self.fail_outgoing(&session_id, &error);
                     self.notice = Some(Notice::error(tf("not sent: {error}", &[("error", &error)])));
-                } else if queued {
-                    self.notice = Some(Notice::said(t("queued behind the running turn")));
+                } else {
+                    self.deliver_outgoing(&session_id);
+                    if queued {
+                        self.notice = Some(Notice::said(t("queued behind the running turn")));
+                    }
                 }
                 if let Some(v) = self.drivers.get_mut(&session_id) {
                     if error.is_empty() && !queued {
@@ -4856,6 +4958,18 @@ impl Workbench {
                     }
                 }
                 self.try_renames(cx);
+                cx.notify();
+            }
+            // A message cannot reach the prompt, or now can.
+            HubEvent::Held { session_id, held } => {
+                match held {
+                    Some(h) => {
+                        self.held.insert(session_id, h);
+                    }
+                    None => {
+                        self.held.remove(&session_id);
+                    }
+                }
                 cx.notify();
             }
             HubEvent::TerminalNeeded(sid) => {
@@ -5953,6 +6067,11 @@ impl Workbench {
                 self.artifacts_open = self.selected_ref().map(|r| r.session_id.clone());
                 cx.notify();
             }
+            // A click on the line of monitors.
+            Some("monitors") => {
+                self.monitors_open = self.selected_ref().map(|r| r.session_id.clone());
+                cx.notify();
+            }
             Some("shells") => {
                 self.shells_open = self.selected_ref().map(|r| r.session_id.clone());
                 self.read_shell_tails();
@@ -6197,16 +6316,16 @@ impl Workbench {
                 let mut by = t["cards:".len()..].split(':').map(|n| n.parse::<f32>().unwrap_or(0.));
                 let (dx, dy) = (by.next().unwrap_or(0.), by.next().unwrap_or(0.));
                 for (key, kept) in self.inner_kept.borrow().iter().filter(|(key, _)| key.starts_with("card-")) {
-                    let (at, most) = (kept.0.offset(), kept.0.max_offset());
-                    kept.0.set_offset(point((at.x + px(dx)).clamp(-most.x, px(0.)), (at.y + px(dy)).clamp(-most.y, px(0.))));
-                    eprintln!("{key}: at {:?} of {:?}", kept.0.offset(), most);
+                    let (at, most) = (kept.handle.offset(), kept.handle.max_offset());
+                    kept.handle.set_offset(point((at.x + px(dx)).clamp(-most.x, px(0.)), (at.y + px(dy)).clamp(-most.y, px(0.))));
+                    eprintln!("{key}: at {:?} of {:?}", kept.handle.offset(), most);
                 }
                 cx.notify();
             }
             // A click on an arrow of the dialog's strip of tabs, and on
             // "Show" in the line for a card left behind.
             Some(t @ ("tabs:left" | "tabs:right")) => {
-                if let Some(scroll) = self.inner_kept.borrow().get("dialog-tabs").map(|kept| kept.0.clone()) {
+                if let Some(scroll) = self.inner_kept.borrow().get("dialog-tabs").map(|kept| kept.handle.clone()) {
                     let by = f32::from(scroll.bounds().size.width) * 0.6 * if t == "tabs:right" { -1. } else { 1. };
                     self.tabs_to.set(Some((f32::from(scroll.offset().x) + by, Instant::now())));
                 }
@@ -6235,6 +6354,63 @@ impl Workbench {
                 let screen = format!("{rule}\n←  ☐ dplyr scope  ☐ Naming  ☐ Bad files  ☐ Partitions  ☐ Tests  ✔ Submit  →\nHow much of the codebase should move to dplyr/dbplyr syntax?\n{choices}  7. Type something.\n{rule}\n  8. Chat about this\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n");
                 self.dialog_demo = true;
                 self.dialog_seen = emaki_core::driver::dialog_on_screen(&screen).map(|d| (sid, d));
+                cx.notify();
+            }
+            // An approval as Claude Code draws one: a command longer than
+            // a card shows, and a clock that changes every second, as the
+            // one over an unattended session does.
+            Some("dialogdemo:approval") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let mut body: Vec<String> = (1..=30).map(|n| format!("step {n}: cargo build -p emaki-app --locked && scripts/check.sh --with-a-long-flag --and-another-one {n}")).collect();
+                body.push("Claude Code will automatically block this request in 1:38, to avoid holding up an unattended session".into());
+                body.push("Do you want to proceed?".into());
+                let option = |n: u32, label: &str| emaki_core::driver::DialogOption { n, label: label.into(), ..Default::default() };
+                self.dialog_seen = Some((sid, emaki_core::driver::Dialog { body, options: vec![option(1, "Yes"), option(2, "Yes, and don't ask again for cargo build commands in this project"), option(3, "No")], ..Default::default() }));
+                self.dialog_demo = true;
+                cx.notify();
+            }
+            // What the tray holds, each by itself: a message waiting on
+            // what covers the prompt, and Claude Code's notes.
+            Some(t) if t.starts_with("held:") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let held = match &t["held:".len()..] {
+                    "off" => None,
+                    "asked" => Some(emaki_core::driver::Held::Asked),
+                    "other" => Some(emaki_core::driver::Held::Other),
+                    name => Some(emaki_core::driver::Held::Covered(name.into())),
+                };
+                match held {
+                    Some(h) => {
+                        self.held.insert(sid, h);
+                    }
+                    None => {
+                        self.held.remove(&sid);
+                    }
+                }
+                cx.notify();
+            }
+            // A click on the held line's button, and what it says now.
+            Some("heldfix") => {
+                if let Some(sid) = self.selected_ref().map(|r| r.session_id.clone()) {
+                    self.hub.back_to_prompt(&sid);
+                }
+            }
+            Some("heldshow") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let out = self.selected.as_ref().and_then(|k| self.outgoing.get(k)).map(|o| (o.delivered, o.error.clone()));
+                eprintln!("held {:?} outgoing {:?}", self.held.get(&sid), out);
+            }
+            Some(t) if t.starts_with("note:") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                let now = self.now;
+                self.note_probe(sid, &t["note:".len()..], now);
+                cx.notify();
+            }
+            // The turn's words, as if a message had not gone.
+            Some(t) if t.starts_with("undelivered:") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                self.show_outgoing(t["undelivered:".len()..].replace('_', " "), Vec::new());
+                self.fail_outgoing(&sid, "the message is still in Claude Code's input");
                 cx.notify();
             }
             Some("dialogdemo:off") => {
@@ -6476,6 +6652,7 @@ impl Workbench {
             // button and its edge close it.
             files_open: Some(self.files_on || self.side_away.contains(&crate::panels::Side::Left)),
             panel_w: Some(f32::from(self.panel_w)),
+            changes_w: Some(f32::from(self.changes_w)),
             term_w: Some(f32::from(self.side_term_w)),
             file_w: Some(f32::from(self.file_w)),
             file_structure_open: Some(self.file_structure_open),
@@ -6684,7 +6861,7 @@ impl Workbench {
         if text.is_empty() && attached.is_empty() || slash_command(&text).is_some() {
             self.outgoing.remove(&key);
         } else {
-            self.outgoing.insert(key.clone(), Outgoing { text, attached, at: now_secs(), base, error: String::new() });
+            self.outgoing.insert(key.clone(), Outgoing { text, attached, at: now_secs(), base, error: String::new(), delivered: false });
         }
         self.set_detail(key, path, session);
     }
@@ -6695,6 +6872,33 @@ impl Workbench {
         for (_, out) in self.outgoing.iter_mut().filter(|(key, _)| key.ends_with(&tail)) {
             out.error = error.to_string();
         }
+    }
+
+    /// A message reached Claude Code: its bubble says so until the
+    /// transcript has it.
+    fn deliver_outgoing(&mut self, session_id: &str) {
+        let tail = format!(":{session_id}");
+        for (_, out) in self.outgoing.iter_mut().filter(|(key, _)| key.ends_with(&tail)) {
+            out.delivered = true;
+        }
+    }
+
+    /// The message that did not go, as it was, sent again. What is typed
+    /// in the composer meanwhile stays there.
+    pub(crate) fn send_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.selected.clone() else { return };
+        let Some(out) = self.outgoing.get(&key).filter(|o| !o.error.is_empty()).cloned() else { return };
+        self.outgoing.remove(&key);
+        let draft = self.composer.read(cx).value().to_string();
+        let attached = std::mem::replace(&mut self.attachments, out.attached.clone());
+        self.composer.update(cx, |s, cx| s.set_value(out.text.clone(), window, cx));
+        self.send_message(window, cx);
+        // Refused on the spot, the words are in the box, and stay.
+        if self.composer.read(cx).value().is_empty() {
+            self.composer.update(cx, |s, cx| s.set_value(draft, window, cx));
+            self.attachments = attached;
+        }
+        cx.notify();
     }
 
     fn set_detail(&mut self, key: String, path: PathBuf, mut session: Session) {
@@ -9190,7 +9394,19 @@ impl Workbench {
     /// A scroller that is not a pane, drawn now: `route_scroll` keeps a
     /// gesture that begins in it with it.
     pub(crate) fn inner_scroller(&self, handle: &ScrollHandle, kind: Inner) {
-        self.inner_live.borrow_mut().push((handle.clone(), kind));
+        if self.in_list.get() {
+            self.inner_list.borrow_mut().push((handle.clone(), kind));
+        } else {
+            self.inner_live.borrow_mut().push((handle.clone(), kind));
+        }
+    }
+
+    /// The conversation's list is being drawn afresh: its scrollers name
+    /// themselves again, and one kept that the last drawing of the list
+    /// did not use goes.
+    pub(crate) fn list_draw(&self) {
+        self.inner_list.borrow_mut().clear();
+        self.inner_kept.borrow_mut().retain(|_, kept| !kept.in_list || std::mem::take(&mut kept.used));
     }
 
     /// The handle of such a scroller that has no field of its own, kept
@@ -9199,16 +9415,17 @@ impl Workbench {
         let mut kept = self.inner_kept.borrow_mut();
         let new = !kept.contains_key(&key);
         let entry = kept.entry(key).or_default();
-        entry.1 = true;
-        self.inner_scroller(&entry.0, kind);
-        (entry.0.clone(), new)
+        entry.used = true;
+        entry.in_list = self.in_list.get();
+        self.inner_scroller(&entry.handle, kind);
+        (entry.handle.clone(), new)
     }
 
     /// The same for a scroller in the conversation that passes a stroke
     /// begun at its edge on to it (`Inner::Chained`), with the stroke.
     fn kept_body(&self, key: SharedString) -> (BodyScroll, bool) {
         let (handle, new) = self.kept_scroll(key.clone(), Inner::Chained);
-        let stroke = self.inner_kept.borrow().get(&key).map(|kept| kept.2.clone()).unwrap_or_default();
+        let stroke = self.inner_kept.borrow().get(&key).map(|kept| kept.stroke.clone()).unwrap_or_default();
         (BodyScroll { handle, stroke }, new)
     }
 
@@ -9334,7 +9551,10 @@ impl Workbench {
         // A scroller inside a pane, or on a sheet over the window, with
         // something to scroll: the gesture that begins in it is its own.
         // The last drawn is the one on top: a pill's list over a page.
-        let inner = self.inner_live.borrow().iter().rev().filter(|(h, _)| h.bounds().contains(&e.position)).find(|(h, _)| h.max_offset().y > px(0.)).cloned();
+        let inner = {
+            let (live, list) = (self.inner_live.borrow(), self.inner_list.borrow());
+            live.iter().rev().chain(list.iter().rev()).filter(|(h, _)| h.bounds().contains(&e.position)).find(|(h, _)| h.max_offset().y > px(0.)).cloned()
+        };
         let begins = match e.touch_phase {
             TouchPhase::Started => true,
             TouchPhase::Moved => fresh || self.scroll_owner.is_none(),
@@ -9648,8 +9868,12 @@ impl Workbench {
             "pty" => {
                 let sid = if new_id.is_empty() { self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default() } else { new_id.clone() };
                 // A terminal waiting on an answer would take the words
-                // for its dialog.
-                if self.hub.peer_for(&sid).is_some_and(|p| p.status == "waiting") {
+                // for its dialog. A panel opened over the prompt says
+                // `waiting` too (`/status`), and is no question: the
+                // message waits for it, and the tray says so with the
+                // way back (`HubEvent::Held`).
+                let covered = self.hub.terminal_for(&sid).is_some_and(|p| driver::cover_on_screen(&p.styled()).is_some());
+                if !covered && self.hub.peer_for(&sid).is_some_and(|p| p.status == "waiting") {
                     self.notice = Some(Notice::error(t("Claude is waiting for an answer first")));
                     cx.notify();
                     return;
@@ -12411,6 +12635,11 @@ impl Workbench {
     /// drawn (as the dialog's card does). Going, it is drawn from what
     /// the caller kept and takes no click. Nothing once it is gone.
     fn card_fold(&self, key: String, on: bool, card: AnyElement, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.fold_with(key, on, 8., card, cx)
+    }
+
+    /// `card_fold` with `gap` under what moves.
+    fn fold_with(&self, key: String, on: bool, gap: f32, card: AnyElement, cx: &mut Context<Self>) -> Option<AnyElement> {
         let moving = self.arrival(&key, on, cx);
         if !on && moving.is_none() {
             self.fold_h.borrow_mut().remove(&key);
@@ -12434,7 +12663,6 @@ impl Workbench {
             .absolute()
             .inset_0()
         });
-        let gap = 8.;
         let inner = div().relative().w_full().flex_shrink_0().child(card).children(measure).when(!on, |d| d.child(div().absolute().inset_0().occlude()));
         let gap_box = div().h(px(gap)).flex_shrink_0();
         let wrap = v_flex().w_full().max_w(CONTENT_W).justify_end().overflow_hidden().child(inner).child(gap_box);
@@ -12448,70 +12676,6 @@ impl Workbench {
                 .into_any_element(),
             None => wrap.into_any_element(),
         })
-    }
-
-    /// The line that says commands, or agents, run in the background,
-    /// coming and going in motion (`foot_line`).
-    fn shells_line(&self, r: &SessionRef, list: &[emaki_core::model::Shell], agents: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let key = format!("line-{}-{}", if agents { "agents" } else { "shells" }, r.session_id);
-        let on = !list.is_empty();
-        if on {
-            self.shells_kept.borrow_mut()[agents as usize] = list.to_vec();
-        }
-        let moving = self.presence(&key, on, cx);
-        if !on && moving.is_none() {
-            return None;
-        }
-        let kept = self.shells_kept.borrow()[agents as usize].clone();
-        let row = self.render_shells(r, if on { list } else { &kept }, agents, cx)?;
-        Some(foot_line(moving, &key, row))
-    }
-
-    /// The line over the composer for the pages the agent published as
-    /// claude.ai artifacts in this session: how many, the newest's title,
-    /// and with one, the way to it. A click opens the list of them at the
-    /// conversation's end (`render_artifacts_card`). It is there while the
-    /// session has any, coming in motion when the first is published.
-    fn artifacts_line(&self, r: &SessionRef, list: &[emaki_core::model::Artifact], cx: &mut Context<Self>) -> Option<AnyElement> {
-        let key = format!("line-artifacts-{}", r.session_id);
-        let moving = self.presence(&key, !list.is_empty(), cx);
-        let newest = list.iter().max_by(|a, b| a.last.cmp(&b.last))?;
-        let theme = cx.theme().clone();
-        let open = self.artifacts_open.as_deref() == Some(r.session_id.as_str());
-        let sid = r.session_id.clone();
-        let one = (list.len() == 1).then(|| newest.url.clone());
-        let list_n = list.len();
-        let row = h_flex()
-            .id("artifacts-row")
-            .w_full()
-            .h(px(26.))
-            .px(px(6.))
-            .gap(px(8.))
-            .items_center()
-            .rounded(px(7.))
-            .cursor_pointer()
-            .text_size(px(12.))
-            .text_color(theme.muted_foreground)
-            .hover(|s| s.bg(theme.muted.opacity(0.5)))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                swallow_click(window, cx);
-                this.artifacts_open = if this.artifacts_open.as_deref() == Some(sid.as_str()) { None } else { Some(sid.clone()) };
-                if this.artifacts_open.is_some() {
-                    this.cards_show();
-                }
-                cx.notify();
-            }))
-            .child(Icon::default().path("icons/app-window.svg").with_size(px(14.)).text_color(theme.muted_foreground).flex_shrink_0())
-            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(count(list_n, "{n} artifact", "{n} artifacts")))
-            .child(div().flex_1().min_w_0().truncate().child(newest.title.clone()))
-            .when_some(one, |d, url| {
-                d.child(crate::branches::small_pill("artifact-open", "icons/external-link.svg", t("Open"), Press::Quiet, false, &theme).h(px(22.)).flex_shrink_0().on_click(move |_, window, cx| {
-                    swallow_click(window, cx);
-                    cx.open_url(&url);
-                }))
-            })
-            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronUp }).with_size(px(13.)).flex_shrink_0());
-        Some(foot_line(moving, &key, v_flex().w_full().max_w(CONTENT_W).child(row)))
     }
 
     /// What that line opens: a card at the conversation's end with each
@@ -14828,28 +14992,17 @@ impl Workbench {
             // neither theme is only kept readable. The bracket carries
             // the turn's time, so ours is left out.
             let seen = self.working_seen.as_ref().filter(|(sid, _, _)| *sid == r.session_id).map(|(_, w, _)| w.clone());
-            let ink = |c: Option<u32>| match c {
-                Some(v) if (v >> 16) & 0xff == (v >> 8) & 0xff && (v >> 8) & 0xff == v & 0xff => theme.muted_foreground,
-                Some(v) => match driver::theme_pair(v) {
-                    Some(pair) => shade(pair, &theme),
-                    None => {
-                        let mut c: Hsla = rgb(v).into();
-                        c.l = if theme.mode.is_dark() { c.l.max(0.6) } else { c.l.min(0.36) };
-                        c
-                    }
-                },
-                None => theme.muted_foreground,
-            };
+            let ink = |c: Option<u32>| screen_ink(c, &theme);
             let word = |c: Option<u32>| c.map(|v| ink(Some(v))).unwrap_or_else(|| agent_color(r.agent, &theme));
             h_flex()
                 .w_full()
-                .max_w(CONTENT_W)
-                .px(px(6.))
+                .h(px(26.))
+                .px(px(8.))
                 .gap(px(8.))
                 .items_center()
                 .text_size(px(12.))
                 .text_color(theme.muted_foreground)
-                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), true))
+                .child(div().size(px(16.)).flex_shrink_0().flex().items_center().justify_center().child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), true)))
                 .map(|d| match seen {
                     Some(w) => d
                         .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(word(w.color)).child(w.verb))
@@ -14866,15 +15019,14 @@ impl Workbench {
                     h_flex()
                         .id("stop-turn")
                         .occlude()
-                        .h(px(22.))
-                        .px(px(9.))
+                        .h(px(24.))
+                        .px(px(10.))
                         .gap(px(6.))
                         .items_center()
                         .rounded_full()
                         .border_1()
                         .border_color(theme.border)
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
+                        .text_size(px(12.))
                         .text_color(theme.foreground)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.danger.opacity(0.10)).border_color(theme.danger.opacity(0.45)).text_color(theme.danger))
@@ -14888,7 +15040,7 @@ impl Workbench {
                         .child(t("Stop")),
                 )
         });
-        let status = status.map(|row| foot_line(status_moving, &status_key, row));
+        let status = status.map(|row| tray::Line { key: status_key.clone(), on: status_on, moving: status_moving, row: row.into_any_element(), free: false });
 
         // The agent waiting on you, said in the same place: what it waits
         // for, and where to give it when the terminal holds the dialog and
@@ -14897,14 +15049,14 @@ impl Workbench {
         // view while the list is there. A conversation with no round yet
         // has no end to stand them at, and they stand over the composer.
         let at_end = list.is_following_tail() || session.rounds.is_empty();
-        let asked = card_up || self.permissions.iter().any(|(sid, _)| *sid == r.session_id);
         // The terminal card holds the keyboard, and one the reader has
         // gone far above is not drawn: the keys would go nowhere.
         if !self.cards_drawn.replace(false) && !at_end && self.term_focus.is_focused(window) {
             let handle = self.composer.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
-        let waiting_now = (!working && !card_up).then(|| self.card_for(&r)).filter(|c| c.column == Column::NeedsYou).map(|card| {
+        // What a card here waits on, the decision line says.
+        let waiting_now = (!working && !card_up).then(|| self.card_for(&r)).filter(|c| c.column == Column::NeedsYou && c.pending.is_none()).map(|card| {
             let in_terminal = card.pending.is_none();
             let question = card.pending.as_ref().map(|p| p.is_question()).unwrap_or(card.chip_kind == "ask");
             let what = if question {
@@ -14927,68 +15079,63 @@ impl Workbench {
         let waiting_moving = self.presence(&waiting_key, waiting_on, cx);
         // Going, it says what it last said and takes no click.
         let waiting = self.waiting_kept.borrow().clone().filter(|_| waiting_on || waiting_moving.is_some()).map(|(said, where_, in_terminal, own, from)| {
-            let row = h_flex()
-                .w_full()
-                .px(px(6.))
-                .gap(px(8.))
-                .items_center()
-                .text_size(px(12.))
-                .text_color(theme.muted_foreground)
-                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said))
-                .child(div().flex_1().min_w_0().truncate().child(where_))
-                .when(in_terminal && waiting_on, |d| d.child(crate::branches::small_pill("waiting-terminal", "icons/terminal.svg", if own { t("Show the terminal") } else { t("Open the terminal") }, Press::Primary, false, &theme).on_click(cx.listener(|this, _, window, cx| {
-                    swallow_click(window, cx);
-                    this.go_to_terminal(cx)
-                }))))
-                // The card that takes the answer, when the reader has
-                // gone up the conversation and left it behind.
-                .when(asked && !at_end && waiting_on, |d| {
-                    d.child(choice_pill("waiting-show", "icons/arrow-down.svg", t("Show"), Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).on_click(cx.listener(|this, _, window, cx| {
-                        swallow_click(window, cx);
-                        this.cards_show();
-                        cx.notify();
-                    })))
+            let pills: Vec<AnyElement> = (in_terminal && waiting_on)
+                .then(|| {
+                    tray::tray_pill("waiting-terminal", "icons/terminal.svg", if own { t("Show the terminal") } else { t("Open the terminal") }, Press::Primary, false, &theme)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.go_to_terminal(cx)
+                        }))
+                        .into_any_element()
                 })
-                .child(div().child(elapsed_since(&from, self.now)));
-            foot_line(waiting_moving, &waiting_key, row)
+                .into_iter()
+                .collect();
+            let row = tray::tray_row("waiting-row", agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false), said, None, where_, Some(elapsed_since(&from, self.now)), pills, &theme);
+            tray::Line { key: waiting_key.clone(), on: waiting_on, moving: waiting_moving, row: row.into_any_element(), free: false }
         });
 
-        let (agents, commands): (Vec<_>, Vec<_>) = self.shells_running(&r, &session).into_iter().partition(|sh| sh.agent);
-        let artifacts = self.artifacts_line(&r, &session.artifacts, cx);
-        let agents = self.shells_line(&r, &agents, true, cx);
-        let shells = self.shells_line(&r, &commands, false, cx);
-        // Left behind by the reader, a card has a line of its own that
-        // goes to it.
-        let behind_on = card_up && !at_end;
+        let running = self.shells_running(&r, &session);
+        let of = |kind: TaskKind| -> Vec<_> { running.iter().filter(|sh| task_of(sh) == kind).cloned().collect() };
+        let mut lines: Vec<tray::Line> = self.note_lines(&r, cx);
+        lines.extend(self.artifacts_line(&r, &session.artifacts, cx));
+        lines.extend(self.shells_line(&r, &of(TaskKind::Agents), TaskKind::Agents, cx));
+        lines.extend(self.shells_line(&r, &of(TaskKind::Monitors), TaskKind::Monitors, cx));
+        lines.extend(self.shells_line(&r, &of(TaskKind::Commands), TaskKind::Commands, cx));
+        lines.extend(self.held_line(&r, cx));
+        lines.extend(status);
+        lines.extend(waiting);
+        // The decision line says what is asked; the terminal's own
+        // screen on its card has no choices to stand here, and when the
+        // reader has left it behind, a line of its own goes to it.
+        let dialog_up = self.dialog_seen.as_ref().is_some_and(|(sid, _)| *sid == r.session_id);
+        let asks = dialog_up || self.permissions.iter().any(|(sid, _)| *sid == r.session_id);
+        let behind_on = card_up && !at_end && !dialog_up;
         if behind_on {
-            *self.behind_said.borrow_mut() = if self.dialog_seen.as_ref().is_some_and(|(sid, _)| *sid == r.session_id) { tf("{agent} is waiting for your answer", &[("agent", &r.agent.speaker())]) } else { tf("{agent}'s terminal is waiting", &[("agent", &r.agent.speaker())]) };
+            *self.behind_said.borrow_mut() = tf("{agent}'s terminal is waiting", &[("agent", &r.agent.speaker())]);
         }
         let behind_moving = self.presence("behind-line", behind_on, cx);
-        let behind = (behind_on || behind_moving.is_some()).then(|| {
-            let row = h_flex()
-                .w_full()
-                .px(px(6.))
-                .gap(px(8.))
-                .items_center()
-                .text_size(px(12.))
-                .text_color(theme.muted_foreground)
-                .child(agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(self.behind_said.borrow().clone()))
-                .child(div().flex_1().min_w_0().truncate().child(t("below")))
-                .child(choice_pill("behind-show", "icons/arrow-down.svg", t("Show"), Press::Quiet, false, &theme).h(px(22.)).px(px(9.)).text_size(px(11.5)).when(behind_on, |d| {
+        if behind_on || behind_moving.is_some() {
+            let pills: Vec<AnyElement> = vec![tray::tray_pill("behind-show", "icons/arrow-down.svg", t("Show"), Press::Quiet, false, &theme)
+                .when(behind_on, |d| {
                     d.on_click(cx.listener(|this, _, window, cx| {
                         swallow_click(window, cx);
                         this.cards_show();
                         cx.notify();
                     }))
-                }));
-            foot_line(behind_moving, "behind-line", row)
-        });
-        let foot_cards = session.rounds.is_empty().then(|| {
-            self.tabs_glide_step(window);
-            self.render_cards(&r, cx)
-        });
+                })
+                .into_any_element()];
+            let row = tray::tray_row("behind-row", agent_glyph(r.agent, px(14.), agent_color(r.agent, &theme), false), self.behind_said.borrow().clone(), None, t("below"), None, pills, &theme);
+            lines.push(tray::Line { key: "behind-line".into(), on: behind_on, moving: behind_moving, row: row.into_any_element(), free: false });
+        }
+        self.tabs_glide_step(window);
+        let others = lines.iter().any(|l| l.on);
+        let deciding = self.decision_line(&r, asks && !at_end, others, cx);
+        let tray = {
+            let asked = deciding.is_some();
+            lines.extend(deciding);
+            self.render_tray(&r, lines, asked, cx)
+        };
+        let foot_cards = session.rounds.is_empty().then(|| self.render_cards(&r, cx));
         // At the conversation's left, under the top strip: the folder's
         // files (`panels.rs`).
         let (files_shown, _) = self.panels_shown();
@@ -15033,9 +15180,8 @@ impl Workbench {
             // moving with it.
             .when(self.find_open, |d| d.child(div().w_full().flex_shrink_0().overflow_hidden().child(self.render_find_bar(cx)).with_animation("find-bar-in", Animation::new(MENU_IN).with_easing(ease_out_quint()), |d, t| if t >= 1. { d } else { d.max_h(px(FIND_BAR_MOST * t)).opacity(t) })))
             .child(transcript)
-            // Each line and card brings its own air (`foot_line`,
-            // `render_terminal`), which moves with it as it comes and
-            // goes, so the column has no gap.
+            // The tray and each card bring their own air, which moves
+            // with them as they come and go, so the column has no gap.
             .child(
                 v_flex()
                     .relative()
@@ -15044,13 +15190,8 @@ impl Workbench {
                     .px(px(24.))
                     .pb(px(14.))
                     .child(crate::transcript::words_at(&self.words_at))
-                    .children(artifacts)
-                    .children(agents)
-                    .children(shells)
-                    .children(status)
-                    .children(waiting)
-                    .children(behind)
                     .children(foot_cards)
+                    .children(tray)
                     .child({
                         // Where the composer stands, for the seams beside
                         // it to end above.
@@ -15193,7 +15334,9 @@ impl Workbench {
         open.into_iter()
             .filter(|sh| {
                 let began = emaki_core::build::parse_ts(&sh.started).map(|t| t.timestamp() as f64).unwrap_or(0.);
-                peer.started_at <= 0. || began + 1. >= peer.started_at
+                // A monitor's time runs out with no row to say so.
+                let over = sh.timeout_ms > 0 && began + sh.timeout_ms as f64 / 1000. < self.now;
+                !over && (peer.started_at <= 0. || began + 1. >= peer.started_at)
             })
             .collect()
     }
@@ -15210,9 +15353,9 @@ impl Workbench {
                 // More was printed: the box stays at its foot if it was
                 // there.
                 if self.shell_tails.get(&sh.id) != Some(&tail) {
-                    if let Some((scroll, _, _)) = self.inner_kept.borrow().get(format!("shell-out-{}", sh.id).as_str()) {
-                        if scroll.offset().y <= -scroll.max_offset().y + px(2.) {
-                            scroll.scroll_to_bottom();
+                    if let Some(kept) = self.inner_kept.borrow().get(format!("shell-out-{}", sh.id).as_str()) {
+                        if kept.handle.offset().y <= -kept.handle.max_offset().y + px(2.) {
+                            kept.handle.scroll_to_bottom();
                         }
                     }
                 }
@@ -15241,69 +15384,81 @@ impl Workbench {
     /// running in the background, and, opened with a click, what each
     /// one is: a command with the last of what it has printed, an agent
     /// with what it was last seen doing.
-    fn render_shells(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], agents: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_shells(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], kind: TaskKind, cx: &mut Context<Self>) -> Option<AnyElement> {
         if shells.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
-        let open = if agents { &self.agents_open } else { &self.shells_open }.as_deref() == Some(r.session_id.as_str());
+        let open = self.task_open(kind).as_deref() == Some(r.session_id.as_str());
         let label = |sh: &emaki_core::model::Shell| if sh.description.is_empty() { sh.command.lines().next().unwrap_or("").to_string() } else { sh.description.clone() };
         let first = &shells[0];
         let shells_n = shells.len();
         let sid = r.session_id.clone();
-        let row = h_flex()
-            .id(if agents { "agents-row" } else { "shells-row" })
-            .w_full()
-            .h(px(26.))
-            .px(px(6.))
-            .gap(px(8.))
-            .items_center()
-            .rounded(px(7.))
+        let pulse = div().size(px(7.)).rounded_full().bg(theme.blue).opacity({
+            let t = crate::ambient::phase(Duration::from_millis(1400));
+            0.35 + 0.65 * (1. - (2. * t - 1.).abs())
+        });
+        let said = match kind {
+            TaskKind::Agents => count(shells_n, "{n} agent running in the background", "{n} agents running in the background"),
+            TaskKind::Commands => count(shells_n, "{n} command running in the background", "{n} commands running in the background"),
+            TaskKind::Monitors => count(shells_n, "{n} monitor running in the background", "{n} monitors running in the background"),
+        };
+        let one = shells.len() == 1;
+        let row = tray::tray_row(SharedString::from(format!("{}-row", kind.word())), pulse, said, Some(open), if one { label(first) } else { String::new() }, one.then(|| elapsed_since(&first.started, self.now)), Vec::new(), &theme)
             .cursor_pointer()
-            .text_size(px(12.))
-            .text_color(theme.muted_foreground)
             .hover(|s| s.bg(theme.muted.opacity(0.5)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 swallow_click(window, cx);
-                if agents {
-                    this.agents_open = if this.agents_open.as_deref() == Some(sid.as_str()) { None } else { Some(sid.clone()) };
-                    this.agent_steps.clear();
-                    this.read_agent_steps();
-                } else {
-                    this.shells_open = if this.shells_open.as_deref() == Some(sid.as_str()) { None } else { Some(sid.clone()) };
-                    this.shell_tails.clear();
-                    this.read_shell_tails();
-                }
+                this.task_toggle(kind, &sid);
                 // The card opens at the conversation's end.
-                if if agents { &this.agents_open } else { &this.shells_open }.is_some() {
+                if this.task_open(kind).is_some() {
                     this.cards_show();
                 }
                 cx.notify();
-            }))
-            .child(div().size(px(7.)).rounded_full().bg(theme.blue).flex_shrink_0().opacity({
-                let t = crate::ambient::phase(Duration::from_millis(1400));
-                0.35 + 0.65 * (1. - (2. * t - 1.).abs())
-            }))
-            .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(if agents { count(shells_n, "{n} agent running in the background", "{n} agents running in the background") } else { count(shells_n, "{n} command running in the background", "{n} commands running in the background") }))
-            .child(div().flex_1().min_w_0().truncate().child(if shells.len() == 1 { label(first) } else { String::new() }))
-            .when(shells.len() == 1, |d| d.child(div().flex_shrink_0().child(elapsed_since(&first.started, self.now))))
-            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronUp }).with_size(px(13.)).flex_shrink_0());
-        Some(v_flex().w_full().max_w(CONTENT_W).child(row).into_any_element())
+            }));
+        Some(row.into_any_element())
+    }
+
+    /// The session whose list of that kind of thing is open.
+    fn task_open(&self, kind: TaskKind) -> &Option<String> {
+        match kind {
+            TaskKind::Commands => &self.shells_open,
+            TaskKind::Agents => &self.agents_open,
+            TaskKind::Monitors => &self.monitors_open,
+        }
+    }
+
+    fn task_toggle(&mut self, kind: TaskKind, sid: &str) {
+        let flip = |open: &mut Option<String>| *open = if open.as_deref() == Some(sid) { None } else { Some(sid.to_string()) };
+        match kind {
+            TaskKind::Agents => {
+                flip(&mut self.agents_open);
+                self.agent_steps.clear();
+                self.read_agent_steps();
+            }
+            TaskKind::Commands => {
+                flip(&mut self.shells_open);
+                self.shell_tails.clear();
+                self.read_shell_tails();
+            }
+            TaskKind::Monitors => flip(&mut self.monitors_open),
+        }
     }
 
     /// What that row opens: a card at the conversation's end with each
     /// command and the last of what it printed, or each agent and what
     /// it was last seen doing.
-    fn render_shells_card(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], agents: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let open = if agents { &self.agents_open } else { &self.shells_open }.as_deref() == Some(r.session_id.as_str());
+    fn render_shells_card(&self, r: &SessionRef, shells: &[emaki_core::model::Shell], kind: TaskKind, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let agents = kind == TaskKind::Agents;
+        let open = self.task_open(kind).as_deref() == Some(r.session_id.as_str());
         let on = open && !shells.is_empty();
-        let key = format!("fold-{}-{}", if agents { "agents" } else { "shells" }, r.session_id);
+        let key = format!("fold-{}-{}", kind.word(), r.session_id);
         if !on && !self.lingering(&key) {
             return None;
         }
         // Going because the last command ended, it is drawn from the
         // ones last running.
-        let kept = self.shells_kept.borrow()[agents as usize].clone();
+        let kept = self.shells_kept.borrow()[kind as usize].clone();
         let shells = if shells.is_empty() { &kept[..] } else { shells };
         let theme = cx.theme().clone();
         let label = |sh: &emaki_core::model::Shell| if sh.description.is_empty() { sh.command.lines().next().unwrap_or("").to_string() } else { sh.description.clone() };
@@ -15341,7 +15496,7 @@ impl Workbench {
                     );
                     continue;
                 }
-                let tail = self.shell_tails.get(&sh.id).cloned().unwrap_or_default();
+                let tail = if kind == TaskKind::Monitors { sh.events.join("\n") } else { self.shell_tails.get(&sh.id).cloned().unwrap_or_default() };
                 list = list.child(
                     v_flex()
                         .w_full()
@@ -15356,10 +15511,10 @@ impl Workbench {
                                 .child(div().flex_shrink_0().text_size(px(11.5)).text_color(theme.muted_foreground).child(elapsed_since(&sh.started, self.now))),
                         )
                         .child(self.shell_box(format!("shell-cmd-{}", sh.id).into(), t("Command"), &sh.command, "", false, cx))
-                        .child(self.shell_box(format!("shell-out-{}", sh.id).into(), t("Output"), tail.trim_end(), t("nothing printed yet"), true, cx)),
+                        .child(self.shell_box(format!("shell-out-{}", sh.id).into(), if kind == TaskKind::Monitors { t("Events") } else { t("Output") }, tail.trim_end(), if kind == TaskKind::Monitors { t("nothing reported yet") } else { t("nothing printed yet") }, true, cx)),
                 );
             }
-            let list = self.card_scroll(if agents { "card-agents" } else { "card-shells" }, None, false, list);
+            let list = self.card_scroll(format!("card-{}", kind.word()), None, false, list);
             // The card's own words are the window's face, not the chat's.
             let card = v_flex().w_full().p(px(12.)).rounded(px(10.)).border_1().border_color(theme.border).bg(theme.muted.opacity(0.25)).font_family(theme.font_family.clone()).child(list);
             self.card_fold(key, on, card.into_any_element(), cx)
@@ -15377,7 +15532,8 @@ impl Workbench {
     /// the column has no gap (`render_terminal`).
     fn render_cards(&self, r: &SessionRef, cx: &mut Context<Self>) -> AnyElement {
         self.cards_drawn.set(true);
-        let (agents, commands): (Vec<_>, Vec<_>) = self.detail.as_ref().map(|d| self.shells_running(r, &d.session)).unwrap_or_default().into_iter().partition(|sh| sh.agent);
+        let running = self.detail.as_ref().map(|d| self.shells_running(r, &d.session)).unwrap_or_default();
+        let of = |kind: TaskKind| -> Vec<_> { running.iter().filter(|sh| task_of(sh) == kind).cloned().collect() };
         // The terminal's own screen takes the place of the dialog's
         // card: it is the same dialog, as it is.
         let terminal = self.render_terminal(r, cx);
@@ -15386,8 +15542,9 @@ impl Workbench {
             .w_full()
             .items_center()
             .children(self.render_artifacts_card(r, cx))
-            .children(self.render_shells_card(r, &agents, true, cx))
-            .children(self.render_shells_card(r, &commands, false, cx))
+            .children(self.render_shells_card(r, &of(TaskKind::Agents), TaskKind::Agents, cx))
+            .children(self.render_shells_card(r, &of(TaskKind::Monitors), TaskKind::Monitors, cx))
+            .children(self.render_shells_card(r, &of(TaskKind::Commands), TaskKind::Commands, cx))
             .children(terminal)
             .children(dialog)
             .child(self.render_permissions(cx))
@@ -15398,15 +15555,15 @@ impl Workbench {
     /// one the cards (`render_cards`): part of the list's last item, so
     /// the list is told of no item more and nothing is spliced.
     pub(crate) fn render_list_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.in_list.set(true);
         let round = self.render_round(ix, window, cx);
         let last = self.detail.as_ref().is_some_and(|d| ix + 1 == d.session.rounds.len());
-        if last {
-            self.tabs_glide_step(window);
-        }
-        match self.selected_ref().filter(|_| last).cloned() {
+        let item = match self.selected_ref().filter(|_| last).cloned() {
             Some(r) => v_flex().w_full().child(round).child(div().w_full().px(px(24.)).child(self.render_cards(&r, cx))).into_any_element(),
             None => round,
-        }
+        };
+        self.in_list.set(false);
+        item
     }
 
     /// Goes to the conversation's end, where the cards are.
@@ -15449,7 +15606,7 @@ impl Workbench {
     /// arrow's side, or to the tab that now shows.
     fn tabs_glide_step(&self, window: &mut Window) {
         let Some((to, last)) = self.tabs_to.take() else { return };
-        let Some(scroll) = self.inner_kept.borrow().get("dialog-tabs").map(|kept| kept.0.clone()) else { return };
+        let Some(scroll) = self.inner_kept.borrow().get("dialog-tabs").map(|kept| kept.handle.clone()) else { return };
         let to = to.clamp(-f32::from(scroll.max_offset().x), 0.);
         let at = scroll.offset();
         let left = to - f32::from(at.x);
@@ -15739,6 +15896,126 @@ impl Workbench {
     /// the choice's digit to the terminal, whose dialog is the one that
     /// moves on; the card is its screen read again. Words typed in the
     /// composer answer a question that offers "Type something".
+    /// A dialog's questions and its review, as the terminal's tabs: the
+    /// one showing ringed, an answered one ticked, and a click goes
+    /// there. It is where to go in what is asked, so it stands in the
+    /// decision line. A strip that scrolls sideways when it is narrower
+    /// than they are, brought to the one showing when that changes.
+    pub(crate) fn dialog_tabs(&self, d: &emaki_core::driver::Dialog, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        // The tabs in a strip that scrolls sideways when the card is
+        // narrower than they are, brought to the one showing when that
+        // changes.
+        let (tabs_scroll, _) = self.kept_scroll("dialog-tabs".into(), Inner::Held);
+        {
+            let mut shown = self.dialog_shown.borrow_mut();
+            if shown.tab != d.current {
+                shown.tab = d.current;
+                // In motion, from where the strip is, once it has been
+                // drawn and knows where its tabs are.
+                if let Some(ix) = d.current {
+                    match tabs_scroll.bounds_for_item(ix) {
+                        Some(tab) => {
+                            let (view, at) = (tabs_scroll.bounds(), f32::from(tabs_scroll.offset().x));
+                            let over = f32::from(tab.right() - view.right()).max(0.);
+                            let under = f32::from(view.left() - tab.left()).max(0.);
+                            if over > 0. || under > 0. {
+                                self.tabs_to.set(Some((if under > 0. { at + under } else { at - over }, Instant::now())));
+                            }
+                        }
+                        None => tabs_scroll.scroll_to_item(ix),
+                    }
+                }
+            }
+        }
+        // An arrow at each end of the strip while it has more tabs than
+        // show: lit where more lies that way, and a click goes there. It
+        // keeps its room at an end with no more, so nothing moves.
+        let tabs_arrow = |right: bool, cx: &mut Context<Self>| {
+            let (at, most) = (tabs_scroll.offset().x, tabs_scroll.max_offset().x);
+            let more = most > px(0.) && if right { at > -most + px(1.) } else { at < px(-1.) };
+            // It fades in and out as the strip comes to an end or
+            // leaves it.
+            let moving = self.presence(if right { "dialog-tabs-right" } else { "dialog-tabs-left" }, more, cx);
+            let scroll = tabs_scroll.clone();
+            (most > px(0.)).then(|| {
+                let arrow = div()
+                    .id(if right { "dialog-tabs-right" } else { "dialog-tabs-left" })
+                    .flex_shrink_0()
+                    .size(px(20.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.muted_foreground)
+                    .when(more, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(theme.muted).text_color(theme.foreground)).on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            // From where it is going, when it is on its
+                            // way: a second click goes a second step.
+                            let from = this.tabs_to.get().map(|(to, _)| to).unwrap_or(f32::from(scroll.offset().x));
+                            let by = f32::from(scroll.bounds().size.width) * 0.6 * if right { -1. } else { 1. };
+                            this.tabs_to.set(Some((from + by, Instant::now())));
+                            cx.notify();
+                        }))
+                    })
+                    .child(Icon::new(if right { IconName::ChevronRight } else { IconName::ChevronLeft }).with_size(px(13.)));
+                // Where more lies past an end the tabs fade into the
+                // card's ground there, as a block of code does: cut off
+                // clean, a tab read as the last.
+                let ground = theme.popover;
+                let (from, to) = if right { (ground.opacity(0.), ground) } else { (ground, ground.opacity(0.)) };
+                let fade = div().absolute().top_0().bottom_0().w(px(TABS_FADE)).map(|d| if right { d.right_0() } else { d.left_0() }).bg(linear_gradient(90., linear_color_stop(from, 0.), linear_color_stop(to, 1.)));
+                match moving {
+                    Some((coming, n)) => (
+                        arrow
+                            .with_animation(ElementId::Name(format!("dialog-tabs-arrow-{right}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t }))
+                            .into_any_element(),
+                        fade.with_animation(ElementId::Name(format!("dialog-tabs-fade-{right}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t }))
+                            .into_any_element(),
+                    ),
+                    None => (arrow.opacity(if more { 1. } else { 0. }).into_any_element(), fade.opacity(if more { 1. } else { 0. }).into_any_element()),
+                }
+            })
+        };
+        let (tabs_left, fade_left) = tabs_arrow(false, cx).unzip();
+        let (tabs_right, fade_right) = tabs_arrow(true, cx).unzip();
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(4.))
+            .items_center()
+            .children(tabs_left)
+            .child(h_flex().relative().flex_1().min_w_0().child(h_flex().id("dialog-tabs").flex_1().min_w_0().gap(px(8.)).items_center().overflow_x_scroll().restrict_scroll_to_axis().track_scroll(&tabs_scroll).children(d.tabs.iter().enumerate().map(|(ix, (name, done))| {
+                let here = d.current == Some(ix);
+                let reachable = d.current.is_some() && !here && !busy;
+                h_flex()
+                    .id(SharedString::from(format!("dialog-tab-{ix}")))
+                    .flex_shrink_0()
+                    .gap(px(4.))
+                    .items_center()
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(999.))
+                    .border_1()
+                    .border_color(if here { theme.primary } else { theme.transparent })
+                    .bg(if *done { theme.primary.opacity(0.12) } else { theme.muted })
+                    .text_size(px(11.))
+                    .text_color(if *done || here { theme.primary } else { theme.muted_foreground })
+                    .when(reachable, |d| d.cursor_pointer().hover(|s| s.bg(theme.list_hover)))
+                    .when(reachable, |d| {
+                        d.on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.dialog_go(ix, cx);
+                        }))
+                    })
+                    .when(*done, |d| d.child(Icon::new(IconName::Check).with_size(px(10.))))
+                    .child(if name == "Submit" { t("Review").to_string() } else { name.clone() })
+            }))).children(fade_left).children(fade_right))
+            .children(tabs_right)
+            .into_any_element()
+    }
+
     fn render_dialog(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
         // The card comes and goes over a moment, as the terminal card
         // does: once there is no dialog it is drawn that long again from
@@ -15805,8 +16082,10 @@ impl Workbench {
             title = d.body[at..].join(" ");
             before = if plan.is_some() { Vec::new() } else { d.body[..at].to_vec() };
         }
-        let typed = !d.multi && d.options.iter().any(|o| o.label.starts_with("Type something"));
         let busy = self.dialog_sending || leaving;
+        // Where the choices are buttons of the decision line, the card
+        // says what they are about and has none of its own.
+        let chosen_below = approval || review || plan_at.is_some();
         let head = if plan_at.is_some() { t("plan") } else if approval { t("approval") } else if review { t("review") } else { t("question") };
         let says = if plan_at.is_some() { tf("{agent} has a plan", &[("agent", &r.agent.speaker())]) } else if approval { tf("{agent} asks to go ahead", &[("agent", &r.agent.speaker())]) } else { tf("{agent} asks", &[("agent", &r.agent.speaker())]) };
         // The plan scrolls in a box of its own, so the choices under it
@@ -15897,8 +16176,8 @@ impl Workbench {
                     )
                 })
                 .children(plan_box)
-                .child(div().text_size(px(14.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).child(title))
-                .when(!review, |el| el.child(v_flex().gap(px(4.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).children(rows)))
+                .when(!approval, |el| el.child(div().text_size(px(14.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).child(title)))
+                .when(!chosen_below, |el| el.child(v_flex().gap(px(4.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).children(rows)))
                 // The picture of the choice the pointer is on, as the
                 // terminal draws it: text in columns, so in the mono
                 // face and never wrapped.
@@ -15910,83 +16189,6 @@ impl Workbench {
                     )
                 });
         let body = self.card_scroll("card-dialog", None, false, body);
-        // The tabs in a strip that scrolls sideways when the card is
-        // narrower than they are, brought to the one showing when that
-        // changes.
-        let (tabs_scroll, _) = self.kept_scroll("dialog-tabs".into(), Inner::Held);
-        {
-            let mut shown = self.dialog_shown.borrow_mut();
-            if shown.tab != d.current {
-                shown.tab = d.current;
-                // In motion, from where the strip is, once it has been
-                // drawn and knows where its tabs are.
-                if let Some(ix) = d.current {
-                    match tabs_scroll.bounds_for_item(ix + 1) {
-                        Some(tab) => {
-                            let (view, at) = (tabs_scroll.bounds(), f32::from(tabs_scroll.offset().x));
-                            let over = f32::from(tab.right() - view.right()).max(0.);
-                            let under = f32::from(view.left() - tab.left()).max(0.);
-                            if over > 0. || under > 0. {
-                                self.tabs_to.set(Some((if under > 0. { at + under } else { at - over }, Instant::now())));
-                            }
-                        }
-                        None => tabs_scroll.scroll_to_item(ix + 1),
-                    }
-                }
-            }
-        }
-        // An arrow at each end of the strip while it has more tabs than
-        // show: lit where more lies that way, and a click goes there. It
-        // keeps its room at an end with no more, so nothing moves.
-        let tabs_arrow = |right: bool, cx: &mut Context<Self>| {
-            let (at, most) = (tabs_scroll.offset().x, tabs_scroll.max_offset().x);
-            let more = most > px(0.) && if right { at > -most + px(1.) } else { at < px(-1.) };
-            // It fades in and out as the strip comes to an end or
-            // leaves it.
-            let moving = self.presence(if right { "dialog-tabs-right" } else { "dialog-tabs-left" }, more, cx);
-            let scroll = tabs_scroll.clone();
-            (most > px(0.)).then(|| {
-                let arrow = div()
-                    .id(if right { "dialog-tabs-right" } else { "dialog-tabs-left" })
-                    .flex_shrink_0()
-                    .size(px(20.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(theme.muted_foreground)
-                    .when(more, |d| {
-                        d.cursor_pointer().hover(|s| s.bg(theme.muted).text_color(theme.foreground)).on_click(cx.listener(move |this, _, window, cx| {
-                            swallow_click(window, cx);
-                            // From where it is going, when it is on its
-                            // way: a second click goes a second step.
-                            let from = this.tabs_to.get().map(|(to, _)| to).unwrap_or(f32::from(scroll.offset().x));
-                            let by = f32::from(scroll.bounds().size.width) * 0.6 * if right { -1. } else { 1. };
-                            this.tabs_to.set(Some((from + by, Instant::now())));
-                            cx.notify();
-                        }))
-                    })
-                    .child(Icon::new(if right { IconName::ChevronRight } else { IconName::ChevronLeft }).with_size(px(13.)));
-                // Where more lies past an end the tabs fade into the
-                // card's ground there, as a block of code does: cut off
-                // clean, a tab read as the last.
-                let ground = theme.popover;
-                let (from, to) = if right { (ground.opacity(0.), ground) } else { (ground, ground.opacity(0.)) };
-                let fade = div().absolute().top_0().bottom_0().w(px(TABS_FADE)).map(|d| if right { d.right_0() } else { d.left_0() }).bg(linear_gradient(90., linear_color_stop(from, 0.), linear_color_stop(to, 1.)));
-                match moving {
-                    Some((coming, n)) => (
-                        arrow
-                            .with_animation(ElementId::Name(format!("dialog-tabs-arrow-{right}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t }))
-                            .into_any_element(),
-                        fade.with_animation(ElementId::Name(format!("dialog-tabs-fade-{right}-{n}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { t } else { 1. - t }))
-                            .into_any_element(),
-                    ),
-                    None => (arrow.opacity(if more { 1. } else { 0. }).into_any_element(), fade.opacity(if more { 1. } else { 0. }).into_any_element()),
-                }
-            })
-        };
-        let (tabs_left, fade_left) = tabs_arrow(false, cx).unzip();
-        let (tabs_right, fade_right) = tabs_arrow(true, cx).unzip();
         // How tall the card is, measured as it is drawn, for the height
         // that opens and closes it.
         let tall = self.dialog_h.clone();
@@ -16027,77 +16229,9 @@ impl Workbench {
                         .gap(px(8.))
                         .items_center()
                         .child(div().flex_shrink_0().child(badge_str(head.into(), theme.primary.opacity(0.14), theme.primary)))
-                        .child(div().flex_shrink_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(says))
-                        // The questions and the review, as the terminal's
-                        // tabs: the one showing ringed, an answered one
-                        // ticked, and a click goes there.
-                        .children(tabs_left)
-                        .child(h_flex().relative().flex_1().min_w_0().child(h_flex().id("dialog-tabs").flex_1().min_w_0().gap(px(8.)).items_center().overflow_x_scroll().restrict_scroll_to_axis().track_scroll(&tabs_scroll).child(div().flex_1()).children(d.tabs.iter().enumerate().map(|(ix, (name, done))| {
-                            let here = d.current == Some(ix);
-                            let reachable = d.current.is_some() && !here && !busy;
-                            h_flex()
-                                .id(SharedString::from(format!("dialog-tab-{ix}")))
-                                .flex_shrink_0()
-                                .gap(px(4.))
-                                .items_center()
-                                .px(px(8.))
-                                .py(px(2.))
-                                .rounded(px(999.))
-                                .border_1()
-                                .border_color(if here { theme.primary } else { theme.transparent })
-                                .bg(if *done { theme.primary.opacity(0.12) } else { theme.muted })
-                                .text_size(px(11.))
-                                .text_color(if *done || here { theme.primary } else { theme.muted_foreground })
-                                .when(reachable, |d| d.cursor_pointer().hover(|s| s.bg(theme.list_hover)))
-                                .when(reachable, |d| {
-                                    d.on_click(cx.listener(move |this, _, window, cx| {
-                                        swallow_click(window, cx);
-                                        this.dialog_go(ix, cx);
-                                    }))
-                                })
-                                .when(*done, |d| d.child(Icon::new(IconName::Check).with_size(px(10.))))
-                                .child(if name == "Submit" { t("Review").to_string() } else { name.clone() })
-                        }))).children(fade_left).children(fade_right))
-                        .children(tabs_right),
+                        .child(div().flex_shrink_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(says)),
                 )
-                .child(body)
-                .when(review, |el| {
-                    // The review's two choices are the card's buttons.
-                    el.child(h_flex().gap(px(8.)).items_center().children(d.options.iter().enumerate().map(|(i, o)| {
-                        let n = o.n;
-                        // The first is the answer the review is for.
-                        let (icon, kind) = if i == 0 { ("icons/check.svg", Press::Primary) } else { ("icons/close.svg", Press::Quiet) };
-                        choice_pill(SharedString::from(format!("dialog-review-{n}")), icon, o.label.clone(), kind, busy, &theme).when(!busy, |b| {
-                            b.on_click(cx.listener(move |this, _, window, cx| {
-                                swallow_click(window, cx);
-                                this.dialog_send(vec![DialogStep { keys: n.to_string(), until: None }], cx)
-                            }))
-                        })
-                    })))
-                })
-                .when(!review, |el| el.child(
-                    h_flex()
-                        .gap(px(10.))
-                        .items_center()
-                        .when(d.multi, |el| {
-                            el.child(choice_pill("dialog-next", "icons/arrow-right.svg", t("Next"), Press::Primary, busy, &theme).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
-                                swallow_click(window, cx);
-                                this.dialog_send(vec![DialogStep { keys: "\t".into(), until: None }], cx)
-                            }))))
-                        })
-                        .when(previews, |el| {
-                            el.child(choice_pill("dialog-choose", "icons/check.svg", t("Choose"), Press::Primary, busy, &theme).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
-                                swallow_click(window, cx);
-                                this.dialog_send(vec![DialogStep { keys: "\r".into(), until: None }], cx)
-                            }))))
-                        })
-                        .child(choice_pill("dialog-cancel", "icons/close.svg", t("Cancel"), Press::Quiet, busy, &theme).child(key_text("Esc")).when(!busy, |b| b.on_click(cx.listener(|this, _, window, cx| {
-                            swallow_click(window, cx);
-                            this.dialog_send(vec![DialogStep { keys: "\x1b".into(), until: None }], cx)
-                        }))))
-                        .child(div().flex_1())
-                        .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(if typed { t("or type an answer below") } else { "" })),
-                ));
+                .child(body);
         // Held by its foot, it opens up from the conversation's end and
         // closes back down to it; the gap under it is part of what moves (see
         // `render_terminal`). Until its height is known it takes none.
@@ -16130,9 +16264,9 @@ impl Workbench {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         let cwd = self.selected_ref().map(|r| r.cwd.clone()).unwrap_or_default();
         let live: Vec<PermissionRequest> = self.permissions.iter().filter(|(s, _)| *s == sid).map(|(_, p)| p.clone()).collect();
-        let several = live.len() > 1;
-        // The oldest card is the one ↩ answers, and says so (`first`).
-        let draw = |p: PermissionRequest, first: bool, cx: &mut Context<Self>| -> AnyElement {
+        // The oldest is the one ↩ answers: the decision line's buttons
+        // are its.
+        let draw = |p: PermissionRequest, cx: &mut Context<Self>| -> AnyElement {
             if p.is_question() {
                 return self.render_question(&p, cx);
             }
@@ -16148,15 +16282,13 @@ impl Workbench {
             let who = self.selected_ref().map(|r| r.agent.speaker()).unwrap_or("Claude");
             // A plan Codex has written and waits to be told to carry out.
             if p.tool_name == "ExitPlanMode" && !said("plan").is_empty() {
-                return self.render_plan_ask(&p, first, cx);
+                return self.render_plan_ask(cx);
             }
             let heading = match p.tool_name.as_str() {
                 "apply_patch" => tf("{who} wants to change files", &[("who", &who)]),
                 "request_permissions" => tf("{who} asks for more access", &[("who", &who)]),
                 tool => tf("{who} wants to run {tool}", &[("who", &who), ("tool", &tool)]),
             };
-            let id_allow = p.request_id.clone();
-            let id_deny = p.request_id.clone();
             // What it does, in words: the model's answer when one has
             // landed, else the free line a simple call carries in its
             // arguments; "Explaining…" while a model is on it. With
@@ -16199,23 +16331,6 @@ impl Workbench {
                             .when(!explanation.is_empty() || explaining, |d| d.child(crate::transcript::explain_card(format!("pex-{}", p.request_id), explanation.clone(), explaining, px(13.5), cx))),
                     ))
                 })
-                .child(
-                    h_flex()
-                        .gap(px(8.))
-                        .items_center()
-                        .child(choice_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", t("Allow"), Press::Primary, false, &theme).when(first, |d| d.child(key_text("↩"))).on_click(cx.listener(move |this, _, window, cx| {
-                            swallow_click(window, cx);
-                            this.answer_permission(id_allow.clone(), true, cx)
-                        })))
-                        .child(choice_pill(SharedString::from(format!("deny-{}", p.request_id)), "icons/close.svg", t("Deny"), Press::Quiet, false, &theme).when(first, |d| d.child(key_text("⇧↩"))).on_click(cx.listener(move |this, _, window, cx| {
-                            swallow_click(window, cx);
-                            this.answer_permission(id_deny.clone(), false, cx)
-                        })))
-                        .when(first && several, |d| d.child(div().flex_1()).child(choice_pill("allow-all", "icons/circle-check.svg", t("Allow all"), Press::Quiet, false, &theme).on_click(cx.listener(|this, _, window, cx| {
-                            swallow_click(window, cx);
-                            this.allow_all_pending(cx)
-                        })))),
-                )
                 .into_any_element()
         };
         // A card answered is drawn a moment more as it was, closing
@@ -16229,12 +16344,11 @@ impl Workbench {
             kept.retain(|(s, _)| *s != sid);
             kept.extend(drawn.iter().map(|p| (sid.clone(), p.clone())));
         }
-        let oldest = live.first().map(|p| p.request_id.clone());
         let cards: Vec<AnyElement> = drawn
             .into_iter()
             .filter_map(|p| {
-                let (key, on, first) = (fold(&p), is_live(&p), oldest.as_deref() == Some(p.request_id.as_str()));
-                let card = draw(p, first, cx);
+                let (key, on) = (fold(&p), is_live(&p));
+                let card = draw(p, cx);
                 self.card_fold(key, on, card, cx)
             })
             .collect();
@@ -16246,9 +16360,8 @@ impl Workbench {
     /// card. The plan itself is in the conversation above it. Yes leaves
     /// the plan mode and tells Codex to carry it out; no stays, and the
     /// next message says what to change.
-    fn render_plan_ask(&self, p: &PermissionRequest, first: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_plan_ask(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let (yes, no) = (p.request_id.clone(), p.request_id.clone());
         v_flex()
             .p(px(14.))
             .gap(px(10.))
@@ -16265,19 +16378,6 @@ impl Workbench {
                     .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(t("Implement this plan?")))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(t("Yes leaves Plan mode and starts the work"))),
             )
-            .child(
-                h_flex()
-                    .gap(px(8.))
-                    .items_center()
-                    .child(choice_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", t("Yes, implement"), Press::Primary, false, &theme).when(first, |d| d.child(key_text("↩"))).on_click(cx.listener(move |this, _, window, cx| {
-                        swallow_click(window, cx);
-                        this.answer_permission(yes.clone(), true, cx)
-                    })))
-                    .child(choice_pill(SharedString::from(format!("deny-{}", p.request_id)), "icons/close.svg", t("No, keep planning"), Press::Quiet, false, &theme).when(first, |d| d.child(key_text("⇧↩"))).on_click(cx.listener(move |this, _, window, cx| {
-                        swallow_click(window, cx);
-                        this.answer_permission(no.clone(), false, cx)
-                    }))),
-            )
             .into_any_element()
     }
 
@@ -16290,8 +16390,6 @@ impl Workbench {
         let theme = cx.theme().clone();
         let qs = questions_of(&p.input);
         let picks = self.picks.get(&p.request_id).cloned().unwrap_or_default();
-        let by_button = qs.len() > 1 || qs.iter().any(|q| q.multi);
-        let ready = qs.iter().all(|q| picks.get(&q.question).map(|l| !l.is_empty()).unwrap_or(false));
         let rid = p.request_id.clone();
         // The agent's words in the conversation's face, as on the
         // terminal's dialog card.
@@ -16366,21 +16464,6 @@ impl Workbench {
                             )
                     })))
             }))))
-            .child(
-                h_flex()
-                    .gap(px(10.))
-                    .items_center()
-                    .when(by_button, |d| {
-                        let rid = p.request_id.clone();
-                        d.child(choice_pill(SharedString::from(format!("answer-{}", p.request_id)), "icons/check.svg", t("Answer"), Press::Primary, !ready, &theme).when(ready, |b| {
-                            b.on_click(cx.listener(move |this, _, window, cx| {
-                                swallow_click(window, cx);
-                                this.submit_question(rid.clone(), cx)
-                            }))
-                        }))
-                    })
-                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(t("or type an answer below"))),
-            )
             .into_any_element()
     }
 
@@ -18239,7 +18322,10 @@ pub(crate) fn choice_pill(id: impl Into<ElementId>, icon: &'static str, label: i
         .border_color(edge)
         .when_some(ground, |d, bg| d.bg(bg))
         .when(!icon.is_empty(), |d| d.child(Icon::default().path(icon).with_size(px(14.)).text_color(ink)))
-        .child(label.into())
+        .map(|d| {
+            let label: SharedString = label.into();
+            if label.is_empty() { d } else { d.child(label) }
+        })
         .map(|d| if off { d.opacity(0.4) } else { d.cursor_pointer().hover(move |s| s.bg(hover)) })
 }
 
@@ -18960,7 +19046,7 @@ impl Render for Workbench {
         // The scrollers inside panes name themselves again as they are
         // drawn; a kept handle the last draw did not use goes.
         self.inner_live.borrow_mut().clear();
-        self.inner_kept.borrow_mut().retain(|_, kept| std::mem::take(&mut kept.1));
+        self.inner_kept.borrow_mut().retain(|_, kept| kept.in_list || std::mem::take(&mut kept.used));
         self.sync_draft(window, cx);
         self.writing_sync(cx);
         self.file_writing_sync(cx);
@@ -19275,6 +19361,10 @@ impl Render for Workbench {
         self.view_w = window.viewport_size().width - FRAME;
         self.view_h = window.viewport_size().height;
         self.pane_w = self.view_w - self.content_left();
+        if std::mem::take(&mut self.changes_fit_wanted) {
+            self.changes_w = self.changes_fit(window, cx);
+            self.save_ui(true);
+        }
         if std::mem::take(&mut self.panel_fit_wanted) {
             self.panel_w = self.panel_fit(window, cx);
         }
@@ -19335,6 +19425,8 @@ impl Render for Workbench {
                                             w.panel_drag_to(e, cx);
                                         } else if w.file_drag {
                                             w.file_drag_to(e, cx);
+                                        } else if w.changes_drag {
+                                            w.changes_drag_to(e, cx);
                                         } else if let Some(agent) = w.term_selecting() {
                                             // A terminal's selection follows the pointer
                                             // past the terminal, scrolling it.
@@ -19354,6 +19446,7 @@ impl Render for Workbench {
                                 let _ = lifter.update(cx, |w, _| {
                                     w.side_drag_end();
                                     w.panel_drag_end();
+                                    w.changes_drag_end();
                                     if std::mem::take(&mut w.file_drag) {
                                         w.save_ui(true);
                                     }

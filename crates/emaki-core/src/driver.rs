@@ -759,6 +759,15 @@ fn is_rule(line: &str) -> bool {
 /// there are words for the prompt, not answers to a dialog or a screen
 /// still being drawn.
 pub fn prompt_on_screen(text: &str) -> Option<bool> {
+    prompt_words(text).map(|typed| typed.is_empty())
+}
+
+/// What is typed in Claude Code's prompt, when the prompt is on the
+/// screen. A long paste is folded by Claude Code a moment after it
+/// arrives ("[Pasted text #5 +15 lines]"), so these words change once
+/// more after they first do, and a message is sent only once they have
+/// stopped (`Hub::type_message_now`).
+pub fn prompt_words(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
     let below = (0..plain.len()).rev().find(|i| is_rule(&plain[*i]))?;
@@ -770,7 +779,106 @@ pub fn prompt_on_screen(text: &str) -> Option<bool> {
         let lit = dim_text(l).1;
         if ix == 0 { lit.trim_start().trim_start_matches(['❯', '!']).to_string() } else { lit }
     }).collect();
-    Some(typed.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}').is_empty())
+    Some(typed.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}').to_string())
+}
+
+/// What keeps a message from Claude Code's prompt while the terminal
+/// has registered and stands still.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Held {
+    /// A list or a panel of its own is open where the prompt is, under
+    /// this name ("Background", "Monitor details"; empty when it names
+    /// none). Esc closes it.
+    Covered(String),
+    /// A question is up, which the cards answer. The message goes once
+    /// it has its answer.
+    Asked,
+    /// Something else: nothing here knows what it is.
+    Other,
+}
+
+/// What stands where the prompt should be on this screen.
+pub fn held_on_screen(text: &str) -> Held {
+    if dialog_on_screen(text).is_some() {
+        return Held::Asked;
+    }
+    match cover_on_screen(text) {
+        Some(name) => Held::Covered(name),
+        None => Held::Other,
+    }
+}
+
+/// The name of a list or panel Claude Code has open over its prompt, read
+/// off 2.1.316: under the rule that heads it, its name, and at its foot
+/// a line of keys saying what Esc does ("↑/↓ to select · Enter to view ·
+/// x to stop · Esc to close", "← to go back · Esc/Enter/Space to close",
+/// on `/config` "… · ↑ to tabs · Esc to clear", on `/status` "Esc to
+/// cancel" alone).
+/// None on any other screen. Only a screen that says what Esc does is
+/// one Esc may be pressed on.
+pub fn cover_on_screen(text: &str) -> Option<String> {
+    let plain: Vec<String> = text.lines().map(strip_sgr).collect();
+    if prompt_on_screen(text).is_some() {
+        return None;
+    }
+    let foot = plain.iter().rposition(|l| !l.trim().is_empty())?;
+    let says_esc = |l: &str| {
+        let l = l.trim();
+        l.starts_with("Esc to ") || l.starts_with("Esc/") || l.contains(" · Esc to ") || l.contains(" · Esc/")
+    };
+    let at = (foot.saturating_sub(2)..=foot).rev().find(|i| says_esc(&plain[*i]))?;
+    let head = (0..at).rev().find(|i| is_rule(&plain[*i]));
+    let name = head.and_then(|h| plain[h + 1..at].iter().map(|l| l.trim()).find(|l| !l.is_empty()));
+    Some(name.unwrap_or("").chars().take(60).collect())
+}
+
+/// A line Claude Code puts up beside its prompt for a moment, a word on
+/// the account or a tip, and not part of the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenNote {
+    pub text: String,
+    /// The color it is drawn in, `0xRRGGBB`, when the screen was read
+    /// with its colors.
+    pub color: Option<u32>,
+    /// A tip on how to use Claude Code, not news.
+    pub tip: bool,
+}
+
+/// The lines over the prompt that are Claude Code's own and not the
+/// conversation's, read off 2.1.316: what it says of the account stands
+/// straight over the prompt's rule, set to the right ("You've used 90%
+/// of your Fable limit · resets Nov 3 at 12am (Australia/Melbourne)"),
+/// and a tip hangs under the working line ("⎿  Tip: Use /btw to ask a
+/// quick side question…"). None of it is in any transcript.
+pub fn notes_on_screen(text: &str) -> Vec<ScreenNote> {
+    let lines: Vec<&str> = text.lines().collect();
+    let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
+    let Some(below) = (0..plain.len()).rev().find(|i| is_rule(&plain[*i])) else { return Vec::new() };
+    let Some(above) = (0..below).rev().find(|i| is_rule(&plain[*i])) else { return Vec::new() };
+    if below - above < 2 || !plain[above + 1].trim_start().starts_with(['❯', '!']) {
+        return Vec::new();
+    }
+    let right = plain[above].trim_end().chars().count();
+    let mut notes = Vec::new();
+    for ix in (above.saturating_sub(4)..above).rev() {
+        let line = plain[ix].trim_end();
+        let words = line.trim_start();
+        if words.is_empty() {
+            break;
+        }
+        let tip = words.trim_start_matches(['⎿', '└', 'L']).trim_start();
+        let indent = line.chars().count() - words.chars().count();
+        let color = sgr_spans(lines[ix].trim_end_matches('\r')).into_iter().find(|(t, _)| !t.trim().is_empty()).and_then(|(_, c)| c);
+        if tip.starts_with("Tip:") {
+            notes.push(ScreenNote { text: tip.to_string(), color, tip: true });
+        } else if indent >= 6 && line.chars().count() + 3 >= right {
+            notes.push(ScreenNote { text: words.to_string(), color, tip: false });
+        } else if !words.starts_with(SPINNER_MARKS) {
+            break;
+        }
+    }
+    notes.reverse();
+    notes
 }
 
 /// Whether Claude Code's prompt is in its shell mode: "!" where "❯" is,

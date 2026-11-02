@@ -727,19 +727,21 @@ impl Workbench {
                 })
         });
         let lines = v_flex().flex_1().min_w_0().children(file_head).child(div().flex_1().min_h_0().child(body));
-        let left = v_flex().w(crate::panels::CHANGES_LIST_W).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).rounded_bl(px(15.)).child(commits_list);
+        let left = v_flex().w(self.changes_w_now()).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).rounded_bl(px(15.)).child(commits_list);
         if wide {
             let files = v_flex().w(px(HISTORY_FILES_W)).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar.opacity(0.5)).child(files_head).child(files_list);
             return h_flex()
+                .relative()
                 .flex_1()
                 .min_h_0()
                 .items_stretch()
                 .child(left)
                 .child(v_flex().flex_1().min_w_0().children(head).child(h_flex().flex_1().min_h_0().items_stretch().when(n_files > 0, |d| d.child(files)).child(lines)))
+                .children(self.changes_grip(cx))
                 .into_any_element();
         }
         let left = left.when(n_files > 0, |d| d.child(v_flex().flex_shrink_0().border_t_1().border_color(theme.border).child(files_head).child(files_list)));
-        h_flex().flex_1().min_h_0().items_stretch().child(left).child(v_flex().flex_1().min_w_0().children(head).child(lines)).into_any_element()
+        h_flex().relative().flex_1().min_h_0().items_stretch().child(left).child(v_flex().flex_1().min_w_0().children(head).child(lines)).children(self.changes_grip(cx)).into_any_element()
     }
 
     // -- committing -----------------------------------------------------------

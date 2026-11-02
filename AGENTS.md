@@ -66,6 +66,8 @@ Each is here because breaking it loses data or reintroduces a bug that was alrea
 - **A child process is started with `emaki_core::process::command`, never `Command::new`,** or on Windows each one opens a console window. (`docs/platform.md`)
 - **Everything Unix-only is gated with a stated fallback.** Windows and Linux are build targets. (`docs/platform.md`)
 - **A card that comes up while a session runs stands at the conversation's end and scrolls with it,** never over the composer. It goes in `render_cards`, its body through `card_scroll`, which caps its height and scrolls both ways. (`docs/live-turn.md`, The cards)
+- **What goes on beside the conversation is a line of the tray over the composer,** every row `tray_row`, so all that can be pressed stands at one right edge. What the agent waits for the person to decide stands there too, always in view, not on its card. (`docs/live-turn.md`, The tray)
+- **A message shown as sent has left Claude Code's prompt.** Return is looked after, and a message that cannot get through says so at once, with the way past it. (`docs/channels.md`)
 - **A button is `choice_pill`,** a pill with an icon before its word, and a menu's choice has an icon. A new button is not the toolkit's `Button`. (`docs/look.md`)
 - **A shortcut is named as the Mac has it,** and its signs are drawn. For ⌘ and a key bind `secondary-<key>` (Ctrl off a Mac) and write ⌘ in the docs. Wherever the window shows a key, it goes through `key_text` (`kbd_hint`, `tip`), never as characters. A command a person may want other keys for is a `Command` in `shortcuts.rs`, never a binding of its own in `main.rs`, and a label naming its keys goes through `shortcuts::keyed` or `signs`. (`main.rs`, `docs/look.md`, `docs/window.md` Shortcuts)
 - **The explainer's and the outline's model calls are real calls of the session's own agent on the person's account.** Cache the answer, ask for no more than is looked at or asked for, and never call one from a test. (`docs/core.md`, `docs/panels.md`)
@@ -79,7 +81,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-app/src/transcript.rs`; the conversation's list, find, or reload in `workbench.rs`; `emaki-core/src/find.rs` | `docs/conversation.md` |
 | The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, the notice and limits row in `workbench.rs`; `a11y.rs`; `pictures.rs`; `emaki-core/src/files.rs`, `check.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
 | The pills, pickers, mode/model/effort notices; `emaki-core/src/options.rs`; `mode_*`, `effort_*`, `model_*`, `options_from` in `driver.rs` | `docs/modes.md` |
-| The working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
+| The tray (`workbench/tray.rs`), the working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `shell_marks.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `sublime.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `quarto.rs`, `math.rs`, `latex.rs`, `typst_doc.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs`; the vendored `text/format/quarto.rs` and `text/math.rs` | `docs/panels.md` |
@@ -142,6 +144,7 @@ crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher
   src/workbench.rs           sidebar, session list, search, composer
   src/workbench/settings.rs  the settings window: its rail, groups, rows, switches
+  src/workbench/tray.rs      the tray over the composer: notes, pages, what runs in the background, a held message, the decisions
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/panels.rs              the files panel at a conversation's left, the folder's files as a tree, and the outline in its drawer at the conversation's left, an entry a round; the conversation's margins and their seams
   src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions

@@ -133,6 +133,27 @@ const BRANCH_WHEN_W: Pixels = px(100.);
 /// The comparison: how wide its list of files is, and how tall a row of
 /// that list.
 pub(crate) const CHANGES_LIST_W: Pixels = px(300.);
+/// The list of changed files is dragged between these, and what is left
+/// is the lines'.
+const CHANGES_LIST_MIN: Pixels = px(200.);
+const CHANGES_LINES_MIN: Pixels = px(320.);
+/// What stands in the lines' place when there are none: a mark and a
+/// sentence in the middle of the canvas.
+fn no_lines(icon: &'static str, said: String, more: String, theme: &gpui_component::Theme) -> AnyElement {
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap(px(12.))
+        .p(px(32.))
+        .child(div().size(px(56.)).rounded_full().bg(theme.muted).flex().items_center().justify_center().child(Icon::default().path(icon).with_size(px(24.)).text_color(theme.muted_foreground)))
+        .child(div().max_w(px(420.)).text_center().text_size(px(13.)).text_color(theme.muted_foreground).child(said))
+        .when(!more.is_empty(), |d| d.child(div().max_w(px(420.)).text_center().text_size(px(12.)).text_color(theme.muted_foreground).child(more)))
+        .into_any_element()
+}
+
+/// How many times a picture that would not read is read again.
+const PICTURE_TRIES: u32 = 12;
 const CHANGE_ROW_H: Pixels = px(26.);
 /// How long the comparison takes to go.
 const CHANGES_OUT: Duration = Duration::from_millis(140);
@@ -2819,6 +2840,85 @@ impl Workbench {
         }
     }
 
+    /// The width of the changed files' column as drawn: what it was
+    /// dragged to, less in a narrower sheet.
+    pub(crate) fn changes_w_now(&self) -> Pixels {
+        let most = (self.changes_sheet.get().size.width - CHANGES_LINES_MIN).max(CHANGES_LIST_MIN);
+        self.changes_w.clamp(CHANGES_LIST_MIN, most)
+    }
+
+    /// The divider beside the changed files follows the pointer.
+    pub(crate) fn changes_drag_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if e.pressed_button != Some(MouseButton::Left) {
+            self.changes_drag_end();
+            cx.notify();
+            return;
+        }
+        self.changes_w = e.position.x - self.changes_sheet.get().left();
+        self.changes_w = self.changes_w_now();
+        cx.notify();
+    }
+
+    pub(crate) fn changes_drag_end(&mut self) {
+        if std::mem::take(&mut self.changes_drag) {
+            self.save_ui(true);
+        }
+    }
+
+    /// The divider beside the changed files, or the commits: where a
+    /// drag and a double click are taken, as on every other divider.
+    /// With it, what says where the sheet's columns stand.
+    pub(crate) fn changes_grip(&self, cx: &mut Context<Self>) -> [AnyElement; 2] {
+        let sheet = self.changes_sheet.clone();
+        let place = canvas(move |b, _, _| sheet.set(b), |_, _, _, _| {}).absolute().size_full().into_any_element();
+        let line = cx.theme().primary.opacity(0.55);
+        let held = self.changes_drag;
+        let grip = div()
+            .id("changes-grip")
+            .group("changes-grip")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(self.changes_w_now() - PANEL_GRIP / 2.)
+            .w(PANEL_GRIP)
+            .occlude()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    if ev.click_count == 2 {
+                        this.changes_drag = false;
+                        this.changes_fit_wanted = true;
+                    } else {
+                        this.changes_drag = true;
+                    }
+                    swallow_click(window, cx);
+                    cx.notify();
+                }),
+            )
+            .child(div().absolute().top_0().h_full().left(PANEL_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("changes-grip", move |s| s.bg(line)))
+            .into_any_element();
+        [place, grip]
+    }
+
+    /// The width a double click on that divider goes to: the longest
+    /// path in the list, as it would be laid out, or as much of it as
+    /// leaves the lines their room.
+    pub(crate) fn changes_fit(&self, window: &Window, cx: &App) -> Pixels {
+        let Some(c) = &self.changes else { return CHANGES_LIST_W };
+        let font = font(cx.theme().font_family.clone());
+        let measure = |text: &str| {
+            let run = TextRun { len: text.len(), font: font.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(text.to_string().into(), px(12.5), &[run], None).width)
+        };
+        // Around a path: the row's inset and padding on both sides, the
+        // box, the icon, the gaps, the letter, the column's edge and a
+        // little air.
+        let widest = self.change_rows().iter().filter_map(|i| self.tree.changed.get(*i)).map(|(p, _)| measure(&p.strip_prefix(&c.root).unwrap_or(p).to_string_lossy()) + 12. + 16. + 15. + 16. + 18. + 12. + 1. + 8.).fold(0f32, f32::max);
+        let most = (self.changes_sheet.get().size.width * 0.6).max(CHANGES_LIST_MIN);
+        px(widest.ceil()).clamp(CHANGES_LIST_MIN, most)
+    }
+
     /// The strip over the pane's right edge, lit under the pointer; a
     /// double click puts the width back.
     pub(crate) fn render_file_grip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -2925,6 +3025,36 @@ impl Workbench {
         px(widest.ceil()).clamp(PANEL_MIN, PANEL_FIT_MAX.min(self.panel_max()))
     }
 
+    /// The picture showing as gpui keeps it. gpui holds what it read of
+    /// a path for as long as it runs, a failure too: a picture looked at
+    /// while it was being written stayed blank for good, with its size
+    /// read fine under it, and one written anew showed as it had been.
+    /// So what it holds goes when the file is another than the one it
+    /// read, and, a few times over, when reading it failed.
+    fn picture_tick(&mut self, cx: &mut Context<Self>) {
+        let shown = self.file_view.as_ref().filter(|v| matches!(v.body, FileBody::Picture(None, None) | FileBody::Picture(Some(_), None))).map(|v| (v.path.clone(), v.mtime));
+        let failed = self.picture_failed.borrow_mut().take();
+        let Some((path, mtime)) = shown else { return };
+        let forget = |path: &Path, cx: &mut Context<Self>| {
+            cx.remove_asset::<gpui::ImgResourceLoader>(&gpui::Resource::Path(path.into()));
+            cx.notify();
+        };
+        match self.picture_read.get_mut(&path) {
+            Some((at, tries)) if *at != mtime => {
+                (*at, *tries) = (mtime, 0);
+                forget(&path, cx);
+            }
+            Some((_, tries)) if failed.as_deref() == Some(path.as_path()) && *tries < PICTURE_TRIES => {
+                *tries += 1;
+                forget(&path, cx);
+            }
+            Some(_) => {}
+            None => {
+                self.picture_read.insert(path, (mtime, 0));
+            }
+        }
+    }
+
     /// A strip over a panel's edge that takes the drag and the double
     /// click, lit under the pointer as the sidebar's is.
     fn grip(&self, id: &'static str, top: Pixels, x: Pixels, held: bool, press: impl Fn(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static, cx: &mut Context<Self>) -> AnyElement {
@@ -3003,6 +3133,7 @@ impl Workbench {
                 cx.notify();
             }
         }
+        self.picture_tick(cx);
         if (!self.panels_shown().0 && self.changes.is_none()) || self.now - self.tree.read_at < TREE_SECS {
             return;
         }
@@ -8627,8 +8758,10 @@ impl Workbench {
                             })
                             .child(tick)
                             .child(img(crate::file_icons::path(&name, false, false, dark)).size(px(16.)).flex_shrink_0())
-                            // The folders give way first, so the name stays whole.
-                            .child(h_flex().flex_1().min_w_0().child(div().min_w_0().truncate().text_color(quiet).child(folder)).child(div().flex_shrink_0().text_color(ink).child(name)))
+                            // The folders give way first; a name too long
+                            // by itself is cut too, and never runs under
+                            // the letter beside it.
+                            .child(h_flex().flex_1().min_w_0().overflow_hidden().when(!folder.is_empty(), |d| d.child(div().min_w_0().map(|mut d| { d.style().flex_shrink = Some(1000.); d }).truncate().text_color(quiet).child(folder))).child(div().min_w_0().truncate().text_color(ink).child(name)))
                             .child(div().w(px(12.)).flex_shrink_0().flex().justify_center().text_size(px(11.)).text_color(tint).children(state.letter()));
                         // The list gives a row its whole width; the plate is inset from it.
                         div().w_full().h(CHANGE_ROW_H).px(px(6.)).child(row).into_any_element()
@@ -8650,11 +8783,16 @@ impl Workbench {
         let rgba_of = |hex: u32, a: f32| Hsla::from(rgb(hex)).opacity(a);
         let (add, add_no, del, del_no) = if dark { (rgba_of(0x2ea043, 0.16), rgba_of(0x3fb950, 0.30), rgba_of(0xf85149, 0.14), rgba_of(0xf85149, 0.30)) } else { (Hsla::from(rgb(0xe6ffec)), Hsla::from(rgb(0xccffd8)), Hsla::from(rgb(0xffebe9)), Hsla::from(rgb(0xffd7d5))) };
         let (add_word, del_word) = if dark { (rgba_of(0x2ea043, 0.40), rgba_of(0xf85149, 0.40)) } else { (Hsla::from(rgb(0xabf2bc)), rgba_of(0xff8182, 0.40)) };
+        let binary = shown.as_ref().is_some_and(|d| d.binary && d.pictures.is_none());
         let body = match &shown {
-            None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { t("Reading…").to_string() } else if c.history { String::new() } else { match &repo_name { Some(r) => tf("Nothing has changed in {repo} since the last commit.", &[("repo", r)]), None => t("Nothing has changed since the last commit.").to_string() } }).into_any_element(),
+            None if showing.is_none() && !c.history => no_lines("icons/circle-check.svg", match &repo_name { Some(r) => tf("Nothing has changed in {repo} since the last commit.", &[("repo", r)]), None => t("Nothing has changed since the last commit.").to_string() }, String::new(), &theme),
+            None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { t("Reading…").to_string() } else { String::new() }).into_any_element(),
             Some(d) if d.pictures.is_some() => picture_compare(d.pictures.as_ref().unwrap(), &c.pictures, &theme),
-            Some(d) if d.binary => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(t("This file is not text, so there are no lines to compare.")).into_any_element(),
-            Some(d) if d.rows.is_empty() => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(t("No lines differ (the file is empty, or only its mode changed).")).into_any_element(),
+            Some(_) if binary => {
+                let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                v_flex().size_full().items_center().justify_center().gap(px(14.)).p(px(32.)).child(crate::pictures::kind_tile(&name, 72., dark)).child(v_flex().items_center().gap(px(6.)).max_w(px(420.)).child(div().max_w_full().truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(name)).child(div().text_center().text_size(px(12.5)).text_color(quiet).child(t("This file is not text, so there are no lines to compare.")))).into_any_element()
+            }
+            Some(d) if d.rows.is_empty() => no_lines("icons/check.svg", t("No lines differ (the file is empty, or only its mode changed).").to_string(), String::new(), &theme),
             Some(d) => {
                 let rows = d.clone();
                 // A file that is all new, or all gone, has one side to
@@ -8860,7 +8998,8 @@ impl Workbench {
                             // A clip is a rectangle, so the column's ground is
                             // rounded where the sheet's corner is: square, it
                             // showed past the sheet's own curve.
-                            .child(v_flex().w(CHANGES_LIST_W).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).rounded_bl(px(15.)).child(
+                            .relative()
+                            .child(v_flex().w(self.changes_w_now()).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).rounded_bl(px(15.)).child(
                                 div()
                                     .id("changes-list")
                                     .relative()
@@ -8927,6 +9066,7 @@ impl Workbench {
                                     )
                                     .child(div().flex_1().min_h_0().child(body)),
                             )
+                            .children(self.changes_grip(cx))
                             .into_any_element()
                     }),
             )
@@ -9088,7 +9228,17 @@ impl Workbench {
                     }
                     _ => (room, room * 0.75),
                 };
-                v_flex().items_center().gap(px(8.)).child(match (drawn, from) { (Some(picture), _) => img(picture.clone()), (None, Some(from)) => img(from), (None, None) => img(v.path.clone()) }.w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.))).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
+                // One read while the file was still being written failed,
+                // and gpui keeps that for the path: it is read again here
+                // (`picture_tick`), and says so meanwhile.
+                let failed = self.picture_failed.clone();
+                let (shown, ink) = (v.path.clone(), theme.muted_foreground);
+                let gave_up = self.picture_read.get(&v.path).is_some_and(|(_, tries)| *tries >= PICTURE_TRIES);
+                let fallback = move || {
+                    failed.borrow_mut().replace(shown.clone());
+                    div().size_full().flex().items_center().justify_center().text_size(px(12.5)).text_color(ink).child(if gave_up { t("This picture could not be read.") } else { t("Reading the picture…") }).into_any_element()
+                };
+                v_flex().items_center().gap(px(8.)).child(match (drawn, from) { (Some(picture), _) => img(picture.clone()), (None, Some(from)) => img(from), (None, None) => img(v.path.clone()) }.w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.)).with_fallback(fallback)).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
             }
             // The document's own pane stands in the body's place.
             FileBody::Word if self.word.is_some() => div().into_any_element(),
@@ -10430,6 +10580,16 @@ impl Workbench {
             "outline" => self.toggle_panel(false, cx),
             // The panel's edge dragged to that width and let go, and the
             // double click on it.
+            // The divider beside the changed files: dragged to that width,
+            // and double clicked.
+            t if t.starts_with("changesw:") => {
+                if let Ok(w) = t["changesw:".len()..].parse::<f32>() {
+                    self.changes_w = px(w);
+                    self.changes_w = self.changes_w_now();
+                    self.save_ui(true);
+                }
+            }
+            "changesfit" => self.changes_fit_wanted = true,
             t if t.starts_with("panelw:") => {
                 if let (Ok(w), true) = (t["panelw:".len()..].parse::<f32>(), self.files_on) {
                     self.panel_drag = true;

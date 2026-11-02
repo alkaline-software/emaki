@@ -47,6 +47,17 @@ const ARCHIVE_EVERY: Duration = Duration::from_secs(300);
 const PACK_EVERY: Duration = Duration::from_secs(6 * 3600);
 /// How often the trash is looked over for sessions past their days.
 const PURGE_EVERY: Duration = Duration::from_secs(3600);
+/// A message that has not reached the prompt in this long says what
+/// holds it, once the screen has stood still that long.
+const HELD_AFTER: Duration = Duration::from_millis(1200);
+const HELD_STILL: Duration = Duration::from_millis(300);
+/// What is in the prompt has stopped changing for this long: Claude Code
+/// has taken in all of a paste. It is not waited on for ever.
+const PROMPT_STILL: Duration = Duration::from_millis(220);
+const PROMPT_STILL_MOST: Duration = Duration::from_secs(4);
+/// Return is looked at for this long, and pressed this many times in all.
+const RETURN_LOOK: Duration = Duration::from_millis(1500);
+const RETURN_TRIES: usize = 3;
 
 pub enum HubEvent {
     Index(Vec<SessionRef>),
@@ -82,6 +93,9 @@ pub enum HubEvent {
     /// A message waits on this session's hidden terminal, which is
     /// showing something that is not its prompt: the person has to see it.
     TerminalNeeded(String),
+    /// What keeps a message from this session's prompt, or that nothing
+    /// does any more.
+    Held { session_id: String, held: Option<driver::Held> },
     /// A `/rename` was typed into the session's hidden terminal, or was
     /// not, and why. The name is the session's only once its transcript
     /// says so.
@@ -869,8 +883,14 @@ impl Hub {
         let look = Duration::from_millis(60);
         let started = Instant::now();
         let mut asked = false;
+        // What the message has been said to wait on, so the person is
+        // told once and told when it changes.
+        let mut held: Option<driver::Held> = None;
         loop {
             if !pty.alive() {
+                if held.is_some() {
+                    self.send(HubEvent::Held { session_id: sid.to_string(), held: None });
+                }
                 return Err(t("claude exited before it took the message").into());
             }
             // Claude Code up and registered: its own record, or, for a
@@ -878,8 +898,22 @@ impl Hub {
             // terminal that joins a job (`claude attach`, which a resume
             // of one becomes) writes none and waited here for ever.
             let registered = !peer::available() || peer::registry_all().iter().any(|p| p.pid == pty.pid || (!p.job.is_empty() && p.session_id == sid));
-            if registered && driver::prompt_on_screen(&pty.styled()).is_some() {
+            let screen = pty.styled();
+            if registered && driver::prompt_on_screen(&screen).is_some() {
+                if held.is_some() {
+                    self.send(HubEvent::Held { session_id: sid.to_string(), held: None });
+                }
                 break;
+            }
+            // Up and registered, standing still, and no prompt: something
+            // is over it, a list opened in the terminal or a question.
+            // The person is told at once, while the message waits.
+            if ask && registered && started.elapsed() > HELD_AFTER && pty.quiet_for() > HELD_STILL {
+                let now = driver::held_on_screen(&screen);
+                if held.as_ref() != Some(&now) {
+                    held = Some(now.clone());
+                    self.send(HubEvent::Held { session_id: sid.to_string(), held: Some(now) });
+                }
             }
             if ask && !asked && started.elapsed() > Duration::from_secs(5) {
                 asked = true;
@@ -949,11 +983,88 @@ impl Hub {
             }
         }
         if !words.is_empty() {
+            let before = driver::prompt_words(&pty.styled());
             pty.paste(words);
+            until(&|screen| driver::prompt_words(screen) != before);
         }
         until(&|screen| driver::prompt_on_screen(screen) == Some(false));
-        pty.write(b"\r");
-        Ok(())
+        // Claude Code takes a long paste in over a moment and folds it
+        // ("[Pasted text #5 +15 lines]"), and a Return that comes in that
+        // moment is a line of the paste, not a send: the words stayed in
+        // the prompt with the window saying they had gone. With a picture
+        // pasted first the prompt was not empty before the words came,
+        // so nothing above had waited for them.
+        let began = Instant::now();
+        let mut last = driver::prompt_words(&pty.styled());
+        let mut still = Instant::now();
+        while still.elapsed() < PROMPT_STILL && began.elapsed() < PROMPT_STILL_MOST && pty.alive() {
+            thread::sleep(look);
+            let now = driver::prompt_words(&pty.styled());
+            if now != last {
+                last = now;
+                still = Instant::now();
+            }
+        }
+        self.press_return(&pty)
+    }
+
+    /// Return, and looking to see it was taken: the prompt empty, or
+    /// gone for what the message started. Still holding the words after
+    /// a moment, it is pressed again, and only then: on an empty prompt
+    /// Return takes a suggested prompt. A message that will not leave
+    /// says so; the window must never show as sent what is still there.
+    fn press_return(&self, pty: &Pty) -> Result<(), String> {
+        let look = Duration::from_millis(60);
+        for tried in 0..RETURN_TRIES {
+            match driver::prompt_on_screen(&pty.styled()) {
+                // The paste never showed: there is nothing to send.
+                Some(true) if tried == 0 => return Err(t("the message did not reach Claude Code's input").into()),
+                Some(false) => {}
+                // A prompt too tall for the screen reads as none, so the
+                // first press does not go by that.
+                _ if tried > 0 => return Ok(()),
+                _ => {}
+            }
+            pty.write(b"\r");
+            let pressed = Instant::now();
+            while pressed.elapsed() < RETURN_LOOK {
+                if !pty.alive() {
+                    return Err(t("claude exited before it took the message").into());
+                }
+                if driver::prompt_on_screen(&pty.styled()) != Some(false) {
+                    return Ok(());
+                }
+                thread::sleep(look);
+            }
+        }
+        Err(t("the message is still in Claude Code's input").into())
+    }
+
+    /// Back to Claude Code's prompt from whatever list or panel is over
+    /// it, by Esc, once for each thing the screen says Esc closes: a
+    /// panel opened from a list closes back to the list. Nothing else is
+    /// pressed on: Esc on the prompt stops a turn, and on a question it
+    /// answers it.
+    pub fn back_to_prompt(self: &Arc<Self>, session_id: &str) {
+        let hub = Arc::clone(self);
+        let sid = session_id.to_string();
+        thread::spawn(move || {
+            let Some(pty) = hub.terminal_for(&sid) else { return };
+            for _ in 0..6 {
+                let screen = pty.styled();
+                if !pty.alive() || !matches!(driver::held_on_screen(&screen), driver::Held::Covered(_)) {
+                    break;
+                }
+                pty.write(b"\x1b");
+                for _ in 0..16 {
+                    if pty.styled() != screen {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+            hub.send(HubEvent::Screen(sid));
+        });
     }
 
     /// Why the session's hidden terminal went away by itself, once.

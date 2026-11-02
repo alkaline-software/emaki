@@ -80,6 +80,7 @@ impl Render for ConversationList {
         // Where the rounds' words stand is taken again as they are laid out.
         if let Some(w) = self.workbench.upgrade() {
             w.read(cx).words_at.borrow_mut().clear();
+            w.read(cx).list_draw();
         }
         let (entity, kept, marks) = (self.workbench.clone(), self.kept.clone(), self.marks.clone());
         gpui::list(list, move |ix, window, cx| {
@@ -448,6 +449,9 @@ impl Workbench {
         // A message sent from here that the transcript does not have yet,
         // and why it did not go when it did not.
         let undelivered = (rnd.uuid == OUTGOING).then(|| self.outgoing.get(&detail.key).map(|o| o.error.clone())).flatten().filter(|e| !e.is_empty());
+        // On its way, or with Claude Code and not yet in the transcript.
+        // A second is the time it usually takes, and goes unsaid.
+        let going = (rnd.uuid == OUTGOING && undelivered.is_none()).then(|| self.outgoing.get(&detail.key).filter(|o| o.delivered || self.now - o.at >= 1.).map(|o| o.delivered)).flatten();
 
         let mut column = v_flex().w_full().max_w(CONTENT_W).px(px(24.)).pt(px(14.)).pb(if is_last { px(28.) } else { px(6.) }).gap(px(12.));
 
@@ -531,7 +535,7 @@ impl Workbench {
                         // A message still in the queue says so, all the
                         // time: it is the one thing under a prompt worth
                         // reading without being asked.
-                        .when(!rnd.queued && undelivered.is_none(), |d| d.opacity(0.).group_hover(group, |s| s.opacity(1.)))
+                        .when(!rnd.queued && undelivered.is_none() && going.is_none(), |d| d.opacity(0.).group_hover(group, |s| s.opacity(1.)))
                         // So does one that did not go, with the reason
                         // under the pointer. Its words are still here to
                         // be copied.
@@ -546,6 +550,13 @@ impl Workbench {
                                     .child(t("Not delivered"))
                                     .managed_tooltip(move |window, cx| crate::workbench::tip(why.clone(), window, cx)),
                             )
+                            .child(crate::branches::small_pill(SharedString::from(format!("send-again-{ix}")), "icons/arrow-up.svg", t("Send again"), crate::workbench::Press::Quiet, false, &theme).h(px(20.)).on_click(cx.listener(|this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.send_again(window, cx);
+                            })))
+                        })
+                        .when_some(going, |d, delivered| {
+                            d.child(if delivered { h_flex().gap(px(4.)).items_center().child(Icon::new(IconName::Check).with_size(px(12.))).child(t("Delivered")) } else { h_flex().child(t("Sending…")) })
                         })
                         .when(rnd.queued, |d| d.child(div().child(tf("Queued, {agent} will read it at its next step", &[("agent", &session.agent.speaker())]))))
                         .children(who.map(|w| div().child(w)))

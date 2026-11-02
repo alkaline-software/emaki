@@ -587,6 +587,18 @@ pub struct Shell {
     /// does is in its own transcript.
     #[serde(default)]
     pub agent: bool,
+    /// A monitor (`Monitor`): `command` is the script it watches with,
+    /// and it reports each line that script prints as an event, in
+    /// `events`, and goes on.
+    #[serde(default)]
+    pub monitor: bool,
+    /// How long a monitor is given before it ends by itself, in
+    /// milliseconds; none for one that runs for the session.
+    #[serde(default)]
+    pub timeout_ms: u64,
+    /// What a monitor has reported so far, the last few.
+    #[serde(default)]
+    pub events: Vec<String>,
     pub command: String,
     /// The agent's own line on what the command is for.
     pub description: String,

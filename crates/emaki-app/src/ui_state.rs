@@ -27,6 +27,8 @@ pub struct UiState {
     /// tab's and are not kept past a launch (`Workbench::tab_views`).
     pub files_open: Option<bool>,
     pub panel_w: Option<f32>,
+    /// How wide the comparison's list of changed files was dragged to.
+    pub changes_w: Option<f32>,
     /// How wide the outline's drawer is.
     pub outline_w: Option<f32>,
     /// The list of branches in the order of their names, not by when
