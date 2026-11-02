@@ -7595,24 +7595,6 @@
     "de": "{name} wurde nicht eingesetzt: {why}",
     "es": "no se pegó {name}: {why}"
   },
-  "{n} agent running in the background": {
-    "zh-Hans": "{n} 个 agent 正在后台运行",
-    "zh-Hant": "{n} 個 agent 正在背景執行",
-    "ja": "{n} 個の agent がバックグラウンドで実行中",
-    "ko": "agent {n}개가 백그라운드에서 실행 중",
-    "fr": "{n} agent s’exécute en arrière-plan",
-    "de": "{n} Agent läuft im Hintergrund",
-    "es": "{n} agent ejecutándose en segundo plano"
-  },
-  "{n} agents running in the background": {
-    "zh-Hans": "{n} 个 agent 正在后台运行",
-    "zh-Hant": "{n} 個 agent 正在背景執行",
-    "ja": "{n} 個の agent がバックグラウンドで実行中",
-    "ko": "agent {n}개가 백그라운드에서 실행 중",
-    "fr": "{n} agents s’exécutent en arrière-plan",
-    "de": "{n} Agents laufen im Hintergrund",
-    "es": "{n} agents ejecutándose en segundo plano"
-  },
   "{n} artifact": {
     "zh-Hans": "{n} 个 artifact",
     "zh-Hant": "{n} 個 artifact",
@@ -7666,24 +7648,6 @@
     "fr": "{n} colonnes",
     "de": "{n} Spalten",
     "es": "{n} columnas"
-  },
-  "{n} command running in the background": {
-    "zh-Hans": "{n} 个命令正在后台运行",
-    "zh-Hant": "{n} 個指令正在背景執行",
-    "ja": "{n} 個のコマンドがバックグラウンドで実行中",
-    "ko": "명령 {n}개가 백그라운드에서 실행 중",
-    "fr": "{n} commande s’exécute en arrière-plan",
-    "de": "{n} Befehl läuft im Hintergrund",
-    "es": "{n} comando ejecutándose en segundo plano"
-  },
-  "{n} commands running in the background": {
-    "zh-Hans": "{n} 个命令正在后台运行",
-    "zh-Hant": "{n} 個指令正在背景執行",
-    "ja": "{n} 個のコマンドがバックグラウンドで実行中",
-    "ko": "명령 {n}개가 백그라운드에서 실행 중",
-    "fr": "{n} commandes s’exécutent en arrière-plan",
-    "de": "{n} Befehle laufen im Hintergrund",
-    "es": "{n} comandos ejecutándose en segundo plano"
   },
   "{n} commit": {
     "zh-Hans": "{n} 个提交",
@@ -9350,24 +9314,6 @@
     "de": "noch nichts gemeldet",
     "es": "nada reportado todavía"
   },
-  "{n} monitor running in the background": {
-    "zh-Hans": "{n} 个 monitor 在后台运行",
-    "zh-Hant": "{n} 個 monitor 在背景執行",
-    "ja": "{n} 個の monitor がバックグラウンドで実行中",
-    "ko": "monitor {n}개가 백그라운드에서 실행 중",
-    "fr": "{n} monitor en arrière-plan",
-    "de": "{n} Monitor läuft im Hintergrund",
-    "es": "{n} monitor en segundo plano"
-  },
-  "{n} monitors running in the background": {
-    "zh-Hans": "{n} 个 monitor 在后台运行",
-    "zh-Hant": "{n} 個 monitor 在背景執行",
-    "ja": "{n} 個の monitor がバックグラウンドで実行中",
-    "ko": "monitor {n}개가 백그라운드에서 실행 중",
-    "fr": "{n} monitors en arrière-plan",
-    "de": "{n} Monitore laufen im Hintergrund",
-    "es": "{n} monitores en segundo plano"
-  },
   "This picture could not be read.": {
     "zh-Hans": "无法读取这张图片。",
     "zh-Hant": "無法讀取這張圖片。",
@@ -9376,5 +9322,77 @@
     "fr": "Cette image n'a pas pu être lue.",
     "de": "Dieses Bild konnte nicht gelesen werden.",
     "es": "No se pudo leer esta imagen."
+  },
+  "{n} background agent": {
+    "zh-Hans": "{n} 个后台 agent",
+    "zh-Hant": "{n} 個背景 agent",
+    "ja": "バックグラウンド agent {n} 個",
+    "ko": "백그라운드 agent {n}개",
+    "fr": "{n} agent en arrière-plan",
+    "de": "{n} Hintergrund-Agent",
+    "es": "{n} agent en segundo plano"
+  },
+  "{n} background agents": {
+    "zh-Hans": "{n} 个后台 agent",
+    "zh-Hant": "{n} 個背景 agent",
+    "ja": "バックグラウンド agent {n} 個",
+    "ko": "백그라운드 agent {n}개",
+    "fr": "{n} agents en arrière-plan",
+    "de": "{n} Hintergrund-Agents",
+    "es": "{n} agents en segundo plano"
+  },
+  "{n} background command": {
+    "zh-Hans": "{n} 个后台命令",
+    "zh-Hant": "{n} 個背景指令",
+    "ja": "バックグラウンドコマンド {n} 個",
+    "ko": "백그라운드 명령 {n}개",
+    "fr": "{n} commande en arrière-plan",
+    "de": "{n} Hintergrundbefehl",
+    "es": "{n} comando en segundo plano"
+  },
+  "{n} background commands": {
+    "zh-Hans": "{n} 个后台命令",
+    "zh-Hant": "{n} 個背景指令",
+    "ja": "バックグラウンドコマンド {n} 個",
+    "ko": "백그라운드 명령 {n}개",
+    "fr": "{n} commandes en arrière-plan",
+    "de": "{n} Hintergrundbefehle",
+    "es": "{n} comandos en segundo plano"
+  },
+  "{n} background monitor": {
+    "zh-Hans": "{n} 个后台 monitor",
+    "zh-Hant": "{n} 個背景 monitor",
+    "ja": "バックグラウンド monitor {n} 個",
+    "ko": "백그라운드 monitor {n}개",
+    "fr": "{n} monitor en arrière-plan",
+    "de": "{n} Hintergrund-Monitor",
+    "es": "{n} monitor en segundo plano"
+  },
+  "{n} background monitors": {
+    "zh-Hans": "{n} 个后台 monitor",
+    "zh-Hant": "{n} 個背景 monitor",
+    "ja": "バックグラウンド monitor {n} 個",
+    "ko": "백그라운드 monitor {n}개",
+    "fr": "{n} monitors en arrière-plan",
+    "de": "{n} Hintergrund-Monitore",
+    "es": "{n} monitores en segundo plano"
+  },
+  "{n} notice": {
+    "zh-Hans": "{n} 条通知",
+    "zh-Hant": "{n} 則通知",
+    "ja": "通知 {n} 件",
+    "ko": "알림 {n}개",
+    "fr": "{n} notification",
+    "de": "{n} Hinweis",
+    "es": "{n} aviso"
+  },
+  "{n} notices": {
+    "zh-Hans": "{n} 条通知",
+    "zh-Hant": "{n} 則通知",
+    "ja": "通知 {n} 件",
+    "ko": "알림 {n}개",
+    "fr": "{n} notifications",
+    "de": "{n} Hinweise",
+    "es": "{n} avisos"
   }
 }

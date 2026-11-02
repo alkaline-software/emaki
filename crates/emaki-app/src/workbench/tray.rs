@@ -325,9 +325,8 @@ impl Workbench {
         let mut toggles: Vec<AnyElement> = Vec::new();
 
         let pages = &session.artifacts;
-        let newest = pages.iter().max_by(|a, b| a.last.cmp(&b.last)).map(|a| a.title.clone()).unwrap_or_default();
         let id = sid.clone();
-        toggles.extend(self.foot_toggle("artifacts", &r, !pages.is_empty(), self.artifacts_open.as_deref() == Some(sid.as_str()), "icons/app-window.svg", pages.len(), None, None, format!("{} · {newest}", count(pages.len(), "{n} artifact", "{n} artifacts")), move |this| {
+        toggles.extend(self.foot_toggle("artifacts", &r, !pages.is_empty(), self.artifacts_open.as_deref() == Some(sid.as_str()), "icons/app-window.svg", pages.len(), None, None, count(pages.len(), "{n} artifact", "{n} artifacts"), move |this| {
             this.artifacts_open = if this.artifacts_open.as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
             if this.artifacts_open.is_some() {
                 this.cards_show();
@@ -342,14 +341,10 @@ impl Workbench {
                 self.shells_kept.borrow_mut()[kind as usize] = list.clone();
             }
             let n = list.len();
-            let said = match kind {
-                TaskKind::Agents => count(n, "{n} agent running in the background", "{n} agents running in the background"),
-                TaskKind::Commands => count(n, "{n} command running in the background", "{n} commands running in the background"),
-                TaskKind::Monitors => count(n, "{n} monitor running in the background", "{n} monitors running in the background"),
-            };
-            let words = match list.as_slice() {
-                [one] => format!("{said} · {}", if one.description.is_empty() { one.command.lines().next().unwrap_or("") } else { one.description.as_str() }),
-                _ => said,
+            let words = match kind {
+                TaskKind::Agents => count(n, "{n} background agent", "{n} background agents"),
+                TaskKind::Commands => count(n, "{n} background command", "{n} background commands"),
+                TaskKind::Monitors => count(n, "{n} background monitor", "{n} background monitors"),
             };
             let id = sid.clone();
             toggles.extend(self.foot_toggle(kind.word(), &r, n > 0, self.task_open(kind).as_deref() == Some(sid.as_str()), icon, n, None, Some((theme.blue, breath)), words, move |this| {
@@ -362,16 +357,12 @@ impl Workbench {
 
         let notes = self.notes.get(&sid).cloned().unwrap_or_default();
         let note = notes.said.map(|n| n.0);
-        let kept = {
-            if let Some(n) = &note {
-                *self.notes_kept.borrow_mut() = Some(n.clone());
-            }
-            self.notes_kept.borrow().clone()
-        };
-        let ink = (!notes.read && note.is_some()).then(|| screen_ink(kept.as_ref().and_then(|n| n.color), &theme));
-        let words = kept.map(|n| n.text).unwrap_or_default();
+        if let Some(n) = &note {
+            *self.notes_kept.borrow_mut() = Some(n.clone());
+        }
+        let ink = note.as_ref().filter(|_| !notes.read).map(|n| screen_ink(n.color, &theme));
         let id = sid.clone();
-        toggles.extend(self.foot_toggle("notes", &r, note.is_some(), self.notes_open.as_deref() == Some(sid.as_str()), "icons/bell.svg", 1, ink, ink.map(|c| (c, 1.)), words, move |this| this.notes_toggle(&id), cx));
+        toggles.extend(self.foot_toggle("notes", &r, note.is_some(), self.notes_open.as_deref() == Some(sid.as_str()), "icons/bell.svg", 1, ink, ink.map(|c| (c, 1.)), count(1, "{n} notice", "{n} notices"), move |this| this.notes_toggle(&id), cx));
 
         (!toggles.is_empty()).then(|| h_flex().flex_shrink_0().mr(px(TOGGLES_END)).items_center().children(toggles).into_any_element())
     }

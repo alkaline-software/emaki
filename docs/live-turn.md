@@ -60,7 +60,7 @@ The agent at work, or waiting, is not in it. That line is the turn's own and sta
 What a session has going on that does not wait on the person: its published pages, background agents, monitors and commands, and Claude Code's note. Each is a small button at the right of the row under the composer (`render_toggles`, `foot_toggle`), an icon and a count past one, shut until pressed. That row is always there, so a toggle coming takes no room from the conversation.
 
 - **A press opens its card at the conversation's end,** another shuts it, and the toggle wears the accent while it is on. It is the same card from any toggle, in the column every card stands in (The cards); there is no line in between.
-- **Pointing says what it is.** The tooltip has the count and the newest or only one's name, and for the bell the note's whole words.
+- **Pointing says what it is,** in a count and a word ("1 artifact", "2 background commands", "1 notice") and no more. What each one is, is on its card.
 - **What is new shows without opening.** A dot breathes on what is running, and a dot in the note's own color, with the bell in that color, stands on a note not yet read. Opening reads it.
 - **Off is the default and stays so.** A list that empties is shut, or the next command to start would open its card by itself; a note's card shuts with its note.
 - **The last toggle stands under the middle of the send button** (`TOGGLES_END`), the bell last when there is one. A toggle comes and goes sideways on its `presence`, those beside it moving over; its width is known from its count, so the motion has no pause at its end. On and off is a `presence` too, the accent coming over a moment.
@@ -146,7 +146,7 @@ A command started with `Bash` `run_in_background` may outlive the turn. The tran
 - Start: a `Bash` result's sidecar carries `backgroundTaskId`, its words naming the output file.
 - End: the first `<task-notification>` for that id, which Claude Code writes into the queue (`queue-operation` `enqueue`) when the command exits and again as the prompt of the turn that starts, or a stop the agent asks for (`KillShell`, `TaskStop`).
 
-Its toggle (The toggles) has the count, and pointing at it the agent's line on what a lone command is for. A press opens a card at the conversation's end (`render_shells_card`) with each command and the last `SHELL_TAIL_LINES` of its output, read from the output file on the clock while the card is open (`file_tail`: color sequences out, a progress line that rewrites itself kept as it last read).
+Its toggle (The toggles) has the count. A press opens a card at the conversation's end (`render_shells_card`) with each command and the last `SHELL_TAIL_LINES` of its output, read from the output file on the clock while the card is open (`file_tail`: color sequences out, a progress line that rewrites itself kept as it last read).
 
 The command and the output are both code and are drawn alike (`shell_box`): a labeled box, every line wrapped and none cut short, a copy button at its top right under the pointer. Past `SHELL_BOX_H` each scrolls, with the bar every scroller has (`docs/window.md`): the command from its start, the output from its foot, where it stays as more is printed unless the reader has scrolled up.
 
@@ -159,7 +159,7 @@ A subagent launched without waiting for it (`Agent`, 2.1.292) is the same kind o
 - Resumed: a `SendMessage` whose result says `resumedAgentId` starts the agent again, until its next notification, which comes each time it stops. One that ran before is its row again from the resume; one that first ran in the foreground gets a row from its own `Agent` call. Taken as ended at its first notification, an agent sent more work showed no row while it did it.
 - `Shell::command` is the kind of agent (`subagent_type`, often empty) and there is no output file. The path Claude Code names as the output file is the agent's whole transcript and is never read here.
 
-Its toggle says "N agents running in the background" under the pointer (`TaskKind::Agents`), and for one agent its task. The card lists each agent with one line on what it was last seen doing (`build::agent_step`): the last tool call, or the first line of the last thing it said, from the end of the agent's own transcript (`build::agent_transcript`, `<session>/subagents/agent-<id>.jsonl`), read on the clock while the card is open (`read_agent_steps`). The same rule says whether one with no end is running (`shells_running`).
+It has a toggle of its own (`TaskKind::Agents`). The card lists each agent with one line on what it was last seen doing (`build::agent_step`): the last tool call, or the first line of the last thing it said, from the end of the agent's own transcript (`build::agent_transcript`, `<session>/subagents/agent-<id>.jsonl`), read on the clock while the card is open (`read_agent_steps`). The same rule says whether one with no end is running (`shells_running`).
 
 ## Monitors
 
@@ -175,7 +175,7 @@ It has a toggle of its own (`TaskKind::Monitors`), and its card has the script a
 
 A page the agent published with Claude's Artifact tool is the session's (`build::artifacts_of`, into `Session::artifacts`): an `Artifact` result whose sidecar names the page (`url`, `artifact_id`, `title`, `icon`, `path`), from a call that publishes (no `action`, or `publish`) and does not upload an asset. A read or a list names a page too and is not one. A page published again is the same one, its title and time the newest.
 
-Its toggle is there for as long as the session has any, the newest's title under the pointer. It is not the background work's kind of thing, which comes and goes with what runs; it stays. A press opens a card at the conversation's end (`render_artifacts_card`) with each page, newest first: its title, where it is, when it was last published, and Open. A click anywhere on a page's row opens it too.
+Its toggle is there for as long as the session has any. It is not the background work's kind of thing, which comes and goes with what runs; it stays. A press opens a card at the conversation's end (`render_artifacts_card`) with each page, newest first: its title, where it is, when it was last published, and Open. A click anywhere on a page's row opens it too.
 
 ## The permission card's keys
 
