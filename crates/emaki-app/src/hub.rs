@@ -907,8 +907,10 @@ impl Hub {
             }
             // Up and registered, standing still, and no prompt: something
             // is over it, a list opened in the terminal or a question.
-            // The person is told at once, while the message waits.
-            if ask && registered && started.elapsed() > HELD_AFTER && pty.quiet_for() > HELD_STILL {
+            // The person is told at once, while the message waits. The
+            // question whether to trust the folder comes before Claude
+            // Code registers, and it waits on that too.
+            if ask && (registered || driver::trust_on_screen(&screen)) && started.elapsed() > HELD_AFTER && pty.quiet_for() > HELD_STILL {
                 let now = driver::held_on_screen(&screen);
                 if held.as_ref() != Some(&now) {
                     held = Some(now.clone());
@@ -1139,9 +1141,13 @@ impl Hub {
                     let exit = matches!(ev, driver::Event::Exit { .. });
                     // The explanation is asked for the moment the card
                     // exists: reading it while you decide is the point.
+                    // What the card only sends to the terminal, and a page
+                    // to open, are no call to explain.
                     if let driver::Event::Permission(p) = &ev {
-                        let id = if p.tool_use_id.is_empty() { p.request_id.clone() } else { p.tool_use_id.clone() };
-                        hub2.explainer.request(agent, &id, &p.tool_name, &p.input, false);
+                        if !p.in_terminal() && p.tool_name != driver::OPEN_URL_ASK {
+                            let id = if p.tool_use_id.is_empty() { p.request_id.clone() } else { p.tool_use_id.clone() };
+                            hub2.explainer.request(agent, &id, &p.tool_name, &p.input, false);
+                        }
                     }
                     hub2.send(HubEvent::Driver { session_id: sid.clone(), event: ev });
                     if exit {

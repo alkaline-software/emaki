@@ -1889,6 +1889,10 @@ impl Paragraph {
                                 .id("math-room")
                                 .min_w_0()
                                 .overflow_x_scroll()
+                                // Sideways only: an up-and-down wheel over a
+                                // wide formula is the page's (Emaki
+                                // addition).
+                                .restrict_scroll_to_axis()
                                 .line_height(relative(picture.height + 0.5))
                                 .whitespace_nowrap()
                                 .child(line),

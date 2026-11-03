@@ -107,6 +107,8 @@ pub struct WordPane {
     blink_at: Instant,
     was_dirty: bool,
     pick: Option<(Pick, bool, Instant)>,
+    /// The style's or the size's list, as it scrolls.
+    pick_scroll: ScrollHandle,
 }
 
 impl EventEmitter<WordEvent> for WordPane {}
@@ -144,6 +146,7 @@ impl WordPane {
             session,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
+            pick_scroll: ScrollHandle::new(),
             drawn: HashMap::new(),
             places: Default::default(),
             room: Rc::new(Cell::new(0.)),
@@ -654,7 +657,7 @@ impl WordPane {
         };
         // The rows scroll inside the card's room above and below them, so
         // one cut at the edge stays inside its corner: a clip is a rectangle.
-        let list = v_flex().id("word-pick-rows").max_h(px(312.)).overflow_y_scroll().px(px(4.)).children(rows.into_iter().enumerate().map(|(ix, (words, id, params, here))| {
+        let list = v_flex().id("word-pick-rows").max_h(px(312.)).overflow_y_scroll().track_scroll(&self.pick_scroll).px(px(4.)).children(rows.into_iter().enumerate().map(|(ix, (words, id, params, here))| {
             div()
                 .id(("word-pick-row", ix))
                 .h(px(26.))
@@ -674,13 +677,27 @@ impl WordPane {
                     window.focus(&this.focus, cx);
                 }))
         }));
-        let list = v_flex().id("word-pick").occlude().w(px(wide)).py(px(4.)).rounded(px(8.)).bg(theme.popover).border_1().border_color(theme.border).shadow_lg().text_size(px(12.5)).text_color(theme.popover_foreground).child(list);
+        let list = v_flex().id("word-pick").relative().occlude().w(px(wide)).py(px(4.)).rounded(px(8.)).bg(theme.popover).border_1().border_color(theme.border).shadow_lg().text_size(px(12.5)).text_color(theme.popover_foreground).child(list).vertical_scrollbar(&self.pick_scroll);
         let t = (since.elapsed().as_secs_f32() / MENU.as_secs_f32()).min(1.);
         let t = if open { t } else { 1. - t };
         if t < 1. {
             cx.notify();
         }
         Some(deferred(div().absolute().top(px(34. - 4. * (1. - t))).left(px(left)).opacity(t).child(list)).with_priority(1).into_any_element())
+    }
+}
+
+impl WordPane {
+    /// The pages' scroller, the file pane's own while the document
+    /// shows (`route_scroll`).
+    pub fn pages_scroll(&self) -> ScrollHandle {
+        self.scroll.clone()
+    }
+
+    /// The style's or the size's list while one is open: a scroller over
+    /// the pages, whose gesture is its own.
+    pub fn pick_scroll(&self) -> Option<ScrollHandle> {
+        self.pick.as_ref().filter(|(_, open, _)| *open).map(|_| self.pick_scroll.clone())
     }
 }
 

@@ -350,6 +350,7 @@ upstream revision finds them.
 67. `crates/base/src/input/base/state.rs` (`scroll_to`): the row an offset is scrolled to is its wrapped row from the display map. Upstream added the row within its line from the last layout, which has only the lines in view, so an offset deep in a long paragraph out of view scrolled to the paragraph's first row: the find's first step to a single match stopped short of it, and the second step found it. A test (`test_scroll_to_offset_in_wrapped_line_out_of_view`) holds it.
 
 68. `crates/ui/src/text/node.rs` (`render_list_item_row`): an item of a list that is not numbered is marked by a hairline, a short thin line at the middle of its first line in the quiet ink, shorter below the first depth, in place of upstream's "•", "◦" and "▪". A numbered list keeps its numbers (`list_item_prefix`).
+69. `crates/ui/src/text/node.rs` (the display formula's `math-room`): its sideways scroller takes a sideways stroke only (`restrict_scroll_to_axis`). An up-and-down wheel over a formula wider than its room slid it across while the conversation scrolled under it.
 
 ## Updating
 

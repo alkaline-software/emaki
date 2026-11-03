@@ -599,19 +599,37 @@ impl Workbench {
             return self.bar_frame(r, Some(tf("{agent} asks", &[("agent", &who)])), None, t("or type an answer below"), pills, cx);
         }
         let plan = p.tool_name == "ExitPlanMode" && p.input.get("plan").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
-        let said = if plan {
-            t("Implement this plan?").to_string()
-        } else {
-            match p.tool_name.as_str() {
-                "apply_patch" => tf("{who} wants to change files", &[("who", &who)]),
-                "request_permissions" => tf("{who} asks for more access", &[("who", &who)]),
-                tool => tf("{who} wants to run {tool}", &[("who", &who), ("tool", &tool)]),
-            }
-        };
+        let said = if plan { t("Implement this plan?").to_string() } else { crate::workbench::permission_heading(p, who) };
         let (yes, no) = (p.request_id.clone(), p.request_id.clone());
-        let several = self.permissions.iter().filter(|(sid, _)| *sid == r.session_id).count() > 1;
+        // What only the agent's terminal can take: the way there, and a
+        // way past it.
+        if p.in_terminal() {
+            pills.push(
+                tray_pill(SharedString::from(format!("terminal-{}", p.request_id)), "icons/terminal.svg", t("Show the terminal"), Press::Primary, leaving, &theme)
+                    .when(!leaving, |b| {
+                        b.on_click(cx.listener(|this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.show_agent_terminal(window, cx)
+                        }))
+                    })
+                    .into_any_element(),
+            );
+            pills.push(
+                tray_pill(SharedString::from(format!("skip-{}", p.request_id)), "icons/close.svg", t("Skip"), Press::Quiet, leaving, &theme)
+                    .when(!leaving, |b| {
+                        b.on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.answer_permission(no.clone(), false, cx)
+                        }))
+                    })
+                    .into_any_element(),
+            );
+            return self.bar_frame(r, Some(said), None, "", pills, cx);
+        }
+        let open_page = p.tool_name == emaki_core::driver::OPEN_URL_ASK;
+        let several = self.permissions.iter().filter(|(sid, p)| *sid == r.session_id && !p.is_question() && !p.in_terminal()).count() > 1;
         pills.push(
-            tray_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", if plan { t("Yes, implement") } else { t("Allow") }, Press::Primary, leaving, &theme)
+            tray_pill(SharedString::from(format!("allow-{}", p.request_id)), "icons/check.svg", if plan { t("Yes, implement") } else if open_page { t("Open") } else { t("Allow") }, Press::Primary, leaving, &theme)
                 .child(key_text("↩"))
                 .when(!leaving, |b| {
                     b.on_click(cx.listener(move |this, _, window, cx| {

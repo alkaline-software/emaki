@@ -26,6 +26,7 @@ About `crates/emaki-app/src/workbench.rs` and `workbench/tray.rs` (the tray over
 - No card is held over the composer. A card there took the conversation's room for as long as it was up: with a long question in a low window a few lines of the conversation were left, and nothing the reader did gave them more. What answers a card stands in the tray, a line and not a card (The tray).
 - A scroller drawn inside the conversation's list is named and kept by the list's own drawing (`list_draw`, `in_list`), never by the window's frames. The list is a view the window keeps: a frame from the cache draws none of its scrollers, and kept by the window's frames a card's scroller was forgotten at the second such frame and made anew at its top. That is what took the reader back up a card a second or two after they had scrolled it, and only while something else (a countdown on the card, a dot, the turning mark) was drawing frames.
 - A scroller inside a card's body is made before the body's own (`card_scroll`): `route_scroll` takes the first one under the pointer.
+- What the lines over the composer say of a card is read from what the card is drawn from (`terminal_screen`, `dialog_seen`, `permissions`), never from the card as last drawn. The cards are part of the list's last item, which the list does not draw while the reader is up the conversation: read from the drawing, the tray said "Claude is working…" over a terminal that waited, and kept a waiting line after the wait was over. Whether the cards were drawn is the list's last fresh drawing's (`cards_drawn`, reset in `list_draw`): reset at every frame, a frame from the cache took them for gone and moved the keyboard off the terminal card.
 
 ## The cards
 
@@ -72,7 +73,7 @@ What the agent asks the person to decide stands here, in a row, in view wherever
 
 - An approval, a review and a plan's go-ahead have their choices here as buttons, in the terminal's order and sending the same digits (`dialog_bar`). A choice's words are as long as the agent makes them: a button is cut at `bar_pill`'s width, with the whole of them under the pointer, and buttons that do not fit go under what is asked.
 - A question keeps its choices on its card, since they carry descriptions. Here are its tabs, Next, Choose and Cancel: what moves through it.
-- A driver's permission, plan and question are the same (`permission_bar`): Allow and Deny with their keys, for the oldest waiting, and Allow all when several wait.
+- A driver's permission, plan and question are the same (`permission_bar`): Allow and Deny with their keys, for the oldest waiting, and Allow all when several wait. What only the agent's terminal can take (`PermissionRequest::in_terminal`) has Show the terminal and Skip instead, and neither ↩ nor Allow all answers it (`docs/channels.md`, Codex).
 
 ## Claude Code's notes
 

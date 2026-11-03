@@ -9394,5 +9394,59 @@
     "fr": "{n} notifications",
     "de": "{n} Hinweise",
     "es": "{n} avisos"
+  },
+  "{who} wants to type into a running command": {
+    "zh-Hans": "{who} 想向正在运行的命令输入内容",
+    "zh-Hant": "{who} 想向正在執行的命令輸入內容",
+    "ja": "{who} が実行中のコマンドに入力しようとしています",
+    "ko": "{who}이(가) 실행 중인 명령에 입력하려고 합니다",
+    "fr": "{who} veut écrire dans une commande en cours",
+    "de": "{who} möchte in einen laufenden Befehl schreiben",
+    "es": "{who} quiere escribir en un comando en ejecución"
+  },
+  "{who} wants to reach {host}": {
+    "zh-Hans": "{who} 想访问 {host}",
+    "zh-Hant": "{who} 想存取 {host}",
+    "ja": "{who} が {host} に接続しようとしています",
+    "ko": "{who}이(가) {host}에 접속하려고 합니다",
+    "fr": "{who} veut joindre {host}",
+    "de": "{who} möchte {host} erreichen",
+    "es": "{who} quiere conectarse a {host}"
+  },
+  "{who} wants to use {tool} from {server}": {
+    "zh-Hans": "{who} 想使用 {server} 的 {tool}",
+    "zh-Hant": "{who} 想使用 {server} 的 {tool}",
+    "ja": "{who} が {server} の {tool} を使おうとしています",
+    "ko": "{who}이(가) {server}의 {tool}을(를) 사용하려고 합니다",
+    "fr": "{who} veut utiliser {tool} de {server}",
+    "de": "{who} möchte {tool} von {server} verwenden",
+    "es": "{who} quiere usar {tool} de {server}"
+  },
+  "{server} asks you to open a page": {
+    "zh-Hans": "{server} 请你打开一个页面",
+    "zh-Hant": "{server} 請你開啟一個頁面",
+    "ja": "{server} がページを開くよう求めています",
+    "ko": "{server}이(가) 페이지를 열어 달라고 요청합니다",
+    "fr": "{server} vous demande d’ouvrir une page",
+    "de": "{server} bittet dich, eine Seite zu öffnen",
+    "es": "{server} te pide que abras una página"
+  },
+  "{who} asks something to answer in its terminal": {
+    "zh-Hans": "{who} 有个问题需要在它的终端里回答",
+    "zh-Hant": "{who} 有個問題需要在它的終端機裡回答",
+    "ja": "{who} がターミナルで答える質問をしています",
+    "ko": "{who}이(가) 터미널에서 답해야 할 것을 묻습니다",
+    "fr": "{who} pose une question à laquelle répondre dans son terminal",
+    "de": "{who} fragt etwas, das in seinem Terminal zu beantworten ist",
+    "es": "{who} pregunta algo que se responde en su terminal"
+  },
+  "Skip": {
+    "zh-Hans": "跳过",
+    "zh-Hant": "略過",
+    "ja": "スキップ",
+    "ko": "건너뛰기",
+    "fr": "Passer",
+    "de": "Überspringen",
+    "es": "Omitir"
   }
 }

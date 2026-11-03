@@ -50,8 +50,8 @@ const HOVER_ROW_H: Pixels = px(24.);
 /// (`KeptViews`).
 pub(crate) struct ConversationList {
     workbench: WeakEntity<Workbench>,
-    /// The session's list, by its key.
-    list: Option<(String, ListState)>,
+    /// The conversation's list, by which it is (`Detail::born`).
+    list: Option<(u64, ListState)>,
     pub(crate) kept: gpui_component::text::KeptViews,
     pub(crate) marks: crate::ambient::Marks,
 }
@@ -62,13 +62,16 @@ impl ConversationList {
         Self { workbench: workbench.downgrade(), list: None, kept: Default::default(), marks: Default::default() }
     }
 
-    /// The list to draw, the session's; whether it is another than the
-    /// one drawn last.
-    pub(crate) fn set_list(&mut self, key: &str, list: &ListState) -> bool {
-        if self.list.as_ref().is_some_and(|(k, _)| k == key) {
+    /// The list to draw; whether it is another than the one drawn last.
+    /// Told by which list it is, never by the session's key: a session's
+    /// tab closed and opened again has a new list under the same key, and
+    /// kept by the key the old one was drawn for ever, with the rounds it
+    /// had then, while every new round went to the new one.
+    pub(crate) fn set_list(&mut self, born: u64, list: &ListState) -> bool {
+        if self.list.as_ref().is_some_and(|(b, _)| *b == born) {
             return false;
         }
-        self.list = Some((key.to_string(), list.clone()));
+        self.list = Some((born, list.clone()));
         true
     }
 }

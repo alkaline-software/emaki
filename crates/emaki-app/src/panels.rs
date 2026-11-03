@@ -3335,7 +3335,10 @@ impl Workbench {
         match have {
             Some((dirty, mtime)) if dirty || mtime == on_disk => return,
             Some(_) => {}
-            None => self.word = None,
+            None => {
+                self.word = None;
+                self.word_scroll = None;
+            }
         }
         let path = path.to_path_buf();
         cx.spawn(async move |this, cx| {
@@ -3356,10 +3359,12 @@ impl Workbench {
                             cx.notify();
                         })
                         .detach();
+                        this.word_scroll = Some(pane.read(cx).pages_scroll());
                         this.word = Some(pane);
                     }
                     (Err(why), _) => {
                         this.word = None;
+                        this.word_scroll = None;
                         if let Some(v) = this.file_view.as_mut() {
                             v.body = FileBody::None(tf("Emaki cannot show this file: {why}.", &[("why", &why)]));
                         }
@@ -3429,6 +3434,7 @@ impl Workbench {
             self.show_word(path, cx);
         } else {
             self.word = None;
+            self.word_scroll = None;
         }
         if !pdf {
             return;
@@ -4497,7 +4503,10 @@ impl Workbench {
                 self.file_parked.retain(|p| p.path != ask.path);
                 self.file_drafts.remove(&ask.path);
             }
-            FileAnswer::Discard if self.word.as_ref().is_some_and(|w| w.read(cx).path == ask.path) => self.word = None,
+            FileAnswer::Discard if self.word.as_ref().is_some_and(|w| w.read(cx).path == ask.path) => {
+                self.word = None;
+                self.word_scroll = None;
+            }
             FileAnswer::Discard => {
                 // The editor goes back to what the file holds, as one
                 // step, so even this can be undone while it shows.
@@ -5231,7 +5240,18 @@ impl Workbench {
 
     /// Where the wheel is over the file's pane.
     pub(crate) fn file_pane_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.file_pane_shown().then(|| self.file_view_scroll.bounds())
+        self.file_pane_shown().then(|| self.file_scroller().bounds())
+    }
+
+    /// What scrolls in the file's pane: a Word document's pages while one
+    /// shows, which are drawn by a view of their own, else the pane's own
+    /// scroller. Read from the pane's alone, the router took a Word
+    /// document for whatever its stale bounds had been.
+    pub(crate) fn file_scroller(&self) -> ScrollHandle {
+        match (&self.word_scroll, &self.file_view) {
+            (Some(pages), Some(v)) if matches!(v.body, FileBody::Word) => pages.clone(),
+            _ => self.file_view_scroll.clone(),
+        }
     }
 
     fn file_menu(&mut self, node: Option<&Node>, at: Point<Pixels>, cx: &mut Context<Self>) {
@@ -9416,7 +9436,13 @@ impl Workbench {
             let editor = gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(self.cfg.app.text_sizes().editor)).on_secondary_click(menu).into_any_element();
             self.sublime_wrap(editor, cx)
         });
-        let word = self.word.as_ref().filter(|w| matches!(v.body, FileBody::Word) && !leaving && w.read(cx).path == v.path).map(|w| w.clone().into_any_element());
+        let word = self.word.as_ref().filter(|w| matches!(v.body, FileBody::Word) && !leaving && w.read(cx).path == v.path).map(|w| {
+            // Its list over the pages keeps the gesture begun on it.
+            if let Some(list) = w.read(cx).pick_scroll() {
+                self.inner_scroller(&list, crate::workbench::Inner::Over);
+            }
+            w.clone().into_any_element()
+        });
         let cut = match &v.body {
             FileBody::Code(_, _, dropped) if *dropped > 0 => Some(div().flex_shrink_0().px(px(pad_x)).py(px(8.)).border_t_1().border_color(theme.border).child(quiet(tf("Only the first {n} lines are shown. Open the file for the rest.", &[("n", &PREVIEW_LINES)])))),
             _ => None,
@@ -9653,6 +9679,7 @@ impl Workbench {
                         .border_b_1()
                         .border_color(theme.border)
                         .overflow_x_scroll()
+                        .restrict_scroll_to_axis()
                         .children(all.iter().enumerate().map(|(ix, (name, ..))| {
                             let path = v.path.clone();
                             div()
@@ -10713,6 +10740,17 @@ impl Workbench {
                 if let (Some(x), Some(y)) = (at.next(), at.next()) {
                     let how = if t.starts_with("clickat:") { Some(0.) } else if t.starts_with("rightat:") { Some(f32::INFINITY) } else if t.starts_with("wheel:") { Some(at.next().unwrap_or(-200.)) } else { None };
                     self.pending_pointer.push((point(px(x), px(y)), how));
+                    cx.notify();
+                }
+            }
+            // A flick begun at one place, its momentum carried to
+            // another: flick:<x>:<y>:<x2>:<y2>, toward the top, or with
+            // :down toward the foot. It prints what moved.
+            t if t.starts_with("flick:") => {
+                let dir = if t.ends_with(":down") { -1. } else { 1. };
+                let n: Vec<f32> = t["flick:".len()..].trim_end_matches(":down").split(':').filter_map(|v| v.parse().ok()).collect();
+                if let [x, y, x2, y2] = n[..] {
+                    self.pending_flick.push((point(px(x), px(y)), point(px(x2), px(y2)), dir));
                     cx.notify();
                 }
             }

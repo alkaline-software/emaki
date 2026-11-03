@@ -39,8 +39,11 @@
 //! - Codex asks by a request of its own: leave to run a command
 //!   (`item/commandExecution/requestApproval`), to change files
 //!   (`item/fileChange/requestApproval`), for wider permissions
-//!   (`item/permissions/requestApproval`), and a question
-//!   (`item/tool/requestUserInput`). Each is answered by its id.
+//!   (`item/permissions/requestApproval`), a question
+//!   (`item/tool/requestUserInput`), and what an MCP server asks
+//!   (`mcpServer/elicitation/request`: leave to call a tool, a page to
+//!   open, a form). Each is answered by its id. What has no card waits
+//!   for Codex's terminal, which is sent it too.
 //!   `serverRequest/resolved` says one is settled, whoever settled it.
 //! - `turn/interrupt` stops a turn.
 //!
@@ -312,6 +315,16 @@ struct Pending {
     question_ids: Vec<(String, String)>,
     /// What was asked for, when the answer is to grant it.
     permissions: Value,
+    /// An MCP server's form, a field a question.
+    fields: Vec<Field>,
+    /// Asked by a method of the old wire, which takes the old decisions.
+    legacy: bool,
+}
+
+impl Pending {
+    fn new(rpc_id: Value, kind: Ask, req: PermissionRequest) -> Self {
+        Self { rpc_id, kind, req, question_ids: Vec::new(), permissions: Value::Null, fields: Vec::new(), legacy: false }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -322,6 +335,147 @@ enum Ask {
     Question,
     /// Not Codex's: the go-ahead on a plan, which its terminal asks itself.
     Plan,
+    /// An MCP server's tool, called once the person allows it.
+    McpTool,
+    /// An MCP server's page to open (a sign-in).
+    McpUrl,
+    /// An MCP server's form, put as a question.
+    McpForm,
+    /// What the window cannot draw: Codex's terminal, joined to the same
+    /// server, has it too, and it is answered there. Passed by, it is
+    /// declined (an MCP server's), or said to be beyond us.
+    Terminal { elicitation: bool },
+}
+
+/// One field of an MCP server's form, as the question it is put as.
+#[derive(Clone, Debug, PartialEq)]
+struct Field {
+    key: String,
+    question: String,
+    kind: FieldKind,
+    /// What the server takes when nothing is said for it.
+    default: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum FieldKind {
+    Text,
+    Number { integer: bool },
+    Yes,
+    /// Choices, each its label and the value sent for it.
+    Pick { choices: Vec<(String, Value)>, multi: bool },
+}
+
+/// The words a yes-or-no field's two choices are put as. Not shown in
+/// the window's language: they are the card's choices as the form's own
+/// words are.
+const YES: &str = "Yes";
+const NO: &str = "No";
+
+/// An MCP server's form as questions the question card can take: a choice
+/// for each field with choices, and at most one field to be typed, since
+/// words typed in the composer answer one question. A form with more, or
+/// with a field of a kind it does not know, is not one (None), and goes
+/// to Codex's terminal.
+fn form_fields(schema: &Value) -> Option<Vec<Field>> {
+    let props = schema.get("properties")?.as_object()?;
+    let mut fields = Vec::new();
+    for (key, p) in props {
+        let title = str_of(p, "title");
+        let description = str_of(p, "description");
+        let question = match (title.is_empty(), description.is_empty()) {
+            (false, false) => format!("{title}: {description}"),
+            (false, true) => title.to_string(),
+            (true, false) => description.to_string(),
+            (true, true) => key.clone(),
+        };
+        let labels = |options: &[Value]| -> Vec<(String, Value)> {
+            options.iter().filter_map(|o| Some((o.as_str()?.to_string(), o.clone()))).collect()
+        };
+        let titled = |options: &[Value]| -> Vec<(String, Value)> {
+            options.iter().filter_map(|o| {
+                let value = o.get("const")?.clone();
+                let label = o.get("title").and_then(Value::as_str).map(str::to_string).or_else(|| value.as_str().map(str::to_string))?;
+                Some((label, value))
+            }).collect()
+        };
+        let kind = match str_of(p, "type") {
+            "boolean" => FieldKind::Yes,
+            "number" => FieldKind::Number { integer: false },
+            // A few whole numbers are choices.
+            "integer" => match (p.get("minimum").and_then(Value::as_i64), p.get("maximum").and_then(Value::as_i64)) {
+                (Some(lo), Some(hi)) if lo <= hi && hi - lo < 10 => FieldKind::Pick { choices: (lo..=hi).map(|n| (n.to_string(), json!(n))).collect(), multi: false },
+                _ => FieldKind::Number { integer: true },
+            },
+            "array" => {
+                let items = p.get("items").unwrap_or(&Value::Null);
+                let choices = if let Some(e) = items.get("enum").and_then(Value::as_array) { labels(e) } else { titled(items.get("anyOf").or_else(|| items.get("oneOf")).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])) };
+                if choices.is_empty() {
+                    return None;
+                }
+                FieldKind::Pick { choices, multi: true }
+            }
+            "string" | "" => {
+                if let Some(e) = p.get("enum").and_then(Value::as_array) {
+                    // The legacy titled enum: its labels beside it.
+                    let names: Vec<&str> = p.get("enumNames").and_then(Value::as_array).map(|n| n.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                    let mut choices = labels(e);
+                    if names.len() == choices.len() {
+                        for (c, n) in choices.iter_mut().zip(names) {
+                            c.0 = n.to_string();
+                        }
+                    }
+                    FieldKind::Pick { choices, multi: false }
+                } else if let Some(o) = p.get("oneOf").and_then(Value::as_array) {
+                    FieldKind::Pick { choices: titled(o), multi: false }
+                } else {
+                    FieldKind::Text
+                }
+            }
+            _ => return None,
+        };
+        fields.push(Field { key: key.clone(), question, kind, default: p.get("default").filter(|d| !d.is_null()).cloned() });
+    }
+    let typed = fields.iter().filter(|f| matches!(f.kind, FieldKind::Text | FieldKind::Number { .. })).count();
+    (!fields.is_empty() && typed <= 1).then_some(fields)
+}
+
+/// The form's answer as the server's schema takes it, from the card's
+/// answers by question: a choice's value, a number as a number, yes or
+/// no as true or false. None when a field cannot be read so.
+fn form_content(fields: &[Field], answers: &Map<String, Value>) -> Option<Value> {
+    let mut out = Map::new();
+    for f in fields {
+        let said: Vec<String> = match answers.get(&f.question) {
+            Some(Value::String(s)) => s.split(", ").map(str::to_string).collect(),
+            Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+            _ => Vec::new(),
+        };
+        let first = said.first().map(|s| s.trim()).unwrap_or("");
+        if first.is_empty() {
+            if let Some(d) = &f.default {
+                out.insert(f.key.clone(), d.clone());
+            }
+            continue;
+        }
+        let value = match &f.kind {
+            FieldKind::Text => json!(said.join(", ")),
+            FieldKind::Number { integer: true } => json!(first.parse::<i64>().ok()?),
+            FieldKind::Number { integer: false } => json!(first.parse::<f64>().ok()?),
+            FieldKind::Yes => json!(first == YES),
+            FieldKind::Pick { choices, multi } => {
+                let picked: Vec<Value> = said.iter().filter_map(|l| choices.iter().find(|(label, _)| label == l.trim()).map(|(_, v)| v.clone())).collect();
+                match (multi, picked.first()) {
+                    (true, _) => Value::Array(picked),
+                    (false, Some(v)) => v.clone(),
+                    // Words typed for a field with choices: as they are.
+                    (false, None) => json!(first),
+                }
+            }
+        };
+        out.insert(f.key.clone(), value);
+    }
+    Some(Value::Object(out))
 }
 
 struct Inner {
@@ -508,6 +662,12 @@ impl CodexDriver {
         let binary = codex_binary().ok_or_else(|| DriverError("codex is not installed".into()))?;
         let mut cmd = crate::process::command(binary);
         cmd.arg("app-server");
+        // EMAKI_CODEX_CONFIG=<key=value>;<key=value> hands the server
+        // config of a probe's own (an MCP server to ask with), with the
+        // person's config.toml left as it is.
+        for kv in std::env::var("EMAKI_CODEX_CONFIG").unwrap_or_default().split(';').filter(|kv| !kv.is_empty()) {
+            cmd.arg("-c").arg(kv);
+        }
         let asked = listen.then(socket_path);
         if let Some(path) = &asked {
             let _ = std::fs::remove_file(path);
@@ -892,7 +1052,7 @@ impl CodexDriver {
             let mut input = Map::new();
             input.insert("plan".into(), json!(plan));
             let req = PermissionRequest { request_id: id.clone(), tool_name: "ExitPlanMode".into(), tool_use_id: id.clone(), input, description: "Implement this plan?".into(), asked_at: now_secs() };
-            crate::held(&self.inner).pending.insert(id, Pending { rpc_id: Value::Null, kind: Ask::Plan, req: req.clone(), question_ids: Vec::new(), permissions: Value::Null });
+            crate::held(&self.inner).pending.insert(id, Pending::new(Value::Null, Ask::Plan, req.clone()));
             self.emit(Event::Permission(req));
         }
         if let Some((text, input)) = next {
@@ -924,6 +1084,15 @@ impl CodexDriver {
                     c => c,
                 };
                 input.insert("command".into(), json!(plain_command(command)));
+                // Leave to reach a host, or to type into a command that
+                // is running: said with what it is for.
+                let host = params.get("networkApprovalContext").map(|c| str_of(c, "host")).unwrap_or("");
+                if !host.is_empty() {
+                    input.insert("host".into(), json!(host));
+                }
+                if str_of(params, "kind") == "writeStdin" {
+                    input.insert("stdin".into(), json!(true));
+                }
                 if !reason.is_empty() {
                     input.insert("description".into(), json!(reason));
                 }
@@ -964,6 +1133,12 @@ impl CodexDriver {
                 }
                 (Ask::Permissions, "request_permissions")
             }
+            // A secret is typed where it is not kept: in Codex's terminal,
+            // never in the composer, whose words stay on the screen.
+            "item/tool/requestUserInput" if arr_of(params, "questions").iter().any(|q| q.get("isSecret").and_then(Value::as_bool) == Some(true)) => {
+                input.insert("message".into(), json!(arr_of(params, "questions").iter().map(|q| str_of(q, "question")).collect::<Vec<_>>().join("\n")));
+                (Ask::Terminal { elicitation: false }, crate::driver::TERMINAL_ASK)
+            }
             "item/tool/requestUserInput" => {
                 let questions: Vec<Value> = arr_of(params, "questions")
                     .iter()
@@ -976,16 +1151,88 @@ impl CodexDriver {
                 input.insert("questions".into(), json!(questions));
                 (Ask::Question, "AskUserQuestion")
             }
-            // Asked of a host that has what we do not (the editor's own
-            // tools, its sign-in): said so, and Codex goes on without.
-            _ => {
+            // An MCP server asks, by Codex: leave to call one of its
+            // tools (a form with nothing to fill, which Codex marks), a
+            // page to open, or a form.
+            "mcpServer/elicitation/request" => {
+                let server = str_of(params, "serverName");
+                let message = str_of(params, "message");
+                let meta = params.get("_meta").unwrap_or(&Value::Null);
+                input.insert("server".into(), json!(server));
+                if !message.is_empty() {
+                    input.insert("message".into(), json!(message));
+                }
+                let mode = str_of(params, "mode");
+                if mode == "form" && str_of(meta, "codex_approval_kind") == "mcp_tool_call" {
+                    let call = crate::held(&self.inner).items.values().find(|i| str_of(i, "type") == "mcpToolCall" && str_of(i, "server") == server).cloned().unwrap_or(Value::Null);
+                    let tool = match str_of(meta, "tool_title") {
+                        "" => str_of(&call, "tool").to_string(),
+                        t => t.to_string(),
+                    };
+                    input.insert("tool".into(), json!(tool));
+                    // What it is called with, as Codex names each value.
+                    let shown: Vec<String> = arr_of(meta, "tool_params_display").iter().map(|p| format!("{}: {}", match str_of(p, "display_name") { "" => str_of(p, "name"), n => n }, p.get("value").map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())).unwrap_or_default())).collect();
+                    if !shown.is_empty() {
+                        input.insert("arguments".into(), json!(shown.join("\n")));
+                    } else if let Some(args) = meta.get("tool_params").or_else(|| call.get("arguments")).filter(|a| !a.is_null()) {
+                        input.insert("arguments".into(), json!(serde_json::to_string_pretty(args).unwrap_or_default()));
+                    }
+                    let about = str_of(meta, "tool_description");
+                    if !about.is_empty() {
+                        input.insert("description".into(), json!(about));
+                    }
+                    (Ask::McpTool, crate::driver::MCP_TOOL_ASK)
+                } else if mode == "url" {
+                    input.insert("url".into(), json!(str_of(params, "url")));
+                    (Ask::McpUrl, crate::driver::OPEN_URL_ASK)
+                } else if let Some(found) = (mode == "form").then(|| params.get("requestedSchema").and_then(form_fields)).flatten() {
+                    let questions: Vec<Value> = found
+                        .iter()
+                        .map(|f| {
+                            let (options, multi): (Vec<Value>, bool) = match &f.kind {
+                                FieldKind::Yes => (vec![json!({"label": YES, "description": ""}), json!({"label": NO, "description": ""})], false),
+                                FieldKind::Pick { choices, multi } => (choices.iter().map(|(l, _)| json!({"label": l, "description": ""})).collect(), *multi),
+                                _ => (Vec::new(), false),
+                            };
+                            json!({"question": f.question, "header": server, "options": options, "multiSelect": multi})
+                        })
+                        .collect();
+                    input.insert("questions".into(), json!(questions));
+                    let req = PermissionRequest { request_id: key.clone(), tool_name: "AskUserQuestion".into(), tool_use_id: String::new(), input, description: message.to_string(), asked_at: now_secs() };
+                    let mut pending = Pending::new(rpc_id, Ask::McpForm, req.clone());
+                    pending.fields = found;
+                    crate::held(&self.inner).pending.insert(key, pending);
+                    self.emit(Event::Permission(req));
+                    return;
+                } else {
+                    (Ask::Terminal { elicitation: true }, crate::driver::TERMINAL_ASK)
+                }
+            }
+            // Asked of a host that has what we do not (tools of its own,
+            // its sign-in, an attestation): said so, and Codex goes on
+            // without. Nothing of these waits on the person.
+            "item/tool/call" | "account/chatgptAuthTokens/refresh" | "attestation/generate" => {
                 let _ = self.write(&json!({"id": rpc_id, "error": {"code": -32601, "message": format!("Emaki does not answer {method}")}}));
                 return;
+            }
+            // Anything else is a newer Codex asking something new. Its
+            // terminal, joined to this server, asks it too: the card
+            // sends the person there.
+            _ => {
+                let message = str_of(params, "message");
+                if !message.is_empty() {
+                    input.insert("message".into(), json!(message));
+                }
+                (Ask::Terminal { elicitation: false }, crate::driver::TERMINAL_ASK)
             }
         };
         let description = if kind == Ask::Question { String::new() } else { reason };
         let req = PermissionRequest { request_id: key.clone(), tool_name: tool.into(), tool_use_id: str_of(params, "itemId").into(), input, description, asked_at: now_secs() };
-        crate::held(&self.inner).pending.insert(key, Pending { rpc_id, kind, req: req.clone(), question_ids, permissions });
+        let mut pending = Pending::new(rpc_id, kind, req.clone());
+        pending.question_ids = question_ids;
+        pending.permissions = permissions;
+        pending.legacy = matches!(method, "execCommandApproval" | "applyPatchApproval");
+        crate::held(&self.inner).pending.insert(key, pending);
         self.emit(Event::Permission(req));
     }
 
@@ -1354,7 +1601,18 @@ impl Drive for CodexDriver {
     fn answer_permission(&self, request_id: &str, allow: bool, _message: &str) {
         let Some(p) = crate::held(&self.inner).pending.remove(request_id) else { return };
         match p.kind {
+            // The old wire's words for the same two answers.
+            Ask::Command | Ask::Files if p.legacy => self.answer(&p.rpc_id, json!({"decision": if allow { json!("approved") } else { json!({"denied": {"rejection": "declined in Emaki"}}) }})),
             Ask::Command | Ask::Files => self.answer(&p.rpc_id, json!({"decision": if allow { "accept" } else { "decline" }})),
+            Ask::McpTool | Ask::McpUrl => self.answer(&p.rpc_id, json!({"action": if allow { "accept" } else { "decline" }, "content": null, "_meta": null})),
+            // A form's answer goes through `answer_question`.
+            Ask::McpForm => self.answer(&p.rpc_id, json!({"action": "decline", "content": null, "_meta": null})),
+            // Answered in the terminal, which settles it for us too
+            // (`serverRequest/resolved`); passed by here, declined.
+            Ask::Terminal { elicitation: true } => self.answer(&p.rpc_id, json!({"action": "decline", "content": null, "_meta": null})),
+            Ask::Terminal { elicitation: false } => {
+                let _ = self.write(&json!({"id": p.rpc_id, "error": {"code": -32601, "message": "declined in Emaki"}}));
+            }
             Ask::Permissions => self.answer(&p.rpc_id, json!({"permissions": if allow { p.permissions.clone() } else { json!({}) }, "scope": "turn"})),
             // No answer but the declined one: a question's answer goes
             // through `answer_question`.
@@ -1386,6 +1644,15 @@ impl Drive for CodexDriver {
 
     fn answer_question(&self, request_id: &str, answers: Map<String, Value>) {
         let Some(p) = crate::held(&self.inner).pending.remove(request_id) else { return };
+        if p.kind == Ask::McpForm {
+            let reply = match form_content(&p.fields, &answers) {
+                Some(content) => json!({"action": "accept", "content": content, "_meta": null}),
+                None => json!({"action": "decline", "content": null, "_meta": null}),
+            };
+            self.answer(&p.rpc_id, reply);
+            self.emit(Event::PermissionSettled(request_id.to_string()));
+            return;
+        }
         let mut out = Map::new();
         for (question, id) in &p.question_ids {
             let said: Vec<String> = match answers.get(question) {
@@ -1438,6 +1705,35 @@ pub fn thread_call(method: &str, thread_id: &str) -> Result<(), DriverError> {
 
 #[cfg(test)]
 mod tests {
+    // The form an MCP server sent through Codex 0.162.1, as it came.
+    fn probe_form() -> Value {
+        json!({"type": "object", "properties": {
+            "color": {"type": "string", "title": "Favorite color", "enum": ["red", "green", "blue"], "enumNames": ["Red", "Green", "Blue"]},
+            "count": {"type": "integer", "title": "How many", "minimum": 1, "maximum": 5, "default": 2},
+            "name": {"type": "string", "title": "Your name", "description": "What to call you", "minLength": 1},
+            "proceed": {"type": "boolean", "title": "Proceed?", "default": true}
+        }, "required": ["name", "color"]})
+    }
+
+    #[test]
+    fn an_mcp_form_is_answered_as_its_schema_takes_it() {
+        let fields = super::form_fields(&probe_form()).expect("one field to type, the rest choices");
+        let q = |key: &str| fields.iter().find(|f| f.key == key).unwrap().question.clone();
+        assert_eq!(q("name"), "Your name: What to call you");
+        let mut answers = Map::new();
+        answers.insert(q("color"), json!("Green"));
+        answers.insert(q("name"), json!("Ada"));
+        answers.insert(q("proceed"), json!("No"));
+        // The count is not answered: it takes its default.
+        assert_eq!(super::form_content(&fields, &answers).unwrap(), json!({"color": "green", "name": "Ada", "proceed": false, "count": 2}));
+        answers.insert(q("count"), json!("4"));
+        assert_eq!(super::form_content(&fields, &answers).unwrap()["count"], json!(4));
+        // Two fields to type are more than the composer answers.
+        let two = json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "number"}}});
+        assert!(super::form_fields(&two).is_none());
+        assert!(super::form_fields(&json!({"type": "object", "properties": {}})).is_none());
+    }
+
     use super::*;
 
     #[test]

@@ -4846,6 +4846,12 @@ fn what_covers_the_prompt_is_named_and_says_what_esc_does() {
     let prompt = format!("  hello\n{rule}\n❯ \n{rule}\n  auto mode on (shift+tab to cycle) · Esc to close\n");
     assert_eq!(cover_on_screen(&prompt), None, "a prompt on the screen is not covered");
     assert_eq!(held_on_screen("  something nobody has seen\n"), Held::Other);
+    // The question whether to trust a folder (2.1.317) says what Esc does
+    // at its foot, but Esc there is "No, exit": not a panel to close.
+    let trust = format!("{rule}\n Accessing workspace:\n\n /tmp/new-repo\n\n Quick safety check: Is this a project you created or one you trust?\n\n Security guide\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n");
+    assert!(emaki_core::driver::trust_on_screen(&trust));
+    assert_eq!(cover_on_screen(&trust), None);
+    assert_eq!(held_on_screen(&trust), Held::Other);
 
     let typed = format!("{rule}\n❯ [Image #4][Pasted text #5 +15 lines]\n{rule}\n");
     assert_eq!(prompt_words(&typed).as_deref(), Some("[Image #4][Pasted text #5 +15 lines]"));

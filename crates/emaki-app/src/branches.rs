@@ -709,7 +709,11 @@ impl Workbench {
                         .child(div().min_w_0().truncate().child(crate::format::ago(m.when as f64, now)))
                         .when(m.local, |d| d.child(div().flex_shrink_0().text_color(theme.primary).child(t("not pushed yet")))),
                 )
-                .when(!m.body.is_empty(), |d| d.child(div().id("history-body").mt(px(4.)).max_h(px(72.)).overflow_y_scroll().text_size(px(12.5)).line_height(px(18.)).text_color(theme.foreground.opacity(0.85)).child(m.body.clone())))
+                .when(!m.body.is_empty(), |d| {
+                    // Its own scroller, with the bar every one has.
+                    let (scroll, _) = self.kept_scroll("history-body".into(), crate::workbench::Inner::Over);
+                    d.child(div().relative().mt(px(4.)).child(div().id("history-body").max_h(px(72.)).overflow_y_scroll().track_scroll(&scroll).text_size(px(12.5)).line_height(px(18.)).text_color(theme.foreground.opacity(0.85)).child(m.body.clone())).vertical_scrollbar(&scroll))
+                })
         });
         let file_head = c.commit_file.clone().map(|rel| {
             h_flex()
@@ -890,7 +894,7 @@ impl Workbench {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, window, cx| swallow_click(window, cx))
             .child(field("commit-summary", summary_focus).h(px(32.)).items_center().child(div().flex_1().min_w_0().child(gpui_component::input::Input::new(&self.commit_summary).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_summary, false, cx)))).child(star))
-            .child(field("commit-body", body_focus).py(px(4.)).items_start().child(gpui_component::input::Textarea::new(&self.commit_body).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_body, false, cx))))
+            .child(field("commit-body", body_focus).relative().py(px(4.)).items_start().child(gpui_component::input::Textarea::new(&self.commit_body).appearance(false).bordered(false).on_secondary_click(self.input_menu(&self.commit_body, false, cx))).child(self.field_place(cx)))
             .child(choice_pill("commit-go", "icons/check.svg", label, Press::Primary, off, &theme).w_full().min_w_0().justify_center().children(branch.map(|b| div().min_w_0().truncate().ml(px(-2.)).font_weight(FontWeight::SEMIBOLD).child(b))).when(!after.is_empty(), |d| d.child(div().flex_shrink_0().ml(px(-2.)).child(after))).managed_tooltip(|window, cx| crate::workbench::tip(t("Commit (⌘↩)"), window, cx)).when(!off, |d| {
                 d.on_click(cx.listener(|this, _, window, cx| {
                     swallow_click(window, cx);

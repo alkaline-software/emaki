@@ -76,6 +76,8 @@ EMAKI_TERM_KEYS=left,s EMAKI_GO=pill:effort EMAKI_OPEN=<id> ./target/debug/Emaki
 EMAKI_SHOT=/tmp/shot.png EMAKI_OPEN=<id> ./target/debug/Emaki  # write a picture of the window there after EMAKI_SHOT_AFTER seconds (5) and quit
 ```
 
+`EMAKI_GO` step `choose:<label>` clicks that choice on a driver's question card and `reply:<words>` types those words as its answer; `askterm` is Show the terminal on what only the agent's terminal can take. `EMAKI_CODEX_CONFIG=<key=value>;<key=value>` hands Codex's app server config of the probe's own with `-c`, with `~/.codex/config.toml` left as it is: an MCP server to ask with, as `mcp_servers.<name>.command=…;mcp_servers.<name>.args=[…]`.
+
 `EMAKI_GO` steps run five seconds apart, separated by ";". `EMAKI_SHOT` writes the picture after `EMAKI_SHOT_AFTER` seconds (5) and quits, so set that past the last step. The picture is taken from inside (`sys::shoot_window`): a process may capture its own window without Screen Recording access, which the terminal running the probe often lacks. Crop a capture with PIL to read a detail.
 
 `EMAKI_KEYS=send` is ⌘↩, `blur` takes the focus off everything, and `astray` puts it on an element no frame holds, as a thing closed leaves it (`EMAKI_FOCUS_DEBUG=1` prints where it is at every draw, and whether the native keyboard is at the window's own view; `EMAKI_GO=web:keys` gives it to the page in the web view as a click there does, and `EMAKI_KEYS_STAY=1` stops the window taking it back): `EMAKI_KEYS=tabs,blur,closetab,tabs` shows what ⌘W does then.

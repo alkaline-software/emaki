@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 
@@ -346,6 +347,74 @@ pub(crate) struct TermView {
     edge_col: u16,
     edge_rows: f32,
     edge_run: bool,
+    /// What its bar reads and moves (`TermScroll`).
+    pub(crate) scroll: TermScroll,
+}
+
+/// A terminal's scrolling back, as the toolkit's bar takes a scroller:
+/// the kept lines over the screen are the content, and how far back it
+/// is, the offset. The terminal has no scroller of its own (it draws
+/// the rows for where it is back to), so this is what the bar every
+/// scroller has reads and moves.
+///
+/// At its foot it says the kept lines it last saw: what a program prints
+/// there adds lines, and the bar, which shows whenever the offset
+/// changes, came up at every one. It takes up the count again whenever it
+/// is scrolled.
+#[derive(Clone, Default)]
+pub(crate) struct TermScroll(Rc<std::cell::RefCell<TermScrollAt>>);
+
+#[derive(Default)]
+struct TermScrollAt {
+    bounds: Bounds<Pixels>,
+    line_h: f32,
+    rows: usize,
+    kept: usize,
+    back: usize,
+    /// How far back a drag of the bar's thumb asks for, until it is drawn.
+    asked: Option<usize>,
+}
+
+impl TermScroll {
+    /// As the screen is drawn: where, how tall a line is, how many rows,
+    /// how far back, and the kept lines, read only once it has moved.
+    fn drawn(&self, bounds: Bounds<Pixels>, line_h: f32, rows: usize, back: usize, kept: impl FnOnce() -> usize) {
+        let mut at = self.0.borrow_mut();
+        if at.back != back {
+            at.kept = kept();
+        }
+        (at.bounds, at.line_h, at.rows, at.back) = (bounds, line_h.max(1.), rows, back);
+    }
+
+    /// How far back a drag of the thumb asked for, once.
+    fn asked(&self) -> Option<usize> {
+        self.0.borrow_mut().asked.take()
+    }
+}
+
+impl gpui_component::scroll::ScrollbarHandle for TermScroll {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        self.0.borrow().bounds
+    }
+
+    fn offset(&self) -> Point<Pixels> {
+        let at = self.0.borrow();
+        point(px(0.), px(-((at.kept.saturating_sub(at.back)) as f32 * at.line_h)))
+    }
+
+    fn set_offset(&self, offset: Point<Pixels>) {
+        let mut at = self.0.borrow_mut();
+        let from_top = (-f32::from(offset.y) / at.line_h).round().max(0.) as usize;
+        let back = at.kept.saturating_sub(from_top);
+        at.back = back;
+        at.asked = Some(back);
+    }
+
+    fn content_size(&self) -> Size<Pixels> {
+        let at = self.0.borrow();
+
+        size(at.bounds.size.width, px((at.kept + at.rows) as f32 * at.line_h).max(at.bounds.size.height))
+    }
 }
 
 impl TermView {
@@ -358,6 +427,7 @@ impl TermView {
             back: 0,
             wheel: 0.,
             cell_w: 0.,
+            scroll: TermScroll::default(),
             edit: Arc::new(Mutex::new(None)),
             mouse: None,
             mouse_cell: (0, 0),
@@ -630,6 +700,32 @@ impl Workbench {
         }
     }
 
+    /// The agent terminal in the CLI layout, for what the agent asks
+    /// that only its terminal can take. Codex's joins its driver, which
+    /// asked; with the keyboard there.
+    pub(crate) fn show_agent_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent_terminal_up(cx) {
+            window.focus(&self.agent_view.focus, cx);
+        }
+    }
+
+    /// The agent terminal started where it joins, and the CLI layout;
+    /// whether the layout could be had.
+    fn agent_terminal_up(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(r) = self.selected_ref().cloned() {
+            match r.agent {
+                AgentId::Codex => self.hub.attach_terminal(r.agent, &r.session_id, &r.cwd),
+                // Its hidden terminal is what asked, and is already there.
+                AgentId::ClaudeCode => {}
+            }
+        }
+        if !self.cli_possible() {
+            return false;
+        }
+        self.layout_go(true, cx);
+        true
+    }
+
     /// The layout goes to the CLI's or back to the rendered one. The
     /// change is drawn where it is seen (`layout_seen`).
     pub(crate) fn layout_go(&mut self, cli: bool, cx: &mut Context<Self>) {
@@ -693,6 +789,10 @@ impl Workbench {
         match step {
             "term" | "term:shell" => self.term_go(true, cx),
             "term:agent" | "layout:cli" => self.layout_go(true, cx),
+            // "Show the terminal" on what only the agent's terminal takes.
+            "askterm" => {
+                self.agent_terminal_up(cx);
+            }
             "layout:rendered" => self.layout_go(false, cx),
             "term:off" => self.term_go(false, cx),
             "term:start" => {
@@ -1019,7 +1119,7 @@ impl Workbench {
         } else {
             self.shell_reveal = None;
         }
-        let mut row = h_flex().id("shell-tabs").min_w_0().h_full().items_center().gap(px(TAB_GAP)).overflow_x_scroll().track_scroll(&self.shell_scroll).on_drag_move::<DragShell>(cx.listener(move |this, e: &DragMoveEvent<DragShell>, _, cx| {
+        let mut row = h_flex().id("shell-tabs").min_w_0().h_full().items_center().gap(px(TAB_GAP)).overflow_x_scroll().restrict_scroll_to_axis().track_scroll(&self.shell_scroll).on_drag_move::<DragShell>(cx.listener(move |this, e: &DragMoveEvent<DragShell>, _, cx| {
             let id = e.drag(cx).0;
             this.shell_drag_to(id, e.event.position.x, e.bounds, tab_w, cx);
         }));
@@ -2328,9 +2428,22 @@ impl Workbench {
             }
         };
 
+        // The bar's thumb dragged: that far back. Then the bar is told
+        // where the screen now is.
+        if let Some(back) = self.view(agent).scroll.asked() {
+            let most = self.term_pty_of(agent).map(|p| p.kept_back()).unwrap_or(0);
+            self.view_mut(agent).back = back.min(most);
+        }
+        {
+            let view = self.view(agent);
+            let rows = view.size.get().0 as usize;
+            let pty = self.term_pty_of(agent);
+            view.scroll.drawn(view.bounds.get(), self.term_line_h(), rows, view.back, || pty.map(|p| p.kept_back()).unwrap_or(0));
+        }
         let lines_back = self.view(agent).back;
         let back = (lines_back > 0).then(|| div().flex_shrink_0().pr(px(10.)).font(face.clone()).text_size(px(11.)).text_color(hsla(k.tab_off)).child(crate::i18n::count(lines_back, "{n} line back", "{n} lines back")));
         let bounds = self.view(agent).bounds.clone();
+        let term_scroll = self.view(agent).scroll.clone();
         let entity = cx.entity().downgrade();
         let screen = div()
             .id(if agent { "term-agent" } else { "term-panel-shell" })
@@ -2428,7 +2541,10 @@ impl Workbench {
                 .absolute()
                 .size_full(),
             ))
-            .child(body);
+            .child(body)
+            // The bar every scroller has, over the kept lines: last, over
+            // the screen's layers.
+            .vertical_scrollbar(&term_scroll);
         // The agent terminal has the conversation's room under the path
         // bar, which names its session; how far back it is scrolled is
         // said at the screen's top right.

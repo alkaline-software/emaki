@@ -792,6 +792,9 @@ struct TabView {
 pub enum Pane {
     /// The sidebar: the projects' card is what scrolls there.
     Sidebar,
+    /// The pinned projects over the rest, when they have more than shows:
+    /// a list of their own, which a flick in the rest never moves.
+    Pins,
     Content,
     /// The two panels beside a conversation.
     Files,
@@ -807,6 +810,13 @@ pub enum Pane {
     HistoryFiles,
     /// Over such a card or sheet, on nothing that scrolls.
     Nowhere,
+    /// In the sidebar or the content, over nothing the router scrolls:
+    /// the composer, the tray, the folder's line, the tabs, the sidebar's
+    /// foot. What is under the pointer there takes the wheel as the
+    /// toolkit gives it (the composer its own words); carried off it, the
+    /// gesture moves nothing. Owned by the pane around it, a flick in an
+    /// empty composer went on to scroll the conversation.
+    Still,
     /// The file shown at the conversation's right.
     File,
     /// The shell terminal at the conversation's right.
@@ -1038,6 +1048,10 @@ pub struct Detail {
     pub path: PathBuf,
     pub session: Rc<Session>,
     pub list: ListState,
+    /// Which list this is: a conversation made again for the same
+    /// session (its tab closed and opened again) has a new list, and the
+    /// kept view must take it up (`ConversationList::set_list`).
+    pub born: u64,
     /// Thumbnails of images pasted into prompts, read back out of the
     /// transcript on demand. `None` while a load is in flight.
     pub thumbs: HashMap<String, Option<Thumb>>,
@@ -1604,8 +1618,8 @@ pub struct Workbench {
     /// Since when a waiting screen has been read as still being drawn.
     dialog_unsettled: Option<Instant>,
     dialog_h: Rc<std::cell::Cell<f32>>,
-    /// Whether the cards at the conversation's end were drawn since the
-    /// page was last built: they are not when the reader is far above.
+    /// Whether the cards at the conversation's end were drawn in the
+    /// list's last drawing: they are not when the reader is far above.
     cards_drawn: std::cell::Cell<bool>,
     /// The conversation on its way to its end, where the cards are:
     /// when it set off and when it last moved (`end_glide_step`).
@@ -1845,6 +1859,9 @@ pub struct Workbench {
     /// handles of those that have no field of their own, by name, with
     /// whether this draw used each. See `Inner`.
     inner_live: std::cell::RefCell<Vec<(ScrollHandle, Inner)>>,
+    /// Where a field that scrolls by itself is, as last drawn: a gesture
+    /// begun on one is the field's (`route_scroll`, `field_place`).
+    pub(crate) fields_live: std::cell::RefCell<Vec<Bounds<Pixels>>>,
     /// The same for what is drawn inside the conversation's list. The
     /// list is a view the window keeps between frames, and a frame that
     /// replays it draws none of its scrollers: they stay named until it
@@ -1859,10 +1876,8 @@ pub struct Workbench {
     inner_kept: std::cell::RefCell<HashMap<SharedString, KeptScroll>>,
     /// The scroll positions momentum may be forwarded to.
     side_scroll: ScrollHandle,
-    /// The pinned projects' own scroller, over the rest, and whether the
-    /// wheel's gesture under way began on it.
+    /// The pinned projects' own scroller, over the rest (`Pane::Pins`).
     pin_scroll: ScrollHandle,
-    scroll_pins: bool,
     sessions_scroll: ScrollHandle,
     home_scroll: ScrollHandle,
     /// The handscroll over the greeting, as it answers the pointer.
@@ -2240,6 +2255,8 @@ pub struct Workbench {
     /// The Word document in the file's pane, written in there
     /// (`word.rs`).
     pub(crate) word: Option<Entity<crate::word::WordPane>>,
+    /// The Word document's pages' scroller, as `word` has it.
+    pub(crate) word_scroll: Option<ScrollHandle>,
     /// The pages a file showed before it was drawn again at a new
     /// width, and since when: kept under the new for a moment.
     pub(crate) pdf_under: Option<(std::sync::Arc<crate::panels::PdfDoc>, Instant)>,
@@ -2362,6 +2379,9 @@ pub struct Workbench {
     /// Where `EMAKI_GO=pointer:<x>:<y>` moves the pointer to.
     /// None a move, Some(0) a click, Some(dy) a scroll of dy points.
     pub(crate) pending_pointer: Vec<(Point<Pixels>, Option<f32>)>,
+    /// A probe's flicks (`flick:`): a gesture begun at the first place
+    /// whose momentum is carried to the second.
+    pub(crate) pending_flick: Vec<(Point<Pixels>, Point<Pixels>, f32)>,
     /// A probe's drags with the left button, from and to (`dragat:`),
     /// and whether to print what is selected once they are done (`seltext`).
     pub(crate) pending_drag: Vec<(Point<Pixels>, Point<Pixels>, bool)>,
@@ -3689,8 +3709,11 @@ impl Workbench {
                         this.dots_drawn = dots;
                         cx.notify();
                     }
-                    this.read_shell_tails();
-                    this.read_agent_steps();
+                    // The cards drawn from these are in the conversation's
+                    // list, which is drawn afresh only at a notify.
+                    if this.read_shell_tails() | this.read_agent_steps() {
+                        cx.notify();
+                    }
                     this.tick_files(cx);
                     // The status line's files once a minute, which is the
                     // countdown's own resolution; a session's load reads
@@ -4352,13 +4375,13 @@ impl Workbench {
             scroll_owner: None,
             last_scroll: Instant::now(),
             inner_live: Default::default(),
+            fields_live: Default::default(),
             inner_list: Default::default(),
             in_list: Default::default(),
             scroll_inner: None,
             inner_kept: Default::default(),
             side_scroll: ScrollHandle::new(),
             pin_scroll: ScrollHandle::new(),
-            scroll_pins: false,
             sessions_scroll: ScrollHandle::new(),
             home_scroll: ScrollHandle::new(),
             home_fig: Default::default(),
@@ -4452,6 +4475,7 @@ impl Workbench {
             pdf_fit_at: None,
             pdf_fitting: false,
             word: None,
+            word_scroll: None,
             pdf_under: None,
             file_big: false,
             file_big_at: None,
@@ -4508,6 +4532,7 @@ impl Workbench {
             pending_tree_focus: false,
             pending_press: Vec::new(),
             pending_pointer: Vec::new(),
+            pending_flick: Vec::new(),
             pending_drag: Vec::new(),
             pending_seltext: false,
             pending_unarchive: None,
@@ -4804,12 +4829,8 @@ impl Workbench {
                     if self.pending_select.as_ref() == Some(&old) {
                         self.pending_select = Some(new.clone());
                     }
-                    if self.selected.as_ref() == Some(&old) {
-                        if self.page == Page::Session {
-                            self.open_session(&new, cx);
-                        } else {
-                            self.selected = Some(new.clone());
-                        }
+                    if self.carry_tab(&old, &new) && self.page == Page::Session {
+                        self.open_session(&new, cx);
                     }
                     self.save_ui(true);
                 }
@@ -4879,7 +4900,9 @@ impl Workbench {
                 cx.notify();
             }
             HubEvent::Changed(path) => {
-                if let Some(d) = &self.detail {
+                // A session begun here has no file yet, and an empty path
+                // starts every path: it is not this one's change.
+                if let Some(d) = self.detail.as_ref().filter(|d| !d.path.as_os_str().is_empty()) {
                     let same = d.path == path || path.starts_with(d.path.with_extension(""));
                     if same && self.loading.is_some() {
                         // A read is under way and may have been taken
@@ -5695,17 +5718,40 @@ impl Workbench {
         if self.pending_select.as_ref() == Some(&old) {
             self.pending_select = Some(new.clone());
         }
-        if self.selected.as_ref() == Some(&old) {
+        if self.carry_tab(&old, &new) {
             self.come_back = None;
             if self.page == Page::Session {
                 self.open_session(&new, cx);
-            } else {
-                self.selected = Some(new);
             }
         }
         self.hub.refresh();
         self.save_ui(true);
         cx.notify();
+    }
+
+    /// A session went on in another (`/clear`, `/resume`, compaction into
+    /// a new file): what its tab kept goes with it, its panels and layout
+    /// and what was typed in its composer, and it is the session showing
+    /// when the old one was. Says whether it was. Left under the old key,
+    /// the terminal panel, the CLI layout and the outline shut at
+    /// `/clear`, and the draft was lost.
+    fn carry_tab(&mut self, old: &str, new: &str) -> bool {
+        if let Some(view) = self.tab_views.remove(old) {
+            self.tab_views.entry(new.to_string()).or_insert(view);
+        }
+        if let Some(kept) = self.drafts.remove(old) {
+            self.drafts.entry(new.to_string()).or_insert(kept);
+        }
+        if self.draft_of.as_deref() == Some(old) {
+            self.draft_of = Some(new.to_string());
+        }
+        let showing = self.selected.as_deref() == Some(old);
+        if showing {
+            // Selected already, the tab shown keeps the panels it has
+            // (`tab_view_switch` leaves a tab for itself alone).
+            self.selected = Some(new.to_string());
+        }
+        showing
     }
 
     /// Set what a Codex session is set to. One not started keeps it for
@@ -5871,6 +5917,9 @@ impl Workbench {
                     self.stashed.insert(left.key.clone(), left);
                 }
                 self.detail = self.stashed.remove(key);
+                // How far each card was open is the conversation left's:
+                // the one arrived at is drawn as it was put away.
+                self.folds.borrow_mut().clear();
                 let tabs = &self.tabs;
                 self.stashed.retain(|k, _| tabs.contains(k));
             }
@@ -6025,7 +6074,7 @@ impl Workbench {
             // The terminal panel: `term` brings it, `term:agent` and
             // `term:shell` choose what it shows, `termtype:<words>` types
             // them there with Return.
-            Some(t) if t == "term" || t == "termcursor" || t.starts_with("term:") || t.starts_with("termtype:") || t.starts_with("termput:") || t.starts_with("layout:") => self.term_panel_probe(t, cx),
+            Some(t) if t == "term" || t == "termcursor" || t.starts_with("term:") || t.starts_with("termtype:") || t.starts_with("termput:") || t.starts_with("layout:") || t == "askterm" => self.term_panel_probe(t, cx),
             // The handscroll on the home page, wound as the pointer at
             // that place across and down it (-1 to 1) would wind it.
             Some(t) if t.starts_with("homewind:") => {
@@ -6213,6 +6262,22 @@ impl Workbench {
             Some(t) if t.starts_with("say:") => {
                 self.send_probe = Some(t["say:".len()..].to_string());
                 cx.notify();
+            }
+            // A driver's question: `choose:<label>` is a click on that
+            // choice, `reply:<words>` those words typed and sent.
+            Some(t) if t.starts_with("choose:") => {
+                if let Some(q) = self.question_pending() {
+                    let label = t["choose:".len()..].to_string();
+                    if let Some(found) = questions_of(&q.input).into_iter().find(|qq| qq.options.iter().any(|(l, _)| *l == label)) {
+                        self.pick_option(q.request_id.clone(), found.question.clone(), label, found.multi, cx);
+                    }
+                }
+            }
+            Some(t) if t.starts_with("reply:") => {
+                if let Some(q) = self.question_pending() {
+                    let answers = self.typed_answers(&q, t["reply:".len()..].to_string());
+                    self.answer_question_with(q.request_id, answers, cx);
+                }
             }
             // The oldest card waiting on the session showing.
             Some("allow") | Some("deny") => {
@@ -6983,11 +7048,13 @@ impl Workbench {
                 self.folds.borrow_mut().clear();
                 let serial = self.detail_in.as_ref().map_or(0, |(_, _, n)| n + 1);
                 self.detail_in = Some((key.clone(), Instant::now(), serial));
+                static BORN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 self.detail = Some(Detail {
                     key,
                     path,
                     session: Rc::new(session),
                     list,
+                    born: BORN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     thumbs: HashMap::new(),
                     sizes: HashMap::new(),
                     open_tools: HashSet::new(),
@@ -9402,6 +9469,26 @@ impl Workbench {
     /// and nothing to do.
     /// A scroller that is not a pane, drawn now: `route_scroll` keeps a
     /// gesture that begins in it with it.
+    /// Where a field that scrolls its own words stands, said as it is
+    /// laid out, for `route_scroll`: on a sheet a gesture begun there is
+    /// the field's, and carried off it moves nothing. A field's handle is
+    /// the toolkit's and not ours to name.
+    pub(crate) fn field_place(&self, cx: &Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        canvas(
+            move |b, _, cx| {
+                if let Some(e) = entity.upgrade() {
+                    e.read(cx).fields_live.borrow_mut().push(b);
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
     pub(crate) fn inner_scroller(&self, handle: &ScrollHandle, kind: Inner) {
         if self.in_list.get() {
             self.inner_list.borrow_mut().push((handle.clone(), kind));
@@ -9414,6 +9501,9 @@ impl Workbench {
     /// themselves again, and one kept that the last drawing of the list
     /// did not use goes.
     pub(crate) fn list_draw(&self) {
+        // Whether the cards are drawn is the list's last drawing's word:
+        // a frame from the cache draws none and says nothing of them.
+        self.cards_drawn.set(false);
         self.inner_list.borrow_mut().clear();
         self.inner_kept.borrow_mut().retain(|_, kept| !kept.in_list || std::mem::take(&mut kept.used));
     }
@@ -9486,6 +9576,19 @@ impl Workbench {
         self.scroll_inner = None;
     }
 
+    /// The sidebar's projects, the pinned ones or the rest, under the
+    /// pointer; anywhere else in the sidebar is nothing that scrolls.
+    fn sidebar_or_still(&self, at: Point<Pixels>) -> Pane {
+        if self.pin_scroll.bounds().contains(&at) {
+            // Pinned ones that all show are nothing to scroll.
+            if self.pin_scroll.max_offset().y > px(0.) { Pane::Pins } else { Pane::Still }
+        } else if self.side_scroll.bounds().contains(&at) {
+            Pane::Sidebar
+        } else {
+            Pane::Still
+        }
+    }
+
     fn route_scroll(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
         if std::env::var("EMAKI_SCROLL_DEBUG").is_ok() {
             eprintln!("scroll {:?} at ({:.0},{:.0}) delta {:?} owner {:?}", e.touch_phase, f32::from(e.position.x), f32::from(e.position.y), e.delta, self.scroll_owner);
@@ -9498,8 +9601,11 @@ impl Workbench {
         // carried off the list it began in stays with that list.
         let listed = self.branch_menu.is_some() || self.repo_menu.is_some();
         if listed || self.changes.is_some() {
-            self.scroll_inner = None;
+            // A field of the sheet's (the commit's words) takes the wheel
+            // as the toolkit gives it, as the composer does.
+            let in_field = self.fields_live.borrow().iter().any(|b| b.contains(&e.position));
             let here = match &self.changes {
+                _ if in_field => Pane::Still,
                 _ if self.branch_menu.is_some() && self.branch_scroll.bounds().contains(&e.position) => Pane::Branches,
                 _ if self.repo_menu.is_some() && self.repo_scroll.bounds().contains(&e.position) => Pane::Repos,
                 // The history draws its own two lists where the files
@@ -9510,10 +9616,23 @@ impl Workbench {
                 Some(c) if !listed && c.list.viewport_bounds().contains(&e.position) => Pane::ChangeLines,
                 _ => Pane::Nowhere,
             };
-            match e.touch_phase {
-                TouchPhase::Started => self.scroll_owner = Some(here),
-                TouchPhase::Moved if fresh || self.scroll_owner.is_none() => self.scroll_owner = Some(here),
-                _ => {}
+            let begins = match e.touch_phase {
+                TouchPhase::Started => true,
+                TouchPhase::Moved => fresh || self.scroll_owner.is_none(),
+                _ => false,
+            };
+            if begins {
+                self.scroll_owner = Some(here);
+                // A scroller of the sheet's that names itself, with more
+                // than shows (a commit's message): the gesture is its own.
+                self.scroll_inner = self.inner_live.borrow().iter().rev().find(|(h, _)| h.bounds().contains(&e.position) && h.max_offset().y > px(0.)).map(|(h, kind)| (h.clone(), *kind, h.offset().y));
+            }
+            if let Some((own, _, _)) = self.scroll_inner.clone() {
+                let at = own.offset().y + e.delta.pixel_delta(px(20.)).y;
+                own.set_offset(point(own.offset().x, at.clamp(-own.max_offset().y, px(0.))));
+                cx.stop_propagation();
+                cx.notify();
+                return;
             }
             let owner = self.scroll_owner.unwrap_or(Pane::Nowhere);
             if owner == here && owner != Pane::Nowhere {
@@ -9540,7 +9659,15 @@ impl Workbench {
         let inline_sidebar = self.sidebar_open && !self.narrow;
         let (files, outline) = self.panels_shown();
         let file = self.file_pane_bounds().is_some_and(|b| b.contains(&e.position));
-        let here = if file {
+        // Something of ours over the page (the search, a menu, a list, a
+        // question on a sheet): only its own named scrollers move, and
+        // anywhere else under it is nothing. Taken for the pane beneath,
+        // a flick on the search's field scrolled the conversation behind
+        // its scrim. The floated sidebar is the sidebar itself.
+        let covered = self.over_page() && !self.sidebar_peek;
+        let here = if covered {
+            Pane::Nowhere
+        } else if file {
             Pane::File
         } else if self.term_panel_bounds().is_some_and(|b| b.contains(&e.position)) {
             Pane::Terminal
@@ -9551,11 +9678,18 @@ impl Workbench {
         } else if outline && self.outline_scroll.bounds().contains(&e.position) {
             Pane::Outline
         } else if self.rail_fly_up() && self.side_room.get().contains(&e.position) {
-            Pane::Sidebar
+            self.sidebar_or_still(e.position)
         } else if !inline_sidebar || e.position.x >= self.sidebar_w {
-            Pane::Content
+            // The page's own list, and nothing else of the content.
+            let list = match self.page {
+                Page::Session => self.detail.as_ref().filter(|_| !self.cli_shown()).map(|d| d.list.viewport_bounds()),
+                Page::Sessions => Some(self.sessions_scroll.bounds()),
+                Page::New => Some(self.home_scroll.bounds()),
+                Page::Agents => Some(self.agents_page_scroll.bounds()),
+            };
+            if list.is_some_and(|b| b.contains(&e.position)) { Pane::Content } else { Pane::Still }
         } else {
-            Pane::Sidebar
+            self.sidebar_or_still(e.position)
         };
         // A scroller inside a pane, or on a sheet over the window, with
         // something to scroll: the gesture that begins in it is its own.
@@ -9571,16 +9705,16 @@ impl Workbench {
         };
         if begins {
             self.scroll_owner = Some(here);
-            // Over the pinned projects, when they have more than shows.
-            self.scroll_pins = here == Pane::Sidebar && self.pin_scroll.max_offset().y > px(0.) && self.pin_scroll.bounds().contains(&e.position);
             self.scroll_inner = inner.clone().map(|(h, kind)| {
                 let at = h.offset().y;
                 (h, kind, at)
             });
         }
         let Some(owner) = self.scroll_owner else { return };
-        // What is left of a gesture that was ended moves nothing.
-        if owner == Pane::Nowhere {
+        // What is left of a gesture that was ended moves nothing; nor
+        // does one begun on nothing that scrolls, unless it began on a
+        // scroller of a sheet's own.
+        if owner == Pane::Nowhere && self.scroll_inner.is_none() {
             cx.stop_propagation();
             return;
         }
@@ -9626,24 +9760,26 @@ impl Workbench {
             cx.notify();
             return;
         }
-        if !carried && (owner == here || !(inline_sidebar || files || outline || here == Pane::Terminal || here == Pane::Agent || here == Pane::File || owner == Pane::File)) {
+        // Where it began: the toolkit has it. Anywhere else the owner is
+        // moved by the router and nothing under the pointer is.
+        if !carried && owner == here {
             return;
         }
         let delta = e.delta.pixel_delta(px(20.));
         match owner {
             // A handle takes any offset it is given, so each is held to
             // what its list has.
-            Pane::Sidebar | Pane::Files | Pane::Outline | Pane::File => {
+            Pane::Sidebar | Pane::Pins | Pane::Files | Pane::Outline | Pane::File => {
                 // A wheel in the file ends a glide the structure began.
                 if owner == Pane::File {
                     self.file_glide += 1;
                 }
                 let handle = match owner {
-                    Pane::Files => &self.files_scroll,
-                    Pane::File => &self.file_view_scroll,
-                    Pane::Outline => &self.outline_scroll,
-                    _ if self.scroll_pins => &self.pin_scroll,
-                    _ => &self.side_scroll,
+                    Pane::Files => self.files_scroll.clone(),
+                    Pane::File => self.file_scroller(),
+                    Pane::Outline => self.outline_scroll.clone(),
+                    Pane::Pins => self.pin_scroll.clone(),
+                    _ => self.side_scroll.clone(),
                 };
                 let at = handle.offset() + delta;
                 handle.set_offset(point(at.x, at.y.clamp(-handle.max_offset().y, px(0.))));
@@ -9659,7 +9795,9 @@ impl Workbench {
                 Page::Agents => self.agents_page_scroll.set_offset(self.agents_page_scroll.offset() + delta),
             },
             // Momentum left over from a card or sheet that has gone.
-            Pane::Branches | Pane::Repos | Pane::ChangeFiles | Pane::ChangeLines | Pane::HistoryCommits | Pane::HistoryFiles | Pane::Nowhere | Pane::Terminal | Pane::Agent => {}
+            // Begun on nothing the router scrolls: carried off it, it
+            // moves nothing.
+            Pane::Branches | Pane::Repos | Pane::ChangeFiles | Pane::ChangeLines | Pane::HistoryCommits | Pane::HistoryFiles | Pane::Nowhere | Pane::Still | Pane::Terminal | Pane::Agent => {}
         }
         cx.stop_propagation();
         cx.notify();
@@ -10368,7 +10506,7 @@ impl Workbench {
         }
         d.thumbs.insert(key.clone(), None);
         let path = d.path.clone();
-        let dkey = d.key.clone();
+        let born = d.born;
         let uuid = uuid.to_string();
         let task = cx.background_spawn(async move { emaki_core::transcript::image_block_bytes(&path, &uuid, index) });
         cx.spawn(async move |this, cx| {
@@ -10377,19 +10515,21 @@ impl Workbench {
                 Some(Thumb { image: Arc::new(gpui::Image::from_bytes(image_format(&mime)?, bytes)), size })
             });
             this.update(cx, |this, cx| {
-                if let Some(d) = this.detail.as_mut() {
-                    if d.key == dkey {
-                        match loaded {
-                            Some(img) => {
-                                d.thumbs.insert(key, Some(img));
-                            }
-                            None => {
-                                d.thumbs.remove(&key);
-                            }
+                // The conversation it was asked for, showing or put away
+                // with its tab: kept as in flight in one put away, the
+                // picture never came when the tab was shown again.
+                let Workbench { detail, stashed, .. } = this;
+                if let Some(d) = detail.as_mut().filter(|d| d.born == born).or_else(|| stashed.values_mut().find(|d| d.born == born)) {
+                    match loaded {
+                        Some(img) => {
+                            d.thumbs.insert(key, Some(img));
                         }
-                        let _ = ix;
-                        cx.notify();
+                        None => {
+                            d.thumbs.remove(&key);
+                        }
                     }
+                    let _ = ix;
+                    cx.notify();
                 }
             })
             .ok();
@@ -10984,7 +11124,14 @@ impl Workbench {
     }
 
     fn answer_permission(&mut self, request_id: String, allow: bool, cx: &mut Context<Self>) {
-        let Some((sid, _)) = self.permissions.iter().find(|(_, r)| r.request_id == request_id).cloned() else { return };
+        let Some((sid, req)) = self.permissions.iter().find(|(_, r)| r.request_id == request_id).cloned() else { return };
+        // A page an MCP server asks to have opened is opened, then said
+        // to be.
+        if allow && req.tool_name == emaki_core::driver::OPEN_URL_ASK {
+            if let Some(url) = req.input.get("url").and_then(|v| v.as_str()).filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
+                cx.open_url(url);
+            }
+        }
         if let Some(d) = self.hub.driver_for(&sid) {
             let rid = request_id.clone();
             std::thread::spawn(move || d.answer_permission(&rid, allow, ""));
@@ -11001,7 +11148,7 @@ impl Workbench {
         }
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
         // A question is never answered by a bare ↩: it takes a choice or words.
-        let Some(id) = self.permissions.iter().find(|(s, p)| *s == sid && !p.is_question()).map(|(_, p)| p.request_id.clone()) else { return false };
+        let Some(id) = self.permissions.iter().find(|(s, p)| *s == sid && !p.is_question() && !p.in_terminal()).map(|(_, p)| p.request_id.clone()) else { return false };
         // The textarea put a new line in before saying ↩ was pressed.
         self.composer.update(cx, |s, cx| s.set_value("", window, cx));
         self.answer_permission(id, allow, cx);
@@ -11011,7 +11158,7 @@ impl Workbench {
     /// Every card waiting on this session, allowed at once.
     fn allow_all_pending(&mut self, cx: &mut Context<Self>) {
         let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
-        let ids: Vec<String> = self.permissions.iter().filter(|(s, p)| *s == sid && !p.is_question()).map(|(_, p)| p.request_id.clone()).collect();
+        let ids: Vec<String> = self.permissions.iter().filter(|(s, p)| *s == sid && !p.is_question() && !p.in_terminal()).map(|(_, p)| p.request_id.clone()).collect();
         for id in ids {
             self.answer_permission(id, true, cx);
         }
@@ -11072,11 +11219,26 @@ impl Workbench {
     /// Words typed while a question waits: they answer the first question
     /// without a pick, and the picks stand for the rest.
     fn answer_question_typed(&mut self, req: PermissionRequest, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let answers = self.typed_answers(&req, text);
+        self.composer.update(cx, |s, cx| s.set_value("", window, cx));
+        self.answer_question_with(req.request_id, answers, cx);
+    }
+
+    /// The answers words typed make, with the picks made on the card.
+    fn typed_answers(&self, req: &PermissionRequest, text: String) -> serde_json::Map<String, serde_json::Value> {
         let qs = questions_of(&req.input);
         let picks = self.picks.get(&req.request_id).cloned().unwrap_or_default();
         let mut answers = serde_json::Map::new();
         let mut placed = false;
-        for q in &qs {
+        // The words go to a question with nothing to choose, when one is
+        // open: an MCP server's form has its one field to type among
+        // fields of choices.
+        let typed_for = qs.iter().find(|q| q.options.is_empty() && picks.get(&q.question).is_none_or(|l| l.is_empty())).map(|q| q.question.clone());
+        if let Some(question) = &typed_for {
+            answers.insert(question.clone(), serde_json::Value::String(text.clone()));
+            placed = true;
+        }
+        for q in qs.iter().filter(|q| Some(&q.question) != typed_for.as_ref()) {
             match picks.get(&q.question).filter(|l| !l.is_empty()) {
                 Some(labels) => {
                     answers.insert(q.question.clone(), serde_json::Value::String(labels.join(", ")));
@@ -11093,8 +11255,7 @@ impl Workbench {
                 answers.insert(q.question.clone(), serde_json::Value::String(text));
             }
         }
-        self.composer.update(cx, |s, cx| s.set_value("", window, cx));
-        self.answer_question_with(req.request_id, answers, cx);
+        answers
     }
 
     // -- derived ------------------------------------------------------------
@@ -13378,6 +13539,8 @@ impl Workbench {
             .items_center()
             .gap(px(PILL_GAP))
             .overflow_x_scroll()
+            // Sideways only: gpui turns an up-and-down wheel into across.
+            .restrict_scroll_to_axis()
             .track_scroll(&self.tabs_scroll)
             .on_drag_move::<DragTab>(cx.listener(|this, e: &DragMoveEvent<DragTab>, _, cx| {
                 let key = e.drag(cx).0.clone();
@@ -13496,7 +13659,9 @@ impl Workbench {
             }
             let r = self.refs.iter().find(|r| key_of(r) == key).cloned();
             let title = r.as_ref().map(|r| r.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| t("untitled").into());
-            let agent = r.as_ref().map(|r| r.agent).unwrap_or(AgentId::ClaudeCode);
+            // A session not found (gone, or its agent turned off) is
+            // still its agent's: the key says whose.
+            let agent = r.as_ref().map(|r| r.agent).or_else(|| key.split_once(':').and_then(|(a, _)| AgentId::parse(a))).unwrap_or(AgentId::ClaudeCode);
             let unnamed = r.as_ref().is_some_and(|r| self.unnamed(r));
             let working = r.as_ref().map(|r| self.is_working(r)).unwrap_or(false);
             let active = self.page == Page::Session && self.selected.as_deref() == Some(key.as_str());
@@ -14872,6 +15037,7 @@ impl Workbench {
         };
         let session = detail.session.clone();
         let list = detail.list.clone();
+        let born = detail.born;
 
         let mut right: Vec<AnyElement> = Vec::new();
         if r.archived {
@@ -14947,7 +15113,7 @@ impl Workbench {
         // is another session's list, and with its turning marks painted
         // and its text kept in the selection here, at every frame.
         let conversation = self.conversation.clone();
-        let other = conversation.update(cx, |c, _| c.set_list(&key_of(&r), &list));
+        let other = conversation.update(cx, |c, _| c.set_list(born, &list));
         let (marks, kept) = { let c = conversation.read(cx); (c.marks.clone(), c.kept.clone()) };
         // Fading in, it is drawn afresh: a frame kept from the cache keeps
         // the opacity it was painted at.
@@ -14975,10 +15141,7 @@ impl Workbench {
         let working = self.is_working(&r);
         // A card says what these lines would, and while one is up the
         // transcript's "working" is not so: the agent waits.
-        let card_up = {
-            let shown = self.term_shown.borrow();
-            (shown.on && shown.sid == r.session_id) || self.dialog_seen.as_ref().is_some_and(|(sid, _)| *sid == r.session_id)
-        };
+        let card_up = self.terminal_screen(&r).is_some() || self.dialog_seen.as_ref().is_some_and(|(sid, _)| *sid == r.session_id);
         let status_on = working && !card_up;
         let status_key = format!("line-status-{}", r.session_id);
         let status_moving = self.presence(&status_key, status_on, cx);
@@ -15043,7 +15206,7 @@ impl Workbench {
         let at_end = list.is_following_tail() || session.rounds.is_empty();
         // The terminal card holds the keyboard, and one the reader has
         // gone far above is not drawn: the keys would go nowhere.
-        if !self.cards_drawn.replace(false) && !at_end && self.term_focus.is_focused(window) {
+        if !self.cards_drawn.get() && !at_end && self.term_focus.is_focused(window) {
             let handle = self.composer.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
@@ -15337,9 +15500,10 @@ impl Workbench {
     /// The end of each running command's output, read again on the
     /// clock while the list is open: Claude Code writes it to a file as
     /// the command runs.
-    fn read_shell_tails(&mut self) {
-        let Some(sid) = self.shells_open.clone() else { return };
-        let Some(detail) = self.detail.as_ref().filter(|d| d.session.id == sid) else { return };
+    /// Whether what they printed changed since the last read.
+    fn read_shell_tails(&mut self) -> bool {
+        let Some(sid) = self.shells_open.clone() else { return false };
+        let Some(detail) = self.detail.as_ref().filter(|d| d.session.id == sid) else { return false };
         let mut tails = HashMap::new();
         for sh in detail.session.shells.iter().filter(|sh| !sh.agent && sh.ended.is_empty() && !sh.output_path.is_empty()) {
             if let Some(tail) = file_tail(&sh.output_path, 6000, SHELL_TAIL_LINES) {
@@ -15355,14 +15519,16 @@ impl Workbench {
                 tails.insert(sh.id.clone(), tail);
             }
         }
+        let changed = tails != self.shell_tails;
         self.shell_tails = tails;
+        changed
     }
 
     /// What each running subagent is on, read again on the clock while
     /// their list is open, from the end of each one's own transcript.
-    fn read_agent_steps(&mut self) {
-        let Some(sid) = self.agents_open.clone() else { return };
-        let Some(detail) = self.detail.as_ref().filter(|d| d.session.id == sid) else { return };
+    fn read_agent_steps(&mut self) -> bool {
+        let Some(sid) = self.agents_open.clone() else { return false };
+        let Some(detail) = self.detail.as_ref().filter(|d| d.session.id == sid) else { return false };
         let mut steps = HashMap::new();
         for sh in detail.session.shells.iter().filter(|sh| sh.agent && sh.ended.is_empty()) {
             let path = emaki_core::build::agent_transcript(&detail.session.transcript_path, &sh.id);
@@ -15370,7 +15536,9 @@ impl Workbench {
                 steps.insert(sh.id.clone(), step);
             }
         }
+        let changed = steps != self.agent_steps;
         self.agent_steps = steps;
+        changed
     }
 
     /// The session whose list of that kind of thing is open.
@@ -15648,7 +15816,13 @@ impl Workbench {
     /// terminal has it, in its colors, on the ground Claude Code's
     /// theme was made for; the keys pressed on it go to Claude Code, and
     /// it leaves when what it showed is done (`back_from_terminal`).
-    fn render_terminal(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The screen the terminal card shows for this session now, when it
+    /// is wanted: what the card draws, and what the lines over the
+    /// composer go by. Read here, not from the card as last drawn: the
+    /// card is part of the conversation's last item, which is not drawn
+    /// while the reader is up the conversation, and the tray said "Claude
+    /// is working…" over a terminal that waited.
+    fn terminal_screen(&self, r: &SessionRef) -> Option<Vec<Vec<emaki_core::pty::Span>>> {
         // Asked for before the picker is drawn, and still up for a moment
         // after it closes: the screen is then the whole conversation, and
         // drawing that made the card jump from tall to small and back.
@@ -15668,7 +15842,7 @@ impl Workbench {
         });
         // `EMAKI_GO=termdemo`: what `/model fable` asks on a warm cache,
         // in Claude Code's own colors (2.1.293).
-        let live = live.or_else(|| {
+        live.or_else(|| {
             self.term_demo.then(|| {
                 if self.term_demo_tall {
                     let bytes: String = (1..=44).map(|n| format!("{n:>2}  a row of the screen that runs to the last of its ninety-six columns, as none wraps {n:>4}\r\n")).collect();
@@ -15677,7 +15851,11 @@ impl Workbench {
                 let bytes = "\x1b[1m\x1b[38;2;255;193;7mSwitch model?\x1b[0m\r\n\x1b[38;2;153;153;153mYour next response will be slower and use more tokens\x1b[0m\r\n\r\nThis conversation is cached for the current model. Switching to \x1b[1mFable 5.1\x1b[0m means the full\r\nhistory gets re-read on your next message.\r\n\r\n\x1b[38;2;177;185;249m❯ \x1b[38;2;153;153;153m1. \x1b[38;2;177;185;249mYes, switch to Fable 5.1\x1b[0m\r\n  \x1b[38;2;153;153;153m2. \x1b[0mNo, go back\r\n";
                 emaki_core::pty::panel_rows(emaki_core::pty::rows_after(bytes.as_bytes(), 12, 96))
             })
-        });
+        })
+    }
+
+    fn render_terminal(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let live = self.terminal_screen(r);
         // The card comes and goes over a moment (`TERM_ANIM`): once the
         // screen has nothing for it, it is drawn that long again from the
         // rows it last had, fading, and takes no click meanwhile.
@@ -16047,7 +16225,7 @@ impl Workbench {
         // stay in view however long it is.
         let plan_box = plan.map(|text| {
             let (scroll, _) = self.kept_scroll("dialog-plan".into(), Inner::Held);
-            div().id("dialog-plan").w_full().max_h(PLAN_BOX_H.min(self.view_h * 0.22).max(px(120.))).overflow_y_scroll().track_scroll(&scroll).rounded(px(8.)).border_1().border_color(theme.border).px(px(14.)).py(px(10.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).text_size(px(self.cfg.app.chat_px())).line_height(gpui::relative(1.5)).child(crate::transcript::chat_md_view("dialog-plan-md".into(), text, cx))
+            div().relative().w_full().child(div().id("dialog-plan").w_full().max_h(PLAN_BOX_H.min(self.view_h * 0.22).max(px(120.))).overflow_y_scroll().track_scroll(&scroll).rounded(px(8.)).border_1().border_color(theme.border).px(px(14.)).py(px(10.)).when_some(chat_font.clone(), |d, f| d.font_family(f)).text_size(px(self.cfg.app.chat_px())).line_height(gpui::relative(1.5)).child(crate::transcript::chat_md_view("dialog-plan-md".into(), text, cx))).vertical_scrollbar(&scroll)
         });
         // With previews the terminal's pointer is the choice so far: a
         // digit moves it, and Return takes the one it is on.
@@ -16228,7 +16406,12 @@ impl Workbench {
             let subject = emaki_core::build::tool_subject(&p.tool_name, &p.input, &cwd);
             let said = |key: &str| p.input.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
             let detail = match p.tool_name.as_str() {
+                "Bash" if !said("host").is_empty() => format!("{}\n{}", said("host"), said("command")).trim().to_string(),
                 "Bash" => said("command"),
+                emaki_core::driver::MCP_TOOL_ASK => said("arguments"),
+                // The page's address stands beside the heading.
+                emaki_core::driver::OPEN_URL_ASK => said("message"),
+                emaki_core::driver::TERMINAL_ASK => said("message"),
                 // Codex's patch: the diff it wants to apply, else the files.
                 "apply_patch" if !said("diff").is_empty() => said("diff"),
                 "apply_patch" => p.input.get("files").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_else(|| said("file_path")),
@@ -16239,23 +16422,26 @@ impl Workbench {
             if p.tool_name == "ExitPlanMode" && !said("plan").is_empty() {
                 return self.render_plan_ask(cx);
             }
-            let heading = match p.tool_name.as_str() {
-                "apply_patch" => tf("{who} wants to change files", &[("who", &who)]),
-                "request_permissions" => tf("{who} asks for more access", &[("who", &who)]),
-                tool => tf("{who} wants to run {tool}", &[("who", &who), ("tool", &tool)]),
-            };
+            let heading = permission_heading(&p, who);
+            // What waits on the terminal is not explained: it is said
+            // there, and the card only sends the person to it.
+            let plain = matches!(p.tool_name.as_str(), emaki_core::driver::TERMINAL_ASK | emaki_core::driver::OPEN_URL_ASK);
             // What it does, in words: the model's answer when one has
             // landed, else the free line a simple call carries in its
             // arguments; "Explaining…" while a model is on it. With
             // Explain off, only the free line.
             let call_id = if p.tool_use_id.is_empty() { p.request_id.clone() } else { p.tool_use_id.clone() };
-            let explain_on = self.cfg.explain.enabled;
+            let explain_on = self.cfg.explain.enabled && !plain;
             let mut explanation = if explain_on { self.explanations.get(&call_id).cloned().unwrap_or_default() } else { String::new() };
             if explanation.is_empty() && explain_on {
                 explanation = self.hub.explainer.lookup(&p.tool_name, &p.input);
             }
-            if explanation.is_empty() {
+            if explanation.is_empty() && !plain {
                 explanation = emaki_core::explain::canned(&p.tool_name, &p.input, &cwd);
+            }
+            // An MCP tool says what it does itself.
+            if explanation.is_empty() && p.tool_name == emaki_core::driver::MCP_TOOL_ASK {
+                explanation = said("description");
             }
             let explaining = explain_on && explanation.is_empty() && self.hub.explainer.in_flight(&p.tool_name, &p.input);
             v_flex()
@@ -16282,7 +16468,10 @@ impl Workbench {
                         v_flex()
                             .w_full()
                             .gap(px(8.))
-                            .when(!detail.is_empty(), |d| d.child(div().p(px(8.)).rounded(px(8.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_size(px(12.)).whitespace_normal().child(detail)))
+                            // What is asked in words is read as words; a
+                            // command or a diff in the code face.
+                            .when(!detail.is_empty() && plain, |d| d.child(div().text_size(px(13.5)).when_some(crate::fonts::chat_family(&self.cfg.app.chat_font, cx), |d, f| d.font_family(f)).child(detail.clone())))
+                            .when(!detail.is_empty() && !plain, |d| d.child(div().p(px(8.)).rounded(px(8.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_size(px(12.)).whitespace_normal().child(detail)))
                             .when(!explanation.is_empty() || explaining, |d| d.child(crate::transcript::explain_card(format!("pex-{}", p.request_id), explanation.clone(), explaining, px(13.5), cx))),
                     ))
                 })
@@ -16364,6 +16553,8 @@ impl Workbench {
                     .child(badge_str(t("question").into(), theme.primary.opacity(0.14), theme.primary))
                     .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(tf("{agent} asks", &[("agent", &self.agent_now().speaker())]))),
             )
+            // An MCP server's form says what it is for.
+            .children(p.input.get("message").and_then(|v| v.as_str()).filter(|m| !m.is_empty()).map(|m| div().text_size(px(13.)).text_color(theme.muted_foreground).when_some(chat_font.clone(), |d, f| d.font_family(f)).child(m.to_string())))
             .child(self.card_scroll(format!("card-ask-{}", p.request_id), None, false, v_flex().w_full().gap(px(12.)).children(qs.iter().enumerate().map(|(qi, q)| {
                 let chosen = picks.get(&q.question).cloned().unwrap_or_default();
                 v_flex()
@@ -18502,6 +18693,21 @@ fn icon_button(id: &'static str, icon: impl Into<Icon>, tip: &'static str, cx: &
     Button::new(id).ghost().small().icon(Icon::new(icon).with_size(px(16.)).text_color(theme.muted_foreground)).tooltip(tip).on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
 }
 
+/// What a permission card and its line in the tray say is asked.
+pub(crate) fn permission_heading(p: &PermissionRequest, who: &str) -> String {
+    let said = |key: &str| p.input.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    match p.tool_name.as_str() {
+        "apply_patch" => tf("{who} wants to change files", &[("who", &who)]),
+        "request_permissions" => tf("{who} asks for more access", &[("who", &who)]),
+        "Bash" if p.input.get("stdin").is_some() => tf("{who} wants to type into a running command", &[("who", &who)]),
+        "Bash" if !said("host").is_empty() => tf("{who} wants to reach {host}", &[("who", &who), ("host", &said("host"))]),
+        emaki_core::driver::MCP_TOOL_ASK => tf("{who} wants to use {tool} from {server}", &[("who", &who), ("tool", &said("tool")), ("server", &said("server"))]),
+        emaki_core::driver::OPEN_URL_ASK => tf("{server} asks you to open a page", &[("server", &said("server"))]),
+        emaki_core::driver::TERMINAL_ASK => tf("{who} asks something to answer in its terminal", &[("who", &who)]),
+        tool => tf("{who} wants to run {tool}", &[("who", &who), ("tool", &tool)]),
+    }
+}
+
 /// A pill under the composer that only says what a terminal session is
 /// set to; the terminal is where it changes.
 /// The question `EMAKI_QUESTION=1` holds on the session opened, for a
@@ -19013,6 +19219,7 @@ impl Render for Workbench {
         // The scrollers inside panes name themselves again as they are
         // drawn; a kept handle the last draw did not use goes.
         self.inner_live.borrow_mut().clear();
+        self.fields_live.borrow_mut().clear();
         self.inner_kept.borrow_mut().retain(|_, kept| kept.in_list || std::mem::take(&mut kept.used));
         self.sync_draft(window, cx);
         self.writing_sync(cx);
@@ -19230,6 +19437,36 @@ impl Render for Workbench {
         }
         if let Some(key) = self.pending_unarchive.take() {
             self.unarchive_sessions(vec![key], window, cx);
+        }
+        for (from, to, dir) in std::mem::take(&mut self.pending_flick) {
+            // What each scroller stood at before and after, printed.
+            let list = self.detail.as_ref().map(|d| d.list.clone());
+            let handles = [("sidebar", self.side_scroll.clone()), ("files", self.files_scroll.clone()), ("outline", self.outline_scroll.clone()), ("sessions", self.sessions_scroll.clone()), ("home", self.home_scroll.clone())];
+            window.defer(cx, move |window, cx| {
+                let at = |list: &Option<ListState>| list.as_ref().map(|l| { let t = l.logical_scroll_top(); (t.item_ix, f32::from(t.offset_in_item).round()) });
+                let before = (at(&list), handles.iter().map(|(_, h)| f32::from(h.offset().y).round()).collect::<Vec<_>>());
+                let wheel = |window: &mut Window, cx: &mut App, p: Point<Pixels>, dy: f32, phase: TouchPhase| {
+                    window.dispatch_event(gpui::PlatformInput::ScrollWheel(ScrollWheelEvent { position: p, delta: ScrollDelta::Pixels(point(px(0.), px(dy))), modifiers: Modifiers::default(), touch_phase: phase }), cx);
+                };
+                window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: from, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                wheel(window, cx, from, 30. * dir, TouchPhase::Started);
+                for _ in 0..3 {
+                    wheel(window, cx, from, 30. * dir, TouchPhase::Moved);
+                }
+                // The finger lifts; the momentum goes on where the pointer goes.
+                window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: to, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                for _ in 0..6 {
+                    wheel(window, cx, to, 40. * dir, TouchPhase::Moved);
+                }
+                wheel(window, cx, to, 0., TouchPhase::Ended);
+                let after = (at(&list), handles.iter().map(|(_, h)| f32::from(h.offset().y).round()).collect::<Vec<_>>());
+                eprintln!("emaki: flick list {:?} -> {:?}", before.0, after.0);
+                for (i, (name, _)) in handles.iter().enumerate() {
+                    if before.1[i] != after.1[i] {
+                        eprintln!("emaki: flick {name} {} -> {}", before.1[i], after.1[i]);
+                    }
+                }
+            });
         }
         for (at, how) in std::mem::take(&mut self.pending_pointer) {
             window.defer(cx, move |window, cx| {

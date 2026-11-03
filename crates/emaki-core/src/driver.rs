@@ -50,6 +50,19 @@ use crate::model::AgentId;
 use crate::options::{humanize, Catalog, Choice, ModelChoice, Options};
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What an agent asks that the window has no card of its own for: the
+/// agent's terminal, which has it too, is where it is answered. The
+/// input's `message` says what was asked, where the agent said.
+pub const TERMINAL_ASK: &str = "terminal";
+
+/// Leave to call a tool of an MCP server's: `server`, `tool`, and
+/// `arguments` as words.
+pub const MCP_TOOL_ASK: &str = "mcp_tool";
+
+/// A page an MCP server asks the person to open (a sign-in): `server`,
+/// `url`, `message`.
+pub const OPEN_URL_ASK: &str = "open_url";
 /// How long a permission card may sit unanswered before the child is told no.
 pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -802,10 +815,23 @@ pub fn held_on_screen(text: &str) -> Held {
     if dialog_on_screen(text).is_some() {
         return Held::Asked;
     }
+    // Its foot says what Esc does, as a panel's does, but Esc here is
+    // "No, exit": it is answered in the terminal, never closed.
+    if trust_on_screen(text) {
+        return Held::Other;
+    }
     match cover_on_screen(text) {
         Some(name) => Held::Covered(name),
         None => Held::Other,
     }
+}
+
+/// Claude Code asking, as it starts in a folder it has not been told to
+/// trust, whether to trust it (2.1.317: "Quick safety check", the two
+/// choices unnumbered, "No, exit" first and under the cursor). It has not
+/// registered yet, and registers once it is answered.
+pub fn trust_on_screen(text: &str) -> bool {
+    text.lines().map(strip_sgr).any(|l| l.trim().trim_start_matches('❯').trim() == "Yes, I trust this folder")
 }
 
 /// The name of a list or panel Claude Code has open over its prompt, read
@@ -818,7 +844,7 @@ pub fn held_on_screen(text: &str) -> Held {
 /// one Esc may be pressed on.
 pub fn cover_on_screen(text: &str) -> Option<String> {
     let plain: Vec<String> = text.lines().map(strip_sgr).collect();
-    if prompt_on_screen(text).is_some() {
+    if prompt_on_screen(text).is_some() || trust_on_screen(text) {
         return None;
     }
     let foot = plain.iter().rposition(|l| !l.trim().is_empty())?;
@@ -1151,6 +1177,12 @@ impl PermissionRequest {
     /// answer goes back in the input (`Driver::answer_question`).
     pub fn is_question(&self) -> bool {
         self.tool_name == "AskUserQuestion"
+    }
+
+    /// Whether this waits on the agent's terminal, which has it too, and
+    /// is answered there: neither ↩ nor "Allow all" answers it.
+    pub fn in_terminal(&self) -> bool {
+        self.tool_name == TERMINAL_ASK
     }
 }
 
