@@ -203,6 +203,10 @@ CHANGELOG.md               one section per release; the release job reads it
 - Write what is so now and why. An approach that was tried and dropped gets one sentence, and only when someone might try it again. What was checked and how belongs in the reply to the person, not in a doc.
 - Do not record what the code says by itself: a constant's value, a pixel size, a list of function names.
 
+## Branches
+
+A branch is named for the version it leads to and what that version is about, as `vX.X.X-<kebab-case>`, at most two words in kebab case: `v0.4.2-session-summary`, `v0.2.5-dictation`. The words come from the release's notes in CHANGELOG.md, its first item where that says it, and are not a vague one like `ux-improvements` or `more-features`. A branch whose work changes course is renamed to fit what it shipped, here and on GitHub.
+
 ## Testing
 
 ```
