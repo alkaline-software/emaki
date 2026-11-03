@@ -268,15 +268,21 @@ pub fn project_slug(cwd: &str) -> String {
     slug
 }
 
-fn claim_project_slug(cwd: &str) -> String {
-    let cwd = absolute(cwd);
-    let base_name = cwd
+/// A project's name before any claim: its folder's name as a slug. Two
+/// folders of one name have this alike, and `project_slug` tells them
+/// apart.
+pub fn project_base(cwd: &str) -> String {
+    let base_name = absolute(cwd)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "root".into());
-    let base = slugify(&base_name, 48);
-    let key = cwd.to_string_lossy().to_string();
+    slugify(&base_name, 48)
+}
+
+fn claim_project_slug(cwd: &str) -> String {
+    let base = project_base(cwd);
+    let key = absolute(cwd).to_string_lossy().to_string();
 
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_path = state_dir().join("projects.json");

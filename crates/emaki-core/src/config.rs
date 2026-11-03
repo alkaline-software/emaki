@@ -57,6 +57,10 @@ pub struct AppConfig {
     /// The conversation's typeface: `serif` (Anthropic Serif) or `sans`
     /// (Anthropic Sans).
     pub chat_font: String,
+    /// The face Chinese, Japanese and Korean are set in behind it: `auto`
+    /// (a serif's behind a serif, a sans serif's behind a sans serif),
+    /// `noto-serif-sc`, `noto-sans-sc` or `wenkai`.
+    pub cjk_font: String,
     /// How large text is set: `small`, `medium` or `large`, each a set of
     /// sizes (`TextSizes::preset`), or `custom`, the sizes in `sizes`.
     pub chat_size: String,
@@ -129,7 +133,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
+        Self { chat_font: "source-serif".into(), cjk_font: "auto".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
     }
 }
 

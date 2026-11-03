@@ -566,6 +566,24 @@
     "de": "Schrift für Unterhaltungen",
     "es": "Tipo de letra de conversación"
   },
+  "Chinese font": {
+    "zh-Hans": "中文字体",
+    "zh-Hant": "中文字體",
+    "ja": "中国語フォント",
+    "ko": "중국어 글꼴",
+    "fr": "Police chinoise",
+    "de": "Chinesische Schrift",
+    "es": "Fuente china"
+  },
+  "Auto": {
+    "zh-Hans": "自动",
+    "zh-Hant": "自動",
+    "ja": "自動",
+    "ko": "자동",
+    "fr": "Auto",
+    "de": "Automatisch",
+    "es": "Automática"
+  },
   "Check again": {
     "zh-Hans": "再次检查",
     "zh-Hant": "再次檢查",
@@ -2572,6 +2590,24 @@
     "fr": "Déplacer dans {folder}",
     "de": "In {folder} bewegen",
     "es": "Mover a {folder}"
+  },
+  "Undo Relocation": {
+    "zh-Hans": "撤销迁移",
+    "zh-Hant": "撤銷遷移",
+    "ja": "移行を取り消す",
+    "ko": "옮기기 취소",
+    "fr": "Annuler le déplacement",
+    "de": "Verlegung widerrufen",
+    "es": "Deshacer la reubicación"
+  },
+  "the move could not be taken back: {error}": {
+    "zh-Hans": "无法撤销迁移：{error}",
+    "zh-Hant": "無法撤銷遷移：{error}",
+    "ja": "移行を取り消せませんでした: {error}",
+    "ko": "옮기기를 취소할 수 없습니다: {error}",
+    "fr": "impossible d’annuler le déplacement : {error}",
+    "de": "Verlegung konnte nicht widerrufen werden: {error}",
+    "es": "no se ha podido deshacer la reubicación: {error}"
   },
   "Move to Recycle Bin": {
     "zh-Hans": "移到回收站",

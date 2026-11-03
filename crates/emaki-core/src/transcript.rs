@@ -264,7 +264,14 @@ pub struct SessionRef {
     pub agent: AgentId,
     pub session_id: String,
     pub path: PathBuf,
+    /// The folder the transcript records. The archive, deleting and
+    /// putting back go by it, so it never changes; where the folder is
+    /// now is `folder`.
     pub cwd: String,
+    /// Where `cwd` is now, when the person confirmed it moved
+    /// (`moves::Moves::now`); empty when it has not.
+    #[serde(default)]
+    pub moved: String,
     pub project_dir: String,
     pub title: String,
     /// The name the person gave it (`custom_title`), where the rows read
@@ -304,11 +311,20 @@ pub struct SessionRef {
 }
 
 impl SessionRef {
+    /// The session's folder where it is now: where it moved to, or the
+    /// one the transcript records. What opens, lists and continues the
+    /// session goes by this.
+    pub fn folder(&self) -> &str {
+        if self.moved.is_empty() { &self.cwd } else { &self.moved }
+    }
+
+    /// The project the session is listed under: its folder's, where the
+    /// folder is now.
     pub fn project(&self) -> String {
-        if self.cwd.is_empty() {
+        if self.folder().is_empty() {
             self.project_dir.clone()
         } else {
-            paths::project_slug(&self.cwd)
+            paths::project_slug(self.folder())
         }
     }
 }

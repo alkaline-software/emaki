@@ -3,6 +3,7 @@
 //! install it and sign in, and the sessions kept of it
 //! (`docs/agents.md`).
 
+use crate::fonts::Faced as _;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -350,7 +351,7 @@ impl Workbench {
             .pt(px(20.))
             .pb(px(40.))
             .gap(px(20.))
-            .child(h_flex().items_center().gap(px(12.)).child(div().flex_1().min_w_0().text_size(px(30.)).font_family(display.clone()).child(t("Agents"))).child(self.check_button(cx)))
+            .child(h_flex().items_center().gap(px(12.)).child(div().flex_1().min_w_0().text_size(px(30.)).faced(display.clone(), cx).child(t("Agents"))).child(self.check_button(cx)))
             .children(warn)
             .child(h_flex().w_full().gap(px(16.)).items_stretch().children(cards))
             .when(!tools.is_empty(), |d| {
@@ -358,7 +359,7 @@ impl Workbench {
                     v_flex()
                         .pt(px(12.))
                         .gap(px(4.))
-                        .child(div().text_size(px(20.)).font_family(display).child(t("Version control"))),
+                        .child(div().text_size(px(20.)).faced(display, cx).child(t("Version control"))),
                 )
                 .child(v_flex().w_full().gap(px(16.)).children(tools))
             })
@@ -430,7 +431,7 @@ impl Workbench {
             .child(
                 v_flex()
                     .gap(px(2.))
-                    .child(div().truncate().text_size(px(24.)).line_height(px(30.)).font_family(display).child(a.name))
+                    .child(div().truncate().text_size(px(24.)).line_height(px(30.)).faced(display, cx).child(a.name))
                     .child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(t(a.maker))),
             )
             .child(div().flex_1().min_h(px(40.)).text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.82)).child(t(a.about)))
@@ -485,7 +486,7 @@ impl Workbench {
                     .flex_1()
                     .min_w_0()
                     .gap(px(4.))
-                    .child(h_flex().gap(px(10.)).items_baseline().child(div().truncate().text_size(px(22.)).line_height(px(28.)).font_family(display).child(a.name)).child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(t(a.maker))))
+                    .child(h_flex().gap(px(10.)).items_baseline().child(div().truncate().text_size(px(22.)).line_height(px(28.)).faced(display, cx).child(a.name)).child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(t(a.maker))))
                     .child(div().text_size(px(13.)).line_height(px(20.)).text_color(theme.foreground.opacity(0.82)).child(t(a.about))),
             )
             .child(facts)
@@ -658,7 +659,7 @@ impl Workbench {
                     .flex_1()
                     .min_w_0()
                     .gap(px(2.))
-                    .child(h_flex().gap(px(12.)).items_center().child(div().min_w_0().truncate().text_size(px(30.)).font_family(display).child(a.name)).child(self.agent_chip(a, cx)))
+                    .child(h_flex().gap(px(12.)).items_center().child(div().min_w_0().truncate().text_size(px(30.)).faced(display, cx).child(a.name)).child(self.agent_chip(a, cx)))
                     .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(t(a.maker))),
             );
         // The steps are this machine's: what the page can see and tick.

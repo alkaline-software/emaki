@@ -670,17 +670,26 @@ impl Workbench {
         ]
     }
 
-    /// Fonts: the conversation's face and the monospace face, each a
-    /// tile drawn in itself. Their sizes are Text Size's.
+    /// Fonts: the conversation's face, the Chinese face behind it and the
+    /// monospace face, each a tile drawn in itself. Their sizes are Text
+    /// Size's.
     fn fonts_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let app = self.cfg.app.clone();
         let chat_now = crate::fonts::chat_face(&app.chat_font).key;
         let mono_now = crate::fonts::mono_face(&self.cfg.terminal.font).key;
+        let cjk_now: &'static str = crate::fonts::CJK.iter().find(|f| f.key == app.cjk_font).map(|f| f.key).unwrap_or("auto");
+        let serif = crate::fonts::is_serif(crate::fonts::chat_face(&app.chat_font).family);
         let tile_ground = if theme.mode.is_dark() { theme.muted } else { theme.popover };
-        let tiles = |faces: &'static [crate::fonts::Face], now: &'static str, sample: &'static str, mono: bool, cx: &mut Context<Self>| {
+        // `kind`: 0 the chat face, 1 the monospace face, 2 the Chinese face.
+        let tiles = |faces: &'static [crate::fonts::Face], now: &'static str, sample: &'static str, kind: u8, cx: &mut Context<Self>| {
             h_flex().gap(px(8.)).children(faces.iter().map(|face| {
                 let (key, active) = (face.key, face.key == now);
+                let mono = kind == 1;
+                // A Chinese tile draws its sample in its own face; Auto in
+                // the one the chat face gets.
+                let family: &'static str = if kind == 2 { crate::fonts::cjk_family(face.key, serif) } else { face.family };
+                let name: SharedString = if face.key == "auto" { t("Auto").into() } else { face.name.into() };
                 v_flex()
                     .id(SharedString::from(format!("face-{key}")))
                     .flex_1()
@@ -696,13 +705,17 @@ impl Workbench {
                     .border_color(if active { theme.primary } else { theme.border })
                     .when(active, |d| d.bg(theme.primary.opacity(0.08)))
                     .when(!active, |d| d.hover(|s| s.border_color(theme.muted_foreground)))
-                    .on_click(cx.listener(move |this, _, window, cx| if mono { this.set_mono_font(key, window, cx) } else { this.set_chat_font(key, cx) }))
+                    .on_click(cx.listener(move |this, _, window, cx| match kind {
+                        1 => this.set_mono_font(key, window, cx),
+                        2 => this.set_cjk_font(key, cx),
+                        _ => this.set_chat_font(key, cx),
+                    }))
                     // One line, at a size that fits the narrowest tile:
                     // wrapped in a narrow tile, or in a wider face drawn
                     // while its own loads, the sample pushed the face's
                     // name out of the tile.
-                    .child(div().whitespace_nowrap().overflow_hidden().text_size(px(if mono { 14. } else { 20. })).line_height(px(25.)).font_family(face.family).child(sample))
-                    .child(div().truncate().text_size(px(11.5)).text_color(if active { theme.foreground } else { theme.muted_foreground }).child(face.name))
+                    .child(div().whitespace_nowrap().overflow_hidden().text_size(px(if mono { 14. } else { 20. })).line_height(px(25.)).font_family(family).child(sample))
+                    .child(div().truncate().text_size(px(11.5)).text_color(if active { theme.foreground } else { theme.muted_foreground }).child(name))
             }))
         };
         // A kind of face, small and quiet, over its tiles.
@@ -711,13 +724,14 @@ impl Workbench {
             .p(px(14.))
             .gap(px(8.))
             .child(kind(t("Serif")))
-            .child(tiles(crate::fonts::SERIFS, chat_now, "Ag", false, cx))
+            .child(tiles(crate::fonts::SERIFS, chat_now, "Ag", 0, cx))
             .child(div().h(px(4.)))
             .child(kind(t("Sans serif")))
-            .child(tiles(crate::fonts::SANS, chat_now, "Ag", false, cx))
+            .child(tiles(crate::fonts::SANS, chat_now, "Ag", 0, cx))
             .into_any_element();
-        let mono = div().p(px(14.)).child(tiles(crate::fonts::monos(), mono_now, "fn(0) -> 1", true, cx)).into_any_element();
-        vec![group(Some(t("Chat font")), None, vec![chat], &theme), group(Some(t("Monospace font")), None, vec![mono], &theme)]
+        let mono = div().p(px(14.)).child(tiles(crate::fonts::monos(), mono_now, "fn(0) -> 1", 1, cx)).into_any_element();
+        let cjk = div().p(px(14.)).child(tiles(crate::fonts::CJK, cjk_now, "汉字", 2, cx)).into_any_element();
+        vec![group(Some(t("Chat font")), None, vec![chat], &theme), group(Some(t("Chinese font")), None, vec![cjk], &theme), group(Some(t("Monospace font")), None, vec![mono], &theme)]
     }
 
     /// Text Size: a preset for every place at once, and each place's

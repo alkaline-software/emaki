@@ -4883,3 +4883,126 @@ fn claude_codes_own_notes_are_told_from_the_conversation() {
     let usage = format!("{:>90}\n{rule}\n❯ \n{rule}\n", "Approaching usage limit · resets Nov 3 · Run /usage-credits to raise the cap");
     assert_eq!(notes_on_screen(&usage).len(), 1, "a command named in news is still news");
 }
+
+#[test]
+fn a_confirmed_move_is_where_a_gone_folder_is_now() {
+    let (_home, _g) = isolated();
+    let root = tempfile::tempdir().unwrap();
+    let (old, new) = (root.path().join("software").join("emaki"), root.path().join("alkaline").join("emaki"));
+    fs::create_dir_all(new.join("crates")).unwrap();
+    let (old_s, new_s) = (old.to_string_lossy().to_string(), new.to_string_lossy().to_string());
+    assert!(emaki_core::moves::load().now(&old_s).is_none(), "nothing confirmed, nothing moved");
+    emaki_core::moves::record(&old_s, &new_s).unwrap();
+    let moves = emaki_core::moves::load();
+    assert_eq!(moves.now(&old_s).as_deref(), Some(new_s.as_str()));
+    // A folder inside the one moved goes with it.
+    assert_eq!(moves.now(&old.join("crates").to_string_lossy()).as_deref(), Some(new.join("crates").to_string_lossy().as_ref()));
+    // A folder that only shares the start of the name is not inside it.
+    assert!(moves.now(&format!("{old_s}-lol")).is_none());
+    // One made again at the old path is its own.
+    fs::create_dir_all(&old).unwrap();
+    assert!(moves.now(&old_s).is_none());
+}
+
+#[test]
+fn a_gone_folder_is_looked_for_where_its_parent_went() {
+    let (_home, _g) = isolated();
+    let root = tempfile::tempdir().unwrap();
+    let at = |p: &str| root.path().join(p).to_string_lossy().to_string();
+    for p in ["alkaline/emaki", "alkaline/kotoba", "papers/emaki"] {
+        fs::create_dir_all(root.path().join(p)).unwrap();
+    }
+    // `software` was renamed `alkaline`: one session has been begun in
+    // the new `emaki`, none yet in the new `kotoba`.
+    let survey = emaki_core::moves::survey([at("software/emaki"), at("software/kotoba"), at("alkaline/emaki")].iter().map(String::as_str));
+    assert!(survey.gone.contains(&at("software/emaki")) && survey.gone.contains(&at("software/kotoba")));
+    assert!(!survey.gone.contains(&at("alkaline/emaki")));
+    // Two live folders named `emaki` would make the name no guide.
+    let two = emaki_core::moves::survey([at("software/emaki"), at("alkaline/emaki"), at("papers/emaki")].iter().map(String::as_str));
+    assert!(two.to.get(&at("software/emaki")).is_none(), "{:?}", two.to);
+    assert_eq!(survey.to.get(&at("software/emaki")), Some(&at("alkaline/emaki")));
+    assert_eq!(survey.to.get(&at("software/kotoba")), Some(&at("alkaline/kotoba")), "the parent's move says where");
+    // A folder whose parent is still there is not taken for another of
+    // its name.
+    fs::create_dir_all(root.path().join("old")).unwrap();
+    let kept = emaki_core::moves::survey([at("old/kotoba"), at("alkaline/kotoba")].iter().map(String::as_str));
+    assert!(kept.to.is_empty(), "{:?}", kept.to);
+    // Once a move is confirmed, its parent's move is offered for the rest.
+    emaki_core::moves::record(&at("software/emaki"), &at("alkaline/emaki")).unwrap();
+    let after = emaki_core::moves::survey([at("software/kotoba")].iter().map(String::as_str));
+    assert_eq!(after.to.get(&at("software/kotoba")), Some(&at("alkaline/kotoba")));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_renamed_folder_is_known_by_its_identity() {
+    let (_home, _g) = isolated();
+    let root = tempfile::tempdir().unwrap();
+    let (old, new) = (root.path().join("emaki"), root.path().join("emaki-2"));
+    fs::create_dir_all(&old).unwrap();
+    let (old_s, new_s) = (old.to_string_lossy().to_string(), new.to_string_lossy().to_string());
+    // Seen while it was there, then renamed in place: its parent is
+    // still there and its name is not the same, so only its identity
+    // says where it went.
+    assert!(emaki_core::moves::survey([old_s.as_str()]).gone.is_empty());
+    fs::rename(&old, &new).unwrap();
+    let survey = emaki_core::moves::survey([old_s.as_str(), new_s.as_str()]);
+    assert_eq!(survey.to.get(&old_s), Some(&new_s));
+    // A Mac finds it with no session begun in the new folder.
+    if cfg!(target_os = "macos") {
+        let alone = emaki_core::moves::survey([old_s.as_str()]);
+        let found = alone.to.get(&old_s).map(|p| fs::canonicalize(p).unwrap());
+        assert_eq!(found, Some(fs::canonicalize(&new).unwrap()));
+    }
+}
+
+#[test]
+fn a_moved_session_is_listed_where_its_folder_went_and_archived_where_it_was() {
+    let (_home, _g) = isolated();
+    let root = tempfile::tempdir().unwrap();
+    let (old, new) = (root.path().join("software").join("proj"), root.path().join("alkaline").join("proj"));
+    fs::create_dir_all(&new).unwrap();
+    let (old_s, new_s) = (old.to_string_lossy().to_string(), new.to_string_lossy().to_string());
+    let dir = archive::claude_project_dir(&old_s).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let mut rows = user("hello", "2026-11-01T00:00:00Z");
+    rows["cwd"] = json!(old_s);
+    rows["sessionId"] = json!("moved-1");
+    fs::write(dir.join("moved-1.jsonl"), format!("{rows}\n")).unwrap();
+    let find = || emaki_core::adapters::index_all(0, &[]).into_iter().find(|r| r.session_id == "moved-1").unwrap();
+    let before = find();
+    assert!(before.moved.is_empty());
+    assert_eq!(before.folder(), old_s);
+    emaki_core::moves::record(&old_s, &new_s).unwrap();
+    let after = find();
+    assert_eq!(after.cwd, old_s, "the transcript's folder stands");
+    assert_eq!(after.folder(), new_s);
+    assert_eq!(after.project(), emaki_core::paths::project_slug(&new_s));
+    // The archive keeps the copy in the old folder's project, where every
+    // earlier sweep put it.
+    archive::sweep(std::slice::from_ref(&after));
+    let slug = emaki_core::paths::project_slug(&old_s);
+    assert!(archive::archive_dir().join("claude").join(&slug).join("moved-1.jsonl").exists());
+}
+
+#[test]
+fn a_move_taken_back_is_not_found_again() {
+    let (_home, _g) = isolated();
+    let root = tempfile::tempdir().unwrap();
+    let at = |p: &str| root.path().join(p).to_string_lossy().to_string();
+    for p in ["alkaline/emaki", "alkaline/kotoba"] {
+        fs::create_dir_all(root.path().join(p)).unwrap();
+    }
+    let folders = [at("software/emaki"), at("software/kotoba"), at("alkaline/emaki")];
+    let survey = emaki_core::moves::survey(folders.iter().map(String::as_str));
+    assert_eq!(survey.to.get(&at("software/emaki")), Some(&at("alkaline/emaki")));
+    emaki_core::moves::record(&at("software/emaki"), &at("alkaline/emaki")).unwrap();
+    emaki_core::moves::take_back(&at("software/emaki")).unwrap();
+    let moves = emaki_core::moves::load();
+    assert!(moves.now(&at("software/emaki")).is_none(), "listed where its transcript says again");
+    let again = emaki_core::moves::survey(folders.iter().map(String::as_str));
+    assert!(again.to.get(&at("software/emaki")).is_none(), "{:?}", again.to);
+    assert!(again.gone.contains(&at("software/emaki")));
+    // The one taken back says nothing of its parent's move.
+    assert!(again.to.get(&at("software/kotoba")).is_none(), "{:?}", again.to);
+}

@@ -61,6 +61,12 @@ const RETURN_TRIES: usize = 3;
 
 pub enum HubEvent {
     Index(Vec<SessionRef>),
+    /// The sessions' folders that are gone (`moves::survey`), sent when
+    /// that changes.
+    Folders(emaki_core::moves::Survey),
+    /// Folders found where they went and kept as moved, old path and new:
+    /// their sessions are listed there from the index after this.
+    Relocated(Vec<(String, String)>),
     Changed(PathBuf),
     DriverStarted { session_id: String },
     /// A new session's agent gave it an id of its own: what the window
@@ -129,6 +135,9 @@ pub struct Hub {
     /// the events from then on (`attach`).
     tx: Arc<Mutex<UnboundedSender<HubEvent>>>,
     wake: Mutex<mpsc::Sender<()>>,
+    /// Look for where gone folders went at the next scan, whether or not
+    /// the folders the sessions name changed (`look_for_moves`).
+    look_again: std::sync::atomic::AtomicBool,
     search_tx: Mutex<mpsc::Sender<Vec<SessionRef>>>,
     drivers: Mutex<HashMap<String, Arc<dyn Drive>>>,
     /// Sessions a driver is being started on for a setting.
@@ -197,6 +206,7 @@ impl Hub {
         let hub = Arc::new(Hub {
             tx,
             wake: Mutex::new(wake_tx),
+            look_again: std::sync::atomic::AtomicBool::new(false),
             search_tx: Mutex::new(search_tx),
             starting: Mutex::new(HashSet::new()),
             attached: Mutex::new(HashMap::new()),
@@ -250,12 +260,21 @@ impl Hub {
         }
     }
 
+    /// Look for where gone folders went now: a session whose folder is
+    /// gone was opened, and its folder may have moved since the last look.
+    pub fn look_for_moves(&self) {
+        self.look_again.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.refresh();
+    }
+
     fn spawn_scanner(self: &Arc<Self>, wake_rx: mpsc::Receiver<()>) {
         let hub = Arc::clone(self);
         thread::Builder::new()
             .name("emaki-scan".into())
             .spawn(move || {
                 let mut last_sig: Vec<(String, u64, f64)> = Vec::new();
+                let mut last_survey: Option<emaki_core::moves::Survey> = None;
+                let mut last_folders: Option<std::collections::BTreeSet<String>> = None;
                 // What of each session the archive has, by its size and
                 // time, and when it was taken.
                 let mut taken: HashMap<String, (u64, f64, Instant)> = HashMap::new();
@@ -272,6 +291,46 @@ impl Hub {
                     hub.refresh_peers();
                     let mut refs = adapters::index_all(200, &agents);
                     hub.settle_stopped(&mut refs);
+                    // Where gone folders went is looked for at launch, when
+                    // the folders the sessions name change (a session begun
+                    // in a folder renamed is how a rename shows), and when
+                    // the window asks; never by the clock. What is found is
+                    // kept and the sessions listed there, and what moved is
+                    // looked at once more, for a folder that move says of.
+                    let folders_now = |refs: &[SessionRef]| -> std::collections::BTreeSet<String> {
+                        refs.iter().map(|r| r.folder().to_string()).filter(|f| !f.is_empty() && !emaki_core::paths::is_temp_dir(f)).collect()
+                    };
+                    let mut folders = folders_now(&refs);
+                    let asked = hub.look_again.swap(false, std::sync::atomic::Ordering::Relaxed);
+                    if asked || last_folders.as_ref() != Some(&folders) {
+                        let mut survey = emaki_core::moves::survey(folders.iter().map(String::as_str));
+                        for _ in 0..3 {
+                            let found: Vec<(String, String)> = survey.to.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+                            let moved: Vec<(String, String)> = found
+                                .into_iter()
+                                .filter(|(from, to)| match emaki_core::moves::record(from, to) {
+                                    Ok(()) => true,
+                                    Err(e) => {
+                                        eprintln!("emaki: the move of {from} to {to} could not be kept: {e}");
+                                        false
+                                    }
+                                })
+                                .collect();
+                            if moved.is_empty() {
+                                break;
+                            }
+                            refs = adapters::index_all(200, &agents);
+                            hub.settle_stopped(&mut refs);
+                            hub.send(HubEvent::Relocated(moved));
+                            folders = folders_now(&refs);
+                            survey = emaki_core::moves::survey(folders.iter().map(String::as_str));
+                        }
+                        last_folders = Some(folders);
+                        if last_survey.as_ref() != Some(&survey) {
+                            last_survey = Some(survey.clone());
+                            hub.send(HubEvent::Folders(survey));
+                        }
+                    }
                     let sig: Vec<(String, u64, f64)> =
                         refs.iter().map(|r| (format!("{}:{}", r.agent.as_str(), r.session_id), r.size, r.mtime)).collect();
                     let changed = sig != last_sig;

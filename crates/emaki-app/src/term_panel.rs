@@ -714,7 +714,7 @@ impl Workbench {
     fn agent_terminal_up(&mut self, cx: &mut Context<Self>) -> bool {
         if let Some(r) = self.selected_ref().cloned() {
             match r.agent {
-                AgentId::Codex => self.hub.attach_terminal(r.agent, &r.session_id, &r.cwd),
+                AgentId::Codex => self.hub.attach_terminal(r.agent, &r.session_id, r.folder()),
                 // Its hidden terminal is what asked, and is already there.
                 AgentId::ClaudeCode => {}
             }
@@ -1014,7 +1014,7 @@ impl Workbench {
     /// `at` is where in the row, the end when none.
     pub(crate) fn shell_new(&mut self, at: Option<usize>, cx: &mut Context<Self>) {
         let Some(r) = self.term_owner() else { return };
-        let cwd = if Self::folder_exists(&r) { r.cwd.clone() } else { emaki_core::paths::home().to_string_lossy().to_string() };
+        let cwd = if Self::folder_exists(&r) { r.folder().to_string() } else { emaki_core::paths::home().to_string_lossy().to_string() };
         // A shell whose prompt marks where what is typed begins.
         let (argv, env) = emaki_core::shell_marks::shell_command();
         let made = Pty::spawn_with(&argv, &env, &cwd, Arc::new(|| {})).inspect(|p| p.reflow_on_resize());
@@ -1549,7 +1549,7 @@ impl Workbench {
     /// The link the cell is part of, when it is part of one.
     fn term_link_at(&self, agent: bool, pty: &Pty, row: u16, col: u16) -> Option<Link> {
         let (rows, _) = pty.rows_back(self.view(agent).back);
-        let cwd = self.term_owner().map(|r| std::path::PathBuf::from(&r.cwd)).unwrap_or_default();
+        let cwd = self.term_owner().map(|r| std::path::PathBuf::from(r.folder())).unwrap_or_default();
         let (from, to, target) = link_at(&row_cells(rows.get(row as usize)?), col as usize, &cwd)?;
         Some(Link { row, from, to, target })
     }

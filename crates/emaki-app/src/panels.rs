@@ -2223,7 +2223,10 @@ impl Workbench {
     /// The folder whose files the panel shows: the session's own.
     pub(crate) fn files_root(&self) -> Option<PathBuf> {
         let d = self.detail.as_ref()?;
-        let cwd = if d.session.cwd.is_empty() { self.selected_ref()?.cwd.clone() } else { d.session.cwd.clone() };
+        let cwd = match self.selected_ref().map(|r| r.folder().to_string()).filter(|f| !f.is_empty()) {
+            Some(f) => f,
+            None => d.session.cwd.clone(),
+        };
         (!cwd.is_empty()).then(|| PathBuf::from(cwd))
     }
 

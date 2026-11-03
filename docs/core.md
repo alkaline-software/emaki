@@ -12,6 +12,7 @@ About `crates/emaki-core/src/`: `paths.rs`, `adapters/`, `archive.rs`, `search.r
 - `fts_query` quotes every term. People type `rm -rf`, `a:b` and a lone `"`, all FTS5 syntax that would raise mid-keystroke.
 - The explainer's child is never `--bare`, and its `cwd` stays under `~/.emaki/run/explain`: it is a real Claude Code session and leaves a transcript, which that folder keeps out of the index.
 - The tests never call a model.
+- A session's `cwd` is the folder its transcript records and never changes: the archive, deleting and putting back go by it (`archived_main` files a copy under `project_slug(cwd)`). What opens, lists or continues a session goes by `SessionRef::folder()`, where that folder is now (Moved folders). Rewriting `cwd` would make the next sweep file a second copy under another project.
 
 ## What is on disk
 
@@ -60,6 +61,15 @@ Gemini CLI had an adapter for one commit and lost it: in June 2026 Google closed
 - **A turn's ends are explicit**: `task_started`, then `task_complete` or `turn_aborted`, kept as `Session::turn_open`. A `task_complete` with an `error` is a turn that failed, and the round ends on the error. `adapters::turn_state_from_session` goes by `turn_open` where there is one, since words said in an open turn are commentary and not the reply; a rollout without those rows is read off the model's tail as before.
 - **Tokens**: `token_count` rows are running totals with cached tokens inside `input_tokens`. The last request's `input_tokens` is the context in use, and `model_context_window` the size it is in. The same row carries the account's usage windows (`rate_limits`: `primary` and `secondary`, each with its length in minutes, either of which can be null), kept as `Session::usage_windows` for the row under the composer (`docs/composer.md`). A row can have the windows with `info` null.
 - **The title** is the thread's name when the person gave one. Names are not in the rollout: `session_index.jsonl` has a row a naming, the newest last. Nothing else in Codex's home is opened.
+
+## Moved folders
+
+`moves.rs`. A folder renamed or moved leaves its sessions naming a path that is gone: Claude Code keys its project folder on the path (a rename makes a new one, and asks about trust again), and Codex keeps `cwd` in each rollout's first row. Nothing of theirs is rewritten. Both continue a session from the folder they are started in: `claude --resume <id>` finds the session in any project folder, keeps writing its original file and stamps the rows it adds with the new `cwd`; Codex takes the new folder as `cwd` beside the thread id on `thread/resume`.
+
+- **A move found is kept** in `state/moves.json`, old path to new, by the scanner and with nothing asked: what changes is Emaki's listing alone, and the person can take it back (`docs/window.md`). One taken back is kept as going nowhere (an empty new path, `take_back`): it is not applied and not found again, and it says nothing of its parent's move. `index_all` reads every session's `cwd` through it into `SessionRef::moved`, a folder inside the one moved going with it. A path that exists again is where it is: a folder made anew at an old path is its own project.
+- **When it is looked for**: at launch, when the folders the sessions name change (a session begun in a folder renamed is how a rename shows), and when a session whose folder is gone is opened (`Hub::look_for_moves`); never by the clock. A folder nothing could place is not looked for again until the folders change. Each find is kept and the index read again, and what moved is looked at once more, for the folders its move says of (`HubEvent::Relocated` goes before that index).
+- **How it is found** (`survey`, over the folders that are not temporary): the folder by its identity first, since a rename on one disk keeps its device and file number, which `state/folders.json` holds for every folder seen while it was there. A live project's folder with that identity is it, and on a Mac the system says where it went with no session begun there (`/.vol/<dev>/<ino>` and `F_GETPATH`); a folder found in a Trash is not taken. Then the parents a move says moved: once `a/old/x` went to `a/new/x`, `a/old/y` is looked for at `a/new/y`. The pair can be a kept move or a gone folder and the one live folder with its name, taken only when the gone folder's parent is gone too. Off Unix there is no identity, and names alone guess.
+- **The project's key does not change.** `state/projects.json` keeps every path's slug, so the archive and `ui.json` keep theirs; a moved session's project is its new folder's (`SessionRef::project` goes by `folder()`). What the window shows is a label (`Workbench::relabel`).
 
 ## Presence, without hooks
 

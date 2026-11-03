@@ -180,6 +180,13 @@ pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
             refs.push(r);
         }
     }
+    // A folder the person said moved is read where it went.
+    let moves = crate::moves::load();
+    if !moves.is_empty() {
+        for r in refs.iter_mut() {
+            r.moved = moves.now(&r.cwd).unwrap_or_default();
+        }
+    }
     refs.sort_by(|a, b| b.active.total_cmp(&a.active));
     refs
 }
