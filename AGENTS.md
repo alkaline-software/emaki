@@ -91,7 +91,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
 | Bringing in a new agent: a variant of `AgentId`, an adapter, a driver | `docs/new-agent.md`, then the docs it names |
-| `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs`, `moves.rs` | `docs/core.md` |
+| `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs`, `moves.rs`, `remote.rs` | `docs/core.md` |
 | `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, `process.rs`, `csd.rs`, any `cfg` for an OS | `docs/platform.md` |
 | Checking a change in the window from a script | `docs/probing.md` |
 | Bumping the version and cutting a release | `docs/release.md` |
@@ -111,6 +111,7 @@ crates/emaki-core/        everything without a window
   src/build.rs               Claude rows -> model, turn_state()
   src/archive.rs             copy-first mirror; runs before anything renders
   src/moves.rs               where a project's folder went: the moves the person confirmed, and the guesses offered for a folder that is gone
+  src/remote.rs              remote control: other computers reached over ssh, their sessions copied here as they are written, an agent started there
   src/render_md.rs store.rs  model -> CommonMark on disk
   src/search.rs              FTS5 over every item, ~/.emaki/search.db
   src/driver.rs              a headless `claude -p` child on stream-json, and `Drive`, what any agent's child answers to
@@ -139,7 +140,7 @@ crates/emaki-core/        everything without a window
   src/pty.rs                 a terminal of our own with no window: an interactive `claude` on a pty, its screen kept in memory
   src/shell_marks.rs         the shell terminal's shell, started so its prompt marks where what is typed begins (OSC 133)
   src/watcher.rs             notify over every agent's data roots
-  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | shells | outline | git | files | peers | inbox | options | explain | update | statusline | agents | drive | pty
+  src/bin/emaki-core.rs     list | render | build | archive | sync | search | bench | shells | outline | git | files | peers | inbox | options | explain | update | statusline | agents | drive | pty | remote
   tests/core.rs
 crates/emaki-app/         the window
   src/hub.rs                 threads: scan -> archive -> index, drivers, watcher

@@ -5006,3 +5006,31 @@ fn a_move_taken_back_is_not_found_again() {
     // The one taken back says nothing of its parent's move.
     assert!(again.to.get(&at("software/kotoba")).is_none(), "{:?}", again.to);
 }
+
+#[test]
+fn a_remote_session_is_listed_under_its_computer_and_never_archived_here() {
+    let (_home, _g) = isolated();
+    let d = emaki_core::remote::add("mac-mini.local", "me", 0, "").unwrap();
+    assert_eq!(d.id, "mac-mini");
+    let dir = emaki_core::remote::claude_projects(&d.id).join("-Users-me-proj");
+    fs::create_dir_all(&dir).unwrap();
+    let mut rows = user("hello there", "2026-11-01T00:00:00Z");
+    rows["cwd"] = json!("/Users/me/proj");
+    rows["sessionId"] = json!("dev-1");
+    fs::write(dir.join("dev-1.jsonl"), format!("{rows}\n")).unwrap();
+    let find = || emaki_core::adapters::index_all(0, &[]).into_iter().find(|r| r.session_id == "dev-1");
+    let r = find().expect("the remote's session is listed");
+    assert_eq!(r.cwd, "ssh://mac-mini/Users/me/proj");
+    assert_eq!(r.remote_id(), Some("mac-mini"));
+    assert!(!r.archived);
+    // Its project is the remote's, apart from a folder of that path here.
+    assert_ne!(r.project(), emaki_core::paths::project_slug("/Users/me/proj"));
+    // The copy is its archive: nothing goes into Emaki's own.
+    archive::sweep(std::slice::from_ref(&r));
+    assert!(fs::read_dir(archive::archive_dir().join("claude")).map(|mut d| d.next().is_none()).unwrap_or(true));
+    // A remote removed takes its sessions out of the lists, and back with it.
+    emaki_core::remote::remove(&d.id).unwrap();
+    assert!(find().is_none());
+    emaki_core::remote::add("mac-mini.local", "me", 0, "").unwrap();
+    assert!(find().is_some());
+}

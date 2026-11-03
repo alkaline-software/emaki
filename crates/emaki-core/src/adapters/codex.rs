@@ -43,12 +43,19 @@ use crate::transcript::{mtime_secs, read_all, SessionRef};
 
 pub struct CodexAdapter {
     roots: Vec<PathBuf>,
+    /// The names the person gave threads (`thread_name`).
+    names: PathBuf,
 }
 
 impl CodexAdapter {
     pub fn new() -> Self {
-        let home = paths::codex_home();
-        Self { roots: vec![home.join("sessions"), home.join("archived_sessions")] }
+        Self::at(paths::codex_home())
+    }
+
+    /// Codex's home at `home`: this computer's, or one copied from a
+    /// remote (`remote`).
+    pub fn at(home: PathBuf) -> Self {
+        Self { roots: vec![home.join("sessions"), home.join("archived_sessions")], names: home.join("session_index.jsonl") }
     }
 }
 
@@ -163,7 +170,7 @@ impl Adapter for CodexAdapter {
         r.session_id = s.id.clone();
         r.cwd = s.cwd.clone();
         r.title = s.title.clone();
-        r.named = thread_name(&s.id);
+        r.named = thread_name(&self.names, &s.id);
         r.started = s.started.clone();
         r.updated = s.updated.clone();
         // Every line of a rollout is something that happened, and a round
@@ -184,7 +191,7 @@ impl Adapter for CodexAdapter {
         if s.id.is_empty() {
             s.id = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         }
-        let name = thread_name(&s.id);
+        let name = thread_name(&self.names, &s.id);
         if !name.is_empty() {
             s.title = name;
         }
@@ -196,17 +203,17 @@ impl Adapter for CodexAdapter {
 /// from the rollouts, a row a naming in `session_index.jsonl`, the newest
 /// last. Read once and again when the file changes: `peek` asks for every
 /// session listed.
-fn thread_name(id: &str) -> String {
-    static NAMES: LazyLock<Mutex<(PathBuf, u64, f64, HashMap<String, String>)>> = LazyLock::new(Default::default);
+fn thread_name(path: &Path, id: &str) -> String {
+    static NAMES: LazyLock<Mutex<HashMap<PathBuf, (u64, f64, HashMap<String, String>)>>> = LazyLock::new(Default::default);
     if id.is_empty() {
         return String::new();
     }
-    let path = paths::codex_home().join("session_index.jsonl");
-    let Ok(st) = fs::metadata(&path) else { return String::new() };
-    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    if names.0 != path || names.1 != st.len() || names.2 != mtime_secs(&st) {
+    let Ok(st) = fs::metadata(path) else { return String::new() };
+    let mut all = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let names = all.entry(path.to_path_buf()).or_default();
+    if names.0 != st.len() || names.1 != mtime_secs(&st) {
         let mut map = HashMap::new();
-        for row in read_all(&path) {
+        for row in read_all(path) {
             let name = str_of(&row, "thread_name").trim();
             if name.is_empty() {
                 map.remove(str_of(&row, "id"));
@@ -214,9 +221,9 @@ fn thread_name(id: &str) -> String {
                 map.insert(str_of(&row, "id").to_string(), name.to_string());
             }
         }
-        *names = (path, st.len(), mtime_secs(&st), map);
+        *names = (st.len(), mtime_secs(&st), map);
     }
-    names.3.get(id).cloned().unwrap_or_default()
+    names.2.get(id).cloned().unwrap_or_default()
 }
 
 static RE_WRAPPERS: LazyLock<Regex> = LazyLock::new(|| {

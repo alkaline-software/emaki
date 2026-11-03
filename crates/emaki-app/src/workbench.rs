@@ -684,6 +684,7 @@ pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
     ("panels", phrase("Panels"), "icons/layout-dashboard.svg"),
     ("files", phrase("Files"), "icons/tree-view.svg"),
     ("terminal", phrase("Terminal"), "icons/terminal.svg"),
+    ("remote", phrase("Remote control"), "icons/devices.svg"),
     ("shortcuts", phrase("Shortcuts"), "icons/keyboard.svg"),
     ("about", phrase("About"), "icons/info.svg"),
 ];
@@ -1514,6 +1515,39 @@ pub struct Workbench {
     pub(crate) rename_input: Entity<InputState>,
     /// The name's field in the settings, made with their window.
     name_input: Option<Entity<InputState>>,
+    /// Settings, Remote control: the address and the password of a computer being
+    /// added, made with the settings window as the name's field is.
+    pub(crate) remote_input: Option<Entity<InputState>>,
+    pub(crate) remote_password: Option<Entity<InputState>>,
+    /// A remote is being reached to be added.
+    pub(crate) remote_adding: bool,
+    /// The form is emptied at its next draw: a remote was added.
+    pub(crate) remote_clear: bool,
+    /// What went wrong adding one, said under the form.
+    pub(crate) remote_said: Option<Instant>,
+    /// How many times Connect has said it could not, so each saying
+    /// fades in and out anew.
+    pub(crate) remote_said_n: u64,
+    /// A saved computer just kept, which grows into the list, and one just
+    /// removed, at its place, which folds away.
+    pub(crate) remote_born: Option<(String, Instant)>,
+    pub(crate) remote_leaving: Option<(usize, emaki_core::remote::Remote, Instant)>,
+    /// The saved computers' list, scrolled inside its card.
+    pub(crate) remote_scroll: ScrollHandle,
+    /// Which computer's projects the sidebar shows, when there are remote
+    /// ones: this computer's (None) or a remote's by its id; and the last
+    /// change of it, from which tab to which, for the plate's slide.
+    pub(crate) side_place: Option<String>,
+    side_place_moved: Option<(usize, usize, Instant)>,
+    /// What the card under the tabs last showed, a computer's projects or
+    /// that it is not connected, and the change to it: its number and when,
+    /// for the fade that plays it (`side_tabs`).
+    side_shown: std::cell::RefCell<(Option<(Option<String>, bool)>, u32, Option<Instant>)>,
+    /// This computer as another reaches it, asked when Remote control shows.
+    pub(crate) here: Option<emaki_core::remote::Here>,
+    pub(crate) here_asked: Option<Instant>,
+    /// A value just copied from Remote control, and when: its button says so.
+    pub(crate) here_copied: Option<(String, Instant)>,
     /// Text Size's fields, a place each, made with the settings window.
     size_inputs: Vec<(&'static str, Entity<InputState>)>,
     /// The names the person gave that the sessions' transcripts do not
@@ -1761,6 +1795,9 @@ pub struct Workbench {
     /// Calls a model is explaining right now.
     pub explaining: HashSet<String>,
     pub new_cwd: String,
+    /// The folders' list walking a remote's folders, to start a new
+    /// session there (`RemoteBrowse`).
+    remote_browse: Option<RemoteBrowse>,
     pub new_id: String,
     pub next_mode: String,
     pub next_model: String,
@@ -1984,6 +2021,11 @@ pub struct Workbench {
     /// The sessions' folders that are gone, and where each may be now,
     /// as the scanner last looked (`moves::survey`).
     folders: emaki_core::moves::Survey,
+    /// How each remote's link stands, by its id (`HubEvent::Remote`).
+    pub(crate) remote_links: HashMap<String, emaki_core::remote::LinkStatus>,
+    /// The remotes connected since launch: one of them that fails has lost
+    /// its connection, the others never had one.
+    remote_ever: HashSet<String>,
     /// The name each project is shown by, where it is not its own
     /// (`relabel`).
     labels: HashMap<String, String>,
@@ -4252,6 +4294,21 @@ impl Workbench {
             rename_drawn: Default::default(),
             rename_input,
             name_input: None,
+            remote_input: None,
+            remote_password: None,
+            remote_adding: false,
+            remote_clear: false,
+            remote_said: None,
+            remote_said_n: 0,
+            remote_born: None,
+            remote_leaving: None,
+            remote_scroll: ScrollHandle::new(),
+            side_place: None,
+            side_place_moved: None,
+            side_shown: Default::default(),
+            here: None,
+            here_asked: None,
+            here_copied: None,
             size_inputs: Vec::new(),
             // A name still in our record is one its transcript does not
             // say yet: asked for again at launch.
@@ -4358,6 +4415,7 @@ impl Workbench {
             explaining: HashSet::new(),
             copied: None,
             new_cwd: String::new(),
+            remote_browse: None,
             new_id: String::new(),
             next_mode,
             next_model,
@@ -4689,6 +4747,8 @@ impl Workbench {
             hidden: ui.hidden.clone(),
             hidden_open: false,
             folders: Default::default(),
+            remote_links: HashMap::new(),
+            remote_ever: HashSet::new(),
             labels: HashMap::new(),
             leaving: Vec::new(),
             leaving_serial: 0,
@@ -4953,6 +5013,23 @@ impl Workbench {
                 for (from, to) in moves {
                     self.relocated(&from, &to, cx);
                 }
+            }
+            HubEvent::Remote(id, status) => {
+                // A link starting again says Connecting first: a computer
+                // that answered stands as connected until the link says
+                // otherwise, and one that failed as failed until it
+                // answers, so its retries do not flicker. Connect pressed
+                // says Connecting itself (`remote_connect`).
+                use emaki_core::remote::LinkState;
+                let keep = (status.state == LinkState::Connecting && self.remote_links.get(&id).is_some_and(|s| matches!(s.state, LinkState::Connected | LinkState::Failed(_)))) || !emaki_core::remote::is_on(&id);
+                if !keep {
+                    if status.state == emaki_core::remote::LinkState::Connected {
+                        self.remote_ever.insert(id.clone());
+                    }
+                    self.remote_links.insert(id, status);
+                }
+                self.relabel();
+                cx.notify();
             }
             HubEvent::Changed(path) => {
                 // A session begun here has no file yet, and an empty path
@@ -5864,7 +5941,7 @@ impl Workbench {
     /// behind, since nothing was started. A folder's empty one is gone
     /// back to, not made twice.
     pub(crate) fn new_session_in(&mut self, cwd: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if cwd.is_empty() || !std::path::Path::new(cwd).is_dir() {
+        if !emaki_core::remote::is_there(cwd) {
             self.notice = Some(Notice::error(t("that folder is gone")));
             cx.notify();
             return;
@@ -5961,9 +6038,15 @@ impl Workbench {
         self.sidebar_peek = false;
         self.save_ui(true);
         if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).cloned() {
+            // The sidebar goes to the computer the session is on, so the
+            // session opened is among its rows.
+            let place = r.remote_id().map(str::to_string);
+            if self.side_place_now(&self.side_places()) != place {
+                self.side_place_go(place, cx);
+            }
             // A session whose folder is gone: the folder may have moved
             // since the scanner last looked, and it looks now.
-            if !r.folder().is_empty() && !emaki_core::paths::is_temp_dir(r.folder()) && !std::path::Path::new(r.folder()).is_dir() {
+            if !r.is_remote() && !r.folder().is_empty() && !emaki_core::paths::is_temp_dir(r.folder()) && !std::path::Path::new(r.folder()).is_dir() {
                 self.hub.look_for_moves();
             }
             // Another tab: the conversation left is put away as it is
@@ -6328,6 +6411,16 @@ impl Workbench {
             // The agent a new session is begun with, and words to send
             // from wherever the composer is, a step among others.
             Some(t) if t.starts_with("newfolder:") => self.pick_chosen(PickFor::Folder, &t["newfolder:".len()..], cx),
+            // A step through a remote's folders in the open folders'
+            // list: `dev:<id>`, `in:<path>`, `up`, `back`, `use:<path>`.
+            Some(t) if t.starts_with("remotefolder:") => self.remote_step(&t["remotefolder:".len()..], cx),
+            // Connect's left saying it could not, as a failed connect does.
+            Some("remotefailed") => self.remote_failed(cx),
+            // A press on a tab over the sidebar's card: `local` or a remote's id.
+            Some(t) if t.starts_with("sideplace:") => {
+                let to = &t["sideplace:".len()..];
+                self.side_place_go((to != "local").then(|| to.to_string()), cx)
+            }
             Some(t) if t.starts_with("newagent:") => self.pick_chosen(PickFor::Agent, &t["newagent:".len()..], cx),
             Some(t) if t.starts_with("say:") => {
                 self.send_probe = Some(t["say:".len()..].to_string());
@@ -6884,7 +6977,7 @@ impl Workbench {
         let path = r.path.clone();
         // The folder's commands, read once per folder, so the commands a
         // prompt names are known by the time they are drawn.
-        if !r.folder().is_empty() && std::path::Path::new(r.folder()).is_dir() {
+        if emaki_core::remote::is_there(r.folder()) {
             let _ = self.hub.commands_for(r.agent, r.folder());
         }
         // EMAKI_TIMING=1 prints how long the load and the hand-over to the
@@ -6913,7 +7006,7 @@ impl Workbench {
                     }
                     (session, Some(rows))
                 }
-                None => (adapters::for_agent(r.agent).load(&r), None),
+                None => (adapters::for_ref(&r).load(&r), None),
             };
             explainer.attach(&mut session);
             (session, rows)
@@ -8184,8 +8277,15 @@ impl Workbench {
                 if !self.new_cwd.is_empty() && !cwds.contains(&self.new_cwd) {
                     cwds.insert(0, self.new_cwd.clone());
                 }
+                if let Some(b) = &self.remote_browse {
+                    return (b.rows(), self.new_cwd.clone());
+                }
                 let mut rows: Vec<PickRow> = cwds.into_iter().map(|c| PickRow::plain(c.clone(), folder_name(&c), folder_parent(&c))).collect();
                 rows.push(PickRow::plain(String::new(), t("Choose a folder…").into(), String::new()));
+                // A folder on a remote is walked to in the list itself.
+                for (ix, d) in emaki_core::remote::remotes().iter().enumerate() {
+                    rows.push(PickRow { rule: ix == 0, ..PickRow::plain(format!("{BROWSE}dev:{}", d.id), tf("A folder on {remote}…", &[("remote", &d.name)]), String::new()) });
+                }
                 (rows, self.new_cwd.clone())
             }
             // The system's, then under a line each language by its flag
@@ -8261,6 +8361,11 @@ impl Workbench {
 
     /// A choice pressed on a list. The one already set changes nothing.
     fn pick_chosen(&mut self, what: PickFor, key: &str, cx: &mut Context<Self>) {
+        // A step through a remote's folders keeps the list open.
+        if let Some(step) = key.strip_prefix(BROWSE).filter(|_| what == PickFor::Folder) {
+            self.remote_step(step, cx);
+            return;
+        }
         let same = self.pick.as_ref().is_some_and(|p| p.current == key);
         self.close_pick(cx);
         if same {
@@ -8298,6 +8403,64 @@ impl Workbench {
             PickFor::HelperClaude => self.set_helper_model(AgentId::ClaudeCode, key, cx),
             PickFor::HelperCodex => self.set_helper_model(AgentId::Codex, key, cx),
         }
+    }
+
+    /// A step through a remote's folders in the folders' list: to the
+    /// remote's home (`dev:`), into a folder (`in:`), up, back to the
+    /// folders worked in last, or this folder chosen (`use:`).
+    fn remote_step(&mut self, step: &str, cx: &mut Context<Self>) {
+        let (remote, path) = match (step.split_once(':'), &self.remote_browse) {
+            (Some(("dev", id)), _) => (id.to_string(), String::new()),
+            (Some(("in", path)), Some(b)) => (b.remote.clone(), path.to_string()),
+            (Some(("use", path)), Some(b)) => {
+                self.new_cwd = emaki_core::remote::folder(&b.remote, path);
+                self.remote_browse = None;
+                self.close_pick(cx);
+                let _ = self.hub.commands_for(self.agent_now(), &self.new_cwd.clone());
+                cx.notify();
+                return;
+            }
+            _ if step == "up" => match &self.remote_browse {
+                Some(b) => (b.remote.clone(), std::path::Path::new(&b.path).parent().map(|p| p.to_string_lossy().to_string()).filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into())),
+                None => return,
+            },
+            _ if step == "back" => {
+                self.remote_browse = None;
+                self.refresh_pick_rows(cx);
+                return;
+            }
+            _ => return,
+        };
+        self.remote_browse = Some(RemoteBrowse { remote: remote.clone(), path: path.clone(), folders: None });
+        self.refresh_pick_rows(cx);
+        let asked = (remote.clone(), path.clone());
+        let task = cx.background_spawn(async move { emaki_core::remote::list_folders(&remote, &path) });
+        cx.spawn(async move |this, cx| {
+            let got = task.await;
+            this.update(cx, |this, cx| {
+                let Some(b) = this.remote_browse.as_mut().filter(|b| (b.remote.clone(), b.path.clone()) == asked) else { return };
+                match got {
+                    Ok((here, names)) => {
+                        b.path = here;
+                        b.folders = Some(Ok(names));
+                    }
+                    Err(e) => b.folders = Some(Err(e)),
+                }
+                this.refresh_pick_rows(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The rows of the list that is open, made again from what they say.
+    fn refresh_pick_rows(&mut self, cx: &mut Context<Self>) {
+        let Some(what) = self.pick.as_ref().map(|p| p.what) else { return };
+        let rows = Rc::new(self.pick_rows(what, cx).0);
+        if let Some(p) = self.pick.as_mut() {
+            p.rows = rows;
+        }
+        cx.notify();
     }
 
     /// Ask the system for a folder, any folder, for the new session to
@@ -9463,6 +9626,9 @@ impl Workbench {
         if r.archived {
             return Err(t("Archived. To continue it, unarchive it from its menu in the sidebar"));
         }
+        if r.is_remote() {
+            return Err(t("a session on another computer has no hidden terminal"));
+        }
         if !Self::folder_exists(r) {
             return Err(t(FOLDER_GONE));
         }
@@ -9528,15 +9694,17 @@ impl Workbench {
         .detach();
     }
 
+    /// Whether the session's folder can be gone to: here and there, or
+    /// on a remote in Settings (`remote::is_there`).
     pub(crate) fn folder_exists(r: &SessionRef) -> bool {
-        !r.folder().is_empty() && std::path::Path::new(r.folder()).is_dir()
+        emaki_core::remote::is_there(r.folder())
     }
 
     /// The second button at the top right: the folder the session ran in,
     /// opened in the file manager.
     pub fn open_project_folder(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.selected_ref() else { return };
-        if !Self::folder_exists(r) {
+        if r.is_remote() || !Self::folder_exists(r) {
             self.notice = Some(Notice::error(t(FOLDER_GONE)));
             cx.notify();
             return;
@@ -9908,6 +10076,12 @@ impl Workbench {
         if self.driven(&r.session_id) {
             return ("driver", String::new());
         }
+        // A disconnected remote is reached by nothing until it is
+        // connected again.
+        if let Some(id) = r.remote_id().filter(|id| !emaki_core::remote::is_on(id)) {
+            let name = remote_name(r.folder()).unwrap_or_else(|| id.to_string());
+            return ("", tf("{computer} is disconnected: connect it in Settings, Remote control", &[("computer", &name)]));
+        }
         // Codex is driven through its app server and nothing else: no
         // terminal of ours, no inbox. With no driver behind the session
         // one is started on it, unless a turn is running somewhere else,
@@ -9925,7 +10099,7 @@ impl Workbench {
             if !self.is_draft(&r.session_id) && self.is_working(r) {
                 return ("", t("Codex is mid-turn somewhere else; this works here once the turn is over").into());
             }
-            if r.folder().is_empty() || !std::path::Path::new(r.folder()).is_dir() {
+            if !emaki_core::remote::is_there(r.folder()) {
                 return ("", t("the session's folder is gone").into());
             }
             return ("spawn", String::new());
@@ -9952,7 +10126,7 @@ impl Workbench {
         if !self.cfg.driver.enabled {
             return ("", t("the driver is off in config").into());
         }
-        if r.folder().is_empty() || !std::path::Path::new(r.folder()).is_dir() {
+        if !emaki_core::remote::is_there(r.folder()) {
             return ("", t("the session's folder is gone").into());
         }
         // A fresh file with neither a driver nor an inbox: an interactive
@@ -11435,7 +11609,7 @@ impl Workbench {
         let own = emaki_core::paths::root().to_string_lossy().to_string();
         let legacy = emaki_core::paths::legacy_root().to_string_lossy().to_string();
         for r in &self.refs {
-            if r.folder().is_empty() || !std::path::Path::new(r.folder()).is_dir() || r.folder().starts_with(&own) || r.folder().starts_with(&legacy) {
+            if !emaki_core::remote::is_there(r.folder()) || r.folder().starts_with(&own) || r.folder().starts_with(&legacy) {
                 continue;
             }
             if seen.insert(r.folder().to_string()) {
@@ -11627,7 +11801,12 @@ impl Workbench {
         // column of rows does not read as so many accents; a live one
         // wears its agent's color and turns while it works.
         let mut folders: Vec<(String, Vec<SessionRef>)> = Vec::new();
-        for r in &self.refs {
+        // The computer the tabs over the card show (`side_places`).
+        let places = self.side_places();
+        let place = self.side_place_now(&places);
+        // A remote not connected shows no projects, only that it is not.
+        let linked = place.as_deref().is_none_or(|id| self.remote_linked(id));
+        for r in self.refs.iter().filter(|r| linked && r.remote_id() == place.as_deref()) {
             let p = r.project();
             match folders.iter_mut().find(|(name, _)| *name == p) {
                 Some((_, list)) => list.push(r.clone()),
@@ -11744,7 +11923,7 @@ impl Workbench {
             let tint = phase.unwrap_or(theme.muted_foreground);
             let name = p.clone();
             // The folder itself, from the newest session that still has it.
-            let folder_cwd = list.iter().map(|r| r.folder().to_string()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
+            let folder_cwd = list.iter().map(|r| r.folder().to_string()).find(|c| emaki_core::remote::is_there(c));
             // A project's archived sessions in a row of its own: no pin
             // and no new session there.
             let archived_row = is_archived_entry(&p);
@@ -12372,9 +12551,10 @@ impl Workbench {
         // which scrolls by itself under its name with the toolkit's
         // fading scrollbar at its edge, as the conversation has, and
         // takes what height is left.
+        let tabbed = places.len() > 1;
         let card = |label: &'static str| {
             v_flex()
-                .mx(px(8.))
+                .when(!tabbed, |d| d.mx(px(8.)))
                 .rounded(px(10.))
                 .border_1()
                 .border_color(theme.sidebar_border)
@@ -12393,7 +12573,7 @@ impl Workbench {
         let room = self.side_room.clone();
         // Beside the rail the card is as far from the panel's edge at its
         // top and foot as at its sides.
-        let folders_card = card(t("Projects")).flex_1().min_h_0().mt(px(if projects_only { 8. } else { 10. })).mb(px(8.)).child(
+        let folders_card = card(t("Projects")).flex_1().min_h_0().when(places.len() < 2, |d| d.mt(px(if projects_only { 8. } else { 10. })).mb(px(8.))).child(
             v_flex()
                 .id("side-card")
                 .relative()
@@ -12485,6 +12665,13 @@ impl Workbench {
                 .children(band),
         );
 
+        // With a remote computer connected, the card stands in a band of
+        // its own whose top holds a tab a computer (`side_tabs`).
+        let folders_card = match place.as_deref().filter(|_| !linked) {
+            Some(id) => self.side_unlinked(id, card_bg, &theme, cx),
+            None => folders_card,
+        };
+        let folders_card = self.side_tabs(folders_card, &places, place.as_deref(), linked, projects_only, &theme, cx);
         if projects_only {
             return v_flex().size_full().text_color(theme.sidebar_foreground).child(folders_card).into_any_element();
         }
@@ -12545,6 +12732,177 @@ impl Workbench {
     /// third and fourth. A pinned project is among the pinned though its
     /// folder is temporary, and a hidden one is hidden whatever else it
     /// is.
+    /// The computers whose projects the sidebar can show: this one, and
+    /// each remote kept and connected, by its id and name. One alone is
+    /// no choice, and no tabs are drawn.
+    fn side_places(&self) -> Vec<(Option<String>, String)> {
+        let mut out = vec![(None, t("Local").to_string())];
+        out.extend(emaki_core::remote::remotes().into_iter().filter(|d| !d.off).map(|d| (Some(d.id), d.name)));
+        out
+    }
+
+    /// The computer the sidebar shows: the one chosen while it is among
+    /// them, else this one.
+    fn side_place_now(&self, places: &[(Option<String>, String)]) -> Option<String> {
+        self.side_place.clone().filter(|id| places.iter().any(|(p, _)| p.as_deref() == Some(id.as_str())))
+    }
+
+    /// Show another computer's projects in the sidebar.
+    fn side_place_go(&mut self, to: Option<String>, cx: &mut Context<Self>) {
+        let places = self.side_places();
+        let from = self.side_place_now(&places);
+        if from == to {
+            return;
+        }
+        let ix = |p: &Option<String>| places.iter().position(|(q, _)| q == p).unwrap_or(0);
+        self.side_place_moved = Some((ix(&from), ix(&to), Instant::now()));
+        self.side_place = to;
+        self.side_marked.clear();
+        self.side_sessions.clear();
+        cx.notify();
+    }
+
+    /// Whether a remote's projects can be shown: it answered, and its
+    /// link stands.
+    fn remote_linked(&self, id: &str) -> bool {
+        use emaki_core::remote::LinkState;
+        self.remote_links.get(id).is_some_and(|s| matches!(s.state, LinkState::Connected | LinkState::Copying(..)))
+    }
+
+    /// The card under a remote's tab while it is not connected: what
+    /// stands, the address it is reached at, and the way to Remote
+    /// control, where it is connected again.
+    fn side_unlinked(&self, id: &str, card_bg: Hsla, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> Div {
+        use emaki_core::remote::LinkState;
+        let remote = emaki_core::remote::find(id);
+        let connecting = self.remote_links.get(id).is_none_or(|s| s.state == LinkState::Connecting);
+        let (icon, said) = if connecting {
+            ("icons/device-desktop.svg", t("Connecting…"))
+        } else if self.remote_ever.contains(id) {
+            ("icons/unlink.svg", t("Connection lost"))
+        } else {
+            ("icons/unlink.svg", t("Not connected"))
+        };
+        let address = remote.map(|d| d.address());
+        let tile = div()
+            .size(px(44.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.foreground.opacity(if theme.mode.is_dark() { 0.06 } else { 0.05 }))
+            .border_1()
+            .border_color(theme.foreground.opacity(0.08))
+            .child(Icon::default().path(icon).with_size(px(19.)).text_color(theme.muted_foreground));
+        let go = choice_pill("side-remote-settings", "icons/devices.svg", t("Remote control"), Press::Quiet, false, theme)
+            .active(|s| s.opacity(0.7))
+            .on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.open_settings(Some("remote"), cx);
+            }));
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.sidebar_border)
+            .bg(card_bg)
+            .items_center()
+            .justify_center()
+            .px(px(16.))
+            .pb(px(28.))
+            .child(tile)
+            .child(div().mt(px(12.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said))
+            .children(address.map(|a| div().mt(px(3.)).max_w_full().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(theme.muted_foreground).child(a)))
+            .child(div().mt(px(16.)).child(go))
+    }
+
+    /// The Projects card in a band whose top is a row of tabs, a computer
+    /// each, sharing the band's width: as the studio's site draws a card
+    /// with a band out from its foot, turned over. The tab showing is on a
+    /// plate that slides to the one pressed, and the card fades in for the
+    /// computer arrived at, or for its connection coming or going. With no
+    /// remote connected the card is drawn as ever.
+    ///
+    /// The fade's wrapper stays at rest under the number of the last
+    /// change: taken off when the fade is over, it made all inside a new
+    /// element whose own animations played again, and the projects shook.
+    #[allow(clippy::too_many_arguments)]
+    fn side_tabs(&self, card: Div, places: &[(Option<String>, String)], place: Option<&str>, linked: bool, projects_only: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
+        if places.len() < 2 {
+            *self.side_shown.borrow_mut() = Default::default();
+            return card.into_any_element();
+        }
+        let n = places.len();
+        let at = places.iter().position(|(p, _)| p.as_deref() == place).unwrap_or(0);
+        let moving = self.side_place_moved.filter(|(_, to, when)| *to == at && when.elapsed() < FOLD_ANIM);
+        let plate = div().absolute().top(px(3.)).bottom(px(3.)).w(gpui::relative(1. / n as f32)).px(px(3.)).child(div().size_full().rounded(px(7.)).bg(theme.sidebar_accent));
+        let plate = match moving {
+            Some((from, to, _)) => plate
+                .with_animation(ElementId::Name(format!("side-place-{from}-{to}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.left(gpui::relative((from as f32 + (to as f32 - from as f32) * t) / n as f32)))
+                .into_any_element(),
+            None => plate.left(gpui::relative(at as f32 / n as f32)).into_any_element(),
+        };
+        let tabs = h_flex().relative().h(px(32.)).flex_shrink_0().child(plate).children(places.iter().enumerate().map(|(i, (p, name))| {
+            let on = i == at;
+            let to = p.clone();
+            div()
+                .id(SharedString::from(format!("side-place-tab-{i}")))
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(8.))
+                .gap(px(5.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .when(on, |d| d.font_weight(FontWeight::MEDIUM).text_color(theme.foreground))
+                .when(!on, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.side_place_go(to.clone(), cx);
+                }))
+                .when(p.is_some(), |d| {
+                    let name = name.clone();
+                    d.managed_tooltip(move |window, cx| crate::workbench::tip(name.clone(), window, cx))
+                })
+                .child(Icon::default().path(if p.is_none() { "icons/folder.svg" } else { "icons/device-desktop.svg" }).with_size(px(12.)).flex_shrink_0())
+                .child(div().min_w_0().truncate().child(name.clone()))
+        }));
+        // What the card shows, against what it showed last: a change is
+        // played once, from its own number.
+        let (serial, fading) = {
+            let mut shown = self.side_shown.borrow_mut();
+            let now = (place.map(str::to_string), linked);
+            if shown.0.as_ref().is_some_and(|was| *was != now) {
+                shown.1 += 1;
+                shown.2 = Some(Instant::now());
+            }
+            shown.0 = Some(now);
+            (shown.1, shown.2.is_some_and(|at| at.elapsed() < FOLD_ANIM))
+        };
+        let card = card.with_animation(ElementId::Name(format!("side-place-card-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| if fading { d.opacity(0.35 + 0.65 * t) } else { d });
+        let band = if theme.mode.is_dark() { theme.foreground.opacity(0.035) } else { theme.foreground.opacity(0.05) };
+        v_flex()
+            .mx(px(8.))
+            .mt(px(if projects_only { 8. } else { 10. }))
+            .mb(px(8.))
+            .flex_1()
+            .min_h_0()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.sidebar_border)
+            .bg(band)
+            .child(tabs)
+            // The card's own edge lies on the band's at the sides and the
+            // foot, as one edge.
+            .child(div().flex_1().min_h_0().mx(px(-1.)).mb(px(-1.)).flex().flex_col().child(card))
+            .into_any_element()
+    }
+
     fn side_order(&self, natural: &[String], temp: &HashSet<String>) -> (Vec<String>, usize, usize, usize, usize) {
         let seen = |n: &&String| !self.hidden.contains(n);
         let mut shown: Vec<String> = self.pinned.iter().filter(|p| natural.contains(p)).filter(seen).cloned().collect();
@@ -12681,7 +13039,7 @@ impl Workbench {
             self.side_sessions.clear();
             self.side_marked.clear();
             let mut items = self.session_menu(key, RenameAt::Side);
-            if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).filter(|r| !r.path.as_os_str().is_empty()) {
+            if let Some(r) = self.refs.iter().find(|r| key_of(r) == key).filter(|r| !r.path.as_os_str().is_empty() && !r.is_remote()) {
                 items.push(("", MenuDo::Rule));
                 if r.archived {
                     // Back to its agent, to be continued.
@@ -12701,7 +13059,7 @@ impl Workbench {
     /// archived ones, each offered only when there is one, and each done
     /// to those alone.
     fn archive_items(&self, keys: &[String]) -> Vec<(&'static str, MenuDo)> {
-        let of = |archived: bool| -> Vec<String> { self.refs.iter().filter(|r| r.archived == archived && !r.path.as_os_str().is_empty() && keys.contains(&key_of(r))).map(key_of).collect() };
+        let of = |archived: bool| -> Vec<String> { self.refs.iter().filter(|r| r.archived == archived && !r.is_remote() && !r.path.as_os_str().is_empty() && keys.contains(&key_of(r))).map(key_of).collect() };
         let (active, archived) = (of(false), of(true));
         let mut items = Vec::new();
         if !active.is_empty() {
@@ -12794,7 +13152,7 @@ impl Workbench {
 
     /// A project's folder: the newest session's that is still there.
     fn project_folder(&self, project: &str) -> Option<String> {
-        self.refs.iter().filter(|r| r.project() == project).map(|r| r.folder().to_string()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir())
+        self.refs.iter().filter(|r| r.project() == project).map(|r| r.folder().to_string()).find(|c| emaki_core::remote::is_there(c))
     }
 
     /// What a project's menu asked, of one or of the several chosen.
@@ -13063,16 +13421,18 @@ impl Workbench {
                 order.push((p, r.folder().to_string()));
             }
         }
-        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        // A remote's projects are named among that remote's alone: its
+        // name stands beside them (`remote_chip`).
+        let mut groups: Vec<((Option<String>, String), Vec<usize>)> = Vec::new();
         for (ix, (_, folder)) in order.iter().enumerate().filter(|(_, (_, f))| !f.is_empty()) {
-            let base = emaki_core::paths::project_base(folder);
-            match groups.iter_mut().find(|(b, _)| *b == base) {
+            let key = (emaki_core::remote::split(folder).map(|(d, _)| d.to_string()), emaki_core::paths::project_base(folder));
+            match groups.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, list)) => list.push(ix),
-                None => groups.push((base, vec![ix])),
+                None => groups.push((key, vec![ix])),
             }
         }
         let mut labels: HashMap<String, String> = HashMap::new();
-        for (base, list) in groups {
+        for ((_, base), list) in groups {
             let gone = |ix: usize| self.folders.gone.contains(&order[ix].1);
             let live = list.iter().filter(|ix| !gone(**ix)).count();
             let mut olds = 0;
@@ -13091,8 +13451,9 @@ impl Workbench {
             }
         }
         // A name that is another project's own is left to it.
-        let own: HashSet<&String> = order.iter().map(|(p, _)| p).filter(|p| !labels.contains_key(*p)).collect();
-        labels.retain(|_, name| !own.contains(name));
+        let own: HashSet<&String> = order.iter().filter(|(_, f)| !emaki_core::remote::is_remote(f)).map(|(p, _)| p).filter(|p| !labels.contains_key(*p)).collect();
+        let remote: HashSet<&String> = order.iter().filter(|(_, f)| emaki_core::remote::is_remote(f)).map(|(p, _)| p).collect();
+        labels.retain(|p, name| remote.contains(p) || !own.contains(name));
         self.labels = labels;
     }
 
@@ -13349,7 +13710,12 @@ impl Workbench {
     pub(crate) fn session_menu(&self, key: &str, at: RenameAt) -> Vec<(&'static str, MenuDo)> {
         let Some(r) = self.refs.iter().find(|r| key_of(r) == key) else { return Vec::new() };
         let resume = emaki_core::terminal::resume_argv(r.agent, &r.session_id).iter().map(|a| emaki_core::terminal::shell_quote(a)).collect::<Vec<_>>().join(" ");
-        let resume = if r.folder().is_empty() { resume } else { format!("cd {} && {resume}", emaki_core::terminal::shell_quote(r.folder())) };
+        // On a remote, the command a terminal here runs to go on there.
+        let resume = match emaki_core::remote::split(r.folder()).and_then(|(id, path)| emaki_core::remote::find(id).map(|d| (d, path))) {
+            Some((d, path)) => format!("ssh -t {} {}", emaki_core::terminal::shell_quote(&d.address()), emaki_core::terminal::shell_quote(&format!("cd {} && {resume}", emaki_core::terminal::shell_quote(path)))),
+            None if r.folder().is_empty() => resume,
+            None => format!("cd {} && {resume}", emaki_core::terminal::shell_quote(r.folder())),
+        };
         let mut items = vec![
             (phrase("Rename"), MenuDo::Rename(key.to_string(), at)),
             ("", MenuDo::Rule),
@@ -13357,9 +13723,14 @@ impl Workbench {
             (phrase("Copy Resume Command"), MenuDo::CopyAs("icons/terminal.svg", resume)),
             ("", MenuDo::Rule),
             (phrase("Open in CLI Layout"), MenuDo::OpenTerminal(key.to_string())),
-            (crate::sys::OPEN_SESSION_FOLDER_LABEL, MenuDo::OpenFolder(Self::folder_exists(r).then(|| r.folder().to_string()))),
+            (crate::sys::OPEN_SESSION_FOLDER_LABEL, MenuDo::OpenFolder((Self::folder_exists(r) && !r.is_remote()).then(|| r.folder().to_string()))),
             (crate::sys::REVEAL_SESSION_LABEL, MenuDo::RevealTranscript(r.path.clone())),
         ];
+        // A remote's session has no agent terminal here, and its folder
+        // is not one the file manager opens.
+        if r.is_remote() {
+            items.retain(|(_, m)| !matches!(m, MenuDo::OpenTerminal(_) | MenuDo::OpenFolder(_)));
+        }
         if self.tabs.iter().any(|t| t == key) {
             items.push(("", MenuDo::Rule));
             items.push((phrase("Close Tab"), MenuDo::CloseTab(key.to_string())));
@@ -13575,7 +13946,7 @@ impl Workbench {
     /// hidden terminal is how sessions run here. A name for any other
     /// session is ours alone.
     fn can_ask(&self, r: &SessionRef) -> bool {
-        r.agent == AgentId::ClaudeCode && !r.archived && Self::folder_exists(r) && self.hub.hidden_terminals()
+        r.agent == AgentId::ClaudeCode && !r.archived && !r.is_remote() && Self::folder_exists(r) && self.hub.hidden_terminals()
     }
 
     /// The name on its way to the session, if one is.
@@ -14586,6 +14957,12 @@ impl Workbench {
                     }
                     let mut failed = Vec::new();
                     for r in &work {
+                        // A remote's sessions are its agents' to archive
+                        // and delete, there.
+                        if r.is_remote() {
+                            failed.push((key_of(r), t("a session on another computer is archived and deleted there").to_string()));
+                            continue;
+                        }
                         let done = match what {
                             ManageDo::Archive => emaki_core::adapters::for_agent(r.agent).archive(r),
                             ManageDo::Delete => emaki_core::trash::put(r),
@@ -14989,15 +15366,13 @@ impl Workbench {
                 let live: Vec<(&SessionRef, Column)> = list.iter().filter_map(|r| self.dot_of(r).map(|col| (r, col))).collect();
                 let chip = Column::LIVE.iter().find(|c| live.iter().any(|(_, col)| col == *c)).map(|c| (*c, self.column_color(*c, cx)));
                 let tint = if live.is_empty() { theme.muted_foreground } else { theme.primary };
-                let folder_cwd = list.iter().map(|r| r.folder().to_string()).find(|c| !c.is_empty() && std::path::Path::new(c).is_dir());
+                let folder_cwd = list.iter().map(|r| r.folder().to_string()).find(|c| emaki_core::remote::is_there(c));
                 let list_n = list.len();
                 let mut sub = vec![crate::i18n::count(list_n, "{n} session", "{n} sessions")];
                 if let Some(c) = list.iter().map(|r| r.folder()).find(|c| !c.is_empty()) {
-                    sub.push(match c.strip_prefix(home.as_str()) {
-                        Some(rest) if !home.is_empty() => format!("~{rest}"),
-                        _ => c.to_string(),
-                    });
+                    sub.push(place_words(c, &home));
                 }
+                let remote = list.first().and_then(|r| remote_name(r.folder()));
                 let open = self.sessions_open.contains(&p);
                 let anim = self.sessions_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
                 let name = p.clone();
@@ -15047,8 +15422,8 @@ impl Workbench {
                         // sessions, and the chevron is what opens it.
                         .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| if this.manage { this.pick_click(Some(&name), &keys, ev.modifiers().shift, cx) } else { this.sessions_toggle(&name, cx) }))
                         .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                            let mut items = vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone()))];
-                            items.extend(folder_cwd.clone().map(|c| (phrase("Copy Path"), MenuDo::CopyPath(c))));
+                            let mut items = vec![(crate::sys::OPEN_FOLDER_LABEL, MenuDo::OpenFolder(folder_cwd.clone().filter(|c| !emaki_core::remote::is_remote(c))))];
+                            items.extend(folder_cwd.clone().map(|c| (phrase("Copy Path"), MenuDo::CopyPath(emaki_core::remote::path_of(&c).to_string()))));
                             this.open_menu(ev.position, items, cx)
                         }))
                         .children(goto)
@@ -15059,7 +15434,7 @@ impl Workbench {
                                 .flex_1()
                                 .min_w_0()
                                 .gap(px(2.))
-                                .child(div().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(self.label(entry_base(&p))))
+                                .child(h_flex().min_w_0().gap(px(7.)).child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(self.label(entry_base(&p)))).children(remote.map(|n| remote_chip(n, &theme))))
                                 .child(div().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(sub.join(" · "))),
                         )
                         .when_some(chip, |d, (col, c)| d.child(state_chip(col, c, &theme)))
@@ -15543,7 +15918,9 @@ impl Workbench {
             right.push(self.term_shell_button(cx));
             self.panel_buttons(cx)
         };
-        let folder_tip = if Self::folder_exists(&r) { t("Open the project folder") } else { t(FOLDER_GONE) };
+        let remote = r.is_remote();
+        let folder_tip = if remote { t("These files are on another computer.") } else if Self::folder_exists(&r) { t("Open the project folder") } else { t(FOLDER_GONE) };
+        let computer = remote_name(r.folder());
         let tabs = self.render_tabs(cx);
         let topbar = self.render_topbar_ends(left, tabs, right, cx);
 
@@ -15554,7 +15931,11 @@ impl Workbench {
         // and a click opens it, as the folder button above does. Rounds,
         // tool calls, tokens, the model and the id used to follow the path
         // on one long line nobody read.
-        let cwd = self.selected_ref().filter(|r| !r.moved.is_empty()).map(|r| r.moved.clone()).unwrap_or_else(|| session.cwd.clone());
+        // A remote's folder from its home there, after the remote's name.
+        let cwd = match self.selected_ref().filter(|r| r.is_remote()) {
+            Some(r) => place_words(r.folder(), ""),
+            None => self.selected_ref().filter(|r| !r.moved.is_empty()).map(|r| r.moved.clone()).unwrap_or_else(|| session.cwd.clone()),
+        };
         // The last folder's name ends the path less any slash after it,
         // which `file_name` passes over.
         let bare = cwd.trim_end_matches(['/', '\\']);
@@ -15576,7 +15957,8 @@ impl Workbench {
                 .font_family(theme.mono_font_family.clone())
                 .text_size(px(11.))
                 .managed_tooltip(move |window, cx| crate::workbench::tip(folder_tip, window, cx))
-                .on_click(cx.listener(|this, _, _, cx| this.open_project_folder(cx)))
+                .when(!remote, |d| d.on_click(cx.listener(|this, _, _, cx| this.open_project_folder(cx))))
+                .children(computer.clone().map(|n| remote_chip(n, &theme)))
                 .child(Icon::new(IconName::Folder).with_size(px(12.)).text_color(theme.muted_foreground).flex_shrink_0())
                 .child(
                     h_flex()
@@ -19500,6 +19882,45 @@ fn fold_row(block: Div, h: f32, coming: bool, serial: u64) -> AnyElement {
 
 /// The name of a project's row under "Archived": the project's key with a
 /// mark before it, so its row, its open state and its choosing are its
+
+/// A folder as the window writes it: under the home folder from `~`, a
+/// remote's from its own home as it last said it.
+pub(crate) fn place_words(folder: &str, home: &str) -> String {
+    let (path, home) = match emaki_core::remote::split(folder) {
+        Some((id, path)) => (path, emaki_core::remote::probed(id).map(|p| p.home).unwrap_or_default()),
+        None => (folder, home.to_string()),
+    };
+    match path.strip_prefix(home.as_str()) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+/// The name of the remote a folder is on, as Settings gives it; none for
+/// a folder here (`remote`).
+pub(crate) fn remote_name(folder: &str) -> Option<String> {
+    let (id, _) = emaki_core::remote::split(folder)?;
+    Some(emaki_core::remote::find(id).map(|d| d.name).filter(|n| !n.is_empty()).unwrap_or_else(|| id.to_string()))
+}
+
+/// A remote's name beside what is on it: a project's name, a session's
+/// path. Quiet, as the count beside it is.
+pub(crate) fn remote_chip(name: String, theme: &gpui_component::Theme) -> AnyElement {
+    h_flex()
+        .flex_shrink_0()
+        .h(px(17.))
+        .px(px(5.))
+        .gap(px(3.))
+        .items_center()
+        .rounded(px(5.))
+        .bg(theme.muted.opacity(if theme.mode.is_dark() { 0.9 } else { 0.7 }))
+        .text_size(px(10.5))
+        .text_color(theme.muted_foreground)
+        .child(Icon::default().path("icons/device-desktop.svg").with_size(px(11.)))
+        .child(div().max_w(px(110.)).truncate().child(name))
+        .into_any_element()
+}
+
 /// own and not those of the project's row under "Projects".
 const ARCHIVED_ENTRY: &str = "\u{1}archived\u{1}";
 
@@ -19555,6 +19976,12 @@ fn folder_name(cwd: &str) -> String {
 }
 
 fn folder_parent(cwd: &str) -> String {
+    // A remote's folder: the remote, then where the folder is there.
+    if let Some((id, path)) = emaki_core::remote::split(cwd) {
+        let parent = std::path::Path::new(path).parent().map(|p| p.to_string_lossy().to_string()).filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into());
+        let name = remote_name(cwd).unwrap_or_else(|| id.to_string());
+        return format!("{name} · {}", place_words(&emaki_core::remote::folder(id, &parent), ""));
+    }
     std::path::Path::new(cwd).parent().map(|p| emaki_core::paths::tilde(&p.to_string_lossy())).filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into())
 }
 
@@ -19700,6 +20127,41 @@ pub(crate) enum PickFor {
 
 /// A pill's list while it is open: every choice with a line on what it
 /// does, the current one ticked, by the pill it hangs off.
+/// What begins a key of the folders' list that walks a remote's folders.
+const BROWSE: &str = "\u{1}remote\u{1}";
+
+/// A remote's folders, walked in the folders' list: the folder the list
+/// is in, and the folders in it once the remote has said.
+#[derive(Clone)]
+struct RemoteBrowse {
+    remote: String,
+    path: String,
+    folders: Option<Result<Vec<String>, String>>,
+}
+
+impl RemoteBrowse {
+    fn rows(&self) -> Vec<PickRow> {
+        let name = remote_name(&emaki_core::remote::folder(&self.remote, "")).unwrap_or_else(|| self.remote.clone());
+        let here = if self.path.is_empty() { "~".to_string() } else { place_words(&emaki_core::remote::folder(&self.remote, &self.path), "") };
+        let mut rows = vec![PickRow::plain(format!("{BROWSE}back"), t("All folders").into(), String::new())];
+        if !self.path.is_empty() && self.path != "/" {
+            rows.push(PickRow::plain(format!("{BROWSE}up"), t("Up one folder").into(), String::new()));
+        }
+        if !self.path.is_empty() {
+            rows.push(PickRow { rule: true, ..PickRow::plain(format!("{BROWSE}use:{}", self.path), tf("Start in {folder}", &[("folder", &folder_name(&self.path))]), format!("{name} · {here}")) });
+        }
+        match &self.folders {
+            None => rows.push(PickRow { rule: true, ..PickRow::plain(format!("{BROWSE}wait"), tf("Asking {remote}…", &[("remote", &name)]), String::new()) }),
+            Some(Err(e)) => rows.push(PickRow { rule: true, ..PickRow::plain(format!("{BROWSE}wait"), t("The folders could not be read").into(), e.clone()) }),
+            Some(Ok(names)) => {
+                let base = self.path.trim_end_matches('/');
+                rows.extend(names.iter().enumerate().map(|(ix, n)| PickRow { rule: ix == 0, ..PickRow::plain(format!("{BROWSE}in:{base}/{n}"), n.clone(), String::new()) }));
+            }
+        }
+        rows
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct PickMenu {
     what: PickFor,

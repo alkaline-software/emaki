@@ -1551,35 +1551,45 @@ impl Driver {
         model: &str,
         events: Sender<Event>,
     ) -> Result<Arc<Driver>, DriverError> {
-        if !cwd.is_empty() && !Path::new(cwd).is_dir() {
+        let remote = crate::remote::is_remote(cwd);
+        if !remote && !cwd.is_empty() && !Path::new(cwd).is_dir() {
             return Err(DriverError(format!("the session's directory is gone: {cwd}")));
         }
-        let binary = claude_binary().ok_or_else(|| DriverError("claude is not on PATH".into()))?;
-        let version = claude_version();
+        let mut args: Vec<String> = ["-p", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--permission-prompt-tool", "stdio"].iter().map(|a| a.to_string()).collect();
+        if resume {
+            args.extend(["--resume".into(), session_id.into()]);
+        } else {
+            args.extend(["--session-id".into(), session_id.into()]);
+        }
+        if !mode.is_empty() {
+            args.extend(["--permission-mode".into(), if mode == "default" { "manual".into() } else { mode.to_string() }]);
+        }
+        if !model.is_empty() && model != "default" {
+            args.extend(["--model".into(), model.to_string()]);
+        }
+        // On a remote the child is ssh's, and Claude Code runs there in
+        // the session's folder (`remote::agent_command`).
+        let (mut cmd, version) = if remote {
+            let cmd = crate::remote::agent_command(cwd, "claude", &args, &[("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT)], false).map_err(DriverError)?;
+            let version = crate::remote::split(cwd).and_then(|(d, _)| crate::remote::probed(d)).map(|p| p.claude_version).unwrap_or_default();
+            (cmd, version)
+        } else {
+            let binary = claude_binary().ok_or_else(|| DriverError("claude is not on PATH".into()))?;
+            let mut cmd = crate::process::command(binary);
+            cmd.args(&args);
+            if !cwd.is_empty() {
+                cmd.current_dir(cwd);
+            }
+            cmd.env_clear();
+            for (k, v) in child_env() {
+                cmd.env(k, v);
+            }
+            cmd.env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT);
+            (cmd, claude_version())
+        };
         if !version.is_empty() && version_cmp(&version, TESTED_CLAUDE_VERSION) == std::cmp::Ordering::Greater {
             eprintln!("emaki: Claude Code {version} is newer than {TESTED_CLAUDE_VERSION}, the release this driver was checked against; if turns stop arriving, that is the first suspect");
         }
-        let mut cmd = crate::process::command(binary);
-        cmd.args(["-p", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--permission-prompt-tool", "stdio"]);
-        if resume {
-            cmd.args(["--resume", session_id]);
-        } else {
-            cmd.args(["--session-id", session_id]);
-        }
-        if !mode.is_empty() {
-            cmd.args(["--permission-mode", if mode == "default" { "manual" } else { mode }]);
-        }
-        if !model.is_empty() && model != "default" {
-            cmd.args(["--model", model]);
-        }
-        if !cwd.is_empty() {
-            cmd.current_dir(cwd);
-        }
-        cmd.env_clear();
-        for (k, v) in child_env() {
-            cmd.env(k, v);
-        }
-        cmd.env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| DriverError(format!("could not start claude: {e}")))?;
         let stdin = child.stdin.take();

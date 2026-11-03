@@ -67,6 +67,8 @@ pub enum HubEvent {
     /// Folders found where they went and kept as moved, old path and new:
     /// their sessions are listed there from the index after this.
     Relocated(Vec<(String, String)>),
+    /// How a remote's link stands (`emaki_core::remote::Link`).
+    Remote(String, emaki_core::remote::LinkStatus),
     Changed(PathBuf),
     DriverStarted { session_id: String },
     /// A new session's agent gave it an id of its own: what the window
@@ -188,6 +190,9 @@ pub struct Hub {
     /// Plain-English lines for opaque tool calls, asked of a small model
     /// on a thread; a permission card asks on arrival, a tool card on click.
     pub explainer: Arc<Explainer>,
+    /// Each remote's link, copying its sessions as they are written
+    /// (`emaki_core::remote`), by the remote's id.
+    links: Mutex<HashMap<String, Arc<emaki_core::remote::Link>>>,
 }
 
 impl Hub {
@@ -225,6 +230,7 @@ impl Hub {
             commands: Mutex::new(HashMap::new()),
             options: Mutex::new(AgentId::ALL.iter().map(|a| ((*a, String::new()), Options::cached(*a))).filter(|(_, o)| !o.is_empty()).collect()),
             explainer,
+            links: Mutex::new(HashMap::new()),
         });
         let _ = emaki_core::paths::ensure_dirs();
         // Claude Code's status line is ours from the first launch on; the
@@ -235,7 +241,52 @@ impl Hub {
         hub.spawn_scanner(wake_rx);
         hub.spawn_search(search_rx);
         hub.spawn_watcher();
+        hub.link_remotes();
         (hub, rx)
+    }
+
+    /// A link for each remote in Settings, and none for one removed:
+    /// at launch, and whenever the remotes change.
+    pub fn link_remotes(self: &Arc<Self>) {
+        let remotes = emaki_core::remote::remotes();
+        let mut links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+        // A link for each remote kept and connected, none for one removed
+        // or disconnected.
+        let remotes: Vec<emaki_core::remote::Remote> = remotes.into_iter().filter(|d| !d.off).collect();
+        links.retain(|id, link| {
+            let keep = remotes.iter().any(|d| d.id == *id && *d == link.remote);
+            if !keep {
+                link.stop();
+            }
+            keep
+        });
+        for d in remotes {
+            if links.contains_key(&d.id) {
+                continue;
+            }
+            let (status_hub, changed_hub) = (Arc::downgrade(self), Arc::downgrade(self));
+            let link = emaki_core::remote::Link::start(
+                d.clone(),
+                Arc::new(move |id: &str, st| {
+                    if let Some(h) = status_hub.upgrade() {
+                        h.send(HubEvent::Remote(id.to_string(), st));
+                    }
+                }),
+                Arc::new(move || {
+                    if let Some(h) = changed_hub.upgrade() {
+                        h.refresh();
+                    }
+                }),
+            );
+            links.insert(d.id.clone(), link);
+        }
+    }
+
+    /// Try a remote's link again now.
+    pub fn retry_remote(&self, id: &str) {
+        if let Some(l) = self.links.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+            l.retry();
+        }
     }
 
     fn send(&self, ev: HubEvent) {
@@ -298,7 +349,7 @@ impl Hub {
                     // kept and the sessions listed there, and what moved is
                     // looked at once more, for a folder that move says of.
                     let folders_now = |refs: &[SessionRef]| -> std::collections::BTreeSet<String> {
-                        refs.iter().map(|r| r.folder().to_string()).filter(|f| !f.is_empty() && !emaki_core::paths::is_temp_dir(f)).collect()
+                        refs.iter().filter(|r| !r.is_remote()).map(|r| r.folder().to_string()).filter(|f| !f.is_empty() && !emaki_core::paths::is_temp_dir(f)).collect()
                     };
                     let mut folders = folders_now(&refs);
                     let asked = hub.look_again.swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -345,7 +396,7 @@ impl Hub {
                     // person looks.
                     let due: Vec<SessionRef> = refs
                         .iter()
-                        .filter(|r| !r.kept)
+                        .filter(|r| !r.kept && !r.is_remote())
                         .filter(|r| match taken.get(&format!("{}:{}", r.agent.as_str(), r.session_id)) {
                             None => true,
                             Some((size, mtime, _)) if *size == r.size && *mtime == r.mtime => false,
@@ -446,6 +497,8 @@ impl Hub {
                 // turn. It says nothing about any transcript, so no rescan.
                 let context = emaki_core::paths::state_dir().join("context");
                 roots.push(context.clone());
+                // The remotes' sessions as they are copied in.
+                roots.push(emaki_core::remote::mirror_root());
                 let Ok(watcher) = Watcher::start(&roots, Duration::from_millis(250)) else { return };
                 while let Ok(path) = watcher.events.recv() {
                     if path.starts_with(&context) {
@@ -795,6 +848,12 @@ impl Hub {
     /// changing arrives as `HubEvent::Screen`, a moment after it does,
     /// so a burst of drawing is one event.
     pub fn start_terminal(self: &Arc<Self>, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str, effort: &str) -> Result<(), String> {
+        // A remote's session runs on its headless child, over ssh: the
+        // hidden terminal reads the registry here, which a remote's
+        // Claude Code does not write to.
+        if emaki_core::remote::is_remote(cwd) {
+            return Err(t("a session on another computer has no hidden terminal").into());
+        }
         if self.terminal_for(session_id).is_some() || self.terminal_starting(session_id) {
             return Ok(());
         }
@@ -1443,6 +1502,9 @@ impl Hub {
         }
         for (_, pty) in self.attached.lock().unwrap().drain() {
             pty.kill();
+        }
+        for (_, link) in self.links.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+            link.stop();
         }
     }
 

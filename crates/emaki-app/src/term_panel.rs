@@ -1014,10 +1014,19 @@ impl Workbench {
     /// `at` is where in the row, the end when none.
     pub(crate) fn shell_new(&mut self, at: Option<usize>, cx: &mut Context<Self>) {
         let Some(r) = self.term_owner() else { return };
-        let cwd = if Self::folder_exists(&r) { r.folder().to_string() } else { emaki_core::paths::home().to_string_lossy().to_string() };
-        // A shell whose prompt marks where what is typed begins.
-        let (argv, env) = emaki_core::shell_marks::shell_command();
-        let made = Pty::spawn_with(&argv, &env, &cwd, Arc::new(|| {})).inspect(|p| p.reflow_on_resize());
+        let home = emaki_core::paths::home().to_string_lossy().to_string();
+        // On a remote, its own login shell in the session's folder there,
+        // over ssh; here, a shell whose prompt marks where what is typed
+        // begins.
+        let made = match emaki_core::remote::shell_argv(r.folder()) {
+            Some(argv) => Pty::spawn_with(&argv, &[], &home, Arc::new(|| {})),
+            None => {
+                let cwd = if Self::folder_exists(&r) { r.folder().to_string() } else { home };
+                let (argv, env) = emaki_core::shell_marks::shell_command();
+                Pty::spawn_with(&argv, &env, &cwd, Arc::new(|| {}))
+            }
+        }
+        .inspect(|p| p.reflow_on_resize());
         let set = self.shells.entry(r.session_id.clone()).or_default();
         set.begun = true;
         match made {

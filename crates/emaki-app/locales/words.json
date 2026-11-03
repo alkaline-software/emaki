@@ -9484,5 +9484,320 @@
     "fr": "Passer",
     "de": "Überspringen",
     "es": "Omitir"
+  },
+  "a session on another computer has no hidden terminal": {
+    "zh-Hans": "另一台电脑上的会话没有隐藏终端",
+    "zh-Hant": "另一台電腦上的工作階段沒有隱藏終端機",
+    "ja": "別のコンピュータのセッションには隠しターミナルがありません",
+    "ko": "다른 컴퓨터의 세션에는 숨겨진 터미널이 없습니다",
+    "fr": "une session sur un autre ordinateur n’a pas de terminal caché",
+    "de": "eine Sitzung auf einem anderen Computer hat kein verborgenes Terminal",
+    "es": "una sesión en otro ordenador no tiene terminal oculto"
+  },
+  "a session on another computer is archived and deleted there": {
+    "zh-Hans": "另一台电脑上的会话要在那台电脑上归档和删除",
+    "zh-Hant": "另一台電腦上的工作階段要在那台電腦上封存和刪除",
+    "ja": "別のコンピュータのセッションは、そのコンピュータでアーカイブ・削除します",
+    "ko": "다른 컴퓨터의 세션은 그 컴퓨터에서 보관하고 삭제합니다",
+    "fr": "une session sur un autre ordinateur s’archive et se supprime sur celui-ci",
+    "de": "eine Sitzung auf einem anderen Computer wird dort archiviert und gelöscht",
+    "es": "una sesión en otro ordenador se archiva y se elimina allí"
+  },
+  "All folders": {
+    "zh-Hans": "所有文件夹",
+    "zh-Hant": "所有資料夾",
+    "ja": "すべてのフォルダ",
+    "ko": "모든 폴더",
+    "fr": "Tous les dossiers",
+    "de": "Alle Ordner",
+    "es": "Todas las carpetas"
+  },
+  "Up one folder": {
+    "zh-Hans": "上一级文件夹",
+    "zh-Hant": "上一層資料夾",
+    "ja": "1つ上のフォルダ",
+    "ko": "상위 폴더",
+    "fr": "Dossier parent",
+    "de": "Einen Ordner höher",
+    "es": "Carpeta superior"
+  },
+  "The folders could not be read": {
+    "zh-Hans": "无法读取文件夹",
+    "zh-Hant": "無法讀取資料夾",
+    "ja": "フォルダを読み込めませんでした",
+    "ko": "폴더를 읽을 수 없습니다",
+    "fr": "Impossible de lire les dossiers",
+    "de": "Die Ordner konnten nicht gelesen werden",
+    "es": "No se pudieron leer las carpetas"
+  },
+  "A folder on {remote}…": {
+    "zh-Hans": "{remote} 上的文件夹…",
+    "zh-Hant": "{remote} 上的資料夾…",
+    "ja": "{remote} のフォルダ…",
+    "ko": "{remote}의 폴더…",
+    "fr": "Un dossier sur {remote}…",
+    "de": "Ein Ordner auf {remote}…",
+    "es": "Una carpeta en {remote}…"
+  },
+  "Start in {folder}": {
+    "zh-Hans": "在 {folder} 开始",
+    "zh-Hant": "在 {folder} 開始",
+    "ja": "{folder} で始める",
+    "ko": "{folder}에서 시작",
+    "fr": "Commencer dans {folder}",
+    "de": "In {folder} beginnen",
+    "es": "Empezar en {folder}"
+  },
+  "Asking {remote}…": {
+    "zh-Hans": "正在询问 {remote}…",
+    "zh-Hant": "正在詢問 {remote}…",
+    "ja": "{remote} に問い合わせ中…",
+    "ko": "{remote}에 묻는 중…",
+    "fr": "Interrogation de {remote}…",
+    "de": "Frage {remote}…",
+    "es": "Consultando {remote}…"
+  },
+  "Connection lost": {
+    "zh-Hans": "连接已断开",
+    "zh-Hant": "連線已中斷",
+    "ja": "接続が切れました",
+    "ko": "연결이 끊겼습니다",
+    "fr": "Connexion perdue",
+    "de": "Verbindung verloren",
+    "es": "Conexión perdida"
+  },
+  "Not connected": {
+    "zh-Hans": "未连接",
+    "zh-Hant": "未連線",
+    "ja": "未接続",
+    "ko": "연결되지 않음",
+    "fr": "Non connecté",
+    "de": "Nicht verbunden",
+    "es": "No conectado"
+  },
+  "Connecting…": {
+    "zh-Hans": "正在连接…",
+    "zh-Hant": "正在連線…",
+    "ja": "接続中…",
+    "ko": "연결 중…",
+    "fr": "Connexion…",
+    "de": "Verbinde…",
+    "es": "Conectando…"
+  },
+  "Address": {
+    "zh-Hans": "地址",
+    "zh-Hant": "位址",
+    "ja": "アドレス",
+    "ko": "주소",
+    "fr": "Adresse",
+    "de": "Adresse",
+    "es": "Dirección"
+  },
+  "Not found": {
+    "zh-Hans": "未找到",
+    "zh-Hant": "未找到",
+    "ja": "見つかりません",
+    "ko": "찾을 수 없음",
+    "fr": "Introuvable",
+    "de": "Nicht gefunden",
+    "es": "No encontrado"
+  },
+  "On": {
+    "zh-Hans": "开",
+    "zh-Hant": "開",
+    "ja": "オン",
+    "ko": "켬",
+    "fr": "Activé",
+    "de": "Ein",
+    "es": "Activado"
+  },
+  "Off": {
+    "zh-Hans": "关",
+    "zh-Hant": "關",
+    "ja": "オフ",
+    "ko": "끔",
+    "fr": "Désactivé",
+    "de": "Aus",
+    "es": "Desactivado"
+  },
+  "Open Sharing Settings": {
+    "zh-Hans": "打开共享设置",
+    "zh-Hant": "打開共享設定",
+    "ja": "共有設定を開く",
+    "ko": "공유 설정 열기",
+    "fr": "Ouvrir les réglages Partage",
+    "de": "Freigabe-Einstellungen öffnen",
+    "es": "Abrir ajustes de Compartir"
+  },
+  "Remote Login": {
+    "zh-Hans": "远程登录",
+    "zh-Hant": "遠端登入",
+    "ja": "リモートログイン",
+    "ko": "원격 로그인",
+    "fr": "Session à distance",
+    "de": "Entfernte Anmeldung",
+    "es": "Sesión remota"
+  },
+  "These files are on another computer.": {
+    "zh-Hans": "这些文件在另一台电脑上。",
+    "zh-Hant": "這些檔案在另一台電腦上。",
+    "ja": "これらのファイルは別のコンピュータにあります。",
+    "ko": "이 파일들은 다른 컴퓨터에 있습니다.",
+    "fr": "Ces fichiers sont sur un autre ordinateur.",
+    "de": "Diese Dateien liegen auf einem anderen Computer.",
+    "es": "Estos archivos están en otro ordenador."
+  },
+  "Remote control": {
+    "zh-Hans": "远程控制",
+    "zh-Hant": "遠端控制",
+    "ja": "リモートコントロール",
+    "ko": "원격 제어",
+    "fr": "Contrôle à distance",
+    "de": "Fernsteuerung",
+    "es": "Control remoto"
+  },
+  "Target Address": {
+    "zh-Hans": "目标地址",
+    "zh-Hant": "目標位址",
+    "ja": "接続先アドレス",
+    "ko": "대상 주소",
+    "fr": "Adresse cible",
+    "de": "Zieladresse",
+    "es": "Dirección de destino"
+  },
+  "Target Password": {
+    "zh-Hans": "目标密码",
+    "zh-Hant": "目標密碼",
+    "ja": "接続先パスワード",
+    "ko": "대상 암호",
+    "fr": "Mot de passe cible",
+    "de": "Zielpasswort",
+    "es": "Contraseña de destino"
+  },
+  "Other computer → This computer": {
+    "zh-Hans": "其他电脑 → 这台电脑",
+    "zh-Hant": "其他電腦 → 這台電腦",
+    "ja": "他のコンピュータ → このコンピュータ",
+    "ko": "다른 컴퓨터 → 이 컴퓨터",
+    "fr": "Autre ordinateur → Cet ordinateur",
+    "de": "Anderer Computer → Dieser Computer",
+    "es": "Otro ordenador → Este ordenador"
+  },
+  "Connect": {
+    "zh-Hans": "连接",
+    "zh-Hant": "連線",
+    "ja": "接続",
+    "ko": "연결",
+    "fr": "Connecter",
+    "de": "Verbinden",
+    "es": "Conectar"
+  },
+  "Connection failed": {
+    "zh-Hans": "连接失败",
+    "zh-Hant": "連線失敗",
+    "ja": "接続に失敗しました",
+    "ko": "연결 실패",
+    "fr": "Échec de la connexion",
+    "de": "Verbindung fehlgeschlagen",
+    "es": "Error de conexión"
+  },
+  "Turn on to let this computer be controlled": {
+    "zh-Hans": "打开后，这台电脑可以被控制",
+    "zh-Hant": "打開後，這台電腦可以被控制",
+    "ja": "オンにすると、このコンピュータを操作できるようになります",
+    "ko": "켜면 이 컴퓨터를 제어할 수 있습니다",
+    "fr": "Activez pour que cet ordinateur puisse être contrôlé",
+    "de": "Einschalten, damit dieser Computer gesteuert werden kann",
+    "es": "Actívalo para que este ordenador pueda ser controlado"
+  },
+  "Provide to your controlling computer": {
+    "zh-Hans": "提供给控制它的电脑",
+    "zh-Hant": "提供給控制它的電腦",
+    "ja": "操作する側のコンピュータに伝えます",
+    "ko": "제어하는 컴퓨터에 알려 주십시오",
+    "fr": "À donner à l’ordinateur qui contrôle",
+    "de": "Für den steuernden Computer",
+    "es": "Dásela al ordenador que controla"
+  },
+  "This computer → Target computer": {
+    "zh-Hans": "这台电脑 → 目标电脑",
+    "zh-Hant": "這台電腦 → 目標電腦",
+    "ja": "このコンピュータ → 接続先コンピュータ",
+    "ko": "이 컴퓨터 → 대상 컴퓨터",
+    "fr": "Cet ordinateur → Ordinateur cible",
+    "de": "Dieser Computer → Zielcomputer",
+    "es": "Este ordenador → Ordenador de destino"
+  },
+  "Saved computers": {
+    "zh-Hans": "已保存的电脑",
+    "zh-Hant": "已儲存的電腦",
+    "ja": "保存したコンピュータ",
+    "ko": "저장된 컴퓨터",
+    "fr": "Ordinateurs enregistrés",
+    "de": "Gespeicherte Computer",
+    "es": "Ordenadores guardados"
+  },
+  "No agent found": {
+    "zh-Hans": "未找到智能体",
+    "zh-Hant": "未找到智慧代理",
+    "ja": "エージェントが見つかりません",
+    "ko": "에이전트를 찾을 수 없음",
+    "fr": "Aucun agent trouvé",
+    "de": "Kein Agent gefunden",
+    "es": "No se encontró ningún agente"
+  },
+  "Connected": {
+    "zh-Hans": "已连接",
+    "zh-Hant": "已連線",
+    "ja": "接続済み",
+    "ko": "연결됨",
+    "fr": "Connecté",
+    "de": "Verbunden",
+    "es": "Conectado"
+  },
+  "Copying… {percent}%": {
+    "zh-Hans": "正在复制… {percent}%",
+    "zh-Hant": "正在複製… {percent}%",
+    "ja": "コピー中… {percent}%",
+    "ko": "복사 중… {percent}%",
+    "fr": "Copie… {percent} %",
+    "de": "Kopiere… {percent} %",
+    "es": "Copiando… {percent} %"
+  },
+  "Disconnect": {
+    "zh-Hans": "断开连接",
+    "zh-Hant": "中斷連線",
+    "ja": "切断",
+    "ko": "연결 해제",
+    "fr": "Déconnecter",
+    "de": "Trennen",
+    "es": "Desconectar"
+  },
+  "{computer} is disconnected: connect it in Settings, Remote control": {
+    "zh-Hans": "{computer} 已断开连接：请在“设置 › 远程控制”中连接它",
+    "zh-Hant": "{computer} 已中斷連線：請在「設定 › 遠端控制」中連線",
+    "ja": "{computer} は切断されています：設定の「リモートコントロール」で接続してください",
+    "ko": "{computer}의 연결이 해제되었습니다: 설정의 원격 제어에서 연결하십시오",
+    "fr": "{computer} est déconnecté : connectez-le dans Réglages, Contrôle à distance",
+    "de": "{computer} ist getrennt: verbinde ihn in Einstellungen, Fernsteuerung",
+    "es": "{computer} está desconectado: conéctalo en Ajustes, Control remoto"
+  },
+  "New computer": {
+    "zh-Hans": "新电脑",
+    "zh-Hant": "新電腦",
+    "ja": "新しいコンピュータ",
+    "ko": "새 컴퓨터",
+    "fr": "Nouvel ordinateur",
+    "de": "Neuer Computer",
+    "es": "Nuevo ordenador"
+  },
+  "Local": {
+    "zh-Hans": "本机",
+    "zh-Hant": "本機",
+    "ja": "ローカル",
+    "ko": "로컬",
+    "fr": "Local",
+    "de": "Lokal",
+    "es": "Local"
   }
 }

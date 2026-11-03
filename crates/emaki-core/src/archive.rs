@@ -486,6 +486,11 @@ pub fn archive_ref(r: &SessionRef, state: &mut State, stats: &mut Stats) {
     if crate::adapters::for_agent(r.agent).archives_itself() {
         return;
     }
+    // A remote's session: its copy here keeps what its agent deletes
+    // there (`remote`), and is never copied again into the archive.
+    if r.is_remote() {
+        return;
+    }
     let own = paths::root().to_string_lossy().to_string();
     if !r.cwd.is_empty() && paths::is_explainer_cwd(&r.cwd, &own) {
         return;

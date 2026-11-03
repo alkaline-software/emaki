@@ -19,6 +19,8 @@ pub(crate) const OWN: &[(&str, &[u8])] = &[
     ("icons/agents/codex.svg", include_bytes!("../assets/icons/agents/codex.svg")),
     ("icons/agents/github.svg", include_bytes!("../assets/icons/agents/github.svg")),
     ("icons/sparkles.svg", include_bytes!("../assets/icons/sparkles.svg")),
+    ("icons/devices.svg", include_bytes!("../assets/icons/devices.svg")),
+    ("icons/unlink.svg", include_bytes!("../assets/icons/unlink.svg")),
     ("icons/typography.svg", include_bytes!("../assets/icons/typography.svg")),
     ("icons/device-desktop.svg", include_bytes!("../assets/icons/device-desktop.svg")),
     ("icons/home/scroll-sky.svg", include_bytes!("../assets/icons/home/scroll-sky.svg")),

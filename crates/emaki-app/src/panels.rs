@@ -6795,7 +6795,8 @@ impl Workbench {
                 .vertical_scrollbar(&self.files_scroll)
                 .into_any_element()
         } else {
-            div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child(t("The session's folder is gone.")).into_any_element()
+            let words = if root.as_ref().is_some_and(|r| emaki_core::remote::is_remote(&r.to_string_lossy())) { t("These files are on another computer.") } else { t("The session's folder is gone.") };
+            div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child(words).into_any_element()
         };
         // The session's folder heads the tree, open to begin with: a row
         // that does not scroll away, with what is asked of the whole

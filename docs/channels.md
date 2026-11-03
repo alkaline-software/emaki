@@ -73,6 +73,10 @@ Claude Code can move a conversation into a background session of its daemon (`cl
 - **A resume of a job joins it.** `claude --resume` of a session the daemon runs becomes `claude attach <job>` in the same process, a view of the job like the parked one, and it writes no registry record. So a hidden terminal is ready when the prompt is on its screen and the session has a record, its own or the job's (`type_message_now`), and the job's record is the session's status (`Hub::peer_for`). Waiting for a record of the terminal's own, a message from the composer was never typed.
 - **Of several records on a session, the job's comes after ours and before the rest** (`refresh_peers`). Another Emaki's terminal parked on the job names the session too; kept first, this window's own view of the job had no record it took, and neither the turn nor a command in the background was shown.
 
+## A session on a remote computer
+
+A session on another computer (`docs/core.md`, Remote control) has one channel, the headless child, for either agent: `Driver::start` and `CodexDriver::spawn` start `ssh <remote> -- cd <path> && exec claude …` (`remote::agent_command`), the same child on the same stdin and stdout, and the reply is read from the copy of its transcript, which the link fills a second after each write there. `Hub::start_terminal` refuses it: the hidden terminal waits on the registry here, which a remote computer's Claude Code does not write to. So a remote computer's session has no CLI layout, no terminal card and no inbox, and a command only a terminal takes says so. Codex there speaks on its stdin and stdout (its socket would be on the remote computer), so it has no terminal to join; a picture goes to it as its bytes, not as a path here. The shell terminal of a remote computer's session is the account's login shell there, in the session's folder, over `ssh -tt` (`remote::shell_argv`).
+
 ## The inbox
 
 `Hub::send_to_inbox`: one connection per message, wrapped in Claude Code's `<cross-session-message>` envelope, no permission mode asserted. The row is a peer's and is read as prose, so no slash command runs there. A running turn queues the message.

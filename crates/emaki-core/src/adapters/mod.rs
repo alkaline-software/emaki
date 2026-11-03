@@ -104,6 +104,16 @@ pub fn for_agent(agent: AgentId) -> Box<dyn Adapter> {
     }
 }
 
+/// The adapter that reads a session where it is: this computer's agents,
+/// or their copy from the session's remote (`remote`).
+pub fn for_ref(r: &SessionRef) -> Box<dyn Adapter> {
+    match (r.remote_id(), r.agent) {
+        (Some(d), AgentId::ClaudeCode) => Box::new(claude::ClaudeAdapter::at(crate::remote::claude_projects(d))),
+        (Some(d), AgentId::Codex) => Box::new(codex::CodexAdapter::at(crate::remote::codex_home(d))),
+        (None, agent) => for_agent(agent),
+    }
+}
+
 /// Which agent a file belongs to, by its path shape. Archived copies keep the
 /// original layout, so this answers for both.
 pub fn agent_for_path(path: &Path) -> AgentId {
@@ -180,10 +190,34 @@ pub fn index_all(min_size: u64, enabled: &[String]) -> Vec<SessionRef> {
             refs.push(r);
         }
     }
+    // The remotes' sessions, from their copies, each folder written as
+    // the remote's (`remote::folder`). Nothing of a remote's is
+    // archived here: the copy keeps what its agent deletes.
+    // A remote the person disconnected is out of the lists until it is
+    // connected again; its copy stays on disk.
+    for d in crate::remote::remotes().into_iter().filter(|d| !d.off) {
+        let remote_adapters: Vec<Box<dyn Adapter>> = vec![
+            Box::new(claude::ClaudeAdapter::at(crate::remote::claude_projects(&d.id))),
+            Box::new(codex::CodexAdapter::at(crate::remote::codex_home(&d.id))),
+        ];
+        for adapter in remote_adapters {
+            if !enabled.is_empty() && !enabled.iter().any(|e| e == adapter.id().as_str()) {
+                continue;
+            }
+            for mut r in adapter.list(min_size) {
+                // An Emaki there has its explainer's sessions too.
+                if r.cwd.is_empty() || paths::is_explainer_cwd(&r.cwd, "") || r.cwd.contains("/.emaki/") || !seen.insert((r.agent, r.session_id.clone())) {
+                    continue;
+                }
+                r.cwd = crate::remote::folder(&d.id, &r.cwd);
+                refs.push(r);
+            }
+        }
+    }
     // A folder the person said moved is read where it went.
     let moves = crate::moves::load();
     if !moves.is_empty() {
-        for r in refs.iter_mut() {
+        for r in refs.iter_mut().filter(|r| !r.is_remote()) {
             r.moved = moves.now(&r.cwd).unwrap_or_default();
         }
     }

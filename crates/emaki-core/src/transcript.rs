@@ -320,6 +320,16 @@ impl SessionRef {
 
     /// The project the session is listed under: its folder's, where the
     /// folder is now.
+    /// The remote the session is on, by its folder; none for one here
+    /// (`remote`).
+    pub fn remote_id(&self) -> Option<&str> {
+        crate::remote::split(&self.cwd).map(|(d, _)| d)
+    }
+
+    pub fn is_remote(&self) -> bool {
+        crate::remote::is_remote(&self.cwd)
+    }
+
     pub fn project(&self) -> String {
         if self.folder().is_empty() {
             self.project_dir.clone()

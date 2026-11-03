@@ -146,7 +146,7 @@ pub fn ensure_dirs() -> std::io::Result<()> {
     let r = root();
     fs::create_dir_all(&r)?;
     chmod700(&r);
-    for d in [logs_dir(), state_dir(), state_dir().join("context"), cache_dir(), run_dir(), archive_dir(), uploads_dir("")] {
+    for d in [logs_dir(), state_dir(), state_dir().join("context"), cache_dir(), run_dir(), archive_dir(), uploads_dir(""), root().join("remote")] {
         fs::create_dir_all(&d)?;
         chmod700(&d);
     }
@@ -306,6 +306,10 @@ fn claim_project_slug(cwd: &str) -> String {
 }
 
 pub fn absolute(p: &str) -> PathBuf {
+    // A remote's folder (`remote::folder`) is whole as it is written.
+    if p.starts_with(crate::remote::SCHEME) {
+        return PathBuf::from(p);
+    }
     let p = if p.is_empty() { "." } else { p };
     let path = expand_tilde(p);
     if path.is_absolute() {

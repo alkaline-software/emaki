@@ -564,22 +564,26 @@ impl CodexDriver {
     /// `session_id()` afterwards. `mode` and `model` empty leave the
     /// person's own config to say.
     pub fn start(session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str, events: Sender<Event>) -> Result<Arc<CodexDriver>, DriverError> {
-        if !cwd.is_empty() && !Path::new(cwd).is_dir() {
+        let remote = crate::remote::is_remote(cwd);
+        if !remote && !cwd.is_empty() && !Path::new(cwd).is_dir() {
             return Err(DriverError(format!("the session's directory is gone: {cwd}")));
         }
+        // The folder as Codex is told it: on a remote, its path there.
+        let path = crate::remote::path_of(cwd);
         // On a socket, so that Codex's terminal can join; on its stdin
-        // and stdout where that cannot be had.
-        let driver = match Self::spawn(cwd, events.clone(), cfg!(unix)) {
+        // and stdout where that cannot be had, and on a remote, whose
+        // socket would be there.
+        let driver = match Self::spawn(cwd, events.clone(), cfg!(unix) && !remote) {
             Ok(d) => d,
             Err(_) if cfg!(unix) => Self::spawn(cwd, events, false)?,
             Err(e) => return Err(e),
         };
         let ready = (|| -> Result<(), DriverError> {
             driver.handshake()?;
-            driver.learn(cwd);
+            driver.learn(path);
             let mut params = Map::new();
-            if !cwd.is_empty() {
-                params.insert("cwd".into(), json!(cwd));
+            if !path.is_empty() {
+                params.insert("cwd".into(), json!(path));
             }
             if !model.is_empty() && model != "default" {
                 params.insert("model".into(), json!(model));
@@ -659,27 +663,33 @@ impl CodexDriver {
     /// `listen` has it on a socket of its own, and fails where the socket
     /// does not come up.
     fn spawn(cwd: &str, events: Sender<Event>, listen: bool) -> Result<Arc<CodexDriver>, DriverError> {
-        let binary = codex_binary().ok_or_else(|| DriverError("codex is not installed".into()))?;
-        let mut cmd = crate::process::command(binary);
-        cmd.arg("app-server");
+        let mut args: Vec<String> = vec!["app-server".into()];
         // EMAKI_CODEX_CONFIG=<key=value>;<key=value> hands the server
         // config of a probe's own (an MCP server to ask with), with the
         // person's config.toml left as it is.
         for kv in std::env::var("EMAKI_CODEX_CONFIG").unwrap_or_default().split(';').filter(|kv| !kv.is_empty()) {
-            cmd.arg("-c").arg(kv);
+            args.extend(["-c".into(), kv.to_string()]);
         }
         let asked = listen.then(socket_path);
         if let Some(path) = &asked {
             let _ = std::fs::remove_file(path);
-            cmd.arg("--listen").arg(format!("unix://{}", path.display()));
+            args.extend(["--listen".into(), format!("unix://{}", path.display())]);
         }
-        if !cwd.is_empty() {
-            cmd.current_dir(cwd);
-        }
-        cmd.env_clear();
-        for (k, v) in child_env() {
-            cmd.env(k, v);
-        }
+        let mut cmd = if crate::remote::is_remote(cwd) {
+            crate::remote::agent_command(cwd, "codex", &args, &[], false).map_err(DriverError)?
+        } else {
+            let binary = codex_binary().ok_or_else(|| DriverError("codex is not installed".into()))?;
+            let mut cmd = crate::process::command(binary);
+            cmd.args(&args);
+            if !cwd.is_empty() {
+                cmd.current_dir(cwd);
+            }
+            cmd.env_clear();
+            for (k, v) in child_env() {
+                cmd.env(k, v);
+            }
+            cmd
+        };
         if listen {
             cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         } else {
@@ -1265,7 +1275,13 @@ impl CodexDriver {
         for img in images {
             // A picture arrives as Claude Code takes one, base64 in a
             // block, or as the path of its file.
-            if let Some(path) = img.get("path").and_then(Value::as_str) {
+            // A file here is not there for Codex on a remote: it goes as
+            // its bytes.
+            let remote = crate::remote::is_remote(&self.cwd);
+            if let Some(block) = img.get("path").and_then(Value::as_str).filter(|_| remote).and_then(|p| crate::driver::image_block(Path::new(p), crate::build::media_type_for(p))) {
+                let src = &block["source"];
+                input.push(json!({"type": "image", "url": format!("data:{};base64,{}", str_of(src, "media_type"), str_of(src, "data"))}));
+            } else if let Some(path) = img.get("path").and_then(Value::as_str) {
                 input.push(json!({"type": "localImage", "path": path}));
             } else if let Some(src) = img.get("source") {
                 let (media, data) = (str_of(src, "media_type"), str_of(src, "data"));
@@ -1680,10 +1696,10 @@ impl Drop for CodexDriver {
 /// No model is called and no session is made.
 pub fn catalog(cwd: &str) -> Result<Catalog, DriverError> {
     let (tx, _rx) = mpsc::channel();
-    let dir = if Path::new(cwd).is_dir() { cwd } else { "" };
+    let dir = if crate::remote::is_remote(cwd) || Path::new(cwd).is_dir() { cwd } else { "" };
     let driver = CodexDriver::spawn(dir, tx, false)?;
     let got = driver.handshake().map(|_| {
-        driver.learn(dir);
+        driver.learn(crate::remote::path_of(dir));
         let caps = driver.caps();
         Catalog { commands: caps.commands, options: caps.options }
     });

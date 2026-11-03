@@ -496,6 +496,53 @@ fn main() {
                 println!("rounds={} title={:?} state={:?}", s.rounds.len(), s.title, emaki_core::build::turn_state(&emaki_core::transcript::read_all(&p), "").phase);
             }
         }
+        "remote" => {
+            // emaki-core remote: the remote computers and what each said of
+            // itself; `add <[user@]host[:port]> [--password <pw>]`,
+            // `remove <id>`, `link <id> [--secs <n>]` (copy its sessions
+            // and follow them, printing how the link stands).
+            use emaki_core::remote;
+            match args.get(1).map(String::as_str) {
+                Some("add") => {
+                    let typed = args.get(2).expect("remote add <[user@]host[:port]>");
+                    let password = args.iter().position(|a| a == "--password").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+                    let (user, rest) = typed.rsplit_once('@').map(|(u, h)| (u.to_string(), h.to_string())).unwrap_or((String::new(), typed.clone()));
+                    let (host, port) = match rest.rsplit_once(':') {
+                        Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.parse().unwrap()),
+                        _ => (rest.clone(), 0),
+                    };
+                    let d = remote::draft(&host, &user, port);
+                    let mut got = remote::probe(&d);
+                    if matches!(&got, Err(e) if e == "permission denied") && !password.is_empty() {
+                        got = remote::install_key(&d, &password).and_then(|_| remote::probe(&d));
+                    }
+                    match got {
+                        Ok(p) => {
+                            remote::keep(&d).expect("keep");
+                            println!("{} ({}): {:?}", d.id, d.address(), p)
+                        }
+                        Err(e) => {
+                            eprintln!("could not reach it: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Some("remove") => remote::remove(args.get(2).expect("remote remove <id>")).expect("remove"),
+                Some("link") => {
+                    let id = args.get(2).expect("remote link <id>");
+                    let secs: u64 = args.iter().position(|a| a == "--secs").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(30);
+                    let d = remote::find(id).expect("no such remote");
+                    let link = remote::Link::start(d, std::sync::Arc::new(|id: &str, st: remote::LinkStatus| println!("{id}: {:?}", st.state)), std::sync::Arc::new(|| println!("copy changed")));
+                    std::thread::sleep(std::time::Duration::from_secs(secs));
+                    link.stop();
+                }
+                _ => {
+                    for d in remote::remotes() {
+                        println!("{:<16} {:<28} {:?}", d.id, d.address(), remote::probed(&d.id));
+                    }
+                }
+            }
+        }
         "codex" => {
             // emaki-core codex options [cwd]: what a Codex session can be
             // set to and the commands it takes; no model call.

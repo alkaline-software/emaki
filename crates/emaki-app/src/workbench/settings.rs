@@ -33,6 +33,19 @@ const CONTROL_H: Pixels = px(28.);
 const UPDATE_W: Pixels = px(190.);
 /// A card's corner.
 const CARD_R: Pixels = px(12.);
+/// How long Connect's left says it could not.
+const REMOTE_SAID_FOR: Duration = Duration::from_millis(3600);
+/// Connect, wide enough for "Connecting…" so it does not move as it says it.
+const CONNECT_W: Pixels = px(118.);
+/// The room for how a saved computer stands.
+const STATE_W: Pixels = px(100.);
+/// A saved computer's row.
+const REMOTE_ROW_H: f32 = 58.;
+/// What Remote control takes besides its saved computers' card: the two
+/// sections' names, the new computer's group, the saved group's head, this
+/// computer's group, the gaps and the page's own padding. The card is no taller than the window
+/// leaves under these, so the page itself does not scroll.
+const REMOTE_REST: f32 = 406.;
 /// The language list at Appearance's title: as wide as its longest
 /// choice, "ZH-CN" by its flag, or the system's name in any language.
 const LANGUAGE_W: Pixels = px(136.);
@@ -210,6 +223,21 @@ impl Workbench {
         })
         .detach();
         self.name_input = Some(name_input);
+        // Remote control's form: the address, and the password that lets this
+        // computer in the first time. ↩ in either adds the remote.
+        let remote_input = cx.new(|cx| InputState::new(window, cx));
+        let remote_password = cx.new(|cx| InputState::new(window, cx).masked(true));
+        for input in [&remote_input, &remote_password] {
+            cx.subscribe_in(input, window, |this, _, ev: &InputEvent, _, cx| match ev {
+                InputEvent::PressEnter { .. } => this.remote_add(cx),
+                // Connect wakes as the address is typed.
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            })
+            .detach();
+        }
+        self.remote_input = Some(remote_input);
+        self.remote_password = Some(remote_password);
         // Text Size's fields: a number with a tenth at most, set at ↩ or
         // when the field is left; anything else put back as it was.
         self.size_inputs = SIZE_PLACES
@@ -231,6 +259,10 @@ impl Workbench {
         cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
                 this.close_settings_lists(cx);
+            } else if this.settings_section == "remote" {
+                // Back from the system's settings: Remote Login may have
+                // been turned on or off there.
+                this.ask_here(cx);
             }
         })
         .detach();
@@ -254,6 +286,8 @@ impl Workbench {
         self.settings_window = None;
         self.shortcut_rec = None;
         self.name_input = None;
+        self.remote_input = None;
+        self.remote_password = None;
         self.size_inputs.clear();
         if self.pick.as_ref().is_some_and(|p| p.in_settings) {
             self.pick = None;
@@ -316,6 +350,7 @@ impl Workbench {
             ("panels", _) => self.panels_rows(window, cx),
             ("files", _) => self.files_rows(cx),
             ("terminal", _) => self.terminal_rows(cx),
+            ("remote", _) => self.remote_rows(window, cx),
             ("sessions", _) => self.sessions_rows(cx),
             ("shortcuts", _) => self.shortcut_rows(cx),
             ("about", _) => self.about_rows(cx),
@@ -380,6 +415,7 @@ impl Workbench {
             ("panels", _) => ("title-panels", "page-panels"),
             ("files", _) => ("title-files", "page-files"),
             ("terminal", _) => ("title-terminal", "page-terminal"),
+            ("remote", _) => ("title-remote", "page-remote"),
             ("sessions", _) => ("title-sessions", "page-sessions"),
             ("shortcuts", "editor") => ("title-shortcuts", "page-shortcuts-editor"),
             ("shortcuts", _) => ("title-shortcuts", "page-shortcuts"),
@@ -1159,6 +1195,488 @@ impl Workbench {
         ]
     }
 
+    /// Remote control: the other computers sessions run on, a row each with how
+    /// its link stands, the way to add one, and this computer as another
+    /// reaches it.
+    fn remote_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        if self.here_asked.is_none_or(|at| at.elapsed() > Duration::from_secs(60)) {
+            self.ask_here(cx);
+        }
+        if std::mem::take(&mut self.remote_clear) {
+            for input in [self.remote_input.clone(), self.remote_password.clone()].into_iter().flatten() {
+                input.update(cx, |s, cx| s.set_value("", window, cx));
+            }
+        }
+        let mut rows = Vec::new();
+        // A target to connect to: its address, and its password the first
+        // time; Connect at the group's head.
+        let mut field = |id: &'static str, input: &Option<Entity<InputState>>, label: &'static str| -> AnyElement {
+            let Some(input) = input.clone() else { return div().w(CONTROL_W).h(CONTROL_H).into_any_element() };
+            div()
+                .id(id)
+                .track_focus(&input.read(cx).focus_handle(cx))
+                .role(Role::TextInput)
+                .aria_label(t(label))
+                .w(CONTROL_W)
+                .h(CONTROL_H)
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(px(8.))
+                .bg(theme.muted)
+                .text_size(px(12.5))
+                .child(Input::new(&input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&input, false, cx)))
+                .into_any_element()
+        };
+        let address = field("remote-address", &self.remote_input, "Target Address");
+        let password = field("remote-password", &self.remote_password, "Target Password");
+        let target = vec![line(t("Target Address"), None, address, &theme), line(t("Target Password"), None, password, &theme)];
+        // Two sections, one a way: this computer reaching a target, in two
+        // parts, a new computer and the saved ones; and another computer
+        // reaching this one.
+        let mut reach = vec![group_with(Some(div().child(t("New computer")).into_any_element()), Some(self.connect_control(cx)), target, &theme)];
+        reach.extend(self.saved_group(window, cx));
+        rows.push(section(t("This computer → Target computer"), reach, &theme));
+        rows.push(div().pt(px(10.)).child(section(t("Other computer → This computer"), vec![self.here_group(window, cx)], &theme)).into_any_element());
+        rows
+    }
+
+    /// Connect, at the head of This computer → Target computer: pressed
+    /// once a target address is typed, faded until then, the fade coming
+    /// and going over a moment. While it works it says so on itself, at
+    /// its own width, and nothing else on the page changes until the
+    /// target answers. When it could not, a word at its left says so and
+    /// fades away.
+    fn connect_control(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let adding = self.remote_adding;
+        let typed = self.remote_input.as_ref().is_some_and(|i| !i.read(cx).value().trim().is_empty());
+        let ready = typed && !adding;
+        let moving = self.presence("remote-connect", ready, cx);
+        let pill = crate::branches::small_pill("remote-connect", "icons/link.svg", if adding { t("Connecting…") } else { t("Connect") }, Press::Primary, !ready, &theme)
+            .min_w(CONNECT_W)
+            .justify_center()
+            .when(ready, |d| d.on_click(cx.listener(|this, _, _, cx| this.remote_add(cx))));
+        let pill = match moving {
+            Some((coming, n)) => pill.with_animation(ElementId::NamedInteger("remote-connect-fade".into(), n as u64), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.opacity(if coming { 0.4 + 0.6 * t } else { 1. - 0.6 * t })).into_any_element(),
+            None => pill.into_any_element(),
+        };
+        let words = self.remote_said.filter(|at| at.elapsed() < REMOTE_SAID_FOR && !adding).map(|_| {
+            let serial = self.remote_said_n;
+            let total = REMOTE_SAID_FOR.as_secs_f32();
+            div()
+                .text_size(px(12.))
+                .text_color(theme.danger)
+                .child(t("Connection failed"))
+                .with_animation(ElementId::NamedInteger("remote-failed".into(), serial), Animation::new(REMOTE_SAID_FOR), move |d, t| {
+                    let s = t * total;
+                    d.opacity((s / 0.24).min(1.).min((total - s) / 0.4).clamp(0., 1.))
+                })
+                .into_any_element()
+        });
+        h_flex().gap(px(10.)).items_center().children(words).child(pill).into_any_element()
+    }
+
+    /// Saved computers: each target that answered, a row each as Kotoba
+    /// lists its models, in a card no taller than leaves the page unscrolled
+    /// in the window as it is (`REMOTE_REST`), scrolling inside past that
+    /// with its cut edge faded. A computer kept grows in, and one removed
+    /// folds away; the first and the last take the group's head with them.
+    fn saved_group(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let mut list: Vec<(emaki_core::remote::Remote, Option<bool>)> = emaki_core::remote::remotes().into_iter().map(|d| (d, None)).collect();
+        let born = self.remote_born.clone().filter(|(_, at)| at.elapsed() < FOLD_ANIM).map(|(id, _)| id);
+        let leaving = self.remote_leaving.clone().filter(|(_, _, at)| at.elapsed() < FOLD_ANIM);
+        let alone = list.len() <= 1;
+        if let Some((ix, d, _)) = &leaving {
+            list.insert((*ix).min(list.len()), (d.clone(), Some(false)));
+        }
+        for (d, motion) in list.iter_mut() {
+            if born.as_deref() == Some(d.id.as_str()) {
+                *motion = Some(true);
+            }
+        }
+        if list.is_empty() {
+            return None;
+        }
+        // The whole group comes and goes with the first and the last.
+        let whole = alone && list.iter().any(|(_, m)| m.is_some()) && list.len() == 1;
+        let row_h = REMOTE_ROW_H + 1.;
+        let room = (f32::from(window.viewport_size().height) - f32::from(TOP_H) - REMOTE_REST).max(REMOTE_ROW_H);
+        let full = list.len() as f32 * row_h - 1.;
+        // Cut at a row's end, never partway through one: the last row
+        // shown fades at its foot, which says there are more.
+        let rows_fit = ((room + 1.) / row_h).floor().max(1.);
+        let cut = full > room + 0.5;
+        let shown = if cut { rows_fit * row_h - 1. } else { full };
+        let rows: Vec<AnyElement> = list
+            .iter()
+            .enumerate()
+            .map(|(i, (d, motion))| {
+                let row = div().when(i > 0, |d| d.border_t_1().border_color(theme.border)).child(self.remote_row(d, &theme, cx));
+                match motion.filter(|_| !whole) {
+                    Some(coming) => row
+                        .overflow_hidden()
+                        .with_animation(ElementId::Name(format!("remote-row-{}-{coming}", d.id).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |r, t| {
+                            let k = if coming { t } else { 1. - t };
+                            r.h(px(row_h * k)).opacity(k)
+                        })
+                        .into_any_element(),
+                    None => row.into_any_element(),
+                }
+            })
+            .collect();
+        let scroll = self.remote_scroll.clone();
+        // How far it can go, from the rows themselves: the handle knows only
+        // after the list's first layout.
+        let (off, max) = (-f32::from(scroll.offset().y), full - shown);
+        let ground = card_ground(&theme);
+        let fade = |top: bool| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(18.))
+                .map(|d| if top { d.top_0() } else { d.bottom_0() })
+                .bg(linear_gradient(if top { 0. } else { 180. }, linear_color_stop(ground.opacity(0.), 0.), linear_color_stop(ground, 1.)))
+        };
+        let body = div()
+            .relative()
+            .w_full()
+            .h(px(shown))
+            .rounded(CARD_R)
+            .border_1()
+            .border_color(theme.border)
+            .bg(ground)
+            .overflow_hidden()
+            .child(v_flex().id("saved-remotes").size_full().overflow_y_scroll().track_scroll(&scroll).children(rows))
+            .when(cut && off > 1., |d| d.child(fade(true)))
+            .when(cut && off < max - 1., |d| d.child(fade(false)))
+            .when(cut, |d| d.vertical_scrollbar(&scroll));
+        let head = h_flex().min_h(px(20.)).px(px(14.)).items_center().child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(t("Saved computers")));
+        let group = v_flex().gap(px(6.)).child(head).child(body);
+        Some(match list.first().and_then(|(_, m)| *m).filter(|_| whole) {
+            // The group's own height, head and card, grown or folded.
+            Some(coming) => {
+                let total = 26. + shown + 2.;
+                group
+                    .overflow_hidden()
+                    .with_animation(ElementId::Name(format!("saved-group-{coming}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |g, t| {
+                        let k = if coming { t } else { 1. - t };
+                        g.h(px(total * k)).opacity(k)
+                    })
+                    .into_any_element()
+            }
+            None => group.into_any_element(),
+        })
+    }
+
+    /// A saved computer's row, as Kotoba lists a model: its mark on a
+    /// tile, its name with the agents it has beside it, small, as Kotoba
+    /// has a model's size, and its address under them, whole; at the right
+    /// how it stands where that says more than its button (Connected, what
+    /// it is doing, or that it failed), the one button for what can be done
+    /// now, and the round bin. Each at a width of its own, so nothing moves
+    /// as it changes.
+    fn remote_row(&self, d: &emaki_core::remote::Remote, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
+        use emaki_core::remote::LinkState;
+        let status = self.remote_links.get(&d.id).cloned().unwrap_or_default();
+        let probe = status.probe.clone().or_else(|| emaki_core::remote::probed(&d.id));
+        // The agents it has, as it last said them, by their marks in their
+        // own colors, each named on the hover; their versions are on the
+        // agents page.
+        let agents: Vec<AgentId> = probe.as_ref().map(|p| AgentId::ALL.iter().copied().filter(|a| p.has(*a)).collect()).unwrap_or_default();
+        let agents_said = if !agents.is_empty() {
+            h_flex()
+                .gap(px(6.))
+                .items_center()
+                .children(agents.iter().map(|a| {
+                    let name = a.display_name();
+                    div().id(SharedString::from(format!("remote-agent-{}-{}", d.id, a.as_str()))).child(agent_icon(*a, px(12.), agent_color(*a, theme))).managed_tooltip(move |window, cx| crate::workbench::tip(name, window, cx))
+                }))
+                .into_any_element()
+        } else if probe.is_some() {
+            div().text_size(px(11.5)).text_color(theme.muted_foreground).child(t("No agent found")).into_any_element()
+        } else {
+            div().into_any_element()
+        };
+        // Disconnected by the person, its link's last word is not its state.
+        let off = d.off;
+        let failed = !off && matches!(status.state, LinkState::Failed(_));
+        let linked = !off && !failed;
+        let id = d.id.clone();
+        let quiet = |words: SharedString| div().text_color(theme.muted_foreground).child(words).into_any_element();
+        // Disconnected, its Connect says all there is.
+        let state = if off {
+            None
+        } else {
+            Some(match &status.state {
+                LinkState::Connected => h_flex().gap(px(5.)).items_center().text_color(theme.green).child(Icon::new(IconName::Check).with_size(px(13.))).child(t("Connected")).into_any_element(),
+                LinkState::Connecting => quiet(t("Connecting…").into()),
+                LinkState::Copying(done, total) => quiet(tf("Copying… {percent}%", &[("percent", &(done * 100 / (*total).max(1)))]).into()),
+                LinkState::Failed(_) => quiet(t("Connection failed").into()),
+            })
+        };
+        // Connect as the target's own Connect is, for one not linked; and
+        // Disconnect for one linked or on its way, which keeps it.
+        let action = if linked {
+            let id = id.clone();
+            crate::branches::small_pill(SharedString::from(format!("remote-off-{id}")), "icons/unlink.svg", t("Disconnect"), Press::Quiet, false, theme).h(CONTROL_H).min_w(CONNECT_W).justify_center().on_click(cx.listener(move |this, _, _, cx| this.remote_connect(&id, false, cx)))
+        } else {
+            let id = id.clone();
+            crate::branches::small_pill(SharedString::from(format!("remote-on-{id}")), "icons/link.svg", t("Connect"), Press::Quiet, false, theme).h(CONTROL_H).min_w(CONNECT_W).justify_center().on_click(cx.listener(move |this, _, _, cx| this.remote_connect(&id, true, cx)))
+        };
+        // Removing is seldom wanted: a round button, the bin alone, named
+        // on the hover.
+        let (danger, edge) = (theme.danger, theme.foreground.opacity(0.16));
+        let remove = div()
+            .id(SharedString::from(format!("remote-remove-{id}")))
+            .size(CONTROL_H)
+            .flex_shrink_0()
+            .rounded_full()
+            .border_1()
+            .border_color(edge)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(theme.muted_foreground)
+            .hover(move |s| s.bg(danger.opacity(0.1)).border_color(danger.opacity(0.45)).text_color(danger))
+            .managed_tooltip(|window, cx| crate::workbench::tip(t("Remove"), window, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                swallow_click(window, cx);
+                this.remote_remove(&id, cx)
+            }))
+            .child(Icon::default().path("icons/trash.svg").with_size(px(14.)));
+        h_flex()
+            .h(px(REMOTE_ROW_H))
+            .px(px(14.))
+            .gap(px(12.))
+            .items_center()
+            .child(div().size(px(34.)).flex_shrink_0().rounded(px(8.)).bg(theme.muted).flex().items_center().justify_center().child(Icon::default().path("icons/device-desktop.svg").with_size(px(17.)).text_color(if linked && status.state == LinkState::Connected { theme.foreground } else { theme.muted_foreground })))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(h_flex().min_w_0().gap(px(8.)).items_center().child(div().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(d.name.clone())).child(agents_said))
+                    .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).line_height(px(15.)).text_color(theme.muted_foreground).child(d.address())),
+            )
+            .child(h_flex().w(STATE_W).flex_shrink_0().justify_end().text_size(px(12.)).children(state))
+            .child(action)
+            .child(remove)
+            .into_any_element()
+    }
+
+    /// This computer as another reaches it: whether its ssh server is on,
+    /// the way to the system's switch for it, and what to type there.
+    fn here_group(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let here = self.here.clone().unwrap_or_default();
+        let mono = theme.mono_font_family.clone();
+        let value = |id: &'static str, text: String| -> AnyElement {
+            let copied = self.here_copied.as_ref().is_some_and(|(k, at)| k == id && at.elapsed() < Duration::from_millis(1600));
+            let text_for_copy = text.clone();
+            h_flex()
+                .gap(px(8.))
+                .items_center()
+                .child(div().max_w(px(300.)).truncate().font_family(mono.clone()).text_size(px(12.5)).text_color(if text.is_empty() { theme.muted_foreground } else { theme.foreground }).child(if text.is_empty() { t("Not found").to_string() } else { text }))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("copy-{id}")))
+                        .size(px(24.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .text_color(theme.muted_foreground)
+                        .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
+                        .managed_tooltip(move |window, cx| crate::workbench::tip(if copied { t("Copied") } else { t("Copy") }, window, cx))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            if !text_for_copy.is_empty() {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text_for_copy.clone()));
+                                this.here_copied = Some((id.to_string(), Instant::now()));
+                                cx.notify();
+                            }
+                        }))
+                        .child(Icon::default().path(if copied { "icons/check.svg" } else { "icons/copy.svg" }).with_size(px(14.))),
+                )
+                .into_any_element()
+        };
+        let state = div().text_size(px(12.5)).text_color(if here.listening { theme.green } else { theme.muted_foreground }).child(if self.here.is_none() { t("Looking…") } else if here.listening { t("On") } else { t("Off") });
+        let control = h_flex()
+            .gap(px(10.))
+            .items_center()
+            .child(state)
+            .when(cfg!(target_os = "macos"), |d| {
+                d.child(crate::branches::small_pill("open-sharing", "icons/external-link.svg", t("Open Sharing Settings"), Press::Quiet, false, &theme).h(CONTROL_H).on_click(|_, _, cx| cx.open_url("x-apple.systempreferences:com.apple.Sharing-Settings.extension")))
+            })
+            .into_any_element();
+        let login_note = div().child(t("Turn on to let this computer be controlled")).into_any_element();
+        // What the other computer's Target Address takes: the account at
+        // this computer's name.
+        let by_name = if here.account.is_empty() || here.computer.is_empty() { String::new() } else { format!("{}@{}", here.account, here.computer) };
+        let address_note = div().child(t("Provide to your controlling computer")).into_any_element();
+        group(
+            None,
+            None,
+            vec![line(t("Remote Login"), Some(login_note), control, &theme), line(t("Address"), Some(address_note), value("address", by_name), &theme)],
+            &theme,
+        )
+    }
+
+    /// Ask, off the window's thread, how this computer is reached.
+    pub(crate) fn ask_here(&mut self, cx: &mut Context<Self>) {
+        self.here_asked = Some(Instant::now());
+        let task = cx.background_spawn(async move { emaki_core::remote::here() });
+        cx.spawn(async move |this, cx| {
+            let here = task.await;
+            this.update(cx, |this, cx| {
+                this.here = Some(here);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Add the remote the form names: reached first, with its password
+    /// letting this computer's key in when the key alone is not let in,
+    /// and kept only once it answers.
+    pub(crate) fn remote_add(&mut self, cx: &mut Context<Self>) {
+        if self.remote_adding {
+            return;
+        }
+        let Some(input) = self.remote_input.clone() else { return };
+        let typed = input.read(cx).value().trim().to_string();
+        if typed.is_empty() {
+            return;
+        }
+        let password = self.remote_password.as_ref().map(|p| p.read(cx).value().to_string()).unwrap_or_default();
+        let (user, rest) = match typed.rsplit_once('@') {
+            Some((u, h)) => (u.to_string(), h.to_string()),
+            None => (String::new(), typed.clone()),
+        };
+        let (host, port) = match rest.rsplit_once(':') {
+            Some((h, p)) if !h.contains(':') && p.parse::<u16>().is_ok() => (h.to_string(), p.parse().unwrap_or(0)),
+            _ => (rest.clone(), 0),
+        };
+        self.remote_adding = true;
+        self.remote_said = None;
+        cx.notify();
+        let task = cx.background_spawn(async move {
+            use emaki_core::remote;
+            // Kept only once it answers: nothing shows until then.
+            let mut d = remote::draft(&host, &user, port);
+            let existed = remote::remotes().iter().any(|k| k.id == d.id);
+            let mut reached = remote::probe(&d);
+            if matches!(&reached, Err(e) if e == "permission denied") && !password.is_empty() {
+                reached = remote::install_key(&d, &password).and_then(|_| remote::probe(&d));
+            }
+            let p = reached.map_err(|e| if e == "permission denied" && password.is_empty() { "permission denied: no password was given".to_string() } else { e })?;
+            // Named as it names itself, not by its address.
+            let name = p.hostname.trim_end_matches(".local").split('.').next().unwrap_or("").to_string();
+            if !name.is_empty() && !existed {
+                d.name = name;
+            }
+            d.off = false;
+            remote::keep(&d).map_err(|e| e.to_string())?;
+            Ok((d.id.clone(), existed, p))
+        });
+        cx.spawn(async move |this, cx| {
+            let done: Result<(String, bool, emaki_core::remote::Probe), String> = task.await;
+            this.update(cx, |this, cx| {
+                this.remote_adding = false;
+                match done {
+                    Ok((id, existed, probe)) => {
+                        this.remote_said = None;
+                        this.remote_clear = true;
+                        // It answered just now: it stands as connected
+                        // while its link starts, and a new one grows in.
+                        this.remote_links.insert(id.clone(), emaki_core::remote::LinkStatus { state: emaki_core::remote::LinkState::Connected, probe: Some(probe) });
+                        if !existed {
+                            this.remote_born = Some((id, Instant::now()));
+                        }
+                        this.hub.link_remotes();
+                        this.hub.refresh();
+                    }
+                    Err(e) => {
+                        eprintln!("emaki: could not connect to the remote computer: {e}");
+                        this.remote_failed(cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Say at Connect's left that it could not, for a moment, and draw
+    /// again once the words are gone.
+    pub(crate) fn remote_failed(&mut self, cx: &mut Context<Self>) {
+        self.remote_said = Some(Instant::now());
+        self.remote_said_n += 1;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REMOTE_SAID_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.remote_said.is_some_and(|at| at.elapsed() >= REMOTE_SAID_FOR) {
+                    this.remote_said = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Connect a saved remote again, or disconnect it: kept either way,
+    /// its link started or ended, and said so at once in its row.
+    fn remote_connect(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        if let Err(e) = emaki_core::remote::set_off(id, !on) {
+            eprintln!("emaki: could not change the remote computer: {e}");
+            return;
+        }
+        if on {
+            self.remote_links.insert(id.to_string(), emaki_core::remote::LinkStatus { state: emaki_core::remote::LinkState::Connecting, probe: emaki_core::remote::probed(id) });
+        } else {
+            self.remote_links.remove(id);
+        }
+        // A link already running, after a failure, tries again at once.
+        self.hub.link_remotes();
+        if on {
+            self.hub.retry_remote(id);
+        }
+        self.hub.refresh();
+        cx.notify();
+    }
+
+    /// Forget a remote: its link ends and its sessions leave the lists.
+    /// What was copied of them stays on disk and comes back with it.
+    fn remote_remove(&mut self, id: &str, cx: &mut Context<Self>) {
+        let list = emaki_core::remote::remotes();
+        if let Some(ix) = list.iter().position(|d| d.id == id) {
+            self.remote_leaving = Some((ix, list[ix].clone(), Instant::now()));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(FOLD_ANIM).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
+        if let Err(e) = emaki_core::remote::remove(id) {
+            eprintln!("emaki: could not remove the remote computer: {e}");
+            self.remote_failed(cx);
+        }
+        self.remote_links.remove(id);
+        self.hub.link_remotes();
+        self.hub.refresh();
+        cx.notify();
+    }
+
     /// Shortcuts: the window's commands whose keys may change, or the
     /// file editor's, a group a card of rows as every section has them,
     /// two commands to a row: a name at the left, its keys at the right.
@@ -1598,6 +2116,17 @@ fn group_with(title: Option<AnyElement>, aside: Option<AnyElement>, rows: Vec<An
     v_flex().gap(px(6.)).children(head).child(card(rows, theme)).into_any_element()
 }
 
+/// A section of a page above its groups, where a page has two ways or
+/// sides to tell apart (Remote control): its name a step larger and in the
+/// ink, flush with the cards, over its groups.
+fn section(title: &'static str, groups: Vec<AnyElement>, theme: &gpui_component::Theme) -> AnyElement {
+    v_flex()
+        .gap(px(12.))
+        .child(div().px(px(2.)).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(title))
+        .child(v_flex().gap(px(14.)).children(groups))
+        .into_any_element()
+}
+
 /// The ground of a group: a card a shade off the page, with a hairline
 /// between its rows. A row that paints its own ground rounds it where it
 /// meets the card's corners: a clip in gpui is a rectangle.
@@ -1623,7 +2152,8 @@ fn card_ground(theme: &gpui_component::Theme) -> Hsla {
 
 /// A row of a card: its name, and under it a line where the name does
 /// not say it all; its control at the right.
-fn line(title: &'static str, detail: Option<AnyElement>, control: AnyElement, theme: &gpui_component::Theme) -> AnyElement {
+fn line(title: impl Into<SharedString>, detail: Option<AnyElement>, control: AnyElement, theme: &gpui_component::Theme) -> AnyElement {
+    let title: SharedString = title.into();
     h_flex()
         .min_h(px(46.))
         .px(px(14.))

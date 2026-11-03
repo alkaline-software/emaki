@@ -18,6 +18,11 @@ impl ClaudeAdapter {
     pub fn new() -> Self {
         Self { projects: paths::projects_dir() }
     }
+
+    /// Claude Code's projects copied from a remote (`remote`).
+    pub fn at(projects: PathBuf) -> Self {
+        Self { projects }
+    }
 }
 
 impl Default for ClaudeAdapter {
