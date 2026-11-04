@@ -85,6 +85,28 @@ pub fn files_ground(theme: &Theme) -> gpui::Hsla {
     gpui::rgb(hex).into()
 }
 
+/// The room between a list row's plate and its edge, at its top and foot.
+pub const ROW_BREATH: f32 = 1.5;
+
+/// What lights a row of a list: drawn as the row's first child, under
+/// its content, a little in from its top and foot (`ROW_BREATH`) so two
+/// lit rows stand apart. The row keeps its whole height for the pointer.
+/// Where two chosen rows join into one block, `joined` takes the room
+/// and the rounding away at that side. The caller gives it its ground,
+/// lit (`bg`) or under the pointer (`group_hover` on the row's group).
+pub fn row_plate(radius: f32, joined: (bool, bool)) -> gpui::Div {
+    use gpui::{div, px, prelude::FluentBuilder, Styled};
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px(if joined.0 { 0. } else { ROW_BREATH }))
+        .bottom(px(if joined.1 { 0. } else { ROW_BREATH }))
+        .rounded(px(radius))
+        .when(joined.0, |d| d.rounded_t(px(0.)))
+        .when(joined.1, |d| d.rounded_b(px(0.)))
+}
+
 /// The colors of the agents' own marks, their makers': Claude's
 /// terracotta and Codex's green, whatever accent the window wears. Not
 /// accents: no window wears them.

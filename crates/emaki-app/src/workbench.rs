@@ -613,8 +613,8 @@ const RAIL_TOP: Pixels = px(52.);
 const RAIL_ENTRY: Pixels = px(36.);
 const RAIL_GAP: Pixels = px(4.);
 /// The sidebar's rows: an agent or a folder, and a session under a folder.
-const SIDE_ROW_H: Pixels = px(26.);
-const SIDE_SESSION_H: Pixels = px(24.);
+const SIDE_ROW_H: Pixels = px(28.);
+const SIDE_SESSION_H: Pixels = px(26.);
 pub const TITLEBAR_H: Pixels = px(48.);
 /// The move to where the new part of a conversation begins
 /// (`UnreadGlide`): the most of the way that is run and not skipped, how
@@ -1541,6 +1541,9 @@ pub struct Workbench {
     /// The sign-in of Claude Code on a remote, from here, while it goes
     /// and a moment after.
     pub(crate) remote_login: Option<settings::RemoteLogin>,
+    /// When Connected Devices last asked each remote's agents whether they
+    /// are signed in, and whether it is asking now (`sign_check`).
+    pub(crate) sign_checks: HashMap<String, (Instant, bool)>,
     /// `EMAKI_GO=remotecode:<code>`: typed and handed in at the settings
     /// window's next draw.
     pub(crate) remote_code_probe: Option<String>,
@@ -4325,6 +4328,7 @@ impl Workbench {
             remote_input: None,
             remote_code: None,
             remote_login: None,
+            sign_checks: HashMap::new(),
             remote_code_probe: None,
             remote_password: None,
             remote_adding: false,
@@ -6453,7 +6457,14 @@ impl Workbench {
             Some("settings:remote") => self.open_settings(Some("remote"), cx),
             // Sign In under a saved computer, and the code typed and
             // handed to it (the page is printed, not opened).
-            Some(t) if t.starts_with("remotesign:") => self.remote_sign_in(&t["remotesign:".len()..], cx),
+            Some("remotecancel") => self.remote_sign_in_cancel(cx),
+            Some(t) if t.starts_with("remotesign:") => {
+                let rest = &t["remotesign:".len()..];
+                match rest.strip_suffix(":codex") {
+                    Some(id) => self.remote_sign_in(id, AgentId::Codex, cx),
+                    None => self.remote_sign_in(rest, AgentId::ClaudeCode, cx),
+                }
+            }
             // A picture of the settings window as it is now.
             Some(t) if t.starts_with("settingsshot:") => {
                 let path = PathBuf::from(&t["settingsshot:".len()..]);
@@ -8608,12 +8619,12 @@ impl Workbench {
                     .px(px(10.))
                     .py(px(6.))
                     .gap(px(1.))
-                    .rounded(px(8.))
                     .cursor_pointer()
                     // The dark palette's own hover is a shade off the
                     // card and cannot be seen on it: a wash of the ink.
-                    .when(active, |d| d.bg(if dark { theme.foreground.opacity(0.06) } else { theme.muted }))
-                    .hover(|s| s.bg(if dark { theme.foreground.opacity(0.11) } else { theme.list_hover }))
+                    .relative()
+                    .group("pick-row")
+                    .child(crate::look::row_plate(8., (false, false)).when(active, |d| d.bg(if dark { theme.foreground.opacity(0.06) } else { theme.muted })).group_hover("pick-row", |s| s.bg(if dark { theme.foreground.opacity(0.11) } else { theme.list_hover })))
                     .when(!gone, |d| d.on_click(cx.listener(move |this, _, _, cx| this.pick_chosen(what, &key, cx))))
                     .child(
                         h_flex()
@@ -11809,10 +11820,10 @@ impl Workbench {
             .h(px(36.))
             .px(px(10.))
             .gap(px(10.))
-            .rounded(px(8.))
             .cursor_pointer()
-            .when(page == Page::New, |d| d.bg(theme.sidebar_accent))
-            .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+            .relative()
+            .group("nav-row")
+            .child(crate::look::row_plate(8., (false, false)).when(page == Page::New, |d| d.bg(theme.sidebar_accent)).group_hover("nav-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
             .on_click(cx.listener(|this, _, window, cx| this.new_toggle(window, cx)))
             .child(div().size(px(22.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.primary_foreground)))
             .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(t(NEW_TITLE)))
@@ -11825,10 +11836,10 @@ impl Workbench {
                 .h(px(32.))
                 .px(px(10.))
                 .gap(px(10.))
-                .rounded(px(8.))
                 .cursor_pointer()
-                .when(active, |d| d.bg(theme.sidebar_accent))
-                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                .relative()
+                .group("nav-row")
+                .child(crate::look::row_plate(8., (false, false)).when(active, |d| d.bg(theme.sidebar_accent)).group_hover("nav-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
                 .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
                 .child(div().w(px(22.)).flex().justify_center().child(Icon::new(icon).with_size(px(16.)).text_color(if active { theme.foreground } else { theme.muted_foreground })))
                 .child(div().flex_1().min_w_0().truncate().text_size(px(13.5)).child(label))
@@ -11991,15 +12002,12 @@ impl Workbench {
                     .h(SIDE_ROW_H)
                     .px(px(10.))
                     .gap(px(10.))
-                    .rounded(px(8.))
                     .cursor_pointer()
                     // One of the projects chosen together is lit, in the
                     // accent as a chosen file is, and joined to the lit
                     // row over it and under it.
-                    .when(!marked, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.6))))
-                    .when(marked, |d| d.bg(theme.primary.opacity(0.22)))
-                    .when(above, |d| d.rounded_t(px(0.)))
-                    .when(below, |d| d.rounded_b(px(0.)))
+                    .relative()
+                    .child(crate::look::row_plate(8., (above, below)).map(|d| if marked { d.bg(theme.primary.opacity(0.22)) } else { d.group_hover(group.clone(), |s| s.bg(theme.sidebar_accent.opacity(0.6))) }))
                     .when(section == Some(1), |d| d.opacity(0.7))
                     .group(group.clone())
                     // ⌘ and a click adds the project to those chosen or
@@ -12216,19 +12224,15 @@ impl Workbench {
                     h_flex()
                         .id(SharedString::from(format!("recent-{key}")))
                         .relative()
+                        .group("side-row")
+                        .child(crate::look::row_plate(7., (joined_up, joined_down)).map(|d| if chosen { d.bg(theme.primary.opacity(0.22)) } else { d.when(active, |d| d.bg(theme.sidebar_accent)).group_hover("side-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))) }))
                         .children(mark)
                         .h(SIDE_SESSION_H)
                         .flex_shrink_0()
                         .ml(px(18.))
                         .px(px(10.))
                         .gap(px(8.))
-                        .rounded(px(7.))
                         .cursor_pointer()
-                        .when(active && !chosen, |d| d.bg(theme.sidebar_accent))
-                        .when(!chosen, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.6))))
-                        .when(chosen, |d| d.bg(theme.primary.opacity(0.22)))
-                        .when(joined_up, |d| d.rounded_t(px(0.)))
-                        .when(joined_down, |d| d.rounded_b(px(0.)))
                         // Where the row is, for a rectangle dragged over it.
                         .child(canvas(move |bounds, _, _| at_rows.borrow_mut().push((at_key, bounds, is_pinned)), |_, _, _, _| {}).absolute().inset_0())
                         // A click opens the session with the caret in
@@ -12306,11 +12310,12 @@ impl Workbench {
                         .flex_shrink_0()
                         .ml(px(18.))
                         .pl(px(36.))
-                        .rounded(px(7.))
                         .cursor_pointer()
                         .text_size(px(12.))
                         .text_color(theme.muted_foreground)
-                        .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                        .relative()
+                        .group("side-row")
+                        .child(crate::look::row_plate(7., (false, false)).group_hover("side-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
                         .on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.show_sessions_in(Scope::All, Some(all.clone()), cx) }))
                         .child(tf("{more} more", &[("more", &more)])),
                 );
@@ -12369,12 +12374,13 @@ impl Workbench {
                     .gap(px(6.))
                     .flex_shrink_0()
                     .items_center()
-                    .rounded(px(8.))
                     .cursor_pointer()
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
-                    .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                    .relative()
+                    .group("side-row")
+                    .child(crate::look::row_plate(8., (false, false)).group_hover("side-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
                     .on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.toggle_section(section, cx) }))
                     .child(div().flex_1().child(t(label)))
                     .child(div().font_weight(FontWeight::NORMAL).child(count.to_string()))
@@ -12413,12 +12419,13 @@ impl Workbench {
                 .gap(px(6.))
                 .flex_shrink_0()
                 .items_center()
-                .rounded(px(8.))
                 .cursor_pointer()
                 .text_size(px(11.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.muted_foreground)
-                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                .relative()
+                .group("side-row")
+                .child(crate::look::row_plate(8., (false, false)).group_hover("side-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
                 .on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(3, cx) }))
                 .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)))
                 .child(div().flex_1().child(t("Trash")))
@@ -12452,9 +12459,9 @@ impl Workbench {
                         .flex_shrink_0()
                         .px(px(10.))
                         .gap(px(10.))
-                        .rounded(px(7.))
+                        .relative()
                         .group(group.clone())
-                        .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)))
+                        .child(crate::look::row_plate(7., (false, false)).group_hover(group.clone(), |s| s.bg(theme.sidebar_accent.opacity(0.6))))
                         .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.trash_menu(Some(&menu_key), ev.position, cx)))
                         .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(row.agent, px(13.), theme.muted_foreground.opacity(0.75), false)))
                         .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme.sidebar_foreground).child(row.title.clone()))
@@ -12703,7 +12710,7 @@ impl Workbench {
                             .relative()
                             .flex_shrink_0()
                             .max_h(gpui::relative(0.5))
-                            .child(v_flex().id("pin-scroll").min_h_0().overflow_y_scroll().track_scroll(&self.pin_scroll).px(px(4.)).child(pins))
+                            .child(v_flex().id("pin-scroll").min_h_0().overflow_y_scroll().track_scroll(&self.pin_scroll).px(px(4.)).child(pins.py(px(crate::look::ROW_BREATH))))
                             .vertical_scrollbar(&self.pin_scroll),
                     )
                 })
@@ -12716,7 +12723,7 @@ impl Workbench {
                         .flex_1()
                         .min_h_0()
                         .pb(px(4.))
-                        .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(4.)).child(scroll))
+                        .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(4.)).child(scroll.pt(px(crate::look::ROW_BREATH))))
                         .vertical_scrollbar(&self.side_scroll),
                 )
                 .children(band),
@@ -13008,12 +13015,13 @@ impl Workbench {
                 .flex_shrink_0()
                 .px(px(10.))
                 .gap(px(10.))
-                .rounded(px(7.))
                 .text_size(px(12.5))
                 .text_color(theme.muted_foreground)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)).text_color(theme.foreground))
-                .active(|s| s.bg(theme.sidebar_accent))
+                .relative()
+                .group("side-place")
+                .child(crate::look::row_plate(7., (false, false)).id(("side-place-plate", i)).group_hover("side-place", |s| s.bg(theme.sidebar_accent.opacity(0.6))).group_active("side-place", |s| s.bg(theme.sidebar_accent)))
+                .hover(|s| s.text_color(theme.foreground))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
                     if add {
@@ -13533,9 +13541,10 @@ impl Workbench {
                     .py(px(6.))
                     .gap(px(10.))
                     .items_center()
-                    .rounded(px(8.))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.muted.opacity(0.5)))
+                    .relative()
+                    .group("artifact-row")
+                    .child(crate::look::row_plate(8., (false, false)).group_hover("artifact-row", |s| s.bg(theme.muted.opacity(0.5))))
                     .on_click(move |_, window, cx| {
                         swallow_click(window, cx);
                         cx.open_url(&open);
@@ -14299,14 +14308,15 @@ impl Workbench {
                     .pl(px(row_pl))
                     .pr(px(row_pr))
                     .gap(px(icon_gap))
-                    .rounded(px(6.))
                     .cursor_pointer()
                     .text_size(px(13.))
                     .whitespace_nowrap()
                     // The dark palette's own hover is a shade off the
                     // card and cannot be seen on it: a wash of the ink,
                     // as a list's rows have.
-                    .hover(|s| s.bg(if theme.mode.is_dark() { theme.foreground.opacity(0.11) } else { theme.sidebar_accent }))
+                    .relative()
+                    .group("menu-item")
+                    .child(crate::look::row_plate(6., (false, false)).group_hover("menu-item", |s| s.bg(if theme.mode.is_dark() { theme.foreground.opacity(0.11) } else { theme.sidebar_accent })))
                     .when(!bare, |d| d.child(Icon::default().path(what.icon()).with_size(px(icon_w)).text_color(theme.foreground).flex_shrink_0()))
                     .on_click(cx.listener(move |this, _, window, cx| this.menu_pick(what.clone(), window, cx)))
                     .child(words),
@@ -15220,7 +15230,7 @@ impl Workbench {
     fn soft_plate(&self, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let hovered = self.page_row_hover.as_deref() == Some(id);
-        let plate = div().absolute().inset_0().rounded(px(10.)).bg(theme.muted.opacity(if theme.mode.is_dark() { 0.7 } else { 0.55 }));
+        let plate = crate::look::row_plate(10., (false, false)).bg(theme.muted.opacity(if theme.mode.is_dark() { 0.7 } else { 0.55 }));
         match self.presence(&format!("soft-plate-{id}"), hovered, cx) {
             Some((coming, serial)) => plate
                 .with_animation(ElementId::Name(format!("soft-plate-{id}-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(gpui::ease_in_out), move |d, t| d.opacity(if coming { t } else { 1. - t }))
@@ -18243,9 +18253,10 @@ impl Workbench {
                 .px(px(10.))
                 .gap(px(14.))
                 .items_center()
-                .rounded(px(8.))
                 .cursor_pointer()
-                .map(|d| if chosen { d.bg(wash) } else { d.hover(|s| s.bg(theme.list_hover)) })
+                .relative()
+                .group("slash-row")
+                .child(crate::look::row_plate(8., (false, false)).map(|d| if chosen { d.bg(wash) } else { d.group_hover("slash-row", |s| s.bg(theme.list_hover)) }))
                 .on_click(cx.listener({
                     let at = Rc::clone(&at);
                     move |this, _, window, cx| {
@@ -19036,9 +19047,10 @@ impl Workbench {
                                 .px(px(12.))
                                 .py(px(8.))
                                 .gap(px(3.))
-                                .rounded(px(10.))
                                 .cursor_pointer()
-                                .hover(|st| st.bg(theme.list_hover))
+                                .relative()
+                                .group("search-hit")
+                                .child(crate::look::row_plate(10., (false, false)).group_hover("search-hit", |st| st.bg(theme.list_hover)))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.close_search(window, cx);
                                     this.open_with_find(&key, &query, round, window, cx);

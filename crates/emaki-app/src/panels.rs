@@ -118,7 +118,7 @@ const NAMED_BRANCH_AT: Pixels = px(300.);
 /// A panel's head is as tall as the folder's band beside it, so the two
 /// read as one band across the pane.
 const HEAD_H: Pixels = px(31.);
-const TREE_ROW_H: Pixels = px(24.);
+const TREE_ROW_H: Pixels = px(26.);
 /// How long a row of the tree takes to come or go.
 const TREE_ANIM: Duration = Duration::from_millis(200);
 /// What the row a new name is typed in goes by among the rows' paths.
@@ -5360,7 +5360,7 @@ impl Workbench {
         self.tree_band = Some((from, at));
         self.tree_band_live = true;
         let Some(root) = self.files_root() else { return };
-        let top = self.files_scroll.bounds().top() + self.files_scroll.offset().y;
+        let top = self.files_scroll.bounds().top() + self.files_scroll.offset().y + px(crate::look::ROW_BREATH);
         let (first, last) = (from.y.min(at.y), from.y.max(at.y));
         self.tree.picked = None;
         self.tree.marked = self
@@ -5843,10 +5843,10 @@ impl Workbench {
         self.tree.picked = Some(rows[to].clone());
         self.tree_anchor = self.tree.picked.clone();
         // Into view, by its number: every row is one height.
-        let (room, top) = (self.files_scroll.bounds().size.height, TREE_ROW_H * to as f32);
+        let (room, top) = (self.files_scroll.bounds().size.height, TREE_ROW_H * to as f32 + px(crate::look::ROW_BREATH));
         let off = -self.files_scroll.offset().y;
         if top < off {
-            self.files_scroll.set_offset(point(px(0.), -top));
+            self.files_scroll.set_offset(point(px(0.), -(top - px(crate::look::ROW_BREATH))));
         } else if room > px(0.) && top + TREE_ROW_H > off + room {
             self.files_scroll.set_offset(point(px(0.), -(top + TREE_ROW_H - room + px(6.))));
         }
@@ -6602,11 +6602,10 @@ impl Workbench {
                             .gap(px(5.))
                             .items_center()
                             .rounded(px(6.))
-                            .when(chosen && above, |d| d.rounded_t(px(0.)))
-                            .when(chosen && below, |d| d.rounded_b(px(0.)))
                             .cursor_pointer()
-                            .when(chosen, |d| d.bg(theme.primary.opacity(0.12)))
-                            .when(!chosen, |d| d.hover(|s| s.bg(row_hover(&theme, dark))))
+                            .relative()
+                            .group("tree-row")
+                            .child(crate::look::row_plate(6., (chosen && above, chosen && below)).map(|d| if chosen { d.bg(theme.primary.opacity(0.12)) } else { d.group_hover("tree-row", |s| s.bg(row_hover(&theme, dark))) }))
                             .when(drop_here, |d| d.bg(theme.primary.opacity(0.22)).rounded_b(px(0.)))
                             .when(drop_in, |d| d.bg(theme.primary.opacity(0.08)).rounded(px(0.)))
                             .when(cut, |d| d.opacity(0.45))
@@ -6768,6 +6767,7 @@ impl Workbench {
                         .overflow_y_scroll()
                         .track_scroll(&self.files_scroll)
                         .px(px(6.))
+                        .pt(px(crate::look::ROW_BREATH))
                         .pb(px(6.))
                         .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.file_menu(None, ev.position, cx)))
                         // A press anywhere in the panel may become a
@@ -7135,10 +7135,10 @@ impl Workbench {
                         .pr(px(8.))
                         .gap(px(6.))
                         .items_center()
-                        .rounded(px(6.))
                         .cursor_pointer()
-                        .when(lit, |d| d.bg(theme.primary.opacity(0.12)))
-                        .when(!lit, |d| d.hover(|s| s.bg(row_hover(&theme, dark))))
+                        .relative()
+                        .group("file-head")
+                        .child(crate::look::row_plate(6., (false, false)).map(|d| if lit { d.bg(theme.primary.opacity(0.12)) } else { d.group_hover("file-head", |s| s.bg(row_hover(&theme, dark))) }))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             swallow_click(window, cx);
                             this.file_head_go(ix, window, cx);
@@ -7497,10 +7497,11 @@ impl Workbench {
                     .px(px(8.))
                     .gap(px(8.))
                     .items_center()
-                    .rounded(px(6.))
                     .cursor_pointer()
                     .text_size(px(13.))
-                    .hover(|s| s.bg(theme.sidebar_accent))
+                    .relative()
+                    .group("list-row")
+                    .child(crate::look::row_plate(6., (false, false)).group_hover("list-row", |s| s.bg(theme.sidebar_accent)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         swallow_click(window, cx);
                         this.repo_pick(to.clone(), window, cx)
@@ -8103,10 +8104,11 @@ impl Workbench {
                     .px(px(8.))
                     .gap(px(6.))
                     .items_center()
-                    .rounded(px(6.))
                     .cursor_pointer()
                     .text_size(px(13.))
-                    .hover(|s| s.bg(theme.sidebar_accent))
+                    .relative()
+                    .group("list-row")
+                    .child(crate::look::row_plate(6., (false, false)).group_hover("list-row", |s| s.bg(theme.sidebar_accent)))
                     .on_click(cx.listener(move |this, _, window, cx| this.branch_go(to.clone(), false, window, cx)))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -8793,13 +8795,11 @@ impl Workbench {
                             .px(px(8.))
                             .gap(px(6.))
                             .items_center()
-                            .rounded(px(6.))
                             .cursor_pointer()
                             .text_size(px(12.5))
-                            .when(chosen, |d| d.bg(chosen_bg))
-                            .when(chosen && above, |d| d.rounded_t(px(0.)))
-                            .when(chosen && below, |d| d.rounded_b(px(0.)))
-                            .when(!chosen, |d| d.hover(move |s| s.bg(hover)))
+                            .relative()
+                            .group("change-row")
+                            .child(crate::look::row_plate(6., (chosen && above, chosen && below)).map(|d| if chosen { d.bg(chosen_bg) } else { d.group_hover("change-row", move |s| s.bg(hover)) }))
                             .on_click(move |e: &ClickEvent, window, cx| {
                                 // Not the list's too, which lets go.
                                 swallow_click(window, cx);
@@ -9593,12 +9593,14 @@ impl Workbench {
                                 .pl(px(8. + 9. * *depth as f32))
                                 .pr(px(6.))
                                 .py(px(4.))
-                                .rounded(px(6.))
                                 .text_size(px(11.5))
                                 .line_height(px(15.))
                                 .text_color(if Some(ix) == here { theme.foreground } else { theme.muted_foreground })
-                                .when(Some(ix) == here, |d| d.bg(theme.primary.opacity(0.16)).font_weight(FontWeight::MEDIUM))
-                                .when(page.is_some(), |d| d.cursor_pointer().hover(|s| s.bg(theme.muted).text_color(theme.foreground)))
+                                .relative()
+                                .group("pdf-heading")
+                                .child(crate::look::row_plate(6., (false, false)).when(Some(ix) == here, |d| d.bg(theme.primary.opacity(0.16))).when(page.is_some() && Some(ix) != here, |d| d.group_hover("pdf-heading", |s| s.bg(theme.muted))))
+                                .when(Some(ix) == here, |d| d.font_weight(FontWeight::MEDIUM))
+                                .when(page.is_some(), |d| d.cursor_pointer().hover(|s| s.text_color(theme.foreground)))
                                 .when_some(page, |d, page| d.on_click(cx.listener(move |this, _, _, cx| this.pdf_go_page(page, cx))))
                                 .child(title.clone())
                         }))
@@ -10396,10 +10398,10 @@ impl Workbench {
                     .items_stretch()
                     .gap(px(9.))
                     .px(px(10.))
-                    .rounded(px(8.))
                     .cursor_pointer()
-                    .when(is_current, |d| d.bg(theme.primary.opacity(if dark { 0.16 } else { 0.10 })))
-                    .when(!is_current, |d| d.hover(|s| s.bg(row_hover(&theme, dark))))
+                    .relative()
+                    .group("outline-row")
+                    .child(crate::look::row_plate(8., (false, false)).map(|d| if is_current { d.bg(theme.primary.opacity(if dark { 0.16 } else { 0.10 })) } else { d.group_hover("outline-row", |s| s.bg(row_hover(&theme, dark))) }))
                     .on_click(cx.listener(move |this, _, _, cx| this.outline_go(round, cx)))
                     .child(h_flex().flex_1().min_w_0().py(px(7.)).gap(px(8.)).items_start().child(stamp).child(div().flex_1().min_w_0().child(said)))
                     .into_any_element(),

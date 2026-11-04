@@ -602,9 +602,10 @@ impl Workbench {
                 .px(px(10.))
                 .gap(px(8.))
                 .items_center()
-                .rounded(px(7.))
                 .cursor_pointer()
-                .map(|d| if chosen { d.bg(chosen_bg) } else { d.hover(move |s| s.bg(hover)) })
+                .relative()
+                .group("commit-row")
+                .child(crate::look::row_plate(7., (false, false)).map(|d| if chosen { d.bg(chosen_bg) } else { d.group_hover("commit-row", move |s| s.bg(hover)) }))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
                     this.history_pick(sha.clone(), cx);
@@ -645,10 +646,11 @@ impl Workbench {
                 .px(px(8.))
                 .gap(px(6.))
                 .items_center()
-                .rounded(px(6.))
                 .cursor_pointer()
                 .text_size(px(12.5))
-                .map(|d| if chosen { d.bg(chosen_bg) } else { d.hover(move |s| s.bg(hover)) })
+                .relative()
+                .group("commit-file")
+                .child(crate::look::row_plate(6., (false, false)).map(|d| if chosen { d.bg(chosen_bg) } else { d.group_hover("commit-file", move |s| s.bg(hover)) }))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
                     this.history_file(to.clone(), cx);

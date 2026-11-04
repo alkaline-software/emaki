@@ -395,6 +395,9 @@ pub struct Probe {
     /// say no here (`login`).
     #[serde(default)]
     pub claude_signed_in: Option<bool>,
+    /// The same of Codex (`codex login status`).
+    #[serde(default)]
+    pub codex_signed_in: Option<bool>,
 }
 
 impl Probe {
@@ -402,6 +405,15 @@ impl Probe {
         match agent {
             crate::model::AgentId::ClaudeCode => !self.claude.is_empty(),
             crate::model::AgentId::Codex => !self.codex.is_empty(),
+        }
+    }
+
+    /// Whether the agent there is signed in, as it last said; `None` when
+    /// it did not say.
+    pub fn signed_in(&self, agent: crate::model::AgentId) -> Option<bool> {
+        match agent {
+            crate::model::AgentId::ClaudeCode => self.claude_signed_in,
+            crate::model::AgentId::Codex => self.codex_signed_in,
         }
     }
 }
@@ -446,9 +458,15 @@ echo "arch=$(uname -m)"
 echo "hostname=$(hostname 2>/dev/null)"
 c=$(command -v claude 2>/dev/null); echo "claude=$c"
 [ -n "$c" ] && echo "claude_version=$(claude --version 2>/dev/null | head -n 1)"
-[ -n "$c" ] && echo "claude_auth=$(claude auth status 2>/dev/null | tr -d ' \t\n\r')"
 x=$(command -v codex 2>/dev/null); echo "codex=$x"
 [ -n "$x" ] && echo "codex_version=$(codex --version 2>/dev/null | head -n 1)"
+"#;
+
+/// What the agents there say of their sign-in, with `$c` and `$x` the
+/// paths of Claude Code and Codex. Codex says it on stderr.
+const AUTH: &str = r#"
+[ -n "$c" ] && echo "claude_auth=$(claude auth status 2>/dev/null | tr -d ' \t\n\r')"
+[ -n "$x" ] && echo "codex_auth=$(codex login status 2>&1 | head -n 1)"
 echo "end=1"
 "#;
 
@@ -459,7 +477,7 @@ pub fn probe(d: &Remote) -> Result<Probe, String> {
     // within `REACH` and it is there. The probe after it, its login shell
     // started, may take longer.
     run(d, "echo emaki", REACH)?;
-    let out = run(d, PROBE, Duration::from_secs(30))?;
+    let out = run(d, &format!("{PROBE}{AUTH}"), Duration::from_secs(30))?;
     let mut p = Probe::default();
     let mut ended = false;
     for line in out.lines() {
@@ -476,6 +494,7 @@ pub fn probe(d: &Remote) -> Result<Probe, String> {
             "codex" => p.codex = v,
             "codex_version" => p.codex_version = v.split_whitespace().last().unwrap_or("").to_string(),
             "claude_auth" => p.claude_signed_in = signed_in_from(&v),
+            "codex_auth" => p.codex_signed_in = codex_signed_in_from(&v),
             "end" => ended = true,
             _ => {}
         }
@@ -492,7 +511,7 @@ pub fn probe(d: &Remote) -> Result<Probe, String> {
 /// on the remote: its login `PATH`, `env` set, in the folder or failing
 /// with the folder named. `tty` gives it a terminal there.
 pub fn agent_command(folder: &str, program: &str, args: &[String], env: &[(&str, &str)], tty: bool) -> Result<Command, String> {
-    let (d, script) = agent_script(folder, program, args, env, false)?;
+    let (d, script) = agent_script(folder, program, args, env, Start::Exec)?;
     Ok(command(&d, &script, tty))
 }
 
@@ -502,14 +521,49 @@ pub fn agent_command(folder: &str, program: &str, args: &[String], env: &[(&str,
 /// (`pty::ANNOUNCE`), which Claude Code keeps, so its record in the
 /// registry there is told from any other.
 pub fn terminal_argv(folder: &str, args: &[String]) -> Result<Vec<String>, String> {
-    let (d, script) = agent_script(folder, "claude", args, &[("COLORTERM", "truecolor")], true)?;
+    let (d, script) = agent_script(folder, "claude", args, &[("COLORTERM", "truecolor")], Start::Announced)?;
     let cmd = command(&d, &script, true);
     let mut argv = vec![cmd.get_program().to_string_lossy().to_string()];
     argv.extend(cmd.get_args().map(|a| a.to_string_lossy().to_string()));
     Ok(argv)
 }
 
-fn agent_script(folder: &str, program: &str, args: &[String], env: &[(&str, &str)], announce: bool) -> Result<(Remote, String), String> {
+/// How a script there starts its program.
+#[derive(Clone, Copy, PartialEq)]
+enum Start {
+    /// The script becomes the program.
+    Exec,
+    /// Its pid named first (`pty::ANNOUNCE`), then the script becomes it.
+    Announced,
+    /// With no terminal there a program does not hear its ssh end, and
+    /// one that waits (a sign-in) would wait on after this computer let
+    /// it go, cancelled or quit. So the script stays: it hands the
+    /// program each line it is sent, through a pipe of its own, and when
+    /// what it is sent ends, the connection gone for whatever reason, it
+    /// ends the program. It ends with the program, as the program ended.
+    Watched,
+}
+
+/// The watcher round a program (`Start::Watched`); `{cmd}` is the
+/// program's own command. A job in the background reads nothing by
+/// itself (its input is `/dev/null`), so the relay reads what the script
+/// is sent from a copy kept first (4). The program is ended as well when
+/// the script itself is (a hangup, a pipe gone), and killed outright if
+/// it is still there two seconds after it was asked to end: a sign-in
+/// left behind once outlived its script.
+const WATCHED: &str = r#"exec 4<&0
+f="${TMPDIR:-/tmp}/emaki-in-$$"; rm -f "$f"; mkfifo "$f" || exit 98
+{cmd} <"$f" & p=$!
+exec 3>"$f"; rm -f "$f"
+end() { kill "$p" 2>/dev/null; ( sleep 2; kill -9 "$p" 2>/dev/null ) & }
+trap 'end; exit 129' HUP TERM PIPE
+( while IFS= read -r l; do printf '%s\n' "$l" >&3; done; end ) <&4 &
+r=$!
+wait "$p"; s=$?
+kill "$r" 2>/dev/null
+exit "$s""#;
+
+fn agent_script(folder: &str, program: &str, args: &[String], env: &[(&str, &str)], start: Start) -> Result<(Remote, String), String> {
     let (id, path) = split(folder).ok_or_else(|| "not a remote computer's folder".to_string())?;
     let d = find(id).ok_or_else(|| format!("{id} is not one of the devices in Settings, Connected Devices"))?;
     let probe = match probed(id) {
@@ -523,20 +577,24 @@ fn agent_script(folder: &str, program: &str, args: &[String], env: &[(&str, &str
     if !path.is_empty() {
         script.push_str(&format!("cd {} || {{ echo {} >&2; exit 97; }}; ", sh_quote(path), sh_quote(&format!("the folder is not there: {path}"))));
     }
-    if announce {
+    if start == Start::Announced {
         script.push_str(&format!("printf '{}' \"$$\"; ", crate::pty::ANNOUNCE));
     }
-    script.push_str("exec ");
+    let mut cmd = String::new();
     if !env.is_empty() {
-        script.push_str("env ");
+        cmd.push_str("env ");
         for (k, v) in env {
-            script.push_str(&format!("{k}={} ", sh_quote(v)));
+            cmd.push_str(&format!("{k}={} ", sh_quote(v)));
         }
     }
-    script.push_str(&sh_quote(program));
+    cmd.push_str(&sh_quote(program));
     for a in args {
-        script.push(' ');
-        script.push_str(&sh_quote(a));
+        cmd.push(' ');
+        cmd.push_str(&sh_quote(a));
+    }
+    match start {
+        Start::Watched => script.push_str(&format!("\n{}", WATCHED.replace("{cmd}", &cmd))),
+        _ => script.push_str(&format!("exec {cmd}")),
     }
     Ok((d, script))
 }
@@ -553,47 +611,74 @@ fn signed_in_from(said: &str) -> Option<bool> {
     }
 }
 
-/// Ask Claude Code there again whether it is signed in, and keep the
-/// answer with the rest of what the remote said. Off the window's thread.
-pub fn check_signed_in(remote: &str) -> Result<Option<bool>, String> {
-    // Signed out, it says so and ends with 1: what it said is read
-    // whatever it ended with.
-    let (d, script) = agent_script(&folder(remote, ""), "claude", &["auth".into(), "status".into()], &[], false)?;
-    let mut cmd = command(&d, &script, false);
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
-    let (code, out, err) = wait_output(child, Duration::from_secs(30))?;
-    if code == Some(255) {
-        return Err(ssh_error(&err, code));
+/// Whether `codex login status` said it is signed in: its first line.
+fn codex_signed_in_from(said: &str) -> Option<bool> {
+    if said.starts_with("Not logged in") {
+        Some(false)
+    } else if said.starts_with("Logged in") {
+        Some(true)
+    } else {
+        None
     }
-    let said: String = out.chars().filter(|c| !c.is_whitespace()).collect();
-    let signed = signed_in_from(&said);
-    if let Some(mut p) = probed(remote) {
-        p.claude_signed_in = signed;
-        let _ = paths::write_json(&probe_file(remote), &serde_json::to_value(&p).unwrap_or_default());
-    }
-    Ok(signed)
 }
 
-/// Claude Code's own sign-in on a remote, done from here: `claude auth
-/// login` there with no terminal, which prints the page to sign in at and
-/// waits for the code that page shows. The page is opened in this
-/// computer's browser and the code typed in the window, so nothing is
-/// done at the remote's screen; none is needed. Claude Code keeps the
-/// sign-in where it can: a Mac's keychain is locked to ssh, and then it
-/// writes `~/.claude/.credentials.json`, which every later ssh session
-/// reads.
+/// Ask the agents there again whether they are signed in, and keep the
+/// answers with the rest of what the remote said. Off the window's
+/// thread.
+pub fn check_sign_ins(remote: &str) -> Result<Probe, String> {
+    let d = find(remote).ok_or_else(|| format!("{remote} is not one of the devices in Settings, Connected Devices"))?;
+    let mut p = match probed(remote) {
+        Some(p) if !p.path.is_empty() => p,
+        _ => return probe(&d),
+    };
+    let script = format!("PATH={}; export PATH; c=$(command -v claude 2>/dev/null); x=$(command -v codex 2>/dev/null)\n{AUTH}", sh_quote(&p.path));
+    let out = run(&d, &script, Duration::from_secs(30))?;
+    let (mut claude, mut codex) = (None, None);
+    for line in out.lines() {
+        match line.split_once('=') {
+            Some(("claude_auth", v)) => claude = signed_in_from(v.trim()),
+            Some(("codex_auth", v)) => codex = codex_signed_in_from(v.trim()),
+            _ => {}
+        }
+    }
+    (p.claude_signed_in, p.codex_signed_in) = (claude, codex);
+    let _ = paths::write_json(&probe_file(remote), &serde_json::to_value(&p).unwrap_or_default());
+    Ok(p)
+}
+
+/// An agent's own sign-in on a remote, done from here, with no terminal
+/// there and nothing done at its screen. Claude Code's `claude auth
+/// login` prints the page to sign in at and waits for the code that page
+/// shows, typed in the window (`finish`); it keeps the sign-in where it
+/// can: a Mac's keychain is locked to ssh, and then it writes
+/// `~/.claude/.credentials.json`, which every later ssh session reads.
+/// Codex's `codex login --device-auth` prints a page and a code to type
+/// there, and ends once the page has it (`wait`).
 pub struct Login {
     child: Mutex<Child>,
     stdin: Mutex<Option<std::process::ChildStdin>>,
     said: Arc<Mutex<String>>,
+    agent: crate::model::AgentId,
+}
+
+/// Where a sign-in begun says to go: the page, and for Codex the code to
+/// type on it.
+pub struct LoginPage {
+    pub url: String,
+    pub code: Option<String>,
 }
 
 impl Login {
-    /// Start it, and wait for the page's address. `BROWSER` is a program
-    /// that does nothing, so no browser opens at the remote's screen.
-    pub fn start(remote: &str) -> Result<(Login, String), String> {
-        let (d, script) = agent_script(&folder(remote, ""), "claude", &["auth".into(), "login".into()], &[("BROWSER", "true")], false)?;
+    /// Start it, and wait for the page's address (and Codex's code).
+    /// `BROWSER` is a program that does nothing, so no browser opens at
+    /// the remote's screen.
+    pub fn start(remote: &str, agent: crate::model::AgentId) -> Result<(Login, LoginPage), String> {
+        let codex = agent == crate::model::AgentId::Codex;
+        let (program, args): (&str, Vec<String>) = if codex { ("codex", vec!["login".into(), "--device-auth".into()]) } else { ("claude", vec!["auth".into(), "login".into()]) };
+        let name = agent.display_name();
+        // Watched there: a sign-in cancelled here, or left by a window
+        // closed or an app quit, ends there with its connection.
+        let (d, script) = agent_script(&folder(remote, ""), program, &args, &[("BROWSER", "true")], Start::Watched)?;
         let mut cmd = command(&d, &script, false);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
@@ -612,18 +697,22 @@ impl Login {
                 }
             });
         }
-        let login = Login { child: Mutex::new(child), stdin: Mutex::new(stdin), said };
+        let login = Login { child: Mutex::new(child), stdin: Mutex::new(stdin), said, agent };
         let began = Instant::now();
         loop {
-            if let Some(url) = login_url(&login.said()) {
-                return Ok((login, url));
+            let said = login.said();
+            if let Some(url) = login_url(&said) {
+                let code = device_code(&said);
+                if !codex || code.is_some() {
+                    return Ok((login, LoginPage { url, code }));
+                }
             }
             if let Ok(Some(_)) = login.child.lock().unwrap_or_else(|e| e.into_inner()).try_wait() {
-                return Err(last_words(&login.said()).unwrap_or_else(|| "Claude Code there did not start its sign-in".into()));
+                return Err(last_words(&login.said()).unwrap_or_else(|| format!("{name} there did not start its sign-in")));
             }
             if began.elapsed() > Duration::from_secs(40) {
                 login.cancel();
-                return Err("Claude Code there did not answer in time".into());
+                return Err(format!("{name} there did not answer in time"));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -644,20 +733,50 @@ impl Login {
             let _ = pipe.flush();
         }
         let began = Instant::now();
+        // A code it does not take, Claude Code says so and asks again,
+        // still running: a line said after the code, with no end in a few
+        // seconds, is why.
+        let mut answered: Option<Instant> = None;
         loop {
             if let Ok(Some(st)) = self.child.lock().unwrap_or_else(|e| e.into_inner()).try_wait() {
                 let after = self.said();
                 let tail = after.get(before..).unwrap_or("");
                 return if st.success() { Ok(()) } else { Err(last_words(tail).or_else(|| last_words(&after)).unwrap_or_else(|| "the sign-in did not go through".into())) };
             }
+            let tail = self.said().get(before..).unwrap_or("").to_string();
+            if answered.is_none() && tail.contains('\n') && last_words(&tail).is_some() {
+                answered = Some(Instant::now());
+            }
+            if answered.is_some_and(|at| at.elapsed() > Duration::from_secs(3)) {
+                return Err(last_words(&tail).unwrap_or_else(|| "the sign-in did not go through".into()));
+            }
             if began.elapsed() > Duration::from_secs(90) {
                 self.cancel();
-                return Err("Claude Code there did not answer in time".into());
+                return Err(format!("{} there did not answer in time", self.agent.display_name()));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 
+    /// Wait for a sign-in that ends by itself, Codex's once its page has
+    /// the code: `Ok` when it ended well, else its own last words. Its
+    /// code holds for fifteen minutes.
+    pub fn wait(&self) -> Result<(), String> {
+        let began = Instant::now();
+        loop {
+            if let Ok(Some(st)) = self.child.lock().unwrap_or_else(|e| e.into_inner()).try_wait() {
+                return if st.success() { Ok(()) } else { Err(last_words(&plain(&self.said())).unwrap_or_else(|| "the sign-in did not go through".into())) };
+            }
+            if began.elapsed() > Duration::from_secs(16 * 60) {
+                self.cancel();
+                return Err("the code ran out".into());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// End it: its connection, and with it the agent there, which its
+    /// script ends when what it is sent ends (`Start::Watched`).
     pub fn cancel(&self) {
         self.stdin.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
@@ -681,8 +800,49 @@ fn login_url(said: &str) -> Option<String> {
     (end < rest.len()).then(|| rest[..end].to_string())
 }
 
+/// What a program said, its colors taken out.
+fn plain(said: &str) -> String {
+    let mut out = String::with_capacity(said.len());
+    let mut chars = said.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                // An operating system command (a title, a pid named), to
+                // its bell.
+                Some(']') => for c in chars.by_ref() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                },
+                _ => {}
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The code `codex login --device-auth` says to type on its page: the
+/// first word after "one-time code" made of capitals and digits with a
+/// hyphen in it.
+fn device_code(said: &str) -> Option<String> {
+    let text = plain(said);
+    let rest = &text[text.find("one-time code")?..];
+    rest.split_whitespace().find(|w| w.len() >= 6 && w.contains('-') && w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')).map(str::to_string)
+}
+
 /// The last line a program said that is not its prompt for the code.
 fn last_words(said: &str) -> Option<String> {
+    let said = plain(said);
     let line = said.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("Paste code")).last()?;
     let line = line.strip_prefix("Error:").unwrap_or(line).trim();
     Some(line.strip_prefix("Login failed:").unwrap_or(line).trim().to_string())
@@ -1401,6 +1561,14 @@ mod tests {
         assert_eq!(signed_in_from(r#"{"loggedIn":true,"authMethod":"claude.ai"}"#), Some(true));
         assert_eq!(signed_in_from(r#"{"loggedIn":false}"#), Some(false));
         assert_eq!(signed_in_from(""), None);
+        assert_eq!(codex_signed_in_from("Logged in using ChatGPT"), Some(true));
+        assert_eq!(codex_signed_in_from("Not logged in"), Some(false));
+        assert_eq!(codex_signed_in_from("bash: codex: command not found"), None);
+        let device = "Follow these steps:\n\n1. Open this link in your browser\n   \u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m\n\n2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)\u{1b}[0m\n   \u{1b}[94mZ5YI-NM22H\u{1b}[0m\n";
+        assert_eq!(login_url(device).as_deref(), Some("https://auth.openai.com/codex/device"));
+        assert_eq!(device_code(device).as_deref(), Some("Z5YI-NM22H"));
+        assert_eq!(device_code("2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)"), None);
+        assert_eq!(last_words("\u{1b}]7337;emaki-pid=4242\u{7}Error: could not reach the server\n").as_deref(), Some("could not reach the server"));
         assert_eq!(last_words("Paste code here if prompted > \nError: Invalid code\n").as_deref(), Some("Invalid code"));
     }
 

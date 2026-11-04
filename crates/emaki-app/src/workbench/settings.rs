@@ -41,14 +41,19 @@ const CONNECT_W: Pixels = px(118.);
 const STATE_W: Pixels = px(100.);
 /// A saved computer's row.
 const REMOTE_ROW_H: f32 = 58.;
-/// The sign-in strip under a saved computer's row (`sign_strip`).
+/// The sign-in line under a saved computer's row (`sign_strip`).
 const SIGN_H: f32 = 44.;
-/// How long "Signed in" stands before the strip folds away.
-const SIGNED_SHOWN: Duration = Duration::from_millis(1600);
+/// How long the agents' sign-in, as a remote said it, stands before
+/// Connected Devices asks again.
+const SIGN_CHECK_EVERY: Duration = Duration::from_secs(30);
 
-/// Claude Code's sign-in on a remote, from Settings (`remote_sign_in`).
+/// An agent's sign-in on a remote, from Settings (`remote_sign_in`).
 pub(crate) struct RemoteLogin {
     pub(crate) id: String,
+    pub(crate) agent: AgentId,
+    /// Which sign-in this is, so what an earlier one, cancelled, says
+    /// when it ends is not taken for this one's.
+    serial: u64,
     pub(crate) stage: LoginStage,
     login: Option<Arc<emaki_core::remote::Login>>,
     /// The code's field is emptied at the settings window's next draw.
@@ -61,9 +66,11 @@ pub(crate) enum LoginStage {
     Starting,
     /// Its page is open in the browser here; the code is waited for.
     Code(String),
+    /// Codex's page is open in the browser here, waiting for the code it
+    /// gave, which is on the clipboard.
+    Device { url: String, code: String },
     Sending,
     Failed(String),
-    Done(Instant),
 }
 /// What Connected Devices takes besides its saved computers' card: the two
 /// sections' names, the new computer's group, the saved group's head, this
@@ -325,9 +332,7 @@ impl Workbench {
         self.remote_password = None;
         self.remote_code = None;
         // A sign-in left part way ends with the window.
-        if self.remote_login.as_ref().is_some_and(|l| !matches!(l.stage, LoginStage::Done(_))) {
-            self.remote_login = None;
-        }
+        self.remote_sign_in_cancel(cx);
         self.size_inputs.clear();
         if self.pick.as_ref().is_some_and(|p| p.in_settings) {
             self.pick = None;
@@ -595,10 +600,10 @@ impl Workbench {
                 .px(px(10.))
                 .gap(px(9.))
                 .items_center()
-                .rounded(px(8.))
                 .cursor_pointer()
-                .when(active, |d| d.bg(theme.sidebar_accent))
-                .when(!active, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.6))))
+                .relative()
+                .group("settings-nav")
+                .child(crate::look::row_plate(8., (false, false)).map(|d| if active { d.bg(theme.sidebar_accent) } else { d.group_hover("settings-nav", |s| s.bg(theme.sidebar_accent.opacity(0.6))) }))
                 // A press on a section is not a drag of the window.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1362,7 +1367,12 @@ impl Workbench {
             }
             self.remote_sign_in_finish(cx);
         }
-        // A row with its sign-in strip is that much taller.
+        // What the agents there say of their sign-in is asked again while
+        // the section shows, so it says how they stand now.
+        for (d, _) in list.iter() {
+            self.sign_check(d, cx);
+        }
+        // A row with its sign-in line is that much taller.
         let signs: Vec<bool> = list.iter().map(|(d, _)| self.sign_shown(d, cx)).collect();
         let heights: Vec<f32> = signs.iter().enumerate().map(|(i, s)| if i > 0 { row_h } else { REMOTE_ROW_H } + if *s { SIGN_H } else { 0. }).collect();
         let full: f32 = heights.iter().sum();
@@ -1465,13 +1475,55 @@ impl Workbench {
         // own colors, each named on the hover; their versions are on the
         // agents page.
         let agents: Vec<AgentId> = probe.as_ref().map(|p| AgentId::ALL.iter().copied().filter(|a| p.has(*a)).collect()).unwrap_or_default();
+        // Each wears how it is signed in there at its top right, as it last
+        // said: a tick, or a mark that it is not. One not signed in is a
+        // button while the computer is connected: a click starts its
+        // sign-in (`remote_sign_in`).
+        let connected = !d.off && status.state == LinkState::Connected;
+        let signing = self.remote_login.as_ref().is_some_and(|l| l.id == d.id);
         let agents_said = if !agents.is_empty() {
+            let ring = theme.background.blend(card_ground(theme));
+            let glyph = theme.background;
             h_flex()
-                .gap(px(6.))
+                .gap(px(2.))
                 .items_center()
                 .children(agents.iter().map(|a| {
+                    let a = *a;
                     let name = a.display_name();
-                    div().id(SharedString::from(format!("remote-agent-{}-{}", d.id, a.as_str()))).child(agent_icon(*a, px(12.), agent_color(*a, theme))).managed_tooltip(move |window, cx| crate::workbench::tip(name, window, cx))
+                    let signed = probe.as_ref().and_then(|p| p.signed_in(a));
+                    let can_sign = connected && !signing && signed == Some(false);
+                    let tip: SharedString = match signed {
+                        Some(true) => format!("{name} \u{b7} {}", t("Signed in")).into(),
+                        Some(false) if can_sign => tf("Sign in to {agent}", &[("agent", &name)]).into(),
+                        Some(false) => format!("{name} \u{b7} {}", t("Not signed in")).into(),
+                        None => name.into(),
+                    };
+                    let badge = signed.map(|ok| {
+                        let disc = div().absolute().top(px(-1.)).right(px(-1.)).size(px(10.)).rounded_full().border(px(1.5)).border_color(ring).flex().items_center().justify_center();
+                        if ok {
+                            disc.bg(theme.green).child(Icon::new(IconName::Check).with_size(px(7.)).text_color(glyph))
+                        } else {
+                            disc.bg(theme.warning).child(v_flex().items_center().gap(px(0.5)).child(div().w(px(1.5)).h(px(3.)).rounded_full().bg(glyph)).child(div().size(px(1.5)).rounded_full().bg(glyph)))
+                        }
+                    });
+                    let id = d.id.clone();
+                    div()
+                        .id(SharedString::from(format!("remote-agent-{}-{}", d.id, a.as_str())))
+                        .relative()
+                        .size(px(22.))
+                        .rounded(px(6.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(agent_icon(a, px(14.), agent_color(a, theme)))
+                        .children(badge)
+                        .when(can_sign, |d| {
+                            d.cursor_pointer().hover(|s| s.bg(theme.muted)).on_click(cx.listener(move |this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.remote_sign_in(&id, a, cx);
+                            }))
+                        })
+                        .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                 }))
                 .into_any_element()
         } else if probe.is_some() {
@@ -1547,20 +1599,37 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// Whether a saved computer's row has its sign-in strip, or is still
-    /// folding it away: Claude Code there is not signed in over ssh, or a
-    /// sign-in from here is under way or just went through.
+    /// Whether a saved computer's row has its sign-in line: a sign-in
+    /// there from here is under way.
     fn sign_wanted(&self, d: &emaki_core::remote::Remote) -> bool {
+        self.remote_login.as_ref().is_some_and(|l| l.id == d.id)
+    }
+
+    /// Ask a connected computer's agents again whether they are signed in,
+    /// when they last said it a while ago and nothing is asking now.
+    fn sign_check(&mut self, d: &emaki_core::remote::Remote, cx: &mut Context<Self>) {
         use emaki_core::remote::LinkState;
-        let status = self.remote_links.get(&d.id);
-        let probe = status.and_then(|s| s.probe.clone()).or_else(|| emaki_core::remote::probed(&d.id));
-        let connected = !d.off && status.is_some_and(|s| s.state == LinkState::Connected);
-        let login = self.remote_login.as_ref().filter(|l| l.id == d.id);
-        let busy = login.is_some_and(|l| match l.stage {
-            LoginStage::Done(at) => at.elapsed() < SIGNED_SHOWN,
-            _ => true,
-        });
-        busy || (connected && probe.is_some_and(|p| p.has(AgentId::ClaudeCode) && p.claude_signed_in == Some(false)))
+        let connected = !d.off && self.remote_links.get(&d.id).is_some_and(|s| s.state == LinkState::Connected);
+        let due = self.sign_checks.get(&d.id).is_none_or(|(at, asking)| !asking && at.elapsed() >= SIGN_CHECK_EVERY);
+        if !connected || !due || self.remote_login.as_ref().is_some_and(|l| l.id == d.id) {
+            return;
+        }
+        let id = d.id.clone();
+        self.sign_checks.insert(id.clone(), (Instant::now(), true));
+        let remote = id.clone();
+        let task = cx.background_spawn(async move { emaki_core::remote::check_sign_ins(&remote) });
+        cx.spawn(async move |this, cx| {
+            let said = task.await;
+            this.update(cx, |this, cx| {
+                this.sign_checks.insert(id.clone(), (Instant::now(), false));
+                if let (Ok(p), Some(s)) = (said, this.remote_links.get_mut(&id)) {
+                    s.probe = Some(p);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Whether the strip is drawn: wanted, or folding away.
@@ -1571,8 +1640,8 @@ impl Workbench {
         on || self.lingering(&key)
     }
 
-    /// Under a saved computer whose Claude Code is not signed in over
-    /// ssh: that, and Sign In. Claude Code signs in there by its own
+    /// Under a saved computer while an agent there signs in from here:
+    /// where the sign-in stands. Claude Code signs in there by its own
     /// `claude auth login`, its page opened in the browser here and the
     /// code it shows typed here (`remote_sign_in`). It grows in and folds
     /// away as the sidebar's small things do (`presence`), its words held
@@ -1581,18 +1650,15 @@ impl Workbench {
         let key = format!("remote-sign-{}", d.id);
         let (on, serial) = self.presences.borrow().get(&key).map(|p| (p.0, p.2)).unwrap_or((true, 0));
         let stage = self.remote_login.as_ref().filter(|l| l.id == d.id).map(|l| l.stage.clone());
+        let agent = self.remote_login.as_ref().filter(|l| l.id == d.id).map(|l| l.agent).unwrap_or(AgentId::ClaudeCode);
         let id = d.id.clone();
         let quiet = |words: String| div().min_w_0().truncate().text_color(theme.muted_foreground).child(words);
         let mut line = h_flex().h(px(SIGN_H)).pl(px(14. + 34. + 12.)).pr(px(14.)).gap(px(10.)).items_center().text_size(px(12.));
+        let going = stage.is_some();
         line = match stage {
-            None => {
-                let id = id.clone();
-                line.child(Icon::default().path("icons/triangle-alert.svg").with_size(px(13.)).text_color(theme.warning))
-                    .child(quiet(t("Claude Code is not signed in").to_string()))
-                    .child(div().flex_1())
-                    .child(crate::branches::small_pill(SharedString::from(format!("remote-sign-{id}")), "icons/log-in.svg", t("Sign In"), Press::Quiet, false, theme).h(CONTROL_H).on_click(cx.listener(move |this, _, _, cx| this.remote_sign_in(&id, cx))))
-            }
-            Some(LoginStage::Starting) => line.child(quiet(t("Opening the sign-in page…").to_string())),
+            // Folding away, the sign-in over.
+            None => line,
+            Some(LoginStage::Starting) => line.child(quiet(t("Opening the sign-in page…").to_string())).child(div().flex_1()),
             Some(LoginStage::Code(url)) => {
                 let field = self.remote_code.as_ref().map(|input| self.text_field("remote-code", input, "Paste the code from the browser", cx).flex_1().w_auto().min_w_0());
                 let typed = self.remote_code.as_ref().is_some_and(|i| !i.read(cx).value().trim().is_empty());
@@ -1620,7 +1686,41 @@ impl Workbench {
                     .child(again)
                     .child(crate::branches::small_pill(SharedString::from(format!("remote-sign-go-{id}")), "icons/log-in.svg", t("Sign In"), Press::Primary, !typed, theme).h(CONTROL_H).on_click(cx.listener(|this, _, _, cx| this.remote_sign_in_finish(cx))))
             }
-            Some(LoginStage::Sending) => line.child(quiet(t("Signing in…").to_string())),
+            Some(LoginStage::Device { url, code }) => {
+                let edge = theme.foreground.opacity(0.16);
+                let round = |key: String, icon: &'static str, words: SharedString| {
+                    div()
+                        .id(SharedString::from(key))
+                        .size(CONTROL_H)
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(edge)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_color(theme.muted_foreground)
+                        .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
+                        .managed_tooltip(move |window, cx| crate::workbench::tip(words.clone(), window, cx))
+                        .child(Icon::default().path(icon).with_size(px(14.)))
+                };
+                let copy_key = SharedString::from(format!("remote-code-copy-{id}"));
+                let copied = self.copied.as_ref() == Some(&copy_key);
+                let text = code.clone();
+                line.child(quiet(t("Type this code on the page").to_string()))
+                    .child(div().flex_shrink_0().px(px(8.)).h(CONTROL_H).flex().items_center().rounded(px(7.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_size(px(13.)).text_color(theme.foreground).child(code))
+                    .child(div().flex_1())
+                    .child(round(format!("remote-code-copy-{id}"), if copied { "icons/check.svg" } else { "icons/copy.svg" }, if copied { t("Copied").into() } else { t("Copy").into() }).on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.copy_text(copy_key.clone(), text.clone(), cx);
+                    })))
+                    .child(round(format!("remote-sign-page-{id}"), "icons/external-link.svg", t("Open the page again").into()).on_click(move |_, window, cx| {
+                        swallow_click(window, cx);
+                        cx.open_url(&url);
+                    }))
+            }
+            Some(LoginStage::Sending) => line.child(quiet(t("Signing in…").to_string())).child(div().flex_1()),
             Some(LoginStage::Failed(e)) => {
                 let id = id.clone();
                 line.child(Icon::default().path("icons/triangle-alert.svg").with_size(px(13.)).text_color(theme.danger))
@@ -1629,10 +1729,35 @@ impl Workbench {
                         let whole = said.clone();
                         div().id(SharedString::from(format!("remote-sign-why-{id}"))).flex_1().min_w_0().truncate().text_color(theme.danger).child(said).managed_tooltip(move |window, cx| crate::workbench::tip(whole.clone(), window, cx))
                     })
-                    .child(crate::branches::small_pill(SharedString::from(format!("remote-sign-again-{id}")), "icons/refresh.svg", t("Try Again"), Press::Quiet, false, theme).h(CONTROL_H).on_click(cx.listener(move |this, _, _, cx| this.remote_sign_in(&id, cx))))
+                    .child(crate::branches::small_pill(SharedString::from(format!("remote-sign-again-{id}")), "icons/refresh.svg", t("Try Again"), Press::Quiet, false, theme).h(CONTROL_H).on_click(cx.listener(move |this, _, _, cx| this.remote_sign_in(&id, agent, cx))))
             }
-            Some(LoginStage::Done(_)) => line.child(h_flex().gap(px(5.)).items_center().text_color(theme.green).child(Icon::new(IconName::Check).with_size(px(13.))).child(t("Signed in"))),
         };
+        // At its right end, whatever it is waiting on, the way out of it:
+        // the sign-in there ended and the line folded away.
+        let danger = theme.danger;
+        let line = line.when(going, |l| {
+            l.child(
+                div()
+                    .id(SharedString::from(format!("remote-sign-cancel-{id}")))
+                    .size(CONTROL_H)
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(danger.opacity(0.45))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(danger)
+                    .hover(move |s| s.bg(danger.opacity(0.1)).border_color(danger))
+                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Cancel"), window, cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.remote_sign_in_cancel(cx);
+                    }))
+                    .child(Icon::new(IconName::Close).with_size(px(14.))),
+            )
+        });
         // Its height runs with the change, the line cut by it; at rest it
         // stays under the name of the last change, so the field keeps its
         // state.
@@ -1646,29 +1771,49 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// Sign Claude Code in on a remote: its own sign-in started there, and
-    /// its page opened in the browser here once it says where.
-    pub(crate) fn remote_sign_in(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.remote_login = Some(RemoteLogin { id: id.to_string(), stage: LoginStage::Starting, login: None, fresh: true });
+    /// Sign an agent in on a remote: its own sign-in started there, and
+    /// its page opened in the browser here once it says where. Codex's
+    /// code is put on the clipboard, and its sign-in waited for.
+    pub(crate) fn remote_sign_in(&mut self, id: &str, agent: AgentId, cx: &mut Context<Self>) {
+        static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(login) = self.remote_login.take().and_then(|l| l.login) {
+            login.cancel();
+        }
+        self.remote_login = Some(RemoteLogin { id: id.to_string(), agent, serial, stage: LoginStage::Starting, login: None, fresh: true });
         cx.notify();
         let remote = id.to_string();
-        let task = cx.background_spawn(async move { emaki_core::remote::Login::start(&remote) });
+        let task = cx.background_spawn(async move { emaki_core::remote::Login::start(&remote, agent) });
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
             let started = task.await;
             this.update(cx, |this, cx| {
-                let Some(l) = this.remote_login.as_mut().filter(|l| l.id == id && l.stage == LoginStage::Starting) else { return };
+                // Cancelled while it started, it is dropped, which ends it.
+                let Some(l) = this.remote_login.as_mut().filter(|l| l.serial == serial && l.stage == LoginStage::Starting) else { return };
                 match started {
-                    Ok((login, url)) => {
+                    Ok((login, page)) => {
                         // A probe prints it: a browser opened by a test is
                         // the person's.
                         if std::env::var_os("EMAKI_GO").is_some() {
-                            eprintln!("emaki: sign-in page {url}");
+                            eprintln!("emaki: sign-in page {} {}", page.url, page.code.as_deref().unwrap_or(""));
                         } else {
-                            cx.open_url(&url);
+                            cx.open_url(&page.url);
                         }
-                        l.login = Some(Arc::new(login));
-                        l.stage = LoginStage::Code(url);
+                        let login = Arc::new(login);
+                        l.login = Some(Arc::clone(&login));
+                        match page.code {
+                            Some(code) => {
+                                // Nor does a probe take the person's clipboard.
+                                if std::env::var_os("EMAKI_GO").is_none() {
+                                    this.copy_text(SharedString::from(format!("remote-code-copy-{id}")), code.clone(), cx);
+                                }
+                                if let Some(l) = this.remote_login.as_mut() {
+                                    l.stage = LoginStage::Device { url: page.url, code };
+                                }
+                                this.remote_sign_in_wait(id.clone(), serial, login, cx);
+                            }
+                            None => l.stage = LoginStage::Code(page.url),
+                        }
                     }
                     Err(e) => l.stage = LoginStage::Failed(e),
                 }
@@ -1677,6 +1822,48 @@ impl Workbench {
             .ok();
         })
         .detach();
+    }
+
+    /// Wait for a sign-in that ends by itself (Codex's), then ask the
+    /// agents there again.
+    fn remote_sign_in_wait(&mut self, id: String, serial: u64, login: Arc<emaki_core::remote::Login>, cx: &mut Context<Self>) {
+        let remote = id.clone();
+        let task = cx.background_spawn(async move { login.wait().and_then(|()| emaki_core::remote::check_sign_ins(&remote)) });
+        cx.spawn(async move |this, cx| {
+            let done = task.await;
+            this.update(cx, |this, cx| this.remote_signed(serial, done, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Cancel: the sign-in there ended, and the line folds away. The page
+    /// left open in the browser does nothing more.
+    pub(crate) fn remote_sign_in_cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(login) = self.remote_login.take().and_then(|l| l.login) {
+            cx.background_spawn(async move { login.cancel() }).detach();
+        }
+        cx.notify();
+    }
+
+    /// How a sign-in ended: the agent signed in, and the line folds away
+    /// with its mark now ticked; or why not.
+    fn remote_signed(&mut self, serial: u64, done: Result<emaki_core::remote::Probe, String>, cx: &mut Context<Self>) {
+        let Some(l) = self.remote_login.as_mut().filter(|l| l.serial == serial) else { return };
+        let (id, agent) = (l.id.clone(), l.agent);
+        let id = id.as_str();
+        l.login = None;
+        match done {
+            Ok(p) if p.signed_in(agent) == Some(true) => {
+                self.remote_login = None;
+                self.sign_checks.insert(id.to_string(), (Instant::now(), false));
+                if let Some(s) = self.remote_links.get_mut(id) {
+                    s.probe = Some(p);
+                }
+            }
+            Ok(_) => l.stage = LoginStage::Failed(tf("{agent} there still says it is not signed in", &[("agent", &agent.display_name())]).to_string()),
+            Err(e) => l.stage = LoginStage::Failed(e),
+        }
+        cx.notify();
     }
 
     /// The code typed: handed to the sign-in there, and Claude Code asked
@@ -1692,31 +1879,11 @@ impl Workbench {
         cx.notify();
         let id = l.id.clone();
         let remote = id.clone();
-        let task = cx.background_spawn(async move { login.finish(&code).and_then(|()| emaki_core::remote::check_signed_in(&remote)) });
+        let serial = l.serial;
+        let task = cx.background_spawn(async move { login.finish(&code).and_then(|()| emaki_core::remote::check_sign_ins(&remote)) });
         cx.spawn(async move |this, cx| {
             let done = task.await;
-            this.update(cx, |this, cx| {
-                let Some(l) = this.remote_login.as_mut().filter(|l| l.id == id) else { return };
-                l.login = None;
-                match done {
-                    Ok(Some(true)) => {
-                        l.stage = LoginStage::Done(Instant::now());
-                        if let Some(p) = this.remote_links.get_mut(&id).and_then(|s| s.probe.as_mut()) {
-                            p.claude_signed_in = Some(true);
-                        }
-                        // "Signed in" stands a moment, then the strip folds.
-                        cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(SIGNED_SHOWN + Duration::from_millis(20)).await;
-                            let _ = this.update(cx, |_, cx| cx.notify());
-                        })
-                        .detach();
-                    }
-                    Ok(_) => l.stage = LoginStage::Failed(t("Claude Code there still says it is not signed in").to_string()),
-                    Err(e) => l.stage = LoginStage::Failed(e),
-                }
-                cx.notify();
-            })
-            .ok();
+            this.update(cx, |this, cx| this.remote_signed(serial, done, cx)).ok();
         })
         .detach();
     }

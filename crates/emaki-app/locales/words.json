@@ -9863,15 +9863,6 @@
     "de": "Code aus dem Browser einfügen",
     "es": "Pega el código del navegador"
   },
-  "Claude Code is not signed in": {
-    "zh-Hans": "Claude Code 尚未登录",
-    "zh-Hant": "Claude Code 尚未登入",
-    "ja": "Claude Code にサインインしていません",
-    "ko": "Claude Code에 로그인되어 있지 않습니다",
-    "fr": "Claude Code n’est pas connecté",
-    "de": "Claude Code ist nicht angemeldet",
-    "es": "Claude Code no ha iniciado sesión"
-  },
   "Sign In": {
     "zh-Hans": "登录",
     "zh-Hant": "登入",
@@ -9917,13 +9908,31 @@
     "de": "Anmeldung fehlgeschlagen: {e}",
     "es": "No se pudo iniciar sesión: {e}"
   },
-  "Claude Code there still says it is not signed in": {
-    "zh-Hans": "那台电脑上的 Claude Code 仍显示未登录",
-    "zh-Hant": "那台電腦上的 Claude Code 仍顯示未登入",
-    "ja": "そのコンピュータの Claude Code はまだサインインしていないと表示しています",
-    "ko": "그 컴퓨터의 Claude Code가 아직 로그인되지 않았다고 표시합니다",
-    "fr": "Claude Code sur cet ordinateur indique toujours ne pas être connecté",
-    "de": "Claude Code dort meldet weiterhin, nicht angemeldet zu sein",
-    "es": "Claude Code en ese ordenador sigue diciendo que no ha iniciado sesión"
+  "Sign in to {agent}": {
+    "zh-Hans": "登录 {agent}",
+    "zh-Hant": "登入 {agent}",
+    "ja": "{agent} にサインイン",
+    "ko": "{agent}에 로그인",
+    "fr": "Se connecter à {agent}",
+    "de": "Bei {agent} anmelden",
+    "es": "Iniciar sesión en {agent}"
+  },
+  "Type this code on the page": {
+    "zh-Hans": "在页面上输入此代码",
+    "zh-Hant": "在頁面上輸入此代碼",
+    "ja": "このコードをページに入力",
+    "ko": "이 코드를 페이지에 입력하세요",
+    "fr": "Saisissez ce code sur la page",
+    "de": "Diesen Code auf der Seite eingeben",
+    "es": "Escribe este código en la página"
+  },
+  "{agent} there still says it is not signed in": {
+    "zh-Hans": "那里的 {agent} 仍显示未登录",
+    "zh-Hant": "那裡的 {agent} 仍顯示未登入",
+    "ja": "そちらの {agent} はまだサインインしていないと表示しています",
+    "ko": "그쪽의 {agent}가 아직 로그인되지 않았다고 합니다",
+    "fr": "{agent} indique toujours ne pas être connecté là-bas",
+    "de": "{agent} meldet dort weiterhin, nicht angemeldet zu sein",
+    "es": "{agent} allí sigue diciendo que no ha iniciado sesión"
   }
 }
