@@ -1535,6 +1535,15 @@ pub struct Workbench {
     /// Settings, Connected Devices: the address and the password of a computer being
     /// added, made with the settings window as the name's field is.
     pub(crate) remote_input: Option<Entity<InputState>>,
+    /// Settings, Connected Devices: the code a remote's sign-in page shows,
+    /// typed here (`remote_sign_in`).
+    pub(crate) remote_code: Option<Entity<InputState>>,
+    /// The sign-in of Claude Code on a remote, from here, while it goes
+    /// and a moment after.
+    pub(crate) remote_login: Option<settings::RemoteLogin>,
+    /// `EMAKI_GO=remotecode:<code>`: typed and handed in at the settings
+    /// window's next draw.
+    pub(crate) remote_code_probe: Option<String>,
     pub(crate) remote_password: Option<Entity<InputState>>,
     /// A remote is being reached to be added.
     pub(crate) remote_adding: bool,
@@ -2609,6 +2618,8 @@ pub struct Workbench {
     pub(crate) changes_focus_due: bool,
     /// `EMAKI_GO=commitsay:<words>`: words for the commit's comment.
     pub(crate) commit_probe: Option<String>,
+    /// `EMAKI_GO=commitgo`: Commit pressed at the next draw.
+    pub(crate) commit_go_due: bool,
     /// `EMAKI_GO=sizetype:<place>:<words>`, at the settings window's next draw.
     pub(crate) size_probe: Option<(String, String)>,
     /// A pull (true) or a push under way.
@@ -4312,6 +4323,9 @@ impl Workbench {
             rename_input,
             name_input: None,
             remote_input: None,
+            remote_code: None,
+            remote_login: None,
+            remote_code_probe: None,
             remote_password: None,
             remote_adding: false,
             remote_clear: false,
@@ -4717,6 +4731,7 @@ impl Workbench {
             changes_focus: cx.focus_handle(),
             changes_focus_due: false,
             commit_probe: None,
+            commit_go_due: false,
             size_probe: None,
             syncing: None,
             sync_kept: Default::default(),
@@ -6436,6 +6451,26 @@ impl Workbench {
             // The bin on a saved computer's row, Settings open on Connected Devices.
             Some(t) if t.starts_with("remoteremove:") => self.remote_remove(&t["remoteremove:".len()..], cx),
             Some("settings:remote") => self.open_settings(Some("remote"), cx),
+            // Sign In under a saved computer, and the code typed and
+            // handed to it (the page is printed, not opened).
+            Some(t) if t.starts_with("remotesign:") => self.remote_sign_in(&t["remotesign:".len()..], cx),
+            // A picture of the settings window as it is now.
+            Some(t) if t.starts_with("settingsshot:") => {
+                let path = PathBuf::from(&t["settingsshot:".len()..]);
+                if let Some(h) = self.settings_window {
+                    cx.defer(move |cx| {
+                        let _ = h.update(cx, |_, window, _| {
+                            if let Err(e) = crate::sys::shoot_window(window, &path) {
+                                eprintln!("emaki: settingsshot: {e}");
+                            }
+                        });
+                    });
+                }
+            }
+            Some(t) if t.starts_with("remotecode:") => {
+                self.remote_code_probe = Some(t["remotecode:".len()..].to_string());
+                cx.notify();
+            }
             // A press on a computer's row in the sidebar's card: `local` or a remote's id.
             Some(t) if t.starts_with("sideplace:") => {
                 let to = &t["sideplace:".len()..];
@@ -9649,9 +9684,6 @@ impl Workbench {
         }
         if r.archived {
             return Err(t("Archived. To continue it, unarchive it from its menu in the sidebar"));
-        }
-        if r.is_remote() {
-            return Err(t("a session on another computer has no hidden terminal"));
         }
         if !Self::folder_exists(r) {
             return Err(t(FOLDER_GONE));
@@ -13849,10 +13881,9 @@ impl Workbench {
             (crate::sys::OPEN_SESSION_FOLDER_LABEL, MenuDo::OpenFolder((Self::folder_exists(r) && !r.is_remote()).then(|| r.folder().to_string()))),
             (crate::sys::REVEAL_SESSION_LABEL, MenuDo::RevealTranscript(r.path.clone())),
         ];
-        // A remote's session has no agent terminal here, and its folder
-        // is not one the file manager opens.
+        // A remote's folder is not one the file manager opens.
         if r.is_remote() {
-            items.retain(|(_, m)| !matches!(m, MenuDo::OpenTerminal(_) | MenuDo::OpenFolder(_)));
+            items.retain(|(_, m)| !matches!(m, MenuDo::OpenFolder(_)));
         }
         if self.tabs.iter().any(|t| t == key) {
             items.push(("", MenuDo::Rule));
@@ -14069,7 +14100,7 @@ impl Workbench {
     /// hidden terminal is how sessions run here. A name for any other
     /// session is ours alone.
     fn can_ask(&self, r: &SessionRef) -> bool {
-        r.agent == AgentId::ClaudeCode && !r.archived && !r.is_remote() && Self::folder_exists(r) && self.hub.hidden_terminals()
+        r.agent == AgentId::ClaudeCode && !r.archived && Self::folder_exists(r) && self.hub.hidden_terminals()
     }
 
     /// The name on its way to the session, if one is.
@@ -16927,7 +16958,35 @@ impl Workbench {
                     })),
             )
         });
-        let presses: Vec<_> = presses.collect();
+        let mut presses: Vec<_> = presses.collect();
+        // A web address opens in the browser here at a click, every row it
+        // runs over: Claude Code's sign-in page is one, cut into rows.
+        if !leaving {
+            for (n, link) in emaki_core::pty::links(&rows).into_iter().enumerate() {
+                for (row_ix, start, end) in link.parts.iter().copied() {
+                    let Some(row) = rows.get(row_ix) else { continue };
+                    let (from, to) = (crate::term_panel::cells_before(row, start), crate::term_panel::cells_before(row, end));
+                    let url = link.url.clone();
+                    presses.push(
+                        div()
+                            .id(SharedString::from(format!("term-link-{n}-{row_ix}")))
+                            .absolute()
+                            .left(px(from as f32 * cell_w))
+                            .top(px(row_ix as f32 * lh))
+                            .w(px((to - from) as f32 * cell_w))
+                            .h(px(lh))
+                            .rounded(px(3.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(ink.opacity(0.10)))
+                            .active(|s| s.bg(ink.opacity(0.20)))
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                swallow_click(window, cx);
+                                cx.open_url(&url);
+                            })),
+                    );
+                }
+            }
+        }
         let rows_n = rows.len();
         let lines = look.lines;
         // The card's height, which the animation runs: a row each and
@@ -16954,6 +17013,13 @@ impl Workbench {
                 .shadow_sm()
                 .overflow_hidden()
                 .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    // ⌘V pastes, as in the agent terminal: the code a
+                    // sign-in page shows goes in so.
+                    if e.keystroke.modifiers.secondary() && e.keystroke.key == "v" {
+                        this.term_paste(true, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if let Some(bytes) = term_bytes(&e.keystroke) {
                         this.term_key(&bytes, cx);
                         cx.stop_propagation();
@@ -20375,6 +20441,9 @@ impl Render for Workbench {
         }
         if let Some(words) = self.commit_probe.take() {
             self.commit_summary.update(cx, |s, cx| s.set_value(words, window, cx));
+        }
+        if std::mem::take(&mut self.commit_go_due) {
+            self.commit_go(window, cx);
         }
         if std::mem::take(&mut self.changes_focus_due) && self.changes.is_some() {
             window.focus(&self.changes_focus, cx);

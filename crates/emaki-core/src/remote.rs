@@ -270,8 +270,11 @@ fn control_path() -> String {
 pub fn ssh(d: &Remote, tty: bool) -> Command {
     let mut cmd = crate::process::command("ssh");
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-o", "Compression=yes", "-o", "LogLevel=ERROR"]);
+    // A terminal has a connection of its own: one that goes through the
+    // shared connection never tells the remote of a new size, and a
+    // program there kept drawing for the size it began at.
     #[cfg(unix)]
-    {
+    if !tty {
         cmd.args(["-o", "ControlMaster=auto", "-o", &format!("ControlPath={}", control_path()), "-o", "ControlPersist=600"]);
     }
     cmd.arg(if tty { "-tt" } else { "-T" });
@@ -308,7 +311,7 @@ pub fn run(d: &Remote, script: &str, timeout: Duration) -> Result<String, String
 }
 
 /// A child's exit code, stdout and stderr, killed past `timeout`.
-fn wait_output(mut child: Child, timeout: Duration) -> Result<(Option<i32>, String, String), String> {
+pub(crate) fn wait_output(mut child: Child, timeout: Duration) -> Result<(Option<i32>, String, String), String> {
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let out_t = std::thread::spawn(move || {
@@ -386,6 +389,12 @@ pub struct Probe {
     pub claude_version: String,
     pub codex: String,
     pub codex_version: String,
+    /// Whether Claude Code there is signed in, as it says over ssh (`claude
+    /// auth status`); `None` when it did not say. A Mac's keychain is
+    /// locked to an ssh session, so one signed in at its own screen can
+    /// say no here (`login`).
+    #[serde(default)]
+    pub claude_signed_in: Option<bool>,
 }
 
 impl Probe {
@@ -437,6 +446,7 @@ echo "arch=$(uname -m)"
 echo "hostname=$(hostname 2>/dev/null)"
 c=$(command -v claude 2>/dev/null); echo "claude=$c"
 [ -n "$c" ] && echo "claude_version=$(claude --version 2>/dev/null | head -n 1)"
+[ -n "$c" ] && echo "claude_auth=$(claude auth status 2>/dev/null | tr -d ' \t\n\r')"
 x=$(command -v codex 2>/dev/null); echo "codex=$x"
 [ -n "$x" ] && echo "codex_version=$(codex --version 2>/dev/null | head -n 1)"
 echo "end=1"
@@ -465,6 +475,7 @@ pub fn probe(d: &Remote) -> Result<Probe, String> {
             "claude_version" => p.claude_version = v.split_whitespace().next().unwrap_or("").to_string(),
             "codex" => p.codex = v,
             "codex_version" => p.codex_version = v.split_whitespace().last().unwrap_or("").to_string(),
+            "claude_auth" => p.claude_signed_in = signed_in_from(&v),
             "end" => ended = true,
             _ => {}
         }
@@ -481,6 +492,24 @@ pub fn probe(d: &Remote) -> Result<Probe, String> {
 /// on the remote: its login `PATH`, `env` set, in the folder or failing
 /// with the folder named. `tty` gives it a terminal there.
 pub fn agent_command(folder: &str, program: &str, args: &[String], env: &[(&str, &str)], tty: bool) -> Result<Command, String> {
+    let (d, script) = agent_script(folder, program, args, env, false)?;
+    Ok(command(&d, &script, tty))
+}
+
+/// An interactive Claude Code in a remote's folder, on a terminal there,
+/// as the argv of the `ssh -tt` that starts it: `args` are Claude Code's
+/// own. Before it becomes Claude Code the script names its pid
+/// (`pty::ANNOUNCE`), which Claude Code keeps, so its record in the
+/// registry there is told from any other.
+pub fn terminal_argv(folder: &str, args: &[String]) -> Result<Vec<String>, String> {
+    let (d, script) = agent_script(folder, "claude", args, &[("COLORTERM", "truecolor")], true)?;
+    let cmd = command(&d, &script, true);
+    let mut argv = vec![cmd.get_program().to_string_lossy().to_string()];
+    argv.extend(cmd.get_args().map(|a| a.to_string_lossy().to_string()));
+    Ok(argv)
+}
+
+fn agent_script(folder: &str, program: &str, args: &[String], env: &[(&str, &str)], announce: bool) -> Result<(Remote, String), String> {
     let (id, path) = split(folder).ok_or_else(|| "not a remote computer's folder".to_string())?;
     let d = find(id).ok_or_else(|| format!("{id} is not one of the devices in Settings, Connected Devices"))?;
     let probe = match probed(id) {
@@ -494,6 +523,9 @@ pub fn agent_command(folder: &str, program: &str, args: &[String], env: &[(&str,
     if !path.is_empty() {
         script.push_str(&format!("cd {} || {{ echo {} >&2; exit 97; }}; ", sh_quote(path), sh_quote(&format!("the folder is not there: {path}"))));
     }
+    if announce {
+        script.push_str(&format!("printf '{}' \"$$\"; ", crate::pty::ANNOUNCE));
+    }
     script.push_str("exec ");
     if !env.is_empty() {
         script.push_str("env ");
@@ -506,7 +538,177 @@ pub fn agent_command(folder: &str, program: &str, args: &[String], env: &[(&str,
         script.push(' ');
         script.push_str(&sh_quote(a));
     }
-    Ok(command(&d, &script, tty))
+    Ok((d, script))
+}
+
+/// Whether `claude auth status` said it is signed in: its JSON, spaces
+/// taken out.
+fn signed_in_from(said: &str) -> Option<bool> {
+    if said.contains("\"loggedIn\":true") {
+        Some(true)
+    } else if said.contains("\"loggedIn\":false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Ask Claude Code there again whether it is signed in, and keep the
+/// answer with the rest of what the remote said. Off the window's thread.
+pub fn check_signed_in(remote: &str) -> Result<Option<bool>, String> {
+    // Signed out, it says so and ends with 1: what it said is read
+    // whatever it ended with.
+    let (d, script) = agent_script(&folder(remote, ""), "claude", &["auth".into(), "status".into()], &[], false)?;
+    let mut cmd = command(&d, &script, false);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
+    let (code, out, err) = wait_output(child, Duration::from_secs(30))?;
+    if code == Some(255) {
+        return Err(ssh_error(&err, code));
+    }
+    let said: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+    let signed = signed_in_from(&said);
+    if let Some(mut p) = probed(remote) {
+        p.claude_signed_in = signed;
+        let _ = paths::write_json(&probe_file(remote), &serde_json::to_value(&p).unwrap_or_default());
+    }
+    Ok(signed)
+}
+
+/// Claude Code's own sign-in on a remote, done from here: `claude auth
+/// login` there with no terminal, which prints the page to sign in at and
+/// waits for the code that page shows. The page is opened in this
+/// computer's browser and the code typed in the window, so nothing is
+/// done at the remote's screen; none is needed. Claude Code keeps the
+/// sign-in where it can: a Mac's keychain is locked to ssh, and then it
+/// writes `~/.claude/.credentials.json`, which every later ssh session
+/// reads.
+pub struct Login {
+    child: Mutex<Child>,
+    stdin: Mutex<Option<std::process::ChildStdin>>,
+    said: Arc<Mutex<String>>,
+}
+
+impl Login {
+    /// Start it, and wait for the page's address. `BROWSER` is a program
+    /// that does nothing, so no browser opens at the remote's screen.
+    pub fn start(remote: &str) -> Result<(Login, String), String> {
+        let (d, script) = agent_script(&folder(remote, ""), "claude", &["auth".into(), "login".into()], &[("BROWSER", "true")], false)?;
+        let mut cmd = command(&d, &script, false);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
+        let stdin = child.stdin.take();
+        let said = Arc::new(Mutex::new(String::new()));
+        for pipe in [child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>), child.stderr.take().map(|e| Box::new(e) as Box<dyn Read + Send>)].into_iter().flatten() {
+            let said = Arc::clone(&said);
+            std::thread::spawn(move || {
+                let mut pipe = pipe;
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = pipe.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    said.lock().unwrap_or_else(|e| e.into_inner()).push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            });
+        }
+        let login = Login { child: Mutex::new(child), stdin: Mutex::new(stdin), said };
+        let began = Instant::now();
+        loop {
+            if let Some(url) = login_url(&login.said()) {
+                return Ok((login, url));
+            }
+            if let Ok(Some(_)) = login.child.lock().unwrap_or_else(|e| e.into_inner()).try_wait() {
+                return Err(last_words(&login.said()).unwrap_or_else(|| "Claude Code there did not start its sign-in".into()));
+            }
+            if began.elapsed() > Duration::from_secs(40) {
+                login.cancel();
+                return Err("Claude Code there did not answer in time".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn said(&self) -> String {
+        self.said.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Hand it the code the page showed, and wait for it to end: `Ok`
+    /// when it ended well, else its own last words.
+    pub fn finish(&self, code: &str) -> Result<(), String> {
+        let before = self.said().len();
+        {
+            let mut stdin = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
+            let pipe = stdin.as_mut().ok_or("the sign-in has ended")?;
+            pipe.write_all(format!("{}\n", code.trim()).as_bytes()).map_err(|e| e.to_string())?;
+            let _ = pipe.flush();
+        }
+        let began = Instant::now();
+        loop {
+            if let Ok(Some(st)) = self.child.lock().unwrap_or_else(|e| e.into_inner()).try_wait() {
+                let after = self.said();
+                let tail = after.get(before..).unwrap_or("");
+                return if st.success() { Ok(()) } else { Err(last_words(tail).or_else(|| last_words(&after)).unwrap_or_else(|| "the sign-in did not go through".into())) };
+            }
+            if began.elapsed() > Duration::from_secs(90) {
+                self.cancel();
+                return Err("Claude Code there did not answer in time".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.stdin.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+impl Drop for Login {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+/// The page `claude auth login` says to sign in at.
+fn login_url(said: &str) -> Option<String> {
+    let at = said.find("https://")?;
+    let rest = &said[at..];
+    let end = rest.find(|c: char| c.is_whitespace() || c == '\u{1b}' || c == '\u{7}').unwrap_or(rest.len());
+    // Whole only once a line ends after it.
+    (end < rest.len()).then(|| rest[..end].to_string())
+}
+
+/// The last line a program said that is not its prompt for the code.
+fn last_words(said: &str) -> Option<String> {
+    let line = said.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("Paste code")).last()?;
+    let line = line.strip_prefix("Error:").unwrap_or(line).trim();
+    Some(line.strip_prefix("Login failed:").unwrap_or(line).trim().to_string())
+}
+
+/// A file of this computer's put in the remote's temporary folder, for
+/// an agent there to read: a picture pasted at its prompt, which names
+/// a path there. Where it went, there. Off the window's thread.
+pub fn put_file(remote: &str, file: &Path) -> Result<String, String> {
+    let d = find(remote).ok_or_else(|| format!("{remote} is not one of the devices in Settings, Connected Devices"))?;
+    let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
+    let name: String = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().chars().map(|c| if c.is_ascii_alphanumeric() || ".-_".contains(c) { c } else { '-' }).collect();
+    let script = format!("d=\"${{TMPDIR:-/tmp}}\"; d=\"${{d%/}}/emaki-pasted\"; mkdir -p \"$d\" && f=\"$d/$$-{name}\" && cat > \"$f\" && printf '%s\\n' \"$f\"");
+    let mut cmd = command(&d, &script, false);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&bytes);
+    });
+    let out = wait_output(child, Duration::from_secs(60))?;
+    let _ = writer.join();
+    match out {
+        (Some(0), said, _) if !said.trim().is_empty() => Ok(said.trim().to_string()),
+        (code, _, err) => Err(ssh_error(&err, code)),
+    }
 }
 
 /// A shell in a remote's folder, on a terminal: the account's own login
@@ -514,7 +716,9 @@ pub fn agent_command(folder: &str, program: &str, args: &[String], env: &[(&str,
 pub fn shell_argv(folder: &str) -> Option<Vec<String>> {
     let (id, path) = split(folder)?;
     let d = find(id)?;
-    let script = format!("cd {} 2>/dev/null; exec \"${{SHELL:-/bin/sh}}\" -l", sh_quote(if path.is_empty() { "." } else { path }));
+    // Its pid named first (`pty::ANNOUNCE`), which tells the terminal
+    // here that ssh is up and the size can be said again.
+    let script = format!("cd {} 2>/dev/null; printf '{}' \"$$\"; exec \"${{SHELL:-/bin/sh}}\" -l", sh_quote(if path.is_empty() { "." } else { path }), crate::pty::ANNOUNCE);
     let cmd = command(&d, &script, true);
     let mut argv = vec![cmd.get_program().to_string_lossy().to_string()];
     argv.extend(cmd.get_args().map(|a| a.to_string_lossy().to_string()));
@@ -693,19 +897,31 @@ pub struct Stat {
 
 /// The `find` over what is copied, each file a line `size mtime path`,
 /// as BSD's and GNU's `stat` each say it. `$N` is a `find` test that
-/// comes first (`-newer` a mark), or nothing.
+/// comes first (`-newer` a mark), or nothing. Of Claude Code's registry
+/// (`.claude/sessions`) only the records are copied, never the key
+/// files beside them, which hold each inbox's token.
 const FIND: &str = r#"
 R=""; for r in .claude/projects .codex/sessions .codex/archived_sessions; do [ -d "$r" ] && R="$R $r"; done
 [ -f .codex/session_index.jsonl ] && R="$R .codex/session_index.jsonl"
-emaki_find() {
-  [ -n "$R" ] || return 0
+emaki_each() {
   if stat -c %s . >/dev/null 2>&1; then
-    find $R -type f $N -exec stat -c '%s %Y %n' {} + 2>/dev/null
+    find "$@" -exec stat -c '%s %Y %n' {} + 2>/dev/null
   else
-    find $R -type f $N -exec stat -f '%z %m %N' {} + 2>/dev/null
+    find "$@" -exec stat -f '%z %m %N' {} + 2>/dev/null
   fi
 }
+emaki_find() {
+  [ -n "$R" ] && emaki_each $R -type f $N
+  [ -d .claude/sessions ] && emaki_each .claude/sessions -maxdepth 1 -type f -name '*.json' $N
+  return 0
+}
 "#;
+
+/// How much more than its size a record is asked for (`wants`).
+const RECORD_ROOM: u64 = 1 << 16;
+
+/// Where Claude Code's registry is copied, under a remote's copy.
+const REGISTRY: &str = ".claude/sessions";
 
 fn parse_stats(out: &str) -> Vec<Stat> {
     out.lines()
@@ -721,7 +937,17 @@ fn parse_stats(out: &str) -> Vec<Stat> {
 
 /// A path that stays inside what is copied.
 fn ok_path(p: &str) -> bool {
-    !p.is_empty() && !p.starts_with('/') && !p.split('/').any(|c| c == "..") && (p.starts_with(".claude/projects/") || p.starts_with(".codex/"))
+    !p.is_empty() && !p.starts_with('/') && !p.split('/').any(|c| c == "..") && (p.starts_with(".claude/projects/") || p.starts_with(".codex/") || is_record(p))
+}
+
+/// A record of the registry: `.claude/sessions/<pid>.json`.
+fn is_record(p: &str) -> bool {
+    p.strip_prefix(".claude/sessions/").and_then(|n| n.strip_suffix(".json")).is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The remote's registry as copied here (`peer::records_in` reads it).
+pub fn registry_dir(remote: &str) -> PathBuf {
+    mirror_dir(remote).join(REGISTRY)
 }
 
 /// Every file that is copied, as it is there now.
@@ -747,6 +973,13 @@ fn wants(dir: &Path, there: &[Stat]) -> Vec<Want> {
             let local = dir.join(&s.path);
             let meta = std::fs::metadata(&local).ok();
             let (len, mtime) = meta.map(|m| (m.len(), mtime_of(&m))).unwrap_or((0, i64::MIN));
+            // A record is rewritten in place, its size and second often
+            // the same, and is small: taken whole each time it is told.
+            if is_record(&s.path) {
+                // Asked for with room: rewritten as it is read, it may
+                // have grown.
+                return Some(Want { stat: Stat { size: s.size + RECORD_ROOM, ..s.clone() }, from: 0, check: 0 });
+            }
             if len == s.size && (mtime == s.mtime || s.path.ends_with(".jsonl")) {
                 return None;
             }
@@ -771,12 +1004,19 @@ fn mtime_of(m: &std::fs::Metadata) -> i64 {
 const TRAILER: &[u8] = b"\n--emaki--\n";
 
 /// The script that sends each file asked for on its stdin (`from len
-/// path` a line): a line saying it, its bytes, and the trailer.
+/// path` a line): a line saying it with the length it has, its bytes,
+/// and the trailer. A file that shrank or went since it was looked at
+/// (a record of the registry, whose process ended) says how much it
+/// has, which may be nothing.
 const FETCH: &str = r#"
 cd "$HOME" || exit 1
+t="${TMPDIR:-/tmp}"; t="${t%/}/emaki-fetch-$$"
+trap 'rm -f "$t"' EXIT
 while IFS=' ' read -r from len p; do
-  printf '%s %s %s\n' "$from" "$len" "$p"
-  tail -c +$((from + 1)) "$p" 2>/dev/null | head -c "$len"
+  tail -c +$((from + 1)) "$p" 2>/dev/null | head -c "$len" > "$t"
+  n=$(wc -c < "$t" | tr -d ' ')
+  printf '%s %s %s\n' "$from" "$n" "$p"
+  cat "$t"
   printf '\n--emaki--\n'
 done
 "#;
@@ -827,18 +1067,34 @@ fn take_one(out: &mut impl BufRead, dir: &Path, w: &Want, again: &mut Vec<Stat>)
     out.read_line(&mut head).map_err(|e| e.to_string())?;
     let mut it = head.trim_end_matches('\n').splitn(3, ' ');
     let (from, len, path) = (it.next().and_then(|s| s.parse::<u64>().ok()), it.next().and_then(|s| s.parse::<u64>().ok()), it.next().unwrap_or(""));
-    if from != Some(w.from) || len != Some(w.stat.size - w.from) || path != w.stat.path {
+    let want = w.stat.size - w.from;
+    let Some(len) = len.filter(|n| *n <= want) else { return Err("the remote computer's answer was not what was asked".into()) };
+    if from != Some(w.from) || path != w.stat.path {
         return Err("the remote computer's answer was not what was asked".into());
     }
-    let len = w.stat.size - w.from;
     let mut bytes = Vec::with_capacity(len.min(64 << 20) as usize);
     out.take(len).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let mut trailer = vec![0u8; TRAILER.len()];
-    // A file cut short as it was read: its trailer came early, inside
-    // what was taken as its bytes. The whole answer from here on is out
-    // of step and is let go; the next look asks again.
     if bytes.len() as u64 != len || out.read_exact(&mut trailer).is_err() || trailer != TRAILER {
-        return Err("a file changed as it was read".into());
+        return Err("the remote computer's answer was cut short".into());
+    }
+    // Shorter than it was when looked at: it changed or went as it was
+    // read. Left as it is here; the watch tells of it again when it
+    // changes.
+    // A record is taken when it reads whole, as a rewrite caught part
+    // way does not, and a broken record would read as its process gone.
+    if is_record(path) {
+        if len > 0 && len < want && serde_json::from_slice::<serde_json::Value>(&bytes).is_ok() {
+            let local = dir.join(path);
+            if let Some(parent) = local.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            paths::write_atomic(&local, &bytes).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    if len < want {
+        return Ok(());
     }
     let local = dir.join(&w.stat.path);
     if let Some(parent) = local.parent() {
@@ -901,11 +1157,12 @@ fn bring(d: &Remote, files: &[Stat], progress: &dyn Fn(u64, u64)) -> Result<(), 
 }
 
 /// Codex's files gone from the remote go from the copy: Codex deletes
-/// nothing by age, so one gone was moved (archived) or deleted there.
+/// nothing by age, so one gone was moved (archived) or deleted there. So
+/// do the registry's records of processes that have ended.
 fn prune(d: &Remote, files: &[Stat]) {
     let dir = mirror_dir(&d.id);
     let there: std::collections::HashSet<&str> = files.iter().map(|s| s.path.as_str()).collect();
-    let mut stack: Vec<PathBuf> = CODEX_ROOTS.iter().map(|r| dir.join(r)).collect();
+    let mut stack: Vec<PathBuf> = CODEX_ROOTS.iter().chain([&REGISTRY]).map(|r| dir.join(r)).collect();
     while let Some(p) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&p) else { continue };
         for e in rd.flatten() {
@@ -1134,6 +1391,27 @@ mod tests {
         assert_eq!(sh_quote("a b"), "'a b'");
         assert_eq!(sh_quote("it's"), "'it'\"'\"'s'");
         assert_eq!(sh_quote(""), "''");
+    }
+
+    #[test]
+    fn the_sign_in_page_and_its_answer_are_read() {
+        let said = "Opening browser to sign in…\nIf the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=x\nPaste code here if prompted > ";
+        assert_eq!(login_url(said).as_deref(), Some("https://claude.com/cai/oauth/authorize?code=true&state=x"));
+        assert_eq!(login_url("visit: https://claude.com/cai/oau"), None);
+        assert_eq!(signed_in_from(r#"{"loggedIn":true,"authMethod":"claude.ai"}"#), Some(true));
+        assert_eq!(signed_in_from(r#"{"loggedIn":false}"#), Some(false));
+        assert_eq!(signed_in_from(""), None);
+        assert_eq!(last_words("Paste code here if prompted > \nError: Invalid code\n").as_deref(), Some("Invalid code"));
+    }
+
+    #[test]
+    fn of_the_registry_only_records_are_copied() {
+        assert!(is_record(".claude/sessions/71343.json"));
+        assert!(!is_record(".claude/sessions/71343.abc.key"));
+        assert!(!is_record(".claude/sessions/x.json"));
+        assert!(!is_record(".claude/sessions/1/2.json"));
+        let s = parse_stats("90 1 .claude/sessions/5.json\n9 1 .claude/sessions/5.k.key\n");
+        assert_eq!(s.len(), 1);
     }
 
     #[test]

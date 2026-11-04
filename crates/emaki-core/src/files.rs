@@ -51,8 +51,13 @@ impl Entry {
 }
 
 /// Every file and folder under `cwd`, folders first by depth then by name.
+/// A remote computer's folder is asked of there: git's list, else a
+/// walk there that leaves out what a walk here does.
 pub fn list(cwd: &str) -> Vec<Entry> {
-    let mut files = git_files(cwd).unwrap_or_else(|| walk(Path::new(cwd)));
+    let mut files = match crate::remote_files::local_of(cwd) {
+        Some(copy) => git_files(&copy.to_string_lossy()).unwrap_or_else(|| walk_there(cwd)),
+        None => git_files(cwd).unwrap_or_else(|| walk(Path::new(cwd))),
+    };
     files.truncate(MAX_FILES);
     let mut dirs = BTreeSet::new();
     for f in &files {
@@ -69,12 +74,21 @@ pub fn list(cwd: &str) -> Vec<Entry> {
 }
 
 fn git_files(cwd: &str) -> Option<Vec<String>> {
-    let out = crate::git::command().args(["-C", cwd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"]).output().ok()?;
+    let out = crate::git::at(Path::new(cwd)).args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
     Some(text.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect())
+}
+
+fn walk_there(folder: &str) -> Vec<String> {
+    let Some((id, path)) = crate::remote::split(folder) else { return Vec::new() };
+    let Some(d) = crate::remote::find(id) else { return Vec::new() };
+    let skip: String = SKIPPED.iter().map(|n| format!(" -o -name {n}")).collect();
+    let script = format!("cd {} || exit 1; find . \\( -name '.*' ! -name .{skip} \\) -prune -o -type f -print 2>/dev/null | head -n {MAX_FILES}", crate::remote::sh_quote(path));
+    let Ok(out) = crate::remote::run(&d, &script, std::time::Duration::from_secs(30)) else { return Vec::new() };
+    out.lines().filter_map(|l| l.strip_prefix("./")).map(str::to_string).collect()
 }
 
 fn walk(root: &Path) -> Vec<String> {

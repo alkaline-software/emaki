@@ -170,6 +170,9 @@ pub struct Hub {
     /// Sessions whose hidden terminal is on its way: the Claude Code
     /// left adrift on it being ended first, off the window's thread.
     terminals_starting: Mutex<HashSet<String>>,
+    /// The hidden terminals whose Claude Code runs on another computer,
+    /// by the pid of their `ssh` here: which computer.
+    remote_terminals: Mutex<HashMap<i32, String>>,
     /// Claude Code's own session registry: every terminal session with an
     /// inbox, refreshed on each scan.
     peers: Mutex<HashMap<String, Peer>>,
@@ -224,6 +227,7 @@ impl Hub {
             ended: Mutex::new(HashMap::new()),
             adrift: Mutex::new(HashMap::new()),
             terminals_starting: Mutex::new(HashSet::new()),
+            remote_terminals: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             inbox_last: Mutex::new(HashMap::new()),
             cfg: RwLock::new(cfg),
@@ -555,11 +559,32 @@ impl Hub {
         }
     }
 
+    /// Claude Code's registry: this computer's records, and the record
+    /// of each hidden terminal of ours whose Claude Code runs on another
+    /// computer, copied from there (`remote::registry_dir`). That one is
+    /// found by the pid its script named (`Pty::announced`) and given
+    /// the pid of its `ssh` here, so everything that follows a terminal
+    /// by its process follows it, and its folder as the remote's.
+    fn registry(&self) -> Vec<Peer> {
+        let mut all = peer::registry_all();
+        let remote: Vec<(i32, i32, String)> = {
+            let terminals = self.terminals.lock().unwrap();
+            let places = self.remote_terminals.lock().unwrap();
+            terminals.values().filter(|p| p.alive()).filter_map(|p| Some((p.pid, p.announced()?, places.get(&p.pid)?.clone()))).collect()
+        };
+        for (here, there, id) in remote {
+            if let Some(p) = peer::records_in(&emaki_core::remote::registry_dir(&id)).into_iter().find(|p| p.pid == there) {
+                all.push(Peer { pid: here, cwd: emaki_core::remote::folder(&id, &p.cwd), ..p });
+            }
+        }
+        all
+    }
+
     pub fn refresh_peers(&self) {
         // A session may be in a hidden terminal of ours and in a terminal
         // of the person's at once, which is theirs to do: ours is the
         // record the window keeps.
-        let all = peer::registry_all();
+        let all = self.registry();
         let moved = self.follow_terminals(&all);
         let ours: Vec<i32> = self.terminals.lock().unwrap().values().map(|p| p.pid).collect();
         // Which of the others has no parent: asked of the system, so
@@ -848,12 +873,6 @@ impl Hub {
     /// changing arrives as `HubEvent::Screen`, a moment after it does,
     /// so a burst of drawing is one event.
     pub fn start_terminal(self: &Arc<Self>, session_id: &str, cwd: &str, resume: bool, mode: &str, model: &str, effort: &str) -> Result<(), String> {
-        // A remote's session runs on its headless child, over ssh: the
-        // hidden terminal reads the registry here, which a remote's
-        // Claude Code does not write to.
-        if emaki_core::remote::is_remote(cwd) {
-            return Err(t("a session on another computer has no hidden terminal").into());
-        }
         if self.terminal_for(session_id).is_some() || self.terminal_starting(session_id) {
             return Ok(());
         }
@@ -895,10 +914,20 @@ impl Hub {
         let (tx, rx) = mpsc::channel::<()>();
         let tx = Mutex::new(tx);
         let argv = emaki_core::pty::claude_argv(session_id, resume, mode, model, effort);
-        let pty = Pty::spawn(&argv, cwd, Arc::new(move || {
+        // On another computer, Claude Code there over `ssh -tt`, started
+        // from home here.
+        let place = emaki_core::remote::split(cwd).map(|(id, _)| id.to_string());
+        let (argv, at) = match &place {
+            Some(_) => (emaki_core::remote::terminal_argv(cwd, &argv[1..])?, emaki_core::paths::home().to_string_lossy().to_string()),
+            None => (argv, cwd.to_string()),
+        };
+        let pty = Pty::spawn(&argv, &at, Arc::new(move || {
             let _ = tx.lock().map(|t| t.send(()));
         }))?;
         let pid = pty.pid;
+        if let Some(id) = place {
+            self.remote_terminals.lock().unwrap().insert(pid, id);
+        }
         self.terminals.lock().unwrap().insert(session_id.to_string(), pty);
         self.ended.lock().unwrap().remove(session_id);
         let hub = Arc::clone(self);
@@ -912,6 +941,7 @@ impl Hub {
                 hub.send(HubEvent::Screen(hub.terminal_session(pid).unwrap_or_else(|| sid.clone())));
             }
             let sid = hub.terminal_session(pid).unwrap_or(sid);
+            hub.remote_terminals.lock().unwrap().remove(&pid);
             // The child is gone. Still held here, nobody let it go: it
             // went by itself, and the foot of its screen says why.
             if let Some(pty) = hub.terminals.lock().unwrap().remove(&sid) {
@@ -1015,7 +1045,7 @@ impl Hub {
             // session its daemon runs as a job, the job's, since a
             // terminal that joins a job (`claude attach`, which a resume
             // of one becomes) writes none and waited here for ever.
-            let registered = !peer::available() || peer::registry_all().iter().any(|p| p.pid == pty.pid || (!p.job.is_empty() && p.session_id == sid));
+            let registered = !peer::available() || self.registry().iter().any(|p| p.pid == pty.pid || (!p.job.is_empty() && p.session_id == sid));
             let screen = pty.styled();
             if registered && driver::prompt_on_screen(&screen).is_some() {
                 if held.is_some() {
@@ -1082,9 +1112,16 @@ impl Hub {
             }
         }
         let marks = |screen: &str| screen.matches("[Image #").count();
+        // A Claude Code on another computer reads a path there: each
+        // picture is put there first.
+        let place = self.remote_terminals.lock().unwrap().get(&pty.pid).cloned();
         for path in images.iter() {
+            let path = match &place {
+                Some(id) => emaki_core::remote::put_file(id, path).map_err(|e| tf("could not send the picture: {e}", &[("e", &e)]))?,
+                None => path.to_string_lossy().to_string(),
+            };
             let before = marks(&pty.styled());
-            pty.paste(&path.to_string_lossy());
+            pty.paste(&path);
             until(&|screen| marks(screen) > before);
         }
         // The prompt's shell mode runs what is typed as a command. A

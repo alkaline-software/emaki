@@ -102,6 +102,40 @@ pub struct Pty {
     /// What the program last asked to have put on the clipboard (OSC
     /// 52), until the window takes it.
     copied: Mutex<Option<String>>,
+    /// The process the child names as its own on another computer
+    /// (`ANNOUNCE`), 0 until it has: a Claude Code there started over
+    /// `ssh -tt`, whose registry record carries that pid, not this one.
+    announced: std::sync::atomic::AtomicI32,
+}
+
+/// What a script started on another computer prints before it becomes
+/// the program, so the terminal here learns the program's pid there:
+/// `ESC ] 7337 ; emaki-pid=<pid> BEL`. A terminal reads it as a sequence
+/// it does not know and shows nothing.
+pub const ANNOUNCE: &str = "\\033]7337;emaki-pid=%s\\007";
+
+/// The pid a script announced (`ANNOUNCE`) in `pending`, and `pending`
+/// cut down to what may still be the start of one.
+pub fn take_announced(pending: &mut Vec<u8>) -> Option<i32> {
+    const START: &[u8] = b"\x1b]7337;emaki-pid=";
+    let mut found = None;
+    loop {
+        let Some(at) = pending.windows(START.len()).position(|w| w == START) else {
+            let keep = pending.len().saturating_sub(START.len() - 1);
+            pending.drain(..keep);
+            return found;
+        };
+        pending.drain(..at);
+        let body = &pending[START.len()..];
+        let Some(end) = body.iter().position(|b| *b == 0x07) else {
+            if pending.len() > 64 {
+                pending.clear();
+            }
+            return found;
+        };
+        found = std::str::from_utf8(&body[..end]).ok().and_then(|n| n.parse().ok()).or(found);
+        pending.drain(..START.len() + end + 1);
+    }
 }
 
 /// What a program hears of the mouse: a button let go, the pointer
@@ -295,6 +329,7 @@ impl Pty {
             started: Instant::now(),
             last_output: Mutex::new(Instant::now()),
             copied: Mutex::new(None),
+            announced: std::sync::atomic::AtomicI32::new(0),
         });
         held(&LIVE).push(Arc::clone(&pty));
         let log = std::env::var_os("EMAKI_PTY_LOG").and_then(|p| std::fs::File::create(p).ok());
@@ -308,6 +343,9 @@ impl Pty {
                 let mut tail: Vec<u8> = Vec::new();
                 // A copy the program asks for, which may come in pieces.
                 let mut osc: Vec<u8> = Vec::new();
+                // The pid a script on another computer names, which comes
+                // first and once.
+                let mut said: Option<Vec<u8>> = Some(Vec::new());
                 loop {
                     let n = match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -323,6 +361,22 @@ impl Pty {
                     osc.extend_from_slice(&buf[..n]);
                     if let Some(text) = take_osc52(&mut osc) {
                         *held(&me.copied) = Some(text);
+                    }
+                    if let Some(pending) = said.as_mut() {
+                        pending.extend_from_slice(&buf[..n]);
+                        if let Some(pid) = take_announced(pending) {
+                            me.announced.store(pid, Ordering::SeqCst);
+                            // `ssh` hears of a new size only once it is
+                            // up, and the window sized the terminal the
+                            // moment it began: the program there kept the
+                            // size it began at, wider and taller than the
+                            // screen here. Up it is now, as the program
+                            // there is speaking, so the size goes again.
+                            me.size_again();
+                            said = None;
+                        } else if me.started.elapsed() > std::time::Duration::from_secs(60) {
+                            said = None;
+                        }
                     }
                     let keep = tail.len().saturating_sub(8);
                     tail.drain(..keep);
@@ -369,6 +423,12 @@ impl Pty {
 
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// The child's pid on the computer it runs on, when that is another
+    /// (`ANNOUNCE`); `None` until it has said.
+    pub fn announced(&self) -> Option<i32> {
+        Some(self.announced.load(Ordering::SeqCst)).filter(|p| *p > 0)
     }
 
     /// How long ago the screen last changed.
@@ -432,6 +492,15 @@ impl Pty {
             let (rows, cols) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.screen().size())).unwrap_or((ROWS, COLS));
             *parser = vt100::Parser::new(rows, cols, SCROLLBACK);
         }
+    }
+
+    /// The size said to the child again: a step wider and back, since a
+    /// size the same as before is not told.
+    fn size_again(&self) {
+        let (rows, cols) = self.size();
+        let master = held(&self.master);
+        let _ = master.resize(PtySize { rows, cols: cols.saturating_add(1), pixel_width: 0, pixel_height: 0 });
+        let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
     }
 
     /// The screen's size: rows, columns.
@@ -906,6 +975,68 @@ pub fn hits(rows: &[Vec<Span>]) -> Vec<Hit> {
     out
 }
 
+/// A web address on a screen, with the stretch of each row it takes:
+/// row, start and end in characters. A program draws a long one as rows,
+/// cut at the screen's edge with no mark (Claude Code's sign-in page is
+/// five), so an address that runs to the end of its row goes on with what
+/// begins the next one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkRun {
+    pub url: String,
+    pub parts: Vec<(usize, usize, usize)>,
+}
+
+/// Every web address on the screen (`LinkRun`).
+pub fn links(rows: &[Vec<Span>]) -> Vec<LinkRun> {
+    let texts: Vec<Vec<char>> = rows.iter().map(|row| row.iter().flat_map(|s| s.text.chars()).collect::<String>().trim_end().chars().collect()).collect();
+    let url_char = |c: char| c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c);
+    let mut found = Vec::new();
+    let mut r = 0;
+    while r < texts.len() {
+        let line = &texts[r];
+        let mut i = 0;
+        let mut next_row = r + 1;
+        while i + 8 <= line.len() {
+            let at: String = line[i..].iter().take(8).collect();
+            if !(at.starts_with("https://") || at.starts_with("http://")) || (i > 0 && url_char(line[i - 1]) && line[i - 1] != '(') {
+                i += 1;
+                continue;
+            }
+            let end = line[i..].iter().position(|c| !url_char(*c)).map(|n| i + n).unwrap_or(line.len());
+            let mut url: String = line[i..end].iter().collect();
+            let mut parts = vec![(r, i, end)];
+            // Run to its row's end: what begins the next row goes on with it.
+            let (mut row, mut reached) = (r, end == line.len());
+            while reached && row + 1 < texts.len() {
+                let more = &texts[row + 1];
+                let n = more.iter().position(|c| !url_char(*c)).unwrap_or(more.len());
+                if n == 0 {
+                    break;
+                }
+                row += 1;
+                url.extend(more[..n].iter());
+                parts.push((row, 0, n));
+                reached = n == more.len();
+            }
+            // The stop after it is not part of it.
+            while url.ends_with(['.', ',', ';', ':', '!', '?', ')', ']']) && !(url.ends_with(')') && url.contains('(')) {
+                url.pop();
+                if let Some(last) = parts.last_mut() {
+                    last.2 -= 1;
+                }
+            }
+            found.push(LinkRun { url, parts });
+            if row > r {
+                next_row = row + 1;
+                break;
+            }
+            i = end;
+        }
+        r = next_row.max(r + 1);
+    }
+    found
+}
+
 pub fn plain(rows: &[Vec<Span>]) -> String {
     rows.iter().map(|row| row.iter().map(|s| s.text.as_str()).collect::<String>().trim_end_matches(' ').to_string()).collect::<Vec<_>>().join("\n")
 }
@@ -947,6 +1078,38 @@ pub fn styled(rows: &[Vec<Span>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_address_cut_into_rows_is_read_whole() {
+        let row = |t: &str| vec![Span { text: t.to_string(), ..Span::default() }];
+        let rows = vec![
+            row("  Browser didn't open? Use the url below to sign in (c to copy)"),
+            row(""),
+            row("https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c"),
+            row("&state=wAdPX1    "),
+            row("  Paste code here if prompted > see https://a.io."),
+        ];
+        let got = links(&rows);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].url, "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&state=wAdPX1");
+        assert_eq!(got[0].parts, vec![(2, 0, 63), (3, 0, 13)]);
+        assert_eq!(got[1].url, "https://a.io");
+        assert_eq!(got[1].parts, vec![(4, 36, 48)]);
+    }
+
+    #[test]
+    fn the_pid_a_script_there_names_is_read_across_reads() {
+        let mut pending = b"Last login\r\n\x1b]7337;emaki-p".to_vec();
+        assert_eq!(take_announced(&mut pending), None);
+        pending.extend_from_slice(b"id=4242\x07\x1b[?25l");
+        assert_eq!(take_announced(&mut pending), Some(4242));
+        // What the format in the script prints is what is read.
+        let printed = ANNOUNCE.replace("\\033", "\x1b").replace("\\007", "\x07").replace("%s", "77");
+        assert_eq!(take_announced(&mut printed.into_bytes()), Some(77));
+        let mut none = b"plain output".to_vec();
+        assert_eq!(take_announced(&mut none), None);
+        assert!(none.len() < 20);
+    }
 
     /// The screen's rows and the scrollback above them, as text.
     fn everything(p: &mut vt100::Parser) -> Vec<String> {

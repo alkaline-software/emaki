@@ -1558,6 +1558,12 @@ impl Workbench {
     /// The link the cell is part of, when it is part of one.
     fn term_link_at(&self, agent: bool, pty: &Pty, row: u16, col: u16) -> Option<Link> {
         let (rows, _) = pty.rows_back(self.view(agent).back);
+        // A web address cut into rows at the screen's edge opens whole.
+        let line = rows.get(row as usize)?;
+        let at = (0..=line.iter().map(|s| s.text.chars().count()).sum::<usize>()).find(|i| cells_before(line, *i) > col as usize).map(|i| i.saturating_sub(1)).unwrap_or(usize::MAX);
+        if let Some((link, (_, start, end))) = emaki_core::pty::links(&rows).into_iter().find_map(|l| l.parts.iter().copied().find(|(r, s, e)| *r == row as usize && (*s..*e).contains(&at)).map(|p| (l, p))) {
+            return Some(Link { row, from: cells_before(line, start), to: cells_before(line, end), target: Target::Url(link.url) });
+        }
         let cwd = self.term_owner().map(|r| std::path::PathBuf::from(r.folder())).unwrap_or_default();
         let (from, to, target) = link_at(&row_cells(rows.get(row as usize)?), col as usize, &cwd)?;
         Some(Link { row, from, to, target })
@@ -1573,20 +1579,60 @@ impl Workbench {
         let Some(pty) = self.term_pty_of(agent).filter(|p| p.alive()) else { return };
         let Some(item) = cx.read_from_clipboard() else { return };
         let dir = emaki_core::paths::uploads_dir(&self.term_owner().map(|r| r.session_id).unwrap_or_else(|| "terminal".into()));
-        let mut said: Vec<String> = Vec::new();
+        // A remote computer's terminal reads a path there: each picture
+        // or file is put there first, and that path pasted.
+        let remote = self.term_owner().and_then(|r| r.remote_id().map(str::to_string));
+        let mut said: Vec<Result<String, Vec<std::path::PathBuf>>> = Vec::new();
         for entry in item.entries() {
             match entry {
                 ClipboardEntry::Image(img) => match crate::workbench::keep_image(&dir, img.format.mime_type(), &img.bytes) {
-                    Ok(path) => said.push(path.to_string_lossy().to_string()),
+                    Ok(path) if remote.is_some() => said.push(Err(vec![path])),
+                    Ok(path) => said.push(Ok(path.to_string_lossy().to_string())),
                     Err(e) => self.notice = Some(crate::workbench::Notice::error(e)),
                 },
-                ClipboardEntry::ExternalPaths(paths) => said.push(path_words(paths.paths())),
-                ClipboardEntry::String(s) => said.push(s.text().to_string()),
+                ClipboardEntry::ExternalPaths(paths) if remote.is_some() => said.push(Err(paths.paths().iter().filter(|p| p.is_file()).cloned().collect())),
+                ClipboardEntry::ExternalPaths(paths) => said.push(Ok(path_words(paths.paths()))),
+                ClipboardEntry::String(s) => said.push(Ok(s.text().to_string())),
             }
         }
         if said.is_empty() {
             return cx.notify();
         }
+        if let Some(id) = remote.filter(|_| said.iter().any(|w| w.is_err())) {
+            let task = cx.background_spawn(async move {
+                let mut out: Vec<String> = Vec::new();
+                for w in said {
+                    match w {
+                        Ok(words) => out.push(words),
+                        Err(files) => {
+                            let mut there = Vec::new();
+                            for f in files {
+                                there.push(std::path::PathBuf::from(emaki_core::remote::put_file(&id, &f)?));
+                            }
+                            out.push(path_words(&there));
+                        }
+                    }
+                }
+                Ok::<String, String>(out.join(" "))
+            });
+            cx.spawn(async move |this, cx| {
+                let words = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    match words {
+                        Ok(words) if pty.alive() => {
+                            let bytes = pty.paste_bytes(&words);
+                            this.term_send(agent, &pty, &bytes);
+                        }
+                        Ok(_) => {}
+                        Err(e) => this.notice = Some(crate::workbench::Notice::error(tf("could not send the picture: {e}", &[("e", &e)]))),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
+        let said: Vec<String> = said.into_iter().filter_map(Result::ok).collect();
         // A selection in what is being typed is what the paste replaces.
         let words = pty.paste_bytes(&said.join(" "));
         if !self.term_delete_sel(agent, words.clone()) {

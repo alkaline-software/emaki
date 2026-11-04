@@ -39,6 +39,7 @@ pub mod shell_marks;
 pub mod quarto;
 pub mod redact;
 pub mod remote;
+pub mod remote_files;
 pub mod render_md;
 pub mod search;
 pub mod statusline;

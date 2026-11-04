@@ -41,6 +41,30 @@ const CONNECT_W: Pixels = px(118.);
 const STATE_W: Pixels = px(100.);
 /// A saved computer's row.
 const REMOTE_ROW_H: f32 = 58.;
+/// The sign-in strip under a saved computer's row (`sign_strip`).
+const SIGN_H: f32 = 44.;
+/// How long "Signed in" stands before the strip folds away.
+const SIGNED_SHOWN: Duration = Duration::from_millis(1600);
+
+/// Claude Code's sign-in on a remote, from Settings (`remote_sign_in`).
+pub(crate) struct RemoteLogin {
+    pub(crate) id: String,
+    pub(crate) stage: LoginStage,
+    login: Option<Arc<emaki_core::remote::Login>>,
+    /// The code's field is emptied at the settings window's next draw.
+    fresh: bool,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) enum LoginStage {
+    /// Claude Code there is starting its sign-in.
+    Starting,
+    /// Its page is open in the browser here; the code is waited for.
+    Code(String),
+    Sending,
+    Failed(String),
+    Done(Instant),
+}
 /// What Connected Devices takes besides its saved computers' card: the two
 /// sections' names, the new computer's group, the saved group's head, this
 /// computer's group, the gaps and the page's own padding. The card is no taller than the window
@@ -240,6 +264,15 @@ impl Workbench {
         }
         self.remote_input = Some(remote_input);
         self.remote_password = Some(remote_password);
+        // The code a remote's sign-in page shows; ↩ signs in.
+        let remote_code = cx.new(|cx| InputState::new(window, cx).placeholder(t("Paste the code from the browser")));
+        cx.subscribe_in(&remote_code, window, |this, _, ev: &InputEvent, _, cx| match ev {
+            InputEvent::PressEnter { .. } => this.remote_sign_in_finish(cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        })
+        .detach();
+        self.remote_code = Some(remote_code);
         // Text Size's fields: a number with a tenth at most, set at ↩ or
         // when the field is left; anything else put back as it was.
         self.size_inputs = SIZE_PLACES
@@ -290,6 +323,11 @@ impl Workbench {
         self.name_input = None;
         self.remote_input = None;
         self.remote_password = None;
+        self.remote_code = None;
+        // A sign-in left part way ends with the window.
+        if self.remote_login.as_ref().is_some_and(|l| !matches!(l.stage, LoginStage::Done(_))) {
+            self.remote_login = None;
+        }
         self.size_inputs.clear();
         if self.pick.as_ref().is_some_and(|p| p.in_settings) {
             self.pick = None;
@@ -1311,19 +1349,45 @@ impl Workbench {
         let whole = alone && list.iter().any(|(_, m)| m.is_some()) && list.len() == 1;
         let row_h = REMOTE_ROW_H + 1.;
         let room = (f32::from(window.viewport_size().height) - f32::from(TOP_H) - REMOTE_REST).max(REMOTE_ROW_H);
-        let full = list.len() as f32 * row_h - 1.;
+        // A sign-in just begun starts with an empty field.
+        if let Some(l) = self.remote_login.as_mut().filter(|l| l.fresh) {
+            l.fresh = false;
+            if let Some(input) = self.remote_code.clone() {
+                input.update(cx, |s, cx| s.set_value("", window, cx));
+            }
+        }
+        if let Some(code) = self.remote_code_probe.take() {
+            if let Some(input) = self.remote_code.clone() {
+                input.update(cx, |s, cx| s.set_value(code, window, cx));
+            }
+            self.remote_sign_in_finish(cx);
+        }
+        // A row with its sign-in strip is that much taller.
+        let signs: Vec<bool> = list.iter().map(|(d, _)| self.sign_shown(d, cx)).collect();
+        let heights: Vec<f32> = signs.iter().enumerate().map(|(i, s)| if i > 0 { row_h } else { REMOTE_ROW_H } + if *s { SIGN_H } else { 0. }).collect();
+        let full: f32 = heights.iter().sum();
         // Cut at a row's end, never partway through one: the last row
         // shown fades at its foot, which says there are more.
-        let rows_fit = ((room + 1.) / row_h).floor().max(1.);
         let cut = full > room + 0.5;
-        let shown = if cut { rows_fit * row_h - 1. } else { full };
+        let shown = if cut {
+            let mut upto = 0.;
+            for h in &heights {
+                if upto > 0. && upto + h > room {
+                    break;
+                }
+                upto += h;
+            }
+            upto
+        } else {
+            full
+        };
         let rows: Vec<AnyElement> = list
             .iter()
             .enumerate()
             .map(|(i, (d, motion))| {
-                let row = div().flex_shrink_0().when(i > 0, |d| d.border_t_1().border_color(theme.border)).child(self.remote_row(d, &theme, cx));
+                let row = div().flex_shrink_0().when(i > 0, |d| d.border_t_1().border_color(theme.border)).child(self.remote_row(d, &theme, cx)).children(signs[i].then(|| self.sign_strip(d, &theme, cx)));
                 // The first row has no line over it: its height is the row's.
-                let tall = if i > 0 { row_h } else { REMOTE_ROW_H };
+                let tall = if i > 0 { row_h } else { REMOTE_ROW_H } + if signs[i] { SIGN_H } else { 0. };
                 match motion.filter(|_| !whole) {
                     Some(coming) => row
                         .overflow_hidden()
@@ -1481,6 +1545,180 @@ impl Workbench {
             .child(action)
             .child(remove)
             .into_any_element()
+    }
+
+    /// Whether a saved computer's row has its sign-in strip, or is still
+    /// folding it away: Claude Code there is not signed in over ssh, or a
+    /// sign-in from here is under way or just went through.
+    fn sign_wanted(&self, d: &emaki_core::remote::Remote) -> bool {
+        use emaki_core::remote::LinkState;
+        let status = self.remote_links.get(&d.id);
+        let probe = status.and_then(|s| s.probe.clone()).or_else(|| emaki_core::remote::probed(&d.id));
+        let connected = !d.off && status.is_some_and(|s| s.state == LinkState::Connected);
+        let login = self.remote_login.as_ref().filter(|l| l.id == d.id);
+        let busy = login.is_some_and(|l| match l.stage {
+            LoginStage::Done(at) => at.elapsed() < SIGNED_SHOWN,
+            _ => true,
+        });
+        busy || (connected && probe.is_some_and(|p| p.has(AgentId::ClaudeCode) && p.claude_signed_in == Some(false)))
+    }
+
+    /// Whether the strip is drawn: wanted, or folding away.
+    fn sign_shown(&self, d: &emaki_core::remote::Remote, cx: &mut Context<Self>) -> bool {
+        let key = format!("remote-sign-{}", d.id);
+        let on = self.sign_wanted(d);
+        self.presence(&key, on, cx);
+        on || self.lingering(&key)
+    }
+
+    /// Under a saved computer whose Claude Code is not signed in over
+    /// ssh: that, and Sign In. Claude Code signs in there by its own
+    /// `claude auth login`, its page opened in the browser here and the
+    /// code it shows typed here (`remote_sign_in`). It grows in and folds
+    /// away as the sidebar's small things do (`presence`), its words held
+    /// at the indent of the row's name.
+    fn sign_strip(&self, d: &emaki_core::remote::Remote, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let key = format!("remote-sign-{}", d.id);
+        let (on, serial) = self.presences.borrow().get(&key).map(|p| (p.0, p.2)).unwrap_or((true, 0));
+        let stage = self.remote_login.as_ref().filter(|l| l.id == d.id).map(|l| l.stage.clone());
+        let id = d.id.clone();
+        let quiet = |words: String| div().min_w_0().truncate().text_color(theme.muted_foreground).child(words);
+        let mut line = h_flex().h(px(SIGN_H)).pl(px(14. + 34. + 12.)).pr(px(14.)).gap(px(10.)).items_center().text_size(px(12.));
+        line = match stage {
+            None => {
+                let id = id.clone();
+                line.child(Icon::default().path("icons/triangle-alert.svg").with_size(px(13.)).text_color(theme.warning))
+                    .child(quiet(t("Claude Code is not signed in").to_string()))
+                    .child(div().flex_1())
+                    .child(crate::branches::small_pill(SharedString::from(format!("remote-sign-{id}")), "icons/log-in.svg", t("Sign In"), Press::Quiet, false, theme).h(CONTROL_H).on_click(cx.listener(move |this, _, _, cx| this.remote_sign_in(&id, cx))))
+            }
+            Some(LoginStage::Starting) => line.child(quiet(t("Opening the sign-in page…").to_string())),
+            Some(LoginStage::Code(url)) => {
+                let field = self.remote_code.as_ref().map(|input| self.text_field("remote-code", input, "Paste the code from the browser", cx).flex_1().w_auto().min_w_0());
+                let typed = self.remote_code.as_ref().is_some_and(|i| !i.read(cx).value().trim().is_empty());
+                let edge = theme.foreground.opacity(0.16);
+                let again = div()
+                    .id(SharedString::from(format!("remote-sign-page-{id}")))
+                    .size(CONTROL_H)
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(edge)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
+                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Open the page again"), window, cx))
+                    .on_click(move |_, window, cx| {
+                        swallow_click(window, cx);
+                        cx.open_url(&url);
+                    })
+                    .child(Icon::default().path("icons/external-link.svg").with_size(px(14.)));
+                line.children(field)
+                    .child(again)
+                    .child(crate::branches::small_pill(SharedString::from(format!("remote-sign-go-{id}")), "icons/log-in.svg", t("Sign In"), Press::Primary, !typed, theme).h(CONTROL_H).on_click(cx.listener(|this, _, _, cx| this.remote_sign_in_finish(cx))))
+            }
+            Some(LoginStage::Sending) => line.child(quiet(t("Signing in…").to_string())),
+            Some(LoginStage::Failed(e)) => {
+                let id = id.clone();
+                line.child(Icon::default().path("icons/triangle-alert.svg").with_size(px(13.)).text_color(theme.danger))
+                    .child({
+                        let said = tf("Could not sign in: {e}", &[("e", &e)]);
+                        let whole = said.clone();
+                        div().id(SharedString::from(format!("remote-sign-why-{id}"))).flex_1().min_w_0().truncate().text_color(theme.danger).child(said).managed_tooltip(move |window, cx| crate::workbench::tip(whole.clone(), window, cx))
+                    })
+                    .child(crate::branches::small_pill(SharedString::from(format!("remote-sign-again-{id}")), "icons/refresh.svg", t("Try Again"), Press::Quiet, false, theme).h(CONTROL_H).on_click(cx.listener(move |this, _, _, cx| this.remote_sign_in(&id, cx))))
+            }
+            Some(LoginStage::Done(_)) => line.child(h_flex().gap(px(5.)).items_center().text_color(theme.green).child(Icon::new(IconName::Check).with_size(px(13.))).child(t("Signed in"))),
+        };
+        // Its height runs with the change, the line cut by it; at rest it
+        // stays under the name of the last change, so the field keeps its
+        // state.
+        div()
+            .overflow_hidden()
+            .child(line)
+            .with_animation(ElementId::Name(format!("remote-sign-{}-{serial}", d.id).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |el, t| {
+                let k = if serial == 0 { 1. } else if on { t } else { 1. - t };
+                el.h(px(SIGN_H * k)).opacity(k)
+            })
+            .into_any_element()
+    }
+
+    /// Sign Claude Code in on a remote: its own sign-in started there, and
+    /// its page opened in the browser here once it says where.
+    pub(crate) fn remote_sign_in(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.remote_login = Some(RemoteLogin { id: id.to_string(), stage: LoginStage::Starting, login: None, fresh: true });
+        cx.notify();
+        let remote = id.to_string();
+        let task = cx.background_spawn(async move { emaki_core::remote::Login::start(&remote) });
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let started = task.await;
+            this.update(cx, |this, cx| {
+                let Some(l) = this.remote_login.as_mut().filter(|l| l.id == id && l.stage == LoginStage::Starting) else { return };
+                match started {
+                    Ok((login, url)) => {
+                        // A probe prints it: a browser opened by a test is
+                        // the person's.
+                        if std::env::var_os("EMAKI_GO").is_some() {
+                            eprintln!("emaki: sign-in page {url}");
+                        } else {
+                            cx.open_url(&url);
+                        }
+                        l.login = Some(Arc::new(login));
+                        l.stage = LoginStage::Code(url);
+                    }
+                    Err(e) => l.stage = LoginStage::Failed(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The code typed: handed to the sign-in there, and Claude Code asked
+    /// again whether it is signed in.
+    pub(crate) fn remote_sign_in_finish(&mut self, cx: &mut Context<Self>) {
+        let code = self.remote_code.as_ref().map(|i| i.read(cx).value().trim().to_string()).unwrap_or_default();
+        let Some(l) = self.remote_login.as_mut().filter(|l| matches!(l.stage, LoginStage::Code(_))) else { return };
+        let Some(login) = l.login.clone() else { return };
+        if code.is_empty() {
+            return;
+        }
+        l.stage = LoginStage::Sending;
+        cx.notify();
+        let id = l.id.clone();
+        let remote = id.clone();
+        let task = cx.background_spawn(async move { login.finish(&code).and_then(|()| emaki_core::remote::check_signed_in(&remote)) });
+        cx.spawn(async move |this, cx| {
+            let done = task.await;
+            this.update(cx, |this, cx| {
+                let Some(l) = this.remote_login.as_mut().filter(|l| l.id == id) else { return };
+                l.login = None;
+                match done {
+                    Ok(Some(true)) => {
+                        l.stage = LoginStage::Done(Instant::now());
+                        if let Some(p) = this.remote_links.get_mut(&id).and_then(|s| s.probe.as_mut()) {
+                            p.claude_signed_in = Some(true);
+                        }
+                        // "Signed in" stands a moment, then the strip folds.
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(SIGNED_SHOWN + Duration::from_millis(20)).await;
+                            let _ = this.update(cx, |_, cx| cx.notify());
+                        })
+                        .detach();
+                    }
+                    Ok(_) => l.stage = LoginStage::Failed(t("Claude Code there still says it is not signed in").to_string()),
+                    Err(e) => l.stage = LoginStage::Failed(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// This computer as another reaches it: whether its ssh server is on,

@@ -9485,15 +9485,6 @@
     "de": "Überspringen",
     "es": "Omitir"
   },
-  "a session on another computer has no hidden terminal": {
-    "zh-Hans": "另一台电脑上的会话没有隐藏终端",
-    "zh-Hant": "另一台電腦上的工作階段沒有隱藏終端機",
-    "ja": "別のコンピュータのセッションには隠しターミナルがありません",
-    "ko": "다른 컴퓨터의 세션에는 숨겨진 터미널이 없습니다",
-    "fr": "une session sur un autre ordinateur n’a pas de terminal caché",
-    "de": "eine Sitzung auf einem anderen Computer hat kein verborgenes Terminal",
-    "es": "una sesión en otro ordenador no tiene terminal oculto"
-  },
   "a session on another computer is archived and deleted there": {
     "zh-Hans": "另一台电脑上的会话要在那台电脑上归档和删除",
     "zh-Hant": "另一台電腦上的工作階段要在那台電腦上封存和刪除",
@@ -9835,5 +9826,104 @@
     "fr": "Cet ordinateur",
     "de": "Dieser Computer",
     "es": "Este ordenador"
+  },
+  "Bringing the files from {computer}…": {
+    "zh-Hans": "正在从 {computer} 取来文件…",
+    "zh-Hant": "正在從 {computer} 取來檔案…",
+    "ja": "{computer} からファイルを取得しています…",
+    "ko": "{computer}에서 파일을 가져오는 중…",
+    "fr": "Récupération des fichiers depuis {computer}…",
+    "de": "Dateien werden von {computer} geholt …",
+    "es": "Trayendo los archivos de {computer}…"
+  },
+  "Could not reach {computer}: {e}": {
+    "zh-Hans": "无法连接 {computer}：{e}",
+    "zh-Hant": "無法連線 {computer}：{e}",
+    "ja": "{computer} に接続できません：{e}",
+    "ko": "{computer}에 연결할 수 없습니다: {e}",
+    "fr": "Impossible de joindre {computer} : {e}",
+    "de": "{computer} ist nicht erreichbar: {e}",
+    "es": "No se pudo conectar con {computer}: {e}"
+  },
+  "could not send the picture: {e}": {
+    "zh-Hans": "无法发送图片：{e}",
+    "zh-Hant": "無法傳送圖片：{e}",
+    "ja": "画像を送れませんでした：{e}",
+    "ko": "사진을 보낼 수 없습니다: {e}",
+    "fr": "impossible d’envoyer l’image : {e}",
+    "de": "das Bild konnte nicht gesendet werden: {e}",
+    "es": "no se pudo enviar la imagen: {e}"
+  },
+  "Paste the code from the browser": {
+    "zh-Hans": "粘贴浏览器中显示的代码",
+    "zh-Hant": "貼上瀏覽器中顯示的代碼",
+    "ja": "ブラウザに表示されたコードを貼り付け",
+    "ko": "브라우저에 표시된 코드 붙여넣기",
+    "fr": "Collez le code affiché dans le navigateur",
+    "de": "Code aus dem Browser einfügen",
+    "es": "Pega el código del navegador"
+  },
+  "Claude Code is not signed in": {
+    "zh-Hans": "Claude Code 尚未登录",
+    "zh-Hant": "Claude Code 尚未登入",
+    "ja": "Claude Code にサインインしていません",
+    "ko": "Claude Code에 로그인되어 있지 않습니다",
+    "fr": "Claude Code n’est pas connecté",
+    "de": "Claude Code ist nicht angemeldet",
+    "es": "Claude Code no ha iniciado sesión"
+  },
+  "Sign In": {
+    "zh-Hans": "登录",
+    "zh-Hant": "登入",
+    "ja": "サインイン",
+    "ko": "로그인",
+    "fr": "Se connecter",
+    "de": "Anmelden",
+    "es": "Iniciar sesión"
+  },
+  "Opening the sign-in page…": {
+    "zh-Hans": "正在打开登录页面…",
+    "zh-Hant": "正在開啟登入頁面…",
+    "ja": "サインインページを開いています…",
+    "ko": "로그인 페이지를 여는 중…",
+    "fr": "Ouverture de la page de connexion…",
+    "de": "Anmeldeseite wird geöffnet …",
+    "es": "Abriendo la página de inicio de sesión…"
+  },
+  "Open the page again": {
+    "zh-Hans": "再次打开页面",
+    "zh-Hant": "再次開啟頁面",
+    "ja": "ページをもう一度開く",
+    "ko": "페이지 다시 열기",
+    "fr": "Rouvrir la page",
+    "de": "Seite erneut öffnen",
+    "es": "Abrir la página de nuevo"
+  },
+  "Signing in…": {
+    "zh-Hans": "正在登录…",
+    "zh-Hant": "正在登入…",
+    "ja": "サインインしています…",
+    "ko": "로그인하는 중…",
+    "fr": "Connexion…",
+    "de": "Anmeldung …",
+    "es": "Iniciando sesión…"
+  },
+  "Could not sign in: {e}": {
+    "zh-Hans": "无法登录：{e}",
+    "zh-Hant": "無法登入：{e}",
+    "ja": "サインインできませんでした：{e}",
+    "ko": "로그인할 수 없습니다: {e}",
+    "fr": "Connexion impossible : {e}",
+    "de": "Anmeldung fehlgeschlagen: {e}",
+    "es": "No se pudo iniciar sesión: {e}"
+  },
+  "Claude Code there still says it is not signed in": {
+    "zh-Hans": "那台电脑上的 Claude Code 仍显示未登录",
+    "zh-Hant": "那台電腦上的 Claude Code 仍顯示未登入",
+    "ja": "そのコンピュータの Claude Code はまだサインインしていないと表示しています",
+    "ko": "그 컴퓨터의 Claude Code가 아직 로그인되지 않았다고 표시합니다",
+    "fr": "Claude Code sur cet ordinateur indique toujours ne pas être connecté",
+    "de": "Claude Code dort meldet weiterhin, nicht angemeldet zu sein",
+    "es": "Claude Code en ese ordenador sigue diciendo que no ha iniciado sesión"
   }
 }

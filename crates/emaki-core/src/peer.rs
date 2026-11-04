@@ -229,25 +229,58 @@ pub fn registry_all() -> Vec<Peer> {
             }
         }
     }
-    for name in &names {
-        if !name.ends_with(".json") {
+    for name in names.iter().filter(|n| n.ends_with(".json")) {
+        let Some(p) = record(&folder.join(name)) else { continue };
+        if p.socket_path.is_empty() || !alive(p.pid) || !std::path::Path::new(&p.socket_path).exists() {
             continue;
         }
-        let Some(record) = paths::read_json(&folder.join(name)) else { continue };
-        let Some(obj) = record.as_object() else { continue };
-        let pid = obj.get("pid").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        let sid = obj.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let sock = obj.get("messagingSocketPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if sid.is_empty() || sock.is_empty() || !alive(pid) || !std::path::Path::new(&sock).exists() {
-            continue;
-        }
-        let s = |k: &str| obj.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        peers.push(
-            Peer { session_id: sid, pid, socket_path: sock, cwd: s("cwd"), kind: s("kind"), name: s("name"), status: s("status"), status_at: obj.get("statusUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, started_at: obj.get("startedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0, proc_start: s("procStart"), key_path: keys.get(&pid).cloned().unwrap_or_default(), job: s("jobId"), parked: s("parkedJobId") },
-        );
+        peers.push(Peer { key_path: keys.get(&p.pid).cloned().unwrap_or_default(), ..p });
     }
     unpark(&mut peers);
     peers
+}
+
+/// The records of a registry copied from another computer
+/// (`remote::registry_dir`), as they read: whose processes are running
+/// is not for this computer to ask, and no inbox there can be reached
+/// from here, so none has a socket or a key.
+pub fn records_in(folder: &std::path::Path) -> Vec<Peer> {
+    let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
+    let mut peers: Vec<Peer> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .filter_map(|e| record(&e.path()))
+        .map(|p| Peer { socket_path: String::new(), ..p })
+        .collect();
+    unpark(&mut peers);
+    peers
+}
+
+/// One record of the registry, as it says; `None` with no session or pid.
+fn record(path: &std::path::Path) -> Option<Peer> {
+    let record = paths::read_json(path)?;
+    let obj = record.as_object()?;
+    let pid = obj.get("pid").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let sid = obj.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if sid.is_empty() || pid <= 0 {
+        return None;
+    }
+    let s = |k: &str| obj.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    Some(Peer {
+        session_id: sid,
+        pid,
+        socket_path: s("messagingSocketPath"),
+        cwd: s("cwd"),
+        kind: s("kind"),
+        name: s("name"),
+        status: s("status"),
+        status_at: obj.get("statusUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0,
+        started_at: obj.get("startedAt").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1000.0,
+        proc_start: s("procStart"),
+        key_path: String::new(),
+        job: s("jobId"),
+        parked: s("parkedJobId"),
+    })
 }
 
 #[cfg(unix)]
@@ -356,6 +389,20 @@ fn uuid_hex() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_copied_from_another_computer_are_read_as_they_say() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("812.json"), r#"{"pid":812,"sessionId":"s1","cwd":"/Users/me/x","kind":"interactive","status":"busy","statusUpdatedAt":2000,"messagingSocketPath":"/tmp/cc-socks/812.sock"}"#).unwrap();
+        std::fs::write(dir.path().join("9.json"), r#"{"pid":9}"#).unwrap();
+        std::fs::write(dir.path().join("812.abc.key"), "{}").unwrap();
+        let got = records_in(dir.path());
+        assert_eq!(got.len(), 1);
+        let p = &got[0];
+        assert_eq!((p.pid, p.session_id.as_str(), p.status.as_str(), p.status_at), (812, "s1", "busy", 2.0));
+        // No inbox there can be reached from here.
+        assert!(p.socket_path.is_empty() && p.key_path.is_empty());
+    }
 
     /// A stand-in inbox: checks the auth frame and the envelope, answers
     /// with a receipt, so the wire is tested without Claude Code.

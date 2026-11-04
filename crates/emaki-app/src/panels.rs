@@ -578,6 +578,9 @@ pub(crate) fn git_color(state: git::State, dark: bool) -> Hsla {
 }
 
 fn list_dir(dir: &Path) -> (Vec<Node>, usize) {
+    // A remote computer's folder, copied here: copied from there and
+    // followed from now on, as it is listed.
+    emaki_core::remote_files::want(dir);
     let Ok(rd) = std::fs::read_dir(dir) else { return (Vec::new(), 0) };
     let mut nodes: Vec<Node> = rd
         .flatten()
@@ -2221,12 +2224,18 @@ fn panel_head(label: &'static str, after: Option<AnyElement>, right: Option<AnyE
 
 impl Workbench {
     /// The folder whose files the panel shows: the session's own.
+    /// A remote computer's folder is its copy here, which this starts
+    /// (`remote_files`): the panel reads it as any folder, and what is
+    /// done in it is done there.
     pub(crate) fn files_root(&self) -> Option<PathBuf> {
         let d = self.detail.as_ref()?;
         let cwd = match self.selected_ref().map(|r| r.folder().to_string()).filter(|f| !f.is_empty()) {
             Some(f) => f,
             None => d.session.cwd.clone(),
         };
+        if emaki_core::remote::is_remote(&cwd) {
+            return emaki_core::remote_files::open(&cwd);
+        }
         (!cwd.is_empty()).then(|| PathBuf::from(cwd))
     }
 
@@ -3203,6 +3212,18 @@ impl Workbench {
                 this.tree.git_reading = false;
                 if *this.tree.repos != repos {
                     this.tree.repos = Rc::new(repos);
+                    // A comparison opened on a folder of checkouts before
+                    // git had found them stood on the folder, which is in
+                    // no repository: it goes to the one in use. Over ssh
+                    // the finding takes seconds.
+                    let folder = this.files_root();
+                    let to = this.git_dir();
+                    if let (Some(c), Some(to)) = (this.changes.as_mut(), to) {
+                        if Some(&c.root) == folder.as_ref() && to != c.root {
+                            c.root = to.clone();
+                            this.tree.repo = Some(to);
+                        }
+                    }
                     cx.notify();
                 }
                 if this.tree.git.as_ref().is_none_or(|(was, st)| *was != root || **st != status) {
@@ -3389,6 +3410,8 @@ impl Workbench {
     /// file.
     fn show_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(root) = self.files_root() else { return };
+        // A remote's large file stands empty until it is opened.
+        emaki_core::remote_files::open_file(path);
         self.file_reads += 1;
         let serial = self.file_reads;
         let from = path.to_path_buf();
@@ -6795,7 +6818,13 @@ impl Workbench {
                 .vertical_scrollbar(&self.files_scroll)
                 .into_any_element()
         } else {
-            let words = if root.as_ref().is_some_and(|r| emaki_core::remote::is_remote(&r.to_string_lossy())) { t("These files are on another computer.") } else { t("The session's folder is gone.") };
+            let coming = root.as_deref().and_then(emaki_core::remote_files::coming);
+            let computer = self.selected_ref().and_then(|r| crate::workbench::remote_name(r.folder())).unwrap_or_default();
+            let words = match coming {
+                Some(emaki_core::remote_files::Coming::Bringing) => tf("Bringing the files from {computer}…", &[("computer", &computer)]),
+                Some(emaki_core::remote_files::Coming::Failed(e)) => tf("Could not reach {computer}: {e}", &[("computer", &computer), ("e", &e)]),
+                None => t("The session's folder is gone.").to_string(),
+            };
             div().p(px(14.)).text_size(px(12.)).text_color(theme.muted_foreground).child(words).into_any_element()
         };
         // The session's folder heads the tree, open to begin with: a row
@@ -10606,6 +10635,11 @@ impl Workbench {
             t if t.starts_with("branchq:") => self.branch_probe = Some(t["branchq:".len()..].to_string()),
             t if t.starts_with("commitsay:") => {
                 self.commit_probe = Some(t["commitsay:".len()..].to_string());
+                cx.notify();
+            }
+            // The comparison's Commit button.
+            "commitgo" => {
+                self.commit_go_due = true;
                 cx.notify();
             }
             "outline" => self.toggle_panel(false, cx),

@@ -53,10 +53,14 @@ pub fn move_path(from: &Path, to: &Path) -> Result<(), String> {
     if std::fs::symlink_metadata(to).is_ok() {
         return Err(format!("{} is already there", name(to)));
     }
-    if let Some(dir) = to.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(from, to).map_err(|e| e.to_string())
+    // In a remote computer's copy, the move is made there too: a move,
+    // the trash, or the thing sent (`remote_files::moved`).
+    crate::remote_files::moved(from, to, || {
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(from, to).map_err(|e| e.to_string())
+    })
 }
 
 fn name(path: &Path) -> String {

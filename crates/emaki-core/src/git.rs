@@ -195,8 +195,8 @@ pub fn trouble(dir: &Path) -> Option<Trouble> {
     };
     let none = || Trouble { words: NO_GIT.to_string(), fix: None };
     let bin = binary();
-    if bin.is_absolute() {
-        let out = crate::process::command(&bin).arg("-C").arg(dir).args(["rev-parse", "--git-dir"]).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
+    if bin.is_absolute() || crate::remote_files::is_copy(dir) {
+        let out = at(dir).args(["rev-parse", "--git-dir"]).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
         return (!out.status.success()).then(|| said(&out.stderr));
     }
     if !mac_tools() {
@@ -214,8 +214,109 @@ pub fn command() -> Command {
     crate::process::command(binary())
 }
 
+/// A git command in `dir`: this computer's git there, or, for the copy
+/// of a remote computer's folder (`remote_files`), git on that computer
+/// in the folder itself, over ssh. The repository there is the only one:
+/// the copy has none, so whatever git says or does is of the remote's,
+/// and the copy follows what it does to the files. A path of the copy
+/// given as an argument is the path there.
+pub fn at(dir: &Path) -> Git {
+    Git { dir: dir.to_path_buf(), args: Vec::new(), envs: Vec::new(), stdin: None, stdout: None, stderr: None }
+}
+
+/// A git command being put together (`at`), as a `Command` is.
+pub struct Git {
+    dir: PathBuf,
+    args: Vec<std::ffi::OsString>,
+    envs: Vec<(String, String)>,
+    stdin: Option<std::process::Stdio>,
+    stdout: Option<std::process::Stdio>,
+    stderr: Option<std::process::Stdio>,
+}
+
+impl Git {
+    pub fn arg(mut self, a: impl AsRef<std::ffi::OsStr>) -> Self {
+        self.args.push(a.as_ref().to_os_string());
+        self
+    }
+
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.args.extend(args.into_iter().map(|a| a.as_ref().to_os_string()));
+        self
+    }
+
+    pub fn env(mut self, k: &str, v: &str) -> Self {
+        self.envs.push((k.to_string(), v.to_string()));
+        self
+    }
+
+    pub fn stdin(mut self, s: std::process::Stdio) -> Self {
+        self.stdin = Some(s);
+        self
+    }
+
+    pub fn stdout(mut self, s: std::process::Stdio) -> Self {
+        self.stdout = Some(s);
+        self
+    }
+
+    pub fn stderr(mut self, s: std::process::Stdio) -> Self {
+        self.stderr = Some(s);
+        self
+    }
+
+    fn command(self) -> std::io::Result<Command> {
+        let mut cmd = match crate::remote_files::place_of(&self.dir) {
+            Some((id, there)) => {
+                let args: Vec<String> = self
+                    .args
+                    .iter()
+                    .map(|a| match crate::remote_files::place_of(Path::new(a)) {
+                        Some((other, path)) if other == id => path,
+                        _ => a.to_string_lossy().to_string(),
+                    })
+                    .collect();
+                let envs: Vec<(&str, &str)> = self.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                crate::remote::agent_command(&crate::remote::folder(&id, &there), "git", &args, &envs, false).map_err(std::io::Error::other)?
+            }
+            None => {
+                let mut cmd = command();
+                cmd.arg("-C").arg(&self.dir).args(&self.args);
+                for (k, v) in &self.envs {
+                    cmd.env(k, v);
+                }
+                cmd
+            }
+        };
+        if let Some(s) = self.stdin {
+            cmd.stdin(s);
+        } else {
+            cmd.stdin(std::process::Stdio::null());
+        }
+        if let Some(s) = self.stdout {
+            cmd.stdout(s);
+        }
+        if let Some(s) = self.stderr {
+            cmd.stderr(s);
+        }
+        Ok(cmd)
+    }
+
+    pub fn output(self) -> std::io::Result<std::process::Output> {
+        self.command()?.output()
+    }
+
+    pub fn spawn(self) -> std::io::Result<std::process::Child> {
+        self.command()?.spawn()
+    }
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let out = command().arg("-C").arg(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
+    let out = at(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
     out.status.success().then_some(out.stdout)
 }
 
@@ -237,19 +338,19 @@ pub enum Discarded {
 /// does not have is only unstaged, and left for the caller to trash.
 pub fn discard(dir: &Path, path: &Path) -> Result<Discarded, String> {
     let rel = path.strip_prefix(dir).unwrap_or(path).to_string_lossy().replace('\\', "/");
-    let at = path.to_string_lossy().to_string();
+    let file = path.to_string_lossy().to_string();
     let run = |args: &[&str]| -> Result<(), String> {
-        let out = command().arg("-C").arg(dir).args(args).output().map_err(|e| e.to_string())?;
+        let out = at(dir).args(args).output().map_err(|e| e.to_string())?;
         if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
     };
     if git(dir, &["cat-file", "-e", &format!("HEAD:./{rel}")]).is_none() {
-        run(&["rm", "--cached", "-q", "--ignore-unmatch", "--", &at])?;
+        run(&["rm", "--cached", "-q", "--ignore-unmatch", "--", &file])?;
         return Ok(Discarded::New);
     }
     if path.is_file() {
-        let _ = run(&["hash-object", "-w", "--", &at]);
+        let _ = run(&["hash-object", "-w", "--", &file]);
     }
-    run(&["restore", "--source=HEAD", "--staged", "--worktree", "--", &at])?;
+    run(&["restore", "--source=HEAD", "--staged", "--worktree", "--", &file])?;
     Ok(Discarded::Restored)
 }
 
@@ -591,7 +692,7 @@ pub fn branches(dir: &Path) -> Option<Branches> {
 /// Run a git command that changes the checkout; its own words when it
 /// refuses.
 fn act(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let out = command().arg("-C").arg(dir).args(args).output().map_err(|e| format!("git did not run: {e}"))?;
+    let out = at(dir).args(args).output().map_err(|e| format!("git did not run: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
@@ -620,9 +721,7 @@ const NET_WAIT: std::time::Duration = std::time::Duration::from_secs(40);
 /// would wait for ever. A failure to sign in comes back as one
 /// (`why_net`), and the window says how to sign in.
 fn net(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let mut child = command()
-        .arg("-C")
-        .arg(dir)
+    let mut child = at(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
@@ -929,7 +1028,7 @@ pub fn commit_diff_in(dir: &Path, sha: &str, path: &str, whole: bool) -> Diff {
         return Diff { binary: true, pictures: Some(Pictures { before, after }), ..Default::default() };
     }
     let context: &[&str] = if whole { &[WHOLE_CONTEXT] } else { &[] };
-    let out = command().arg("-C").arg(dir).args(["show", "--no-color", "--no-ext-diff", "--first-parent", "--format="]).args(context).args([sha, "--", &format!(":/{path}")]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success());
+    let out = at(dir).args(["show", "--no-color", "--no-ext-diff", "--first-parent", "--format="]).args(context).args([sha, "--", &format!(":/{path}")]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success());
     let d = out.map(|o| parse_diff(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
     if whole { whole_view(d) } else { d }
 }
@@ -980,7 +1079,12 @@ pub fn undo_last(dir: &Path) -> Result<(String, String), String> {
 
 /// The top folder of the repository `dir` is in.
 pub fn top(dir: &Path) -> Option<PathBuf> {
-    line(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+    let top = line(dir, &["rev-parse", "--show-toplevel"])?;
+    // Git there names its folder there: the copy's is the one here.
+    Some(match crate::remote_files::place_of(dir) {
+        Some((id, _)) => crate::remote_files::local_of(&crate::remote::folder(&id, &top))?,
+        None => PathBuf::from(top),
+    })
 }
 
 /// A file as a commit has it, on the host's pages: `/blob/<sha>/<path>`
@@ -1174,7 +1278,7 @@ pub fn misfits(dir: &Path, name: &str) -> Vec<String> {
     let Some(theirs) = tip(dir, name) else { return Vec::new() };
     let mut bad = Vec::new();
     if let Some(mine) = line(dir, &["stash", "create"]) {
-        let out = command().arg("-C").arg(dir).args(["merge-tree", "--write-tree", "--name-only", "--no-messages", "--merge-base=HEAD", &theirs, &mine]).output();
+        let out = at(dir).args(["merge-tree", "--write-tree", "--name-only", "--no-messages", "--merge-base=HEAD", &theirs, &mine]).output();
         match out {
             // Exit 1 is "merged, with conflicts": the tree's id, then the files.
             Ok(o) if o.status.code() == Some(1) => bad.extend(String::from_utf8_lossy(&o.stdout).lines().skip(1).filter(|l| !l.is_empty()).map(str::to_string)),
@@ -1358,7 +1462,7 @@ const PICTURE_BYTES: usize = 40_000_000;
 /// A file as git has it at `spec` (`HEAD:./a.png`, `<sha>:a.png`), when
 /// it has it and it is not too large to show.
 fn blob(dir: &Path, spec: &str) -> Option<std::sync::Arc<[u8]>> {
-    let out = command().arg("-C").arg(dir).args(["show", spec]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success())?;
+    let out = at(dir).args(["show", spec]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success())?;
     (out.stdout.len() <= PICTURE_BYTES).then(|| out.stdout.into())
 }
 
@@ -1383,7 +1487,7 @@ pub fn diff_in(dir: &Path, path: &Path, state: State, whole: bool) -> Diff {
         return whole_file(path);
     }
     let context: &[&str] = if whole { &[WHOLE_CONTEXT] } else { &[] };
-    let run = |base: &[&str]| command().arg("-C").arg(dir).args(["diff", "--no-color", "--no-ext-diff"]).args(context).args(base).arg("--").arg(path).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+    let run = |base: &[&str]| at(dir).args(["diff", "--no-color", "--no-ext-diff"]).args(context).args(base).arg("--").arg(path).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
     // Before the first commit there is no HEAD to compare with, and
     // what is staged is all there is.
     let d = match run(&["HEAD"]).or_else(|| run(&["--cached"])) {
