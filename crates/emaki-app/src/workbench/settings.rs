@@ -41,7 +41,7 @@ const CONNECT_W: Pixels = px(118.);
 const STATE_W: Pixels = px(100.);
 /// A saved computer's row.
 const REMOTE_ROW_H: f32 = 58.;
-/// What Remote control takes besides its saved computers' card: the two
+/// What Connected Devices takes besides its saved computers' card: the two
 /// sections' names, the new computer's group, the saved group's head, this
 /// computer's group, the gaps and the page's own padding. The card is no taller than the window
 /// leaves under these, so the page itself does not scroll.
@@ -223,10 +223,12 @@ impl Workbench {
         })
         .detach();
         self.name_input = Some(name_input);
-        // Remote control's form: the address, and the password that lets this
+        // Connected Devices' form: the address, and the password that lets this
         // computer in the first time. ↩ in either adds the remote.
-        let remote_input = cx.new(|cx| InputState::new(window, cx));
-        let remote_password = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let remote_input = cx.new(|cx| InputState::new(window, cx).placeholder(t("Type address here")));
+        // A computer may have no password, and one connected before needs
+        // none again.
+        let remote_password = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("Type password if there is one")));
         for input in [&remote_input, &remote_password] {
             cx.subscribe_in(input, window, |this, _, ev: &InputEvent, _, cx| match ev {
                 InputEvent::PressEnter { .. } => this.remote_add(cx),
@@ -620,24 +622,39 @@ impl Workbench {
     /// field (`name_input`, made with the window), in the focus wrapper
     /// every own input has.
     fn your_name_field(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
         let Some(input) = self.name_input.clone() else { return div().w(CONTROL_W).h(CONTROL_H).into_any_element() };
+        let value = input.read(cx).value().to_string();
+        self.text_field("name-field", &input, "Your name", cx).aria_value(value).into_any_element()
+    }
+
+    /// A field words are typed in, the controls' width: on the page's own
+    /// ground with an edge, so it reads as a place to type and not as a
+    /// bar; the edge darker under the pointer, and the accent's with a soft
+    /// ring of it while the field has the keyboard. In the focus wrapper
+    /// every own input has.
+    fn text_field(&self, id: &'static str, input: &Entity<InputState>, label: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme().clone();
+        let edge = theme.foreground.opacity(if theme.mode.is_dark() { 0.16 } else { 0.14 });
+        let ring = theme.primary;
         div()
-            .id("name-field")
+            .id(id)
             .track_focus(&input.read(cx).focus_handle(cx))
             .role(Role::TextInput)
-            .aria_label(t("Your name"))
-            .aria_value(input.read(cx).value().to_string())
+            .aria_label(t(label))
             .w(CONTROL_W)
             .h(CONTROL_H)
-            .px(px(8.))
+            .px(px(9.))
             .flex()
             .items_center()
             .rounded(px(8.))
-            .bg(theme.muted)
+            .border_1()
+            .border_color(edge)
+            .bg(theme.background)
+            .cursor_text()
             .text_size(px(12.5))
-            .child(Input::new(&input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&input, false, cx)))
-            .into_any_element()
+            .hover(move |s| s.border_color(theme.foreground.opacity(0.28)))
+            .focus(move |s| s.border_color(ring).shadow(vec![gpui::BoxShadow { color: ring.opacity(0.22), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(3.), inset: false }]))
+            .child(Input::new(input).appearance(false).bordered(false).px_0().on_secondary_click(self.input_menu(input, false, cx)))
     }
 
     /// A choice from a list, the controls' width (`settings_pick_h`).
@@ -1195,7 +1212,7 @@ impl Workbench {
         ]
     }
 
-    /// Remote control: the other computers sessions run on, a row each with how
+    /// Connected Devices: the other computers sessions run on, a row each with how
     /// its link stands, the way to add one, and this computer as another
     /// reaches it.
     fn remote_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1212,22 +1229,10 @@ impl Workbench {
         // A target to connect to: its address, and its password the first
         // time; Connect at the group's head.
         let mut field = |id: &'static str, input: &Option<Entity<InputState>>, label: &'static str| -> AnyElement {
-            let Some(input) = input.clone() else { return div().w(CONTROL_W).h(CONTROL_H).into_any_element() };
-            div()
-                .id(id)
-                .track_focus(&input.read(cx).focus_handle(cx))
-                .role(Role::TextInput)
-                .aria_label(t(label))
-                .w(CONTROL_W)
-                .h(CONTROL_H)
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .rounded(px(8.))
-                .bg(theme.muted)
-                .text_size(px(12.5))
-                .child(Input::new(&input).appearance(false).bordered(false).on_secondary_click(self.input_menu(&input, false, cx)))
-                .into_any_element()
+            match input {
+                Some(input) => self.text_field(id, input, label, cx).into_any_element(),
+                None => div().w(CONTROL_W).h(CONTROL_H).into_any_element(),
+            }
         };
         let address = field("remote-address", &self.remote_input, "Target Address");
         let password = field("remote-password", &self.remote_password, "Target Password");
@@ -1235,9 +1240,11 @@ impl Workbench {
         // Two sections, one a way: this computer reaching a target, in two
         // parts, a new computer and the saved ones; and another computer
         // reaching this one.
+        // The saved computers' group stands under New computer with the
+        // room between them its own, so it folds away with it.
         let mut reach = vec![group_with(Some(div().child(t("New computer")).into_any_element()), Some(self.connect_control(cx)), target, &theme)];
         reach.extend(self.saved_group(window, cx));
-        rows.push(section(t("This computer → Target computer"), reach, &theme));
+        rows.push(section_spaced(t("This computer → Target computer"), reach, &theme));
         rows.push(div().pt(px(10.)).child(section(t("Other computer → This computer"), vec![self.here_group(window, cx)], &theme)).into_any_element());
         rows
     }
@@ -1314,13 +1321,15 @@ impl Workbench {
             .iter()
             .enumerate()
             .map(|(i, (d, motion))| {
-                let row = div().when(i > 0, |d| d.border_t_1().border_color(theme.border)).child(self.remote_row(d, &theme, cx));
+                let row = div().flex_shrink_0().when(i > 0, |d| d.border_t_1().border_color(theme.border)).child(self.remote_row(d, &theme, cx));
+                // The first row has no line over it: its height is the row's.
+                let tall = if i > 0 { row_h } else { REMOTE_ROW_H };
                 match motion.filter(|_| !whole) {
                     Some(coming) => row
                         .overflow_hidden()
                         .with_animation(ElementId::Name(format!("remote-row-{}-{coming}", d.id).into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |r, t| {
                             let k = if coming { t } else { 1. - t };
-                            r.h(px(row_h * k)).opacity(k)
+                            r.h(px(tall * k)).opacity(k)
                         })
                         .into_any_element(),
                     None => row.into_any_element(),
@@ -1341,30 +1350,35 @@ impl Workbench {
                 .map(|d| if top { d.top_0() } else { d.bottom_0() })
                 .bg(linear_gradient(if top { 0. } else { 180. }, linear_color_stop(ground.opacity(0.), 0.), linear_color_stop(ground, 1.)))
         };
+        // As tall as its rows, up to the room: a row coming or going runs
+        // the card's height with it. A height fixed from the rows counted
+        // held the card at its old height while a row folded inside it,
+        // and then it jumped.
         let body = div()
             .relative()
             .w_full()
-            .h(px(shown))
             .rounded(CARD_R)
             .border_1()
             .border_color(theme.border)
             .bg(ground)
             .overflow_hidden()
-            .child(v_flex().id("saved-remotes").size_full().overflow_y_scroll().track_scroll(&scroll).children(rows))
+            .child(v_flex().id("saved-remotes").w_full().max_h(px(shown)).overflow_y_scroll().track_scroll(&scroll).children(rows))
             .when(cut && off > 1., |d| d.child(fade(true)))
             .when(cut && off < max - 1., |d| d.child(fade(false)))
             .when(cut, |d| d.vertical_scrollbar(&scroll));
         let head = h_flex().min_h(px(20.)).px(px(14.)).items_center().child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(t("Saved computers")));
-        let group = v_flex().gap(px(6.)).child(head).child(body);
+        let group = v_flex().pt(px(GROUP_GAP)).gap(px(6.)).child(head).child(body);
         Some(match list.first().and_then(|(_, m)| *m).filter(|_| whole) {
-            // The group's own height, head and card, grown or folded.
+            // The group's own height, the room over it, its head and its
+            // card, grown or folded on one clock, the room scaled with the
+            // height (docs/window.md, Motion).
             Some(coming) => {
-                let total = 26. + shown + 2.;
+                let total = GROUP_GAP + 26. + shown + 2.;
                 group
                     .overflow_hidden()
                     .with_animation(ElementId::Name(format!("saved-group-{coming}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |g, t| {
                         let k = if coming { t } else { 1. - t };
-                        g.h(px(total * k)).opacity(k)
+                        g.h(px(total * k)).pt(px(GROUP_GAP * k)).opacity(k)
                     })
                     .into_any_element()
             }
@@ -1454,7 +1468,7 @@ impl Workbench {
             .px(px(14.))
             .gap(px(12.))
             .items_center()
-            .child(div().size(px(34.)).flex_shrink_0().rounded(px(8.)).bg(theme.muted).flex().items_center().justify_center().child(Icon::default().path("icons/device-desktop.svg").with_size(px(17.)).text_color(if linked && status.state == LinkState::Connected { theme.foreground } else { theme.muted_foreground })))
+            .child(div().size(px(34.)).flex_shrink_0().rounded(px(8.)).bg(theme.muted).flex().items_center().justify_center().child(Icon::default().path(crate::workbench::REMOTE_ICON).with_size(px(17.)).text_color(if linked && status.state == LinkState::Connected { theme.foreground } else { theme.muted_foreground })))
             .child(
                 v_flex()
                     .flex_1()
@@ -1636,7 +1650,7 @@ impl Workbench {
 
     /// Connect a saved remote again, or disconnect it: kept either way,
     /// its link started or ended, and said so at once in its row.
-    fn remote_connect(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+    pub(crate) fn remote_connect(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
         if let Err(e) = emaki_core::remote::set_off(id, !on) {
             eprintln!("emaki: could not change the remote computer: {e}");
             return;
@@ -1657,7 +1671,7 @@ impl Workbench {
 
     /// Forget a remote: its link ends and its sessions leave the lists.
     /// What was copied of them stays on disk and comes back with it.
-    fn remote_remove(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn remote_remove(&mut self, id: &str, cx: &mut Context<Self>) {
         let list = emaki_core::remote::remotes();
         if let Some(ix) = list.iter().position(|d| d.id == id) {
             self.remote_leaving = Some((ix, list[ix].clone(), Instant::now()));
@@ -2117,13 +2131,30 @@ fn group_with(title: Option<AnyElement>, aside: Option<AnyElement>, rows: Vec<An
 }
 
 /// A section of a page above its groups, where a page has two ways or
-/// sides to tell apart (Remote control): its name a step larger and in the
+/// sides to tell apart (Connected Devices): its name a step larger and in the
 /// ink, flush with the cards, over its groups.
+/// The room between two groups of a section.
+const GROUP_GAP: f32 = 14.;
+
+/// A section whose groups after the first bring the room over them
+/// themselves (`GROUP_GAP` as their top padding), so one that comes and
+/// goes takes its room with it. A column's gap outlives a group folded
+/// to nothing and went at once at the fold's end; a negative margin to
+/// take it back stopped working once the group was shorter than the
+/// margin, and the gap came back for the last frames.
+fn section_spaced(title: &'static str, groups: Vec<AnyElement>, theme: &gpui_component::Theme) -> AnyElement {
+    v_flex()
+        .gap(px(12.))
+        .child(div().px(px(2.)).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(title))
+        .child(v_flex().children(groups))
+        .into_any_element()
+}
+
 fn section(title: &'static str, groups: Vec<AnyElement>, theme: &gpui_component::Theme) -> AnyElement {
     v_flex()
         .gap(px(12.))
         .child(div().px(px(2.)).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(title))
-        .child(v_flex().gap(px(14.)).children(groups))
+        .child(v_flex().gap(px(GROUP_GAP)).children(groups))
         .into_any_element()
 }
 

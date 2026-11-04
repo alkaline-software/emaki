@@ -2947,7 +2947,7 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
         // itself at its own: laid out by the face's advances, one row of
         // text drifted off the columns the cursor, the grounds and the
         // selection are drawn at.
-        let mut pieces: Vec<(usize, String, Vec<(std::ops::Range<usize>, HighlightStyle)>)> = Vec::new();
+        let mut pieces: Vec<(usize, String, Vec<(std::ops::Range<usize>, HighlightStyle)>, bool)> = Vec::new();
         let mut piece_col = 0usize;
         let mut text = String::new();
         let mut looks = Vec::new();
@@ -3037,10 +3037,10 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
                         looks.push((run.0..text.len(), look(run.1)));
                     }
                     if !text.is_empty() {
-                        pieces.push((piece_col, std::mem::take(&mut text), std::mem::take(&mut looks)));
+                        pieces.push((piece_col, std::mem::take(&mut text), std::mem::take(&mut looks), false));
                     }
                     let shown = cell_face(cell, w);
-                    pieces.push((col, shown.to_string(), vec![(0..shown.len(), look(now))]));
+                    pieces.push((col, shown.to_string(), vec![(0..shown.len(), look(now))], narrow_emoji(cell, w)));
                     run = (0, now);
                 }
                 col += w as usize;
@@ -3056,9 +3056,17 @@ fn screen_lines(rows: &[Vec<pty::Span>], cell_w: f32, lh: f32, k: &Scheme, picke
             grounds.push(div().absolute().left(px(from as f32 * cell_w)).top_0().w(px((to - from) as f32 * cell_w)).h(px(lh)).bg(hsla(k.sel.0).opacity(k.sel.1)).into_any_element());
         }
         if !text.is_empty() {
-            pieces.push((piece_col, text, looks));
+            pieces.push((piece_col, text, looks, false));
         }
-        let letters = pieces.into_iter().map(|(at, text, looks)| div().absolute().top_0().left(px(at as f32 * cell_w)).child(StyledText::new(text).with_highlights(looks)));
+        let letters = pieces.into_iter().map(|(at, text, looks, narrow)| {
+            let piece = div().absolute().top_0().left(px(at as f32 * cell_w));
+            if narrow {
+                // Set small enough to stand in its one column.
+                piece.w(px(cell_w)).h(px(lh)).flex().items_center().justify_center().text_size(px(cell_w * 0.8)).line_height(px(lh)).child(StyledText::new(text).with_highlights(looks))
+            } else {
+                piece.child(StyledText::new(text).with_highlights(looks))
+            }
+        });
         lines.push(div().h(px(lh)).relative().flex_shrink_0().whitespace_nowrap().children(grounds).children(under).children(letters).into_any_element());
     }
     lines
@@ -3074,6 +3082,15 @@ fn cell_face(cell: &str, w: u8) -> std::borrow::Cow<'_, str> {
     } else {
         cell.into()
     }
+}
+
+/// Whether a cell holds a picture character with no text form (🖥,
+/// U+1F5A5), with or without the emoji selector, that the screen model
+/// and the program count as one column: it is drawn only as an emoji, two
+/// columns wide, and drawn so it covered the character after it. It is
+/// set small enough to fit.
+fn narrow_emoji(cell: &str, w: u8) -> bool {
+    w == 1 && cell.chars().next().is_some_and(|c| (0x1f000..=0x1faff).contains(&(c as u32)))
 }
 
 /// A line-drawing character (U+2500 on) as the arms it has from the
@@ -3183,7 +3200,7 @@ fn block_shape(c: char) -> Option<(Vec<(f32, f32, f32, f32)>, f32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cell_face, link_at, Target};
+    use super::{cell_face, link_at, narrow_emoji, Target};
 
     #[test]
     fn an_emoji_in_one_column_is_drawn_as_text() {
@@ -3192,6 +3209,15 @@ mod tests {
         // Two columns have room for the emoji.
         assert_eq!(cell_face("\u{2764}\u{fe0f}", 2), "\u{2764}\u{fe0f}");
         assert_eq!(cell_face("\u{1f680}", 2), "\u{1f680}");
+    }
+
+    #[test]
+    fn a_picture_with_no_text_form_in_one_column_is_set_small() {
+        assert!(narrow_emoji("\u{1f5a5}", 1));
+        assert!(narrow_emoji("\u{1f5a5}\u{fe0f}", 1));
+        // Two columns have room for it, and a symbol with a text form is drawn as text.
+        assert!(!narrow_emoji("\u{1f5a5}", 2));
+        assert!(!narrow_emoji("\u{2601}\u{fe0f}", 1));
     }
 
     #[test]

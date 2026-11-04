@@ -109,6 +109,9 @@ web-time.workspace = true
 heapless.workspace = true
 ztracing.workspace = true
 
+# (Emaki addition.) The columns a character takes, for monospace text set on a grid.
+unicode-width = { workspace = true }
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
 uuid = { workspace = true, features = ["js"] }

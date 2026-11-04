@@ -673,6 +673,8 @@ impl LineLayoutCache {
 
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
+            } else {
+                snap_to_cells(&mut layout, &text, runs, font_size, &*self.platform_text_system);
             }
 
             let key = Arc::new(CacheKey {
@@ -846,6 +848,79 @@ impl LineLayoutCache {
 // loop must not advance the cell counter for these zero-advance glyphs,
 // otherwise they get displaced into the next cell. We detect them by checking
 // whether shaped x has advanced by at least half a cell beyond the last base.
+/// Monospace text set on its face's grid: each character takes one cell
+/// of the face's width, or two for a wide one (CJK, East Asian width W
+/// or F) and anything drawn as an emoji, as a terminal sets them. A
+/// character from a fallback face (an emoji, a Chinese character) has
+/// that face's own advance, a little wider than two cells, so a box
+/// drawn in a block of code with one in it came out with its right edge
+/// out of line. Text in a face that is not monospace is left as shaped.
+/// (Emaki addition.)
+fn snap_to_cells(layout: &mut LineLayout, text: &str, runs: &[FontRun], font_size: Pixels, platform: &dyn PlatformTextSystem) {
+    use unicode_width::UnicodeWidthChar as _;
+    if runs.is_empty() || layout.runs.is_empty() {
+        return;
+    }
+    // Each run's cell, or none for a face that is not monospace.
+    let cell_of = |font_id: FontId| -> Option<Pixels> {
+        let advance = |c: char| platform.glyph_for_char(font_id, c).and_then(|g| platform.advance(font_id, g).ok()).map(|s| s.width);
+        let (i, m, zero) = (advance('i')?, advance('M')?, advance('0')?);
+        if (i - m).abs() > 0.01 || (i - zero).abs() > 0.01 || i <= 0. {
+            return None;
+        }
+        Some(px(i / platform.font_metrics(font_id).units_per_em as f32 * font_size.0))
+    };
+    let mut cells: Vec<(usize, Option<Pixels>)> = Vec::with_capacity(runs.len());
+    let mut end = 0;
+    let mut any = false;
+    for run in runs {
+        end += run.len;
+        let cell = cell_of(run.font_id);
+        any |= cell.is_some();
+        cells.push((end, cell));
+    }
+    if !any {
+        return;
+    }
+    let cell_at = |ix: usize| cells.iter().find(|(end, _)| ix < *end).and_then(|(_, c)| *c);
+    // The glyphs in the order they stand, as clusters: those that share
+    // the place in the text they came from. Text set right to left is
+    // left as shaped.
+    let order: Vec<(usize, usize)> = layout.runs.iter().enumerate().flat_map(|(r, run)| (0..run.glyphs.len()).map(move |g| (r, g))).collect();
+    let glyph = |k: usize| &layout.runs[order[k].0].glyphs[order[k].1];
+    let ix: Vec<usize> = (0..order.len()).map(|k| glyph(k).index).collect();
+    let xs: Vec<Pixels> = (0..order.len()).map(|k| glyph(k).position.x).collect();
+    let emoji: Vec<bool> = (0..order.len()).map(|k| glyph(k).is_emoji).collect();
+    if ix.windows(2).any(|w| w[1] < w[0]) {
+        return;
+    }
+    let starts: Vec<usize> = (0..order.len()).filter(|&k| k == 0 || ix[k] != ix[k - 1]).collect();
+    let mut pen = xs[0];
+    for (n, &first) in starts.iter().enumerate() {
+        let last = starts.get(n + 1).copied().unwrap_or(order.len());
+        let (base_x, from) = (xs[first], ix[first]);
+        let next_x = starts.get(n + 1).map(|&k| xs[k]).unwrap_or(layout.width);
+        let to = starts.get(n + 1).map(|&k| ix[k]).unwrap_or(text.len()).min(text.len());
+        let advance = match cell_at(from) {
+            Some(cell) => {
+                // A control character (a tab) keeps its own advance.
+                let widths: Option<usize> = text.get(from..to).and_then(|s| s.chars().map(|c| c.width()).sum::<Option<usize>>());
+                match widths {
+                    Some(w) => cell * if emoji[first] { 2 } else { w } as f32,
+                    None => next_x - base_x,
+                }
+            }
+            None => next_x - base_x,
+        };
+        for k in first..last {
+            let (r, g) = order[k];
+            layout.runs[r].glyphs[g].position.x = pen + (xs[k] - base_x);
+        }
+        pen += advance;
+    }
+    layout.width = pen;
+}
+
 fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
     let mut glyph_pos: usize = 0;
     // NEG_INFINITY ensures the first glyph is always classified as a base.

@@ -111,7 +111,7 @@ crates/emaki-core/        everything without a window
   src/build.rs               Claude rows -> model, turn_state()
   src/archive.rs             copy-first mirror; runs before anything renders
   src/moves.rs               where a project's folder went: the moves the person confirmed, and the guesses offered for a folder that is gone
-  src/remote.rs              remote control: other computers reached over ssh, their sessions copied here as they are written, an agent started there
+  src/remote.rs              other computers (Settings, Connected Devices) reached over ssh, their sessions copied here as they are written, an agent started there
   src/render_md.rs store.rs  model -> CommonMark on disk
   src/search.rs              FTS5 over every item, ~/.emaki/search.db
   src/driver.rs              a headless `claude -p` child on stream-json, and `Drive`, what any agent's child answers to

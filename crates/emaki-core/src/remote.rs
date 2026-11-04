@@ -1,4 +1,4 @@
-//! Remote control: other computers whose sessions this window lists,
+//! Connected Devices (Settings): other computers whose sessions this window lists,
 //! reads and runs, over ssh. Each is a `Remote` here. Nothing of Emaki's is installed there; it needs the
 //! system's ssh server (Remote Login on a Mac), a key this computer signs
 //! in with, and the agents themselves.
@@ -482,7 +482,7 @@ pub fn probe(d: &Remote) -> Result<Probe, String> {
 /// with the folder named. `tty` gives it a terminal there.
 pub fn agent_command(folder: &str, program: &str, args: &[String], env: &[(&str, &str)], tty: bool) -> Result<Command, String> {
     let (id, path) = split(folder).ok_or_else(|| "not a remote computer's folder".to_string())?;
-    let d = find(id).ok_or_else(|| format!("{id} is not one of the computers in Remote control"))?;
+    let d = find(id).ok_or_else(|| format!("{id} is not one of the devices in Settings, Connected Devices"))?;
     let probe = match probed(id) {
         Some(p) => p,
         None => probe(&d)?,
@@ -538,7 +538,7 @@ pub fn is_there(folder: &str) -> bool {
 /// the window's thread.
 pub fn folder_on_remote(folder: &str) -> Result<bool, String> {
     let (id, path) = split(folder).ok_or_else(|| "not a remote computer's folder".to_string())?;
-    let d = find(id).ok_or_else(|| format!("{id} is not one of the computers in Remote control"))?;
+    let d = find(id).ok_or_else(|| format!("{id} is not one of the devices in Settings, Connected Devices"))?;
     let out = run(&d, &format!("[ -d {} ] && echo yes || echo no", sh_quote(path)), Duration::from_secs(15))?;
     Ok(out.trim() == "yes")
 }
@@ -546,7 +546,7 @@ pub fn folder_on_remote(folder: &str) -> Result<bool, String> {
 /// The folders in a remote's folder, for choosing one to start in: their
 /// names, hidden ones left out, sorted. `~` and an empty path are home.
 pub fn list_folders(remote: &str, path: &str) -> Result<(String, Vec<String>), String> {
-    let d = self::find(remote).ok_or_else(|| format!("{remote} is not one of the computers in Remote control"))?;
+    let d = self::find(remote).ok_or_else(|| format!("{remote} is not one of the devices in Settings, Connected Devices"))?;
     let at = if path.is_empty() || path == "~" { "\"$HOME\"".to_string() } else { sh_quote(path) };
     let script = format!("cd {at} || exit 3; pwd; for f in * ; do [ -d \"$f\" ] && printf '%s\\n' \"$f\"; done; true");
     let out = run(&d, &script, Duration::from_secs(15))?;

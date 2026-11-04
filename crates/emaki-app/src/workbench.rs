@@ -684,7 +684,7 @@ pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
     ("panels", phrase("Panels"), "icons/layout-dashboard.svg"),
     ("files", phrase("Files"), "icons/tree-view.svg"),
     ("terminal", phrase("Terminal"), "icons/terminal.svg"),
-    ("remote", phrase("Remote control"), "icons/devices.svg"),
+    ("remote", phrase("Connected Devices"), "icons/devices.svg"),
     ("shortcuts", phrase("Shortcuts"), "icons/keyboard.svg"),
     ("about", phrase("About"), "icons/info.svg"),
 ];
@@ -938,6 +938,23 @@ const FIND_BAR_MOST: f32 = 64.;
 
 /// How long a fold in the conversation takes to open or shut, and a
 /// session's row in the sidebar to come or go.
+/// The height of a hairline between the sidebar's blocks, with its air.
+const SIDE_RULE_H: Pixels = px(9.);
+
+/// A hairline between the sidebar's blocks: under the pinned projects,
+/// over Archived, Temporary and Hidden, and over the Trash.
+fn side_rule(theme: &gpui_component::Theme) -> Div {
+    div().h(SIDE_RULE_H).flex_shrink_0().flex().items_center().px(px(10.)).child(div().h(px(1.)).w_full().bg(theme.sidebar_border))
+}
+
+/// The mark of another computer, wherever one is named: a desktop with
+/// the arrow of one reached from here. This computer's is the desktop alone.
+pub(crate) const REMOTE_ICON: &str = "icons/device-desktop-share.svg";
+
+/// The place in the sidebar's card for connecting a device, while none
+/// is saved; never a remote's id, which is a slug.
+const ADD_PLACE: &str = "+add";
+
 pub(crate) const FOLD_ANIM: Duration = Duration::from_millis(200);
 
 /// One thing that folds in the conversation, as it last stood.
@@ -1515,7 +1532,7 @@ pub struct Workbench {
     pub(crate) rename_input: Entity<InputState>,
     /// The name's field in the settings, made with their window.
     name_input: Option<Entity<InputState>>,
-    /// Settings, Remote control: the address and the password of a computer being
+    /// Settings, Connected Devices: the address and the password of a computer being
     /// added, made with the settings window as the name's field is.
     pub(crate) remote_input: Option<Entity<InputState>>,
     pub(crate) remote_password: Option<Entity<InputState>>,
@@ -1543,10 +1560,10 @@ pub struct Workbench {
     /// that it is not connected, and the change to it: its number and when,
     /// for the fade that plays it (`side_tabs`).
     side_shown: std::cell::RefCell<(Option<(Option<String>, bool)>, u32, Option<Instant>)>,
-    /// This computer as another reaches it, asked when Remote control shows.
+    /// This computer as another reaches it, asked when Connected Devices shows.
     pub(crate) here: Option<emaki_core::remote::Here>,
     pub(crate) here_asked: Option<Instant>,
-    /// A value just copied from Remote control, and when: its button says so.
+    /// A value just copied from Connected Devices, and when: its button says so.
     pub(crate) here_copied: Option<(String, Instant)>,
     /// Text Size's fields, a place each, made with the settings window.
     size_inputs: Vec<(&'static str, Entity<InputState>)>,
@@ -6416,10 +6433,17 @@ impl Workbench {
             Some(t) if t.starts_with("remotefolder:") => self.remote_step(&t["remotefolder:".len()..], cx),
             // Connect's left saying it could not, as a failed connect does.
             Some("remotefailed") => self.remote_failed(cx),
-            // A press on a tab over the sidebar's card: `local` or a remote's id.
+            // The bin on a saved computer's row, Settings open on Connected Devices.
+            Some(t) if t.starts_with("remoteremove:") => self.remote_remove(&t["remoteremove:".len()..], cx),
+            Some("settings:remote") => self.open_settings(Some("remote"), cx),
+            // A press on a computer's row in the sidebar's card: `local` or a remote's id.
             Some(t) if t.starts_with("sideplace:") => {
                 let to = &t["sideplace:".len()..];
-                self.side_place_go((to != "local").then(|| to.to_string()), cx)
+                if to == ADD_PLACE {
+                    self.open_settings(Some("remote"), cx);
+                } else {
+                    self.side_place_go((to != "local").then(|| to.to_string()), cx)
+                }
             }
             Some(t) if t.starts_with("newagent:") => self.pick_chosen(PickFor::Agent, &t["newagent:".len()..], cx),
             Some(t) if t.starts_with("say:") => {
@@ -10080,7 +10104,7 @@ impl Workbench {
         // connected again.
         if let Some(id) = r.remote_id().filter(|id| !emaki_core::remote::is_on(id)) {
             let name = remote_name(r.folder()).unwrap_or_else(|| id.to_string());
-            return ("", tf("{computer} is disconnected: connect it in Settings, Remote control", &[("computer", &name)]));
+            return ("", tf("{computer} is disconnected: connect it in Settings, Connected Devices", &[("computer", &name)]));
         }
         // Codex is driven through its app server and nothing else: no
         // terminal of ours, no inbox. With no driver behind the session
@@ -11874,12 +11898,12 @@ impl Workbench {
         // which the rest scrolls under, and the line is its foot.
         let mut pins = v_flex().flex_shrink_0();
         let rule_line = |theme: &gpui_component::Theme| {
-            let line = div().flex_shrink_0().overflow_hidden().child(div().h(px(9.)).flex().items_center().px(px(10.)).child(div().h(px(1.)).w_full().bg(theme.sidebar_border)));
+            let line = div().flex_shrink_0().overflow_hidden().child(side_rule(theme));
             match rule {
                 Some((coming, serial)) => line
                     .with_animation(ElementId::Name(format!("pin-rule-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
                         let t = if coming { t } else { 1. - t };
-                        d.h(px(9. * t)).opacity(t)
+                        d.h(SIDE_RULE_H * t).opacity(t)
                     })
                     .into_any_element(),
                 None => line.into_any_element(),
@@ -12291,18 +12315,24 @@ impl Workbench {
         // project that shows: each a heading with how many there are, and
         // under it its projects when it is open. All are shut at every
         // launch.
+        // A hairline sets the block off from the projects over it, and
+        // another the Trash from all above it: the line under the pinned
+        // projects, drawn the same (`side_rule`).
         let mut first_head = true;
+        let above = archived_from > 0;
         for (section, (label, id, count), block) in [(phrase("Archived"), "side-archived", archived_n), (phrase("Temporary"), "side-temp", temp_n), (phrase("Hidden"), "side-hidden", hidden_n)].into_iter().zip(section_box).enumerate().map(|(n, (said, block))| (n, said, block)) {
             if count == 0 {
                 continue;
             }
             let lead = std::mem::replace(&mut first_head, false);
             let theme = Self::shell_theme(cx);
+            if lead && above {
+                scroll = scroll.child(side_rule(&theme));
+            }
             scroll = scroll.child(
                 h_flex()
                     .id(id)
                     .h(SIDE_ROW_H)
-                    .when(lead, |d| d.mt(px(6.)))
                     .px(px(10.))
                     .gap(px(6.))
                     .flex_shrink_0()
@@ -12342,10 +12372,11 @@ impl Workbench {
             let open = self.trash_open && !self.trashed.is_empty();
             let moving = self.presence("side-trash", open, cx);
             let count = self.trashed.len();
+            // Its line comes and goes with it, as one.
+            let lined = above || archived_n + temp_n + hidden_n > 0;
             let head = h_flex()
                 .id("side-trash")
                 .h(SIDE_ROW_H)
-                .mt(px(6.))
                 .px(px(10.))
                 .gap(px(6.))
                 .flex_shrink_0()
@@ -12361,6 +12392,8 @@ impl Workbench {
                 .child(div().flex_1().child(t("Trash")))
                 .child(div().font_weight(FontWeight::NORMAL).child(count.to_string()))
                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground));
+            let head = v_flex().flex_shrink_0().when(lined, |d| d.child(side_rule(&theme))).child(head);
+            let tall = SIDE_ROW_H + if lined { SIDE_RULE_H } else { px(0.) };
             scroll = scroll.child(match trash_head {
                 Some((coming, serial)) => div()
                     .flex_shrink_0()
@@ -12368,7 +12401,7 @@ impl Workbench {
                     .child(head)
                     .with_animation(ElementId::Name(format!("side-trash-head-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
                         let t = if coming { t } else { 1. - t };
-                        d.h((SIDE_ROW_H + px(6.)) * t).opacity(t)
+                        d.h(tall * t).opacity(t)
                     })
                     .into_any_element(),
                 None => head.into_any_element(),
@@ -12551,17 +12584,9 @@ impl Workbench {
         // which scrolls by itself under its name with the toolkit's
         // fading scrollbar at its edge, as the conversation has, and
         // takes what height is left.
-        let tabbed = places.len() > 1;
-        let card = |label: &'static str| {
-            v_flex()
-                .when(!tabbed, |d| d.mx(px(8.)))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(theme.sidebar_border)
-                .bg(card_bg)
-                .overflow_hidden()
-                .child(h_flex().h(px(28.)).flex_shrink_0().px(px(14.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(label))
-        };
+        // The card holds a computer each, and the computer's row heads
+        // its projects (`side_stack`).
+        let card = || v_flex().overflow_hidden();
         // The rectangle, over the rows, cut to the card's room less the
         // rows' own margin, which keeps it inside the card's corners.
         let band = self.side_band.filter(|_| self.side_band_live).map(|(a, b)| {
@@ -12573,7 +12598,7 @@ impl Workbench {
         let room = self.side_room.clone();
         // Beside the rail the card is as far from the panel's edge at its
         // top and foot as at its sides.
-        let folders_card = card(t("Projects")).flex_1().min_h_0().when(places.len() < 2, |d| d.mt(px(if projects_only { 8. } else { 10. })).mb(px(8.))).child(
+        let folders_card = card().flex_1().min_h_0().child(
             v_flex()
                 .id("side-card")
                 .relative()
@@ -12668,10 +12693,10 @@ impl Workbench {
         // With a remote computer connected, the card stands in a band of
         // its own whose top holds a tab a computer (`side_tabs`).
         let folders_card = match place.as_deref().filter(|_| !linked) {
-            Some(id) => self.side_unlinked(id, card_bg, &theme, cx),
+            Some(id) => self.side_unlinked(id, &theme, cx),
             None => folders_card,
         };
-        let folders_card = self.side_tabs(folders_card, &places, place.as_deref(), linked, projects_only, &theme, cx);
+        let folders_card = self.side_stack(folders_card, &places, place.as_deref(), linked, projects_only, card_bg, &theme, cx);
         if projects_only {
             return v_flex().size_full().text_color(theme.sidebar_foreground).child(folders_card).into_any_element();
         }
@@ -12732,19 +12757,23 @@ impl Workbench {
     /// third and fourth. A pinned project is among the pinned though its
     /// folder is temporary, and a hidden one is hidden whatever else it
     /// is.
-    /// The computers whose projects the sidebar can show: this one, and
-    /// each remote kept and connected, by its id and name. One alone is
-    /// no choice, and no tabs are drawn.
+    /// The computers in the sidebar's card: this one, then each saved
+    /// device by its id and name, connected or not; with none saved, the
+    /// row that leads to connecting one (`ADD_PLACE`).
     fn side_places(&self) -> Vec<(Option<String>, String)> {
-        let mut out = vec![(None, t("Local").to_string())];
-        out.extend(emaki_core::remote::remotes().into_iter().filter(|d| !d.off).map(|d| (Some(d.id), d.name)));
+        let mut out = vec![(None, t("This computer").to_string())];
+        let saved = emaki_core::remote::remotes();
+        if saved.is_empty() {
+            out.push((Some(ADD_PLACE.to_string()), t("Connect a Device…").to_string()));
+        }
+        out.extend(saved.into_iter().map(|d| (Some(d.id), d.name)));
         out
     }
 
     /// The computer the sidebar shows: the one chosen while it is among
     /// them, else this one.
     fn side_place_now(&self, places: &[(Option<String>, String)]) -> Option<String> {
-        self.side_place.clone().filter(|id| places.iter().any(|(p, _)| p.as_deref() == Some(id.as_str())))
+        self.side_place.clone().filter(|id| id != ADD_PLACE && places.iter().any(|(p, _)| p.as_deref() == Some(id.as_str())))
     }
 
     /// Show another computer's projects in the sidebar.
@@ -12772,18 +12801,18 @@ impl Workbench {
     /// The card under a remote's tab while it is not connected: what
     /// stands, the address it is reached at, and the way to Remote
     /// control, where it is connected again.
-    fn side_unlinked(&self, id: &str, card_bg: Hsla, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> Div {
+    fn side_unlinked(&self, id: &str, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> Div {
         use emaki_core::remote::LinkState;
         let remote = emaki_core::remote::find(id);
-        let connecting = self.remote_links.get(id).is_none_or(|s| s.state == LinkState::Connecting);
-        let (icon, said) = if connecting {
-            ("icons/device-desktop.svg", t("Connecting…"))
-        } else if self.remote_ever.contains(id) {
-            ("icons/unlink.svg", t("Connection lost"))
-        } else {
-            ("icons/unlink.svg", t("Not connected"))
+        let state = self.remote_links.get(id).map(|s| &s.state);
+        let connecting = remote.as_ref().is_some_and(|d| !d.off) && state.is_none_or(|s| *s == LinkState::Connecting);
+        let (icon, said) = match &remote {
+            Some(d) if d.off => ("icons/unlink.svg", t("Disconnected")),
+            _ if connecting => (REMOTE_ICON, t("Connecting…")),
+            _ if self.remote_ever.contains(id) => ("icons/unlink.svg", t("Connection lost")),
+            _ => ("icons/unlink.svg", t("Not connected")),
         };
-        let address = remote.map(|d| d.address());
+        let address = remote.as_ref().map(|d| d.address());
         let tile = div()
             .size(px(44.))
             .rounded_full()
@@ -12794,84 +12823,73 @@ impl Workbench {
             .border_1()
             .border_color(theme.foreground.opacity(0.08))
             .child(Icon::default().path(icon).with_size(px(19.)).text_color(theme.muted_foreground));
-        let go = choice_pill("side-remote-settings", "icons/devices.svg", t("Remote control"), Press::Quiet, false, theme)
-            .active(|s| s.opacity(0.7))
+        // Connect, for a saved device that is not on its way.
+        let can = remote.is_some() && !connecting;
+        let target = id.to_string();
+        let connect = choice_pill("side-remote-connect", "icons/link.svg", if connecting { t("Connecting…") } else { t("Connect") }, Press::Primary, !can, theme)
+            .min_w(px(128.))
+            .justify_center()
+            .when(can, |d| {
+                d.active(|s| s.opacity(0.8)).on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    this.remote_connect(&target, true, cx);
+                }))
+            });
+        let settings = div()
+            .id("side-remote-settings")
+            .size(px(28.))
+            .flex_shrink_0()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_1()
+            .border_color(theme.foreground.opacity(0.16))
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.foreground.opacity(0.06)).text_color(theme.foreground))
+            .active(|s| s.bg(theme.foreground.opacity(0.12)))
+            .managed_tooltip(|window, cx| crate::workbench::tip(t("Connected Devices"), window, cx))
             .on_click(cx.listener(|this, _, window, cx| {
                 swallow_click(window, cx);
                 this.open_settings(Some("remote"), cx);
-            }));
+            }))
+            .child(Icon::default().path("icons/settings.svg").with_size(px(14.)));
         v_flex()
             .flex_1()
             .min_h_0()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(theme.sidebar_border)
-            .bg(card_bg)
+            .overflow_hidden()
             .items_center()
             .justify_center()
             .px(px(16.))
-            .pb(px(28.))
+            .pb(px(12.))
             .child(tile)
             .child(div().mt(px(12.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said))
             .children(address.map(|a| div().mt(px(3.)).max_w_full().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(theme.muted_foreground).child(a)))
-            .child(div().mt(px(16.)).child(go))
+            .child(h_flex().mt(px(16.)).gap(px(8.)).items_center().child(connect).child(settings))
     }
 
-    /// The Projects card in a band whose top is a row of tabs, a computer
-    /// each, sharing the band's width: as the studio's site draws a card
-    /// with a band out from its foot, turned over. The tab showing is on a
-    /// plate that slides to the one pressed, and the card fades in for the
-    /// computer arrived at, or for its connection coming or going. With no
-    /// remote connected the card is drawn as ever.
+    /// The computers as two cards. The open one is the card its projects
+    /// are in, its name on a tinted band at the card's head with a line
+    /// under it, so the computer reads as what the projects belong to; the
+    /// others are a slim card of their own at the sidebar's foot, a row
+    /// each with a dot for how its link stands (a ring when it is
+    /// disconnected), and with none saved the row Connect a Device…. The
+    /// gap between the cards keeps the two apart. Tried first: one card of
+    /// rows, the computers as rows among the projects, which read as one
+    /// list; and tabs over the card, which cut the names short past two.
     ///
-    /// The fade's wrapper stays at rest under the number of the last
-    /// change: taken off when the fade is over, it made all inside a new
-    /// element whose own animations played again, and the projects shook.
+    /// A row pressed opens that computer: in the slim card its row folds
+    /// away as the row of the computer left folds in, so the card keeps its
+    /// height, and the open card's band and projects fade in. So they do
+    /// for the link coming or going. The fade's wrapper stays at rest under
+    /// the number of the last change: taken off when the fade is over, it
+    /// made all inside a new element whose own animations played again.
     #[allow(clippy::too_many_arguments)]
-    fn side_tabs(&self, card: Div, places: &[(Option<String>, String)], place: Option<&str>, linked: bool, projects_only: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
-        if places.len() < 2 {
-            *self.side_shown.borrow_mut() = Default::default();
-            return card.into_any_element();
-        }
-        let n = places.len();
+    fn side_stack(&self, content: Div, places: &[(Option<String>, String)], place: Option<&str>, linked: bool, projects_only: bool, card_bg: Hsla, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
+        use emaki_core::remote::LinkState;
         let at = places.iter().position(|(p, _)| p.as_deref() == place).unwrap_or(0);
-        let moving = self.side_place_moved.filter(|(_, to, when)| *to == at && when.elapsed() < FOLD_ANIM);
-        let plate = div().absolute().top(px(3.)).bottom(px(3.)).w(gpui::relative(1. / n as f32)).px(px(3.)).child(div().size_full().rounded(px(7.)).bg(theme.sidebar_accent));
-        let plate = match moving {
-            Some((from, to, _)) => plate
-                .with_animation(ElementId::Name(format!("side-place-{from}-{to}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| d.left(gpui::relative((from as f32 + (to as f32 - from as f32) * t) / n as f32)))
-                .into_any_element(),
-            None => plate.left(gpui::relative(at as f32 / n as f32)).into_any_element(),
-        };
-        let tabs = h_flex().relative().h(px(32.)).flex_shrink_0().child(plate).children(places.iter().enumerate().map(|(i, (p, name))| {
-            let on = i == at;
-            let to = p.clone();
-            div()
-                .id(SharedString::from(format!("side-place-tab-{i}")))
-                .relative()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .px(px(8.))
-                .gap(px(5.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .when(on, |d| d.font_weight(FontWeight::MEDIUM).text_color(theme.foreground))
-                .when(!on, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    swallow_click(window, cx);
-                    this.side_place_go(to.clone(), cx);
-                }))
-                .when(p.is_some(), |d| {
-                    let name = name.clone();
-                    d.managed_tooltip(move |window, cx| crate::workbench::tip(name.clone(), window, cx))
-                })
-                .child(Icon::default().path(if p.is_none() { "icons/folder.svg" } else { "icons/device-desktop.svg" }).with_size(px(12.)).flex_shrink_0())
-                .child(div().min_w_0().truncate().child(name.clone()))
-        }));
+        let moving = self.side_place_moved.filter(|(from, to, when)| *to == at && *from != at && *from < places.len() && when.elapsed() < FOLD_ANIM).map(|(from, _, _)| from);
         // What the card shows, against what it showed last: a change is
         // played once, from its own number.
         let (serial, fading) = {
@@ -12884,23 +12902,128 @@ impl Workbench {
             shown.0 = Some(now);
             (shown.1, shown.2.is_some_and(|at| at.elapsed() < FOLD_ANIM))
         };
-        let card = card.with_animation(ElementId::Name(format!("side-place-card-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| if fading { d.opacity(0.35 + 0.65 * t) } else { d });
-        let band = if theme.mode.is_dark() { theme.foreground.opacity(0.035) } else { theme.foreground.opacity(0.05) };
-        v_flex()
+        let fade_in = move |d: Div, id: String| d.with_animation(ElementId::Name(id.into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| if fading { d.opacity(0.35 + 0.65 * t) } else { d });
+        // How a saved device's link stands: connected, on its way, or not;
+        // one disconnected is a ring.
+        let dot = |i: usize, id: &str| {
+            let (color, said) = match self.remote_links.get(id).map(|s| &s.state) {
+                _ if !emaki_core::remote::is_on(id) => (None, t("Disconnected")),
+                Some(LinkState::Connected | LinkState::Copying(..)) => (Some(theme.green), t("Connected")),
+                None | Some(LinkState::Connecting) => (Some(theme.muted_foreground.opacity(0.5)), t("Connecting…")),
+                Some(LinkState::Failed(_)) if self.remote_ever.contains(id) => (Some(theme.danger.opacity(0.8)), t("Connection lost")),
+                Some(LinkState::Failed(_)) => (Some(theme.muted_foreground.opacity(0.5)), t("Not connected")),
+            };
+            div()
+                .id(SharedString::from(format!("side-place-dot-{i}")))
+                .size(px(16.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .managed_tooltip(move |window, cx| crate::workbench::tip(said, window, cx))
+                .child(match color {
+                    Some(color) => div().size(px(7.)).rounded_full().bg(color),
+                    None => div().size(px(7.)).rounded_full().border_1().border_color(theme.muted_foreground.opacity(0.7)),
+                })
+        };
+        let band_bg = if theme.mode.is_dark() { theme.foreground.opacity(0.035) } else { theme.foreground.opacity(0.05) };
+        let (open_place, open_name) = places[at].clone();
+        // The band: what the projects under it belong to. Nothing to press.
+        let band = h_flex()
+            .h(px(36.))
+            .flex_shrink_0()
+            .px(px(14.))
+            .gap(px(10.))
+            .items_center()
+            .bg(band_bg)
+            .border_b_1()
+            .border_color(theme.sidebar_border)
+            .text_size(px(12.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.foreground)
+            // On the projects' columns: the mark over their folders, the
+            // name over theirs.
+            .child(div().w(px(22.)).flex().justify_center().child(Icon::default().path(if open_place.is_some() { REMOTE_ICON } else { "icons/device-desktop.svg" }).with_size(px(14.)).text_color(theme.muted_foreground)))
+            .child(div().flex_1().min_w_0().truncate().child(open_name))
+            .children(open_place.as_deref().map(|id| dot(at, id)));
+        let band = fade_in(band, format!("side-place-band-{serial}"));
+        let content = fade_in(content.flex_1().min_h_0(), format!("side-place-card-{serial}"));
+        let open = v_flex()
             .mx(px(8.))
             .mt(px(if projects_only { 8. } else { 10. }))
-            .mb(px(8.))
             .flex_1()
             .min_h_0()
             .rounded(px(10.))
             .border_1()
             .border_color(theme.sidebar_border)
-            .bg(band)
-            .child(tabs)
-            // The card's own edge lies on the band's at the sides and the
-            // foot, as one edge.
-            .child(div().flex_1().min_h_0().mx(px(-1.)).mb(px(-1.)).flex().flex_col().child(card))
-            .into_any_element()
+            .bg(card_bg)
+            .overflow_hidden()
+            .child(band)
+            .child(content);
+        // The others, in their order; while one opens, its row folding
+        // away and the row of the one left folding in.
+        let row = |i: usize, p: &Option<String>, name: &String| {
+            let add = p.as_deref() == Some(ADD_PLACE);
+            let to = p.clone();
+            let icon = match p {
+                _ if add => "icons/devices.svg",
+                Some(_) => REMOTE_ICON,
+                None => "icons/device-desktop.svg",
+            };
+            h_flex()
+                .id(SharedString::from(format!("side-place-{i}")))
+                .h(px(32.))
+                .flex_shrink_0()
+                .px(px(10.))
+                .gap(px(10.))
+                .rounded(px(7.))
+                .text_size(px(12.5))
+                .text_color(theme.muted_foreground)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.sidebar_accent.opacity(0.6)).text_color(theme.foreground))
+                .active(|s| s.bg(theme.sidebar_accent))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    swallow_click(window, cx);
+                    if add {
+                        this.open_settings(Some("remote"), cx);
+                    } else {
+                        this.side_place_go(to.clone(), cx);
+                    }
+                }))
+                .child(div().w(px(22.)).flex().justify_center().child(Icon::default().path(icon).with_size(px(14.))))
+                .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                .children(p.as_deref().filter(|_| !add).map(|id| dot(i, id)))
+                .child(match add {
+                    true => Icon::default().path("icons/external-link.svg").with_size(px(12.)),
+                    false => Icon::new(IconName::ChevronRight).with_size(px(12.)),
+                })
+        };
+        let fold = |d: AnyElement, coming: bool, key: String| {
+            div()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(d)
+                .with_animation(ElementId::Name(key.into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                    let k = if coming { t } else { 1. - t };
+                    d.h(px(32. * k)).opacity(k)
+                })
+                .into_any_element()
+        };
+        let others: Vec<AnyElement> = places
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != at || moving.is_some())
+            .map(|(i, (p, name))| {
+                let r = row(i, p, name).into_any_element();
+                match moving {
+                    Some(_) if i == at => fold(r, false, format!("side-place-out-{serial}")),
+                    Some(from) if i == from => fold(r, true, format!("side-place-in-{serial}")),
+                    _ => r,
+                }
+            })
+            .collect();
+        let rest = v_flex().mx(px(8.)).mt(px(8.)).mb(px(8.)).p(px(4.)).flex_shrink_0().rounded(px(10.)).border_1().border_color(theme.sidebar_border).bg(card_bg).children(others);
+        v_flex().flex_1().min_h_0().child(open).child(rest).into_any_element()
     }
 
     fn side_order(&self, natural: &[String], temp: &HashSet<String>) -> (Vec<String>, usize, usize, usize, usize) {
@@ -19916,7 +20039,7 @@ pub(crate) fn remote_chip(name: String, theme: &gpui_component::Theme) -> AnyEle
         .bg(theme.muted.opacity(if theme.mode.is_dark() { 0.9 } else { 0.7 }))
         .text_size(px(10.5))
         .text_color(theme.muted_foreground)
-        .child(Icon::default().path("icons/device-desktop.svg").with_size(px(11.)))
+        .child(Icon::default().path(REMOTE_ICON).with_size(px(11.)))
         .child(div().max_w(px(110.)).truncate().child(name))
         .into_any_element()
 }

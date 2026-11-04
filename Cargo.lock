@@ -5659,6 +5659,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "ttf-parser",
+ "unicode-width 0.2.2",
  "url",
  "usvg 0.46.0",
  "util_macros",

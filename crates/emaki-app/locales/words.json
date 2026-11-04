@@ -9647,14 +9647,50 @@
     "de": "Diese Dateien liegen auf einem anderen Computer.",
     "es": "Estos archivos están en otro ordenador."
   },
-  "Remote control": {
-    "zh-Hans": "远程控制",
-    "zh-Hant": "遠端控制",
-    "ja": "リモートコントロール",
-    "ko": "원격 제어",
-    "fr": "Contrôle à distance",
-    "de": "Fernsteuerung",
-    "es": "Control remoto"
+  "Connected Devices": {
+    "zh-Hans": "已连接的设备",
+    "zh-Hant": "已連接的裝置",
+    "ja": "接続済みのデバイス",
+    "ko": "연결된 기기",
+    "fr": "Appareils connectés",
+    "de": "Verbundene Geräte",
+    "es": "Dispositivos conectados"
+  },
+  "Connect a Device…": {
+    "zh-Hans": "连接设备…",
+    "zh-Hant": "連接裝置…",
+    "ja": "デバイスに接続…",
+    "ko": "기기 연결…",
+    "fr": "Connecter un appareil…",
+    "de": "Gerät verbinden…",
+    "es": "Conectar un dispositivo…"
+  },
+  "Type address here": {
+    "zh-Hans": "在此输入地址",
+    "zh-Hant": "在此輸入位址",
+    "ja": "ここにアドレスを入力",
+    "ko": "여기에 주소 입력",
+    "fr": "Saisissez l’adresse ici",
+    "de": "Adresse hier eingeben",
+    "es": "Escribe la dirección aquí"
+  },
+  "Type password if there is one": {
+    "zh-Hans": "如有密码，请输入",
+    "zh-Hant": "如有密碼，請輸入",
+    "ja": "パスワードがあれば入力",
+    "ko": "비밀번호가 있으면 입력",
+    "fr": "Saisissez le mot de passe s’il y en a un",
+    "de": "Passwort eingeben, falls es eines gibt",
+    "es": "Escribe la contraseña si la hay"
+  },
+  "Disconnected": {
+    "zh-Hans": "已断开连接",
+    "zh-Hant": "已中斷連線",
+    "ja": "切断済み",
+    "ko": "연결 해제됨",
+    "fr": "Déconnecté",
+    "de": "Getrennt",
+    "es": "Desconectado"
   },
   "Target Address": {
     "zh-Hans": "目标地址",
@@ -9773,14 +9809,14 @@
     "de": "Trennen",
     "es": "Desconectar"
   },
-  "{computer} is disconnected: connect it in Settings, Remote control": {
-    "zh-Hans": "{computer} 已断开连接：请在“设置 › 远程控制”中连接它",
-    "zh-Hant": "{computer} 已中斷連線：請在「設定 › 遠端控制」中連線",
-    "ja": "{computer} は切断されています：設定の「リモートコントロール」で接続してください",
-    "ko": "{computer}의 연결이 해제되었습니다: 설정의 원격 제어에서 연결하십시오",
-    "fr": "{computer} est déconnecté : connectez-le dans Réglages, Contrôle à distance",
-    "de": "{computer} ist getrennt: verbinde ihn in Einstellungen, Fernsteuerung",
-    "es": "{computer} está desconectado: conéctalo en Ajustes, Control remoto"
+  "{computer} is disconnected: connect it in Settings, Connected Devices": {
+    "zh-Hans": "{computer} 已断开连接：请在“设置 › 已连接的设备”中连接它",
+    "zh-Hant": "{computer} 已中斷連線：請在「設定 › 已連接的裝置」中連線",
+    "ja": "{computer} は切断されています：設定の「接続済みのデバイス」で接続してください",
+    "ko": "{computer}의 연결이 해제되었습니다: 설정의 연결된 기기에서 연결하십시오",
+    "fr": "{computer} est déconnecté : connectez-le dans Réglages, Appareils connectés",
+    "de": "{computer} ist getrennt: verbinde ihn in Einstellungen, Verbundene Geräte",
+    "es": "{computer} está desconectado: conéctalo en Ajustes, Dispositivos conectados"
   },
   "New computer": {
     "zh-Hans": "新电脑",
@@ -9791,13 +9827,13 @@
     "de": "Neuer Computer",
     "es": "Nuevo ordenador"
   },
-  "Local": {
+  "This computer": {
     "zh-Hans": "本机",
     "zh-Hant": "本機",
-    "ja": "ローカル",
-    "ko": "로컬",
-    "fr": "Local",
-    "de": "Lokal",
-    "es": "Local"
+    "ja": "このコンピュータ",
+    "ko": "이 컴퓨터",
+    "fr": "Cet ordinateur",
+    "de": "Dieser Computer",
+    "es": "Este ordenador"
   }
 }
