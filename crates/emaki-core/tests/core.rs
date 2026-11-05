@@ -4908,7 +4908,9 @@ fn a_confirmed_move_is_where_a_gone_folder_is_now() {
 fn a_gone_folder_is_looked_for_where_its_parent_went() {
     let (_home, _g) = isolated();
     let root = tempfile::tempdir().unwrap();
-    let at = |p: &str| root.path().join(p).to_string_lossy().to_string();
+    // Joined a part at a time, so the separators are the system's, as a
+    // folder a session names has them: on Windows "\\", never a "/" inside.
+    let at = |p: &str| p.split('/').fold(root.path().to_path_buf(), |a, c| a.join(c)).to_string_lossy().to_string();
     for p in ["alkaline/emaki", "alkaline/kotoba", "papers/emaki"] {
         fs::create_dir_all(root.path().join(p)).unwrap();
     }
@@ -4989,7 +4991,9 @@ fn a_moved_session_is_listed_where_its_folder_went_and_archived_where_it_was() {
 fn a_move_taken_back_is_not_found_again() {
     let (_home, _g) = isolated();
     let root = tempfile::tempdir().unwrap();
-    let at = |p: &str| root.path().join(p).to_string_lossy().to_string();
+    // Joined a part at a time, so the separators are the system's, as a
+    // folder a session names has them: on Windows "\\", never a "/" inside.
+    let at = |p: &str| p.split('/').fold(root.path().to_path_buf(), |a, c| a.join(c)).to_string_lossy().to_string();
     for p in ["alkaline/emaki", "alkaline/kotoba"] {
         fs::create_dir_all(root.path().join(p)).unwrap();
     }
