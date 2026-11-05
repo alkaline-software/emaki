@@ -2,6 +2,19 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.5.0
+
+1. **Connected Devices**: Work on another Mac or Linux computer from this one over ssh: its Claude Code and Codex sessions are copied here, listed and searched with the rest, and you type to them as to one here.
+2. **Remote sessions**: A session on another computer has its CLI layout, terminals, files panel and git there, its files kept the same on both computers.
+3. **Addresses**: A computer is one entry however it is reached, by its name on your network or from anywhere over a private network, each address with its own Connect, one used at a time.
+4. **Sign-in there**: Each agent's mark shows whether it is signed in on that computer, and a click signs Claude Code or Codex in from here in your browser, with a button to cancel.
+5. **Names**: A computer takes its own Computer Name, can be renamed, and comes back with its name and sessions when removed and added again.
+6. **Sidebar**: The sidebar is two cards, the open computer's projects and a row for each other computer, with its addresses to connect by when it is not connected.
+7. **Moved folders**: A project follows a folder that was renamed or moved, with undo.
+8. **Session groups**: Archived, Temporary and Trash stand beside Projects, and All Sessions is in sections.
+9. **Look**: List rows have room above and below, monospace text lines up on a grid, and a Chinese font can be chosen behind the chat font.
+10. **Fixes**: Rounds that went missing until relaunch show at once, Codex's approvals and forms come up as cards, Claude Code's trust question no longer holds messages, and scrolling stays in the area it began in.
+
 ## v0.4.3
 
 1. **The tray**: What waits on you, a message that cannot get through or a decision the agent asks for, stands in one card over the composer with its buttons always in view, and the agent's working line stands under it.
