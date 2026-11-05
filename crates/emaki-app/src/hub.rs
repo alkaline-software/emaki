@@ -69,6 +69,10 @@ pub enum HubEvent {
     Relocated(Vec<(String, String)>),
     /// How a remote's link stands (`emaki_core::remote::Link`).
     Remote(String, emaki_core::remote::LinkStatus),
+    /// A remote kept twice was made one: the one that stays, and the one
+    /// that went with where it stood in the list
+    /// (`emaki_core::remote::join_same`).
+    RemoteJoined(String, usize, emaki_core::remote::Remote),
     Changed(PathBuf),
     DriverStarted { session_id: String },
     /// A new session's agent gave it an id of its own: what the window
@@ -271,9 +275,18 @@ impl Hub {
             let (status_hub, changed_hub) = (Arc::downgrade(self), Arc::downgrade(self));
             let link = emaki_core::remote::Link::start(
                 d.clone(),
-                Arc::new(move |id: &str, st| {
+                Arc::new(move |id: &str, st: emaki_core::remote::LinkStatus| {
                     if let Some(h) = status_hub.upgrade() {
+                        // One computer kept twice, each by a way of its
+                        // own, is made one once it answers; the links
+                        // follow the remotes as they are now.
+                        let joined = if st.state == emaki_core::remote::LinkState::Connected { st.probe.as_ref().and_then(|p| emaki_core::remote::join_same(id, p)) } else { None };
                         h.send(HubEvent::Remote(id.to_string(), st));
+                        if let Some((kept, at, gone)) = joined {
+                            h.send(HubEvent::RemoteJoined(kept, at, gone));
+                            h.link_remotes();
+                            h.refresh();
+                        }
                     }
                 }),
                 Arc::new(move || {

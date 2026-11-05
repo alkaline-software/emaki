@@ -37,10 +37,12 @@ const CARD_R: Pixels = px(12.);
 const REMOTE_SAID_FOR: Duration = Duration::from_millis(3600);
 /// Connect, wide enough for "Connecting…" so it does not move as it says it.
 const CONNECT_W: Pixels = px(118.);
-/// The room for how a saved computer stands.
-const STATE_W: Pixels = px(100.);
-/// A saved computer's row.
-const REMOTE_ROW_H: f32 = 58.;
+/// A saved computer's own row, at the head of its entry.
+const REMOTE_ROW_H: f32 = 52.;
+/// A way to a saved computer, a row under its own.
+const WAY_ROW_H: f32 = 40.;
+/// Where a saved computer's name starts, and the rows under it.
+const REMOTE_INDENT: f32 = 14. + 34. + 12.;
 /// The sign-in line under a saved computer's row (`sign_strip`).
 const SIGN_H: f32 = 44.;
 /// How long the agents' sign-in, as a remote said it, stands before
@@ -280,6 +282,16 @@ impl Workbench {
         })
         .detach();
         self.remote_code = Some(remote_code);
+        // A saved computer's name, written in its row: ↩ or leaving the
+        // field keeps it, Escape leaves it as it was.
+        let remote_name = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe_in(&remote_name, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => this.remote_rename_commit(true, window, cx),
+            InputEvent::Blur if this.remote_naming.is_some() => this.remote_rename_commit(false, window, cx),
+            _ => {}
+        })
+        .detach();
+        self.remote_name = Some(remote_name);
         // Text Size's fields: a number with a tenth at most, set at ↩ or
         // when the field is left; anything else put back as it was.
         self.size_inputs = SIZE_PLACES
@@ -331,6 +343,8 @@ impl Workbench {
         self.remote_input = None;
         self.remote_password = None;
         self.remote_code = None;
+        self.remote_name = None;
+        self.remote_naming = None;
         // A sign-in left part way ends with the window.
         self.remote_sign_in_cancel(cx);
         self.size_inputs.clear();
@@ -1285,7 +1299,7 @@ impl Workbench {
         // reaching this one.
         // The saved computers' group stands under New computer with the
         // room between them its own, so it folds away with it.
-        let mut reach = vec![group_with(Some(div().child(t("New computer")).into_any_element()), Some(self.connect_control(cx)), target, &theme)];
+        let mut reach = vec![group_with(Some(div().child(t("New connection")).into_any_element()), Some(self.connect_control(cx)), target, &theme)];
         reach.extend(self.saved_group(window, cx));
         rows.push(section_spaced(t("This computer → Target computer"), reach, &theme));
         rows.push(div().pt(px(10.)).child(section(t("Other computer → This computer"), vec![self.here_group(window, cx)], &theme)).into_any_element());
@@ -1352,8 +1366,7 @@ impl Workbench {
         }
         // The whole group comes and goes with the first and the last.
         let whole = alone && list.iter().any(|(_, m)| m.is_some()) && list.len() == 1;
-        let row_h = REMOTE_ROW_H + 1.;
-        let room = (f32::from(window.viewport_size().height) - f32::from(TOP_H) - REMOTE_REST).max(REMOTE_ROW_H);
+        let room = (f32::from(window.viewport_size().height) - f32::from(TOP_H) - REMOTE_REST).max(REMOTE_ROW_H + WAY_ROW_H);
         // A sign-in just begun starts with an empty field.
         if let Some(l) = self.remote_login.as_mut().filter(|l| l.fresh) {
             l.fresh = false;
@@ -1372,12 +1385,18 @@ impl Workbench {
         for (d, _) in list.iter() {
             self.sign_check(d, cx);
         }
-        // A row with its sign-in line is that much taller.
+        // A way just added grows in, and one just removed folds away.
+        self.remote_way_born.retain(|(_, _, at)| at.elapsed() < FOLD_ANIM);
+        if self.remote_way_leaving.as_ref().is_some_and(|(_, _, _, at)| at.elapsed() >= FOLD_ANIM) {
+            self.remote_way_leaving = None;
+        }
+        // An entry is its computer's row, its sign-in line while one goes,
+        // and a row a way to it; the first entry has no line over it.
         let signs: Vec<bool> = list.iter().map(|(d, _)| self.sign_shown(d, cx)).collect();
-        let heights: Vec<f32> = signs.iter().enumerate().map(|(i, s)| if i > 0 { row_h } else { REMOTE_ROW_H } + if *s { SIGN_H } else { 0. }).collect();
+        let heights: Vec<f32> = list.iter().zip(&signs).enumerate().map(|(i, ((d, _), s))| REMOTE_ROW_H + WAY_ROW_H * d.ways.len() as f32 + if i > 0 { 1. } else { 0. } + if *s { SIGN_H } else { 0. }).collect();
         let full: f32 = heights.iter().sum();
-        // Cut at a row's end, never partway through one: the last row
-        // shown fades at its foot, which says there are more.
+        // Cut at an entry's end, never partway through one: the last shown
+        // fades at its foot, which says there are more.
         let cut = full > room + 0.5;
         let shown = if cut {
             let mut upto = 0.;
@@ -1395,9 +1414,13 @@ impl Workbench {
             .iter()
             .enumerate()
             .map(|(i, (d, motion))| {
-                let row = div().flex_shrink_0().when(i > 0, |d| d.border_t_1().border_color(theme.border)).child(self.remote_row(d, &theme, cx)).children(signs[i].then(|| self.sign_strip(d, &theme, cx)));
-                // The first row has no line over it: its height is the row's.
-                let tall = if i > 0 { row_h } else { REMOTE_ROW_H } + if signs[i] { SIGN_H } else { 0. };
+                let row = v_flex()
+                    .flex_shrink_0()
+                    .when(i > 0, |d| d.border_t_1().border_color(theme.border))
+                    .child(self.remote_row(d, &theme, cx))
+                    .children(signs[i].then(|| self.sign_strip(d, &theme, cx)))
+                    .children(self.way_rows(d, &theme, cx));
+                let tall = heights[i];
                 match motion.filter(|_| !whole) {
                     Some(coming) => row
                         .overflow_hidden()
@@ -1531,37 +1554,106 @@ impl Workbench {
         } else {
             div().into_any_element()
         };
-        // Disconnected by the person, its link's last word is not its state.
-        let off = d.off;
-        let failed = !off && matches!(status.state, LinkState::Failed(_));
-        let linked = !off && !failed;
+        let lit = !d.off && status.state == LinkState::Connected;
         let id = d.id.clone();
-        let quiet = |words: SharedString| div().text_color(theme.muted_foreground).child(words).into_any_element();
-        // Disconnected, its Connect says all there is.
-        let state = if off {
-            None
-        } else {
-            Some(match &status.state {
-                LinkState::Connected => h_flex().gap(px(5.)).items_center().text_color(theme.green).child(Icon::new(IconName::Check).with_size(px(13.))).child(t("Connected")).into_any_element(),
-                LinkState::Connecting => quiet(t("Connecting…").into()),
-                LinkState::Copying(done, total) => quiet(tf("Copying… {percent}%", &[("percent", &(done * 100 / (*total).max(1)))]).into()),
-                LinkState::Failed(_) => quiet(t("Connection failed").into()),
-            })
+        // Removing a computer is seldom wanted and cannot be taken back
+        // from here: a round button, the bin alone, named on the hover,
+        // which asks first. The question stands where the bin stood.
+        let asking = self.remote_confirm.as_ref().filter(|(c, _)| *c == d.id).map(|(_, at)| *at);
+        let end = match asking {
+            Some(at) => {
+                let (no, yes) = (id.clone(), id.clone());
+                h_flex()
+                    .flex_shrink_0()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(t("Remove this computer?")))
+                    .child(crate::branches::small_pill(SharedString::from(format!("remote-keep-{id}")), "icons/close.svg", t("Cancel"), Press::Quiet, false, theme).h(CONTROL_H).on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        if this.remote_confirm.as_ref().is_some_and(|(c, _)| *c == no) {
+                            this.remote_confirm = None;
+                        }
+                        cx.notify();
+                    })))
+                    .child(crate::branches::small_pill(SharedString::from(format!("remote-gone-{id}")), "icons/trash.svg", t("Remove"), Press::Danger, false, theme).h(CONTROL_H).on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.remote_confirm = None;
+                        this.remote_remove(&yes, cx);
+                    })))
+                    .with_animation(ElementId::Name(format!("remote-ask-{id}-{at:?}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), |e, t| e.opacity(t))
+                    .into_any_element()
+            }
+            // Rename beside it, the pencil alone as the bin is; a double
+            // click on the name does the same.
+            None => {
+                let target = id.clone();
+                let rename = div()
+                    .id(SharedString::from(format!("remote-rename-{id}")))
+                    .size(CONTROL_H)
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.foreground.opacity(0.16))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.foreground.opacity(0.06)).text_color(theme.foreground))
+                    .managed_tooltip(|window, cx| crate::workbench::tip(t("Rename"), window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.remote_rename(&target, window, cx);
+                    }))
+                    .child(Icon::default().path("icons/pencil-simple.svg").with_size(px(14.)));
+                h_flex()
+                    .flex_shrink_0()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(rename)
+                    .child(self.round_button(SharedString::from(format!("remote-remove-{id}")), "icons/trash.svg", t("Remove Computer").into(), true, false, theme, cx, move |this, cx| this.remote_confirm_ask(&id, cx)))
+                    .into_any_element()
+            }
         };
-        // Connect as the target's own Connect is, for one not linked; and
-        // Disconnect for one linked or on its way, which keeps it.
-        let action = if linked {
-            let id = id.clone();
-            crate::branches::small_pill(SharedString::from(format!("remote-off-{id}")), "icons/unlink.svg", t("Disconnect"), Press::Quiet, false, theme).h(CONTROL_H).min_w(CONNECT_W).justify_center().on_click(cx.listener(move |this, _, _, cx| this.remote_connect(&id, false, cx)))
-        } else {
-            let id = id.clone();
-            crate::branches::small_pill(SharedString::from(format!("remote-on-{id}")), "icons/link.svg", t("Connect"), Press::Quiet, false, theme).h(CONTROL_H).min_w(CONNECT_W).justify_center().on_click(cx.listener(move |this, _, _, cx| this.remote_connect(&id, true, cx)))
+        // Its name, written in place on a double click (`remote_rename`).
+        let name = match self.remote_name.as_ref().filter(|_| self.remote_naming.as_deref() == Some(d.id.as_str())) {
+            Some(input) => self.name_field("remote-name", input, 13., t("Computer name"), Self::remote_rename_cancel, cx).on_click(|_, window, cx| swallow_click(window, cx)).flex_none().w(px(240.)).h(px(24.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).into_any_element(),
+            None => {
+                let target = d.id.clone();
+                div()
+                    .id(SharedString::from(format!("remote-name-{}", d.id)))
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(d.name.clone())
+                    .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                        if ev.click_count() >= 2 {
+                            this.remote_rename(&target, window, cx);
+                        }
+                    }))
+                    .into_any_element()
+            }
         };
-        // Removing is seldom wanted: a round button, the bin alone, named
-        // on the hover.
-        let (danger, edge) = (theme.danger, theme.foreground.opacity(0.16));
-        let remove = div()
-            .id(SharedString::from(format!("remote-remove-{id}")))
+        h_flex()
+            .h(px(REMOTE_ROW_H))
+            .px(px(14.))
+            .gap(px(12.))
+            .items_center()
+            .child(div().size(px(34.)).flex_shrink_0().rounded(px(8.)).bg(theme.muted).flex().items_center().justify_center().child(Icon::default().path(crate::workbench::REMOTE_ICON).with_size(px(17.)).text_color(if lit { theme.foreground } else { theme.muted_foreground })))
+            .child(h_flex().flex_1().min_w_0().gap(px(8.)).items_center().child(name).child(agents_said))
+            .child(end)
+            .into_any_element()
+    }
+
+    /// A round button of a saved computer's entry, its icon alone and its
+    /// name on the hover: the bin and a way's cross. `danger`, the danger's
+    /// color under the pointer; `off`, paler and pressing nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn round_button(&self, id: SharedString, icon: &'static str, tip: SharedString, danger: bool, off: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>, press: impl Fn(&mut Self, &mut Context<Self>) + 'static) -> Stateful<Div> {
+        let (red, edge, quiet) = (theme.danger, theme.foreground.opacity(0.16), theme.foreground.opacity(0.06));
+        div()
+            .id(id)
             .size(CONTROL_H)
             .flex_shrink_0()
             .rounded_full()
@@ -1570,33 +1662,100 @@ impl Workbench {
             .flex()
             .items_center()
             .justify_center()
-            .cursor_pointer()
             .text_color(theme.muted_foreground)
-            .hover(move |s| s.bg(danger.opacity(0.1)).border_color(danger.opacity(0.45)).text_color(danger))
-            .managed_tooltip(|window, cx| crate::workbench::tip(t("Remove"), window, cx))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                swallow_click(window, cx);
-                this.remote_remove(&id, cx)
-            }))
-            .child(Icon::default().path("icons/trash.svg").with_size(px(14.)));
-        h_flex()
-            .h(px(REMOTE_ROW_H))
-            .px(px(14.))
-            .gap(px(12.))
-            .items_center()
-            .child(div().size(px(34.)).flex_shrink_0().rounded(px(8.)).bg(theme.muted).flex().items_center().justify_center().child(Icon::default().path(crate::workbench::REMOTE_ICON).with_size(px(17.)).text_color(if linked && status.state == LinkState::Connected { theme.foreground } else { theme.muted_foreground })))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(2.))
-                    .child(h_flex().min_w_0().gap(px(8.)).items_center().child(div().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(d.name.clone())).child(agents_said))
-                    .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).line_height(px(15.)).text_color(theme.muted_foreground).child(d.address())),
-            )
-            .child(h_flex().w(STATE_W).flex_shrink_0().justify_end().text_size(px(12.)).children(state))
-            .child(action)
-            .child(remove)
-            .into_any_element()
+            .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
+            .child(Icon::default().path(icon).with_size(px(if icon.ends_with("close.svg") { 12. } else { 14. })))
+            .map(|d| {
+                if off {
+                    d.opacity(0.4)
+                } else {
+                    d.cursor_pointer()
+                        .hover(move |s| if danger { s.bg(red.opacity(0.1)).border_color(red.opacity(0.45)).text_color(red) } else { s.bg(quiet) })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            press(this, cx);
+                        }))
+                }
+            })
+    }
+
+    /// The ways to a saved computer, a row each under its own, at its
+    /// name's indent: which network it goes over (the one at home, or one
+    /// that reaches it from anywhere), its address, and at the right how
+    /// it stands, its button and its cross, at the widths the computer's
+    /// row had them so nothing moves. One way is used at a time: it says
+    /// how it stands and has Disconnect, and the others' Connect stays pale
+    /// until it is disconnected. Disconnected, any way's Connect connects
+    /// by it. A way's cross forgets it; the one in use is disconnected
+    /// first, and the last asks as the computer's bin does, being the
+    /// computer.
+    fn way_rows(&self, d: &emaki_core::remote::Remote, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use emaki_core::remote::{LinkState, Way};
+        let status = self.remote_links.get(&d.id).cloned().unwrap_or_default();
+        let using = (!d.off).then(|| d.way());
+        let mut ways: Vec<(Way, Option<bool>)> = d.ways.iter().map(|w| (w.clone(), self.remote_way_born.iter().any(|(id, b, _)| *id == d.id && b == w).then_some(true))).collect();
+        if let Some((_, at, w, _)) = self.remote_way_leaving.as_ref().filter(|(id, ..)| *id == d.id) {
+            ways.insert((*at).min(ways.len()), (w.clone(), Some(false)));
+        }
+        let alone = d.ways.len() == 1;
+        ways.into_iter()
+            .enumerate()
+            .map(|(i, (w, motion))| {
+                let active = using.as_ref() == Some(&w) && motion != Some(false);
+                let lit = active && matches!(status.state, LinkState::Connected | LinkState::Copying(..));
+                let key = format!("{}-{}-{i}", d.id, w.address());
+                let quiet = |words: SharedString| div().text_color(theme.muted_foreground).child(words).into_any_element();
+                let state = active.then(|| match &status.state {
+                    LinkState::Connected => h_flex().gap(px(5.)).items_center().text_color(theme.green).child(Icon::new(IconName::Check).with_size(px(13.))).child(t("Connected")).into_any_element(),
+                    LinkState::Connecting => quiet(t("Connecting…").into()),
+                    LinkState::Copying(done, total) => quiet(tf("Copying… {percent}%", &[("percent", &(done * 100 / (*total).max(1)))]).into()),
+                    LinkState::Failed(_) => quiet(t("Connection failed").into()),
+                });
+                let id = d.id.clone();
+                let action = if active {
+                    crate::branches::small_pill(SharedString::from(format!("remote-off-{key}")), "icons/unlink.svg", t("Disconnect"), Press::Quiet, false, theme).h(CONTROL_H).min_w(CONNECT_W).justify_center().on_click(cx.listener(move |this, _, _, cx| this.remote_connect(&id, false, cx)))
+                } else {
+                    // Another way in use: pale until it is disconnected.
+                    let busy = using.is_some();
+                    let way = w.clone();
+                    crate::branches::small_pill(SharedString::from(format!("remote-on-{key}")), "icons/link.svg", t("Connect"), Press::Quiet, busy, theme).h(CONTROL_H).min_w(CONNECT_W).justify_center().when(!busy, |p| p.on_click(cx.listener(move |this, _, _, cx| this.remote_connect_by(&id, &way, cx))))
+                };
+                let (id, way) = (d.id.clone(), w.clone());
+                let cross = self.round_button(SharedString::from(format!("remote-way-x-{key}")), "icons/close.svg", t("Remove Connection").into(), true, active, theme, cx, move |this, cx| {
+                    if alone {
+                        this.remote_confirm_ask(&id, cx);
+                    } else {
+                        this.remote_remove_way(&id, &way, cx);
+                    }
+                });
+                let row = div().flex_shrink_0().pl(px(REMOTE_INDENT)).pr(px(14.)).child(
+                    h_flex()
+                        .h(px(WAY_ROW_H))
+                        .gap(px(10.))
+                        .items_center()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(Icon::default().path(if w.local() { "icons/network.svg" } else { "icons/globe.svg" }).with_size(px(14.)).text_color(if lit { theme.foreground } else { theme.muted_foreground }))
+                        .child(div().flex_shrink_0().text_size(px(12.5)).child(if w.local() { t("Local network") } else { t("Remote") }))
+                        .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(theme.muted_foreground).child(w.address()))
+                        // Only the way in use says how it stands; the
+                        // others' addresses take its room.
+                        .children(state.map(|s| h_flex().flex_shrink_0().text_size(px(12.)).child(s)))
+                        .child(action)
+                        .child(cross),
+                );
+                match motion {
+                    Some(coming) => row
+                        .overflow_hidden()
+                        .with_animation(ElementId::Name(format!("remote-way-{key}-{coming}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |r, t| {
+                            let k = if coming { t } else { 1. - t };
+                            r.h(px(WAY_ROW_H * k)).opacity(k)
+                        })
+                        .into_any_element(),
+                    None => row.into_any_element(),
+                }
+            })
+            .collect()
     }
 
     /// Whether a saved computer's row has its sign-in line: a sign-in
@@ -1653,7 +1812,7 @@ impl Workbench {
         let agent = self.remote_login.as_ref().filter(|l| l.id == d.id).map(|l| l.agent).unwrap_or(AgentId::ClaudeCode);
         let id = d.id.clone();
         let quiet = |words: String| div().min_w_0().truncate().text_color(theme.muted_foreground).child(words);
-        let mut line = h_flex().h(px(SIGN_H)).pl(px(14. + 34. + 12.)).pr(px(14.)).gap(px(10.)).items_center().text_size(px(12.));
+        let mut line = h_flex().h(px(SIGN_H)).pl(px(REMOTE_INDENT)).pr(px(14.)).gap(px(10.)).items_center().text_size(px(12.));
         let going = stage.is_some();
         line = match stage {
             // Folding away, the sign-in over.
@@ -1996,26 +2155,42 @@ impl Workbench {
                 reached = remote::install_key(&d, &password).and_then(|_| remote::probe(&d));
             }
             let p = reached.map_err(|e| if e == "permission denied" && password.is_empty() { "permission denied: no password was given".to_string() } else { e })?;
-            // Named as it names itself, not by its address.
-            let name = p.hostname.trim_end_matches(".local").split('.').next().unwrap_or("").to_string();
+            // Named as its person names it (a Mac's Computer Name), else
+            // by its host's name; never by its address.
+            let name = p.name();
             if !name.is_empty() && !existed {
                 d.name = name;
             }
             d.off = false;
-            remote::keep(&d).map_err(|e| e.to_string())?;
-            Ok((d.id.clone(), existed, p))
+            // A computer kept already by another way takes this one as a
+            // way of its own.
+            let before = remote::remotes();
+            let kept = remote::settle(&d, &p).map_err(|e| e.to_string())?;
+            let had = before.iter().find(|k| k.id == kept.id).map(|k| k.ways.clone());
+            let added: Vec<remote::Way> = match &had {
+                Some(had) => kept.ways.iter().filter(|w| !had.contains(w)).cloned().collect(),
+                None => Vec::new(),
+            };
+            Ok((kept.id.clone(), had.is_some(), p, added))
         });
         cx.spawn(async move |this, cx| {
-            let done: Result<(String, bool, emaki_core::remote::Probe), String> = task.await;
+            let done: Result<(String, bool, emaki_core::remote::Probe, Vec<emaki_core::remote::Way>), String> = task.await;
             this.update(cx, |this, cx| {
                 this.remote_adding = false;
                 match done {
-                    Ok((id, existed, probe)) => {
+                    Ok((id, existed, probe, added)) => {
+                        for w in added {
+                            this.remote_way_born.push((id.clone(), w, Instant::now()));
+                        }
                         this.remote_said = None;
                         this.remote_clear = true;
-                        // It answered just now: it stands as connected
-                        // while its link starts, and a new one grows in.
-                        this.remote_links.insert(id.clone(), emaki_core::remote::LinkStatus { state: emaki_core::remote::LinkState::Connected, probe: Some(probe) });
+                        // It answered just now: connected by this way, it
+                        // stands as connected while its link starts, and a
+                        // new one grows in. A way added to a computer
+                        // connected by another leaves that as it stands.
+                        if emaki_core::remote::find(&id).is_some_and(|k| !k.off && probe.way.as_ref() == Some(&k.way())) {
+                            this.remote_links.insert(id.clone(), emaki_core::remote::LinkStatus { state: emaki_core::remote::LinkState::Connected, probe: Some(probe) });
+                        }
                         if !existed {
                             this.remote_born = Some((id, Instant::now()));
                         }
@@ -2071,6 +2246,77 @@ impl Workbench {
             self.hub.retry_remote(id);
         }
         self.hub.refresh();
+        cx.notify();
+    }
+
+    /// Connect a saved computer by one of its ways: it is disconnected,
+    /// so no other is in use.
+    pub(crate) fn remote_connect_by(&mut self, id: &str, way: &emaki_core::remote::Way, cx: &mut Context<Self>) {
+        if let Err(e) = emaki_core::remote::connect_by(id, way) {
+            eprintln!("emaki: could not change the remote computer: {e}");
+            return;
+        }
+        self.remote_connect(id, true, cx);
+    }
+
+    /// Write a saved computer's name in its row: the field holds the name,
+    /// all of it chosen, and takes the keys.
+    pub(crate) fn remote_rename(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(input), Some(d)) = (self.remote_name.clone(), emaki_core::remote::find(id)) else { return };
+        self.remote_naming = Some(id.to_string());
+        input.update(cx, |s, cx| {
+            s.set_value(d.name.clone(), window, cx);
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Keep the name written: an empty one leaves the name as it was.
+    pub(crate) fn remote_rename_commit(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.remote_naming.take() else { return };
+        let name = self.remote_name.as_ref().map(|i| i.read(cx).value().trim().to_string()).unwrap_or_default();
+        if !name.is_empty() {
+            if let Err(e) = emaki_core::remote::rename(&id, &name) {
+                eprintln!("emaki: could not rename the remote computer: {e}");
+            }
+            self.relabel();
+        }
+        if refocus {
+            window.focus(&self.settings_focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Escape in the name: as it was.
+    pub(crate) fn remote_rename_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remote_naming = None;
+        window.focus(&self.settings_focus, cx);
+        cx.notify();
+    }
+
+    /// The bin pressed: ask, where the bin stood, whether to remove the
+    /// computer.
+    pub(crate) fn remote_confirm_ask(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.remote_confirm = Some((id.to_string(), Instant::now()));
+        cx.notify();
+    }
+
+    /// Forget one way to a saved computer: its row folds away. The way in
+    /// use is not offered, and the last goes with the computer.
+    pub(crate) fn remote_remove_way(&mut self, id: &str, way: &emaki_core::remote::Way, cx: &mut Context<Self>) {
+        let Some(at) = emaki_core::remote::find(id).and_then(|d| d.ways.iter().position(|w| w == way)) else { return };
+        if let Err(e) = emaki_core::remote::remove_way(id, way) {
+            eprintln!("emaki: could not change the remote computer: {e}");
+            return;
+        }
+        self.remote_way_leaving = Some((id.to_string(), at, way.clone(), Instant::now()));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FOLD_ANIM).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+        self.hub.link_remotes();
         cx.notify();
     }
 

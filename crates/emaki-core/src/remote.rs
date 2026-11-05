@@ -43,28 +43,40 @@ const CLAUDE_PROJECTS: &str = ".claude/projects";
 const CODEX: &str = ".codex";
 const CODEX_ROOTS: [&str; 2] = [".codex/sessions", ".codex/archived_sessions"];
 
-/// A computer this window reaches over ssh.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One way to reach a computer: what ssh is given.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Remote {
-    /// The name its folders are written under: letters, digits and
-    /// dashes, never changed once given.
-    pub id: String,
-    /// What the window calls it.
-    pub name: String,
-    /// Its address: a name, a number, or a host of `~/.ssh/config`.
+pub struct Way {
+    /// A name, a number, or a host of `~/.ssh/config`.
     pub host: String,
     /// The account signed in to; empty for ssh's own choice.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub user: String,
     /// 0 for ssh's own choice.
+    #[serde(skip_serializing_if = "is_zero")]
     pub port: u16,
-    /// Disconnected by the person: kept, with its sessions as they were
-    /// copied, and nothing reached there until it is connected again.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub off: bool,
 }
 
-impl Remote {
+fn is_zero(n: &u16) -> bool {
+    *n == 0
+}
+
+impl Way {
+    /// Whether it reaches the computer on the network this one is on: a
+    /// name the network gives (`.local`, `.lan`, `.home.arpa`) or a
+    /// private address. Anything else reaches it from anywhere.
+    pub fn local(&self) -> bool {
+        let h = self.host.trim_end_matches('.').to_ascii_lowercase();
+        if [".local", ".lan", ".home.arpa"].iter().any(|s| h.ends_with(s)) {
+            return true;
+        }
+        match h.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(a)) => a.is_private() || a.is_link_local(),
+            Ok(std::net::IpAddr::V6(a)) => (a.segments()[0] & 0xffc0) == 0xfe80 || (a.segments()[0] & 0xfe00) == 0xfc00,
+            Err(_) => false,
+        }
+    }
+
     /// `user@host`, as ssh is given it and the window says it.
     pub fn address(&self) -> String {
         if self.user.is_empty() {
@@ -75,50 +87,154 @@ impl Remote {
     }
 }
 
+/// A computer this window reaches over ssh.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Kept")]
+pub struct Remote {
+    /// The name its folders are written under: letters, digits and
+    /// dashes, never changed once given.
+    pub id: String,
+    /// What the window calls it.
+    pub name: String,
+    /// The ways to it, in the order they were added: its name on the
+    /// network at home, its name on a private network that reaches it from
+    /// anywhere, any other.
+    pub ways: Vec<Way>,
+    /// The way the person connected it by, the one every command takes;
+    /// none for the first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using: Option<Way>,
+    /// Disconnected by the person: kept, with its sessions as they were
+    /// copied, and nothing reached there until it is connected again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
+}
+
+/// A remote as `remotes.json` has it, of now or from before a computer
+/// had more than one way, when its one way was its own.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Kept {
+    id: String,
+    name: String,
+    ways: Vec<Way>,
+    using: Option<Way>,
+    host: String,
+    user: String,
+    port: u16,
+    off: bool,
+}
+
+impl From<Kept> for Remote {
+    fn from(k: Kept) -> Remote {
+        let mut ways = k.ways;
+        if ways.is_empty() && !k.host.is_empty() {
+            ways.push(Way { host: k.host, user: k.user, port: k.port });
+        }
+        Remote { id: k.id, name: k.name, ways, using: k.using, off: k.off }
+    }
+}
+
+impl Remote {
+    /// The way it is reached by: the one the person connected it by, else
+    /// the one it last answered by, else its first.
+    pub fn way(&self) -> Way {
+        self.using
+            .clone()
+            .filter(|w| self.ways.contains(w))
+            .or_else(|| probed(&self.id).and_then(|p| p.way).filter(|w| self.ways.contains(w)))
+            .or_else(|| self.ways.first().cloned())
+            .unwrap_or_default()
+    }
+
+    /// The address of the way it is reached by.
+    pub fn address(&self) -> String {
+        self.way().address()
+    }
+}
+
 fn remotes_file() -> PathBuf {
     paths::state_dir().join("remotes.json")
 }
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-/// The remotes, in the order they were added. Read again only when the
-/// file changed: the window asks while it draws.
-pub fn remotes() -> Vec<Remote> {
-    type Stamp = (PathBuf, u64, std::time::SystemTime);
-    static CACHE: Mutex<Option<(Stamp, Vec<Remote>)>> = Mutex::new(None);
+/// How long a file read is trusted before the file is looked at again.
+/// The window asks for the remotes many times a frame, a session row
+/// at a time; what this process writes is in the cache at once (`save`,
+/// `keep_probe`), and only another process's write waits this long.
+const LOOK_AGAIN: Duration = Duration::from_millis(500);
+
+type Stamp = (u64, std::time::SystemTime);
+
+fn stamp_of(path: &Path) -> Option<Stamp> {
+    std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)))
+}
+
+/// The remotes as last read: the file, its stamp, when it was looked at.
+struct KeptList {
+    path: PathBuf,
+    stamp: Option<Stamp>,
+    looked: Instant,
+    list: Arc<Vec<Remote>>,
+}
+
+static KEPT: Mutex<Option<KeptList>> = Mutex::new(None);
+
+/// The remotes, shared: read again only when the file changed, and looked
+/// at no more than every `LOOK_AGAIN`.
+fn kept() -> Arc<Vec<Remote>> {
     let path = remotes_file();
-    let Ok(meta) = std::fs::metadata(&path) else { return Vec::new() };
-    let stamp = (path.clone(), meta.len(), meta.modified().unwrap_or(std::time::UNIX_EPOCH));
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, list)) = cache.as_ref() {
-        if *at == stamp {
-            return list.clone();
+    let mut cache = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = cache.as_mut().filter(|c| c.path == path) {
+        if c.looked.elapsed() < LOOK_AGAIN {
+            return Arc::clone(&c.list);
+        }
+        let stamp = stamp_of(&path);
+        if stamp == c.stamp {
+            c.looked = Instant::now();
+            return Arc::clone(&c.list);
         }
     }
-    let list: Vec<Remote> = paths::read_json(&path).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-    *cache = Some((stamp, list.clone()));
+    let stamp = stamp_of(&path);
+    let list: Vec<Remote> = stamp.and_then(|_| paths::read_json(&path)).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let list = Arc::new(list);
+    *cache = Some(KeptList { path, stamp, looked: Instant::now(), list: Arc::clone(&list) });
     list
 }
 
+/// The remotes, in the order they were added.
+pub fn remotes() -> Vec<Remote> {
+    kept().as_ref().clone()
+}
+
 pub fn find(id: &str) -> Option<Remote> {
-    remotes().into_iter().find(|d| d.id == id)
+    kept().iter().find(|d| d.id == id).cloned()
 }
 
 fn save(list: &[Remote]) -> std::io::Result<()> {
-    paths::write_json(&remotes_file(), &serde_json::to_value(list).unwrap_or_default())
+    let path = remotes_file();
+    paths::write_json(&path, &serde_json::to_value(list).unwrap_or_default())?;
+    *KEPT.lock().unwrap_or_else(|e| e.into_inner()) = Some(KeptList { stamp: stamp_of(&path), path, looked: Instant::now(), list: Arc::new(list.to_vec()) });
+    Ok(())
 }
 
 /// The remote an address names, before it is kept: the one kept with
 /// that address, or a new one with an id of its own made from its address,
 /// the same for the same address again, so a remote removed and added back
-/// finds its copied sessions. Nothing is written: a remote is kept only once
-/// it answers (`keep`).
+/// finds its copied sessions. Either way it is reached by that address
+/// alone. Nothing is written: a remote is kept only once it answers
+/// (`settle`).
 pub fn draft(host: &str, user: &str, port: u16) -> Remote {
     let list = remotes();
     let host = host.trim().to_string();
     let user = user.trim().to_string();
-    if let Some(d) = list.iter().find(|d| d.host == host && d.user == user && d.port == port) {
-        return d.clone();
+    let way = Way { host: host.clone(), user, port };
+    // Typed with no account, it is the way kept with the account that
+    // answered then (`settle`).
+    let same = |w: &Way| w.host == way.host && w.port == way.port && (way.user.is_empty() || w.user == way.user);
+    if let Some((d, w)) = list.iter().find_map(|d| d.ways.iter().find(|w| same(w)).map(|w| (d, w.clone()))) {
+        return Remote { ways: vec![w.clone()], using: Some(w), ..d.clone() };
     }
     let base = {
         let from = if host.parse::<std::net::IpAddr>().is_ok() { host.as_str() } else { host.split('.').next().unwrap_or(&host) };
@@ -131,18 +247,158 @@ pub fn draft(host: &str, user: &str, port: u16) -> Remote {
         id = format!("{base}-{n}");
         n += 1;
     }
-    Remote { id, name: host.clone(), host, user, port, off: false }
+    Remote { id, name: host, ways: vec![way.clone()], using: Some(way), off: false }
 }
 
-/// Keep a remote, or keep the one with its id as it is now.
+/// Keep a remote (`keep_in`).
 pub fn keep(d: &Remote) -> std::io::Result<()> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = remotes();
+    keep_in(&mut list, d);
+    save(&list)
+}
+
+/// Keep a remote with its ways. One kept already takes the ways beside
+/// its own and keeps its name; disconnected, it is connected by the way
+/// it is given, and connected by another way, it stays on that one: a
+/// way is changed only by disconnecting first.
+fn keep_in(list: &mut Vec<Remote>, d: &Remote) {
     match list.iter_mut().find(|k| k.id == d.id) {
-        Some(k) => *k = d.clone(),
+        Some(k) => {
+            for w in &d.ways {
+                if !k.ways.contains(w) {
+                    k.ways.push(w.clone());
+                }
+            }
+            if k.off && !d.off {
+                k.off = false;
+                k.using = d.using.clone();
+            }
+        }
         None => list.push(d.clone()),
     }
-    save(&list)
+}
+
+/// Keep a remote that just answered with `p` (`keep_in`). When a computer
+/// kept already is the one it reached, the way is kept as another way to
+/// that one (`join`). The remote it is kept as.
+pub fn settle(d: &Remote, p: &Probe) -> std::io::Result<Remote> {
+    let mut d = d.clone();
+    let mut p = p.clone();
+    // A way typed with no account is kept with the account that answered,
+    // so every way says whom it signs in as, and goes on doing so from a
+    // computer whose own account is named otherwise.
+    if !p.user.is_empty() {
+        for w in d.ways.iter_mut().chain(d.using.iter_mut()).chain(p.way.iter_mut()) {
+            if w.user.is_empty() {
+                w.user = p.user.clone();
+            }
+        }
+    }
+    let (d, p) = (&d, &p);
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = remotes();
+    let new = !list.iter().any(|k| k.id == d.id);
+    keep_in(&mut list, d);
+    let id = join(&mut list, &d.id, p, false).map(|(id, ..)| id).or_else(|| if new { revive(&mut list, &d.id, p) } else { None }).unwrap_or_else(|| d.id.clone());
+    save(&list)?;
+    if new && id != d.id {
+        // What its probe left under an id never kept.
+        let _ = std::fs::remove_file(probe_file(&d.id));
+        let _ = std::fs::remove_dir(mirror_dir(&d.id));
+        if let Some(m) = PROBES.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            m.remove(&d.id);
+        }
+    }
+    Ok(list.into_iter().find(|k| k.id == id).unwrap_or_else(|| d.clone()))
+}
+
+/// A computer saved again after it was removed, by whatever way: the new
+/// remote `id` takes the removed one's id, so its copy and its sessions
+/// are found again, and the name it had. Known by the answer its copy
+/// kept (`same_machine`). The id it takes.
+fn revive(list: &mut [Remote], id: &str, p: &Probe) -> Option<String> {
+    let kept: Vec<String> = list.iter().map(|k| k.id.clone()).collect();
+    let mut old: Vec<String> = std::fs::read_dir(mirror_root()).ok()?.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| !kept.contains(n)).collect();
+    old.sort();
+    let was = old.into_iter().find(|n| probed(n).is_some_and(|q| same_machine(&q, p)))?;
+    let k = list.iter_mut().find(|k| k.id == id)?;
+    k.id = was.clone();
+    if let Some(name) = std::fs::read_to_string(name_file(&was)).ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+        k.name = name;
+    }
+    keep_probe(&was, p);
+    Some(was)
+}
+
+/// Make one of a computer kept twice, each by a way of its own, now that
+/// `id` answered with `p`: the one kept first takes the other's ways and
+/// stays, connected by the way that answered, and the other goes, its copy
+/// left on disk unread. The id that stays, when there were two, and the
+/// one that went with where it stood.
+pub fn join_same(id: &str, p: &Probe) -> Option<(String, usize, Remote)> {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = remotes();
+    let joined = join(&mut list, id, p, true)?;
+    save(&list).ok()?;
+    Some(joined)
+}
+
+/// `switch`: the one that stays is connected by the way `p` came by even
+/// when it was connected by another (`join_same`); otherwise only when it
+/// was disconnected (`settle`, as `keep_in`).
+fn join(list: &mut Vec<Remote>, id: &str, p: &Probe, switch: bool) -> Option<(String, usize, Remote)> {
+    let me = list.iter().position(|k| k.id == id)?;
+    let other = list.iter().position(|k| k.id != id && probed(&k.id).is_some_and(|q| same_machine(&q, p)))?;
+    let at = me.max(other);
+    let gone = list.remove(at);
+    let left = gone.clone();
+    let kept = &mut list[me.min(other)];
+    for w in gone.ways {
+        if !kept.ways.contains(&w) {
+            kept.ways.push(w);
+        }
+    }
+    if switch || kept.off {
+        kept.using = p.way.clone();
+    }
+    kept.off = kept.off && gone.off;
+    keep_probe(&kept.id, p);
+    Some((kept.id.clone(), at, left))
+}
+
+/// A kept way with no account takes the account that answered by it
+/// (`settle`), and is the way in use, having answered. Whether it changed.
+pub fn fill_account(id: &str, p: &Probe) -> bool {
+    let Some(way) = p.way.clone().filter(|w| w.user.is_empty() && !p.user.is_empty()) else { return false };
+    let full = Way { user: p.user.clone(), ..way.clone() };
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = remotes();
+    let Some(d) = list.iter_mut().find(|d| d.id == id && d.ways.contains(&way)) else { return false };
+    if d.ways.contains(&full) {
+        d.ways.retain(|w| *w != way);
+    } else {
+        for w in d.ways.iter_mut().filter(|w| **w == way) {
+            *w = full.clone();
+        }
+    }
+    if d.using.is_none() || d.using.as_ref() == Some(&way) {
+        d.using = Some(full.clone());
+    }
+    let mut p = p.clone();
+    p.way = Some(full);
+    keep_probe(id, &p);
+    save(&list).is_ok()
+}
+
+/// Whether two answers came from one computer: its own id, as the system
+/// gives it, the same. An answer from before the id was asked is matched
+/// by the computer's name, home and system.
+pub fn same_machine(a: &Probe, b: &Probe) -> bool {
+    match (&a.machine, &b.machine) {
+        (Some(x), Some(y)) => !x.is_empty() && x == y,
+        _ => !a.hostname.is_empty() && a.hostname == b.hostname && a.home == b.home && a.os == b.os,
+    }
 }
 
 /// Keep the remote an address names (`draft`, `keep`), named `name` when
@@ -156,7 +412,8 @@ pub fn add(host: &str, user: &str, port: u16, name: &str) -> std::io::Result<Rem
     Ok(d)
 }
 
-/// Disconnect a remote, or connect it again (`Remote::off`).
+/// Disconnect a remote, or connect it again by the way it had
+/// (`Remote::off`).
 pub fn set_off(id: &str, off: bool) -> std::io::Result<()> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = remotes();
@@ -166,17 +423,56 @@ pub fn set_off(id: &str, off: bool) -> std::io::Result<()> {
     save(&list)
 }
 
+/// Connect a remote by one of its ways.
+pub fn connect_by(id: &str, way: &Way) -> std::io::Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = remotes();
+    if let Some(d) = list.iter_mut().find(|d| d.id == id && d.ways.contains(way)) {
+        d.using = Some(way.clone());
+        d.off = false;
+    }
+    save(&list)
+}
+
+/// Forget one way to a remote; with none left, the remote (`remove`).
+pub fn remove_way(id: &str, way: &Way) -> std::io::Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = remotes();
+    if let Some(d) = list.iter_mut().find(|d| d.id == id) {
+        d.ways.retain(|w| w != way);
+        if d.using.as_ref() == Some(way) {
+            d.using = None;
+        }
+    }
+    let (gone, list): (Vec<Remote>, Vec<Remote>) = list.into_iter().partition(|d| d.ways.is_empty());
+    gone.iter().for_each(remember);
+    save(&list)
+}
+
 /// Whether a remote is kept and connected: not disconnected by the person.
 pub fn is_on(id: &str) -> bool {
-    remotes().iter().any(|d| d.id == id && !d.off)
+    kept().iter().any(|d| d.id == id && !d.off)
 }
 
 /// Forget a remote. Its copied sessions stay on disk, unread, and come
 /// back with it.
 pub fn remove(id: &str) -> std::io::Result<()> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let list: Vec<Remote> = remotes().into_iter().filter(|d| d.id != id).collect();
+    let (gone, list): (Vec<Remote>, Vec<Remote>) = remotes().into_iter().partition(|d| d.id == id);
+    gone.iter().for_each(remember);
     save(&list)
+}
+
+/// A remote removed is remembered beside its copy, which stays: the name
+/// it had, so the same computer saved again by any way comes back as it
+/// was (`revive`).
+fn remember(d: &Remote) {
+    let _ = std::fs::create_dir_all(mirror_dir(&d.id));
+    let _ = std::fs::write(name_file(&d.id), &d.name);
+}
+
+fn name_file(id: &str) -> PathBuf {
+    mirror_dir(id).join("name")
 }
 
 /// Rename a remote in the window.
@@ -268,6 +564,11 @@ fn control_path() -> String {
 /// first time and checked after (`accept-new`, shown in Settings), a
 /// dead link noticed, and on Unix one connection shared.
 pub fn ssh(d: &Remote, tty: bool) -> Command {
+    ssh_at(&d.way(), tty)
+}
+
+/// `ssh` by one way to a computer.
+fn ssh_at(d: &Way, tty: bool) -> Command {
     let mut cmd = crate::process::command("ssh");
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-o", "Compression=yes", "-o", "LogLevel=ERROR"]);
     // A terminal has a connection of its own: one that goes through the
@@ -292,14 +593,22 @@ pub fn ssh(d: &Remote, tty: bool) -> Command {
 /// ssh running `script` in a POSIX shell there, whatever the account's
 /// own shell is.
 pub fn command(d: &Remote, script: &str, tty: bool) -> Command {
-    let mut cmd = ssh(d, tty);
+    command_at(&d.way(), script, tty)
+}
+
+fn command_at(d: &Way, script: &str, tty: bool) -> Command {
+    let mut cmd = ssh_at(d, tty);
     cmd.arg(format!("exec /bin/sh -c {}", sh_quote(script)));
     cmd
 }
 
 /// Run a script there and take what it printed, within `timeout`.
 pub fn run(d: &Remote, script: &str, timeout: Duration) -> Result<String, String> {
-    let mut cmd = command(d, script, false);
+    run_at(&d.way(), script, timeout)
+}
+
+fn run_at(d: &Way, script: &str, timeout: Duration) -> Result<String, String> {
+    let mut cmd = command_at(d, script, false);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
     let out = wait_output(child, timeout)?;
@@ -398,6 +707,41 @@ pub struct Probe {
     /// The same of Codex (`codex login status`).
     #[serde(default)]
     pub codex_signed_in: Option<bool>,
+    /// The computer's own id, as its system gives it (a Mac's hardware
+    /// UUID, Linux's machine id): the same by every way to it, so one
+    /// computer is kept once (`same_machine`). `None` from before it was
+    /// asked, empty when the system gave none.
+    #[serde(default)]
+    pub machine: Option<String>,
+    /// The way it answered by.
+    #[serde(default)]
+    pub way: Option<Way>,
+    /// What the computer is called by its person: a Mac's Computer Name
+    /// (System Settings, General, About); empty elsewhere. `None` from
+    /// before it was asked.
+    #[serde(default)]
+    pub computer: Option<String>,
+    /// The account that answered.
+    #[serde(default)]
+    pub user: String,
+}
+
+impl Probe {
+    /// The name a computer is kept under when it is first saved: its
+    /// person's name for it, else its host's name without the network's
+    /// part.
+    pub fn name(&self) -> String {
+        match self.computer.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(c) => c.to_string(),
+            None => host_name(&self.hostname),
+        }
+    }
+}
+
+/// A host's name without the network's part: `pingfan-mba.local` is
+/// `pingfan-mba`.
+fn host_name(hostname: &str) -> String {
+    hostname.trim_end_matches(".local").split('.').next().unwrap_or("").to_string()
 }
 
 impl Probe {
@@ -422,21 +766,40 @@ fn probe_file(remote: &str) -> PathBuf {
     mirror_dir(remote).join("probe.json")
 }
 
-/// What the remote said when last reached, kept between launches.
+/// What each remote said when last reached, as `probed` last read it:
+/// the file, its stamp, when it was looked at.
+type KeptProbe = (PathBuf, Option<Stamp>, Instant, Option<Probe>);
+static PROBES: Mutex<Option<HashMap<String, KeptProbe>>> = Mutex::new(None);
+
+/// What the remote said when last reached, kept between launches. Read
+/// again only when the file changed, looked at no more than every
+/// `LOOK_AGAIN`: the window asks a session row at a time.
 pub fn probed(remote: &str) -> Option<Probe> {
-    static CACHE: Mutex<Option<HashMap<String, (std::time::SystemTime, Probe)>>> = Mutex::new(None);
     let path = probe_file(remote);
-    let at = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = PROBES.lock().unwrap_or_else(|e| e.into_inner());
     let map = cache.get_or_insert_with(HashMap::new);
-    if let Some((when, p)) = map.get(remote) {
-        if *when == at {
-            return Some(p.clone());
+    if let Some((at, stamp, looked, p)) = map.get_mut(remote).filter(|(at, ..)| *at == path) {
+        if looked.elapsed() < LOOK_AGAIN {
+            return p.clone();
+        }
+        let now = stamp_of(at);
+        if now == *stamp {
+            *looked = Instant::now();
+            return p.clone();
         }
     }
-    let p: Probe = paths::read_json(&path).and_then(|v| serde_json::from_value(v).ok())?;
-    map.insert(remote.to_string(), (at, p.clone()));
-    Some(p)
+    let stamp = stamp_of(&path);
+    let p: Option<Probe> = stamp.and_then(|_| paths::read_json(&path)).and_then(|v| serde_json::from_value(v).ok());
+    map.insert(remote.to_string(), (path, stamp, Instant::now(), p.clone()));
+    p
+}
+
+/// Keep what a remote said, on disk and in `probed`'s cache.
+fn keep_probe(remote: &str, p: &Probe) {
+    let path = probe_file(remote);
+    let _ = std::fs::create_dir_all(mirror_dir(remote));
+    let _ = paths::write_json(&path, &serde_json::to_value(p).unwrap_or_default());
+    PROBES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(remote.to_string(), (path.clone(), stamp_of(&path), Instant::now(), Some(p.clone())));
 }
 
 /// The script that asks a remote what it has. The login shell is asked
@@ -456,6 +819,11 @@ echo "home=$HOME"
 echo "os=$(uname -s)"
 echo "arch=$(uname -m)"
 echo "hostname=$(hostname 2>/dev/null)"
+m=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | sed -n 's/.*"IOPlatformUUID" = "\(.*\)".*/\1/p')
+[ -n "$m" ] || m=$(cat /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null | head -n 1)
+echo "machine=$m"
+echo "computer=$(scutil --get ComputerName 2>/dev/null)"
+echo "user=$(id -un 2>/dev/null)"
 c=$(command -v claude 2>/dev/null); echo "claude=$c"
 [ -n "$c" ] && echo "claude_version=$(claude --version 2>/dev/null | head -n 1)"
 x=$(command -v codex 2>/dev/null); echo "codex=$x"
@@ -472,13 +840,10 @@ echo "end=1"
 
 /// Ask a remote what it has, and keep the answer.
 pub fn probe(d: &Remote) -> Result<Probe, String> {
-    // A computer asleep, or one that took the connection and says nothing,
-    // fails in a few seconds rather than being waited on: anything at all
-    // within `REACH` and it is there. The probe after it, its login shell
-    // started, may take longer.
-    run(d, "echo emaki", REACH)?;
-    let out = run(d, &format!("{PROBE}{AUTH}"), Duration::from_secs(30))?;
-    let mut p = Probe::default();
+    let way = reach(d)?;
+    // The probe, its login shell started, may take longer than `REACH`.
+    let out = run_at(&way, &format!("{PROBE}{AUTH}"), Duration::from_secs(30))?;
+    let mut p = Probe { way: Some(way), ..Probe::default() };
     let mut ended = false;
     for line in out.lines() {
         let Some((k, v)) = line.split_once('=') else { continue };
@@ -489,6 +854,9 @@ pub fn probe(d: &Remote) -> Result<Probe, String> {
             "os" => p.os = v,
             "arch" => p.arch = v,
             "hostname" => p.hostname = v,
+            "machine" => p.machine = Some(v),
+            "computer" => p.computer = Some(v),
+            "user" => p.user = v,
             "claude" => p.claude = v,
             "claude_version" => p.claude_version = v.split_whitespace().next().unwrap_or("").to_string(),
             "codex" => p.codex = v,
@@ -502,9 +870,28 @@ pub fn probe(d: &Remote) -> Result<Probe, String> {
     if !ended || p.home.is_empty() {
         return Err("it answered, but not as a Mac or Linux does".into());
     }
-    let _ = std::fs::create_dir_all(mirror_dir(&d.id));
-    let _ = paths::write_json(&probe_file(&d.id), &serde_json::to_value(&p).unwrap_or_default());
+    // Kept before its person's name for it was asked, under its host's
+    // name, it takes the person's name now, once.
+    if let Some(was) = probed(&d.id).filter(|o| o.computer.is_none()) {
+        if find(&d.id).is_some_and(|k| k.name == host_name(&was.hostname)) && p.name() != host_name(&was.hostname) {
+            let _ = rename(&d.id, &p.name());
+        }
+    }
+    keep_probe(&d.id, &p);
     Ok(p)
+}
+
+/// The way a remote is connected by, when it answers within `REACH`. A
+/// computer asleep, or one that took the connection and says nothing,
+/// fails in a few seconds rather than being waited on: anything at all
+/// and it is there.
+pub fn reach(d: &Remote) -> Result<Way, String> {
+    let way = d.way();
+    if way.host.is_empty() {
+        return Err("it has no address".into());
+    }
+    run_at(&way, "echo emaki", REACH)?;
+    Ok(way)
 }
 
 /// The command that starts `program` with `args` in a remote's folder,
@@ -642,7 +1029,7 @@ pub fn check_sign_ins(remote: &str) -> Result<Probe, String> {
         }
     }
     (p.claude_signed_in, p.codex_signed_in) = (claude, codex);
-    let _ = paths::write_json(&probe_file(remote), &serde_json::to_value(&p).unwrap_or_default());
+    keep_probe(remote, &p);
     Ok(p)
 }
 
@@ -893,7 +1280,7 @@ pub fn is_there(folder: &str) -> bool {
         return false;
     }
     match split(folder) {
-        Some((id, _)) => remotes().iter().any(|d| d.id == id),
+        Some((id, _)) => kept().iter().any(|d| d.id == id),
         None => Path::new(folder).is_dir(),
     }
 }
@@ -972,6 +1359,7 @@ pub fn install_key(d: &Remote, password: &str) -> Result<(), String> {
         k = sh_quote(&key)
     );
     let mut cmd = crate::process::command("ssh");
+    let d = d.way();
     cmd.args(["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5", "-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=keyboard-interactive,password", "-o", "NumberOfPasswordPrompts=1", "-o", "ControlMaster=no", "-o", "LogLevel=ERROR", "-T"]);
     if d.port != 0 {
         cmd.args(["-p", &d.port.to_string()]);
@@ -1418,12 +1806,22 @@ impl Link {
 
     fn run(self: Arc<Self>, status: Arc<dyn Fn(&str, LinkStatus) + Send + Sync>, changed: Arc<dyn Fn() + Send + Sync>) {
         let id = self.remote.id.clone();
-        let say = |state: LinkState, probe: Option<Probe>| status(&id, LinkStatus { state, probe });
+        // A link stopped says nothing more: one started in its place for
+        // the same remote speaks for it, and a word from a probe this one
+        // was still waiting on came after the new one's.
+        let say = |state: LinkState, probe: Option<Probe>| {
+            if !self.stop.load(Ordering::Relaxed) {
+                status(&id, LinkStatus { state, probe })
+            }
+        };
         let mut wait = 5;
         while !self.stop.load(Ordering::Relaxed) {
             say(LinkState::Connecting, probed(&id));
             let probe = match probe(&self.remote) {
-                Ok(p) => p,
+                Ok(p) => {
+                    fill_account(&id, &p);
+                    p
+                }
                 Err(e) => {
                     say(LinkState::Failed(e), probed(&id));
                     self.rest(wait);
@@ -1543,6 +1941,46 @@ mod tests {
         assert_eq!(path_of(&f), "/Users/me/emaki");
         assert_eq!(split("/Users/me/emaki"), None);
         assert_eq!(path_of("/Users/me/emaki"), "/Users/me/emaki");
+    }
+
+    #[test]
+    fn a_computer_is_kept_once_with_every_way_to_it() {
+        // Kept before a computer had ways: its one way is its own.
+        let old: Remote = serde_json::from_str(r#"{"id":"mba","name":"mba","host":"mba.local","user":"me","port":0}"#).unwrap();
+        assert_eq!(old.ways, vec![Way { host: "mba.local".into(), user: "me".into(), port: 0 }]);
+        assert_eq!(serde_json::to_value(&old).unwrap(), serde_json::json!({"id":"mba","name":"mba","ways":[{"host":"mba.local","user":"me"}]}));
+        // Kept again by another way, it has both.
+        let mut list = vec![old.clone()];
+        keep_in(&mut list, &Remote { ways: vec![Way { host: "macbook-air".into(), ..Way::default() }], ..old.clone() });
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].ways.iter().map(Way::address).collect::<Vec<_>>(), ["me@mba.local", "macbook-air"]);
+        // Connected by one way, it stays on it when another is added;
+        // disconnected, it is connected by the one added.
+        let air = Way { host: "macbook-air".into(), ..Way::default() };
+        list[0].using = Some(list[0].ways[0].clone());
+        keep_in(&mut list, &Remote { ways: vec![air.clone()], using: Some(air.clone()), ..old.clone() });
+        assert_eq!(list[0].way().host, "mba.local");
+        list[0].off = true;
+        keep_in(&mut list, &Remote { ways: vec![air.clone()], using: Some(air.clone()), ..old.clone() });
+        assert_eq!((list[0].off, list[0].way()), (false, air.clone()));
+        // Named as its person names it, else by its host.
+        let named = |computer: Option<&str>| Probe { computer: computer.map(str::to_string), hostname: "pingfan-mba.local".into(), ..Probe::default() }.name();
+        assert_eq!(named(Some("小茶壶的MacBook Air")), "小茶壶的MacBook Air");
+        assert_eq!(named(Some("")), "pingfan-mba");
+        assert_eq!(named(None), "pingfan-mba");
+        // Which network a way is on.
+        assert!(list[0].ways[0].local());
+        assert!(!air.local());
+        assert!(Way { host: "192.168.1.20".into(), ..Way::default() }.local());
+        assert!(!Way { host: "100.113.189.88".into(), ..Way::default() }.local());
+        // One computer by its own id, whatever its name.
+        let p = |machine: Option<&str>, hostname: &str| Probe { machine: machine.map(str::to_string), hostname: hostname.into(), home: "/Users/me".into(), os: "Darwin".into(), ..Probe::default() };
+        assert!(same_machine(&p(Some("A"), "x"), &p(Some("A"), "y")));
+        assert!(!same_machine(&p(Some("A"), "x"), &p(Some("B"), "x")));
+        assert!(!same_machine(&p(Some(""), "x"), &p(Some(""), "x")));
+        // An answer from before the id was asked, by its name, home and system.
+        assert!(same_machine(&p(None, "mba.local"), &p(Some("A"), "mba.local")));
+        assert!(!same_machine(&p(None, "mba.local"), &p(Some("A"), "mini.local")));
     }
 
     #[test]

@@ -1561,6 +1561,17 @@ pub struct Workbench {
     /// removed, at its place, which folds away.
     pub(crate) remote_born: Option<(String, Instant)>,
     pub(crate) remote_leaving: Option<(usize, emaki_core::remote::Remote, Instant)>,
+    /// A way to a saved computer just added, which grows in under it, and
+    /// one just removed, at its place, which folds away.
+    pub(crate) remote_way_born: Vec<(String, emaki_core::remote::Way, Instant)>,
+    pub(crate) remote_way_leaving: Option<(String, usize, emaki_core::remote::Way, Instant)>,
+    /// The saved computer whose bin was pressed, asking whether to remove
+    /// it, and since when.
+    pub(crate) remote_confirm: Option<(String, Instant)>,
+    /// The saved computer whose name is being written, in its row, and
+    /// the field it is written in (Settings, Connected Devices).
+    pub(crate) remote_naming: Option<String>,
+    pub(crate) remote_name: Option<Entity<InputState>>,
     /// The saved computers' list, scrolled inside its card.
     pub(crate) remote_scroll: ScrollHandle,
     /// Which computer's projects the sidebar shows, when there are remote
@@ -4337,6 +4348,11 @@ impl Workbench {
             remote_said_n: 0,
             remote_born: None,
             remote_leaving: None,
+            remote_way_born: Vec::new(),
+            remote_way_leaving: None,
+            remote_confirm: None,
+            remote_naming: None,
+            remote_name: None,
             remote_scroll: ScrollHandle::new(),
             side_place: None,
             side_place_moved: None,
@@ -5064,6 +5080,22 @@ impl Workbench {
                     }
                     self.remote_links.insert(id, status);
                 }
+                self.relabel();
+                cx.notify();
+            }
+            HubEvent::RemoteJoined(kept, at, gone) => {
+                // Its row folds away as one removed does, and its ways grow
+                // in under the one that stays.
+                self.remote_links.remove(&gone.id);
+                for w in &gone.ways {
+                    self.remote_way_born.push((kept.clone(), w.clone(), Instant::now()));
+                }
+                self.remote_leaving = Some((at, gone, Instant::now()));
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(FOLD_ANIM).await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
                 self.relabel();
                 cx.notify();
             }
@@ -6453,7 +6485,20 @@ impl Workbench {
             // Connect's left saying it could not, as a failed connect does.
             Some("remotefailed") => self.remote_failed(cx),
             // The bin on a saved computer's row, Settings open on Connected Devices.
-            Some(t) if t.starts_with("remoteremove:") => self.remote_remove(&t["remoteremove:".len()..], cx),
+            Some(t) if t.starts_with("remoteremove:") => self.remote_confirm_ask(&t["remoteremove:".len()..], cx),
+            Some(t) if t.starts_with("remotegone:") => self.remote_remove(&t["remotegone:".len()..], cx),
+            Some(t) if t.starts_with("remoteway:") => {
+                // remoteway:<id>:<n>:on|x, the nth way's Connect or cross.
+                let mut parts = t["remoteway:".len()..].rsplitn(3, ':');
+                let (what, n, id) = (parts.next().unwrap_or(""), parts.next().and_then(|n| n.parse::<usize>().ok()), parts.next().unwrap_or(""));
+                if let Some(w) = n.and_then(|n| emaki_core::remote::find(id).and_then(|d| d.ways.get(n).cloned())) {
+                    match what {
+                        "on" => self.remote_connect_by(id, &w, cx),
+                        "x" => self.remote_remove_way(id, &w, cx),
+                        _ => {}
+                    }
+                }
+            }
             Some("settings:remote") => self.open_settings(Some("remote"), cx),
             // Sign In under a saved computer, and the code typed and
             // handed to it (the page is printed, not opened).
@@ -12851,7 +12896,6 @@ impl Workbench {
             _ if self.remote_ever.contains(id) => ("icons/unlink.svg", t("Connection lost")),
             _ => ("icons/unlink.svg", t("Not connected")),
         };
-        let address = remote.as_ref().map(|d| d.address());
         let tile = div()
             .size(px(44.))
             .rounded_full()
@@ -12862,50 +12906,62 @@ impl Workbench {
             .border_1()
             .border_color(theme.foreground.opacity(0.08))
             .child(Icon::default().path(icon).with_size(px(19.)).text_color(theme.muted_foreground));
-        // Connect, for a saved device that is not on its way.
-        let can = remote.is_some() && !connecting;
-        let target = id.to_string();
-        let connect = choice_pill("side-remote-connect", "icons/link.svg", if connecting { t("Connecting…") } else { t("Connect") }, Press::Primary, !can, theme)
-            .min_w(px(128.))
-            .justify_center()
-            .when(can, |d| {
-                d.active(|s| s.opacity(0.8)).on_click(cx.listener(move |this, _, window, cx| {
+        // Its ways, as Settings lists them under the computer: a row each,
+        // the network it goes over by its icon, its word and its address
+        // under it, so two of one kind are told apart, and the row's own
+        // button. Disconnected, each has Connect; on its way or failed,
+        // the way in use has Disconnect and the others' Connect is pale.
+        let Some(d) = remote else { return v_flex().flex_1() };
+        let using = (!d.off).then(|| d.way());
+        let edge = theme.sidebar_border;
+        let rows = d.ways.iter().enumerate().map(|(i, w)| {
+            let active = using.as_ref() == Some(w);
+            let target = id.to_string();
+            let button = if active {
+                crate::branches::small_pill(("side-remote-off", i), "icons/unlink.svg", t("Disconnect"), Press::Quiet, false, theme).on_click(cx.listener(move |this, _, window, cx| {
                     swallow_click(window, cx);
-                    this.remote_connect(&target, true, cx);
+                    this.remote_connect(&target, false, cx);
                 }))
-            });
-        let settings = div()
-            .id("side-remote-settings")
-            .size(px(28.))
-            .flex_shrink_0()
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_1()
-            .border_color(theme.foreground.opacity(0.16))
-            .text_color(theme.muted_foreground)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.foreground.opacity(0.06)).text_color(theme.foreground))
-            .active(|s| s.bg(theme.foreground.opacity(0.12)))
-            .managed_tooltip(|window, cx| crate::workbench::tip(t("Connected Devices"), window, cx))
-            .on_click(cx.listener(|this, _, window, cx| {
-                swallow_click(window, cx);
-                this.open_settings(Some("remote"), cx);
-            }))
-            .child(Icon::default().path("icons/settings.svg").with_size(px(14.)));
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_hidden()
-            .items_center()
-            .justify_center()
-            .px(px(16.))
-            .pb(px(12.))
-            .child(tile)
-            .child(div().mt(px(12.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said))
-            .children(address.map(|a| div().mt(px(3.)).max_w_full().truncate().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(theme.muted_foreground).child(a)))
-            .child(h_flex().mt(px(16.)).gap(px(8.)).items_center().child(connect).child(settings))
+            } else {
+                let busy = using.is_some();
+                let way = w.clone();
+                crate::branches::small_pill(("side-remote-on", i), "icons/link.svg", t("Connect"), Press::Quiet, busy, theme).when(!busy, |p| {
+                    p.on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.remote_connect_by(&target, &way, cx);
+                    }))
+                })
+            };
+            // The host is what tells two ways apart in this narrow room;
+            // the whole address is on the hover.
+            let host = if w.port != 0 { format!("{}:{}", w.host, w.port) } else { w.host.clone() };
+            let whole: SharedString = w.address().into();
+            h_flex()
+                .id(("side-remote-way", i))
+                .px(px(10.))
+                .py(px(8.))
+                .gap(px(9.))
+                .items_center()
+                .when(i > 0, |r| r.border_t_1().border_color(edge))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(whole.clone(), window, cx))
+                .child(Icon::default().path(if w.local() { "icons/network.svg" } else { "icons/globe.svg" }).with_size(px(14.)).text_color(theme.muted_foreground))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(1.))
+                        .child(div().min_w_0().truncate().text_size(px(12.5)).text_color(theme.foreground).child(if w.local() { t("Local network") } else { t("Remote") }))
+                        .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(10.5)).text_color(theme.muted_foreground).child(host)),
+                )
+                .child(button)
+        });
+        let card = v_flex().mt(px(16.)).w_full().max_w(px(300.)).rounded(px(10.)).border_1().border_color(edge).bg(theme.foreground.opacity(0.03)).overflow_hidden().children(rows);
+        // Its settings, under the ways whatever their number.
+        let settings = crate::branches::small_pill("side-remote-settings", "icons/settings.svg", t("Connected Devices"), Press::Quiet, false, theme).mt(px(12.)).on_click(cx.listener(|this, _, window, cx| {
+            swallow_click(window, cx);
+            this.open_settings(Some("remote"), cx);
+        }));
+        v_flex().flex_1().min_h_0().overflow_hidden().items_center().justify_center().px(px(16.)).pb(px(12.)).child(tile).child(div().mt(px(12.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(said)).child(card).child(settings)
     }
 
     /// The computers as two cards. The open one is the card its projects
@@ -12984,6 +13040,17 @@ impl Workbench {
             // name over theirs.
             .child(div().w(px(22.)).flex().justify_center().child(Icon::default().path(if open_place.is_some() { REMOTE_ICON } else { "icons/device-desktop.svg" }).with_size(px(14.)).text_color(theme.muted_foreground)))
             .child(div().flex_1().min_w_0().truncate().child(open_name))
+            // The network it goes over, its address on the hover.
+            .children(open_place.as_deref().and_then(emaki_core::remote::find).filter(|d| !d.off).map(|d| {
+                let w = d.way();
+                let tip: SharedString = format!("{} \u{b7} {}", if w.local() { t("Local network") } else { t("Remote") }, w.address()).into();
+                div()
+                    .id("side-place-way")
+                    .flex_shrink_0()
+                    .text_color(theme.muted_foreground)
+                    .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
+                    .child(Icon::default().path(if w.local() { "icons/network.svg" } else { "icons/globe.svg" }).with_size(px(13.)))
+            }))
             .children(open_place.as_deref().map(|id| dot(at, id)));
         let band = fade_in(band, format!("side-place-band-{serial}"));
         let content = fade_in(content.flex_1().min_h_0(), format!("side-place-card-{serial}"));

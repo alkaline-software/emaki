@@ -94,6 +94,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs`, `moves.rs`, `remote.rs`, `remote_files.rs` | `docs/core.md` |
 | `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, `process.rs`, `csd.rs`, any `cfg` for an OS | `docs/platform.md` |
 | Checking a change in the window from a script | `docs/probing.md` |
+| An optimization pass, or anything that runs at every frame, in a loop or on a timer | `docs/performance.md`, its log first |
 | Bumping the version and cutting a release | `docs/release.md` |
 
 A change that crosses two rows reads both docs. `workbench.rs` is in most rows: go by what the code you are changing does.

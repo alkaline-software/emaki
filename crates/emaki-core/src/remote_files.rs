@@ -225,6 +225,12 @@ struct Engine {
 }
 
 impl Engine {
+    /// The remote as it is kept now: the way it is connected by may have
+    /// changed since the engine started.
+    fn now(&self) -> Remote {
+        remote::find(&self.remote.id).unwrap_or_else(|| self.remote.clone())
+    }
+
     fn start(remote: Remote) -> Arc<Engine> {
         let files = load(&remote.id);
         // A copy with no record of what it was is not trusted to say what
@@ -301,13 +307,13 @@ impl Engine {
             st.wanted.iter().filter(|w| !st.listed.contains(*w)).cloned().collect()
         };
         if !fresh.is_empty() {
-            let out = remote::run(&self.remote, &format!("{LS}\n{}", fresh.iter().map(|d| format!("emaki_dir {}\n", sh_quote(d))).collect::<String>()), Duration::from_secs(60))?;
+            let out = remote::run(&self.now(), &format!("{LS}\n{}", fresh.iter().map(|d| format!("emaki_dir {}\n", sh_quote(d))).collect::<String>()), Duration::from_secs(60))?;
             self.take_listing(&out)?;
         }
         lock(&self.state).failed = None;
         let set: Vec<String> = lock(&self.state).wanted.iter().cloned().collect();
         let script = format!("{LS}\n{}\n{WATCH}", format_args!("set -- {}", set.iter().map(|d| sh_quote(d)).collect::<Vec<_>>().join(" ")));
-        let mut cmd = remote::command(&self.remote, &script, false);
+        let mut cmd = remote::command(&self.now(), &script, false);
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
         let lines = read_lines(&mut child);
@@ -495,7 +501,7 @@ impl Engine {
     /// moved in, so the watcher here sees the file arrive and not a part.
     fn fetch(&self, files: &[(String, u64)]) -> Result<(), String> {
         for batch in files.chunks(200) {
-            let mut cmd = remote::command(&self.remote, FETCH, false);
+            let mut cmd = remote::command(&self.now(), FETCH, false);
             cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
             let mut stdin = child.stdin.take().ok_or("no stdin")?;
@@ -610,7 +616,7 @@ impl Engine {
         if lock(&self.state).files.get(path).is_some_and(|e| e.dir) {
             return Ok(());
         }
-        remote::run(&self.remote, &format!("mkdir -p {}", sh_quote(path)), Duration::from_secs(30))?;
+        remote::run(&self.now(), &format!("mkdir -p {}", sh_quote(path)), Duration::from_secs(30))?;
         {
             let mut st = lock(&self.state);
             st.files.insert(path.to_string(), Entry { dir: true, ..Entry::default() });
@@ -639,7 +645,7 @@ impl Engine {
         let before = stamp(local);
         let bytes = std::fs::read(local).map_err(|e| e.to_string())?;
         let script = format!("{STAT}\np={}\n{SEND}", sh_quote(path));
-        let mut cmd = remote::command(&self.remote, &script, false);
+        let mut cmd = remote::command(&self.now(), &script, false);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
         let mut stdin = child.stdin.take().ok_or("no stdin")?;
@@ -749,7 +755,7 @@ pub fn moved(from: &Path, to: &Path, local: impl FnOnce() -> Result<(), String>)
             let e = engine(&ia).ok_or("that computer is not in Settings, Connected Devices")?;
             let _held = lock(&e.moving);
             let script = format!("[ -e {b} ] && {{ echo 'already there' >&2; exit 3; }}; mkdir -p {d} && mv {a} {b}", a = sh_quote(&pa), b = sh_quote(&pb), d = sh_quote(&parent_of(&pb)));
-            remote::run(&e.remote, &script, Duration::from_secs(60))?;
+            remote::run(&e.now(), &script, Duration::from_secs(60))?;
             local()?;
             let mut st = lock(&e.state);
             let prefix = format!("{pa}/");
@@ -766,13 +772,13 @@ pub fn moved(from: &Path, to: &Path, local: impl FnOnce() -> Result<(), String>)
         (Some((id, path)), None) => {
             let e = engine(&id).ok_or("that computer is not in Settings, Connected Devices")?;
             let _held = lock(&e.moving);
-            let out = remote::run(&e.remote, &format!("p={}\n{TRASH}", sh_quote(&path)), Duration::from_secs(60))?;
+            let out = remote::run(&e.now(), &format!("p={}\n{TRASH}", sh_quote(&path)), Duration::from_secs(60))?;
             let there = out.trim().to_string();
             if there.is_empty() {
                 return Err("it could not be moved to the trash there".into());
             }
             if let Err(err) = local() {
-                let _ = remote::run(&e.remote, &format!("mv {} {}", sh_quote(&there), sh_quote(&path)), Duration::from_secs(60));
+                let _ = remote::run(&e.now(), &format!("mv {} {}", sh_quote(&there), sh_quote(&path)), Duration::from_secs(60));
                 return Err(err);
             }
             let mut st = lock(&e.state);
@@ -789,7 +795,7 @@ pub fn moved(from: &Path, to: &Path, local: impl FnOnce() -> Result<(), String>)
             local()?;
             if let Some(there) = back {
                 let script = format!("[ -e {b} ] && exit 3; mkdir -p {d} && mv {a} {b}", a = sh_quote(&there), b = sh_quote(&path), d = sh_quote(&parent_of(&path)));
-                if remote::run(&e.remote, &script, Duration::from_secs(60)).is_ok() {
+                if remote::run(&e.now(), &script, Duration::from_secs(60)).is_ok() {
                     // What it holds is listed again when its folder is.
                     let prefix = format!("{path}/");
                     let mut st = lock(&e.state);

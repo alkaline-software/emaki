@@ -499,7 +499,7 @@ fn main() {
         "remote" => {
             // emaki-core remote: the remote computers and what each said of
             // itself; `add <[user@]host[:port]> [--password <pw>]`,
-            // `remove <id>`, `link <id> [--secs <n>]` (copy its sessions
+            // `remove <id>`, `rename <id> <name>`, `link <id> [--secs <n>]` (copy its sessions
             // and follow them, printing how the link stands).
             use emaki_core::remote;
             match args.get(1).map(String::as_str) {
@@ -518,7 +518,7 @@ fn main() {
                     }
                     match got {
                         Ok(p) => {
-                            remote::keep(&d).expect("keep");
+                            let d = remote::settle(&d, &p).expect("keep");
                             println!("{} ({}): {:?}", d.id, d.address(), p)
                         }
                         Err(e) => {
@@ -528,6 +528,7 @@ fn main() {
                     }
                 }
                 Some("remove") => remote::remove(args.get(2).expect("remote remove <id>")).expect("remove"),
+                Some("rename") => remote::rename(args.get(2).expect("remote rename <id> <name>"), args.get(3).expect("remote rename <id> <name>")).expect("rename"),
                 Some("link") => {
                     let id = args.get(2).expect("remote link <id>");
                     let secs: u64 = args.iter().position(|a| a == "--secs").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(30);

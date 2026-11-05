@@ -53,17 +53,23 @@ pub fn expand_tilde(s: &str) -> PathBuf {
 /// `~/.emaki` whole: the archive, logs, state and uploads come along and
 /// nothing is copied. A failed move leaves the old directory in place and
 /// starts fresh, never half of each.
+///
+/// The move is looked for once a run, not at every call: every path the
+/// app names starts here, many times a frame.
 pub fn root() -> PathBuf {
     if let Some(p) = env_path("EMAKI_HOME") {
         return p;
     }
     let new = home().join(".emaki");
-    if !new.exists() {
-        let old = legacy_root();
-        if old.is_dir() {
-            let _ = fs::rename(&old, &new);
+    static MOVED: std::sync::Once = std::sync::Once::new();
+    MOVED.call_once(|| {
+        if !new.exists() {
+            let old = legacy_root();
+            if old.is_dir() {
+                let _ = fs::rename(&old, &new);
+            }
         }
-    }
+    });
     new
 }
 

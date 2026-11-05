@@ -9809,15 +9809,6 @@
     "de": "{computer} ist getrennt: verbinde ihn in Einstellungen, Verbundene Geräte",
     "es": "{computer} está desconectado: conéctalo en Ajustes, Dispositivos conectados"
   },
-  "New computer": {
-    "zh-Hans": "新电脑",
-    "zh-Hant": "新電腦",
-    "ja": "新しいコンピュータ",
-    "ko": "새 컴퓨터",
-    "fr": "Nouvel ordinateur",
-    "de": "Neuer Computer",
-    "es": "Nuevo ordenador"
-  },
   "This computer": {
     "zh-Hans": "本机",
     "zh-Hant": "本機",
@@ -9934,5 +9925,68 @@
     "fr": "{agent} indique toujours ne pas être connecté là-bas",
     "de": "{agent} meldet dort weiterhin, nicht angemeldet zu sein",
     "es": "{agent} allí sigue diciendo que no ha iniciado sesión"
+  },
+  "Local network": {
+    "zh-Hans": "局域网",
+    "zh-Hant": "區域網路",
+    "ja": "ローカルネットワーク",
+    "ko": "로컬 네트워크",
+    "fr": "Réseau local",
+    "de": "Lokales Netzwerk",
+    "es": "Red local"
+  },
+  "Remote": {
+    "zh-Hans": "远程",
+    "zh-Hant": "遠端",
+    "ja": "リモート",
+    "ko": "원격",
+    "fr": "À distance",
+    "de": "Fernverbindung",
+    "es": "Remoto"
+  },
+  "Remove Computer": {
+    "zh-Hans": "移除电脑",
+    "zh-Hant": "移除電腦",
+    "ja": "コンピュータを削除",
+    "ko": "컴퓨터 제거",
+    "fr": "Supprimer l’ordinateur",
+    "de": "Computer entfernen",
+    "es": "Quitar ordenador"
+  },
+  "Remove Connection": {
+    "zh-Hans": "移除连接",
+    "zh-Hant": "移除連線",
+    "ja": "接続を削除",
+    "ko": "연결 제거",
+    "fr": "Supprimer la connexion",
+    "de": "Verbindung entfernen",
+    "es": "Quitar conexión"
+  },
+  "Remove this computer?": {
+    "zh-Hans": "移除这台电脑？",
+    "zh-Hant": "移除這台電腦？",
+    "ja": "このコンピュータを削除しますか？",
+    "ko": "이 컴퓨터를 제거할까요?",
+    "fr": "Supprimer cet ordinateur ?",
+    "de": "Diesen Computer entfernen?",
+    "es": "¿Quitar este ordenador?"
+  },
+  "New connection": {
+    "zh-Hans": "新连接",
+    "zh-Hant": "新連線",
+    "ja": "新しい接続",
+    "ko": "새 연결",
+    "fr": "Nouvelle connexion",
+    "de": "Neue Verbindung",
+    "es": "Nueva conexión"
+  },
+  "Computer name": {
+    "zh-Hans": "电脑名称",
+    "zh-Hant": "電腦名稱",
+    "ja": "コンピュータ名",
+    "ko": "컴퓨터 이름",
+    "fr": "Nom de l’ordinateur",
+    "de": "Computername",
+    "es": "Nombre del ordenador"
   }
 }

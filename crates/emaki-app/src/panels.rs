@@ -10748,6 +10748,17 @@ impl Workbench {
                     });
                 }
             }
+            // Settings, Connected Devices: a saved computer's name written
+            // in its row, as a double click on it begins (remotename:<id>);
+            // shortcutkey: types in it.
+            t if t.starts_with("remotename:") => {
+                if let Some(h) = self.settings_window {
+                    let (id, me) = (t["remotename:".len()..].to_string(), cx.entity().downgrade());
+                    cx.defer(move |cx| {
+                        let _ = h.update(cx, |_, window, cx| me.update(cx, |this, cx| this.remote_rename(&id, window, cx)));
+                    });
+                }
+            }
             // Text Size's preset, or one place's size in points.
             t if t.starts_with("size:") => self.set_chat_size(&t["size:".len()..], cx),
             // Words typed in a place's field and ↩, as a hand types them.
