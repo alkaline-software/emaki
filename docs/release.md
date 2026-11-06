@@ -35,10 +35,10 @@ The names never change, so `releases/latest/download/<name>` links stay valid. T
 
 ### 1. Bump the version
 
-The version lives in one place, `version = "X.Y.Z"` in the workspace's `Cargo.toml`; both crates inherit it. `Cargo.lock` records it too, and CI builds with `--locked`, so refresh the lock and commit it with the rest:
+The version lives in one place, `version = "X.Y.Z"` in the workspace's `Cargo.toml`; both crates inherit it. `Cargo.lock` records it too, under `name = "emaki-app"` and `name = "emaki-core"`, and CI builds with `--locked`. Change those two lines by hand, nothing else in the lock, and confirm it builds as it stands:
 
 ```
-cargo check -p emaki-app
+cargo check --locked -p emaki-app
 ```
 
 ### 2. Write the changelog section
@@ -275,6 +275,7 @@ Every failure met while cutting a release gets a line here once it is solved, wi
 - **One Mac package job in `release.yml` fails right after "satisfies its Designated Requirement", with no message, while the other passes**: `hdiutil create` on the runner ("Resource busy"). `release-mac.sh` tries it five times and says why. If it still fails, re-run only that job, which keeps the tag and the images built here: `gh run rerun <run-id> --failed --repo alkaline-software/emaki`. The `release` job waits for all six.
 - **`release-mac.sh` stops with "Finder ... AppleEvent timed out (-1712)"**: macOS asked whether the terminal may control Finder and nobody answered. Allow it (System Settings, Privacy & Security, Automation) and run the script again.
 - **`release-mac.sh --notarize` or `release-check.sh` stops with "No Keychain password item found for profile: notarytool-profile"** while the profile is in place: the Mac's screen is locked. `store-credentials` keeps the profile in the keychain that opens only while the screen is unlocked, and this Mac locks it the moment the display sleeps, so a release run overnight finds no profile from then on, in an agent's session or anyone's, while builds and CI go on. It is not the sandbox or which Emaki the session runs in. Notarize while the person is at the Mac; a run that reaches step 5 with the screen locked waits for it.
+- **The bump rewrites hundreds of lines of `Cargo.lock`**: `cargo check` without `--locked` after the version changed, or `cargo update --workspace`, resolves the whole lock again, and moved zed's crates and others to new versions (v0.5.1, before the commit). A release ships the dependencies that were tested; step 1 changes the two version lines by hand. Put the lock back with `git checkout Cargo.lock` and do that.
 - **CI refuses the tag with "Cargo.toml says X but the tag is vY", "CHANGELOG.md has no section '## vX.Y.Z'", a `--locked` failure, or a Windows job's "cannot find type" or unresolved import**: `scripts/release-check.sh` was skipped, which catches each of these. Fix it (a line used on every platform that leans on something gated for Unix or macOS, for the last), commit, redo the tag.
 - **Notarization rejected**: `xcrun notarytool log <submission-id> --keychain-profile notarytool-profile`. The usual causes are a binary signed without `--options runtime` or an unsigned helper inside the bundle; the script signs with `--deep` and the hardened runtime, so look for a new binary the packager added.
 - **The Finder layout step fails**: the volume `Emaki vX.Y.Z` was already mounted, or Finder had no session. The script detaches a stale volume first; `hdiutil info` shows what is mounted.
