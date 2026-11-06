@@ -5063,7 +5063,9 @@ fn a_memory_report_is_written_to_the_logs() {
 
 /// A file another program moves, or whose folder it renames, is found
 /// where it went through the handle kept open on it; and what moved is
-/// the folder, not the file under it.
+/// the folder, not the file under it. Not on Windows, which refuses to
+/// rename a folder over an open file, and where nothing is held.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn an_open_file_is_found_where_it_was_moved() {
     use emaki_core::fsops::{what_moved, where_now};
@@ -5075,10 +5077,7 @@ fn an_open_file_is_found_where_it_was_moved() {
     let file = std::fs::File::open(&old).unwrap();
     std::fs::rename(root.join("2026-11-05-unsw"), root.join("2026-11-06-unsw")).unwrap();
     let new = root.join("2026-11-06-unsw").join("README.md");
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     assert_eq!(where_now(&file), Some(new.clone()));
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = where_now(&file);
     assert_eq!(what_moved(&old, &new), (root.join("2026-11-05-unsw"), root.join("2026-11-06-unsw")));
     assert_eq!(what_moved(&root.join("a.md"), &root.join("b.md")), (root.join("a.md"), root.join("b.md")));
 }

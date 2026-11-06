@@ -3143,7 +3143,7 @@ impl Workbench {
                 Ok(meta) => {
                     // The file showing is held open, so it can be found
                     // again if another program moves it.
-                    if self.file_held.as_ref().is_none_or(|(held, _)| *held != path) {
+                    if emaki_core::fsops::CAN_FOLLOW && self.file_held.as_ref().is_none_or(|(held, _)| *held != path) {
                         self.file_held = std::fs::File::open(&path).ok().map(|f| (path.clone(), f));
                     }
                     let now = meta.modified().ok();

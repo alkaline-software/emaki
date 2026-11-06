@@ -43,6 +43,12 @@ pub struct Journal {
 /// How many things done are kept to take back.
 const MOST: usize = 100;
 
+/// Whether `where_now` can answer here, and so whether a file is worth
+/// holding open to follow. Windows cannot, and there a folder is not let
+/// be renamed while a file in it is open: held, the file's folder could
+/// not be renamed by the agent or the person at all.
+pub const CAN_FOLLOW: bool = cfg!(any(target_os = "macos", target_os = "linux"));
+
 /// Where an open file is now, as the system knows it: a file renamed or
 /// moved, or a folder over it renamed, by another program (the agent, the
 /// Finder) is still the file the handle has open. macOS asks the handle
