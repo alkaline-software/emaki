@@ -35,6 +35,10 @@ pub struct TextViewStyle {
     /// on a single line — columns then never shrink and the table scrolls as
     /// soon as the content is wider than the frame.
     pub table_cell: StyleRefinement,
+    /// The ground under the text, which a table that scrolls sideways
+    /// fades into at an edge with more past it; `None` is the theme's
+    /// background. (Emaki addition.)
+    pub table_ground: Option<Hsla>,
     /// The highlight style for inline code.
     ///
     /// Default is [`HighlightStyle::default()`], the `background_color` will
@@ -94,6 +98,7 @@ impl PartialEq for TextViewStyle {
             && self.code_block == other.code_block
             && self.table == other.table
             && self.table_cell == other.table_cell
+            && self.table_ground == other.table_ground
             && self.inline_code == other.inline_code
             && self.inline_code_font_family == other.inline_code_font_family
             && self.inline_code_chip == other.inline_code_chip
@@ -116,6 +121,7 @@ impl Default for TextViewStyle {
             code_block: StyleRefinement::default(),
             table: StyleRefinement::default(),
             table_cell: StyleRefinement::default(),
+            table_ground: None,
             inline_code: HighlightStyle::default(),
             inline_code_font_family: None,
             inline_code_chip: None,

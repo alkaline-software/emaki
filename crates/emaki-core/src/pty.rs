@@ -189,6 +189,12 @@ pub fn mouse_bytes(code: u8, col: u16, row: u16, press: bool, form: MouseForm) -
 /// Every live one, for `for_pid`.
 static LIVE: Mutex<Vec<Arc<Pty>>> = Mutex::new(Vec::new());
 
+/// How many terminals of ours are alive, the shells' too, for the
+/// memory report.
+pub fn live_count() -> usize {
+    held(&LIVE).len()
+}
+
 /// The hidden terminal whose child is `pid`, when there is one.
 pub fn for_pid(pid: i32) -> Option<Arc<Pty>> {
     held(&LIVE).iter().find(|p| p.pid == pid && p.alive()).cloned()

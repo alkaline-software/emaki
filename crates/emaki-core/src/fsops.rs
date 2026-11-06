@@ -43,6 +43,51 @@ pub struct Journal {
 /// How many things done are kept to take back.
 const MOST: usize = 100;
 
+/// Where an open file is now, as the system knows it: a file renamed or
+/// moved, or a folder over it renamed, by another program (the agent, the
+/// Finder) is still the file the handle has open. macOS asks the handle
+/// (`F_GETPATH`), Linux its entry in `/proc/self/fd`. None on Windows,
+/// where a file moved by another program is found again only when opened
+/// again, and for a file no longer anywhere.
+pub fn where_now(file: &std::fs::File) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::AsRawFd;
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+            return None;
+        }
+        let end = buf.iter().position(|b| *b == 0)?;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..end])))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
+        // A file removed is named "<path> (deleted)" there.
+        (!path.to_string_lossy().ends_with(" (deleted)")).then_some(path)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// The folder or file that moved, when `old` is now `new`: the two less
+/// the names they end in together. A file renamed is itself; a folder
+/// over it renamed or moved is that folder, so what else is under it can
+/// follow too.
+pub fn what_moved(old: &Path, new: &Path) -> (PathBuf, PathBuf) {
+    let (mut from, mut to) = (old.to_path_buf(), new.to_path_buf());
+    while from.file_name().is_some() && from.file_name() == to.file_name() && from.parent().is_some() && to.parent().is_some() {
+        from.pop();
+        to.pop();
+    }
+    (from, to)
+}
+
 /// Move a file or a folder to a path nothing is at. Its folder is made
 /// when it is not there. Across two volumes it is not moved: a rename is
 /// all this does, so nothing is ever half copied.

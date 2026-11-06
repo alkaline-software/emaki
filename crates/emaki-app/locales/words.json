@@ -1709,6 +1709,15 @@
     "de": "Emaki {latest} ist verfügbar. Aktualisiere in den Einstellungen (⌘,).",
     "es": "Emaki {latest} está disponible. Actualiza desde Ajustes (⌘,)."
   },
+  "{size} of memory in use": {
+    "zh-Hans": "已使用 {size} 内存",
+    "zh-Hant": "已使用 {size} 記憶體",
+    "ja": "{size} のメモリを使用中",
+    "ko": "메모리 {size} 사용 중",
+    "fr": "{size} de mémoire utilisés",
+    "de": "{size} Arbeitsspeicher belegt",
+    "es": "{size} de memoria en uso"
+  },
   "Empty Trash": {
     "zh-Hans": "清倒废纸篓",
     "zh-Hant": "清空垃圾桶",
@@ -3112,6 +3121,24 @@
     "fr": "Non connecté",
     "de": "Nicht angemeldet",
     "es": "Sin iniciar sesión"
+  },
+  "Connect below to sign in to {agent}": {
+    "zh-Hans": "请先在下方连接，再登录 {agent}",
+    "zh-Hant": "請先在下方連線，再登入 {agent}",
+    "ja": "{agent} にサインインするには、先に下で接続してください",
+    "ko": "{agent}에 로그인하려면 먼저 아래에서 연결하세요",
+    "fr": "Connectez-vous ci-dessous pour authentifier {agent}",
+    "de": "Erst unten verbinden, um {agent} anzumelden",
+    "es": "Conéctese abajo para iniciar sesión en {agent}"
+  },
+  "Connect to sign in": {
+    "zh-Hans": "连接后即可登录",
+    "zh-Hant": "連線後即可登入",
+    "ja": "接続するとサインインできます",
+    "ko": "연결하면 로그인할 수 있습니다",
+    "fr": "Connectez-vous à l’ordinateur pour l’authentifier",
+    "de": "Zum Anmelden zuerst verbinden",
+    "es": "Conéctese para iniciar sesión"
   },
   "Not switched": {
     "zh-Hans": "未切换",
@@ -5839,6 +5866,15 @@
     "fr": "impossible de conserver l’image collée : {e}",
     "de": "eingesetztes Bild konnte nicht gesichert werden: {e}",
     "es": "no se ha podido guardar la imagen pegada: {e}"
+  },
+  "a report for its developers is saved": {
+    "zh-Hans": "已保存一份给开发者的报告",
+    "zh-Hant": "已儲存一份給開發者的報告",
+    "ja": "開発者向けのレポートを保存しました",
+    "ko": "개발자용 보고서를 저장했습니다",
+    "fr": "un rapport pour ses développeurs est enregistré",
+    "de": "ein Bericht für die Entwickler ist gespeichert",
+    "es": "se ha guardado un informe para sus desarrolladores"
   },
   "could not keep the word: {e}": {
     "zh-Hans": "无法保存该单词：{e}",

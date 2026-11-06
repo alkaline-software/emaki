@@ -1502,11 +1502,18 @@ impl Workbench {
         // said: a tick, or a mark that it is not. One not signed in is a
         // button while the computer is connected: a click starts its
         // sign-in (`remote_sign_in`).
-        let connected = !d.off && status.state == LinkState::Connected;
+        // Connected counts while it copies what it has, as everywhere a
+        // link is asked of: with Connected alone the pill began to grow,
+        // went at the copy, and grew again.
+        let connected = !d.off && self.remote_linked(&d.id);
+        // No way to it is up or on its way: a sign-in has to wait for a
+        // Connect below, and a click on a mark not signed in says so.
+        let reaching = !d.off && self.remote_links.get(&d.id).is_some_and(|s| matches!(s.state, LinkState::Connecting | LinkState::Connected | LinkState::Copying(..)));
         let signing = self.remote_login.as_ref().is_some_and(|l| l.id == d.id);
         let agents_said = if !agents.is_empty() {
             let ring = theme.background.blend(card_ground(theme));
             let glyph = theme.background;
+            let (green, warning) = (theme.green, theme.warning);
             h_flex()
                 .gap(px(2.))
                 .items_center()
@@ -1518,35 +1525,102 @@ impl Workbench {
                     let tip: SharedString = match signed {
                         Some(true) => format!("{name} \u{b7} {}", t("Signed in")).into(),
                         Some(false) if can_sign => tf("Sign in to {agent}", &[("agent", &name)]).into(),
+                        Some(false) if !connected => format!("{name} \u{b7} {} \u{b7} {}", t("Not signed in"), t("Connect to sign in")).into(),
                         Some(false) => format!("{name} \u{b7} {}", t("Not signed in")).into(),
                         None => name.into(),
                     };
-                    let badge = signed.map(|ok| {
+                    // How it stands there is a status, drawn on the mark;
+                    // what can be pressed is a button. One that can be
+                    // signed in is a pill: the mark, then "Sign in", with
+                    // an edge and a hover. Its words and edge grow out of
+                    // the mark and back as that comes and goes, so the
+                    // marks after it move with it, never at a jump.
+                    let badge_of = move |ok: bool| {
                         let disc = div().absolute().top(px(-1.)).right(px(-1.)).size(px(10.)).rounded_full().border(px(1.5)).border_color(ring).flex().items_center().justify_center();
                         if ok {
-                            disc.bg(theme.green).child(Icon::new(IconName::Check).with_size(px(7.)).text_color(glyph))
+                            disc.bg(green).child(Icon::new(IconName::Check).with_size(px(7.)).text_color(glyph))
                         } else {
-                            disc.bg(theme.warning).child(v_flex().items_center().gap(px(0.5)).child(div().w(px(1.5)).h(px(3.)).rounded_full().bg(glyph)).child(div().size(px(1.5)).rounded_full().bg(glyph)))
+                            disc.bg(warning).child(v_flex().items_center().gap(px(0.5)).child(div().w(px(1.5)).h(px(3.)).rounded_full().bg(glyph)).child(div().size(px(1.5)).rounded_full().bg(glyph)))
                         }
-                    });
+                    };
+                    let word: SharedString = t("Sign in").into();
+                    // The words' width as last drawn, for the pill's growth:
+                    // they are laid out whole inside it every frame, cut
+                    // by it, and measured there. Never drawn yet, a guess.
+                    let measured = self.sign_word_w.clone();
+                    let word_w = if measured.get() > 0. { measured.get() } else { word.chars().count() as f32 * 7. };
+                    let (ink, edge, mark_color) = (theme.foreground, theme.foreground.opacity(0.16), agent_color(a, theme));
+                    let pill = move |open: f32| {
+                        h_flex()
+                            .h(px(22.))
+                            .items_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(edge.opacity(open))
+                            .pl(px(3. * open))
+                            .pr(px(10. * open))
+                            .child(div().relative().size(px(20.)).flex_shrink_0().flex().items_center().justify_center().child(agent_icon(a, px(14.), mark_color)).children(signed.map(badge_of)))
+                            .child({
+                                let measured = measured.clone();
+                                let words = div()
+                                    .relative()
+                                    .flex_shrink_0()
+                                    .whitespace_nowrap()
+                                    .text_size(px(12.))
+                                    .text_color(ink)
+                                    .child(word.clone())
+                                    .child(gpui::canvas(move |b, _, _| measured.set(f32::from(b.size.width)), |_, _, _, _| {}).absolute().inset_0());
+                                // At rest the words take their own width;
+                                // only the growth goes by the measure.
+                                div()
+                                    .overflow_hidden()
+                                    .opacity(open)
+                                    .pl(px(3. * open))
+                                    .when(open < 1., |d| d.max_w(px(word_w * open)))
+                                    .child(words)
+                            })
+                    };
+                    let key = format!("remote-sign-{}-{}", d.id, a.as_str());
+                    let (from, to, len, n) = self.sign_fold(&key, can_sign, cx);
                     let id = d.id.clone();
-                    div()
-                        .id(SharedString::from(format!("remote-agent-{}-{}", d.id, a.as_str())))
-                        .relative()
-                        .size(px(22.))
-                        .rounded(px(6.))
-                        .flex()
+                    let drawn = if len.is_zero() {
+                        div().child(pill(to)).into_any_element()
+                    } else {
+                        div().with_animation(ElementId::Name(format!("{key}-{n}").into()), Animation::new(len).with_easing(ease_out_quint()), move |d, t| d.child(pill(from + (to - from) * t))).into_any_element()
+                    };
+                    let slot = div().id(SharedString::from(format!("remote-agent-{}-{}", d.id, a.as_str()))).flex_shrink_0().rounded_full().child(drawn);
+                    let slot = if can_sign {
+                        slot.cursor_pointer().hover(|s| s.bg(ink.opacity(0.06))).on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.remote_sign_in(&id, a, cx);
+                        }))
+                    } else if !reaching && signed == Some(false) {
+                        // A status still, so no pointer of a button; but a
+                        // press on it is meant, and is answered.
+                        slot.on_click(cx.listener(move |this, _, window, cx| {
+                            swallow_click(window, cx);
+                            this.connect_first(&id, a, cx);
+                        }))
+                    } else {
+                        slot
+                    };
+                    slot.managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
+                }))
+                .children(self.connect_first.as_ref().filter(|f| f.0 == d.id && f.2.elapsed() < REMOTE_SAID_FOR && !reaching).map(|(_, agent, _, serial)| {
+                    let total = REMOTE_SAID_FOR.as_secs_f32();
+                    h_flex()
+                        .ml(px(8.))
+                        .min_w_0()
+                        .gap(px(4.))
                         .items_center()
-                        .justify_center()
-                        .child(agent_icon(a, px(14.), agent_color(a, theme)))
-                        .children(badge)
-                        .when(can_sign, |d| {
-                            d.cursor_pointer().hover(|s| s.bg(theme.muted)).on_click(cx.listener(move |this, _, window, cx| {
-                                swallow_click(window, cx);
-                                this.remote_sign_in(&id, a, cx);
-                            }))
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::default().path("icons/arrow-down.svg").with_size(px(12.)).text_color(theme.muted_foreground))
+                        .child(div().min_w_0().truncate().child(tf("Connect below to sign in to {agent}", &[("agent", &agent.display_name())])))
+                        .with_animation(ElementId::NamedInteger("connect-first".into(), u64::from(*serial)), Animation::new(REMOTE_SAID_FOR), move |d, t| {
+                            let s = t * total;
+                            d.opacity((s / 0.24).min(1.).min((total - s) / 0.4).clamp(0., 1.))
                         })
-                        .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                 }))
                 .into_any_element()
         } else if probe.is_some() {
@@ -2211,6 +2285,79 @@ impl Workbench {
 
     /// Say at Connect's left that it could not, for a moment, and draw
     /// again once the words are gone.
+    /// A press on an agent's mark beside a saved computer, as the probe's
+    /// `remotesign` step makes it: what a click there does in each state.
+    pub(crate) fn agent_mark_pressed(&mut self, id: &str, agent: AgentId, cx: &mut Context<Self>) {
+        use emaki_core::remote::LinkState;
+        let Some(d) = emaki_core::remote::find(id) else { return };
+        let probe = self.remote_links.get(id).and_then(|s| s.probe.clone()).or_else(|| emaki_core::remote::probed(id));
+        if probe.and_then(|p| p.signed_in(agent)) != Some(false) {
+            return;
+        }
+        let reaching = !d.off && self.remote_links.get(id).is_some_and(|s| matches!(s.state, LinkState::Connecting | LinkState::Connected | LinkState::Copying(..)));
+        if !d.off && self.remote_linked(id) && self.remote_login.as_ref().is_none_or(|l| l.id != id) {
+            self.remote_sign_in(id, agent, cx);
+        } else if !reaching {
+            self.connect_first(id, agent, cx);
+        }
+    }
+
+    /// A press on an agent's mark that cannot sign in until the computer
+    /// is reached: the words to the marks' right say so, and fade by
+    /// themselves, as "Connection failed" does.
+    pub(crate) fn connect_first(&mut self, id: &str, agent: AgentId, cx: &mut Context<Self>) {
+        let serial = self.connect_first.as_ref().map_or(0, |f| f.3 + 1);
+        self.connect_first = Some((id.to_string(), agent, Instant::now(), serial));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REMOTE_SAID_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.connect_first.as_ref().is_some_and(|f| f.3 == serial) {
+                    this.connect_first = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// How far an agent's Sign in pill stands, open 1 or shut 0, as
+    /// (from, to, length, serial): a change runs from where it stood
+    /// toward where it goes, over the share of `FOLD_ANIM` left to it, so
+    /// one turned back part way goes back from there, not from its far
+    /// end. At rest the length is zero. The view is drawn again once a
+    /// run is over, so it rests there.
+    fn sign_fold(&self, key: &str, open: bool, cx: &mut Context<Self>) -> (f32, f32, Duration, u32) {
+        let mut all = self.sign_folds.borrow_mut();
+        let now = Instant::now();
+        let to = if open { 1. } else { 0. };
+        let at = |from: f32, to: f32, since: Instant| {
+            let len = FOLD_ANIM.mul_f32((to - from).abs());
+            if len.is_zero() {
+                return to;
+            }
+            let t = (since.elapsed().as_secs_f32() / len.as_secs_f32()).min(1.);
+            from + (to - from) * ease_out_quint()(t)
+        };
+        let fold = all.entry(key.to_string()).or_insert((open, to, now, 0));
+        if fold.0 != open {
+            let was = at(fold.1, if fold.0 { 1. } else { 0. }, fold.2);
+            *fold = (open, was, now, fold.3 + 1);
+            let len = FOLD_ANIM.mul_f32((to - was).abs());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(len + Duration::from_millis(20)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        let len = FOLD_ANIM.mul_f32((to - fold.1).abs());
+        if fold.2.elapsed() >= len {
+            return (to, to, Duration::ZERO, fold.3);
+        }
+        (fold.1, to, len, fold.3)
+    }
+
     pub(crate) fn remote_failed(&mut self, cx: &mut Context<Self>) {
         self.remote_said = Some(Instant::now());
         self.remote_said_n += 1;

@@ -1848,6 +1848,11 @@ impl LiveRows {
         &self.tail.path
     }
 
+    /// How many rows are held, for the memory report.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
     /// The session as its file has it now.
     pub fn build(&mut self, cwd_hint: &str) -> Session {
         let mut new = self.tail.read_new();

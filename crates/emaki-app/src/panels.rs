@@ -3138,12 +3138,24 @@ impl Workbench {
     pub(crate) fn tick_files(&mut self, cx: &mut Context<Self>) {
         self.keep_drafts(cx);
         if let Some(v) = self.file_view.as_ref().filter(|_| !self.file_reading) {
-            let now = std::fs::metadata(&v.path).ok().and_then(|m| m.modified().ok());
-            if now.is_some() && now != v.mtime {
-                let path = v.path.clone();
-                self.show_file(&path, cx);
-                cx.notify();
+            let path = v.path.clone();
+            match std::fs::metadata(&path) {
+                Ok(meta) => {
+                    // The file showing is held open, so it can be found
+                    // again if another program moves it.
+                    if self.file_held.as_ref().is_none_or(|(held, _)| *held != path) {
+                        self.file_held = std::fs::File::open(&path).ok().map(|f| (path.clone(), f));
+                    }
+                    let now = meta.modified().ok();
+                    if now.is_some() && now != v.mtime {
+                        self.show_file(&path, cx);
+                        cx.notify();
+                    }
+                }
+                Err(_) => self.file_moved_away(&path, cx),
             }
+        } else {
+            self.file_held = None;
         }
         self.picture_tick(cx);
         if (!self.panels_shown().0 && self.changes.is_none()) || self.now - self.tree.read_at < TREE_SECS {
@@ -5894,6 +5906,27 @@ impl Workbench {
         }
         self.tree.marked.retain(|p| !p.starts_with(path));
         self.file_cut.retain(|p| !p.starts_with(path));
+    }
+
+    /// The file showing is no longer where it was: the agent or the Finder
+    /// renamed it, or a folder over it, or moved it. Where the handle held
+    /// on it says it is now, inside the session's folder, everything under
+    /// what moved follows it as after a rename in the tree (`tree_follow`):
+    /// the pane's head, the folders open, what was typed and not saved. A
+    /// file gone from the folder, or put in the trash, is left as it was.
+    fn file_moved_away(&mut self, old: &Path, cx: &mut Context<Self>) {
+        let Some(real) = self.file_held.as_ref().filter(|(held, _)| held == old).and_then(|(_, f)| emaki_core::fsops::where_now(f)) else { return };
+        let Some(root) = self.files_root() else { return };
+        // The system names it by its real path; the tree, by the folder's
+        // as the session has it.
+        let Some(new) = std::fs::canonicalize(&root).ok().and_then(|r| real.strip_prefix(r).ok().map(|rest| root.join(rest))) else { return };
+        if new == old || !new.exists() {
+            return;
+        }
+        let (from, to) = emaki_core::fsops::what_moved(old, &new);
+        self.file_held = None;
+        self.tree_follow(&from, &to, cx);
+        cx.notify();
     }
 
     /// What was at `from` is at `to`: the folders open under it, the

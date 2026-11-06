@@ -91,7 +91,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
 | Bringing in a new agent: a variant of `AgentId`, an adapter, a driver | `docs/new-agent.md`, then the docs it names |
-| `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs`, `moves.rs`, `remote.rs`, `remote_files.rs` | `docs/core.md` |
+| `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs`, `moves.rs`, `remote.rs`, `remote_files.rs`, `memory.rs` | `docs/core.md` |
 | `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, `process.rs`, `csd.rs`, any `cfg` for an OS | `docs/platform.md` |
 | Checking a change in the window from a script | `docs/probing.md` |
 | An optimization pass, or anything that runs at every frame, in a loop or on a timer | `docs/performance.md`, its log first |
@@ -129,6 +129,7 @@ crates/emaki-core/        everything without a window
   src/office.rs              Word, PowerPoint and Excel files read for showing: a document or a deck as markdown, a workbook as sheets
   src/quarto.rs              a Quarto document made ready to read without `quarto render`: its includes pasted in, its variables and metadata filled
   src/math.rs                a formula set by Typst for the file's pane: LaTeX's math by way of MiTeX, Typst's as it is
+  src/memory.rs              the process's own footprint, and the report written to the logs when it grows past what Emaki needs
   src/latex.rs src/typst_doc.rs  a LaTeX or Typst document written as the Quarto markdown the file's pane reads
   src/fsops.rs               what the files tree does to the disk, as moves to take back and do again; what is removed is held, not thrown away
   src/indent.rs              where a new line starts in the file's editor, by language, and what one step of indent is

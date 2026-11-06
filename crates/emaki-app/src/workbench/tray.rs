@@ -186,6 +186,36 @@ impl Workbench {
         Some(Line { key, on, moving, row: row.into_any_element(), free: false })
     }
 
+    /// Emaki holds far more memory than it should, and a report of it
+    /// is written (`watch_memory`): the way to the file, for the person
+    /// to send, until they put the line away.
+    pub(super) fn memory_line(&self, cx: &mut Context<Self>) -> Option<Line> {
+        let key = "line-memory".to_string();
+        let on = self.memory_said;
+        let moving = self.presence(&key, on, cx);
+        if !on && moving.is_none() {
+            return None;
+        }
+        let (size, path) = self.memory_report.clone()?;
+        let theme = cx.theme().clone();
+        let reveal = tray_pill("memory-reveal", "icons/folder-open.svg", t(crate::sys::REVEAL_LABEL), Press::Primary, !on, &theme).when(on, |b| {
+            b.on_click(cx.listener(move |_, _, window, cx| {
+                swallow_click(window, cx);
+                crate::sys::reveal_path(&path);
+            }))
+        });
+        let close = tray_pill("memory-close", "icons/close.svg", t("Close"), Press::Quiet, !on, &theme).when(on, |b| {
+            b.on_click(cx.listener(|this, _, window, cx| {
+                swallow_click(window, cx);
+                this.memory_said = false;
+                cx.notify();
+            }))
+        });
+        let mark = Icon::default().path("icons/triangle-alert.svg").with_size(px(14.)).text_color(theme.warning);
+        let row = tray_row("memory-row", mark, tf("{size} of memory in use", &[("size", &human_size(size))]), t("a report for its developers is saved"), None, vec![reveal.into_any_element(), close.into_any_element()], &theme);
+        Some(Line { key, on, moving, row: row.into_any_element(), free: false })
+    }
+
     /// Claude Code's own notes for the session showing, off its screen.
     /// Only a hidden terminal of ours has a screen to read. One read at
     /// a time, off the main thread.

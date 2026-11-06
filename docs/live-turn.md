@@ -45,8 +45,9 @@ Whatever comes up for the person to read or answer while a session runs is a car
 One card over the composer that holds what waits on the person, a line each (`workbench/tray.rs`, `render_tray`). It is there only while something does, and most of the time nothing does. Top to bottom:
 
 1. A message that cannot get to the prompt (`held_line`).
-2. The terminal's card left behind, with the way back to it.
-3. What the agent waits for the person to decide (`decision_line`).
+2. A memory report written because Emaki holds far more than it should (`memory_line`, `docs/core.md`, Memory reports), until it is put away.
+3. The terminal's card left behind, with the way back to it.
+4. What the agent waits for the person to decide (`decision_line`).
 
 The agent at work, or waiting, is not in it. That line is the turn's own and stands by itself under the tray, over the composer (`foot_line`), its mark and its Stop in the columns of the rows above it. All the rest a session has going on is behind a toggle (The toggles): a tray that also held the pages, the background work and the notes stood there for as long as a session had a page, over the agent's own line, and looked like one more thing to deal with.
 

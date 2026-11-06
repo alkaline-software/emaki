@@ -171,20 +171,27 @@ fn math_face(dialect: Dialect) -> gpui_component::text::MathFace {
 /// smaller cut of the monospace face (`fonts::inline_mono_family`), so
 /// it stands no taller than they do.
 pub(crate) fn chat_md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, None, cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, None, None, cx)
+}
+
+/// `chat_md_view` on a ground other than the page's (a prompt's bubble,
+/// a tinted card): a table wider than its room fades into it at a cut
+/// edge.
+pub(crate) fn chat_md_view_on(id: String, text: String, ground: Hsla, cx: &App) -> impl IntoElement {
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, None, Some(ground), cx)
 }
 
 /// Markdown as a document draws it, a file's or a page's: all of GFM,
 /// as GitHub reads the file.
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, None, cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, None, None, cx)
 }
 
 /// `md_view`, with words found in it painted (`TextFind`): a file as it
 /// reads, with its find open; and with where its headings are painted
 /// kept, for the outline at the files panel's foot (`HeadingSpots`).
 pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, find, headings, None, None, cx)
+    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, find, headings, None, None, None, cx)
 }
 
 /// A file's markdown as it reads: with `quarto`, Quarto's syntax read
@@ -193,25 +200,25 @@ pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component
 /// file's view keeps, and `kept` holds it for frames it is drawn from a
 /// cache in (`panels::FileDoc`).
 pub(crate) fn md_view_file(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
-    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), Some(state), cx)
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), Some(state), None, cx)
 }
 
 /// `md_view` drawn from `state`, which the caller keeps: words it can
 /// select all of (the outline's summary).
 pub(crate) fn md_view_state(state: Entity<gpui_component::text::TextViewState>, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, Some(state), cx)
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, Some(state), None, cx)
 }
 
 /// A file's YAML header as its fields: `text` is the header written as a
 /// table (`files::front_matter_table`), drawn a field a row in the mono
 /// face, for the band over the file.
 pub(crate) fn md_view_fields(state: Entity<gpui_component::text::TextViewState>, text: String, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
-    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, true, None, None, Some(kept), Some(state), cx)
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, true, None, None, Some(kept), Some(state), None, cx)
 }
 
 /// `state`, when the caller keeps the view's state, is drawn from in
 /// place of one kept by the view's `id` where it is drawn.
-fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, state: Option<Entity<gpui_component::text::TextViewState>>, cx: &App) -> impl IntoElement {
+fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, state: Option<Entity<gpui_component::text::TextViewState>>, ground: Option<Hsla>, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown by the view as it is, in a
     // block of code (the vendored `parse_content`).
@@ -271,9 +278,21 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, q
                 chunk_words: [t("Fold").into(), t("Unfold").into()],
                 chunk_icons: "icons/lang".into(),
                 callout_icons: "icons/callout".into(),
+                table_ground: Some(ground.unwrap_or(theme.background)),
                 ..Default::default()
             }
-            .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.))),
+            .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.)))
+            // A table keeps its columns wide enough to read, each down to
+            // about two lines of its text and never under its longest
+            // word, and scrolls sideways past that, fading into the ground
+            // at a cut edge (the vendored `render_scroll_table`): fitted
+            // to the room, a wide table was cut off at its right and its
+            // columns wrapped a word a line.
+            .table({
+                let mut table = StyleRefinement::default();
+                table.overflow.x = Some(Overflow::Scroll);
+                table
+            }),
         )
         // A block of code is copied whole with the button at its top
         // right, which shows under the pointer (the vendored `node.rs`).
@@ -290,14 +309,15 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, q
 pub(crate) fn explain_card(id: String, text: String, pending: bool, size: Pixels, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     let anim: SharedString = format!("{id}-in").into();
+    let tint = theme.primary.opacity(if theme.mode.is_dark() { 0.10 } else { 0.07 });
     v_flex()
         .w_full()
         .px(px(14.))
         .py(px(10.))
         .rounded(px(10.))
-        .bg(theme.primary.opacity(if theme.mode.is_dark() { 0.10 } else { 0.07 }))
+        .bg(tint)
         .when(pending && text.is_empty(), |d| d.child(div().italic().text_size(size - px(1.)).text_color(theme.muted_foreground).child(t("Explaining…"))))
-        .when(!(pending && text.is_empty()), |d| d.child(div().text_size(size).text_color(theme.foreground).line_height(relative(1.6)).child(chat_md_view(id, text, cx))))
+        .when(!(pending && text.is_empty()), |d| d.child(div().text_size(size).text_color(theme.foreground).line_height(relative(1.6)).child(chat_md_view_on(id, text, theme.background.blend(tint), cx))))
         .with_animation(ElementId::Name(anim), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(-4. * (1. - t))))
 }
 
@@ -513,7 +533,7 @@ impl Workbench {
                 let prompt = if rnd.prompt.contains('/') { emaki_core::driver::mark_commands(&rnd.prompt, |name| self.hub.knows_command(session.agent, cwd, name)) } else { rnd.prompt.clone() };
                 // And an "@" that names a file under the folder.
                 let prompt = if prompt.contains('@') { emaki_core::files::mark_mentions(&prompt, cwd) } else { prompt };
-                bubble = bubble.child(chat_md_view(format!("p-{ix}"), prompt, cx));
+                bubble = bubble.child(chat_md_view_on(format!("p-{ix}"), prompt, theme.muted, cx));
             }
             // The time and the copy button show while the pointer is over
             // the prompt's row, as in the Claude app. Their line is always
@@ -1563,7 +1583,7 @@ impl Workbench {
         let mut v = v_flex().w_full().gap(px(6.));
         if !sub.prompt.is_empty() {
             let (snippet, _) = clip(&sub.prompt, 1200);
-            v = v.child(div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme.muted).text_size(px(12.)).child(chat_md_view(format!("sp-{ix}-{jx}-{k}"), snippet, cx)));
+            v = v.child(div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme.muted).text_size(px(12.)).child(chat_md_view_on(format!("sp-{ix}-{jx}-{k}"), snippet, theme.muted, cx)));
         }
         for (m, item) in sub.items.iter().enumerate() {
             match item {

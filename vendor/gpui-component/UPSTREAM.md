@@ -352,6 +352,8 @@ upstream revision finds them.
 68. `crates/ui/src/text/node.rs` (`render_list_item_row`): an item of a list that is not numbered is marked by a hairline, a short thin line at the middle of its first line in the quiet ink, shorter below the first depth, in place of upstream's "•", "◦" and "▪". A numbered list keeps its numbers (`list_item_prefix`).
 69. `crates/ui/src/text/node.rs` (the display formula's `math-room`): its sideways scroller takes a sideways stroke only (`restrict_scroll_to_axis`). An up-and-down wheel over a formula wider than its room slid it across while the conversation scrolled under it.
 
+70. `crates/ui/src/text/node.rs` (`render_scroll_table`), `style.rs` (`TextViewStyle::table_ground`): the scroll layout of a table, which Emaki opts into. The frame is as wide as the columns' text and no wider, up to the room, and stays still while the rows scroll inside it; upstream framed the track, whose edges scrolled away, and stretched every table across the line. A column is never narrower than its longest word, measured, and every measured width has two pixels of slack: a column exactly a word's width broke it on a fraction. Where more lies past an edge the rows fade into `table_ground` there, the scrollbar shows under the pointer, and a selection dragged to an edge scrolls the table (`code_drag`), as a code block does. `overflow-x: scroll` on `table` chooses the layout and is not set on the viewport, where gpui scrolled it by an up-and-down wheel too.
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

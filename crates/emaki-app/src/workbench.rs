@@ -1084,7 +1084,9 @@ pub struct Detail {
     /// kept view must take it up (`ConversationList::set_list`).
     pub born: u64,
     /// Thumbnails of images pasted into prompts, read back out of the
-    /// transcript on demand. `None` while a load is in flight.
+    /// transcript on demand. `None` while a load is in flight, and for
+    /// one that could not be read: it is not asked for again until the
+    /// conversation is read anew.
     pub thumbs: HashMap<String, Option<Thumb>>,
     /// Pixel sizes of kept picture files, read from their headers once.
     pub sizes: HashMap<String, Option<(u32, u32)>>,
@@ -1606,6 +1608,27 @@ pub struct Workbench {
     reload_wanted: bool,
     /// The rows of the session showing, kept between its reads.
     live_rows: Option<(String, emaki_core::build::LiveRows)>,
+    /// The last footprint a memory report was written at, 0 for none
+    /// (`watch_memory`).
+    memory_reported: u64,
+    /// The footprint and the file of the last memory report written,
+    /// and whether its line stands in the tray (`memory_line`).
+    pub(super) memory_report: Option<(u64, PathBuf)>,
+    pub(super) memory_said: bool,
+    /// The width "Sign in" was last drawn at, beside a saved computer's
+    /// agent, for its pill to grow by (`remote_row`).
+    pub(super) sign_word_w: Rc<std::cell::Cell<f32>>,
+    /// The file showing in the pane, held open so it is found again when
+    /// another program moves it (`file_moved_away`).
+    pub(crate) file_held: Option<(PathBuf, std::fs::File)>,
+    /// A press on an agent's mark that cannot sign in until its computer
+    /// is reached: which computer and agent, when, and a serial for its
+    /// fade (`connect_first`).
+    pub(crate) connect_first: Option<(String, AgentId, Instant, u32)>,
+    /// Each agent's Sign in pill, shut or open: whether open, where it
+    /// stood when that last changed, when, and how many changes
+    /// (`sign_fold`).
+    pub(crate) sign_folds: std::cell::RefCell<HashMap<String, (bool, f32, Instant, u32)>>,
     /// The folder last opened or closed: which, whether it was opened,
     /// when, and the click's number, for the moment its sessions take to
     /// unfold or fold away.
@@ -3835,6 +3858,7 @@ impl Workbench {
                         cx.notify();
                     }
                     this.tick_files(cx);
+                    this.watch_memory(cx);
                     // The status line's files once a minute, which is the
                     // countdown's own resolution; a session's load reads
                     // them too, and that is when they change.
@@ -4367,6 +4391,13 @@ impl Workbench {
             renamed: HashMap::new(),
             reload_wanted: false,
             live_rows: None,
+            memory_reported: 0,
+            memory_report: None,
+            memory_said: false,
+            sign_word_w: Rc::new(std::cell::Cell::new(0.)),
+            file_held: None,
+            connect_first: None,
+            sign_folds: Default::default(),
             draft_of: None,
             lightbox: None,
             lightbox_set: Vec::new(),
@@ -6506,8 +6537,8 @@ impl Workbench {
             Some(t) if t.starts_with("remotesign:") => {
                 let rest = &t["remotesign:".len()..];
                 match rest.strip_suffix(":codex") {
-                    Some(id) => self.remote_sign_in(id, AgentId::Codex, cx),
-                    None => self.remote_sign_in(rest, AgentId::ClaudeCode, cx),
+                    Some(id) => self.agent_mark_pressed(id, AgentId::Codex, cx),
+                    None => self.agent_mark_pressed(rest, AgentId::ClaudeCode, cx),
                 }
             }
             // A picture of the settings window as it is now.
@@ -8834,7 +8865,7 @@ impl Workbench {
             self.terminal_up = None;
             return;
         }
-        self.hub.refresh_peers();
+        self.hub.refresh_registry();
         let peer = self.hub.peer_for(&sid).filter(|p| p.status == "idle");
         let in_terminal = self.selected_ref().is_some_and(|r| self.in_terminal(r));
         match peer {
@@ -8966,7 +8997,7 @@ impl Workbench {
         let Some(cb) = self.come_back.as_ref().filter(|cb| cb.typed.is_some()) else { return };
         let typed = cb.typed.unwrap_or(0.0);
         let (sid, picking) = (cb.sid.clone(), cb.picking);
-        self.hub.refresh_peers();
+        self.hub.refresh_registry();
         let peer = self.hub.peer_for(&sid).filter(|p| !p.status.is_empty());
         if peer.as_ref().is_some_and(|p| p.status == "waiting" && p.status_at >= typed) {
             if let Some(cb) = self.come_back.as_mut() {
@@ -9177,7 +9208,7 @@ impl Workbench {
         // is the terminal itself that is shown (`unsaid`, below).
         let agent_side = self.cli_shown();
         let target = self.selected_ref().filter(|r| self.page == Page::Session && self.in_terminal(r) && !picking).map(|r| r.session_id.clone()).and_then(|sid| {
-            self.hub.refresh_peers();
+            self.hub.refresh_registry();
             match (self.hub.peer_for(&sid), self.hub.terminal_for(&sid)) {
                 (Some(p), _) if p.status == "waiting" => Some((sid, p.pid, None)),
                 // The person is looking at that screen already.
@@ -10893,14 +10924,12 @@ impl Workbench {
                 // picture never came when the tab was shown again.
                 let Workbench { detail, stashed, .. } = this;
                 if let Some(d) = detail.as_mut().filter(|d| d.born == born).or_else(|| stashed.values_mut().find(|d| d.born == born)) {
-                    match loaded {
-                        Some(img) => {
-                            d.thumbs.insert(key, Some(img));
-                        }
-                        None => {
-                            d.thumbs.remove(&key);
-                        }
-                    }
+                    // One that could not be read stays `None`, drawn as
+                    // its tile: taken out, the next draw asked for it
+                    // again and read the whole transcript, at every
+                    // frame for as long as it was in view.
+                    let Some(img) = loaded else { return };
+                    d.thumbs.insert(key, Some(img));
                     let _ = ix;
                     cx.notify();
                 }
@@ -16361,6 +16390,7 @@ impl Workbench {
             }
         }
         let mut lines: Vec<tray::Line> = self.held_line(&r, cx).into_iter().collect();
+        lines.extend(self.memory_line(cx));
         // The decision line says what is asked; the terminal's own
         // screen on its card has no choices to stand here, and when the
         // reader has left it behind, a line of its own goes to it.
@@ -18011,6 +18041,58 @@ impl Workbench {
         self.issues.clear();
         self.mark_slash(cx);
         self.check_soon(cx);
+    }
+
+    /// Emaki's own footprint, on the clock: past `memory::first_report`
+    /// and at each doubling after it, a report of what the system and
+    /// the window say it holds is written to the logs, off the main
+    /// thread, and a line in the tray says so (`memory_line`). A leak one
+    /// machine had and no other could reproduce left nothing to read.
+    fn watch_memory(&mut self, cx: &mut Context<Self>) {
+        use emaki_core::memory;
+        let Some(now) = memory::footprint() else { return };
+        let first = memory::first_report();
+        let Some(step) = memory::report_due(now, self.memory_reported, first) else { return };
+        self.memory_reported = step;
+        let held = self.memory_held(cx);
+        cx.spawn(async move |this, cx| {
+            let written = cx.background_spawn(async move { memory::write_report(now, &held) }).await;
+            let _ = this.update(cx, |this, cx| match written {
+                Ok(path) => {
+                    this.memory_report = Some((now, path));
+                    this.memory_said = true;
+                    cx.notify();
+                }
+                Err(e) => eprintln!("emaki: could not write the memory report: {e}"),
+            });
+        })
+        .detach();
+    }
+
+    /// What the window holds, in counts and no words of the person's,
+    /// for the memory report.
+    fn memory_held(&self, cx: &App) -> String {
+        let conversation = |d: &Detail| {
+            let items: usize = d.session.rounds.iter().map(|r| r.items.len()).sum();
+            format!("{} rounds, {} items, {} thumbnails, {} picture sizes", d.session.rounds.len(), items, d.thumbs.len(), d.sizes.len())
+        };
+        let mut out = String::new();
+        out.push_str(&format!("tabs: {}\n", self.tabs.len()));
+        if let Some(d) = &self.detail {
+            out.push_str(&format!("conversation showing: {}\n", conversation(d)));
+        }
+        for d in self.stashed.values() {
+            out.push_str(&format!("conversation put away: {}\n", conversation(d)));
+        }
+        if let Some((_, rows)) = &self.live_rows {
+            out.push_str(&format!("transcript rows held: {}\n", rows.len()));
+        }
+        let entries: usize = self.files.values().map(|(_, list)| list.len()).sum();
+        out.push_str(&format!("\"@\" file lists: {} folders, {} entries\n", self.files.len(), entries));
+        out.push_str(&format!("drafts: {}\n", self.drafts.len()));
+        out.push_str(&format!("composer: {} bytes, {} writing marks\n", self.composer.read(cx).value().len(), self.issues.len()));
+        out.push_str(&self.hub.held());
+        out
     }
 
     /// Checks the composer's text once the typing has paused. English is

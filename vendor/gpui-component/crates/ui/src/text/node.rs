@@ -2670,7 +2670,7 @@ impl BlockNode {
         const CELL_WRAP_MIN_PX: f32 = 160.0;
         const CELL_WRAP_MAX_PX: f32 = 480.0;
         const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the last
-        const TABLE_BORDER_PX: f32 = 2.0; // the track's border_1, left + right
+        const CELL_SLACK_PX: f32 = 2.0;
 
         // Measure the widest text per column (max-content width). Never
         // capped: a cap would clip overflowing text *and* leave it outside
@@ -2678,13 +2678,17 @@ impl BlockNode {
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let mut col_w = vec![CELL_MIN_PX; col_count];
+        // Each column's longest word, measured: a column is never narrower
+        // than it, so no word is broken in its middle. (Emaki addition.)
+        let mut col_word_w = vec![0.0_f32; col_count];
         for row in table.children.iter() {
             for (ix, cell) in row.children.iter().enumerate() {
-                let Some(slot) = col_w.get_mut(ix) else {
+                if ix >= col_count {
                     continue;
-                };
+                }
+                let text = cell.children.text();
                 let mut w = 0.0_f32;
-                for line in cell.children.text().split('\n') {
+                for line in text.split('\n') {
                     let line = line.trim();
                     if line.is_empty() {
                         continue;
@@ -2696,6 +2700,14 @@ impl BlockNode {
                         .width;
                     w = w.max(f32::from(line_w));
                 }
+                let word_w = text
+                    .split_whitespace()
+                    .max_by_key(|word| word.chars().count())
+                    .map(|word| {
+                        let run = text_style.to_run(word.len());
+                        f32::from(window.text_system().layout_line(word, font_size, &[run], None).width)
+                    })
+                    .unwrap_or(0.);
                 // Border-box widths, so the padding and border the cell draws
                 // must leave the measured text its full width.
                 let border = if ix + 1 < col_count {
@@ -2703,7 +2715,10 @@ impl BlockNode {
                 } else {
                     0.
                 };
-                *slot = slot.max(w + CELL_PAD_PX + border);
+                // Two pixels more than measured: a column exactly as wide
+                // as a word broke it on a fraction. (Emaki change.)
+                col_w[ix] = col_w[ix].max(w + CELL_PAD_PX + border + CELL_SLACK_PX);
+                col_word_w[ix] = col_word_w[ix].max(word_w + CELL_PAD_PX + border + CELL_SLACK_PX);
             }
         }
         let style = &node_cx.style;
@@ -2716,14 +2731,19 @@ impl BlockNode {
         } else {
             col_w
                 .iter()
-                .map(|w| {
+                .zip(&col_word_w)
+                .map(|(w, word)| {
                     (w / CELL_WRAP_MAX_LINES)
                         .clamp(CELL_WRAP_MIN_PX, CELL_WRAP_MAX_PX)
+                        .max(*word)
                         .min(*w)
                 })
                 .collect()
         };
-        let min_total_w: f32 = col_min_w.iter().sum::<f32>() + TABLE_BORDER_PX;
+        // The frame is on the viewport, so the track is the columns alone.
+        // (Emaki change.)
+        let min_total_w: f32 = col_min_w.iter().sum::<f32>();
+        let content_w: f32 = col_w.iter().sum::<f32>();
 
         let table_scroll_key = if let Some(span) = table.span {
             SharedString::from(format!(
@@ -2739,6 +2759,9 @@ impl BlockNode {
                 options.ix
             ))
         };
+        // A selection dragged to an edge of the table scrolls it that way,
+        // as a code block's does. (Emaki addition.)
+        let drag = window.use_keyed_state(SharedString::from(format!("{table_scroll_key}-drag")), cx, |_, _| CodeDrag::default());
         let scroll_handle = window
             .use_keyed_state(table_scroll_key, cx, |_, _| ScrollHandle::default())
             .read(cx)
@@ -2756,9 +2779,9 @@ impl BlockNode {
                     div()
                         .id(("cell", ix))
                         // Measured max-content width is the flex-basis;
-                        // `flex_grow` (proportional to it) distributes extra
-                        // space so a narrow table still fills the frame, while
-                        // shrinking is clamped at `min_w` — the flex engine
+                        // the frame is no wider than their sum, so `flex_grow`
+                        // only takes up a rounding's fraction, while
+                        // shrinking is clamped at `min_w`: the flex engine
                         // squeezes columns (their text wraps) down to the
                         // floors before the track starts to scroll.
                         .flex_basis(px(width))
@@ -2789,31 +2812,69 @@ impl BlockNode {
             );
         }
 
+        // The frame stands still at the room's width and the rows scroll
+        // inside it. Where more lies past an edge the rows fade into the
+        // ground there, and the scrollbar shows under the pointer, as a
+        // code block's: cut off clean, a column read as the table's last.
+        // (Emaki change: upstream framed the track, whose edges scrolled
+        // away with it and left the table open at the side.)
+        let (at, most) = (-scroll_handle.offset().x, scroll_handle.max_offset().x);
+        let ground = style.table_ground.unwrap_or(cx.theme().background);
+        // `overflow-x: scroll` chose this layout and is not set on the
+        // viewport: there gpui scrolls it by itself, an up-and-down wheel
+        // too, and a wheel over the table slid it sideways while the page
+        // scrolled. The mask scrolls it, by sideways strokes alone.
+        // (Emaki change.)
+        let mut viewport = style.table.clone();
+        viewport.overflow = Default::default();
+        let fade = |left: bool| {
+            let (from, to) = if left { (ground, ground.opacity(0.)) } else { (ground.opacity(0.), ground) };
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(36.))
+                .map(|d| if left { d.left_0() } else { d.right_0() })
+                .bg(linear_gradient(90., linear_color_stop(from, 0.), linear_color_stop(to, 1.)))
+        };
         div()
             .pb(rems(1.))
             .w_full()
             .child(
-                // Scroll viewport: clips and scrolls horizontally (overflow-x
-                // is handled by `ScrollableMask`, so vertical wheel events keep
-                // bubbling to the parent TextView). No border — the frame is on
-                // the inner track so it wraps the table tightly.
-                horizontal_scroll_area(
-                    ("table", options.ix),
-                    &scroll_handle,
-                    &style.table,
-                    // Bordered track sized to `max(viewport, column floors)`:
-                    // `min_w_full` fills the frame while the columns can still
-                    // shrink-to-fit (their text wrapping), the definite
-                    // `w(min_total_w)` keeps the floors once they are reached,
-                    // letting the track exceed the viewport and scroll.
-                    div()
-                        .min_w_full()
-                        .w(px(min_total_w))
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded(cx.theme().radius)
-                        .children(rows),
-                ),
+                div()
+                    .id(("table-frame", options.ix))
+                    .relative()
+                    // As wide as its columns' text and no wider, up to the
+                    // room: a table of two short columns stretched across
+                    // the line read as empty cells. (Emaki change.)
+                    .w(px(content_w + 2.))
+                    .max_w_full()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius)
+                    .overflow_hidden()
+                    .child(
+                        // Scroll viewport: clips and scrolls horizontally
+                        // (overflow-x is handled by `ScrollableMask`, so
+                        // vertical wheel events keep bubbling to the parent
+                        // TextView).
+                        horizontal_scroll_area(
+                            ("table", options.ix),
+                            &scroll_handle,
+                            &viewport,
+                            // Track sized to `max(viewport, column floors)`:
+                            // `min_w_full` fills the frame while the columns
+                            // can still shrink-to-fit (their text wrapping),
+                            // the definite `w(min_total_w)` keeps the floors
+                            // once they are reached, letting the track exceed
+                            // the viewport and scroll.
+                            div().min_w_full().w(px(min_total_w)).children(rows),
+                        ),
+                    )
+                    .when(at > px(1.), |d| d.child(fade(true)))
+                    .when(most - at > px(1.), |d| d.child(fade(false)))
+                    .child(code_drag(drag, scroll_handle.clone()).absolute().inset_0())
+                    .horizontal_scrollbar(&scroll_handle),
             )
             .into_any_element()
     }

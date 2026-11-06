@@ -593,7 +593,23 @@ impl Hub {
         all
     }
 
+    /// The registry read again, and which of its processes are adrift
+    /// asked of the system (`peer::adrift_of`, a `ps`). Off the window's
+    /// thread: the scanner, which does it at every pass and before the
+    /// first index reaches the window, so a session can be started on
+    /// only once it is known.
     pub fn refresh_peers(&self) {
+        self.read_peers(true);
+    }
+
+    /// The registry read again for the window's thread, which waits on
+    /// no process: whether one is adrift stays as the scanner last
+    /// found it, no more than a pass and the ten seconds a pid behind.
+    pub fn refresh_registry(&self) {
+        self.read_peers(false);
+    }
+
+    fn read_peers(&self, ask_adrift: bool) {
         // A session may be in a hidden terminal of ours and in a terminal
         // of the person's at once, which is theirs to do: ours is the
         // record the window keeps.
@@ -609,7 +625,7 @@ impl Hub {
             adrift.retain(|pid, _| all.iter().any(|p| p.pid == *pid));
             all.iter().filter(|p| p.kind == "interactive" && !ours.contains(&p.pid) && adrift.get(&p.pid).is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(10))).map(|p| p.pid).collect()
         };
-        if !due.is_empty() {
+        if ask_adrift && !due.is_empty() {
             let found = peer::adrift_of(&due);
             let now = Instant::now();
             let mut adrift = self.adrift.lock().unwrap();
@@ -1242,6 +1258,19 @@ impl Hub {
         self.lost.lock().unwrap().remove(session_id)
     }
 
+    /// What the hub holds, in counts, for the memory report.
+    pub fn held(&self) -> String {
+        // A count a statement: a lock taken in the arguments of one
+        // `format!` is held to its end, and `terminals` with `peers`
+        // stands against `reap_terminals`.
+        let drivers = self.drivers.lock().unwrap().len();
+        let terminals = self.terminals.lock().unwrap().len();
+        let attached = self.attached.lock().unwrap().len();
+        let live = emaki_core::pty::live_count();
+        let peers = self.peers.lock().unwrap().len();
+        format!("drivers: {drivers}\nhidden terminals: {terminals}\njoined terminals: {attached}\nterminals alive in all: {live}\nregistry records: {peers}\n")
+    }
+
     /// Whether the hidden terminal is how sessions run here.
     pub fn hidden_terminals(&self) -> bool {
         self.cfg.read().unwrap().driver.hidden_terminal
@@ -1249,7 +1278,11 @@ impl Hub {
 
     /// Let a session's hidden terminal go.
     pub fn stop_terminal(&self, session_id: &str) {
-        if let Some(pty) = self.terminals.lock().unwrap().remove(session_id) {
+        // Out of the lock before `peers` is taken: held through the
+        // block, it stood against `reap_terminals`, which takes `peers`
+        // first, and the two could wait on each other for good.
+        let pty = self.terminals.lock().unwrap().remove(session_id);
+        if let Some(pty) = pty {
             let pid = pty.pid;
             pty.kill();
             self.peers.lock().unwrap().retain(|_, p| p.pid != pid);

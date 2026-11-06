@@ -5038,3 +5038,47 @@ fn a_remote_session_is_listed_under_its_computer_and_never_archived_here() {
     emaki_core::remote::add("mac-mini.local", "me", 0, "").unwrap();
     assert!(find().is_some());
 }
+
+/// A memory report lands in the logs with what the app said it holds and
+/// the system's view of the process, and only the newest twenty stay.
+#[test]
+fn a_memory_report_is_written_to_the_logs() {
+    let (_home, _g) = isolated();
+    let logs = emaki_core::paths::logs_dir();
+    std::fs::create_dir_all(&logs).unwrap();
+    for n in 0..25 {
+        std::fs::write(logs.join(format!("memory-20200101-0000{n:02}.txt")), "old").unwrap();
+    }
+    let path = emaki_core::memory::write_report(3 << 30, "tabs: 2\n").unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(path.starts_with(&logs));
+    assert!(text.contains("Footprint: 3072 MB"), "{text}");
+    assert!(text.contains("== What Emaki holds ==\ntabs: 2"), "{text}");
+    #[cfg(target_os = "macos")]
+    assert!(text.contains("== Regions ==") && text.contains("MALLOC"), "{text}");
+    let left = std::fs::read_dir(&logs).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("memory-")).count();
+    assert_eq!(left, 20);
+    assert!(path.exists());
+}
+
+/// A file another program moves, or whose folder it renames, is found
+/// where it went through the handle kept open on it; and what moved is
+/// the folder, not the file under it.
+#[test]
+fn an_open_file_is_found_where_it_was_moved() {
+    use emaki_core::fsops::{what_moved, where_now};
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let old = root.join("2026-11-05-unsw").join("README.md");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, "x").unwrap();
+    let file = std::fs::File::open(&old).unwrap();
+    std::fs::rename(root.join("2026-11-05-unsw"), root.join("2026-11-06-unsw")).unwrap();
+    let new = root.join("2026-11-06-unsw").join("README.md");
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    assert_eq!(where_now(&file), Some(new.clone()));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = where_now(&file);
+    assert_eq!(what_moved(&old, &new), (root.join("2026-11-05-unsw"), root.join("2026-11-06-unsw")));
+    assert_eq!(what_moved(&root.join("a.md"), &root.join("b.md")), (root.join("a.md"), root.join("b.md")));
+}
