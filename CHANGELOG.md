@@ -2,6 +2,14 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.5.1
+
+1. **Memory reports**: When Emaki holds more than 3 GB of memory, it saves a report for its developers and says so over the composer, with a button to the file.
+2. **Wide tables**: A table wider than its room keeps its columns readable and scrolls sideways, fading at the edge that is cut, in a conversation and in a markdown file; a small table is only as wide as its text.
+3. **Signing in on another computer**: An agent that can be signed in on a connected computer is a Sign in button beside its mark, and one that cannot yet says to connect first.
+4. **Files that move**: A file open in the pane follows when the agent or the Finder renames it or a folder above it.
+5. **Fixes**: A rare hang when a session's terminal closed, a picture that could not be read no longer reloads its whole transcript without end, and the window no longer waits on a system command while it checks Claude Code's processes.
+
 ## v0.5.0
 
 1. **Connected Devices**: Work on another Mac or Linux computer from this one over ssh: its Claude Code and Codex sessions are copied here, listed and searched with the rest, and you type to them as to one here.
