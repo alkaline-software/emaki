@@ -2,6 +2,12 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.5.2
+
+1. **Memory**: Pictures are let go when what shows them closes (a tab, the lightbox, a file, the composer's chips), and thumbnails are decoded small, so Emaki no longer grows by gigabytes over a day.
+2. **Code blocks**: A long line in a code block wraps to the width of the conversation or the file pane instead of running off its edge.
+3. **Fixes**: Selecting from the start of a wrapped line takes its first letter, an input method's candidates stay in place while you type, and a file open in the pane no longer stops its folder being renamed on Windows.
+
 ## v0.5.1
 
 1. **Memory reports**: When Emaki holds more than 3 GB of memory, it saves a report for its developers and says so over the composer, with a button to the file.
