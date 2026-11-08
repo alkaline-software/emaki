@@ -1553,7 +1553,7 @@ pub(crate) fn picture_sides(path: &Path, d: &git::Diff) -> [Option<Arc<gpui::Ima
 /// and in bytes. A picture added or deleted has the one side, the
 /// width to itself. A large picture is brought down to its plate; a small
 /// one keeps its size.
-fn picture_compare(p: &git::Pictures, drawn: &[Option<Arc<gpui::Image>>; 2], theme: &gpui_component::Theme) -> AnyElement {
+fn picture_compare(p: &git::Pictures, drawn: &[Option<Arc<gpui::Image>>; 2], kept: Option<&Entity<crate::pictures::Kept>>, theme: &gpui_component::Theme) -> AnyElement {
     let dark = theme.mode.is_dark();
     // GitHub's red and green, as the lines' numbers wear them.
     let (gone, put) = if dark { (rgb(0xf85149), rgb(0x3fb950)) } else { (rgb(0xcf222e), rgb(0x1a7f37)) };
@@ -1587,7 +1587,12 @@ fn picture_compare(p: &git::Pictures, drawn: &[Option<Arc<gpui::Image>>; 2], the
                         .border_1()
                         .border_color(theme.border)
                         .bg(if dark { theme.sidebar } else { theme.muted.opacity(0.4) })
-                        .child(img(ImageSource::Image(image)).size_full().object_fit(ObjectFit::ScaleDown)),
+                        .child(img(match kept {
+                            Some(kept) => crate::pictures::through(kept, ImageSource::Image(image), 0),
+                            None => ImageSource::Image(image),
+                        })
+                        .size_full()
+                        .object_fit(ObjectFit::ScaleDown)),
                 ),
         )
     };
@@ -3037,18 +3042,19 @@ impl Workbench {
         px(widest.ceil()).clamp(PANEL_MIN, PANEL_FIT_MAX.min(self.panel_max()))
     }
 
-    /// The picture showing as gpui keeps it. gpui holds what it read of
-    /// a path for as long as it runs, a failure too: a picture looked at
-    /// while it was being written stayed blank for good, with its size
-    /// read fine under it, and one written anew showed as it had been.
-    /// So what it holds goes when the file is another than the one it
-    /// read, and, a few times over, when reading it failed.
+    /// The picture showing as the pane keeps it (`file_pictures`), which
+    /// holds what it read of a path, a failure too: a picture looked at
+    /// while it was being written stayed blank, with its size read fine
+    /// under it, and one written anew showed as it had been. So what it
+    /// holds goes when the file is another than the one it read, and, a
+    /// few times over, when reading it failed.
     fn picture_tick(&mut self, cx: &mut Context<Self>) {
         let shown = self.file_view.as_ref().filter(|v| matches!(v.body, FileBody::Picture(None, None) | FileBody::Picture(Some(_), None))).map(|v| (v.path.clone(), v.mtime));
         let failed = self.picture_failed.borrow_mut().take();
         let Some((path, mtime)) = shown else { return };
+        let kept = self.file_pictures.clone();
         let forget = |path: &Path, cx: &mut Context<Self>| {
-            cx.remove_asset::<gpui::ImgResourceLoader>(&gpui::Resource::Path(path.into()));
+            kept.update(cx, |k, cx| k.forget(&gpui::Resource::Path(path.into()), cx));
             cx.notify();
         };
         match self.picture_read.get_mut(&path) {
@@ -3610,13 +3616,10 @@ impl Workbench {
     }
 
     /// The pages drawn before the ones showing are let go, and the
-    /// toolkit's copies of their pictures with them: it keeps every
-    /// picture it has read until told.
+    /// pane's copies of their pictures with them.
     fn pdf_under_drop(&mut self, cx: &mut Context<Self>) {
-        if let Some((old, _)) = self.pdf_under.take() {
-            for page in &old.pages {
-                page.image.clone().remove_asset(cx);
-            }
+        if self.pdf_under.take().is_some() {
+            self.file_pictures.update(cx, |k, cx| k.sweep(cx));
         }
     }
 
@@ -8873,7 +8876,7 @@ impl Workbench {
         let body = match &shown {
             None if showing.is_none() && !c.history => no_lines("icons/circle-check.svg", match &repo_name { Some(r) => tf("Nothing has changed in {repo} since the last commit.", &[("repo", r)]), None => t("Nothing has changed since the last commit.").to_string() }, String::new(), &theme),
             None => div().p(px(20.)).text_size(px(12.5)).text_color(quiet).child(if showing.is_some() { t("Reading…").to_string() } else { String::new() }).into_any_element(),
-            Some(d) if d.pictures.is_some() => picture_compare(d.pictures.as_ref().unwrap(), &c.pictures, &theme),
+            Some(d) if d.pictures.is_some() => picture_compare(d.pictures.as_ref().unwrap(), &c.pictures, self.changes_pictures.as_ref(), &theme),
             Some(_) if binary => {
                 let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
                 v_flex().size_full().items_center().justify_center().gap(px(14.)).p(px(32.)).child(crate::pictures::kind_tile(&name, 72., dark)).child(v_flex().items_center().gap(px(6.)).max_w(px(420.)).child(div().max_w_full().truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(name)).child(div().text_center().text_size(px(12.5)).text_color(quiet).child(t("This file is not text, so there are no lines to compare.")))).into_any_element()
@@ -9165,6 +9168,23 @@ impl Workbench {
 
     // -- the file shown -------------------------------------------------------
 
+    /// The file the pane draws, and whether it is leaving: the one
+    /// showing, or the one closed while the pane slides away with it.
+    pub(crate) fn file_drawn(&self) -> Option<(&FileView, bool)> {
+        let live = self.file_anim.filter(|(_, at, _)| at.elapsed() < FILE_ANIM);
+        match (&self.file_view, &self.file_gone, live) {
+            (Some(v), _, _) => Some((v, false)),
+            (None, Some(v), Some((false, _, _))) => Some((v, true)),
+            _ => None,
+        }
+    }
+
+    /// A picture the pane shows, read through its pictures
+    /// (`file_pictures`), which go when another file is shown.
+    fn pane_picture(&self, source: ImageSource) -> ImageSource {
+        crate::pictures::through(&self.file_pictures, source, 0)
+    }
+
     /// The file's pane in the row beside the conversation, or none:
     /// between the tree and the conversation, widening in and narrowing
     /// out as the panels at its sides do.
@@ -9173,11 +9193,7 @@ impl Workbench {
             return None;
         }
         let live = self.file_anim.filter(|(_, at, _)| at.elapsed() < FILE_ANIM);
-        let (v, leaving) = match (&self.file_view, &self.file_gone, live) {
-            (Some(v), _, _) => (v, false),
-            (None, Some(v), Some((false, _, _))) => (v, true),
-            _ => return None,
-        };
+        let (v, leaving) = self.file_drawn()?;
         let w = self.file_pane_w();
         let serial = self.file_anim.map(|(_, _, n)| n).unwrap_or(0);
         let play = live.map(|(opening, _, _)| opening);
@@ -9186,7 +9202,9 @@ impl Workbench {
                 .h_full()
                 .flex_shrink_0()
                 .overflow_hidden()
-                .child(self.file_pane(v, w, leaving, cx))
+                // A picture a markdown file shows is read through the
+                // pane's pictures, and goes with them.
+                .child(gpui::image_cache(self.file_pictures.clone()).h_full().child(self.file_pane(v, w, leaving, cx)))
                 .with_animation(ElementId::Name(format!("file-pane-{serial}").into()), Animation::new(FILE_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
                     Some(opening) => {
                         let t = if opening { t } else { 1. - t };
@@ -9279,7 +9297,7 @@ impl Workbench {
                     // link, which goes where a link out of the app goes.
                     Some((_, shot)) => {
                         let by = room / shot.css_w.max(1.);
-                        let strips = shot.strips.iter().map(|(image, rows)| img(ImageSource::Image(image.clone())).w(px(room)).h(px(room * *rows as f32 / shot.px_w.max(1) as f32)).flex_shrink_0());
+                        let strips = shot.strips.iter().map(|(image, rows)| img(self.pane_picture(ImageSource::Image(image.clone()))).w(px(room)).h(px(room * *rows as f32 / shot.px_w.max(1) as f32)).flex_shrink_0());
                         let links = shot.links.iter().enumerate().filter(|(_, (href, _))| ["http://", "https://", "mailto:"].iter().any(|s| href.starts_with(s))).map(|(ix, (href, at))| {
                             let href = href.clone();
                             div().id(("html-link", ix)).absolute().left(px(at[0] * by)).top(px(at[1] * by)).w(px(at[2] * by)).h(px(at[3] * by)).cursor_pointer().on_click(move |_, window, cx| {
@@ -9324,7 +9342,7 @@ impl Workbench {
                     failed.borrow_mut().replace(shown.clone());
                     div().size_full().flex().items_center().justify_center().text_size(px(12.5)).text_color(ink).child(if gave_up { t("This picture could not be read.") } else { t("Reading the picture…") }).into_any_element()
                 };
-                v_flex().items_center().gap(px(8.)).child(match (drawn, from) { (Some(picture), _) => img(picture.clone()), (None, Some(from)) => img(from), (None, None) => img(v.path.clone()) }.w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.)).with_fallback(fallback)).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
+                v_flex().items_center().gap(px(8.)).child(img(self.pane_picture(match (drawn, from) { (Some(picture), _) => picture.clone().into(), (None, Some(from)) => from.into(), (None, None) => v.path.clone().into() })).w(px(pw)).h(px(ph)).object_fit(ObjectFit::Contain).rounded(px(6.)).with_fallback(fallback)).children(size.map(|(iw, ih)| quiet(format!("{iw} × {ih}")))).into_any_element()
             }
             // The document's own pane stands in the body's place.
             FileBody::Word if self.word.is_some() => div().into_any_element(),
@@ -9352,8 +9370,8 @@ impl Workbench {
                             .border_color(theme.border)
                             .bg(gpui::white())
                             .cursor(CursorStyle::IBeam)
-                            .children(under.as_ref().and_then(|old| old.pages.get(ix)).map(|old| img(ImageSource::Image(old.image.clone())).absolute().top_0().left_0().size_full()))
-                            .child(img(ImageSource::Image(page.image.clone())).absolute().top_0().left_0().size_full())
+                            .children(under.as_ref().and_then(|old| old.pages.get(ix)).map(|old| img(self.pane_picture(ImageSource::Image(old.image.clone()))).absolute().top_0().left_0().size_full()))
+                            .child(img(self.pane_picture(ImageSource::Image(page.image.clone()))).absolute().top_0().left_0().size_full())
                             // Over the picture: where the page is, kept for
                             // the mouse, and the marks of what is selected
                             // and found, a line at a time.
@@ -9607,7 +9625,7 @@ impl Workbench {
                                 .when(ix == now, |d| d.bg(theme.primary.opacity(0.16)))
                                 .when(ix != now, |d| d.hover(|s| s.bg(theme.muted)))
                                 .on_click(cx.listener(move |this, _, _, cx| this.pdf_go_page(ix, cx)))
-                                .child(img(ImageSource::Image(page.thumb.clone())).w(px(w)).h(px(w * page.px.1 as f32 / page.px.0.max(1) as f32)).rounded(px(3.)).border_1().border_color(theme.border).bg(gpui::white()))
+                                .child(img(self.pane_picture(ImageSource::Image(page.thumb.clone()))).w(px(w)).h(px(w * page.px.1 as f32 / page.px.0.max(1) as f32)).rounded(px(3.)).border_1().border_color(theme.border).bg(gpui::white()))
                                 .child(div().text_size(px(10.5)).text_color(if ix == now { theme.foreground } else { theme.muted_foreground }).child((ix + 1).to_string()))
                         }))
                         .into_any_element()

@@ -1088,6 +1088,10 @@ pub struct Detail {
     /// one that could not be read: it is not asked for again until the
     /// conversation is read anew.
     pub thumbs: HashMap<String, Option<Thumb>>,
+    /// The conversation's pictures as drawn, small (`pictures::Kept`):
+    /// they go with it when its tab is closed. Made at its first draw
+    /// (`sync_pictures`).
+    pub pictures: Option<Entity<crate::pictures::Kept>>,
     /// Pixel sizes of kept picture files, read from their headers once.
     pub sizes: HashMap<String, Option<(u32, u32)>>,
     pub open_tools: HashSet<(usize, usize)>,
@@ -1646,6 +1650,10 @@ pub struct Workbench {
     /// and a count of steps, which names each fade.
     lightbox_from: Option<usize>,
     lightbox_steps: u32,
+    /// The pictures the lightbox shows, whole; they go when it closes.
+    lightbox_pictures: Option<Entity<crate::pictures::Kept>>,
+    /// The composer's chips' pictures; they go once it holds none.
+    composer_pictures: Entity<crate::pictures::Kept>,
     pub search_input: Entity<InputState>,
     pub search_open: bool,
     /// The settings window, while it is open (`workbench/settings.rs`).
@@ -2401,6 +2409,10 @@ pub struct Workbench {
     /// The pages a file showed before it was drawn again at a new
     /// width, and since when: kept under the new for a moment.
     pub(crate) pdf_under: Option<(std::sync::Arc<crate::panels::PdfDoc>, Instant)>,
+    /// The pictures the file's pane shows, and the file they are of: they
+    /// go when another file is shown, or none.
+    pub(crate) file_pictures: Entity<crate::pictures::Kept>,
+    file_pictures_for: Option<PathBuf>,
     pub(crate) file_big: bool,
     pub(crate) file_big_at: Option<Instant>,
     pub(crate) file_gone: Option<crate::panels::FileView>,
@@ -2678,6 +2690,9 @@ pub struct Workbench {
     /// The comparison of the folder's files against the last commit,
     /// while it shows.
     pub(crate) changes: Option<crate::panels::Changes>,
+    /// The pictures the comparison of changes shows; they go when it
+    /// closes.
+    pub(crate) changes_pictures: Option<Entity<crate::pictures::Kept>>,
     /// The file the comparison last showed, by repository, as GitHub
     /// Desktop keeps it: it opens there again. Held until the app quits.
     pub(crate) changes_last: HashMap<PathBuf, PathBuf>,
@@ -4061,7 +4076,16 @@ impl Workbench {
                 let _ = cx.update(|window, cx| composer.update(cx, |s, cx| s.focus(window, cx)));
                 // `keys:<words>` is a keystroke a letter, each handled
                 // before the next, as from the keyboard.
-                let keys: Vec<String> = keys.split(',').flat_map(|key| match key.strip_prefix("keys:") { Some(words) => words.chars().map(|c| format!("key:{c}")).collect(), None => vec![key.to_string()] }).collect();
+                // `ime:<letters>` is an input method composing them, a
+                // letter at a time: each marks all typed so far.
+                let keys: Vec<String> = keys
+                    .split(',')
+                    .flat_map(|key| match (key.strip_prefix("keys:"), key.strip_prefix("ime:")) {
+                        (Some(words), _) => words.chars().map(|c| format!("key:{c}")).collect(),
+                        (_, Some(letters)) => letters.char_indices().map(|(i, c)| format!("mark:{}", &letters[..i + c.len_utf8()])).collect(),
+                        _ => vec![key.to_string()],
+                    })
+                    .collect();
                 for key in keys.iter().map(String::as_str) {
                     cx.background_executor().timer(Duration::from_millis(if key.starts_with("key:") { 15 } else { 200 })).await;
                     let _ = cx.update(|window, cx| match key {
@@ -4095,6 +4119,25 @@ impl Workbench {
                         }
                         t if t.starts_with("key:") => composer.update(cx, |s, cx| s.insert(t["key:".len()..].to_string(), window, cx)),
                         "back" => window.dispatch_action(Box::new(gpui_component::input::Backspace), cx),
+                        // What an input method composes, marked through the
+                        // composer's own handler, and where it is told to
+                        // put its candidates at once, as AppKit asks before
+                        // the next frame. `commit:<words>` ends it.
+                        t if t.starts_with("mark:") => composer.update(cx, |s, cx| {
+                            use gpui::EntityInputHandler as _;
+                            s.replace_and_mark_text_in_range(None, &t["mark:".len()..], None, window, cx);
+                            let spot = s.input_bounds();
+                            let caret = s.selected_text_range(false, window, cx).map(|r| r.range);
+                            let marked = s.marked_text_range(window, cx);
+                            let show = |b: Option<Bounds<Pixels>>| b.map(|b| format!("{:.0},{:.0} {:.0}x{:.0}", f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)));
+                            let c = show(caret.and_then(|r| s.bounds_for_range(r, spot, window, cx)));
+                            let m = show(marked.and_then(|r| s.bounds_for_range(r, spot, window, cx)));
+                            eprintln!("emaki: ime {:?} caret {c:?} marked {m:?}", &t["mark:".len()..]);
+                        }),
+                        t if t.starts_with("commit:") => composer.update(cx, |s, cx| {
+                            use gpui::EntityInputHandler as _;
+                            s.replace_text_in_range(None, &t["commit:".len()..], window, cx);
+                        }),
                         // What is marked in the composer, printed; `fix`
                         // takes the first correction of the first mark,
                         // `marks` opens its menu.
@@ -4405,6 +4448,8 @@ impl Workbench {
             lightbox_focus: false,
             lightbox_from: None,
             lightbox_steps: 0,
+            lightbox_pictures: None,
+            composer_pictures: crate::pictures::Kept::new(cx),
             search_input,
             search_open: false,
             settings_window: None,
@@ -4655,6 +4700,8 @@ impl Workbench {
             word: None,
             word_scroll: None,
             pdf_under: None,
+            file_pictures: crate::pictures::Kept::new(cx),
+            file_pictures_for: None,
             file_big: false,
             file_big_at: None,
             file_gone: None,
@@ -4791,6 +4838,7 @@ impl Workbench {
             branch_ask_probe: None,
             branch_delete_probe: None,
             changes: None,
+            changes_pictures: None,
             changes_last: HashMap::new(),
             file_probe: None,
             side_drag: false,
@@ -7374,6 +7422,7 @@ impl Workbench {
                     list,
                     born: BORN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     thumbs: HashMap::new(),
+                    pictures: None,
                     sizes: HashMap::new(),
                     open_tools: HashSet::new(),
                     open_thoughts: HashSet::new(),
@@ -10897,6 +10946,45 @@ impl Workbench {
             out.push_str(&lines.join("\n"));
         }
         (out, images)
+    }
+
+    /// Each place's pictures go with it (`pictures::Kept`): a
+    /// conversation's with its tab, the lightbox's and the comparison's
+    /// when they close, the composer's once it holds no attachment, the file
+    /// pane's when another file is shown there.
+    fn sync_pictures(&mut self, cx: &mut Context<Self>) {
+        if let Some(d) = self.detail.as_mut().filter(|d| d.pictures.is_none()) {
+            d.pictures = Some(crate::pictures::Kept::new(cx));
+        }
+        match (&self.lightbox, &self.lightbox_pictures) {
+            (Some(_), None) => self.lightbox_pictures = Some(crate::pictures::Kept::new(cx)),
+            (None, Some(_)) => self.lightbox_pictures = None,
+            _ => {}
+        }
+        if self.attachments.is_empty() && !self.composer_pictures.read(cx).is_empty() {
+            self.composer_pictures = crate::pictures::Kept::new(cx);
+        }
+        match (&self.changes, &self.changes_pictures) {
+            (Some(_), None) => self.changes_pictures = Some(crate::pictures::Kept::new(cx)),
+            (None, Some(_)) => self.changes_pictures = None,
+            _ => {}
+        }
+        let shown = self.file_drawn().map(|(v, _)| v.path.clone());
+        if shown != self.file_pictures_for {
+            self.file_pictures_for = shown;
+            if !self.file_pictures.read(cx).is_empty() {
+                self.file_pictures = crate::pictures::Kept::new(cx);
+            }
+        }
+    }
+
+    /// A picture of the conversation showing as a thumbnail draws it:
+    /// decoded small, and let go with the conversation (`pictures::Kept`).
+    pub(crate) fn small(&self, source: ImageSource) -> ImageSource {
+        match self.detail.as_ref().and_then(|d| d.pictures.as_ref()) {
+            Some(kept) => crate::pictures::through(kept, source, crate::pictures::THUMB_PX),
+            None => source,
+        }
     }
 
     /// The thumbnail of the `index`-th image block of row `uuid`, if it has
@@ -16813,6 +16901,12 @@ impl Workbench {
     pub(crate) fn render_list_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.in_list.set(true);
         let round = self.render_round(ix, window, cx);
+        // A picture a reply's markdown shows is read through the
+        // conversation's pictures, and goes with them.
+        let round = match self.detail.as_ref().and_then(|d| d.pictures.clone()) {
+            Some(kept) => gpui::image_cache(kept).w_full().child(round).into_any_element(),
+            None => round,
+        };
         let last = self.detail.as_ref().is_some_and(|d| ix + 1 == d.session.rounds.len());
         let item = match self.selected_ref().filter(|_| last).cloned() {
             Some(r) => v_flex().w_full().child(round).child(div().w_full().px(px(24.)).child(self.render_cards(&r, cx))).into_any_element(),
@@ -18072,9 +18166,13 @@ impl Workbench {
     /// What the window holds, in counts and no words of the person's,
     /// for the memory report.
     fn memory_held(&self, cx: &App) -> String {
+        let pictures = |kept: Option<&Entity<crate::pictures::Kept>>| {
+            let (n, bytes) = kept.map(|k| k.read(cx).held()).unwrap_or_default();
+            format!("{n} pictures drawn ({} MB)", bytes >> 20)
+        };
         let conversation = |d: &Detail| {
             let items: usize = d.session.rounds.iter().map(|r| r.items.len()).sum();
-            format!("{} rounds, {} items, {} thumbnails, {} picture sizes", d.session.rounds.len(), items, d.thumbs.len(), d.sizes.len())
+            format!("{} rounds, {} items, {} thumbnails, {} picture sizes, {}", d.session.rounds.len(), items, d.thumbs.len(), d.sizes.len(), pictures(d.pictures.as_ref()))
         };
         let mut out = String::new();
         out.push_str(&format!("tabs: {}\n", self.tabs.len()));
@@ -18090,6 +18188,10 @@ impl Workbench {
         let entries: usize = self.files.values().map(|(_, list)| list.len()).sum();
         out.push_str(&format!("\"@\" file lists: {} folders, {} entries\n", self.files.len(), entries));
         out.push_str(&format!("drafts: {}\n", self.drafts.len()));
+        out.push_str(&format!("composer chips: {}\n", pictures(Some(&self.composer_pictures))));
+        out.push_str(&format!("lightbox: {}\n", pictures(self.lightbox_pictures.as_ref())));
+        out.push_str(&format!("file pane: {}\n", pictures(Some(&self.file_pictures))));
+        out.push_str(&format!("changes: {}\n", pictures(self.changes_pictures.as_ref())));
         out.push_str(&format!("composer: {} bytes, {} writing marks\n", self.composer.read(cx).value().len(), self.issues.len()));
         out.push_str(&self.hub.held());
         out
@@ -18635,7 +18737,7 @@ impl Workbench {
                             Some(from) => {
                                 let size = a.size.or_else(|| crate::pictures::dims(&from));
                                 let (w, h) = fit_thumb(size, 96., 40., (40., 40.));
-                                img(from).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(ObjectFit::Contain).bg(theme.border).into_any_element()
+                                img(crate::pictures::through(&self.composer_pictures, ImageSource::from(from), crate::pictures::THUMB_PX)).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(ObjectFit::Contain).bg(theme.border).into_any_element()
                             }
                             None => crate::pictures::kind_tile(&a.name, 40., dark).into_any_element(),
                         })
@@ -19053,13 +19155,18 @@ impl Workbench {
                 let top = order.remove(at);
                 order.push(top);
                 let region = self.lightbox_region.clone();
+                let pictures = self.lightbox_pictures.clone();
                 div().relative().w(gpui::relative(0.88)).h(gpui::relative(0.8)).child(canvas(move |b, _, _| region.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full()).children(order.into_iter().map(move |(i, pic)| {
                     let shown = i == at;
                     // The picture is the region's size and fits itself in
                     // it whole, rounded where it is drawn. Held to a share of
                     // a box whose height was its own, a tall one was never
                     // held and was cut off at the region's foot.
-                    let frame = img(pic.source).id(("lightbox-img", i)).size_full().object_fit(ObjectFit::Contain).rounded(px(12.));
+                    let source = match &pictures {
+                        Some(kept) => crate::pictures::through(kept, pic.source, 0),
+                        None => pic.source,
+                    };
+                    let frame = img(source).id(("lightbox-img", i)).size_full().object_fit(ObjectFit::Contain).rounded(px(12.));
                     let place = div().absolute().inset_0().flex().items_center().justify_center();
                     let step = Animation::new(LIGHTBOX_STEP);
                     if shown && from.is_some() {
@@ -20562,6 +20669,7 @@ impl Render for Workbench {
         self.fields_live.borrow_mut().clear();
         self.inner_kept.borrow_mut().retain(|_, kept| kept.in_list || std::mem::take(&mut kept.used));
         self.sync_draft(window, cx);
+        self.sync_pictures(cx);
         self.writing_sync(cx);
         self.file_writing_sync(cx);
         self.sync_folders(cx);

@@ -149,7 +149,7 @@ pub use text_selection::{
     TextSelection, TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint,
     TextSelectionEvent, TextSelectionHandle, TextSelectionLayer, TextSelectionProjection,
     TextSelectionRegistration, TextSelectionRun, TextSelectionScopeId, TextSelectionSnapshot,
-    TextSelectionWindowPoints,
+    TextSelectionWindowPoints, letter_box,
 };
 pub use theme::{ResizableTheme, ScrollbarTheme, Theme};
 pub use theme_tokens::{

@@ -3390,7 +3390,16 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         let last_layout = self.last_layout.as_ref()?;
         let line_height = last_layout.line_height;
         let line_number_width = last_layout.line_number_width;
-        let range = self.range_from_utf16(&range_utf16);
+        let mut range = self.range_from_utf16(&range_utf16);
+        // While an input method composes, its candidates stand under where
+        // the composition began, as AppKit's own fields keep them. The
+        // range asked for ran to letters the last layout did not have yet,
+        // and the panel jumped at every key. (Emaki addition.)
+        if let Some(marked) = self.ime_marked_range {
+            if range.start >= marked.start && range.start <= marked.end {
+                range = marked.start..marked.start;
+            }
+        }
 
         let mut start_origin = None;
         let mut end_origin = None;
@@ -3428,9 +3437,12 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         }
 
         let start_origin = start_origin.unwrap_or_default();
-        let mut end_origin = end_origin.unwrap_or_default();
-        // Ensure at same line.
-        end_origin.y = start_origin.y;
+        // An end the layout does not have, or on another line, ends where
+        // it starts: a box with its right edge left of its left one put
+        // the candidates anywhere. (Emaki addition.)
+        let end_origin = end_origin
+            .filter(|end| end.y == start_origin.y && end.x >= start_origin.x)
+            .unwrap_or(start_origin);
 
         Some(Bounds::from_corners(
             bounds.origin + line_number_origin + start_origin,

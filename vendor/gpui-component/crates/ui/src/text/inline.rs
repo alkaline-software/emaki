@@ -212,13 +212,12 @@ impl Inline {
                     offset = next_offset;
                     continue;
                 };
-                // An index at a wrap is reported at the end of the line
-                // above, so the first letter of a wrapped line is found by
-                // where the next index is: it runs from the line's start.
-                let (left, top) = if next_pos.y == pos.y { (pos.x, pos.y) } else { (bounds.left(), next_pos.y) };
+                // The first letter of a wrapped line runs from the line's
+                // start (`letter_box`).
+                let (at, width) = gpui_base::letter_box(c, pos, Some(next_pos), bounds.left(), px(0.));
                 let letter = Bounds::from_corners(
-                    point(left, top + inset),
-                    point(next_pos.x, top + inset + height),
+                    point(at.x, at.y + inset),
+                    point(at.x + width, at.y + inset + height),
                 );
                 let is_code = c != CODE_PAD;
                 match lines.last_mut() {
@@ -348,20 +347,18 @@ impl Inline {
         let mut offset = 0;
         let mut spots = Spots::new(text_layout);
         let mut here = spots.at(0);
+        let left = text_layout.bounds().left();
         for c in self.text.chars() {
             let next_offset = offset + c.len_utf8();
             let next = spots.at(next_offset);
-            let Some(pos) = std::mem::replace(&mut here, next) else {
+            let Some(at) = std::mem::replace(&mut here, next) else {
                 offset = next_offset;
                 continue;
             };
 
-            let mut char_width = line_height.half();
-            if let Some(next_pos) = next {
-                if next_pos.y == pos.y {
-                    char_width = next_pos.x - pos.x;
-                }
-            }
+            // The first letter of a wrapped line where it is drawn, not at
+            // the end of the line above (`letter_box`). (Emaki addition.)
+            let (pos, char_width) = gpui_base::letter_box(c, at, next, left, line_height.half());
 
             if point_in_text_selection(pos, char_width, selection_start, selection_end, line_height)
             {
@@ -398,21 +395,19 @@ impl Inline {
         let mut offset = 0;
         let mut spots = Spots::new(text_layout);
         let mut here = spots.at(0);
+        let left = shown.left();
 
         for c in self.text.chars() {
             let next_offset = offset + c.len_utf8();
             let next = spots.at(next_offset);
-            let Some(pos) = std::mem::replace(&mut here, next) else {
+            let Some(at) = std::mem::replace(&mut here, next) else {
                 offset = next_offset;
                 continue;
             };
 
-            let mut char_width = line_height.half();
-            if let Some(next_pos) = next {
-                if next_pos.y == pos.y {
-                    char_width = next_pos.x - pos.x;
-                }
-            }
+            // A wrapped line's box starts at its first letter, where it is
+            // drawn (`letter_box`). (Emaki addition.)
+            let (pos, char_width) = gpui_base::letter_box(c, at, next, left, line_height.half());
 
             let bounds = Bounds::from_corners(pos, point(pos.x + char_width, pos.y + line_height))
                 .intersect(&mask_bounds);
@@ -442,8 +437,8 @@ impl Inline {
 
     /// Emaki: a found range's ground, a box a line it is on; the first
     /// line's box, where the range begins.
-    fn paint_range(range: &Range<usize>, color: Hsla, text_layout: &TextLayout, bounds: &Bounds<Pixels>, window: &mut Window) -> Option<Bounds<Pixels>> {
-        let start = text_layout.position_for_index(range.start)?;
+    fn paint_range(text: &str, range: &Range<usize>, color: Hsla, text_layout: &TextLayout, bounds: &Bounds<Pixels>, window: &mut Window) -> Option<Bounds<Pixels>> {
+        let start = drawn_at(text, text_layout, range.start)?;
         let end = text_layout.position_for_index(range.end)?;
         let line_height = text_layout.line_height();
         let fill = |b: Bounds<Pixels>, window: &mut Window| window.paint_quad(quad(b, px(2.), color, Edges::default(), gpui::transparent_black(), BorderStyle::default()));
@@ -463,6 +458,7 @@ impl Inline {
 
     /// Paint the selection background.
     fn paint_selection(
+        text: &str,
         selection: &Selection,
         text_layout: &TextLayout,
         bounds: &Bounds<Pixels>,
@@ -474,7 +470,7 @@ impl Inline {
         if end < start {
             std::mem::swap(&mut start, &mut end);
         }
-        let Some(start_position) = text_layout.position_for_index(start) else {
+        let Some(start_position) = drawn_at(text, text_layout, start) else {
             return;
         };
         let Some(end_position) = text_layout.position_for_index(end) else {
@@ -645,7 +641,7 @@ impl Element for Inline {
             let selection = cx.theme().selection;
             let other = Hsla { s: 0.1, ..selection };
             for (range, ix, current) in find.take_matches(&self.text) {
-                if let Some(at) = Self::paint_range(&range, if current { selection } else { other }, &text_layout, &bounds, window) {
+                if let Some(at) = Self::paint_range(&self.text, &range, if current { selection } else { other }, &text_layout, &bounds, window) {
                     if current {
                         find.painted_current(ix, at);
                     }
@@ -673,7 +669,7 @@ impl Element for Inline {
         }
 
         if let Some(selection) = &state.selection {
-            Self::paint_selection(selection, &text_layout, &bounds, window, cx);
+            Self::paint_selection(&self.text, selection, &text_layout, &bounds, window, cx);
         }
 
         if is_selectable {
@@ -850,6 +846,19 @@ fn selection_for_multi_click(
         // so triple-click only selects the run on the clicked side of the image.
         TextViewMultiClickKind::Paragraph => (!text.is_empty()).then_some(0..text.len()),
     }
+}
+
+/// Where the letter at `index` is drawn, the first of a wrapped line at
+/// that line's start (`letter_box`); the end of the text, or a line
+/// break, where `TextLayout::position_for_index` puts it. A selection or a
+/// found range starts here. (Emaki addition.)
+fn drawn_at(text: &str, layout: &TextLayout, index: usize) -> Option<Point<Pixels>> {
+    let at = layout.position_for_index(index)?;
+    let Some(c) = text.get(index..).and_then(|t| t.chars().next()) else {
+        return Some(at);
+    };
+    let next = layout.position_for_index(index + c.len_utf8());
+    Some(gpui_base::letter_box(c, at, next, layout.bounds().left(), px(0.)).0)
 }
 
 /// Where a run's indices are, as `TextLayout::position_for_index` gives

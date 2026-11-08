@@ -211,18 +211,10 @@ upstream revision finds them.
    and a `themes/aurora.json` holding `{}`, which a test reads and the
    copy does not have; neither is kept.
 
-27. `crates/ui/src/text/node.rs`: a code block's lines are not wrapped
-   (`whitespace_nowrap` on the block). The text is in the toolkit's own
-   `horizontal_scroll_area`, as a table is, so a block wider than its
-   room scrolls sideways and a wheel that is not sideways passes through
-   to what the block is in. The area is a row and the text an item of it
-   that does not shrink: as a block's child the text was as wide as the
-   block and there was nothing to scroll. Its handle is kept with `use_keyed_state`
-   under the parsed block's own address, since a node is made off the
-   main thread and cannot hold one. Where more lies past an edge the text
-   fades into the block's ground, and the block has a horizontal
-   scrollbar, on the block itself so it lies in the padding under the
-   text and not over the last line. Wrapped, anything set out in columns came apart.
+27. `crates/ui/src/text/node.rs` (`CodeBlock::render`): a code block's
+   lines wrap at its room, as upstream has them. Tried and dropped: no
+   wrap and a sideways scroll, where a long line was read a screen at a
+   time.
 28. `crates/ui/src/text/node.rs` (`render_wrap_table`): a column is never
    narrower than its longest word, up to a number of letters that is
    less with more columns. Columns are sized by the length of their text
@@ -241,10 +233,10 @@ upstream revision finds them.
    tooltip whose trigger went (a sheet closed under the pointer, or a
    show that landed after its trigger had gone) stayed for good.
 31. `crates/ui/src/text/node.rs` (`code_drag`, `CodeDrag`): a selection
-   dragged to a code block's left or right edge scrolls the block that
+   dragged to a wide table's left or right edge scrolls the table that
    way, a step a frame, longer the further past the edge the pointer is.
    It begins only with a press on the text and a move with the button
-   held, so the copy button and the scrollbar are left alone. The text
+   held, so the scrollbar is left alone. The text
    view keeps a selection as points in the window and reads them
    against the text where it stands, so the selection follows the
    scroll with nothing else changed.
@@ -352,7 +344,11 @@ upstream revision finds them.
 68. `crates/ui/src/text/node.rs` (`render_list_item_row`): an item of a list that is not numbered is marked by a hairline, a short thin line at the middle of its first line in the quiet ink, shorter below the first depth, in place of upstream's "•", "◦" and "▪". A numbered list keeps its numbers (`list_item_prefix`).
 69. `crates/ui/src/text/node.rs` (the display formula's `math-room`): its sideways scroller takes a sideways stroke only (`restrict_scroll_to_axis`). An up-and-down wheel over a formula wider than its room slid it across while the conversation scrolled under it.
 
-70. `crates/ui/src/text/node.rs` (`render_scroll_table`), `style.rs` (`TextViewStyle::table_ground`): the scroll layout of a table, which Emaki opts into. The frame is as wide as the columns' text and no wider, up to the room, and stays still while the rows scroll inside it; upstream framed the track, whose edges scrolled away, and stretched every table across the line. A column is never narrower than its longest word, measured, and every measured width has two pixels of slack: a column exactly a word's width broke it on a fraction. Where more lies past an edge the rows fade into `table_ground` there, the scrollbar shows under the pointer, and a selection dragged to an edge scrolls the table (`code_drag`), as a code block does. `overflow-x: scroll` on `table` chooses the layout and is not set on the viewport, where gpui scrolled it by an up-and-down wheel too.
+70. `crates/ui/src/text/node.rs` (`render_scroll_table`), `style.rs` (`TextViewStyle::table_ground`): the scroll layout of a table, which Emaki opts into. The frame is as wide as the columns' text and no wider, up to the room, and stays still while the rows scroll inside it; upstream framed the track, whose edges scrolled away, and stretched every table across the line. A column is never narrower than its longest word, measured, and every measured width has two pixels of slack: a column exactly a word's width broke it on a fraction. Where more lies past an edge the rows fade into `table_ground` there, the scrollbar shows under the pointer, and a selection dragged to an edge scrolls the table (`code_drag`). `overflow-x: scroll` on `table` chooses the layout and is not set on the viewport, where gpui scrolled it by an up-and-down wheel too.
+
+71. `crates/base/src/text_selection.rs` (`letter_box`, `selection_range_for_run`), `crates/ui/src/text/inline.rs` (`drawn_at`, the selection, `text_line_bounds`, `paint_selection`, `paint_range`, the code plates): the first letter of a wrapped line is where it is drawn, at that line's start. gpui's `position_for_index` puts the index where a line wraps at the end of the line above, where a caret there goes, so a selection begun on a wrapped line left its first letter out, and one beginning at that letter was painted from the end of the line above.
+
+72. `crates/base/src/input/base/state.rs` (`bounds_for_range`): while an input method composes, the box its candidates stand under is at the start of the marked text, whatever part of it is asked for, and a box's end the last layout lacks, or on another line, is its start. Upstream answered from the last frame's layout, which did not have the letter just typed: the caret came out at the line's start and the marked text as a box of negative width, and the panel jumped at every key.
 
 ## Updating
 

@@ -1035,7 +1035,7 @@ impl Workbench {
             let caption = if a.name.is_empty() { t("image").to_string() } else { a.name.clone() };
             return frame(
                 v_flex()
-                    .child(img(src).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain).bg(theme.muted))
+                    .child(img(self.small(src)).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain).bg(theme.muted))
                     .child(tile_caption(w, caption, &theme))
                     .into_any_element(),
             )
@@ -1475,7 +1475,7 @@ impl Workbench {
                                         }),
                                     )
                                     .on_click(cx.listener(move |this, _, _, cx| this.preview_attachment(title.clone(), file.clone(), Some(image.clone()), cx)))
-                                    .child(img(ImageSource::from(t.image)).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain))
+                                    .child(img(self.small(ImageSource::from(t.image))).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain))
                                     .child(tile_caption(w, caption, &theme)),
                             );
                         }
@@ -1619,7 +1619,25 @@ impl Workbench {
 #[cfg(test)]
 mod tests {
     use super::chat_parse_options;
+    use gpui::{point, px};
     use markdown::mdast::Node;
+
+    /// A selection takes the first letter of a wrapped line where it is
+    /// drawn (the vendored `letter_box`, which the text view's selection,
+    /// its line boxes and the window's selection all go through).
+    #[test]
+    fn the_first_letter_of_a_wrapped_line_is_at_its_start() {
+        let letter_box = gpui_base::letter_box;
+        let (left, half) = (px(10.), px(5.));
+        // A letter with the next on its line runs to it.
+        assert_eq!(letter_box('a', point(px(40.), px(0.)), Some(point(px(48.), px(0.))), left, half), (point(px(40.), px(0.)), px(8.)));
+        // Put at the end of the line above, with the next index below:
+        // drawn at the lower line's start.
+        assert_eq!(letter_box('p', point(px(300.), px(0.)), Some(point(px(19.), px(20.))), left, half), (point(px(10.), px(20.)), px(9.)));
+        // A line break stays where it is.
+        assert_eq!(letter_box('\n', point(px(300.), px(0.)), Some(point(px(10.), px(20.))), left, half), (point(px(300.), px(0.)), half));
+        assert_eq!(letter_box('z', point(px(300.), px(0.)), None, left, half), (point(px(300.), px(0.)), half));
+    }
 
     fn chat(text: &str) -> Node {
         let mut opts = markdown::ParseOptions::gfm();

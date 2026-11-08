@@ -10,6 +10,7 @@ About keeping Emaki fast and light: how an optimization pass is done, the rules 
 - **Nothing slow is asked while a frame is built** (`docs/window.md`, Frames), and that includes what a row asks for: a row's call runs once a row a frame, so a list of 300 rows at 120 frames a second makes it 36,000 times a second.
 - **A lookup a row makes at every frame is answered from memory.** A small file the window reads per row (`state/remotes.json`, a remote's `probe.json`) is held in memory (`remote::kept`, `remote::probed`): this process's own writes go into the memory as they go to the disk (`remote::save`, `remote::keep_probe`), and the disk is looked at no more than every half second (`LOOK_AGAIN`), for another process's write. A read that answers with a shared list (`Arc`) copies nothing; `find` copies one remote, not the list.
 - **A path is a name, not a look at the disk.** `paths::root` starts every path the app names, many times a frame; the move from the old folder name is looked for once a run, not at every call.
+- **A picture belongs to the place that shows it.** gpui keeps every picture it decodes from a path or from bytes (`ImageSource::Resource`, `ImageSource::Image`), and its copy on the GPU, for as long as the app runs, and a day of pasted screenshots looked at held 2.4 GB. So each place that shows pictures has a `pictures::Kept` (a conversation's `Detail::pictures`, the composer's, the lightbox's, the file pane's, the comparison's), and a picture is drawn through it (`pictures::through`, or an `image_cache` of it around a markdown view, which catches the pictures it shows). When the place goes, its `Kept` goes, and every picture in it is let go with `drop_image`, its GPU copy too; one made from bytes goes as soon as nothing else holds those bytes (`Kept::sweep`), so a PDF's pages drawn again at a new width leave no copies behind. A thumbnail is decoded no larger than `THUMB_PX` on its longer side, twice the largest box one is drawn in: handed the whole picture, the GPU kept all of it and drew it jagged. `remove_asset` is not a way to let a picture go: it frees the decoded copy and leaves the GPU's.
 - **Work leaves the main thread** (reading files, git, ssh, a model's answer), and a clock runs only while it has something to move (`docs/window.md`, Frames).
 
 ## A pass
@@ -27,19 +28,20 @@ About keeping Emaki fast and light: how an optimization pass is done, the rules 
 
 Newest first. Each entry: the version and date, the commit range covered, what was looked at, what was found and done with numbers, and what was left for later.
 
-### v0.5.0, 2026-11-05
+### v0.5.2, 2026-11-08
 
-Covers `v0.4.3..` the commit that adds this entry: Connected Devices (`remote.rs`, `remote_files.rs`, Settings' saved computers in `workbench/settings.rs`, the sidebar's computer cards and `side_unlinked` in `workbench.rs`, the hub's links).
+Covers `v0.5.1..` the commit that adds this entry: what memory a picture takes, from a memory report written at 3 GB after 23 hours with four tabs open: 1.3 GB of the heap in about 126 blocks of ten megabytes, and 1.1 GB on the GPU. The window's own counts were small; the pictures were in gpui's caches, which they do not see.
 
-Found and fixed: every remote session row in the sidebar and on the sessions page asked `remote::is_there`, `find` (its computer's name) or `probed` (its home) at every frame, and each call looked at the file's stamp on the disk and copied the whole list or probe. `paths::root` looked at the disk at every call as well. Now held in memory as the Rules say. Timed 20,000 calls each, release build, the real `HOME`:
+Found and fixed: every picture the window drew was decoded whole and kept by gpui, on the heap and on the GPU, until the app quit: a conversation's thumbnails, the composer's chips, the lightbox's pictures, the file pane's pictures, PDF pages and HTML strips, the comparison's pictures and a markdown file's. Closing the tab let none of them go. Now each place's pictures go with it (Rules, a picture belongs to the place that shows it), a thumbnail is decoded at 640 pixels at most, and two pictures are decoded at a time (`pictures::DECODING`): twenty decoded together left some 400 MB of scratch the allocator gave back only over a minute or more (`vmmap`, Malloc Large (empty)). A probe copy (`docs/probing.md`), a session of one prompt with twenty pasted pictures of 2000 × 1288, measured with `footprint`:
 
-| Call | Before | After |
+| | Before | After |
 |---|---|---|
-| `is_there` | 3.4 µs | 0.25 µs |
-| `find` | 2.5 µs | 0.33 µs |
-| `probed` | 2.4 µs | 0.38 µs |
+| A session without pictures open | 257 MB | 258 MB |
+| The twenty-picture session opened | 831 MB | 367 MB, 303 MB a minute later |
+| Its tab closed | 737 MB | 268 MB |
+| The lightbox opened on the twenty, then closed | not measured | +225 MB while open, 218 MB of it back on closing |
 
-Looked at and left as they are: the link's watch (a `find` there once a second, a line back; the work is on the remote), the files engine's watch (the same), the sign-in check (one ssh command a connected computer every 30 seconds, only while Settings shows the section), one shared ssh connection a computer (`ControlMaster`), a copied change waking the scan as a local session's write does, and Settings' entries, drawn only while the window shows them.
+What the open session holds is the twenty thumbnails, twenty blocks of about a megabyte (`heap`), and as much again on the GPU.
 
 Left for later: nothing.
 

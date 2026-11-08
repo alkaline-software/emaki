@@ -1478,15 +1478,6 @@ impl CodeBlock {
         cx: &mut App,
     ) -> AnyElement {
         let style = &node_cx.style;
-        // Where the block is scrolled sideways, kept by the block as
-        // parsed: the same block has the same place while its text
-        // stands. (Emaki addition.)
-        let key = SharedString::from(format!("codeblock-scroll-{:p}", Arc::as_ptr(&self.state)));
-        let scroll = window.use_keyed_state(key, cx, |_, _| ScrollHandle::default()).read(cx).clone();
-        // A selection dragged to an edge of the block scrolls it that
-        // way, as a text field does. (Emaki addition.)
-        let drag_key = SharedString::from(format!("codeblock-drag-{:p}", Arc::as_ptr(&self.state)));
-        let drag = window.use_keyed_state(drag_key, cx, |_, _| CodeDrag::default());
         // The actions are made for the block under the pointer only: made
         // for every block, a document of a hundred chunks built a button
         // for each of them every frame, a quarter of the frame's time.
@@ -1552,44 +1543,16 @@ impl CodeBlock {
                 .child(label)
         });
 
-        let code = {
-                        let scroll = scroll.clone();
-                        let (at, most) = (-scroll.offset().x, scroll.max_offset().x);
-                        let ground = cx.theme().muted;
-                        let fade = |left: bool| {
-                            let (from, to) = if left { (ground, ground.opacity(0.)) } else { (ground.opacity(0.), ground) };
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .w(px(36.))
-                                .map(|d| if left { d.left_0() } else { d.right_0() })
-                                .bg(linear_gradient(90., linear_color_stop(from, 0.), linear_color_stop(to, 1.)))
-                        };
-                        div()
-                            .relative()
-                            .w_full()
-                            .min_w_0()
-                            .child(horizontal_scroll_area(
-                                ("code-scroll", options.ix),
-                                &scroll,
-                                // A row, and the text an item of it that
-                                // does not shrink: as a block's child it
-                                // was as wide as the block, its lines ran
-                                // past it, and there was nothing to scroll.
-                                &gpui::StyleRefinement::default().flex(),
-                                div().flex_none().child(Inline::new(
-                                    "code",
-                                    self.state.clone(),
-                                    vec![],
-                                    self.styles(&cx.theme().highlight_theme),
-                                    node_cx.link_click_handler.clone(),
-                                )),
-                            ))
-                            .when(at > px(1.), |d| d.child(fade(true)))
-                            .when(most - at > px(1.), |d| d.child(fade(false)))
-                            .child(code_drag(drag.clone(), scroll.clone()).absolute().inset_0())
-                    };
+        // A line wider than the room wraps onto the next, as prose does:
+        // scrolled sideways instead, a line was read a screen at a time.
+        // (Emaki addition.)
+        let code = div().w_full().min_w_0().child(Inline::new(
+            "code",
+            self.state.clone(),
+            vec![],
+            self.styles(&cx.theme().highlight_theme),
+            node_cx.link_click_handler.clone(),
+        ));
         // What folds: the code, and the room between it and the head.
         // Measured as it is drawn, so a fold closes from the height it had.
         let body = {
@@ -1629,22 +1592,8 @@ impl CodeBlock {
                     .text_size(cx.theme().mono_font_size)
                     .relative()
                     .refine_style(&style.code_block)
-                    // A line of code is not wrapped: what is set out in
-                    // columns (a table, a drawing, a mock of a screen)
-                    // came apart where a line was broken. A block wider
-                    // than its room scrolls sideways, and only when the
-                    // gesture is sideways, so a wheel over it still moves
-                    // what it is in (`horizontal_scroll_area`, as a table
-                    // has). Where more lies past an edge the
-                    // text fades into the block's ground there, and the
-                    // scrollbar shows under the pointer: cut off clean,
-                    // a line read as all there was. (Emaki addition.)
-                    .whitespace_nowrap()
                     .children(head)
                     .when(shown > 0., |d| d.child(body))
-                    // On the block and not on the text's own box: there
-                    // it lay over the last line.
-                    .when(open, |d| d.horizontal_scrollbar(&scroll))
                     .when_some(pointed.clone(), |d, pointed| {
                         d.on_hover(move |on, _, cx| {
                             pointed.update(cx, |was, cx| {
@@ -1729,9 +1678,9 @@ impl ChunkFold {
     }
 }
 
-/// A drag that began on a code block's text: where the pointer is while
+/// A drag that began on a wide table's text: where the pointer is while
 /// the button that began it is held, and whether it has moved since, so
-/// a press alone (the copy button, near the right edge) scrolls nothing.
+/// a press alone scrolls nothing.
 /// (Emaki addition.)
 #[derive(Default)]
 struct CodeDrag {
@@ -1739,10 +1688,10 @@ struct CodeDrag {
     moved: bool,
 }
 
-/// Laid over a code block's text, it scrolls the block sideways while a
+/// Laid over a wide table's text, it scrolls the table sideways while a
 /// drag that began on the text is held near or past its left or right
 /// edge: a step a frame, longer the further out the pointer is, so a
-/// selection reaches what lies past the edge. A press on the block's
+/// selection reaches what lies past the edge. A press on the table's
 /// scrollbar is under the text's box and begins nothing, so dragging the
 /// bar is the bar's alone. The selection follows by itself: it is kept
 /// as points in the window, read against the text where it now stands.

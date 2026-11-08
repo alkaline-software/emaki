@@ -380,6 +380,27 @@ fn project_ranges(
     }
 }
 
+/// Where the letter `c` is drawn, from where `TextLayout::position_for_index`
+/// puts its index (`at`) and the next (`next`): its top left and its width.
+/// An index where a line wraps is put at the end of the line above, where a
+/// caret there goes, so a letter whose next index is on a lower line is the
+/// first of a wrapped line and runs from that line's start (`left`); a line
+/// break keeps its place. With no next index on its line, the width is
+/// `fallback`. (Emaki addition.)
+pub fn letter_box(
+    c: char,
+    at: Point<Pixels>,
+    next: Option<Point<Pixels>>,
+    left: Pixels,
+    fallback: Pixels,
+) -> (Point<Pixels>, Pixels) {
+    match next {
+        Some(next) if next.y == at.y => (at, next.x - at.x),
+        Some(next) if next.y > at.y && c != '\n' => (Point::new(left, next.y), next.x - left),
+        _ => (at, fallback),
+    }
+}
+
 fn selection_range_for_run(
     run: &TextSelectionRun,
     selection_start: Point<Pixels>,
@@ -390,18 +411,22 @@ fn selection_range_for_run(
     }
 
     let line_height = run.layout.line_height();
+    let left = run.layout.bounds().left();
     let mut range = None;
     for (offset, character) in run.text.char_indices() {
         let next_offset = offset + character.len_utf8();
-        let Some(position) = run.layout.position_for_index(offset) else {
+        let Some(at) = run.layout.position_for_index(offset) else {
             continue;
         };
-
-        let char_width = run
-            .layout
-            .position_for_index(next_offset)
-            .filter(|next| next.y == position.y)
-            .map_or_else(|| line_height.half(), |next| next.x - position.x);
+        // The first letter of a wrapped line where it is drawn, not at the
+        // end of the line above. (Emaki addition.)
+        let (position, char_width) = letter_box(
+            character,
+            at,
+            run.layout.position_for_index(next_offset),
+            left,
+            line_height.half(),
+        );
 
         if point_in_selection_band(
             position,

@@ -4066,6 +4066,7 @@ dependencies = [
  "anyhow",
  "anyrender",
  "anyrender_vello_cpu",
+ "async-lock",
  "blitz-dom",
  "blitz-html",
  "blitz-paint",
