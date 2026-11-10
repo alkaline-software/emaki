@@ -7,6 +7,7 @@ How to look at a state of the window from a script, without the person's hands. 
 - Probe with a second copy, never the running app: `EMAKI_HOME` at a scratch directory. The agent's session is a child of the running Emaki (its hidden terminal), so quitting that Emaki ends the session.
 - Never `pkill` by hand from inside the app. `scripts/relaunch.sh` is the only way the running copy is replaced.
 - Say what was checked and what was not. A synthetic click does not reach a click handler in a background window, so "the click works" is not shown by a screenshot of the state the click leads to.
+- A probe never makes the system ask the person for anything. macOS keeps one grant a bundle identifier (Documents, Desktop, Downloads), tied to the signature that asked: a copy of an app re-signed under the same identifier takes the grant from the app, and each then asks again whenever the other was allowed last, and git in the window fails with "Operation not permitted" until it is answered. So a probe runs the bundle `scripts/dev-app.sh` makes, or the installed app, as they are signed; a copy of a bundle is never re-signed under its identifier; and a probe that compares builds or runs one of its own reads only folders the system does not guard (a scratch project under `/private/tmp`, not under `~/Documents`), with a bundle identifier of its own.
 
 ## A second copy
 

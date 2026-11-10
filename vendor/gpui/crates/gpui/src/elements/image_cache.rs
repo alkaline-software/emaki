@@ -137,9 +137,17 @@ impl Element for ImageCacheElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        for child in &mut self.children {
-            child.prepaint(window, cx);
-        }
+        // The cache is the children's in prepaint too: an element that
+        // lays out what it holds as it is placed (a markdown view measures
+        // its pictures there) found none and read each picture through
+        // the app's asset cache, decoded whole and kept until the app
+        // quits. (Emaki addition.)
+        let image_cache = self.image_cache_provider.provide(window, cx);
+        window.with_image_cache(Some(image_cache), |window| {
+            for child in &mut self.children {
+                child.prepaint(window, cx);
+            }
+        })
     }
 
     fn paint(

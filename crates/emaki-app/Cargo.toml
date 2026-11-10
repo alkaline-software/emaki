@@ -63,6 +63,9 @@ wordcraft-render = { git = "https://github.com/storytold/wordcraft", rev = "325e
 wordcraft-engine = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
 wordcraft-geom = { git = "https://github.com/storytold/wordcraft", rev = "325e5a6157930d076816f41425d89fa37022cdf3" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+# A moving GIF's frames, laid on its canvas a frame at a time (`pictures.rs`):
+# the crate the image crate reads GIFs with.
+gif = "0.14"
 # A PowerPoint deck's slides as pictures, drawn by DeckCraft
 # (storytold/deckcraft, MIT OR Apache-2.0), on the same terms.
 deckcraft-pptx = { git = "https://github.com/storytold/deckcraft", rev = "0ec0cc5e815caea982a7deec51bc437f3ba187ad" }

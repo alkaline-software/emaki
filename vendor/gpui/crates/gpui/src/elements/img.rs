@@ -487,10 +487,14 @@ impl Element for Img {
                     if data.frame_count() == 0 {
                         return;
                     }
+                    // The picture is asked for again to paint, and may not
+                    // be the one laid out: a frame it does not have aborted
+                    // the app in `paint_image`. (Emaki addition.)
+                    let frame_index = layout_state.frame_index.min(data.frame_count() - 1);
                     let new_bounds = self
                         .style
                         .object_fit
-                        .get_bounds(bounds, data.size(layout_state.frame_index));
+                        .get_bounds(bounds, data.size(frame_index));
                     let corner_radii = style.corner_radii.to_pixels(window.rem_size());
                     window
                         .paint_image(
@@ -498,7 +502,7 @@ impl Element for Img {
                             new_bounds,
                             corner_radii,
                             data,
-                            layout_state.frame_index,
+                            frame_index,
                             self.style.grayscale,
                         )
                         .log_err();

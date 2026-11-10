@@ -4077,6 +4077,7 @@ dependencies = [
  "deckcraft-render",
  "emaki-core",
  "futures",
+ "gif 0.14.2",
  "gpui",
  "gpui-base",
  "gpui-component",

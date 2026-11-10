@@ -4718,7 +4718,7 @@ impl Workbench {
             file_structure_drag: None,
             file_heads_spots: gpui_component::text::HeadingSpots::new(),
             file_doc: Default::default(),
-            ambient: cx.new(|_| crate::ambient::Ambient::default()),
+            ambient: { let ambient = cx.new(|_| crate::ambient::Ambient::default()); crate::pictures::Clock::set(&ambient, cx); ambient },
             conversation: { let wb = cx.entity(); cx.new(|cx| crate::transcript::ConversationList::new(wb, cx)) },
             side_view: { let wb = cx.entity(); cx.new(|cx| SideView::new(wb, cx)) },
             file_structure_scroll: ScrollHandle::new(),
@@ -13147,6 +13147,10 @@ impl Workbench {
             .px(px(14.))
             .gap(px(10.))
             .items_center()
+            // Round at the card's corners, inside its edge: gpui cuts
+            // what a card holds at its box, not its curve, and the tint
+            // stood square past both corners.
+            .rounded_t(px(9.))
             .bg(band_bg)
             .border_b_1()
             .border_color(theme.sidebar_border)
