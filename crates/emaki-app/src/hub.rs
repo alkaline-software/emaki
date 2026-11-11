@@ -549,7 +549,8 @@ impl Hub {
     }
 
     /// A session the registry calls idle is not working, whatever its
-    /// transcript's tail reads as: see `TurnState::settle_idle`. Nor is
+    /// transcript's tail reads as: see `TurnState::settle_idle`. One it
+    /// calls busy since after its rows is (`TurnState::settle_busy`). Nor is
     /// one whose rows are older than the process behind it: a Claude Code
     /// killed part way through a turn leaves a tail that reads as working,
     /// and the hidden terminal started on it at the next launch is behind
@@ -561,8 +562,15 @@ impl Hub {
         let peers = self.peers.lock().unwrap();
         for r in refs.iter_mut() {
             let since = match peers.get(&r.session_id) {
-                // A turn of this process's, its rows perhaps not written yet.
-                Some(p) if p.status == "busy" => None,
+                // A turn of this process's, its rows perhaps not written
+                // yet: working, though they read as the turn before
+                // (`/compact` writes nothing until it is over).
+                Some(p) if p.status == "busy" => {
+                    if p.status_at > 0.0 {
+                        r.state.settle_busy(p.status_at);
+                    }
+                    None
+                }
                 Some(p) => Some(if p.status == "idle" { p.status_at.max(p.started_at) } else { p.started_at }),
                 None => born.get(&r.session_id).copied(),
             };

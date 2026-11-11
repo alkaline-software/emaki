@@ -674,6 +674,13 @@ pub const CONTENT_W: Pixels = px(768.);
 /// green dot), in seconds: from its newest row, or from when its dot was
 /// last blue, whichever is later.
 const YOUR_TURN_FOR: f64 = 1800.;
+
+/// The parts of the window a selection keeps to: a drag begun in one,
+/// carried over another, selects in the one it began in alone (the
+/// vendored `text_selection_region`). Everything else is the toolkit's
+/// part 0.
+pub(crate) const SELECT_CONVERSATION: u64 = 1;
+pub(crate) const SELECT_FILE: u64 = 2;
 /// The settings panel's sections, in rail order: key, label, icon.
 pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
     ("appearance", phrase("Appearance"), "icons/palette.svg"),
@@ -5074,8 +5081,12 @@ impl Workbench {
                 // The turn showing was working and now reads as stopped
                 // (Escape in the terminal, or Stop here): its prompt goes
                 // back to the composer.
+                // A turn only the registry knows of (`settle_busy`) has
+                // no prompt in the transcript to give back: the stop
+                // read after it is the turn's before, and gave that
+                // turn's prompt back when `/compact` ended.
                 let shown = self.selected_ref().filter(|_| self.page == Page::Session).cloned();
-                let working = shown.as_ref().filter(|r| self.is_working(r)).map(|r| r.session_id.clone());
+                let working = shown.as_ref().filter(|r| self.is_working(r) && r.state.activity_kind != "busy").map(|r| r.session_id.clone());
                 if let (Some(was), Some(r)) = (&self.was_working, &shown) {
                     if *was == r.session_id && working.is_none() && r.state.activity_kind == "stop" {
                         self.restore_due = true;
@@ -16352,7 +16363,7 @@ impl Workbench {
             .min_h_0()
             .relative()
             .when_some(chat_font, |d, f| d.faced(f, cx))
-            .child(list_view)
+            .child(gpui_base::ElementExt::text_selection_region(div().size_full().child(list_view), SELECT_CONVERSATION))
             .child(canvas(move |_, window, cx| kept.keep(window, cx), move |_, _, window, cx| marks.paint(window, cx)).absolute().size_0())
             // Not while the layouts trade places: the bar would travel
             // with the conversation's card.

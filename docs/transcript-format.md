@@ -26,7 +26,7 @@ Facts about Claude Code's transcript and registry files that `crates/emaki-core/
 
 ## Slash commands
 
-A slash command answers its own prompt. `/compact` typed in the terminal is written as a user row saying `/compact`, then the rows the command leaves (`<command-name>` in a user row, or a `system/local_command` row with `commandRun`), and no assistant row. `turn_state` would read the prompt as one waiting on a reply, and the session would read as working until the next turn. So a prompt that is a slash command with a command row of the same name after it is skipped, and the state is the turn before it. A skill (`/review`) leaves no command row and is a prompt like any other.
+A slash command answers its own prompt. `/compact` typed in the terminal is written as a user row saying `/compact` (up to 2.1.319; 2.1.322 writes none, and nothing at all until the command is over, so only the registry says it runs: `docs/live-turn.md`), then the rows the command leaves (`<command-name>` in a user row, or a `system/local_command` row with `commandRun`), and no assistant row. `turn_state` would read the prompt as one waiting on a reply, and the session would read as working until the next turn. So a prompt that is a slash command with a command row of the same name after it is skipped, and the state is the turn before it. A skill (`/review`) leaves no command row and is a prompt like any other.
 
 In the conversation the command's own chip is left out when the prompt above already says it. `/compact`'s output line, "Compacted (ctrl+o to see full summary)", is the terminal's instruction and is dropped, so the round reads as the prompt and the boundary's notice.
 

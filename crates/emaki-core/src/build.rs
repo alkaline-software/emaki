@@ -471,6 +471,34 @@ impl TurnState {
         true
     }
 
+    /// Claude Code's own word that a turn is running (`status: busy`
+    /// since `busy_at`, Unix seconds), where the transcript has nothing
+    /// of it yet. `/compact` writes no row until it is over (2.1.322; up
+    /// to 2.1.319 its prompt row came at once), and the session read as
+    /// the turn before. Busy since after the rows this state was read
+    /// from means a turn began that they do not show; busy from before
+    /// them is the registry not having caught up with a turn's end. A
+    /// state so made says `busy` as its kind. Returns whether the state
+    /// changed.
+    pub fn settle_busy(&mut self, busy_at: f64) -> bool {
+        if !matches!(self.phase, Phase::YourTurn | Phase::Idle) {
+            return false;
+        }
+        let at = |ts: &str| parse_ts(ts).map(|d| d.timestamp_millis() as f64 / 1000.0).unwrap_or(0.0);
+        if busy_at <= at(&self.since).max(at(&self.turn_started)) {
+            return false;
+        }
+        self.phase = Phase::Working;
+        self.activity.clear();
+        self.activity_kind = "busy".into();
+        self.tool.clear();
+        self.reply.clear();
+        if let Some(t) = chrono::DateTime::from_timestamp_millis((busy_at * 1000.) as i64) {
+            self.turn_started = t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        }
+        true
+    }
+
     fn set(&mut self, phase: Phase, activity: impl Into<String>, kind: &str) {
         self.phase = phase;
         self.activity = activity.into();

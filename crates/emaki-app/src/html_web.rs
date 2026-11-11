@@ -20,6 +20,7 @@
 //! Blitz (`html_shot.rs`).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui::{Bounds, Pixels, Window};
 
@@ -179,6 +180,11 @@ pub struct Web {
     placed: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     shown: bool,
     round: Option<(bool, bool, f32)>,
+    /// A picture of the page as it was on the screen, standing in its
+    /// place while the window draws over it (`shoot`), and whether one
+    /// was tried since the window last left the page alone.
+    still: Option<(Arc<gpui::RenderImage>, Bounds<Pixels>)>,
+    shot: bool,
 }
 
 impl Web {
@@ -259,7 +265,7 @@ impl Web {
             .with_url(page_url(file, &page))
             .build_as_child(window)
             .ok()?;
-        Some(Web { view: std::rc::Rc::new(view), file: file.to_path_buf(), page, mtime, placed: Default::default(), shown: false, round: None })
+        Some(Web { view: std::rc::Rc::new(view), file: file.to_path_buf(), page, mtime, placed: Default::default(), shown: false, round: None, still: None, shot: false })
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -351,6 +357,57 @@ impl Web {
         let _ = self.view.focus();
     }
 
+    /// Where it was put last, in the window.
+    pub fn placed_at(&self) -> Option<Bounds<Pixels>> {
+        self.placed.get()
+    }
+
+    /// Takes a picture of the page as it is on the screen now: its
+    /// pixels, copied out of the window's own last frame, so the page is
+    /// not drawn again for it and the picture is what was there, blurs
+    /// and all. Tried once until `let_go`. WebKit's own snapshot draws
+    /// the page anew, and that drawing stood off its place and left out
+    /// what a backdrop filter blurs. A Mac's alone: on Windows the page
+    /// is put out of sight with nothing in its place.
+    pub fn shoot(&mut self, window: &Window) {
+        if self.shot {
+            return;
+        }
+        self.shot = true;
+        #[cfg(target_os = "macos")]
+        if let Some(at) = self.placed.get() {
+            self.still = window_part(window, at);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = window;
+    }
+
+    /// The picture, while there is one, and where in the room it goes:
+    /// on the whole pixels it was taken from, which reach past the room
+    /// where the room's edges fall between two.
+    pub fn still(&self) -> Option<(Arc<gpui::RenderImage>, Bounds<Pixels>)> {
+        let (image, at) = self.still.clone()?;
+        let room = self.placed.get()?;
+        Some((image, Bounds::new(at.origin - room.origin, at.size)))
+    }
+
+    /// Whether a picture was tried.
+    pub fn shot(&self) -> bool {
+        self.shot
+    }
+
+    /// The picture let go, to be dropped from the window's sprites; the
+    /// next cover takes a new one.
+    pub fn let_go(&mut self) -> Option<Arc<gpui::RenderImage>> {
+        self.shot = false;
+        self.still.take().map(|(image, _)| image)
+    }
+
+    /// Whether the page is showing.
+    pub fn is_shown(&self) -> bool {
+        self.shown
+    }
+
     /// Shown, or put out of sight while the window draws over the pane.
     pub fn show(&mut self, shown: bool) {
         if self.shown != shown {
@@ -358,5 +415,99 @@ impl Web {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             let _ = self.view.set_visible(shown);
         }
+    }
+}
+
+/// The part `at` of the window, in its points, as it is on the screen,
+/// and where in the window that picture stands: `at` widened to whole
+/// points, so drawn there each pixel is back on the one it came from. The
+/// window server takes a part's place in whole points: a part at 306.5
+/// came from 306 with its width kept, and the picture drawn at 306.5
+/// stood a pixel to the right, the pane's edge doubled beside it.
+/// The part is
+/// that part of the window's last frame from the window server, which a
+/// process may take of a window of its own without being let record the
+/// screen (`sys::shoot_window`); the part alone, since the whole window
+/// took 30 ms. Drawn by Core Graphics into
+/// sRGB in gpui's order of bytes (blue, green, red, alpha). The window
+/// server's picture is in the display's colors; read as sRGB, the page
+/// came out warmer than it was.
+#[cfg(target_os = "macos")]
+fn window_part(window: &Window, at: Bounds<Pixels>) -> Option<(Arc<gpui::RenderImage>, Bounds<Pixels>)> {
+    use std::ffi::{c_char, c_void};
+
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+    type Capture = unsafe extern "C" fn(Rect, u32, u32, u32) -> *mut c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCGColorSpaceSRGB: *const c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn CGImageGetWidth(image: *mut c_void) -> usize;
+        fn CGImageGetHeight(image: *mut c_void) -> usize;
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayBounds(display: u32) -> Rect;
+        fn CGColorSpaceCreateWithName(name: *const c_void) -> *mut c_void;
+        fn CGBitmapContextCreate(data: *mut c_void, w: usize, h: usize, bits: usize, row: usize, space: *mut c_void, info: u32) -> *mut c_void;
+        fn CGContextDrawImage(context: *mut c_void, rect: Rect, image: *mut c_void);
+        fn CFRelease(obj: *mut c_void);
+    }
+
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return None };
+    let view = unsafe { (handle.ns_view.as_ptr() as *const NSView).as_ref() }?;
+    let ns_window = view.window()?;
+    let number = ns_window.windowNumber();
+    let frame = ns_window.frame();
+    let (x0, y0) = ((f32::from(at.origin.x) as f64).floor(), (f32::from(at.origin.y) as f64).floor());
+    let (x1, y1) = ((f32::from(at.right()) as f64).ceil(), (f32::from(at.bottom()) as f64).ceil());
+    let whole = Bounds::new(gpui::point(gpui::px(x0 as f32), gpui::px(y0 as f32)), gpui::size(gpui::px((x1 - x0) as f32), gpui::px((y1 - y0) as f32)));
+    unsafe {
+        let capture = dlsym(-2isize as *mut c_void, c"CGWindowListCreateImage".as_ptr());
+        if capture.is_null() {
+            return None;
+        }
+        let capture: Capture = std::mem::transmute(capture);
+        // The part on the screen, in the window server's points, which
+        // run down from the main display's top; the window's frame runs
+        // up from its foot. This window alone.
+        let top = CGDisplayBounds(CGMainDisplayID()).h - (frame.origin.y + frame.size.height);
+        let place = Rect { x: frame.origin.x + x0, y: top + y0, w: x1 - x0, h: y1 - y0 };
+        if place.w < 1. || place.h < 1. {
+            return None;
+        }
+        let part = capture(place, 1 << 3, number as u32, 1);
+        if part.is_null() {
+            return None;
+        }
+        let (w, h) = (CGImageGetWidth(part), CGImageGetHeight(part));
+        let mut bgra = vec![0u8; w * h * 4];
+        let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        // Alpha first, premultiplied, the pixel's 32 bits little-endian:
+        // blue, green, red, alpha in memory.
+        let context = if space.is_null() { std::ptr::null_mut() } else { CGBitmapContextCreate(bgra.as_mut_ptr().cast(), w, h, 8, w * 4, space, 2 | 2 << 12) };
+        if !context.is_null() {
+            CGContextDrawImage(context, Rect { x: 0., y: 0., w: w as f64, h: h as f64 }, part);
+            CFRelease(context);
+        }
+        if !space.is_null() {
+            CFRelease(space);
+        }
+        CFRelease(part);
+        if context.is_null() {
+            return None;
+        }
+        let frame = image::RgbaImage::from_raw(w as u32, h as u32, bgra).map(image::Frame::new)?;
+        Some((Arc::new(gpui::RenderImage::new(vec![frame])), whole))
     }
 }

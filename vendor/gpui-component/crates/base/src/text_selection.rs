@@ -205,6 +205,7 @@ pub struct TextSelectionRegistration {
     bounds: Bounds<Pixels>,
     scroll_offset: Point<Pixels>,
     scope: TextSelectionScopeId,
+    region: u64,
     document_order: u64,
     text_bounds: Vec<Bounds<Pixels>>,
 }
@@ -217,6 +218,7 @@ impl TextSelectionRegistration {
             bounds,
             scroll_offset: Point::default(),
             scope: TextSelectionScopeId::default(),
+            region: 0,
             document_order: 0,
             text_bounds: Vec::new(),
         }
@@ -231,6 +233,13 @@ impl TextSelectionRegistration {
     /// Sets the opaque selection scope.
     pub fn with_scope(mut self, scope: TextSelectionScopeId) -> Self {
         self.scope = scope;
+        self
+    }
+
+    /// Sets the region, which the region marker around the participant
+    /// otherwise sets. (Emaki addition.)
+    pub fn with_region(mut self, region: u64) -> Self {
+        self.region = region;
         self
     }
 
@@ -264,6 +273,13 @@ impl TextSelectionRegistration {
     /// Returns the opaque selection scope.
     pub const fn scope(&self) -> TextSelectionScopeId {
         self.scope
+    }
+
+    /// Returns the region the participant was drawn in (Emaki
+    /// addition): a drag reaches only the participants of the region it
+    /// began in. 0 is everything outside a marked region.
+    pub const fn region(&self) -> u64 {
+        self.region
     }
 
     /// Returns the stable logical document order.
@@ -728,6 +744,9 @@ impl TextSelectionHandle {
     ) {
         if let Some(scope) = current_text_selection_scope(window.window_handle().window_id(), cx) {
             registration.scope = scope;
+        }
+        if let Some(region) = current_text_selection_region(window.window_handle().window_id(), cx) {
+            registration.region = region;
         }
         let Some(state) = WindowSelectionState::existing(window, cx) else {
             return;
@@ -1196,7 +1215,7 @@ impl WindowSelectionState {
         if GlobalState::is_text_selection_suppressed(cx) {
             return;
         }
-        let hit = self.endpoint(position, Some(window), cx);
+        let hit = self.endpoint(position, Some(window), None, cx);
         if !hit.inside_text {
             return;
         }
@@ -1273,7 +1292,8 @@ impl WindowSelectionState {
         if !extend && !already_prepared {
             self.clear(cx);
         }
-        let endpoint = self.endpoint(position, window.as_deref(), cx);
+        let region = previous_anchor.as_ref().and_then(|anchor| self.region_of(anchor));
+        let endpoint = self.endpoint(position, window.as_deref(), region, cx);
         let focus_participant = endpoint
             .inside
             .then(|| endpoint.participant.clone())
@@ -1295,17 +1315,29 @@ impl WindowSelectionState {
         if !self.is_selecting {
             return;
         }
-        let endpoint = self.endpoint(position, window, cx);
+        let region = self.anchor.as_ref().and_then(|anchor| self.region_of(anchor));
+        let endpoint = self.endpoint(position, window, region, cx);
         self.did_hit_text |= endpoint.inside_text;
         self.cursor = Some(endpoint);
         self.update_anchor_auto_scroll(position, cx);
         self.publish_snapshots(cx);
     }
 
+    /// The region of the participant an endpoint is in. (Emaki addition.)
+    fn region_of(&self, endpoint: &SelectionEndpoint) -> Option<u64> {
+        let id = endpoint.entity_id()?;
+        Some(self.participants.get(&id)?.registration.region)
+    }
+
+    /// Where `position` falls among the participants; with `region`,
+    /// among that region's alone (Emaki addition): a drag begun in one
+    /// part of the window, carried over another, selects in the part it
+    /// began in, as far as the pointer goes there, and never in the other.
     fn endpoint(
         &mut self,
         position: Point<Pixels>,
         window: Option<&Window>,
+        region: Option<u64>,
         cx: &App,
     ) -> SelectionEndpoint {
         self.prune_dead_participants();
@@ -1325,6 +1357,7 @@ impl WindowSelectionState {
 
         for registration in self.participants.values() {
             if registration.registration.scope != self.active_scope
+                || region.is_some_and(|region| registration.registration.region != region)
                 || registration.participant.upgrade().is_none()
             {
                 continue;
@@ -1475,6 +1508,10 @@ impl WindowSelectionState {
         let Some(cursor_registration) = self.participants.get(&cursor) else {
             return false;
         };
+        // Of the anchor's region alone. (Emaki addition.)
+        if registration.registration.region != anchor_registration.registration.region {
+            return false;
+        }
         let start = anchor_registration
             .registration
             .document_order
@@ -1644,6 +1681,83 @@ impl TextSelection {
         };
         let handlers = state.update(cx, |state, cx| state.set_active_scope_state(scope, cx));
         dispatch_clear_handlers(handlers, cx);
+    }
+}
+
+#[derive(Default)]
+struct TextSelectionRegionStacks(HashMap<gpui::WindowId, Vec<u64>>);
+
+impl Global for TextSelectionRegionStacks {}
+
+fn current_text_selection_region(window_id: gpui::WindowId, cx: &App) -> Option<u64> {
+    cx.has_global::<TextSelectionRegionStacks>()
+        .then(|| cx.global::<TextSelectionRegionStacks>().0.get(&window_id).and_then(|stack| stack.last().copied()))
+        .flatten()
+}
+
+fn with_text_selection_region<T>(window_id: gpui::WindowId, region: u64, cx: &mut App, callback: impl FnOnce(&mut App) -> T) -> T {
+    if !cx.has_global::<TextSelectionRegionStacks>() {
+        cx.set_global(TextSelectionRegionStacks::default());
+    }
+    cx.global_mut::<TextSelectionRegionStacks>().0.entry(window_id).or_default().push(region);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(cx)));
+    let stacks = &mut cx.global_mut::<TextSelectionRegionStacks>().0;
+    if stacks.get_mut(&window_id).is_some_and(|stack| {
+        stack.pop();
+        stack.is_empty()
+    }) {
+        stacks.remove(&window_id);
+    }
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// Marks a subtree as a region of the window's selection: a drag begun
+/// in it selects in it alone (Emaki addition).
+pub(crate) fn text_selection_region(region: u64, element: impl IntoElement) -> impl IntoElement {
+    TextSelectionRegionMarker { region, element: element.into_element() }
+}
+
+struct TextSelectionRegionMarker<E> {
+    region: u64,
+    element: E,
+}
+
+impl<E: Element> IntoElement for TextSelectionRegionMarker<E> {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl<E: Element> Element for TextSelectionRegionMarker<E> {
+    type RequestLayoutState = E::RequestLayoutState;
+    type PrepaintState = E::PrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        self.element.id()
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.element.source_location()
+    }
+
+    fn request_layout(&mut self, id: Option<&GlobalElementId>, inspector_id: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
+        let window_id = window.window_handle().window_id();
+        with_text_selection_region(window_id, self.region, cx, |cx| self.element.request_layout(id, inspector_id, window, cx))
+    }
+
+    fn prepaint(&mut self, id: Option<&GlobalElementId>, inspector_id: Option<&InspectorElementId>, bounds: Bounds<Pixels>, request_layout: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
+        let window_id = window.window_handle().window_id();
+        with_text_selection_region(window_id, self.region, cx, |cx| self.element.prepaint(id, inspector_id, bounds, request_layout, window, cx))
+    }
+
+    fn paint(&mut self, id: Option<&GlobalElementId>, inspector_id: Option<&InspectorElementId>, bounds: Bounds<Pixels>, request_layout: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
+        let window_id = window.window_handle().window_id();
+        with_text_selection_region(window_id, self.region, cx, |cx| self.element.paint(id, inspector_id, bounds, request_layout, prepaint, window, cx));
     }
 }
 
@@ -2245,6 +2359,41 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(called.get());
+    }
+
+    /// A drag begun in one region and carried over another selects in
+    /// the first alone. (Emaki addition.)
+    #[gpui::test]
+    fn a_drag_keeps_to_the_region_it_began_in(cx: &mut TestAppContext) {
+        let (selection_state, file, chat) = cx.update(|cx| {
+            (cx.new(|_| WindowSelectionState::default()), TextSelectionHandle::new("file", cx), TextSelectionHandle::new("chat", cx))
+        });
+        let place = |y: f32| {
+            let bounds = Bounds::new(point(px(0.), px(y)), size(px(100.), px(10.)));
+            let hitbox = Hitbox { id: HitboxId::placeholder(), bounds, content_mask: ContentMask { bounds }, behavior: HitboxBehavior::Normal };
+            TextSelectionRegistration::new(hitbox, bounds).with_text_bounds(vec![bounds])
+        };
+        cx.update(|cx| {
+            selection_state.update(cx, |state, cx| {
+                state.register_participant(file.clone(), place(0.).with_region(1).with_document_order(0), cx);
+                state.register_participant(chat.clone(), place(20.).with_region(2).with_document_order(1), cx);
+                state.begin(point(px(1.), px(1.)), false, cx);
+                state.update(point(px(50.), px(25.)), cx);
+                let snapshot = state.snapshot().unwrap();
+                assert_eq!(snapshot.cursor().entity_id(), Some(file.entity_id()), "the cursor stays in the file");
+                let chat_registration = state.participants.get(&chat.entity_id()).unwrap();
+                assert!(!state.participates(chat.entity_id(), chat_registration));
+            });
+        });
+        // One region: the drag runs on into the next text.
+        cx.update(|cx| {
+            selection_state.update(cx, |state, cx| {
+                state.register_participant(chat.clone(), place(20.).with_region(1).with_document_order(1), cx);
+                state.begin(point(px(1.), px(1.)), false, cx);
+                state.update(point(px(50.), px(25.)), cx);
+                assert_eq!(state.snapshot().unwrap().cursor().entity_id(), Some(chat.entity_id()));
+            });
+        });
     }
 
     #[gpui::test]

@@ -12,6 +12,15 @@ pub trait ElementExt: ParentElement + Sized {
         crate::text_selection::text_selection_scope(scope, self)
     }
 
+    /// Marks this element subtree as a region of the window's selection:
+    /// a drag begun in it selects in it alone. (Emaki addition.)
+    fn text_selection_region(self, region: u64) -> impl IntoElement
+    where
+        Self: IntoElement,
+    {
+        crate::text_selection::text_selection_region(region, self)
+    }
+
     /// Invokes `callback` during prepaint with this element's resolved bounds.
     fn on_prepaint<F>(self, callback: F) -> Self
     where

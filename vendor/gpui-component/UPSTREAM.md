@@ -209,7 +209,11 @@ upstream revision finds them.
    The crates' tests are run from this folder with the app's
    `Cargo.lock` copied beside its `Cargo.toml`, for the pinned gpui,
    and a `themes/aurora.json` holding `{}`, which a test reads and the
-   copy does not have; neither is kept.
+   copy does not have; neither is kept. Since gpui is built from
+   `vendor/gpui`, they are run in a copy of this folder whose
+   `Cargo.toml` ends with the app's patches of gpui, `block` and
+   `proc-macro-error2`, pointing at the app's `vendor/`: without them the
+   copy builds gpui from git beside the patched one, and nothing compiles.
 
 27. `crates/ui/src/text/node.rs` (`CodeBlock::render`): a code block's
    lines wrap at its room, as upstream has them. Tried and dropped: no
@@ -349,6 +353,8 @@ upstream revision finds them.
 71. `crates/base/src/text_selection.rs` (`letter_box`, `selection_range_for_run`), `crates/ui/src/text/inline.rs` (`drawn_at`, the selection, `text_line_bounds`, `paint_selection`, `paint_range`, the code plates): the first letter of a wrapped line is where it is drawn, at that line's start. gpui's `position_for_index` puts the index where a line wraps at the end of the line above, where a caret there goes, so a selection begun on a wrapped line left its first letter out, and one beginning at that letter was painted from the end of the line above.
 
 72. `crates/base/src/input/base/state.rs` (`bounds_for_range`): while an input method composes, the box its candidates stand under is at the start of the marked text, whatever part of it is asked for, and a box's end the last layout lacks, or on another line, is its start. Upstream answered from the last frame's layout, which did not have the letter just typed: the caret came out at the line's start and the marked text as a box of negative width, and the panel jumped at every key.
+
+73. `crates/base/src/text_selection.rs` (`TextSelectionRegistration::region`, `with_region`, `region_of`, `endpoint`, `participates`, `text_selection_region`, `TextSelectionRegionMarker`), `element_ext.rs` (`ElementExt::text_selection_region`): regions of the window's selection. A participant takes the region of the marker around it as it registers, and a drag reaches only the participants of the region its anchor is in: carried over another, the cursor goes to the anchor's region's text at the pointer's height. Upstream had one selection over the whole window, and a drag begun in a file's pane and carried over the conversation beside it selected in both. Emaki marks the conversation and the file's pane (`workbench::SELECT_CONVERSATION`, `SELECT_FILE`). A test (`a_drag_keeps_to_the_region_it_began_in`) holds it.
 
 ## Updating
 

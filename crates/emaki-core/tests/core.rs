@@ -1001,6 +1001,29 @@ fn the_registrys_idle_settles_a_turn_the_transcript_left_working() {
     assert_ne!(done.activity_kind, "stop");
 }
 
+/// `/compact` writes nothing until it is over (2.1.322), so the rows
+/// read as the turn before; the registry's busy, newer than them, is
+/// what says a turn runs.
+#[test]
+fn the_registrys_busy_starts_a_turn_the_transcript_does_not_show() {
+    use emaki_core::build::{turn_state, Phase};
+    let rows = vec![user("hello", "2026-01-01T10:00:00Z"), assistant(vec![json!({"type": "text", "text": "hi"})], "end_turn", "2026-01-01T10:00:02Z")];
+    let at = |ts: &str| emaki_core::build::parse_ts(ts).unwrap().timestamp() as f64;
+    let mut st = turn_state(&rows, "/tmp/proj");
+    assert_eq!(st.phase, Phase::YourTurn);
+    // Busy since the turn the rows show: the registry has not caught up with its end.
+    assert!(!st.settle_busy(at("2026-01-01T10:00:00Z")));
+    assert_eq!(st.phase, Phase::YourTurn);
+    assert!(st.settle_busy(at("2026-01-01T10:05:00Z")));
+    assert_eq!((st.phase, st.activity_kind.as_str()), (Phase::Working, "busy"));
+    assert_eq!(emaki_core::build::parse_ts(&st.turn_started).map(|d| d.timestamp() as f64), Some(at("2026-01-01T10:05:00Z")), "the clock counts from the registry's busy");
+    // A turn the rows already show as running is left as it reads.
+    let mut running = turn_state(&[rows[0].clone()], "/tmp/proj");
+    let before = running.clone();
+    assert!(!running.settle_busy(at("2026-01-01T10:05:00Z")));
+    assert_eq!(running, before);
+}
+
 /// Escape before the agent did anything withdraws the prompt; after it
 /// did, the round stays and only the marker goes.
 #[test]

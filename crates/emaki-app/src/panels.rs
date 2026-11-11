@@ -267,6 +267,34 @@ pub struct Node {
     pub path: PathBuf,
     pub name: String,
     pub dir: bool,
+    /// A symbolic link, to a file or a folder: its icon wears the
+    /// Finder's arrow (`tree_icon`).
+    pub link: bool,
+}
+
+/// A row's icon in the tree. A symbolic link's wears an arrow at its
+/// lower left, on a plate of the panel's ground, as the Finder marks an
+/// alias: the icon is the one its name gives it, so `CLAUDE.md` linked to
+/// `AGENTS.md` is still Claude's.
+fn tree_icon(node: &Node, open: bool, theme: &gpui_component::Theme) -> Div {
+    let dark = theme.mode.is_dark();
+    div().relative().size(px(16.)).flex_shrink_0().child(img(crate::file_icons::path(&node.name, node.dir, open, dark)).size(px(16.))).when(node.link, |d| {
+        d.child(
+            div()
+                .absolute()
+                .left(px(-2.))
+                .bottom(px(-2.))
+                .size(px(9.))
+                .rounded(px(2.5))
+                .bg(theme.sidebar)
+                .border_1()
+                .border_color(theme.border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::default().path("icons/symlink.svg").with_size(px(7.)).text_color(theme.foreground)),
+        )
+    })
 }
 
 /// What a folder holds, as far as it is listed, and how many were left out.
@@ -590,12 +618,14 @@ fn list_dir(dir: &Path) -> (Vec<Node>, usize) {
                 return None;
             }
             let path = e.path();
-            let dir = match e.file_type() {
-                Ok(t) if t.is_symlink() => path.is_dir(),
-                Ok(t) => t.is_dir(),
-                Err(_) => false,
+            let kind = e.file_type().ok();
+            let link = kind.is_some_and(|t| t.is_symlink());
+            let dir = match kind {
+                Some(_) if link => path.is_dir(),
+                Some(t) => t.is_dir(),
+                None => false,
             };
-            Some(Node { path, name, dir })
+            Some(Node { path, name, dir, link })
         })
         .collect();
     // Each name made small once, not at every comparison: a folder of a
@@ -2936,6 +2966,24 @@ impl Workbench {
         px(widest.ceil()).clamp(CHANGES_LIST_MIN, most)
     }
 
+    /// Where a divider's strip begins for its line at `x`: centered on
+    /// the line, or beside a page the system's web view shows (`html_web`)
+    /// where it would reach over it. The page is drawn over the window
+    /// and takes a press there for itself: the half of the strip over it
+    /// lit under the pointer and showed the arrows, and a drag from it
+    /// selected the page's words and moved no edge.
+    fn grip_left(&self, x: Pixels) -> Pixels {
+        let left = x - PANEL_GRIP / 2.;
+        let Some(page) = self.html_web.as_ref().and_then(|web| web.placed_at()).filter(|p| p.size.width > px(2.)) else { return left };
+        if left < page.right() && x >= page.right() - px(1.) {
+            page.right().max(left)
+        } else if left + PANEL_GRIP > page.left() && x <= page.left() + px(1.) {
+            (page.left() - PANEL_GRIP).min(left)
+        } else {
+            left
+        }
+    }
+
     /// The strip over the pane's right edge, lit under the pointer; a
     /// double click puts the width back.
     pub(crate) fn render_file_grip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -2944,6 +2992,7 @@ impl Workbench {
         }
         let line = cx.theme().primary.opacity(0.55);
         let held = self.file_drag;
+        let x = self.row_x(self.file_pane_left() + self.file_pane_w());
         Some(
             div()
                 .id("file-grip")
@@ -2951,7 +3000,7 @@ impl Workbench {
                 .absolute()
                 .top(crate::workbench::TITLEBAR_H)
                 .bottom(crate::workbench::FRAME)
-                .left(self.row_x(self.file_pane_left() + self.file_pane_w()) - PANEL_GRIP / 2.)
+                .left(self.grip_left(x))
                 .w(PANEL_GRIP)
                 .occlude()
                 .cursor(CursorStyle::ResizeLeftRight)
@@ -2969,7 +3018,7 @@ impl Workbench {
                         cx.notify();
                     }),
                 )
-                .child(div().absolute().top_0().h_full().left(PANEL_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("file-grip", move |s| s.bg(line))),
+                .child(div().absolute().top_0().h_full().left(x - self.grip_left(x) - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("file-grip", move |s| s.bg(line))),
         )
     }
 
@@ -3083,7 +3132,7 @@ impl Workbench {
             .absolute()
             .top(top)
             .bottom(crate::workbench::FRAME)
-            .left(x - PANEL_GRIP / 2.)
+            .left(self.grip_left(x))
             .w(PANEL_GRIP)
             .occlude()
             .cursor(CursorStyle::ResizeLeftRight)
@@ -3095,7 +3144,7 @@ impl Workbench {
                     cx.notify();
                 }),
             )
-            .child(div().absolute().top_0().h_full().left(PANEL_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover(id, move |s| s.bg(line)))
+            .child(div().absolute().top_0().h_full().left(x - self.grip_left(x) - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover(id, move |s| s.bg(line)))
             .into_any_element()
     }
 
@@ -3158,7 +3207,10 @@ impl Workbench {
                         cx.notify();
                     }
                 }
-                Err(_) => self.file_moved_away(&path, cx),
+                Err(_) => {
+                    self.file_moved_away(&path, cx);
+                    self.file_vanished(path, cx);
+                }
             }
         } else {
             self.file_held = None;
@@ -3526,7 +3578,10 @@ impl Workbench {
         let Some((path, page, mtime)) = self.file_view.as_ref().filter(|_| shows).and_then(|v| shown_as(v, self.file_raw).map(|page| (v.path.clone(), page, v.mtime))) else {
             // Let go, and the keyboard with it back to the window: a
             // click in the page had given it to the page.
-            if self.html_web.take().is_some() {
+            if let Some(mut web) = self.html_web.take() {
+                if let Some(still) = web.let_go() {
+                    window.defer(cx, move |window, _| drop(window.drop_image(still)));
+                }
                 crate::sys::keys_to_window(window);
             }
             return;
@@ -3547,9 +3602,34 @@ impl Workbench {
         web.round(left, right, f32::from(crate::workbench::CARD_R));
         // Where it stands is the pane's to say as it is laid out
         // (`Web::placer`, in `file_pane`). Out of sight, the keyboard is
-        // not left with it.
-        let shown = !over && web.is_placed();
+        // not left with it. While the window draws over it, a picture of
+        // the page as it was on the screen stands in its place
+        // (`Web::shoot`, drawn under it in `file_pane`): put out of sight
+        // with nothing there, it left the pane blank under a menu. The
+        // picture is drawn a frame before the page goes and kept a frame
+        // after it comes back, so no frame has neither.
+        let placed = web.is_placed();
+        let mut let_go = None;
+        let shown = if !over || !placed {
+            if web.is_shown() || !placed {
+                let_go = web.let_go();
+            } else if web.still().is_some() {
+                window.request_animation_frame();
+            }
+            placed && !over
+        } else if !web.shot() {
+            web.shoot(window);
+            if web.still().is_some() {
+                window.request_animation_frame();
+            }
+            web.still().is_some() && web.is_shown()
+        } else {
+            false
+        };
         web.show(shown);
+        if let Some(still) = let_go {
+            window.defer(cx, move |window, _| drop(window.drop_image(still)));
+        }
         if !shown {
             crate::sys::keys_to_window(window);
         }
@@ -3700,6 +3780,11 @@ impl Workbench {
         if !self.file_guard(FileThen::Close, cx) {
             return;
         }
+        self.shut_file_view(cx);
+    }
+
+    /// The pane goes in motion, nothing asked: closed, or its file gone.
+    fn shut_file_view(&mut self, cx: &mut Context<Self>) {
         if let Some(v) = self.file_view.take() {
             // The conversation has its room back at once, and the pane
             // goes from the width it has beside it.
@@ -5896,9 +5981,9 @@ impl Workbench {
     }
 
     /// What was open under a path that is gone goes with it.
-    fn tree_forget(&mut self, path: &Path) {
+    fn tree_forget(&mut self, path: &Path, cx: &mut Context<Self>) {
         if self.file_view.as_ref().is_some_and(|v| v.path.starts_with(path)) {
-            self.file_view = None;
+            self.shut_file_view(cx);
         }
         // What was typed in it and not saved goes with it.
         self.file_editor.take_if(|ed| ed.path.starts_with(path));
@@ -5911,12 +5996,37 @@ impl Workbench {
         self.file_cut.retain(|p| !p.starts_with(path));
     }
 
+    /// The file showing is gone and not to a place in the folder the
+    /// pane can follow it to: deleted, or put in the trash, by the agent
+    /// or another program. The pane closes, as it does when the file is
+    /// removed in the tree, unless something typed in it is not saved:
+    /// that stays, and saving it writes the file again. Looked at again a
+    /// moment later first, so a program that writes a file by deleting
+    /// it and making it anew does not close it.
+    fn file_vanished(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.file_view.as_ref().is_none_or(|v| v.path != path) || self.unsaved(cx).contains(&path) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(400)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.file_view.as_ref().is_some_and(|v| v.path == path) && !path.exists() && !this.unsaved(cx).contains(&path) {
+                    this.file_held = None;
+                    this.file_editor.take_if(|ed| ed.path == path);
+                    this.shut_file_view(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The file showing is no longer where it was: the agent or the Finder
     /// renamed it, or a folder over it, or moved it. Where the handle held
     /// on it says it is now, inside the session's folder, everything under
     /// what moved follows it as after a rename in the tree (`tree_follow`):
     /// the pane's head, the folders open, what was typed and not saved. A
-    /// file gone from the folder, or put in the trash, is left as it was.
+    /// file gone from the folder, or put in the trash, is not followed
+    /// (`file_vanished`).
     fn file_moved_away(&mut self, old: &Path, cx: &mut Context<Self>) {
         let Some(real) = self.file_held.as_ref().filter(|(held, _)| held == old).and_then(|(_, f)| emaki_core::fsops::where_now(f)) else { return };
         let Some(root) = self.files_root() else { return };
@@ -5995,7 +6105,7 @@ impl Workbench {
                     }
                 },
             }
-            self.tree_forget(path);
+            self.tree_forget(path, cx);
         }
         let held = moves.len();
         if !moves.is_empty() {
@@ -6117,7 +6227,7 @@ impl Workbench {
         for (before, after) in &op.moves {
             let (from, to) = if redo { (before, after) } else { (after, before) };
             match (from.starts_with(&hold), to.starts_with(&hold)) {
-                (false, true) => self.tree_forget(from),
+                (false, true) => self.tree_forget(from, cx),
                 (true, false) => here = Some(to.clone()),
                 _ => {
                     self.tree_follow(from, to, cx);
@@ -6551,7 +6661,7 @@ impl Workbench {
                         let tint = status.as_ref().and_then(|st| st.mark(&node.path, node.dir)).map(|m| git_color(m.state, dark));
                         [
                             div().w(px(10.)).flex_shrink_0().flex().justify_center().when(node.dir, |d| d.child(chevron(open))).into_any_element(),
-                            img(crate::file_icons::path(&node.name, node.dir, open, dark)).size(px(16.)).flex_shrink_0().into_any_element(),
+                            tree_icon(&node, open, &theme).into_any_element(),
                             div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(tint.unwrap_or(theme.foreground)).child(node.name.clone()).into_any_element(),
                         ]
                     }).into_iter().flatten());
@@ -6615,7 +6725,7 @@ impl Workbench {
                         _ => div().w(px(12.)).flex_shrink_0().flex().justify_center().child(div().size(px(5.)).rounded_full().bg(tint.opacity(0.8))).into_any_element(),
                     });
                     let (click, menu, over) = (node.clone(), node.clone(), node.clone());
-                    let icon = img(crate::file_icons::path(&node.name, node.dir, open, dark)).size(px(16.)).flex_shrink_0();
+                    let icon = tree_icon(&node, open, &theme);
                     // Files dragged in: the folder they would go into is
                     // lit, and what it holds under it more faintly, so
                     // the whole of where they land reads as one place.
@@ -9204,7 +9314,7 @@ impl Workbench {
                 .overflow_hidden()
                 // A picture a markdown file shows is read through the
                 // pane's pictures, and goes with them.
-                .child(gpui::image_cache(self.file_pictures.clone()).h_full().child(self.file_pane(v, w, leaving, cx)))
+                .child(gpui::image_cache(self.file_pictures.clone()).h_full().child(gpui_base::ElementExt::text_selection_region(div().h_full().child(self.file_pane(v, w, leaving, cx)), crate::workbench::SELECT_FILE)))
                 .with_animation(ElementId::Name(format!("file-pane-{serial}").into()), Animation::new(FILE_ANIM).with_easing(ease_out_quint()), move |d, t| match play {
                     Some(opening) => {
                         let t = if opening { t } else { 1. - t };
@@ -9930,8 +10040,10 @@ impl Workbench {
                         // The web view is put over this room as the room
                         // is laid out, so it moves in the frame the pane
                         // does.
-                        .when_some(self.html_web.as_ref().filter(|_| !leaving && ((matches!(v.body, FileBody::Html(_)) && !self.file_raw) || matches!(v.body, FileBody::Media(_)))).map(|web| web.placer()), |d, place| {
+                        .when_some(self.html_web.as_ref().filter(|_| !leaving && ((matches!(v.body, FileBody::Html(_)) && !self.file_raw) || matches!(v.body, FileBody::Media(_)))).map(|web| (web.placer(), web.still())), |d, (place, still)| {
                             d.child(canvas(move |bounds, _, _| place(bounds), |_, _, _, _| {}).absolute().inset_0())
+                                // The page's picture, under it until it goes.
+                                .when_some(still, |d, (still, at)| d.child(img(still).absolute().left(at.origin.x).top(at.origin.y).w(at.size.width).h(at.size.height).object_fit(gpui::ObjectFit::Fill)))
                         })
                         .map(|d| match (word, editor) {
                             // The document's pane scrolls itself too.
@@ -11037,7 +11149,7 @@ impl Workbench {
             t if t.starts_with("file:") => self.file_probe = under(&t["file:".len()..]),
             t if t.starts_with("filemenu:") => {
                 if let Some(p) = under(&t["filemenu:".len()..]) {
-                    let node = Node { name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), dir: p.is_dir(), path: p };
+                    let node = Node { name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), dir: p.is_dir(), link: p.is_symlink(), path: p };
                     self.file_menu(Some(&node), point(self.pane_w, px(200.)), cx);
                 }
             }
