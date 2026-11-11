@@ -4073,6 +4073,7 @@ dependencies = [
  "blitz-traits",
  "block2 0.6.2",
  "chrono",
+ "core-text",
  "deckcraft-pptx",
  "deckcraft-render",
  "emaki-core",

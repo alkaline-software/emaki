@@ -87,6 +87,10 @@ winresource = "0.1"
 objc2 = "0.6"
 # The handler of an AppKit event monitor (`sys::key_events`).
 block2 = "0.6"
+# The system's font families, for a face chosen in Settings, Text: which
+# have CJK characters, which are monospaced, where a face's file is
+# (`fonts::system_families`). gpui's own, already in the build.
+core-text = "21"
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSResponder", "NSApplication", "NSImage", "NSRunningApplication", "NSWorkspace", "NSSpellChecker", "NSPasteboard", "NSColor", "NSSound"] }
 objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSURL", "NSArray", "NSRange", "NSDictionary", "NSUserDefaults", "NSBundle"] }
 raw-window-handle = "0.6"

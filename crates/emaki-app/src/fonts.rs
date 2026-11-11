@@ -13,10 +13,9 @@
 //! regular alone, and every bold drawn as regular.
 //!
 //! None of the Latin faces has a Chinese, Japanese or Korean character,
-//! so behind the conversation's face and the titles' stands a Chinese face
-//! the window carries (`CJK`), as Onyx has it: Noto Serif SC behind a
-//! serif and Noto Sans SC behind a sans serif under Auto, or the one the
-//! person chose, then the system's faces of that kind for what it lacks,
+//! so behind the conversation's face and the titles' stands the CJK face
+//! the person chose (`CJK`), as Onyx has it, Noto Serif SC to begin with,
+//! then the system's faces of the chat face's kind for what it lacks,
 //! and the system's emoji last (`cjk_fallbacks`). The window's own words
 //! are the system's face and keep the system's Chinese.
 
@@ -57,55 +56,112 @@ pub const MONOS: &[Face] = &[
 ];
 
 /// The faces Chinese, Japanese and Korean may be set in behind the
-/// conversation's face, carried: Noto Serif SC and Noto Sans SC (Adobe
-/// and Google's Source Han faces, the simplified Chinese subset), regular
-/// and bold, and LXGW WenKai, a kai hand, regular and medium. `auto` is
-/// none of them by name: a serif's behind a serif face and a sans serif's
-/// behind a sans serif, and in a window in Japanese or traditional
-/// Chinese the system's faces for it first.
+/// conversation's face: Noto Serif SC and Noto Sans SC (Adobe and
+/// Google's Source Han faces, the simplified Chinese subset), regular and
+/// bold, and LXGW WenKai, a kai hand, regular and medium, carried; and
+/// TsangerJinKai, a kai hand of Beijing Tsanger's, the system's where it
+/// is installed and never carried: its file asks for the maker's written
+/// leave for any use (`ChatFonts::tsanger`). Noto Serif SC is the one to
+/// begin with.
 pub const CJK: &[Face] = &[
-    Face { key: "auto", name: "Auto", family: "" },
     Face { key: "noto-serif-sc", name: "Noto Serif SC", family: "Noto Serif SC" },
     Face { key: "noto-sans-sc", name: "Noto Sans SC", family: "Noto Sans SC" },
     Face { key: "wenkai", name: "LXGW WenKai", family: "LXGW WenKai" },
+    Face { key: TSANGER, name: "TsangerJinKai", family: "" },
 ];
 
-/// The family a Chinese face is known by: `auto` is the one a serif or a
-/// sans serif face gets.
-pub fn cjk_family(key: &str, serif: bool) -> &'static str {
-    match CJK.iter().find(|f| f.key == key) {
-        Some(f) if !f.family.is_empty() => f.family,
-        _ => if serif { CJK[1].family } else { CJK[2].family },
+/// TsangerJinKai's key, whose family is the one installed.
+pub const TSANGER: &str = "tsanger";
+
+/// The family TsangerJinKai is installed under, among `names`: its
+/// second cut (TsangerJinKai02, the one pingfan.org sets its words in)
+/// first, else any of its cuts; empty where none is.
+pub fn tsanger_in(names: &[String]) -> String {
+    names.iter().find(|n| *n == "TsangerJinKai02").or_else(|| names.iter().find(|n| n.starts_with("TsangerJinKai"))).cloned().unwrap_or_default()
+}
+
+/// Whether TsangerJinKai is installed, looked at again: when Settings
+/// comes forward, so one installed while the window runs is found.
+pub fn find_tsanger(cx: &mut App) {
+    let found = tsanger_in(&cx.text_system().all_font_names());
+    if cx.global::<ChatFonts>().tsanger != found {
+        cx.global_mut::<ChatFonts>().tsanger = found;
     }
 }
 
-/// Whether a family is one of the serifs.
-pub fn is_serif(family: &str) -> bool {
-    SERIFS.iter().any(|f| f.family == family)
+/// The key a face of the system's the person chose goes by, in the chat
+/// font, the CJK font and the monospace font alike.
+pub const CUSTOM: &str = "custom";
+
+/// The faces of the system's the person chose, by family; empty where
+/// none was. `chat_serif` is whether the chat's is a serif, which says
+/// whether the system's serif or sans serif CJK faces stand behind it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Custom {
+    pub chat: String,
+    pub chat_serif: bool,
+    pub cjk: String,
+    pub mono: String,
+}
+
+impl Custom {
+    pub fn of(app: &emaki_core::config::AppConfig, terminal: &emaki_core::config::Terminal) -> Self {
+        Custom { chat_serif: is_serif_face(&app.chat_custom), chat: app.chat_custom.clone(), cjk: app.cjk_custom.clone(), mono: terminal.font_custom.clone() }
+    }
+}
+
+/// Whether a face of the system's is a serif, by the class its family
+/// says it is of (old style, transitional, modern, Clarendon, slab or
+/// freeform serifs).
+#[cfg(target_os = "macos")]
+pub fn is_serif_face(family: &str) -> bool {
+    use core_text::font_descriptor::TraitAccessors as _;
+    if family.is_empty() {
+        return false;
+    }
+    std::panic::catch_unwind(|| {
+        let faces = core_text::font_collection::create_for_family(family)?.get_descriptors()?;
+        let class = faces.iter().next()?.traits().symbolic_traits() >> 28;
+        Some((1..=7).contains(&class) && class != 6)
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_serif_face(_: &str) -> bool {
+    false
+}
+
+/// The family a CJK face is known by. TsangerJinKai's is the one
+/// installed (`tsanger`), and `custom` the face chosen. Where that is
+/// none, and for a key from before (`auto`, which paired a serif with a
+/// serif), it is the first.
+pub fn cjk_family(key: &str, custom: &Custom, tsanger: &str) -> String {
+    match CJK.iter().find(|f| f.key == key) {
+        Some(f) if !f.family.is_empty() => f.family.to_string(),
+        _ if key == TSANGER && !tsanger.is_empty() => tsanger.to_string(),
+        _ if key == CUSTOM && !custom.cjk.is_empty() => custom.cjk.clone(),
+        _ => CJK[0].family.to_string(),
+    }
+}
+
+/// Whether a family is a serif: one of the serifs, or the chat's own
+/// face of the system's when that is one.
+pub fn is_serif(family: &str, custom: &Custom) -> bool {
+    SERIFS.iter().any(|f| f.family == family) || (custom.chat_serif && custom.chat == family)
 }
 
 /// The faces Chinese, Japanese and Korean fall back on behind `family`,
-/// which has none of their characters: the carried face chosen (or under
-/// Auto a serif's behind a serif and a sans serif's behind the rest),
-/// then the system's faces of that kind for whatever it lacks, and the
-/// system's emoji last. Under Auto a window in Japanese or traditional
-/// Chinese has the system's faces for it first, so kanji and traditional
-/// characters take their own shapes and not the simplified ones'.
-pub fn cjk_fallbacks(family: &str, key: &str, lang: &str) -> gpui::FontFallbacks {
-    let serif = is_serif(family);
-    let system = system_fallbacks(serif);
-    let mut faces: Vec<String> = Vec::new();
-    if key == "auto" || CJK.iter().all(|f| f.key != key) {
-        // The system's faces for Japanese, then traditional Chinese, as
-        // `system_fallbacks` lists them.
-        let first: &[&str] = match lang {
-            "ja" => &system[2..3],
-            "zh-Hant" => &system[1..2],
-            _ => &[],
-        };
-        faces.extend(first.iter().map(|f| f.to_string()));
-    }
-    faces.push(cjk_family(key, serif).to_string());
+/// which has none of their characters: the CJK face chosen, then the
+/// system's faces of the chat face's kind (serif or sans serif) for
+/// whatever it lacks, and the system's emoji last. Auto, which put the
+/// system's faces first in a window in Japanese or traditional Chinese,
+/// was taken out at the person's word.
+pub fn cjk_fallbacks(family: &str, fonts: &ChatFonts) -> gpui::FontFallbacks {
+    let system = system_fallbacks(is_serif(family, &fonts.custom));
+    let mut faces = vec![cjk_family(&fonts.cjk, &fonts.custom, &fonts.tsanger)];
     faces.extend(system.iter().map(|f| f.to_string()));
     gpui::FontFallbacks::from_fonts(faces)
 }
@@ -131,7 +187,7 @@ fn system_fallbacks(serif: bool) -> &'static [&'static str] {
 pub trait Faced: gpui::Styled + Sized {
     fn faced(mut self, family: impl Into<SharedString>, cx: &App) -> Self {
         let family = family.into();
-        let fallbacks = cjk_fallbacks(&family, &cx.global::<ChatFonts>().cjk, crate::i18n::lang());
+        let fallbacks = cjk_fallbacks(&family, cx.global::<ChatFonts>());
         let style = self.text_style();
         style.font_family = Some(family);
         style.font_fallbacks = Some(fallbacks);
@@ -424,15 +480,20 @@ pub struct ChatFonts {
     /// The smaller cuts of the monospace faces that were made
     /// (`inline_cut`), by family.
     pub inline: Vec<String>,
-    /// The Chinese face chosen, by its key in `CJK`.
+    /// The CJK face chosen, by its key in `CJK` or `custom`.
     pub cjk: String,
+    /// The faces of the system's chosen.
+    pub custom: Custom,
+    /// The family TsangerJinKai is installed under, empty where it is
+    /// not (`tsanger_in`).
+    pub tsanger: String,
 }
 
 impl Global for ChatFonts {}
 
 /// Hand the built-in faces to the text system. `chat` is the chat font
 /// `config.json` asks for, which titles follow.
-pub fn install(chat: &str, cjk: &str, cx: &mut App) {
+pub fn install(chat: &str, cjk: &str, custom: Custom, cx: &mut App) {
     let _ = cx.text_system().add_fonts(FACES.iter().map(|b| std::borrow::Cow::Borrowed(*b)).collect());
     emaki_core::math::use_font(MATH_FACE);
     // The smaller cut of each monospace face, for code among a
@@ -452,23 +513,198 @@ pub fn install(chat: &str, cjk: &str, cx: &mut App) {
     let asked = std::env::var("EMAKI_WORDMARK").ok();
     let wordmark = asked.or_else(|| WORDMARK_FACES.iter().find(|f| names.iter().any(|n| n == *f)).map(|f| f.to_string()));
     let kanji = KANJI_FACES.iter().find(|f| names.iter().any(|n| n == *f)).map(|f| f.to_string());
-    cx.set_global(ChatFonts { wordmark, kanji, display: chat_face(chat).family.to_string(), inline, cjk: cjk.to_string() });
+    let display = chat_name(chat, &custom);
+    let mono = custom.mono.clone();
+    let tsanger = tsanger_in(&names);
+    cx.set_global(ChatFonts { wordmark, kanji, display, inline, cjk: cjk.to_string(), custom, tsanger });
+    cut_custom_mono(&mono, cx);
 }
 
-/// The Chinese face chosen.
+/// The CJK face chosen.
 pub fn set_cjk(cjk: &str, cx: &mut App) {
     cx.global_mut::<ChatFonts>().cjk = cjk.to_string();
 }
 
 /// The chat font changed: titles go with it.
 pub fn set_chat(chat: &str, cx: &mut App) {
-    cx.global_mut::<ChatFonts>().display = chat_face(chat).family.to_string();
+    let fonts = cx.global_mut::<ChatFonts>();
+    fonts.display = chat_name(chat, &fonts.custom);
+}
+
+/// A face of the system's chosen for a custom place; titles follow the
+/// chat font, and a monospace face gets its smaller cut for code among
+/// words where one can be made.
+pub fn set_custom(custom: Custom, chat: &str, cx: &mut App) {
+    let mono = (cx.global::<ChatFonts>().custom.mono != custom.mono).then(|| custom.mono.clone());
+    let fonts = cx.global_mut::<ChatFonts>();
+    fonts.display = chat_name(chat, &custom);
+    fonts.custom = custom;
+    if let Some(mono) = mono {
+        cut_custom_mono(&mono, cx);
+    }
+}
+
+/// The smaller cut of a monospace face of the system's (`inline_cut`),
+/// from its file, once: a face whose file is not a TrueType font read
+/// whole (a collection, a CFF face) has none, and code among words is set
+/// in the face itself at the words' size.
+fn cut_custom_mono(family: &str, cx: &mut App) {
+    let name = format!("{family}{INLINE_SUFFIX}");
+    if family.is_empty() || cx.global::<ChatFonts>().inline.contains(&name) {
+        return;
+    }
+    let Some(cut) = system_font_file(family).and_then(|bytes| inline_cut(&bytes, INLINE_SCALE, INLINE_SUFFIX)) else { return };
+    if cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(cut)]).is_ok() && cx.text_system().all_font_names().contains(&name) {
+        cx.global_mut::<ChatFonts>().inline.push(name);
+    }
+}
+
+/// The file a face of the system's regular cut is in.
+#[cfg(target_os = "macos")]
+fn system_font_file(family: &str) -> Option<Vec<u8>> {
+    use core_text::font_descriptor::TraitAccessors as _;
+    let found = std::panic::catch_unwind(|| {
+        let faces = core_text::font_collection::create_for_family(family)?.get_descriptors()?;
+        let paths: Vec<std::path::PathBuf> = faces.iter().filter_map(|d| d.font_path()).collect();
+        // The upright one at the regular weight, where the family says.
+        faces.iter().find(|d| d.traits().symbolic_traits() & (core_text::font_descriptor::kCTFontBoldTrait | core_text::font_descriptor::kCTFontItalicTrait) == 0).and_then(|d| d.font_path()).or_else(|| paths.first().cloned())
+    });
+    std::fs::read(found.ok().flatten()?).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_font_file(_: &str) -> Option<Vec<u8>> {
+    None
+}
+
+/// The family the chat font `choice` is set in: the face of the system's
+/// chosen, for `custom` while there is one.
+pub fn chat_name(choice: &str, custom: &Custom) -> String {
+    if choice == CUSTOM && !custom.chat.is_empty() {
+        return custom.chat.clone();
+    }
+    chat_face(choice).family.to_string()
 }
 
 /// The family the terminal and all code are set in, for a choice in the
 /// settings.
-pub fn term_family(choice: &str, _: &App) -> SharedString {
+pub fn term_family(choice: &str, cx: &App) -> SharedString {
+    let custom = &cx.global::<ChatFonts>().custom.mono;
+    if choice == CUSTOM && !custom.is_empty() {
+        return custom.clone().into();
+    }
     mono_face(choice).family.into()
+}
+
+/// A place a face of the system's can be chosen for, in Settings, Text:
+/// the chat font, the CJK font, the monospace font.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Slot {
+    Chat,
+    Cjk,
+    Mono,
+}
+
+impl Slot {
+    /// The list its faces are chosen from.
+    pub fn kinds(self) -> Kinds {
+        match self {
+            Slot::Cjk => Kinds::Cjk,
+            Slot::Mono => Kinds::Mono,
+            Slot::Chat => Kinds::All,
+        }
+    }
+
+    /// The face chosen for it, empty while none was.
+    pub fn family(self, custom: &Custom) -> &str {
+        match self {
+            Slot::Chat => &custom.chat,
+            Slot::Cjk => &custom.cjk,
+            Slot::Mono => &custom.mono,
+        }
+    }
+}
+
+/// What a list of the system's faces is for: every face, those with
+/// CJK characters, or the monospaced ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kinds {
+    All,
+    Cjk,
+    Mono,
+}
+
+/// The system's font families, by name, for each kind of list. Names
+/// beginning with a dot are the system's own and left out, and so are
+/// the cuts made here.
+#[derive(Debug, Clone, Default)]
+pub struct Families {
+    pub all: Vec<String>,
+    pub cjk: Vec<String>,
+    pub mono: Vec<String>,
+}
+
+impl Families {
+    pub fn of(&self, kinds: Kinds) -> &[String] {
+        match kinds {
+            Kinds::All => &self.all,
+            Kinds::Cjk => &self.cjk,
+            Kinds::Mono => &self.mono,
+        }
+    }
+}
+
+/// The system's font families, read off the main thread: each family's
+/// first face asked whether it is monospaced, and whether it has 汉, あ or
+/// 한. A face that cannot be read is left out, not the list.
+#[cfg(target_os = "macos")]
+pub fn system_families() -> Families {
+    use core_text::font_descriptor::SymbolicTraitAccessors as _;
+    use core_text::font_descriptor::TraitAccessors as _;
+    let Some(faces) = std::panic::catch_unwind(|| core_text::font_collection::create_for_all_families().get_descriptors()).ok().flatten() else { return Families::default() };
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Families::default();
+    for face in faces.iter() {
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let family = face.family_name();
+            if family.starts_with('.') || family.ends_with(INLINE_SUFFIX) || seen.contains(&family) {
+                return None;
+            }
+            let mono = face.traits().symbolic_traits().is_monospace();
+            let font = core_text::font::new_from_descriptor(&face, 12.);
+            let cjk = ['汉', 'あ', '한'].iter().any(|c| {
+                let mut unit = [0u16; 2];
+                let unit = c.encode_utf16(&mut unit);
+                let mut glyphs = [0u16; 2];
+                unsafe { font.get_glyphs_for_characters(unit.as_ptr(), glyphs.as_mut_ptr(), unit.len() as isize) }
+            });
+            Some((family, mono, cjk))
+        }));
+        if let Ok(Some((family, mono, cjk))) = read {
+            seen.insert(family.clone());
+            if mono {
+                out.mono.push(family.clone());
+            }
+            if cjk {
+                out.cjk.push(family.clone());
+            }
+            out.all.push(family);
+        }
+    }
+    for list in [&mut out.all, &mut out.cjk, &mut out.mono] {
+        list.sort_by_cached_key(|f| f.to_lowercase());
+    }
+    out
+}
+
+/// Elsewhere every family the text system knows, in each list: what a
+/// face holds is not asked there.
+#[cfg(not(target_os = "macos"))]
+pub fn system_families_of(names: Vec<String>) -> Families {
+    let mut all: Vec<String> = names.into_iter().filter(|f| !f.starts_with('.') && !f.ends_with(INLINE_SUFFIX)).collect();
+    all.sort_by_cached_key(|f| f.to_lowercase());
+    all.dedup();
+    Families { cjk: all.clone(), mono: all.clone(), all }
 }
 
 /// The family the app's name is set in, in the sidebar, or None to leave
@@ -500,8 +736,8 @@ pub fn display_family(cx: &App) -> SharedString {
 }
 
 /// The family a conversation is drawn in for `choice`.
-pub fn chat_family(choice: &str, _: &App) -> Option<SharedString> {
-    Some(chat_face(choice).family.into())
+pub fn chat_family(choice: &str, cx: &App) -> Option<SharedString> {
+    Some(chat_name(choice, &cx.global::<ChatFonts>().custom).into())
 }
 
 #[cfg(test)]

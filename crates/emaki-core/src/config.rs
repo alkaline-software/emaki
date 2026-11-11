@@ -57,10 +57,19 @@ pub struct AppConfig {
     /// The conversation's typeface: `serif` (Anthropic Serif) or `sans`
     /// (Anthropic Sans).
     pub chat_font: String,
-    /// The face Chinese, Japanese and Korean are set in behind it: `auto`
-    /// (a serif's behind a serif, a sans serif's behind a sans serif),
-    /// `noto-serif-sc`, `noto-sans-sc` or `wenkai`.
+    /// The face Chinese, Japanese and Korean are set in behind it:
+    /// `noto-serif-sc`, `noto-sans-sc`, `wenkai`, `tsanger` (the system's,
+    /// where installed) or `custom` (`cjk_custom`). `auto`, from before,
+    /// reads as the first.
     pub cjk_font: String,
+    /// The faces of the system's the person chose, by family, for
+    /// `chat_font` and `cjk_font` `custom`; empty until one is chosen.
+    pub chat_custom: String,
+    pub cjk_custom: String,
+    /// The faces chosen in those rows before `custom` was, which a custom
+    /// face put away goes back to; empty for the row's first.
+    pub chat_preset: String,
+    pub cjk_preset: String,
     /// How large text is set: `small`, `medium` or `large`, each a set of
     /// sizes (`TextSizes::preset`), or `custom`, the sizes in `sizes`.
     pub chat_size: String,
@@ -133,7 +142,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), cjk_font: "auto".into(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
+        Self { chat_font: "source-serif".into(), cjk_font: "noto-serif-sc".into(), chat_custom: String::new(), cjk_custom: String::new(), chat_preset: String::new(), cjk_preset: String::new(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
     }
 }
 
@@ -228,9 +237,13 @@ pub struct Terminal {
     /// `match` follows the window's appearance; `dark` and `light` keep
     /// Kaku Dark or Kaku Light whatever the window is.
     pub theme: String,
-    /// `jetbrains` (JetBrains Mono, built in), `code` (the face the
-    /// window sets code in) or `system` (the system's monospaced face).
+    /// The monospace face, every one in the window: `jetbrains`,
+    /// `monaco` (`plex-mono` off a Mac), `maple`, `geist-mono`, or
+    /// `custom`, the system's face named in `font_custom`.
     pub font: String,
+    pub font_custom: String,
+    /// The face chosen before `custom` was (`AppConfig::chat_preset`).
+    pub font_preset: String,
     /// The letters' size: the settings offer 12, 13 and 15.
     pub size: f32,
     /// A row's height over the font's own line: `tight` (1), `normal`
@@ -249,7 +262,7 @@ pub struct Terminal {
 
 impl Default for Terminal {
     fn default() -> Self {
-        Self { theme: "match".into(), font: "jetbrains".into(), size: 13., spacing: "normal".into(), padding: "medium".into(), cursor: "bar".into(), cursor_blink: true, ligatures: false, copy_on_select: true }
+        Self { theme: "match".into(), font: "jetbrains".into(), font_custom: String::new(), font_preset: String::new(), size: 13., spacing: "normal".into(), padding: "medium".into(), cursor: "bar".into(), cursor_blink: true, ligatures: false, copy_on_select: true }
     }
 }
 

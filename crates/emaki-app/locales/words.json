@@ -566,23 +566,14 @@
     "de": "Schrift für Unterhaltungen",
     "es": "Tipo de letra de conversación"
   },
-  "Chinese font": {
-    "zh-Hans": "中文字体",
-    "zh-Hant": "中文字體",
-    "ja": "中国語フォント",
-    "ko": "중국어 글꼴",
-    "fr": "Police chinoise",
-    "de": "Chinesische Schrift",
-    "es": "Fuente china"
-  },
-  "Auto": {
-    "zh-Hans": "自动",
-    "zh-Hant": "自動",
-    "ja": "自動",
-    "ko": "자동",
-    "fr": "Auto",
-    "de": "Automatisch",
-    "es": "Automática"
+  "CJK font": {
+    "zh-Hans": "中日韩字体",
+    "zh-Hant": "中日韓字體",
+    "ja": "日中韓フォント",
+    "ko": "한중일 글꼴",
+    "fr": "Police CJK",
+    "de": "CJK-Schrift",
+    "es": "Fuente CJK"
   },
   "Check again": {
     "zh-Hans": "再次检查",
@@ -10024,5 +10015,32 @@
     "fr": "Nom de l’ordinateur",
     "de": "Computername",
     "es": "Nombre del ordenador"
+  },
+  "Search fonts": {
+    "zh-Hans": "搜索字体",
+    "zh-Hant": "搜尋字體",
+    "ja": "フォントを検索",
+    "ko": "글꼴 검색",
+    "fr": "Rechercher une police",
+    "de": "Schriften suchen",
+    "es": "Buscar fuentes"
+  },
+  "No font matches": {
+    "zh-Hans": "没有匹配的字体",
+    "zh-Hant": "沒有符合的字體",
+    "ja": "一致するフォントはありません",
+    "ko": "일치하는 글꼴 없음",
+    "fr": "Aucune police ne correspond",
+    "de": "Keine Schrift passt",
+    "es": "Ninguna fuente coincide"
+  },
+  "Reading fonts…": {
+    "zh-Hans": "正在读取字体…",
+    "zh-Hant": "正在讀取字體…",
+    "ja": "フォントを読み込み中…",
+    "ko": "글꼴을 읽는 중…",
+    "fr": "Lecture des polices…",
+    "de": "Schriften werden gelesen…",
+    "es": "Leyendo fuentes…"
   }
 }

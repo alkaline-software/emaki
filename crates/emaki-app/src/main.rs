@@ -372,7 +372,7 @@ fn main() {
         i18n::set(&i18n::chosen(&cfg.app.language));
         shortcuts::set_chosen(&cfg.app.shortcuts);
         let app_cfg = cfg.app;
-        fonts::install(&app_cfg.chat_font, &app_cfg.cjk_font, cx);
+        fonts::install(&app_cfg.chat_font, &app_cfg.cjk_font, fonts::Custom::of(&app_cfg, &cfg.terminal), cx);
         look::install(&app_cfg.accent, &cfg.terminal.font, cx);
         look::install_languages();
         look::apply(&app_cfg.appearance, None, cx);

@@ -1680,6 +1680,17 @@ pub struct Workbench {
     /// The scroll of a list opened in the settings window, which has no
     /// `route_scroll` of its own to keep one.
     settings_pick_scroll: ScrollHandle,
+    /// The list of the system's faces open from a custom tile in
+    /// Settings, Text (`render_font_list`).
+    pub(crate) font_list: Option<settings::FontList>,
+    /// The system's families, read once, off the main thread, when such
+    /// a list first opens.
+    pub(crate) font_families: Option<Rc<crate::fonts::Families>>,
+    pub(crate) font_families_reading: bool,
+    /// The list's search field, and where each custom tile was drawn.
+    pub(crate) font_query: Option<Entity<InputState>>,
+    pub(crate) font_list_scroll: gpui::UniformListScrollHandle,
+    pub(crate) font_tiles: Rc<std::cell::RefCell<HashMap<crate::fonts::Slot, Bounds<Pixels>>>>,
     /// How wide a pill's list was last drawn, which sets how far it
     /// moves in from the window's edge (`render_pick`).
     pick_w: Rc<Cell<Pixels>>,
@@ -4467,6 +4478,12 @@ impl Workbench {
             shortcut_held: Modifiers::default(),
             shortcut_refused: None,
             settings_pick_scroll: ScrollHandle::new(),
+            font_list: None,
+            font_families: None,
+            font_families_reading: false,
+            font_query: None,
+            font_list_scroll: gpui::UniformListScrollHandle::new(),
+            font_tiles: Default::default(),
             pick_w: Rc::new(Cell::new(px(380.))),
             settings_section,
             lang_serial: 0,
@@ -6600,6 +6617,35 @@ impl Workbench {
                     None => self.agent_mark_pressed(rest, AgentId::ClaudeCode, cx),
                 }
             }
+            // In Settings, Text: the list of the system's faces for a
+            // place (`fontlist:chat`, `cjk`, `mono`), words typed in its
+            // search, and the face ↑ and ↓ are on chosen, as ↩ does.
+            Some(t) if t.starts_with("fontlist:") || t.starts_with("fontclear:") || t.starts_with("fonttype:") || t == "fontpick" => {
+                let step = t.to_string();
+                let (Some(h), me) = (self.settings_window, cx.entity()) else { return };
+                cx.defer(move |cx| {
+                    let _ = h.update(cx, |_, window, cx| {
+                        me.update(cx, |this, cx| {
+                            let slot_of = |name: &str| match name {
+                                "cjk" => crate::fonts::Slot::Cjk,
+                                "mono" => crate::fonts::Slot::Mono,
+                                _ => crate::fonts::Slot::Chat,
+                            };
+                            if let Some(slot) = step.strip_prefix("fontlist:") {
+                                this.font_list_open(slot_of(slot), window, cx);
+                            } else if let Some(slot) = step.strip_prefix("fontclear:") {
+                                this.clear_custom_font(slot_of(slot), window, cx);
+                            } else if let Some(words) = step.strip_prefix("fonttype:") {
+                                if let Some(q) = this.font_query.clone() {
+                                    q.update(cx, |s, cx| s.set_value(words.replace('_', " "), window, cx));
+                                }
+                            } else {
+                                this.font_list_choose(None, window, cx);
+                            }
+                        })
+                    });
+                });
+            }
             // A picture of the settings window as it is now.
             Some(t) if t.starts_with("settingsshot:") => {
                 let path = PathBuf::from(&t["settingsshot:".len()..]);
@@ -7560,15 +7606,72 @@ impl Workbench {
         }
     }
 
-    fn set_chat_font(&mut self, choice: &str, cx: &mut Context<Self>) {
+    pub(crate) fn set_chat_font(&mut self, choice: &str, cx: &mut Context<Self>) {
+        // The face a custom one put away goes back to.
+        if choice == crate::fonts::CUSTOM && self.cfg.app.chat_font != choice {
+            self.cfg.app.chat_preset = self.cfg.app.chat_font.clone();
+        }
         self.cfg.app.chat_font = choice.to_string();
         self.save_app_config();
         crate::fonts::set_chat(choice, cx);
         cx.notify();
     }
 
-    /// The Chinese face behind the conversation's, chosen in Settings.
+    /// A face of the system's chosen for a custom place in Settings,
+    /// Text, and that place chosen with it.
+    pub(crate) fn set_custom_font(&mut self, slot: crate::fonts::Slot, family: String, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::fonts::Slot;
+        match slot {
+            Slot::Chat => self.cfg.app.chat_custom = family,
+            Slot::Cjk => self.cfg.app.cjk_custom = family,
+            Slot::Mono => self.cfg.terminal.font_custom = family,
+        }
+        crate::fonts::set_custom(crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal), &self.cfg.app.chat_font, cx);
+        match slot {
+            Slot::Chat => self.set_chat_font(crate::fonts::CUSTOM, cx),
+            Slot::Cjk => self.set_cjk_font(crate::fonts::CUSTOM, cx),
+            Slot::Mono => self.set_mono_font(crate::fonts::CUSTOM, window, cx),
+        }
+    }
+
+    /// A custom place's face put away: the tile says "Custom" again.
+    /// Where it was the one in use, the face chosen before it takes its
+    /// place (`chat_preset`, `cjk_preset`, `font_preset`), or the row's
+    /// first where that is none.
+    pub(crate) fn clear_custom_font(&mut self, slot: crate::fonts::Slot, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::fonts::{Slot, CUSTOM};
+        match slot {
+            Slot::Chat => self.cfg.app.chat_custom.clear(),
+            Slot::Cjk => self.cfg.app.cjk_custom.clear(),
+            Slot::Mono => self.cfg.terminal.font_custom.clear(),
+        }
+        crate::fonts::set_custom(crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal), &self.cfg.app.chat_font, cx);
+        match slot {
+            Slot::Chat if self.cfg.app.chat_font == CUSTOM => {
+                let back = crate::fonts::chat_face(&self.cfg.app.chat_preset).key;
+                self.set_chat_font(back, cx)
+            }
+            Slot::Cjk if self.cfg.app.cjk_font == CUSTOM => {
+                let back = crate::fonts::CJK.iter().find(|f| f.key == self.cfg.app.cjk_preset).unwrap_or(&crate::fonts::CJK[0]).key;
+                self.set_cjk_font(back, cx)
+            }
+            Slot::Mono if self.cfg.terminal.font == CUSTOM => {
+                let back = crate::fonts::mono_face(&self.cfg.terminal.font_preset).key;
+                self.set_mono_font(back, window, cx)
+            }
+            Slot::Mono => self.set_terminal(|_| {}, cx),
+            _ => {
+                self.save_app_config();
+                cx.notify();
+            }
+        }
+    }
+
+    /// The CJK face behind the conversation's, chosen in Settings.
     pub(crate) fn set_cjk_font(&mut self, choice: &str, cx: &mut Context<Self>) {
+        if choice == crate::fonts::CUSTOM && self.cfg.app.cjk_font != choice {
+            self.cfg.app.cjk_preset = self.cfg.app.cjk_font.clone();
+        }
         self.cfg.app.cjk_font = choice.to_string();
         self.save_app_config();
         crate::fonts::set_cjk(choice, cx);
@@ -7591,8 +7694,16 @@ impl Workbench {
     /// conversation, the file's editor and the terminal. It is painted
     /// into both palettes, as the accent is, and the appearance drawn
     /// again with it.
-    fn set_mono_font(&mut self, choice: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_terminal(|t| t.font = choice.into(), cx);
+    pub(crate) fn set_mono_font(&mut self, choice: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_terminal(
+            |t| {
+                if choice == crate::fonts::CUSTOM && t.font != choice {
+                    t.font_preset = t.font.clone();
+                }
+                t.font = choice.into();
+            },
+            cx,
+        );
         crate::look::install(&self.cfg.app.accent, choice, cx);
         crate::look::apply(&self.cfg.app.appearance, Some(window), cx);
     }
@@ -17504,11 +17615,17 @@ impl Workbench {
             let (scroll, _) = self.kept_scroll("dialog-plan".into(), Inner::Held);
             div().relative().w_full().child(div().id("dialog-plan").w_full().max_h(PLAN_BOX_H.min(self.view_h * 0.22).max(px(120.))).overflow_y_scroll().track_scroll(&scroll).rounded(px(8.)).border_1().border_color(theme.border).px(px(14.)).py(px(10.)).when_some(chat_font.clone(), |d, f| d.faced(f, cx)).text_size(px(self.cfg.app.chat_px())).line_height(gpui::relative(1.5)).child(crate::transcript::chat_md_view("dialog-plan-md".into(), text, cx))).vertical_scrollbar(&scroll)
         });
-        // With previews the terminal's pointer is the choice so far: a
-        // digit moves it, and Return takes the one it is on.
+        // With previews a digit only moves the terminal's pointer, whose
+        // choice's preview shows, and Return takes the one it is on. The
+        // pointer is not a choice made: it stands on the first as the
+        // question comes up. So it is ringed quietly, never ticked, and a
+        // press on a choice takes it, the digit and then Return once the
+        // pointer is there. Ticked as the choice so far, the first read
+        // as chosen though nothing was; and a press that only moved the
+        // pointer left the question unanswered when Next went on.
         let previews = d.preview.is_some();
         let rows = d.options.iter().filter(|o| !(d.multi && o.label.starts_with("Type something"))).map(|o| {
-            let on = o.checked == Some(true) || (previews && o.cursor);
+            let on = o.checked == Some(true);
             let pointed = previews && o.cursor;
             let (n, multi, own) = (o.n, d.multi, o.label.starts_with("Type something"));
             // The two the dialog adds to every question are quieter.
@@ -17522,7 +17639,7 @@ impl Workbench {
                 .items_start()
                 .rounded(px(10.))
                 .border_1()
-                .border_color(if on { theme.primary } else { theme.border })
+                .border_color(if on { theme.primary } else if pointed { theme.muted_foreground.opacity(0.6) } else { theme.border })
                 .bg(if on { theme.primary.opacity(0.08) } else { theme.transparent })
                 .when(busy, |d| d.opacity(0.6))
                 .cursor_pointer()
@@ -17538,7 +17655,13 @@ impl Workbench {
                         this.notice = Some(Notice::said(t("type your answer in the box and send it")));
                         cx.notify();
                     } else {
-                        this.dialog_send(vec![DialogStep { keys: if pointed { "\r".into() } else { n.to_string() }, until: None }], cx);
+                        let take = DialogStep { keys: "\r".into(), until: None };
+                        let steps = match (previews, pointed) {
+                            (true, true) => vec![take],
+                            (true, false) => vec![DialogStep { keys: n.to_string(), until: Some(DialogUntil::CursorOn(n)) }, take],
+                            _ => vec![DialogStep { keys: n.to_string(), until: None }],
+                        };
+                        this.dialog_send(steps, cx);
                     }
                 }))
                 .child(
