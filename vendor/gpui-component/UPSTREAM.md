@@ -50,12 +50,12 @@ upstream revision finds them.
    `Inline::with_chip`, and `Inline::paint_code_chips` paints one rounded
    quad per line of each span before the text, 1.35 times the font size
    tall and centred on the line. A text run has no padding, so the
-   markdown parser sets every inline code span between two `CODE_PAD`
-   characters (U+202F) at each end, outside the code mark: the plate takes
-   in the nearer one as its padding and the farther one is its margin.
-   The parser runs before the view's style is known, so the spaces are
-   set whether or not a plate is asked for. The view's Copy action takes
-   each pair out of the copied text again.
+   markdown parser sets every inline code span between three `CODE_PAD`
+   characters (U+202F) at each end (`CODE_PADS`), outside the code mark:
+   the plate takes in the nearest one as its padding and the other two
+   are its margin. The parser runs before the view's style is known, so
+   the spaces are set whether or not a plate is asked for. The view's
+   Copy action takes them out of the copied text again.
 
 7. `crates/base/src/input/base/kind.rs`, `input/textarea/mod.rs`: a
    textarea can colour ranges. `TextareaMode::Extras` is `TextareaExtras`
@@ -360,7 +360,7 @@ upstream revision finds them.
 
 75. `crates/ui/src/text/node.rs` (`CodeBlock::render`): a press on a code block's own buttons stops there, so it is no press on the block (74).
 
-76. `crates/ui/src/text/node.rs` (`CodeBlock::indented`, `CodeBlock::render`), `format/markdown.rs` (`Node::Code`): a block of code set by its indent, with no fences, is drawn as its lines are written: their indent kept, in the mono face on a line and a half, with no plate, head or fold.
+76. `crates/ui/src/text/node.rs` (`CodeBlock::indented`, `CodeBlock::render`), `format/markdown.rs` (`Node::Code`): a block of code set by its indent, with no fences, is drawn as its lines are written: their indent kept, in the mono face on a line and a half, with no plate, head or fold, at the size the view's `code_block` style sets where it sets one.
 
 77. `crates/ui/src/text/edit.rs` (`EditSlot::run`, `run_part`; `UnitClick::press`), `node.rs` (`BlockNode::render_top`; the block's press: a `press` on the button going down, then the click, and a text cursor), `document.rs` (`render_root` draws `render_top`): the caller's element in the place of a run of blocks of the top level, and a press a drag may follow (74). Since a markdown file written in as it reads became one editor (`docs/panels.md`), the app gives no view a slot or a press handler, so 74 and 77 draw nothing of their own; they can be taken out with the next update.
 

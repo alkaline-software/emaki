@@ -168,27 +168,27 @@ fn math_face(dialect: Dialect) -> gpui_component::text::MathFace {
 /// smaller cut of the monospace face (`fonts::inline_mono_family`), so
 /// it stands no taller than they do.
 pub(crate) fn chat_md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, None, None, cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, None, None, None, cx)
 }
 
 /// `chat_md_view` on a ground other than the page's (a prompt's bubble,
 /// a tinted card): a table wider than its room fades into it at a cut
 /// edge.
 pub(crate) fn chat_md_view_on(id: String, text: String, ground: Hsla, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, None, Some(ground), cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), true, None, false, None, None, None, None, Some(ground), None, cx)
 }
 
 /// Markdown as a document draws it, a file's or a page's: all of GFM,
 /// as GitHub reads the file.
 pub(crate) fn md_view(id: String, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, None, None, cx)
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), false, None, false, None, None, None, None, None, None, cx)
 }
 
 /// `md_view`, with words found in it painted (`TextFind`): a file as it
 /// reads, with its find open; and with where its headings are painted
 /// kept, for the outline at the files panel's foot (`HeadingSpots`).
-pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, cx: &App) -> impl IntoElement {
-    md_view_in(id, text, cx.theme().mono_font_family.clone(), false, None, false, find, headings, None, None, None, cx)
+pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, code_px: f32, cx: &App) -> impl IntoElement {
+    md_view_in(id, text, crate::fonts::inline_mono_family(cx), false, None, false, find, headings, None, None, None, Some(code_px), cx)
 }
 
 /// A file's markdown as it reads: with `quarto`, Quarto's syntax read
@@ -196,37 +196,37 @@ pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component
 /// Markdown chunk folds by itself. It is drawn from `state`, which the
 /// file's view keeps, and `kept` holds it for frames it is drawn from a
 /// cache in (`panels::FileDoc`).
-pub(crate) fn md_view_file(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: gpui_component::text::KeptViews, slot: Option<gpui_component::text::EditSlot>, click: Option<std::sync::Arc<gpui_component::text::UnitClickFn>>, cx: &App) -> impl IntoElement {
+pub(crate) fn md_view_file(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: gpui_component::text::KeptViews, slot: Option<gpui_component::text::EditSlot>, click: Option<std::sync::Arc<gpui_component::text::UnitClickFn>>, code_px: f32, cx: &App) -> impl IntoElement {
     // A file written in as it reads selects in the field, which a press
     // and a drag open (`doc_edit.rs`), not in the drawing.
     let selectable = click.is_none();
-    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), Some(state), None, cx).selectable(selectable).edit_slot(slot).on_unit_click(click)
+    md_view_in(String::new(), text, crate::fonts::inline_mono_family(cx), false, quarto, false, find, headings, Some(kept), Some(state), None, Some(code_px), cx).selectable(selectable).edit_slot(slot).on_unit_click(click)
 }
 
 /// A block of a markdown file written in as it reads that the editor
 /// does not draw (`panels/doc_edit.rs`): drawn as the file reads, from
 /// `state`, which the file's editor keeps. It selects nothing of its
 /// own: the editor's selection takes it whole.
-pub(crate) fn md_view_piece(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
-    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, None, None, Some(kept), Some(state), None, cx).selectable(false)
+pub(crate) fn md_view_piece(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, kept: gpui_component::text::KeptViews, code_px: f32, cx: &App) -> impl IntoElement {
+    md_view_in(String::new(), text, crate::fonts::inline_mono_family(cx), false, quarto, false, None, None, Some(kept), Some(state), None, Some(code_px), cx).selectable(false)
 }
 
 /// `md_view` drawn from `state`, which the caller keeps: words it can
 /// select all of (the outline's summary).
 pub(crate) fn md_view_state(state: Entity<gpui_component::text::TextViewState>, text: String, cx: &App) -> impl IntoElement {
-    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, false, None, None, None, Some(state), None, cx)
+    md_view_in(String::new(), text, crate::fonts::inline_mono_family(cx), false, None, false, None, None, None, Some(state), None, None, cx)
 }
 
 /// A file's YAML header as its fields: `text` is the header written as a
 /// table (`files::front_matter_table`), drawn a field a row in the mono
 /// face, for the band over the file.
 pub(crate) fn md_view_fields(state: Entity<gpui_component::text::TextViewState>, text: String, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
-    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, true, None, None, Some(kept), Some(state), None, cx)
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, None, true, None, None, Some(kept), Some(state), None, None, cx)
 }
 
 /// `state`, when the caller keeps the view's state, is drawn from in
 /// place of one kept by the view's `id` where it is drawn.
-fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, state: Option<Entity<gpui_component::text::TextViewState>>, ground: Option<Hsla>, cx: &App) -> TextView {
+fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, state: Option<Entity<gpui_component::text::TextViewState>>, ground: Option<Hsla>, code_px: Option<f32>, cx: &App) -> TextView {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown by the view as it is, in a
     // block of code (the vendored `parse_content`).
@@ -289,7 +289,14 @@ fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, q
                 table_ground: Some(ground.unwrap_or(theme.background)),
                 ..Default::default()
             }
-            .code_block(StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.)))
+            .code_block({
+                let block = StyleRefinement::default().bg(code_bg).border_1().border_color(border).rounded(px(10.)).px(px(12.)).py(px(10.));
+                // A file's blocks of code go by the file's size.
+                match code_px {
+                    Some(size) => block.text_size(px(size)),
+                    None => block,
+                }
+            })
             // A table keeps its columns wide enough to read, each down to
             // about two lines of its text and never under its longest
             // word, and scrolls sideways past that, fading into the ground

@@ -378,7 +378,20 @@ fn main() {
         // The words first: the menus and the window are named in them.
         i18n::set(&i18n::chosen(&cfg.app.language));
         shortcuts::set_chosen(&cfg.app.shortcuts);
-        let app_cfg = cfg.app;
+        let mut app_cfg = cfg.app;
+        // TsangerJinKai was one of the CJK faces, and is a custom one now:
+        // a file that chose it keeps it where it is installed.
+        if app_cfg.cjk_font == "tsanger" {
+            match fonts::tsanger_in(&cx.text_system().all_font_names()) {
+                Some(family) if app_cfg.cjk_custom.is_empty() || app_cfg.cjk_custom == family => {
+                    app_cfg.cjk_font = fonts::CUSTOM.into();
+                    app_cfg.cjk_custom = family;
+                }
+                _ => app_cfg.cjk_font = fonts::AUTO.into(),
+            }
+            let (font, custom) = (app_cfg.cjk_font.clone(), app_cfg.cjk_custom.clone());
+            let _ = emaki_core::config::Config::edit(move |c| (c.app.cjk_font, c.app.cjk_custom) = (font, custom));
+        }
         fonts::install(&app_cfg.chat_font, &app_cfg.cjk_font, fonts::Custom::of(&app_cfg, &cfg.terminal), cx);
         look::install(&app_cfg.accent, &cfg.terminal.font, cx);
         look::install_languages();

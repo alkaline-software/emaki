@@ -46,10 +46,15 @@ impl Workbench {
     /// Whether the file showing is written in as it reads: markdown or
     /// Quarto the pane holds whole, with its editor.
     pub(crate) fn doc_editable(&self) -> bool {
-        !self.file_raw
-            && self.file_view.as_ref().is_some_and(|v| {
-                matches!(&v.body, FileBody::Markdown(text) if text.len() <= DOC_MOST) && v.source.is_some() && written_as(&v.path).is_none() && self.file_editor.as_ref().is_some_and(|ed| ed.path == v.path && ed.saved.is_some())
-            })
+        !self.file_raw && self.doc_writable()
+    }
+
+    /// Whether the file showing is written in as it reads when it is shown
+    /// rendered: its rendered side is the rendered editor.
+    pub(crate) fn doc_writable(&self) -> bool {
+        self.file_view.as_ref().is_some_and(|v| {
+            matches!(&v.body, FileBody::Markdown(text) if text.len() <= DOC_MOST) && v.source.is_some() && written_as(&v.path).is_none() && self.file_editor.as_ref().is_some_and(|ed| ed.path == v.path && ed.saved.is_some())
+        })
     }
 
     /// The editor the file showing is drawn and written in, made when the
@@ -137,9 +142,11 @@ impl Workbench {
             }
         }
         look.mono_family = theme.mono_font_family.clone();
+        look.inline_family = Some(crate::fonts::inline_mono_family(cx));
         look.text_px = size;
         look.line_px = (size * 1.6).round();
-        look.mono_px = f32::from(theme.mono_font_size);
+        // A block of code goes by the file's size, a little under it.
+        look.mono_px = crate::fonts::code_px(size);
         look.colors.plate = theme.muted;
         let h = |scale: f32| live::Heading { scale, line: 1.6, above: 0. };
         look.headings = Some([h(1.7), h(1.5), h(1.25), h(1.125), h(1.), h(1.)]);
@@ -221,7 +228,7 @@ impl Workbench {
                         .text_size(px(size))
                         .line_height(relative(1.6))
                         .when_some(face.clone(), |d, face| crate::fonts::Faced::faced(d, face, cx))
-                        .child(crate::transcript::md_view_piece(state.clone(), words.clone(), quarto, kept.clone(), cx))
+                        .child(crate::transcript::md_view_piece(state.clone(), words.clone(), quarto, kept.clone(), crate::fonts::code_px(size), cx))
                         .into_any_element()
                 })
             };

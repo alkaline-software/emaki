@@ -296,13 +296,7 @@ impl Workbench {
         // through what is left, ↩ chooses.
         let font_query = cx.new(|cx| InputState::new(window, cx).placeholder(t("Search fonts")));
         cx.subscribe_in(&font_query, window, |this, _, ev: &InputEvent, window, cx| match ev {
-            InputEvent::Change => {
-                if let Some(list) = this.font_list.as_mut() {
-                    list.at = 0;
-                }
-                this.font_list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
-                cx.notify();
-            }
+            InputEvent::Change => this.font_list_typed(cx),
             InputEvent::PressEnter { .. } => this.font_list_choose(None, window, cx),
             _ => {}
         })
@@ -329,10 +323,10 @@ impl Workbench {
         cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
                 this.close_settings_lists(cx);
-            } else if this.settings_section == "text" {
-                // A face installed while the window was away.
-                crate::fonts::find_tsanger(cx);
-                cx.notify();
+            } else if this.settings_section == "text" && !this.font_families_reading {
+                // A face installed while the window was away is in the
+                // list the next time it opens.
+                this.font_families = None;
             } else if this.settings_section == "remote" {
                 // Back from the system's settings: Remote Login may have
                 // been turned on or off there.
@@ -814,35 +808,46 @@ impl Workbench {
         use crate::fonts::{Custom, Slot, CUSTOM};
         let theme = cx.theme().clone();
         let app = self.cfg.app.clone();
-        let custom = Custom::of(&app, &self.cfg.terminal);
         let chat_now: &str = if app.chat_font == CUSTOM { CUSTOM } else { crate::fonts::chat_face(&app.chat_font).key };
         let mono_now: &str = if self.cfg.terminal.font == CUSTOM { CUSTOM } else { crate::fonts::mono_face(&self.cfg.terminal.font).key };
-        let cjk_now: &str = if app.cjk_font == CUSTOM { CUSTOM } else { crate::fonts::CJK.iter().find(|f| f.key == app.cjk_font).map(|f| f.key).unwrap_or(crate::fonts::CJK[0].key) };
-        let tsanger = cx.global::<crate::fonts::ChatFonts>().tsanger.clone();
+        let cjk_now: &str = if app.cjk_font == CUSTOM { CUSTOM } else { crate::fonts::CJK.iter().find(|f| f.key == app.cjk_font).map(|f| f.key).unwrap_or(crate::fonts::AUTO) };
+        // Auto's sample is drawn in the face the chat font gets behind it.
+        let chat_serif = {
+            let fonts = cx.global::<crate::fonts::ChatFonts>();
+            crate::fonts::is_serif(&crate::fonts::chat_name(&app.chat_font, &fonts.custom), &fonts.custom)
+        };
         // `kind`: 0 the chat face, 1 the monospace face, 2 the CJK face.
+        // Each sample at a size that stands as tall as the others and fits
+        // the narrowest tile: a CJK name of four characters, or five with
+        // two figures.
+        let sample_px = |kind: u8| match kind {
+            1 => 12.,
+            2 => 16.,
+            _ => 20.,
+        };
+        let tile = |face: &'static crate::fonts::Face, now: &str, sample: &'static str, kind: u8, cx: &mut Context<Self>| {
+            let (key, active) = (face.key, face.key == now);
+            // A CJK tile's sample is its name in Chinese, drawn in the face
+            // itself over its English name; Auto's is 汉字 in the face the
+            // chat font gets.
+            let (family, name, sample): (SharedString, SharedString, SharedString) = if kind == 2 {
+                let name = if key == crate::fonts::AUTO { t("Auto").into() } else { face.name.into() };
+                (crate::fonts::cjk_family(key, &Custom::default(), chat_serif).into(), name, crate::fonts::cjk_native(key).unwrap_or(sample).into())
+            } else {
+                (face.family.into(), face.name.into(), sample.into())
+            };
+            self.font_tile(SharedString::from(format!("face-{key}")), active, family, sample, sample_px(kind), name, None, &theme).on_click(cx.listener(move |this, _, window, cx| match kind {
+                1 => this.set_mono_font(key, window, cx),
+                2 => this.set_cjk_font(key, cx),
+                _ => this.set_chat_font(key, cx),
+            }))
+        };
         let tiles = |faces: &'static [crate::fonts::Face], now: &str, sample: &'static str, kind: u8, slot: Option<Slot>, cx: &mut Context<Self>| {
             let mut row = h_flex().gap(px(6.));
             for face in faces {
-                let (key, active) = (face.key, face.key == now);
-                // A CJK tile draws its sample in its own face.
-                let family: SharedString = if kind == 2 { crate::fonts::cjk_family(face.key, &Custom::default(), &tsanger).into() } else { face.family.into() };
-                // TsangerJinKai is the system's: where it is not installed
-                // its tile is faint, says so under the pointer, and
-                // chooses nothing.
-                let missing = face.key == crate::fonts::TSANGER && tsanger.is_empty();
-                let tile = self.font_tile(SharedString::from(format!("face-{key}")), active, family, sample, kind == 1, face.name.into(), None, &theme);
-                let tile = if missing {
-                    tile.opacity(0.45).cursor_default().managed_tooltip(|window, cx| crate::workbench::tip(t("Not installed"), window, cx))
-                } else {
-                    tile.on_click(cx.listener(move |this, _, window, cx| match kind {
-                        1 => this.set_mono_font(key, window, cx),
-                        2 => this.set_cjk_font(key, cx),
-                        _ => this.set_chat_font(key, cx),
-                    }))
-                };
-                row = row.child(tile);
+                row = row.child(tile(face, now, sample, kind, cx));
             }
-            row.children(slot.map(|slot| self.custom_tile(slot, now == CUSTOM, slot.family(&custom).to_string(), sample, kind == 1, false, &theme, cx)))
+            row.children(slot.map(|slot| self.custom_tile(slot, now == CUSTOM, sample, sample_px(kind), false, &theme, cx)))
         };
         // A kind of face, small and quiet, over its tiles.
         let kind = |name: &'static str| div().text_size(px(11.5)).text_color(theme.muted_foreground).child(name);
@@ -857,7 +862,7 @@ impl Workbench {
             .gap(gap)
             .child(kind(t("Serif")))
             .child(tiles(crate::fonts::SERIFS, chat_now, "Ag", 0, None, cx))
-            .child(div().h(px(6.)))
+            .child(div().h(px(4.)))
             .child(kind(t("Sans serif")))
             .child(tiles(crate::fonts::SANS, chat_now, "Ag", 0, None, cx));
         // Its top level with the first row's: under a label's room, kept
@@ -868,27 +873,28 @@ impl Workbench {
             .min_w_0()
             .gap(gap)
             .child(kind(t("Serif")).invisible())
-            .child(div().flex_1().min_h_0().child(self.custom_tile(Slot::Chat, chat_now == CUSTOM, custom.chat.clone(), "Ag", false, true, &theme, cx)));
-        let chat = h_flex().p(px(12.)).gap(gap).items_stretch().child(rows).child(own).into_any_element();
-        let mono = div().p(px(12.)).child(tiles(crate::fonts::monos(), mono_now, "fn(0) -> 1", 1, Some(Slot::Mono), cx)).into_any_element();
-        let cjk = div().p(px(12.)).child(tiles(crate::fonts::CJK, cjk_now, "汉字", 2, Some(Slot::Cjk), cx)).into_any_element();
+            .child(div().flex_1().min_h_0().child(self.custom_tile(Slot::Chat, chat_now == CUSTOM, "Ag", 20., true, &theme, cx)));
+        let chat = h_flex().p(px(10.)).gap(gap).items_stretch().child(rows).child(own).into_any_element();
+        let mono = div().p(px(10.)).child(tiles(crate::fonts::monos(), mono_now, "fn(0) -> 1", 1, Some(Slot::Mono), cx)).into_any_element();
+        // Five columns, as the chat font's and the monospace font's.
+        let cjk = div().p(px(10.)).child(tiles(crate::fonts::CJK, cjk_now, "汉字", 2, Some(Slot::Cjk), cx)).into_any_element();
         vec![group(Some(t("Chat font")), None, vec![chat], &theme), group(Some(t("CJK font")), None, vec![cjk], &theme), group(Some(t("Monospace font")), None, vec![mono], &theme)]
     }
 
     /// A face's tile: its sample drawn in it over its name, ringed in the
     /// accent while it is the one chosen.
     #[allow(clippy::too_many_arguments)]
-    fn font_tile(&self, id: SharedString, active: bool, family: SharedString, sample: &'static str, mono: bool, name: SharedString, mark: Option<AnyElement>, theme: &gpui_component::Theme) -> Stateful<Div> {
+    fn font_tile(&self, id: SharedString, active: bool, family: SharedString, sample: SharedString, sample_px: f32, name: SharedString, mark: Option<AnyElement>, theme: &gpui_component::Theme) -> Stateful<Div> {
         let ground = if theme.mode.is_dark() { theme.muted } else { theme.popover };
         let (primary, edge, quiet) = (theme.primary, theme.border, theme.muted_foreground);
         v_flex()
             .id(id)
             .flex_1()
             .min_w_0()
-            .h(px(64.))
+            .h(px(54.))
             .px(px(10.))
             .justify_center()
-            .gap(px(2.))
+            .gap(px(1.))
             .rounded(px(10.))
             .border_1()
             .cursor_pointer()
@@ -899,7 +905,7 @@ impl Workbench {
             // One line, at a size that fits the narrowest tile: wrapped in
             // a narrow tile, or in a wider face drawn while its own loads,
             // the sample pushed the face's name out of the tile.
-            .child(div().whitespace_nowrap().overflow_hidden().text_size(px(if mono { 12. } else { 20. })).line_height(px(25.)).font_family(family).child(sample))
+            .child(div().truncate().text_size(px(sample_px)).line_height(px(24.)).font_family(family).child(sample))
             .child(h_flex().gap(px(2.)).items_center().child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(if active { theme.foreground } else { quiet }).child(name)).children(mark))
     }
 
@@ -909,15 +915,66 @@ impl Workbench {
     /// system's faces (`render_font_list`). `tall` fills the room it is
     /// given, with a larger sample.
     #[allow(clippy::too_many_arguments)]
-    fn custom_tile(&self, slot: crate::fonts::Slot, active: bool, family: String, sample: &'static str, mono: bool, tall: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn custom_tile(&self, slot: crate::fonts::Slot, active: bool, sample: &'static str, sample_px: f32, tall: bool, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal);
+        let family = slot.family(&chosen).to_string();
         let none = family.is_empty();
-        let name: SharedString = if none { t("Custom").into() } else { family.clone().into() };
-        let face: SharedString = if none { theme.font_family.clone() } else { family.clone().into() };
+        // Named in its own language and in English where it has both, and
+        // drawn in the style chosen, which is named after it.
+        let about = crate::fonts::about(&family);
+        let style = about.styles.iter().find(|s| s.ps == slot.style(&chosen)).map(|s| s.name.clone());
+        // A CJK face's name in its own language is its sample, as on the
+        // other CJK tiles, with the English under it, or the style chosen,
+        // which the sample cannot show: the two names and the style would
+        // not fit one column. All of it is the tile's hover.
+        let cjk_name = (slot == crate::fonts::Slot::Cjk).then(|| about.native.clone()).flatten();
+        let full: Option<SharedString> = (!none).then(|| {
+            let both = crate::fonts::both_names(about.native.as_deref(), &family);
+            match &style {
+                Some(s) => format!("{both} · {s}").into(),
+                None => both.into(),
+            }
+        });
+        let (name, style): (SharedString, Option<String>) = match (&cjk_name, none) {
+            (_, true) => (t("Custom").into(), style),
+            (Some(_), _) => (style.clone().unwrap_or_else(|| family.clone()).into(), None),
+            (None, _) => (crate::fonts::both_names(about.native.as_deref(), &family).into(), style),
+        };
+        // A long name drawn smaller, so it fits beside the × in the corner:
+        // a CJK character an em wide, anything else about half.
+        let sample_px = match (&cjk_name, self.font_tiles.borrow().get(&slot)) {
+            (Some(n), Some(b)) => {
+                let ems: f32 = n.chars().map(|c| if c.is_ascii() { 0.55 } else { 1. }).sum();
+                let room = f32::from(b.size.width) - 20. - 14.;
+                sample_px.min((room / ems.max(1.)).floor()).max(11.)
+            }
+            _ => sample_px,
+        };
+        let sample: SharedString = cjk_name.unwrap_or_else(|| sample.to_string()).into();
+        let face: SharedString = if none {
+            theme.font_family.clone()
+        } else {
+            let fonts = &cx.global::<crate::fonts::ChatFonts>().custom;
+            match slot {
+                crate::fonts::Slot::Chat => fonts.chat_family(),
+                crate::fonts::Slot::Cjk => fonts.cjk_family(),
+                crate::fonts::Slot::Mono => fonts.mono_family(),
+            }
+            .to_string()
+            .into()
+        };
         let open = self.font_list.as_ref().is_some_and(|l| l.slot == slot);
         let tiles = self.font_tiles.clone();
         let quiet = theme.muted_foreground;
-        // The sign that it opens a list, after its name.
-        let mark = Icon::default().path("icons/chevrons-up-down.svg").with_size(px(12.)).text_color(quiet).flex_shrink_0().into_any_element();
+        // The style chosen and the sign that it opens a list, after its
+        // name.
+        let mark = h_flex()
+            .flex_shrink_0()
+            .gap(px(4.))
+            .items_center()
+            .children(style.map(|s| div().text_size(px(11.5)).text_color(quiet).child(s)))
+            .child(Icon::default().path("icons/chevrons-up-down.svg").with_size(px(12.)).text_color(quiet))
+            .into_any_element();
         // A face chosen can be put away by the × at the tile's corner,
         // there only while there is one, and coming and going over a
         // moment. Small and in the very corner, it stands over the
@@ -972,11 +1029,12 @@ impl Workbench {
                 .child(div().whitespace_nowrap().overflow_hidden().text_size(px(30.)).line_height(px(38.)).font_family(face).child(sample))
                 .child(h_flex().gap(px(2.)).items_center().child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(if active { theme.foreground } else { quiet }).child(name)).child(mark))
         } else {
-            self.font_tile(SharedString::from(format!("face-custom-{slot:?}")), active || open, face, sample, mono, name, Some(mark), theme)
+            self.font_tile(SharedString::from(format!("face-custom-{slot:?}")), active || open, face, sample, sample_px, name, Some(mark), theme)
         };
         tile.relative()
             // While none was chosen, the sample is the list's sign.
             .when(none, |d| d.text_color(quiet))
+            .when_some(full, |d, full| d.managed_tooltip(move |window, cx| crate::workbench::tip(full.clone(), window, cx)))
             .children(clear)
             .child(canvas(move |b, _, _| { tiles.borrow_mut().insert(slot, b); }, |_, _, _, _| {}).absolute().inset_0())
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -995,23 +1053,23 @@ impl Workbench {
     }
 
     /// The list of the system's faces for `slot`, its search empty and
-    /// its keyboard there. The families are read the first time, off the
-    /// main thread.
+    /// its keyboard there, the face chosen in view and its family open
+    /// where a style of it was chosen. The families are read the first
+    /// time, off the main thread.
     pub(super) fn font_list_open(&mut self, slot: crate::fonts::Slot, window: &mut Window, cx: &mut Context<Self>) {
         self.close_settings_lists(cx);
         let serial = self.menu_serial.wrapping_add(1);
         self.menu_serial = serial;
-        self.font_list = Some(FontList { slot, at: 0, serial });
+        let chosen = crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal);
+        let (family, style) = (slot.family(&chosen).to_string(), slot.style(&chosen).to_string());
+        let open = (!style.is_empty()).then(|| family.clone());
+        self.font_list = Some(FontList { slot, at: 0, serial, open, closing: None, turn: None });
         if let Some(query) = self.font_query.clone() {
             query.update(cx, |s, cx| s.set_value("", window, cx));
             let handle = query.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
-        // The face chosen, in view.
-        let now = slot.family(&crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal)).to_string();
-        if let Some(ix) = self.font_families.as_ref().and_then(|f| f.of(slot.kinds()).iter().position(|n| *n == now)) {
-            self.font_list_scroll.scroll_to_item(ix, gpui::ScrollStrategy::Center);
-        }
+        self.font_list_show_chosen(&family, &style, cx);
         if self.font_families.is_none() && !self.font_families_reading {
             self.font_families_reading = true;
             #[cfg(target_os = "macos")]
@@ -1026,6 +1084,7 @@ impl Workbench {
                 let _ = this.update(cx, |this, cx| {
                     this.font_families_reading = false;
                     this.font_families = Some(Rc::new(families));
+                    this.font_list_show_chosen(&family, &style, cx);
                     cx.notify();
                 });
             })
@@ -1034,49 +1093,166 @@ impl Workbench {
         cx.notify();
     }
 
-    /// The families the list shows now: its kind's, narrowed by what is
-    /// typed, word by word, in any order.
-    fn font_list_rows(&self, slot: crate::fonts::Slot, cx: &App) -> Vec<String> {
+    /// ↑ and ↓ on the face chosen, its row in view.
+    fn font_list_show_chosen(&mut self, family: &str, style: &str, cx: &App) {
+        let Some(list) = self.font_list.clone() else { return };
+        let rows = self.font_list_rows(&list, cx);
+        self.font_list_scroll.reset(rows.iter().filter(|r| matches!(r, FontRow::Family(_))).count());
+        let ix = rows.iter().position(|r| match r {
+            FontRow::Family(f) => style.is_empty() && f == family,
+            FontRow::Style(f, s) => f == family && s.ps == style,
+        });
+        if let Some(ix) = ix {
+            if let Some(list) = self.font_list.as_mut() {
+                list.at = ix;
+            }
+            // A few families over it, so it stands toward the middle.
+            self.font_list_scroll.scroll_to(gpui::ListOffset { item_ix: font_item_of(&rows, ix).saturating_sub(4), offset_in_item: px(0.) });
+        }
+    }
+
+    /// Words typed in the list's search: ↑ and ↓ from the top again, and
+    /// the one family they leave, where they leave one, open.
+    pub(super) fn font_list_typed(&mut self, cx: &mut Context<Self>) {
+        if let Some(list) = self.font_list.clone() {
+            let rows = self.font_list_rows(&FontList { open: None, closing: None, ..list }, cx);
+            self.font_list_scroll.reset(rows.len());
+            let only = match rows.as_slice() {
+                [FontRow::Family(f)] => Some(f.clone()),
+                _ => None,
+            };
+            if let Some(list) = self.font_list.as_mut() {
+                list.at = 0;
+                list.open = only;
+                list.closing = None;
+                list.turn = None;
+            }
+        }
+        self.font_list_scroll.scroll_to(gpui::ListOffset::default());
+        cx.notify();
+    }
+
+    /// → on a family with styles opens it; ← on an open family, or on
+    /// one of its styles, shuts it and stands on the family. Anything
+    /// else is the search field's caret moving. True where the list took
+    /// the key.
+    fn font_list_turn(&mut self, open: bool, cx: &mut Context<Self>) -> bool {
+        let Some(list) = self.font_list.clone() else { return false };
+        let rows = self.font_list_rows(&list, cx);
+        let Some(row) = rows.get(list.at) else { return false };
+        let several = |f: &str| self.font_families.as_ref().is_some_and(|fams| fams.styles(f).len() > 1);
+        let family = match (row, open) {
+            (FontRow::Family(f), true) if several(f) && list.open.as_ref() != Some(f) => f.clone(),
+            (FontRow::Family(f), false) if list.open.as_ref() == Some(f) => f.clone(),
+            (FontRow::Style(f, _), false) if list.open.as_ref() == Some(f) => f.clone(),
+            _ => return false,
+        };
+        self.font_list_toggle(family.clone(), cx);
+        if let Some(list) = self.font_list.as_mut() {
+            if let Some(ix) = rows.iter().position(|r| *r == FontRow::Family(family.clone())) {
+                list.at = ix;
+                self.font_list_scroll.scroll_to_reveal_item(font_item_of(&rows, ix));
+            }
+        }
+        true
+    }
+
+    /// What the list shows now: its kind's families narrowed by what is
+    /// typed, word by word in any order, in either of a family's names;
+    /// and under a family that is open, its styles. A family shutting
+    /// keeps its styles while they go.
+    fn font_list_rows(&self, list: &FontList, cx: &App) -> Vec<FontRow> {
         let Some(families) = &self.font_families else { return Vec::new() };
         let typed = self.font_query.as_ref().map(|q| q.read(cx).value().to_lowercase()).unwrap_or_default();
         let words: Vec<&str> = typed.split_whitespace().collect();
-        families.of(slot.kinds()).iter().filter(|f| { let f = f.to_lowercase(); words.iter().all(|w| f.contains(w)) }).cloned().collect()
+        let matched: Vec<&String> = families.of(list.slot.kinds()).iter().filter(|f| { let f = families.shown(f).to_lowercase(); words.iter().all(|w| f.contains(w)) }).collect();
+        let mut rows = Vec::with_capacity(matched.len());
+        for family in matched {
+            rows.push(FontRow::Family(family.clone()));
+            let shows = [list.open.as_ref(), list.closing.as_ref()].into_iter().flatten().any(|f| f == family);
+            if shows {
+                rows.extend(families.styles(family).iter().map(|style| FontRow::Style(family.clone(), style.clone())));
+            }
+        }
+        rows
     }
 
-    /// The face at `ix` of the list, or the one ↑ and ↓ are on, chosen.
+    /// A family's styles opened under it, or shut; one family is open at
+    /// a time. They come and go over a moment, and the list's height with
+    /// them.
+    fn font_list_toggle(&mut self, family: String, cx: &mut Context<Self>) {
+        let Some(list) = self.font_list.clone() else { return };
+        let opening = list.open.as_ref() != Some(&family);
+        let turn = list.turn.as_ref().map_or(1, |(_, _, n, _)| n.wrapping_add(1));
+        let mut next = list;
+        next.closing = next.open.take();
+        if opening {
+            next.open = Some(family.clone());
+        }
+        next.turn = Some((family, opening, turn, std::time::Instant::now()));
+        let n = self.font_list_rows(&next, cx).len();
+        next.at = next.at.min(n.saturating_sub(1));
+        self.font_list = Some(next);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FOLD_ANIM).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(list) = this.font_list.as_mut().filter(|l| l.turn.as_ref().is_some_and(|(_, _, n, _)| *n == turn)) {
+                    list.closing = None;
+                    list.turn = None;
+                    this.font_list_scroll.remeasure();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The row at `ix` of the list, or the one ↑ and ↓ are on, chosen: a
+    /// family as it is, or one style of it.
     pub(super) fn font_list_choose(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(list) = self.font_list.clone() else { return };
-        let rows = self.font_list_rows(list.slot, cx);
-        let Some(family) = rows.get(ix.unwrap_or(list.at)).cloned() else { return };
+        let rows = self.font_list_rows(&list, cx);
+        let Some(row) = rows.get(ix.unwrap_or(list.at.min(rows.len().saturating_sub(1)))).cloned() else { return };
         self.font_list = None;
         window.focus(&self.settings_focus, cx);
-        self.set_custom_font(list.slot, family, window, cx);
+        let (family, style) = match row {
+            FontRow::Family(f) => (f, String::new()),
+            FontRow::Style(f, s) => (f, s.ps),
+        };
+        self.set_custom_font(list.slot, family, style, window, cx);
     }
 
     /// ↑ and ↓ in the list's field move through what it shows.
     fn font_list_step(&mut self, by: isize, cx: &mut Context<Self>) {
-        let Some(slot) = self.font_list.as_ref().map(|l| l.slot) else { return };
-        let n = self.font_list_rows(slot, cx).len();
+        let Some(list) = self.font_list.clone() else { return };
+        let rows = self.font_list_rows(&list, cx);
+        let n = rows.len();
         let Some(list) = self.font_list.as_mut() else { return };
         if n == 0 {
             return;
         }
         list.at = (list.at as isize + by).clamp(0, n as isize - 1) as usize;
-        self.font_list_scroll.scroll_to_item(list.at, gpui::ScrollStrategy::Nearest);
+        let item = font_item_of(&rows, list.at);
+        self.font_list_scroll.scroll_to_reveal_item(item);
         cx.notify();
     }
 
     /// The list of the system's faces, hanging off its tile: a search
-    /// field over the families, the one chosen ticked. Only the rows in
-    /// view are drawn, and each in the window's face: drawn in its own,
-    /// every face scrolled past would be loaded and kept.
+    /// field over the families, each named in its own language and in
+    /// English where it has both; a family with several styles opens to
+    /// them at its chevron, as Font Book's do, and the face or style
+    /// chosen is ticked. Only the rows in view are drawn, and each in the
+    /// window's face: drawn in its own, every face scrolled past would be
+    /// loaded and kept.
     fn render_font_list(&self, list: FontList, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let view = window.viewport_size();
         let by = self.font_tiles.borrow().get(&list.slot).copied().unwrap_or_default();
-        let rows = Rc::new(self.font_list_rows(list.slot, cx));
-        let now = list.slot.family(&crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal)).to_string();
-        let (w, gap) = (px(280.), px(6.));
+        let rows = Rc::new(self.font_list_rows(&list, cx));
+        let chosen = crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal);
+        let (now, now_style) = (list.slot.family(&chosen).to_string(), list.slot.style(&chosen).to_string());
+        let (w, gap) = (px(320.), px(6.));
         let left = by.left().min(view.width - px(12.) - w).max(px(12.));
         // Below the tile where there is the room, else over it.
         let below = view.height - by.bottom() - gap - px(12.);
@@ -1088,16 +1264,25 @@ impl Workbench {
         let field = div()
             .px(px(8.))
             .pb(px(6.))
-            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
-                "up" => {
-                    this.font_list_step(-1, cx);
+            // Taken before the field, whose own ↑ and ↓ go to its start
+            // and end.
+            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveUp, _, cx| {
+                this.font_list_step(-1, cx);
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveDown, _, cx| {
+                this.font_list_step(1, cx);
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveRight, _, cx| {
+                if this.font_list_turn(true, cx) {
                     cx.stop_propagation();
                 }
-                "down" => {
-                    this.font_list_step(1, cx);
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveLeft, _, cx| {
+                if this.font_list_turn(false, cx) {
                     cx.stop_propagation();
                 }
-                _ => {}
             }))
             .children(self.font_query.as_ref().map(|q| {
                 h_flex()
@@ -1110,61 +1295,128 @@ impl Workbench {
                     .child(Icon::default().path("icons/search.svg").with_size(px(13.)).text_color(theme.muted_foreground))
                     .child(div().flex_1().min_w_0().track_focus(&q.read(cx).focus_handle(cx)).child(Input::new(q).appearance(false).bordered(false).px_0().on_secondary_click(self.input_menu(q, false, cx))))
             }));
-        let body: AnyElement = if self.font_families.is_none() {
-            div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(t("Reading fonts…")).into_any_element()
-        } else if rows.is_empty() {
-            div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(t("No font matches")).into_any_element()
-        } else {
-            let (at, slot) = (list.at, list.slot);
-            let dark = theme.mode.is_dark();
-            let rows_for = rows.clone();
-            let n = rows.len();
-            let this = cx.entity().downgrade();
-            div()
-                .relative()
-                .h((px(ROW_H) * n as f32).min(list_h))
-                .child(
-                    gpui::uniform_list("font-list", n, move |range, _, cx| {
-                        let theme = cx.theme().clone();
-                        range
-                            .map(|ix| {
-                                let family = rows_for[ix].clone();
-                                let chosen = family == now;
-                                let lit = ix == at;
-                                let this = this.clone();
-                                h_flex()
-                                    .id(("font-row", ix))
-                                    .h(px(ROW_H))
-                                    .w_full()
-                                    .px(px(10.))
-                                    .gap(px(6.))
-                                    .items_center()
-                                    .rounded(px(7.))
-                                    .cursor_pointer()
-                                    .text_size(px(13.))
-                                    .when(lit, |d| d.bg(if dark { theme.foreground.opacity(0.11) } else { theme.list_hover }))
-                                    .when(!lit, |d| {
-                                        let over = if dark { theme.foreground.opacity(0.06) } else { theme.muted };
-                                        d.hover(move |s| s.bg(over))
-                                    })
-                                    .child(div().flex_1().min_w_0().truncate().child(family))
-                                    .when(chosen, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary)))
-                                    .on_click(move |_, window, cx| {
-                                        swallow_click(window, cx);
-                                        let _ = this.update(cx, |this, cx| {
-                                            if this.font_list.as_ref().is_some_and(|l| l.slot == slot) {
-                                                this.font_list_choose(Some(ix), window, cx);
-                                            }
-                                        });
-                                    })
+        let body: AnyElement = match self.font_families.clone() {
+            None => div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(t("Reading fonts…")).into_any_element(),
+            Some(_) if rows.is_empty() => div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(t("No font matches")).into_any_element(),
+            Some(families) => {
+                let (at, slot) = (list.at, list.slot);
+                let dark = theme.mode.is_dark();
+                let this = cx.entity().downgrade();
+                // The list's items are the families, each with the styles
+                // that show under it: the rows of the flat list (`rows`)
+                // a family and the styles after it, by where each stands.
+                let mut items: Vec<(usize, String, Vec<(usize, crate::fonts::Style)>)> = Vec::new();
+                for (ix, row) in rows.iter().enumerate() {
+                    match row {
+                        FontRow::Family(f) => items.push((ix, f.clone(), Vec::new())),
+                        FontRow::Style(_, st) => {
+                            if let Some(item) = items.last_mut() {
+                                item.2.push((ix, st.clone()));
+                            }
+                        }
+                    }
+                }
+                // A family opening or shutting: how far, eased, and so how
+                // tall its styles stand and how far its chevron has turned.
+                // The list measures that family again at every frame
+                // until it stands still.
+                let turn = list.turn.clone().map(|(f, opening, _, at)| (f, opening, ease_out_quint()((at.elapsed().as_secs_f32() / FOLD_ANIM.as_secs_f32()).min(1.))));
+                let open_share = {
+                    let (open, closing, turn) = (list.open.clone(), list.closing.clone(), turn.clone());
+                    move |family: &str| -> f32 {
+                        match &turn {
+                            Some((f, true, e)) if f == family => *e,
+                            _ if closing.as_deref() == Some(family) => 1. - turn.as_ref().map_or(1., |t| t.2),
+                            _ if open.as_deref() == Some(family) => 1.,
+                            _ => 0.,
+                        }
+                    }
+                };
+                if turn.as_ref().is_some_and(|t| t.2 < 1.) {
+                    self.font_list_scroll.remeasure();
+                    window.request_animation_frame();
+                }
+                let content: f32 = items.iter().map(|(_, f, styles)| ROW_H + ROW_H * styles.len() as f32 * open_share(f)).sum();
+                let items = Rc::new(items);
+                let quarter = std::f32::consts::FRAC_PI_2;
+                let row_of = {
+                    let this = this.clone();
+                    move |ix: usize, name: String, style_row: bool, chosen: bool, chevron: Option<AnyElement>, theme: &gpui_component::Theme| {
+                        let this = this.clone();
+                        h_flex()
+                            .id(("font-row", ix))
+                            .h(px(ROW_H))
+                            .flex_shrink_0()
+                            .w_full()
+                            .pl(px(if style_row { 30. } else { 4. }))
+                            .pr(px(10.))
+                            .gap(px(4.))
+                            .items_center()
+                            .rounded(px(7.))
+                            .cursor_pointer()
+                            .text_size(px(13.))
+                            .when(ix == at, |d| d.bg(if dark { theme.foreground.opacity(0.11) } else { theme.list_hover }))
+                            .when(ix != at, |d| {
+                                let over = if dark { theme.foreground.opacity(0.06) } else { theme.muted };
+                                d.hover(move |s| s.bg(over))
                             })
-                            .collect()
-                    })
-                    .size_full()
-                    .px(px(5.))
-                    .track_scroll(&self.font_list_scroll),
-                )
-                .into_any_element()
+                            .when(!style_row, |d| d.child(div().size(px(18.)).flex_shrink_0().children(chevron)))
+                            .child(div().flex_1().min_w_0().truncate().child(name))
+                            .when(chosen, |d| d.child(Icon::new(IconName::Check).with_size(px(12.)).text_color(theme.primary)))
+                            .on_click(move |_, window, cx| {
+                                swallow_click(window, cx);
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.font_list.as_ref().is_some_and(|l| l.slot == slot) {
+                                        this.font_list_choose(Some(ix), window, cx);
+                                    }
+                                });
+                            })
+                    }
+                };
+                let draw = gpui::list(self.font_list_scroll.clone(), move |item, _window, cx| {
+                    let theme = cx.theme().clone();
+                    let Some((ix, family, styles)) = items.get(item).cloned() else { return div().into_any_element() };
+                    let share = open_share(&family);
+                    // The chevron of a family with styles, turned down as
+                    // far as they show; a box as wide where it has none,
+                    // so every name starts at one edge.
+                    let chevron = (families.styles(&family).len() > 1).then(|| {
+                        let this = this.clone();
+                        let family = family.clone();
+                        let over = if dark { theme.foreground.opacity(0.1) } else { theme.border };
+                        div()
+                            .id(("font-open", ix))
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.))
+                            .hover(move |s| s.bg(over))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                swallow_click(window, cx);
+                                let family = family.clone();
+                                let _ = this.update(cx, |this, cx| this.font_list_toggle(family, cx));
+                            })
+                            .child(Icon::new(IconName::ChevronRight).with_size(px(12.)).text_color(theme.muted_foreground).rotate(gpui::radians(quarter * share)))
+                            .into_any_element()
+                    });
+                    let head = row_of(ix, families.shown(&family), false, family == now && now_style.is_empty(), chevron, &theme);
+                    // Its styles, in a box as tall as they show: it grows
+                    // from nothing as the family opens and the families
+                    // under it move down with it, and shrinks as it shuts.
+                    let block = (!styles.is_empty()).then(|| {
+                        div()
+                            .h(px(ROW_H * styles.len() as f32 * share))
+                            .overflow_hidden()
+                            .child(v_flex().children(styles.iter().map(|(sx, st)| row_of(*sx, st.name.clone(), true, family == now && st.ps == now_style, None, &theme))))
+                    });
+                    v_flex().w_full().px(px(5.)).child(head).children(block).into_any_element()
+                })
+                .size_full();
+                div().relative().h(px(content).min(list_h)).child(draw).into_any_element()
+            }
         };
         let card = v_flex()
             .id(("font-card", list.serial as usize))
@@ -3230,7 +3482,7 @@ impl Workbench {
 }
 
 /// The places text is set in, as Text Size names them.
-const SIZE_PLACES: [(&str, &str); 5] = [("conversation", phrase("Conversation")), ("composer", phrase("Composer")), ("preview", phrase("File preview")), ("editor", phrase("File editor")), ("terminal", phrase("Terminal"))];
+const SIZE_PLACES: [(&str, &str); 5] = [("conversation", phrase("Conversation")), ("composer", phrase("Composer")), ("preview", phrase("Rendered editor")), ("editor", phrase("Raw editor")), ("terminal", phrase("Terminal"))];
 
 /// A place's size in the sizes.
 fn size_field<'a>(s: &'a mut emaki_core::config::TextSizes, key: &str) -> &'a mut f32 {
@@ -3344,10 +3596,29 @@ fn line(title: impl Into<SharedString>, detail: Option<AnyElement>, control: Any
 }
 
 /// The list of the system's faces while it is open: the place it chooses
-/// for, the row ↑ and ↓ are on, and the opening it belongs to.
+/// for, the row ↑ and ↓ are on, and the opening it belongs to; the family
+/// whose styles show, one whose styles are going, and the last family
+/// opened or shut (whether it opened, a count, and when).
 #[derive(Clone, Debug)]
 pub(crate) struct FontList {
     pub(crate) slot: crate::fonts::Slot,
     pub(crate) at: usize,
     pub(crate) serial: u32,
+    pub(crate) open: Option<String>,
+    pub(crate) closing: Option<String>,
+    pub(crate) turn: Option<(String, bool, u32, std::time::Instant)>,
+}
+
+/// The family a row of the list belongs to, as the list's item: the rows
+/// before it that are families.
+fn font_item_of(rows: &[FontRow], ix: usize) -> usize {
+    rows.iter().take(ix + 1).filter(|r| matches!(r, FontRow::Family(_))).count().saturating_sub(1)
+}
+
+/// A row of the list of the system's faces: a family as it is, or one of
+/// its styles.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FontRow {
+    Family(String),
+    Style(String, crate::fonts::Style),
 }

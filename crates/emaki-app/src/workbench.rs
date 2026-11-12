@@ -700,7 +700,7 @@ pub const SETTINGS_SECTIONS: &[(&str, &str, &str)] = &[
 /// label, the first the one it opens on.
 pub const SETTINGS_PAGES: &[(&str, &[(&str, &str)])] = &[
     ("text", &[("fonts", phrase("Fonts")), ("size", phrase("Size"))]),
-    ("shortcuts", &[("window", phrase("Window")), ("editor", phrase("File editor"))]),
+    ("shortcuts", &[("window", phrase("Window")), ("editor", phrase("Raw editor"))]),
 ];
 
 /// The section a name stands for, and the page in it when it names a
@@ -1689,7 +1689,7 @@ pub struct Workbench {
     pub(crate) font_families_reading: bool,
     /// The list's search field, and where each custom tile was drawn.
     pub(crate) font_query: Option<Entity<InputState>>,
-    pub(crate) font_list_scroll: gpui::UniformListScrollHandle,
+    pub(crate) font_list_scroll: gpui::ListState,
     pub(crate) font_tiles: Rc<std::cell::RefCell<HashMap<crate::fonts::Slot, Bounds<Pixels>>>>,
     /// How wide a pill's list was last drawn, which sets how far it
     /// moves in from the window's edge (`render_pick`).
@@ -4520,7 +4520,7 @@ impl Workbench {
             font_families: None,
             font_families_reading: false,
             font_query: None,
-            font_list_scroll: gpui::UniformListScrollHandle::new(),
+            font_list_scroll: gpui::ListState::new(0, gpui::ListAlignment::Top, px(300.)),
             font_tiles: Default::default(),
             pick_w: Rc::new(Cell::new(px(380.))),
             settings_section,
@@ -6679,6 +6679,8 @@ impl Workbench {
                                 if let Some(q) = this.font_query.clone() {
                                     q.update(cx, |s, cx| s.set_value(words.replace('_', " "), window, cx));
                                 }
+                                // As typing does (`InputEvent::Change`).
+                                this.font_list_typed(cx);
                             } else {
                                 this.font_list_choose(None, window, cx);
                             }
@@ -7658,13 +7660,14 @@ impl Workbench {
     }
 
     /// A face of the system's chosen for a custom place in Settings,
-    /// Text, and that place chosen with it.
-    pub(crate) fn set_custom_font(&mut self, slot: crate::fonts::Slot, family: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Text, and that place chosen with it: a family as it is, or one
+    /// style of it, by its PostScript name.
+    pub(crate) fn set_custom_font(&mut self, slot: crate::fonts::Slot, family: String, style: String, window: &mut Window, cx: &mut Context<Self>) {
         use crate::fonts::Slot;
         match slot {
-            Slot::Chat => self.cfg.app.chat_custom = family,
-            Slot::Cjk => self.cfg.app.cjk_custom = family,
-            Slot::Mono => self.cfg.terminal.font_custom = family,
+            Slot::Chat => (self.cfg.app.chat_custom, self.cfg.app.chat_custom_style) = (family, style),
+            Slot::Cjk => (self.cfg.app.cjk_custom, self.cfg.app.cjk_custom_style) = (family, style),
+            Slot::Mono => (self.cfg.terminal.font_custom, self.cfg.terminal.font_custom_style) = (family, style),
         }
         crate::fonts::set_custom(crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal), &self.cfg.app.chat_font, cx);
         match slot {
@@ -7681,10 +7684,10 @@ impl Workbench {
     pub(crate) fn clear_custom_font(&mut self, slot: crate::fonts::Slot, window: &mut Window, cx: &mut Context<Self>) {
         use crate::fonts::{Slot, CUSTOM};
         match slot {
-            Slot::Chat => self.cfg.app.chat_custom.clear(),
-            Slot::Cjk => self.cfg.app.cjk_custom.clear(),
-            Slot::Mono => self.cfg.terminal.font_custom.clear(),
-        }
+            Slot::Chat => (self.cfg.app.chat_custom.clear(), self.cfg.app.chat_custom_style.clear()),
+            Slot::Cjk => (self.cfg.app.cjk_custom.clear(), self.cfg.app.cjk_custom_style.clear()),
+            Slot::Mono => (self.cfg.terminal.font_custom.clear(), self.cfg.terminal.font_custom_style.clear()),
+        };
         crate::fonts::set_custom(crate::fonts::Custom::of(&self.cfg.app, &self.cfg.terminal), &self.cfg.app.chat_font, cx);
         match slot {
             Slot::Chat if self.cfg.app.chat_font == CUSTOM => {
@@ -18570,34 +18573,36 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Colors every command the composer's text names (`/ph-image` in a
-    /// sentence, `/compact` alone) in the accent, as the conversation does
-    /// once it is sent. Set again on every change: the ranges are not
-    /// tracked across edits.
+    /// Sets every command the composer's text names (`/ph-image` in a
+    /// sentence, `/compact` alone) and every file it names with "@" as
+    /// code among words, and a command for the agent's shell in the mono
+    /// face, as the conversation draws them once sent. Set again on every
+    /// change: the ranges are not tracked across edits.
     fn mark_slash(&mut self, cx: &mut Context<Self>) {
+        use crate::live::Mark;
         let (via, _) = self.reply_via();
         let text = self.composer.read(cx).value().to_string();
-        let mut marks = Vec::new();
-        // A command for the agent's shell wears its mark in the link's
-        // ink, as Claude Code's prompt wears it in shell mode.
+        let mut marks: Vec<(std::ops::Range<usize>, Mark)> = Vec::new();
+        let code = Mark { code: true, ..Default::default() };
+        // A command for the agent's shell is in the mono face, its mark in
+        // the link's ink, as Claude Code's prompt wears it in shell mode.
         if text.trim_start().starts_with('!') {
             let at = text.len() - text.trim_start().len();
-            marks.push(gpui_component::input::TextDecoration::new(at..at + 1, HighlightStyle { color: Some(cx.theme().link), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() }));
+            marks.push((at..text.len(), Mark { mono: true, ..Default::default() }));
+            marks.push((at..at + 1, Mark { style: HighlightStyle { color: Some(cx.theme().link), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() }, mono: true, code: false }));
         }
         if text.contains('/') {
             let (known, _) = self.slash_rows("", via, true);
-            let style = HighlightStyle { color: Some(cx.theme().link), ..Default::default() };
             for (a, b) in slash_tokens(&text) {
                 let name = &text[a + 1..b];
                 if acts_alone(name) || known.iter().any(|row| row.0 == name) {
-                    marks.push(gpui_component::input::TextDecoration::new(a..b, style));
+                    marks.push((a..b, code));
                 }
             }
         }
         // And every "@" that names a file or folder that is there.
         if text.contains('@') {
             let cwd = self.composer_cwd();
-            let style = HighlightStyle { color: Some(cx.theme().link), ..Default::default() };
             for (a, b, path) in emaki_core::files::at_tokens(&text) {
                 let end = if text[a + 1..].starts_with('"') {
                     (!cwd.is_empty() && emaki_core::files::resolve(&cwd, &path).exists()).then_some(b)
@@ -18605,7 +18610,7 @@ impl Workbench {
                     emaki_core::files::named(&cwd, &path).map(|p| a + 1 + p.len())
                 };
                 if let Some(end) = end {
-                    marks.push(gpui_component::input::TextDecoration::new(a..end, style));
+                    marks.push((a..end, code));
                 }
             }
         }
@@ -18621,11 +18626,11 @@ impl Workbench {
                 }
                 let color = if spelling { theme.danger } else { theme.info };
                 let style = HighlightStyle { underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: Some(color), wavy: true }), ..Default::default() };
-                marks.push(gpui_component::input::TextDecoration::new(issue.range.clone(), style));
+                marks.push((issue.range.clone(), style.into()));
             }
         }
-        marks.sort_by_key(|m| m.range.start);
-        self.composer.update(cx, |s, cx| s.set_marks(marks.into_iter().map(|m| (m.range, m.style)).collect(), cx));
+        marks.sort_by_key(|m| m.0.start);
+        self.composer.update(cx, |s, cx| s.set_marks(marks, cx));
         self.want_files(cx);
     }
 
@@ -18663,6 +18668,7 @@ impl Workbench {
             look.text_family = family;
         }
         look.mono_family = theme.mono_font_family.clone();
+        look.inline_family = Some(crate::fonts::inline_mono_family(cx));
         // A block of code is set into the card: the page's ground, a
         // shade under the composer's.
         look.colors.plate = theme.background;

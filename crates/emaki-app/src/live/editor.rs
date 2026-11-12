@@ -255,10 +255,15 @@ pub(crate) struct Look {
     /// Code's face, in a block and among words.
     pub mono_family: SharedString,
     pub mono_fallbacks: Option<FontFallbacks>,
+    /// Code's face among words, where it is not `mono_family`: a smaller,
+    /// lighter cut of it (`fonts::inline_mono_family`), so code stands no
+    /// larger or heavier than the words around it (Emaki).
+    pub inline_family: Option<SharedString>,
     /// The face of a code block's language name, the window's own words.
     pub ui_family: SharedString,
     pub text_px: f32,
-    /// Code's size in a block. Code among words is the words' size.
+    /// Code's size in a block. Code among words is laid out at the words'
+    /// size, in `inline_family` where there is one.
     pub mono_px: f32,
     /// The body's line, in pixels. A heading's and code's go by their
     /// own sizes (`rhythm.rs`).
@@ -284,6 +289,7 @@ impl Look {
             text_fallbacks: None,
             mono_family: theme.mono_font_family.clone(),
             mono_fallbacks: None,
+            inline_family: None,
             ui_family: theme.font_family.clone(),
             text_px,
             mono_px: f32::from(theme.mono_font_size),
@@ -296,7 +302,7 @@ impl Look {
 
 impl Default for Look {
     fn default() -> Self {
-        Self { headings: None, cells: None, plain_head: false, blank: None, strong: FontWeight::BOLD, text_family: "Inter".into(), text_fallbacks: None, mono_family: "JetBrains Mono".into(), mono_fallbacks: None, ui_family: "Inter".into(), text_px: 16., mono_px: 14., line_px: 26., colors: Colors::default(), syntax: HighlightTheme::default_light() }
+        Self { headings: None, cells: None, plain_head: false, blank: None, strong: FontWeight::BOLD, text_family: "Inter".into(), text_fallbacks: None, mono_family: "JetBrains Mono".into(), mono_fallbacks: None, inline_family: None, ui_family: "Inter".into(), text_px: 16., mono_px: 14., line_px: 26., colors: Colors::default(), syntax: HighlightTheme::default_light() }
     }
 }
 
@@ -384,13 +390,30 @@ pub(crate) struct Editor {
     /// its own styles over the words, both in bytes of `decor_for`, the
     /// text they stand on: they move with the words as it changes.
     issues: Vec<Issue>,
-    marks: Vec<(Range<usize>, HighlightStyle)>,
+    marks: Vec<(Range<usize>, Mark)>,
     decor_for: String,
     /// Where the pointer is in a table, and a drag of its edges or handles.
     hover: Option<cells::Hover>,
     table_drag: Option<cells::TableDrag>,
     /// A table's columns as a drag has them: its first line, and each width.
     hold: Option<(usize, Vec<f32>)>,
+}
+
+/// A style the view lays over some words (`Editor::set_marks`): a color,
+/// a weight and the rest of a highlight; `mono` sets them in code's face,
+/// and `code` as code among words is set, in its face and ink on its
+/// plate, as a command or a file the prompt names is (Emaki).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Hash)]
+pub struct Mark {
+    pub style: HighlightStyle,
+    pub mono: bool,
+    pub code: bool,
+}
+
+impl From<HighlightStyle> for Mark {
+    fn from(style: HighlightStyle) -> Self {
+        Mark { style, ..Default::default() }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -466,7 +489,7 @@ fn changed(old: &str, new: &str) -> (usize, usize, usize) {
 /// The view's styles carried over a change of the text, until it sets
 /// them again: those before the change stay, those after it move with
 /// the words, and those it touched go.
-fn carry_marks(old: &str, new: &str, marks: &[(Range<usize>, HighlightStyle)]) -> Vec<(Range<usize>, HighlightStyle)> {
+fn carry_marks<T: Copy>(old: &str, new: &str, marks: &[(Range<usize>, T)]) -> Vec<(Range<usize>, T)> {
     let (start, old_end, new_end) = changed(old, new);
     marks
         .iter()
@@ -902,10 +925,10 @@ impl Editor {
 
     /// The view's own styles over the words, by bytes of the text as it
     /// is now, drawn over the editor's own: a color, a weight, an italic,
-    /// a ground, an underline, a strike. They move with the words as the
+    /// a ground, an underline, a strike, code's face (`Mark`). They move with the words as the
     /// text changes, until they are set again.
-    pub fn set_marks(&mut self, marks: Vec<(Range<usize>, HighlightStyle)>, cx: &mut Context<Self>) {
-        let mut marks: Vec<(Range<usize>, HighlightStyle)> = marks.into_iter().filter(|(r, _)| r.start < r.end).collect();
+    pub fn set_marks(&mut self, marks: Vec<(Range<usize>, Mark)>, cx: &mut Context<Self>) {
+        let mut marks: Vec<(Range<usize>, Mark)> = marks.into_iter().filter(|(r, _)| r.start < r.end).collect();
         marks.sort_by_key(|(r, _)| (r.start, r.end));
         if self.marks != marks {
             self.marks = marks;
@@ -2330,7 +2353,7 @@ fn paint_flow(flow: &super::layout::Flow, origin: Point<Pixels>, line: usize, pa
     let clear = transparent_black();
     let lh = flow.line_h;
     for (b, color) in flow.chips(origin) {
-        let b = Bounds::new(point(b.origin.x - px(2.), b.origin.y + px(lh * 0.08)), size(b.size.width + px(4.), px(lh * 0.84)));
+        let b = Bounds::new(point(b.origin.x - px(flow.pad), b.origin.y + px(lh * 0.08)), size(b.size.width + px(flow.pad * 2.), px(lh * 0.84)));
         window.paint_quad(quad(b, px(4.), color, px(0.), clear, BorderStyle::default()));
     }
     // The find's matches on this line, washed; the one the find stands on
@@ -2914,8 +2937,7 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use super::{carry_marks, changed, find_all};
-    use gpui::HighlightStyle;
+    use super::{carry_marks, changed, find_all, Mark};
 
     #[test]
     fn a_phrase_is_found_whatever_its_case() {
@@ -2936,7 +2958,7 @@ mod tests {
 
     #[test]
     fn a_style_moves_with_its_words() {
-        let style = HighlightStyle::default();
+        let style = Mark::default();
         let marks = vec![(0..3, style), (4..7, style), (8..12, style)];
         // "one two /cmd" with "new " typed before "two".
         let carried = carry_marks("one two /cmd", "one new two /cmd", &marks);

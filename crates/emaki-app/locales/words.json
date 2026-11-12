@@ -395,6 +395,15 @@
     "de": "Aug.",
     "es": "ago"
   },
+  "Auto": {
+    "zh-Hans": "自动",
+    "zh-Hant": "自動",
+    "ja": "自動",
+    "ko": "자동",
+    "fr": "Auto",
+    "de": "Automatisch",
+    "es": "Automática"
+  },
   "Auto-capitalization": {
     "zh-Hans": "自动大写",
     "zh-Hant": "自動大寫",
@@ -1817,23 +1826,23 @@
     "de": "Ablage",
     "es": "Archivo"
   },
-  "File editor": {
-    "zh-Hans": "文件编辑器",
-    "zh-Hant": "檔案編輯器",
-    "ja": "ファイルエディタ",
-    "ko": "파일 편집기",
-    "fr": "Éditeur de fichiers",
-    "de": "Dateieditor",
-    "es": "Editor de archivos"
+  "Raw editor": {
+    "zh-Hans": "原始编辑器",
+    "zh-Hant": "原始編輯器",
+    "ja": "ソースエディタ",
+    "ko": "원본 편집기",
+    "fr": "Éditeur brut",
+    "de": "Roh-Editor",
+    "es": "Editor sin formato"
   },
-  "File preview": {
-    "zh-Hans": "文件预览",
-    "zh-Hant": "檔案預覽",
-    "ja": "ファイルのプレビュー",
-    "ko": "파일 미리보기",
-    "fr": "Aperçu des fichiers",
-    "de": "Dateivorschau",
-    "es": "Vista previa de archivos"
+  "Rendered editor": {
+    "zh-Hans": "渲染编辑器",
+    "zh-Hant": "渲染編輯器",
+    "ja": "レンダリングエディタ",
+    "ko": "렌더링 편집기",
+    "fr": "Éditeur rendu",
+    "de": "Gerenderter Editor",
+    "es": "Editor renderizado"
   },
   "Files": {
     "zh-Hans": "文件",
@@ -8657,14 +8666,23 @@
     "de": "Gerendert (⌘⇧V)",
     "es": "Renderizado (⌘⇧V)"
   },
-  "Raw (⌘⇧V)": {
-    "zh-Hans": "原始 (⌘⇧V)",
-    "zh-Hant": "原始 (⌘⇧V)",
-    "ja": "ソース (⌘⇧V)",
-    "ko": "원본 (⌘⇧V)",
-    "fr": "Brut (⌘⇧V)",
-    "de": "Roh (⌘⇧V)",
-    "es": "Sin formato (⌘⇧V)"
+  "Rendered Editor (⌘⇧V)": {
+    "zh-Hans": "渲染编辑器 (⌘⇧V)",
+    "zh-Hant": "渲染編輯器 (⌘⇧V)",
+    "ja": "レンダリングエディタ (⌘⇧V)",
+    "ko": "렌더링 편집기 (⌘⇧V)",
+    "fr": "Éditeur rendu (⌘⇧V)",
+    "de": "Gerenderter Editor (⌘⇧V)",
+    "es": "Editor renderizado (⌘⇧V)"
+  },
+  "Raw Editor (⌘⇧V)": {
+    "zh-Hans": "原始编辑器 (⌘⇧V)",
+    "zh-Hant": "原始編輯器 (⌘⇧V)",
+    "ja": "ソースエディタ (⌘⇧V)",
+    "ko": "원본 편집기 (⌘⇧V)",
+    "fr": "Éditeur brut (⌘⇧V)",
+    "de": "Roh-Editor (⌘⇧V)",
+    "es": "Editor sin formato (⌘⇧V)"
   },
   "Open files as": {
     "zh-Hans": "文件打开方式",

@@ -58,14 +58,19 @@ pub struct AppConfig {
     /// (Anthropic Sans).
     pub chat_font: String,
     /// The face Chinese, Japanese and Korean are set in behind it:
-    /// `noto-serif-sc`, `noto-sans-sc`, `wenkai`, `tsanger` (the system's,
-    /// where installed) or `custom` (`cjk_custom`). `auto`, from before,
-    /// reads as the first.
+    /// `auto` (a serif's behind a serif, a sans serif's behind the rest),
+    /// `noto-serif-sc`, `noto-sans-sc`, `wenkai` or `custom`
+    /// (`cjk_custom`). `tsanger`, from before, is taken as the custom
+    /// face it named where that is installed, and as `auto` elsewhere.
     pub cjk_font: String,
     /// The faces of the system's the person chose, by family, for
     /// `chat_font` and `cjk_font` `custom`; empty until one is chosen.
     pub chat_custom: String,
     pub cjk_custom: String,
+    /// The one style of each of those families chosen, by its PostScript
+    /// name (`TsangerJinKai02-W03`); empty for the family as it is.
+    pub chat_custom_style: String,
+    pub cjk_custom_style: String,
     /// The faces chosen in those rows before `custom` was, which a custom
     /// face put away goes back to; empty for the row's first.
     pub chat_preset: String,
@@ -145,7 +150,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), cjk_font: "noto-serif-sc".into(), chat_custom: String::new(), cjk_custom: String::new(), chat_preset: String::new(), cjk_preset: String::new(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, live_markdown: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
+        Self { chat_font: "source-serif".into(), cjk_font: "auto".into(), chat_custom: String::new(), cjk_custom: String::new(), chat_custom_style: String::new(), cjk_custom_style: String::new(), chat_preset: String::new(), cjk_preset: String::new(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, live_markdown: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
     }
 }
 
@@ -178,7 +183,7 @@ impl TextSizes {
     /// height 1.5); what is written and read beside it a step under, so
     /// the conversation leads; code and the terminal at the size a Mac's
     /// editors set monospace. Every preset's sizes are whole points.
-    pub const MEDIUM: Self = Self { conversation: 16., composer: 14., preview: 15., editor: 13., terminal: 13. };
+    pub const MEDIUM: Self = Self { conversation: 16., composer: 15., preview: 15., editor: 13., terminal: 13. };
     pub const SMALL: Self = Self { conversation: 15., composer: 13., preview: 14., editor: 12., terminal: 12. };
     pub const LARGE: Self = Self { conversation: 18., composer: 16., preview: 17., editor: 15., terminal: 15. };
     /// What a size may be set to.
@@ -245,6 +250,8 @@ pub struct Terminal {
     /// `custom`, the system's face named in `font_custom`.
     pub font: String,
     pub font_custom: String,
+    /// Its one style chosen (`AppConfig::chat_custom_style`).
+    pub font_custom_style: String,
     /// The face chosen before `custom` was (`AppConfig::chat_preset`).
     pub font_preset: String,
     /// The letters' size: the settings offer 12, 13 and 15.
@@ -265,7 +272,7 @@ pub struct Terminal {
 
 impl Default for Terminal {
     fn default() -> Self {
-        Self { theme: "match".into(), font: "jetbrains".into(), font_custom: String::new(), font_preset: String::new(), size: 13., spacing: "normal".into(), padding: "medium".into(), cursor: "bar".into(), cursor_blink: true, ligatures: false, copy_on_select: true }
+        Self { theme: "match".into(), font: "jetbrains".into(), font_custom: String::new(), font_custom_style: String::new(), font_preset: String::new(), size: 13., spacing: "normal".into(), padding: "medium".into(), cursor: "bar".into(), cursor_blink: true, ligatures: false, copy_on_select: true }
     }
 }
 

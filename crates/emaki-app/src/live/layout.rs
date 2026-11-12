@@ -21,7 +21,7 @@ use std::rc::Rc;
 use emaki_core::check::{Issue, Kind};
 use gpui::*;
 
-use super::editor::{Look, Mode};
+use super::editor::{Look, Mark, Mode};
 use super::html::Rgb;
 use super::lines::{Doc, ListKind, Pos};
 use super::markdown::{self, Align, Analysis, LineKind, Shown, SpanKind, Table};
@@ -106,6 +106,8 @@ impl Para {
 pub(crate) struct Flow {
     pub paras: Vec<Para>,
     pub line_h: f32,
+    /// How far a plate reaches past its words at each end.
+    pub pad: f32,
     /// The caret's height here, standing in the middle of a line.
     pub caret_h: f32,
     pub height: f32,
@@ -333,6 +335,15 @@ pub(crate) struct Cache {
     pub grids: HashMap<usize, (u64, Rc<Grid>)>,
 }
 
+/// The narrow no-break space set around code among words, as the reading
+/// view sets it: gpui's line wrapper keeps it with its word.
+const CODE_PAD: char = '\u{202F}';
+/// A hidden backtick's room: the plate's padding and its margin.
+const PADS: &str = "\u{202F}\u{202F}";
+/// A space before marked code, and one after it, each with the margin.
+const SPACE_PAD: &str = " \u{202F}";
+const PAD_SPACE: &str = "\u{202F} ";
+
 /// A style a byte of the source.
 #[derive(Clone, Copy, PartialEq)]
 struct St {
@@ -340,6 +351,8 @@ struct St {
     italic: bool,
     strike: bool,
     mono: bool,
+    /// Code among words, set in the look's smaller cut of the mono face.
+    inline: bool,
     color: Hsla,
     chip: Option<Hsla>,
     underline: Option<Hsla>,
@@ -368,7 +381,7 @@ pub(crate) struct Reader<'a> {
     pub quiet: Option<usize>,
     /// The host's own styles, by bytes of the whole text, drawn over the
     /// editor's.
-    pub marks: &'a [(Range<usize>, HighlightStyle)],
+    pub marks: &'a [(Range<usize>, Mark)],
     /// A table's columns as a drag has them: its first line, and each width.
     pub hold: Option<&'a (usize, Vec<f32>)>,
     /// The lines the view around draws, shut: first, last, and the
@@ -450,7 +463,7 @@ impl<'a> Reader<'a> {
     }
 
     /// The host's styles that touch a line.
-    fn marks_on(&self, line: usize) -> impl Iterator<Item = &'a (Range<usize>, HighlightStyle)> {
+    fn marks_on(&self, line: usize) -> impl Iterator<Item = &'a (Range<usize>, Mark)> {
         let from = self.analysis.line_starts[line];
         let to = from + self.doc.line(line).len();
         self.marks.iter().filter(move |(r, _)| r.start < to && r.end > from)
@@ -461,6 +474,7 @@ impl<'a> Reader<'a> {
         let look = self.look;
         look.text_family.hash(&mut h);
         look.mono_family.hash(&mut h);
+        look.inline_family.hash(&mut h);
         look.ui_family.hash(&mut h);
         look.text_fallbacks.hash(&mut h);
         look.mono_fallbacks.hash(&mut h);
@@ -553,7 +567,7 @@ impl<'a> Reader<'a> {
     }
 
     fn font(&self, family: &SharedString, weight: FontWeight, italic: bool) -> Font {
-        let fallbacks = if *family == self.look.mono_family { self.look.mono_fallbacks.clone() } else { self.look.text_fallbacks.clone() };
+        let fallbacks = if *family == self.look.mono_family || self.look.inline_family.as_ref() == Some(family) { self.look.mono_fallbacks.clone() } else { self.look.text_fallbacks.clone() };
         Font { family: family.clone(), features: FontFeatures::default(), fallbacks, weight, style: if italic { FontStyle::Italic } else { FontStyle::Normal } }
     }
 
@@ -628,7 +642,7 @@ impl<'a> Reader<'a> {
         let muted = inks.muted;
         let ink = inks.ink;
         let link = inks.link;
-        let base = St { weight: base_weight, italic: false, strike: info.task_done, mono: mono_line, color: if muted_line || info.task_done { muted } else { ink }, chip: None, underline: None, wavy: None, raise: 0 };
+        let base = St { weight: base_weight, italic: false, strike: info.task_done, mono: mono_line, inline: false, color: if muted_line || info.task_done { muted } else { ink }, chip: None, underline: None, wavy: None, raise: 0 };
         let mut styles = vec![base; text.len()];
         let paint = |styles: &mut Vec<St>, r: Range<usize>, f: &dyn Fn(&mut St)| {
             for s in styles.iter_mut().take(r.end.min(text.len())).skip(r.start.min(text.len())) {
@@ -720,9 +734,16 @@ impl<'a> Reader<'a> {
             paint(&mut styles, close, &marks_muted);
         }
         // The host's styles, over the editor's own.
-        for (r, style) in self.marks_on(line) {
-            let style = *style;
+        for (r, mark) in self.marks_on(line) {
+            let (style, mark) = (mark.style, *mark);
             paint(&mut styles, local(r), &|st| {
+                if mark.mono || mark.code {
+                    st.mono = true;
+                }
+                if mark.code {
+                    st.color = link;
+                    st.chip = Some(chip_bg);
+                }
                 if let Some(c) = style.color {
                     st.color = c;
                 }
@@ -753,6 +774,12 @@ impl<'a> Reader<'a> {
             let color = if issue.kind == Kind::Spelling { inks.spelling } else { inks.grammar };
             paint(&mut styles, local(&issue.range), &|st| st.wavy = Some(color));
         }
+        // Code among words, in a line that is not code, is in the cut.
+        if !mono_line {
+            for st in styles.iter_mut().filter(|st| st.mono) {
+                st.inline = true;
+            }
+        }
         (styles, links)
     }
 
@@ -782,11 +809,21 @@ impl<'a> Reader<'a> {
         let text = self.doc.line(line);
         let mut paras = Vec::new();
         let mut top = 0.;
+        let pads = self.code_pads(line, hidden);
         for r in self.para_ranges(line, range, hidden) {
             let mut out: Vec<Range<usize>> = hidden.to_vec();
             out.push(0..r.start);
             out.push(r.end..text.len());
-            let swaps = raised_chars(text, r.clone(), styles, &out);
+            // A hidden backtick stands as the room around code's plate,
+            // and is no longer hidden.
+            let pads: Vec<&(usize, &str)> = pads.iter().filter(|(at, _)| r.contains(at)).collect();
+            for (at, _) in &pads {
+                out = out.into_iter().flat_map(|h| if h.contains(at) { vec![h.start..*at, at + 1..h.end] } else { vec![h] }).filter(|h| h.start < h.end).collect();
+            }
+            let mut swaps = raised_chars(text, r.clone(), styles, &out);
+            swaps.extend(pads.iter().map(|(at, with)| (*at..at + 1, with.to_string())));
+            swaps.sort_by_key(|(r, _)| r.start);
+            swaps.dedup_by(|b, a| b.0.start < a.0.end);
             let shown = Shown::with(text, &out, &swaps);
             let mut runs: Vec<TextRun> = Vec::new();
             let mut chips: Vec<(Range<usize>, Hsla)> = Vec::new();
@@ -802,7 +839,11 @@ impl<'a> Reader<'a> {
                     while end < s + len && (styles.get(end) == Some(&st) || !text.is_char_boundary(end)) {
                         end += 1;
                     }
-                    let family = if st.mono { &self.look.mono_family } else { &self.look.text_family };
+                    let family = match (st.inline, &self.look.inline_family) {
+                        (true, Some(cut)) => cut,
+                        _ if st.mono => &self.look.mono_family,
+                        _ => &self.look.text_family,
+                    };
                     let underline = match (st.wavy, st.underline) {
                         (Some(c), _) => Some(UnderlineStyle { thickness: px(1.), color: Some(c), wavy: true }),
                         (None, Some(c)) => Some(UnderlineStyle { thickness: px(1.), color: Some(c), wavy: false }),
@@ -849,7 +890,52 @@ impl<'a> Reader<'a> {
             top += para.rows() as f32 * line_h;
             paras.push(para);
         }
-        Flow { paras, line_h, caret_h: Rhythm::caret(font_px, line_h), height: top, width: wrap, align }
+        // A plate reaches past its code by one narrow space, the inner of
+        // the two each end has (`code_pads`).
+        let font = self.font(&self.look.text_family, FontWeight::NORMAL, false);
+        let pad = window.text_system().advance(window.text_system().resolve_font(&font), px(font_px), CODE_PAD).map_or(2., |s| f32::from(s.width));
+        Flow { paras, line_h, caret_h: Rhythm::caret(font_px, line_h), height: top, width: wrap, align, pad }
+    }
+
+    /// Where on a line code among words has room around its plate, as
+    /// the reading view gives it (`CODE_PAD`, the vendored toolkit's
+    /// `style.rs`): by the line's bytes, what is drawn there in place of
+    /// the one byte. A code span's backticks, while they are hidden, stand
+    /// as two narrow spaces each, the plate's padding and its margin; and
+    /// a space beside code the view marks (a command, a file named) has a
+    /// narrow one beside it, toward the code.
+    fn code_pads(&self, line: usize, hidden: &[Range<usize>]) -> Vec<(usize, &'static str)> {
+        let text = self.doc.line(line);
+        let start = self.analysis.line_starts[line];
+        let local = |r: &Range<usize>| r.start.saturating_sub(start).min(text.len())..r.end.saturating_sub(start).min(text.len());
+        let hid = |r: &Range<usize>| !r.is_empty() && hidden.iter().any(|h| h.start <= r.start && r.end <= h.end);
+        let mut pads = Vec::new();
+        for &ix in &self.analysis.line_spans[line] {
+            let s = &self.analysis.spans[ix];
+            if s.kind != SpanKind::Code {
+                continue;
+            }
+            for mark in [local(&s.open), local(&s.close)] {
+                if hid(&mark) {
+                    pads.push((mark.start, PADS));
+                }
+            }
+        }
+        for (r, mark) in self.marks_on(line) {
+            if !mark.code {
+                continue;
+            }
+            let r = local(r);
+            if r.start > 0 && text.as_bytes()[r.start - 1] == b' ' && !hidden.iter().any(|h| h.contains(&(r.start - 1))) {
+                pads.push((r.start - 1, SPACE_PAD));
+            }
+            if text.as_bytes().get(r.end) == Some(&b' ') && !hidden.iter().any(|h| h.contains(&r.end)) {
+                pads.push((r.end, PAD_SPACE));
+            }
+        }
+        pads.sort();
+        pads.dedup_by_key(|(at, _)| *at);
+        pads
     }
 
     /// One line laid out: its words with the hidden marks taken out, in

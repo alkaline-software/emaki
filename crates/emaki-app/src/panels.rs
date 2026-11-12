@@ -854,7 +854,7 @@ impl Render for FileDoc {
             None => (None, self.text.clone()),
         };
         let find = shown.find.is_some().then(|| self.find.clone());
-        let view = crate::transcript::md_view_file(text_state, rest, shown.quarto, find, Some(self.spots.clone()), self.kept.clone(), None, None, cx);
+        let view = crate::transcript::md_view_file(text_state, rest, shown.quarto, find, Some(self.spots.clone()), self.kept.clone(), None, None, crate::fonts::code_px(shown.size), cx);
         let height = self.height.clone();
         // It comes in as the pane's other contents do, over `FILE_ANIM`.
         let t = (self.fade.1.elapsed().as_secs_f32() / FILE_ANIM.as_secs_f32()).min(1.);
@@ -9429,7 +9429,7 @@ impl Workbench {
                     doc.into_any_element()
                 }
             }
-            FileBody::Notebook(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), None, cx)).into_any_element(),
+            FileBody::Notebook(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), None, crate::fonts::code_px(self.cfg.app.text_sizes().preview), cx)).into_any_element(),
             // The web view stands over the pane's room; nothing of the
             // page is drawn under it.
             FileBody::Html(_) if self.html_web.is_some() => div().into_any_element(),
@@ -9597,7 +9597,7 @@ impl Workbench {
                 heads = Some(self.render_table_heads(v, rows.len(), widths, cx));
                 self.render_table(v, rows, widths, *more, cx)
             }
-            FileBody::Doc(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), None, cx)).into_any_element(),
+            FileBody::Doc(text) => div().text_size(px(self.cfg.app.text_sizes().preview)).line_height(relative(1.6)).child(crate::transcript::md_view_find(format!("file-{}", v.rel), text.clone(), self.text_find_open.then(|| self.text_find.clone()), None, crate::fonts::code_px(self.cfg.app.text_sizes().preview), cx)).into_any_element(),
             FileBody::Sheets(sheets) => match sheets.get(self.sheet_of(&v.path, sheets.len())) {
                 Some((_, rows, widths, more)) if !rows.is_empty() => {
                     wide = true;
@@ -9726,7 +9726,7 @@ impl Workbench {
         let modes = if leaving {
             None
         } else if two_ways {
-            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, crate::shortcuts::keyed(if table { t("Table (⌘⇧V)") } else { t("Rendered (⌘⇧V)") }, "raw")), ("icons/file-code.svg", crate::shortcuts::keyed(t("Raw (⌘⇧V)"), "raw")), |this, first, cx| this.set_file_raw(!first, cx), cx))
+            Some(pair("file-mode", Some(!self.file_raw), Some(self.file_raw), self.file_mode_serial, (if table { "icons/file-table.svg" } else { "icons/eye.svg" }, crate::shortcuts::keyed(if table { t("Table (⌘⇧V)") } else if self.doc_writable() { t("Rendered Editor (⌘⇧V)") } else { t("Rendered (⌘⇧V)") }, "raw")), ("icons/file-code.svg", crate::shortcuts::keyed(t("Raw Editor (⌘⇧V)"), "raw")), |this, first, cx| this.set_file_raw(!first, cx), cx))
         } else if pdf {
             let (was, serial) = self.pdf_side_anim.map(|(was, _, n)| (was, n)).unwrap_or((self.pdf_side, 0));
             Some(pair("pdf-side", self.pdf_side, was, serial, ("icons/gallery-vertical-end.svg", t("Pages").into()), ("icons/list-bullets.svg", t("Contents").into()), |this, first, cx| this.pdf_side_toggle(first, cx), cx))

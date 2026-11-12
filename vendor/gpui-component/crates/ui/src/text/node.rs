@@ -1560,9 +1560,10 @@ impl CodeBlock {
         ));
         // A block set by its indent: its lines as written, indent and
         // all, in the mono face on a line and a half, as an editor shows
-        // them, with no plate. (Emaki addition.)
+        // them, with no plate; at the size the view sets code in, where it
+        // sets one. (Emaki addition.)
         if self.indented {
-            let mono = cx.theme().mono_font_size;
+            let mono = style.code_block.text.font_size.map(|size| size.to_pixels(window.rem_size())).unwrap_or(cx.theme().mono_font_size);
             let line = (f32::from(mono) * 1.5).round();
             return div()
                 .w_full()

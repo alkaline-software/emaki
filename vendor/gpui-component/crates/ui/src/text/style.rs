@@ -74,13 +74,18 @@ pub struct TextViewStyle {
     pub is_dark: bool,
 }
 
-/// The space set around an inline code span, twice at each end: the inner
-/// one is the padding of the plate drawn behind the span, the outer one
-/// the plate's margin. A text run has no padding of its own. It is the
-/// narrow no-break space because gpui's line wrapper treats that as part
-/// of a word, so the spaces stay with the span at a line's end; a
+/// The space set around an inline code span, at each end: the inner one
+/// is the padding of the plate drawn behind the span, the others the
+/// plate's margin (`CODE_PADS`). A text run has no padding of its own. It
+/// is the narrow no-break space because gpui's line wrapper treats that
+/// as part of a word, so the spaces stay with the span at a line's end; a
 /// breaking space left the next line starting with a gap. (Emaki addition.)
 pub(crate) const CODE_PAD: char = '\u{202F}';
+
+/// What stands at each end of an inline code span: its padding and a
+/// margin of two, so the words beside it stand clear of its plate.
+/// (Emaki addition.)
+pub(crate) const CODE_PADS: &str = "\u{202F}\u{202F}\u{202F}";
 
 impl PartialEq for TextViewStyle {
     fn eq(&self, other: &Self) -> bool {

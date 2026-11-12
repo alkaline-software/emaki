@@ -33,7 +33,7 @@ mod tables;
 
 #[allow(unused_imports)]
 pub(crate) use editor::{
-    key_bindings, Backspace, Bold, CellAt, Colors, Delete, DeleteLineBack, DeleteWordBack, DocEnd, DocStart, Down, Editor, EditorEvent, Enter, Escape, Italic, Left, LineEnd, LineStart, Look, MenuAt, MenuIssue, MenuLink, Mode, NewLine, Outdent, Piece, PageDown, PageUp, Right, Scope, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft, SelectLineEnd,
+    key_bindings, Backspace, Bold, CellAt, Colors, Delete, DeleteLineBack, DeleteWordBack, DocEnd, DocStart, Down, Editor, EditorEvent, Enter, Escape, Italic, Left, LineEnd, LineStart, Look, Mark, MenuAt, MenuIssue, MenuLink, Mode, NewLine, Outdent, Piece, PageDown, PageUp, Right, Scope, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft, SelectLineEnd,
     SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab, TableFacts, ToggleTask, Up, WordLeft, WordRight, LIVE_CONTEXT,
 };
 #[allow(unused_imports)]
