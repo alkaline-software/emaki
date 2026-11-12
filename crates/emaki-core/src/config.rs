@@ -96,6 +96,9 @@ pub struct AppConfig {
     pub auto_capitalize: bool,
     /// Spelling and grammar are marked in the composer.
     pub check_writing: bool,
+    /// The composer draws its markdown as it is typed: strong words
+    /// heavy, code on a plate, the marks left in.
+    pub live_markdown: bool,
     /// The language they are checked in; see `check::LANGUAGES`.
     pub writing_language: String,
     /// A file saved from the file's pane is put in its language's form
@@ -142,7 +145,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chat_font: "source-serif".into(), cjk_font: "noto-serif-sc".into(), chat_custom: String::new(), cjk_custom: String::new(), chat_preset: String::new(), cjk_preset: String::new(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
+        Self { chat_font: "source-serif".into(), cjk_font: "noto-serif-sc".into(), chat_custom: String::new(), cjk_custom: String::new(), chat_preset: String::new(), cjk_preset: String::new(), chat_size: "medium".into(), sizes: None, send_key: "cmd-enter".into(), appearance: "system".into(), accent: "periwinkle".into(), check_updates: true, user_name: String::new(), avatar: String::new(), auto_capitalize: true, check_writing: true, live_markdown: true, writing_language: "en-US".into(), format_on_save: false, format_langs: crate::format::all_keys(), outline: true, outline_summaries: true, fold_runs: true, keep_display_on: false, file_view: "rendered".into(), language: "system".into(), files_side: "left".into(), outline_side: "left".into(), shortcuts: Default::default() }
     }
 }
 

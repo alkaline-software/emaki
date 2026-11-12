@@ -116,14 +116,11 @@ pub(crate) fn words_at(rects: &std::rc::Rc<std::cell::RefCell<Vec<Bounds<Pixels>
 /// - A line of `-` or `=` under a line of text is a line of its own, not
 ///   the line above turned into a heading (setext). `---` after text is
 ///   then a rule, as a model writing it means.
-/// - Text indented four spaces is text, not a block of code. Code comes
-///   between fences.
 /// - A tag in a sentence (`<Input>`, `<div>`) is its words: raw HTML was
 ///   parsed as a tag and drawn as nothing.
 /// - One tilde is a tilde ("~30% … ~40%"): strikethrough takes two.
 pub(crate) fn chat_parse_options(opts: &mut markdown::ParseOptions) {
     opts.constructs.heading_setext = false;
-    opts.constructs.code_indented = false;
     opts.constructs.html_flow = false;
     opts.constructs.html_text = false;
     opts.gfm_strikethrough_single_tilde = false;
@@ -199,8 +196,19 @@ pub(crate) fn md_view_find(id: String, text: String, find: Option<gpui_component
 /// Markdown chunk folds by itself. It is drawn from `state`, which the
 /// file's view keeps, and `kept` holds it for frames it is drawn from a
 /// cache in (`panels::FileDoc`).
-pub(crate) fn md_view_file(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
-    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), Some(state), None, cx)
+pub(crate) fn md_view_file(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: gpui_component::text::KeptViews, slot: Option<gpui_component::text::EditSlot>, click: Option<std::sync::Arc<gpui_component::text::UnitClickFn>>, cx: &App) -> impl IntoElement {
+    // A file written in as it reads selects in the field, which a press
+    // and a drag open (`doc_edit.rs`), not in the drawing.
+    let selectable = click.is_none();
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, find, headings, Some(kept), Some(state), None, cx).selectable(selectable).edit_slot(slot).on_unit_click(click)
+}
+
+/// A block of a markdown file written in as it reads that the editor
+/// does not draw (`panels/doc_edit.rs`): drawn as the file reads, from
+/// `state`, which the file's editor keeps. It selects nothing of its
+/// own: the editor's selection takes it whole.
+pub(crate) fn md_view_piece(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, kept: gpui_component::text::KeptViews, cx: &App) -> impl IntoElement {
+    md_view_in(String::new(), text, cx.theme().mono_font_family.clone(), false, quarto, false, None, None, Some(kept), Some(state), None, cx).selectable(false)
 }
 
 /// `md_view` drawn from `state`, which the caller keeps: words it can
@@ -218,7 +226,7 @@ pub(crate) fn md_view_fields(state: Entity<gpui_component::text::TextViewState>,
 
 /// `state`, when the caller keeps the view's state, is drawn from in
 /// place of one kept by the view's `id` where it is drawn.
-fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, state: Option<Entity<gpui_component::text::TextViewState>>, ground: Option<Hsla>, cx: &App) -> impl IntoElement {
+fn md_view_in(id: String, text: String, inline_mono: SharedString, chat: bool, quarto: Option<Dialect>, fields: bool, find: Option<gpui_component::text::TextFind>, headings: Option<gpui_component::text::HeadingSpots>, kept: Option<gpui_component::text::KeptViews>, state: Option<Entity<gpui_component::text::TextViewState>>, ground: Option<Hsla>, cx: &App) -> TextView {
     let theme = cx.theme().clone();
     // A text the parser cannot take is shown by the view as it is, in a
     // block of code (the vendored `parse_content`).
@@ -1665,7 +1673,6 @@ mod tests {
 
     #[test]
     fn prose_signs_stay_text() {
-        assert!(!has(&chat("    indented, as pasted\n"), &|n| matches!(n, Node::Code(_))));
         assert!(!has(&chat("Use the <Input> field here.\n"), &|n| matches!(n, Node::Html(_))));
         assert!(!has(&chat("It took ~30% then ~40% of the time.\n"), &|n| matches!(n, Node::Delete(_))));
     }
@@ -1675,6 +1682,8 @@ mod tests {
         assert!(has(&chat("## A heading\n"), &heading));
         assert!(has(&chat("Some **bold** words.\n"), &|n| matches!(n, Node::Strong(_))));
         assert!(has(&chat("```rust\nfn x() {}\n```\n"), &|n| matches!(n, Node::Code(_))));
+        // Lines four spaces in are code, as the composer and a file show them.
+        assert!(has(&chat("Paths:\n\n    a/b-*.jsonl\n    c/d.json\n"), &|n| matches!(n, Node::Code(_))));
         assert!(has(&chat("~~gone~~\n"), &|n| matches!(n, Node::Delete(_))));
         assert!(has(&chat("| a | b |\n|---|---|\n| 1 | 2 |\n"), &|n| matches!(n, Node::Table(_))));
         assert!(has(&chat("- one\n- two\n"), &|n| matches!(n, Node::List(_))));

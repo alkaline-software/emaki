@@ -404,6 +404,15 @@
     "de": "Automatische Großschreibung",
     "es": "Mayúsculas automáticas"
   },
+  "Live markdown": {
+    "zh-Hans": "实时 Markdown",
+    "zh-Hant": "即時 Markdown",
+    "ja": "ライブ Markdown",
+    "ko": "실시간 Markdown",
+    "fr": "Markdown en direct",
+    "de": "Live-Markdown",
+    "es": "Markdown en vivo"
+  },
   "Avatar": {
     "zh-Hans": "头像",
     "zh-Hant": "頭像",

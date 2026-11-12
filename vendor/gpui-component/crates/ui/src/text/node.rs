@@ -1246,6 +1246,10 @@ struct CachedCodeBlockStyles {
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     lang: Option<SharedString>,
+    /// Set by its indent, not by fences: drawn as its lines are written,
+    /// in the mono face with their indent and on no plate. (Emaki
+    /// addition.)
+    pub(crate) indented: bool,
     styles: Arc<Mutex<Option<CachedCodeBlockStyles>>>,
     state: Arc<Mutex<InlineState>>,
     pub span: Option<Span>,
@@ -1319,7 +1323,7 @@ fn chunk_label(lang: Option<&str>) -> Option<String> {
 
 impl PartialEq for CodeBlock {
     fn eq(&self, other: &Self) -> bool {
-        self.lang == other.lang && self.code() == other.code() && self.span == other.span
+        self.lang == other.lang && self.indented == other.indented && self.code() == other.code() && self.span == other.span
     }
 }
 
@@ -1349,6 +1353,7 @@ impl CodeBlock {
 
         Self {
             lang,
+            indented: false,
             styles: Arc::new(Mutex::new(None)),
             state,
             span: span.map(|s| s.into()),
@@ -1553,6 +1558,30 @@ impl CodeBlock {
             self.styles(&cx.theme().highlight_theme),
             node_cx.link_click_handler.clone(),
         ));
+        // A block set by its indent: its lines as written, indent and
+        // all, in the mono face on a line and a half, as an editor shows
+        // them, with no plate. (Emaki addition.)
+        if self.indented {
+            let mono = cx.theme().mono_font_size;
+            let line = (f32::from(mono) * 1.5).round();
+            return div()
+                .w_full()
+                .min_w_0()
+                .flex_shrink_0()
+                .when(!options.is_last, |this| this.pb(style.paragraph_gap))
+                .child(
+                    div()
+                        .id(("codeblock", options.ix))
+                        .w_full()
+                        .min_w_0()
+                        .pl(px(12.))
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_size(mono)
+                        .line_height(px(line))
+                        .child(code),
+                )
+                .into_any_element();
+        }
         // What folds: the code, and the room between it and the head.
         // Measured as it is drawn, so a fold closes from the height it had.
         let body = {
@@ -1615,6 +1644,10 @@ impl CodeBlock {
                                 .rounded(cx.theme().radius)
                                 .opacity(0.)
                                 .group_hover("codeblock", |s| s.opacity(1.))
+                                // Emaki: a press on the block's own
+                                // buttons is no press on the block
+                                // (`edit.rs`).
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .child(actions(&self, window, cx)),
                         )
                     }),
@@ -1763,6 +1796,10 @@ pub(crate) struct NodeContext {
     /// The markdown being parsed, which node positions count in: a link
     /// keeps what it was written as. (Emaki addition.)
     pub(crate) source: Option<Arc<str>>,
+    /// A block written in where it stands, and what a press on a block
+    /// is handed to (`edit.rs`). (Emaki addition.)
+    pub(crate) edit: Option<super::EditSlot>,
+    pub(crate) unit_click: Option<Arc<super::UnitClickFn>>,
 }
 
 impl NodeContext {
@@ -2440,6 +2477,15 @@ impl BlockNode {
                 .when(*spread, |this| this.child(div()))
                 .children({
                     let mut items: Vec<Div> = Vec::with_capacity(children.len());
+                    // An item with nothing in it draws no row; the
+                    // caller's field stands in one, its mark before it
+                    // (`edit.rs`). (Emaki addition.)
+                    if children.is_empty() {
+                        if let Some(slot) = node_cx.edit.as_ref().filter(|slot| !slot.after && item.span() == Some(slot.span)) {
+                            let field = (slot.render)(window, cx);
+                            items.push(Self::render_list_item_row(field, ix, options, *checked, cx));
+                        }
+                    }
 
                     for (child_ix, child) in children.iter().enumerate() {
                         match child {
@@ -3449,7 +3495,114 @@ impl BlockNode {
         )
     }
 
+    /// The block, or the caller's element in its place or after it,
+    /// and a press on it handed on (`edit.rs`). (Emaki addition.)
     pub(crate) fn render_block(
+        &self,
+        options: NodeRenderOptions,
+        node_cx: &NodeContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let span = self.span();
+        let kind = self.unit_kind();
+        if let Some(slot) = node_cx.edit.as_ref().filter(|slot| !slot.run && span == Some(slot.span)) {
+            let last = options.in_list || options.is_last;
+            let gap = node_cx.style.paragraph_gap;
+            if slot.after {
+                let field = (slot.render)(window, cx);
+                // Its gap is under it, as a paragraph's; after the last
+                // block, which has none under it, over it.
+                let field = if last { div().pt(gap).child(field) } else { div().pb(gap).child(field) };
+                // The block before it is drawn as it is, with no slot.
+                let plain = NodeContext { edit: None, ..node_cx.clone() };
+                return div().w_full().min_w_0().child(self.render_block(options, &plain, window, cx)).child(field).into_any_element();
+            }
+            if kind.is_some_and(|k| k != super::UnitKind::Item) {
+                let field = (slot.render)(window, cx);
+                if slot.warm {
+                    let plain = NodeContext { edit: None, ..node_cx.clone() };
+                    return div()
+                        .w_full()
+                        .min_w_0()
+                        .relative()
+                        .child(self.render_block(options, &plain, window, cx))
+                        .child(div().absolute().top_0().left_0().w_full().opacity(0.).child(field))
+                        .into_any_element();
+                }
+                let under = match kind {
+                    Some(super::UnitKind::Heading(_)) => rems(0.3),
+                    // As the grid has it (`render_scroll_table`).
+                    Some(super::UnitKind::Table) if matches!(node_cx.style.table.overflow.x, Some(Overflow::Scroll)) => rems(1.),
+                    _ if last => rems(0.),
+                    _ => gap,
+                };
+                return div().w_full().min_w_0().pb(under).child(field).into_any_element();
+            }
+        }
+        let block = self.render_block_plain(options, node_cx, window, cx);
+        let (Some(click), Some(kind), Some(span)) = (node_cx.unit_click.clone(), kind, span) else { return block };
+        let press = click.clone();
+        div()
+            .id(SharedString::from(format!("unit-{}-{}", span.start, span.end)))
+            .w_full()
+            .min_w_0()
+            .cursor_text()
+            .on_mouse_down(gpui::MouseButton::Left, move |ev, window, cx| {
+                let position = ev.position;
+                let text = super::edit::take_words_pressed(position);
+                if ev.click_count > 1 || ev.modifiers.shift {
+                    return;
+                }
+                press(&super::UnitClick { span, kind, position, text, press: true }, window, cx);
+            })
+            .on_click(move |ev, window, cx| {
+                let position = ev.position();
+                let text = super::edit::take_words_pressed(position);
+                if ev.click_count() > 1 || ev.is_right_click() {
+                    return;
+                }
+                click(&super::UnitClick { span, kind, position, text, press: false }, window, cx);
+            })
+            .child(block)
+            .into_any_element()
+    }
+
+    /// A block of the document's top level, or, inside a run, the
+    /// caller's element at the run's first block and nothing after it
+    /// (`EditSlot::run`). (Emaki addition.)
+    pub(crate) fn render_top(
+        &self,
+        options: NodeRenderOptions,
+        node_cx: &NodeContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let Some(slot) = node_cx.edit.as_ref() else { return self.render_block(options, node_cx, window, cx) };
+        match slot.run_part(self.span()) {
+            None => self.render_block(options, node_cx, window, cx),
+            // Not seen yet: the blocks are drawn, the element laid out
+            // over the first, unseen.
+            Some(first) if slot.warm => {
+                let plain = NodeContext { edit: None, ..node_cx.clone() };
+                let block = self.render_block(options, &plain, window, cx);
+                if !first {
+                    return block;
+                }
+                let field = (slot.render)(window, cx);
+                div().w_full().min_w_0().relative().child(block).child(div().absolute().top_0().left_0().w_full().opacity(0.).child(field)).into_any_element()
+            }
+            Some(true) => {
+                let field = (slot.render)(window, cx);
+                // Its gap under it, as its last block's (`is_last`, which
+                // the document gives the run's first as its last's).
+                div().w_full().min_w_0().when(!options.is_last, |d| d.pb(node_cx.style.paragraph_gap)).child(field).into_any_element()
+            }
+            Some(false) => div().into_any_element(),
+        }
+    }
+
+    fn render_block_plain(
         &self,
         options: NodeRenderOptions,
         node_cx: &NodeContext,

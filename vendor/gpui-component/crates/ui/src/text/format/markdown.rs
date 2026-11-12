@@ -516,11 +516,18 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
                 Err(_) => BlockNode::CodeBlock(CodeBlock::new(raw.value.into(), raw.lang.map(|s| s.into()), span)),
             }
         }
-        Node::Code(raw) => BlockNode::CodeBlock(CodeBlock::new(
-            raw.value.into(),
-            raw.lang.map(|s| s.into()),
-            new_span(raw.position, cx),
-        )),
+        Node::Code(raw) => {
+            // Set by its indent, with no fences: its lines keep their
+            // indent where it is drawn. (Emaki addition.)
+            let indented = raw.position.as_ref().and_then(|p| source.get(p.start.offset..)).is_some_and(|t| {
+                let t = t.trim_start();
+                !t.starts_with("```") && !t.starts_with("~~~")
+            });
+            let code = if indented { raw.value.split('\n').map(|l| if l.is_empty() { String::new() } else { format!("    {l}") }).collect::<Vec<_>>().join("\n") } else { raw.value };
+            let mut block = CodeBlock::new(code.into(), raw.lang.map(|s| s.into()), new_span(raw.position, cx));
+            block.indented = indented;
+            BlockNode::CodeBlock(block)
+        }
         Node::Heading(val) => {
             let mut paragraph = Paragraph::default();
             parse_inlines(&mut paragraph, &val.children, cx);

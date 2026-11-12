@@ -2415,6 +2415,15 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
     }
 
+    /// Whether the caret is on the first row the field shows, and whether
+    /// on the last, soft wraps counted: for a caller that carries the
+    /// caret on to what stands over or under the field. (Emaki addition.)
+    pub fn caret_rows(&self) -> (bool, bool) {
+        let at = self.display_map.offset_to_wrap_display_point(self.cursor()).row;
+        let end = self.display_map.offset_to_wrap_display_point(self.text.len()).row;
+        (at == 0, at >= end)
+    }
+
     /// Visible row range in the last laid-out viewport, `None` before first layout.
     pub fn visible_row_range(&self) -> Option<std::ops::Range<usize>> {
         self.last_layout.as_ref().map(|l| l.visible_range.clone())

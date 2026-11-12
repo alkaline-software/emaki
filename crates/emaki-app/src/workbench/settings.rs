@@ -1519,6 +1519,7 @@ impl Workbench {
         let send = div().w(CONTROL_W).child(self.segmented("send-key", vec![("cmd-enter", "⌘↩".into(), None), ("enter", "↩".into(), None)], if enter_sends { "enter" } else { "cmd-enter" }, Rc::new(|this, key, _, cx| this.set_send_key(key, cx)), cx)).into_any_element();
         let send_note = key_text_wrap(if enter_sends { t("⇧↩ for a new line") } else { t("↩ or ⇧↩ for a new line") }).into_any_element();
         let auto_cap = self.switch("auto-capitalize", app.auto_capitalize, Rc::new(|this, on, _, cx| this.set_writing(|a| a.auto_capitalize = on, cx)), cx);
+        let live_markdown = self.switch("live-markdown", app.live_markdown, Rc::new(|this, on, _, cx| this.set_writing(|a| a.live_markdown = on, cx)), cx);
         let spelling = app.check_writing;
         let check_writing = self.switch("check-writing", spelling, Rc::new(|this, on, _, cx| this.set_writing(|a| a.check_writing = on, cx)), cx);
         // The languages are the check's choices: dimmed and out of the
@@ -1531,7 +1532,7 @@ impl Workbench {
         // Said only where a choice does nothing: off a Mac.
         let language_note = (!crate::sys::SYSTEM_SPELLING).then(|| div().child(t("Spanish, French and German are checked on a Mac only.")).into_any_element());
         vec![
-            group(Some(t("Composer")), None, vec![line(t("Send with"), Some(send_note), send, &theme), line(t("Auto-capitalization"), None, auto_cap, &theme)], &theme),
+            group(Some(t("Composer")), None, vec![line(t("Send with"), Some(send_note), send, &theme), line(t("Auto-capitalization"), None, auto_cap, &theme), line(t("Live markdown"), None, live_markdown, &theme)], &theme),
             group(Some(t("Spelling and grammar")), None, vec![line(t("Check as you type"), None, check_writing, &theme), line(t("Language"), language_note, writing_language, &theme)], &theme),
         ]
     }

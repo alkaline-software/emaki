@@ -5,7 +5,7 @@ About the composer parts of `crates/emaki-app/src/workbench.rs`, `crates/emaki-a
 ## Rules
 
 - Keep both accessibility fixes (the focus wrapper in `render_composer`, the forwarder in `a11y.rs`). Without either, macOS reports the window as the focused element and a dictation app (Kotoba, the studio's) cannot find the text field.
-- The composer is plain text. Do not bring back live markdown rendering without a real in-toolkit rich editor: the toolkit has no editable rich-text view, and a native webview draws above every gpui overlay.
+- The composer is Onyx's live-preview editor (`live/`, below), not the toolkit's field: the text is drawn as it reads while it is typed, and what it sends is what was typed. Tried and dropped before it: a preview block beside the text, the code editor's highlighted mode, a block-by-block editor, a CodeMirror editor in a webview (a native webview draws above every gpui overlay), and styles laid on the toolkit's field, which can neither hide a mark nor change a face or a size within a line.
 - Never send a slash command down the inbox socket. Claude Code wraps every `user` frame there as a message from a peer, with or without our envelope, and the model refuses a peer's command. Type it in the session's terminal instead.
 - ↩ or a click runs a command only when it acts alone (`driver::acts_alone`) and is the whole message. A skill run unasked cannot be taken back, so a name not on the list counts as a skill.
 - The status line is the only write the app makes to Claude Code's settings. The script never exits non-zero and never writes to stderr, it lives at a stable path outside any checkout, and a copy run with `EMAKI_HOME` set leaves the settings alone (it would point Claude Code at its scratch tree).
@@ -26,7 +26,19 @@ With both, the focused element is an `AXTextArea` carrying the text.
 
 ## Plain text and drafts
 
-The composer is a growing `TextareaState`; markdown renders once a message is sent. Tried and dropped: a preview block beside the text, a highlighted editor mode, a block-by-block editor, a CodeMirror editor in a webview.
+The composer is one `live::Editor`, as tall as its words between its fewest rows and its most and scrolling past that (`composer-room`, its scroller the editor's own `scroll`, named to the scroll router). `live/field.rs` gives the editor the names the toolkit's field answered to (`value`, `cursor`, `set_value`, `replace_bytes`), so what reads and writes the composer's text did not change.
+
+## Live markdown
+
+About `crates/emaki-app/src/live/` and `composer_md.rs`.
+
+`live/` is Onyx's editor (`onyx/docs/editor.md` is its story), brought over without what a note has and a message does not: pictures, files in frames, cards, PDF pages, the vault. A span's marks (`**`, `*`, backticks, a heading's hashes, a link's address) hide unless the caret or the selection touches them; a heading is larger; code among words and a fenced block are in the mono face, the block on a plate with its language's mark and colors; a list has its bullets, numbers and boxes with its lines hung under them; a quote has its bar; a table is a grid.
+
+- Its look is the window's (`composer_look`, at every draw): the chat font with its CJK face behind it, the mono face, the composer's size, strong words semibold as the conversation sets them (`Look::strong`), and the page's ground for a block of code's plate, a shade under the composer's card. Settings, Conversation, Live markdown off (`app.live_markdown`) reads the text as plain lines (`Editor::set_plain`).
+- It differs from Onyx's where a message is not a note: a tag that is no style of its own and a comment stay in sight (a prompt's `<task>` is words), and lines of dashes at the top are a rule, not a YAML header (`live/markdown.rs`).
+- Its keys are its own (`live::key_bindings`, under `LIVE_CONTEXT`), not the toolkit field's; typed text arrives through gpui's input handler. The composer takes what is its own before the editor does (`capture_action` in `render_composer`): ⌘↩ sends (the editor's `ToggleTask`), ↩ sends when the setting says so and runs the slash list's choice, ⇧⇥ changes the mode (the editor's `Outdent`), ↑ ↓ ⇥ → and Esc are the slash list's while it is open. ⌘B and ⌘I are the editor's; ⌘U and ⇧⌘X put `<u>` and `~~` around what is selected (`composer_md::toggle`, `composer_wrap`).
+- The slash and "@" marks and the spelling marks are the editor's `set_marks`, by bytes of the text, carried with the words until set again. A right click is the editor's `Menu` event: the corrections of the word the click put the caret on, else Cut, Copy, Paste and Select All (`composer_menu`).
+- The placeholder is the composer's to draw, in the chat font (`render_composer_hint`): an empty editor draws its caret and nothing else.
 
 There is one textarea, and `Workbench::sync_draft` makes it stand for whichever place is showing. On arriving somewhere else (`draft_key`: the session, or the new-session page) the words and attachment chips are put away under where they were typed (`drafts`) and what was left here comes back with the caret at its end. It runs at every draw and before `restore_prompt`, which asks whether the box is empty on a session's behalf. The sessions page draws no composer and changes nothing. Drafts are in memory only, and last until Quit: a window closed leaves them with the app (`keep_composers`, `KeptDrafts`), which runs on with no window, and the window opened next starts with them. Its first composer takes what was left there when it is empty.
 
@@ -36,7 +48,7 @@ An input method's candidates (Chinese, Japanese) stand under where its compositi
 
 ## Finding in it
 
-⌘F with the keyboard in the composer finds in what is written there: the toolkit's find card, the file editor's (`searchable` on the composer's state), at the composer's top, with case, whole word and regular expression, ⌘F again or Escape to close. Escape closes it with the keyboard in the card or in the text, and goes no further: it is not the window's Escape, which stops a running turn when nothing is open. The composer's capture of Escape (for the slash list, before the textarea) lets it through while the card is open; taken there, it stopped the turn and the card stayed. With the keyboard anywhere else ⌘F is the conversation's find or a file's, as before. The hint an empty composer shows is not drawn under the card (`render_composer_hint`).
+The composer has no find of its own now: the toolkit's find card went with the toolkit's field. The editor can find (`Editor::set_find`, `find_step`), and a card for it is not built yet; ⌘F with the keyboard in the composer is the conversation's.
 
 ## Dictation
 
@@ -106,7 +118,7 @@ After a turn Claude Code sets dim, untyped words in its input. The composer show
 - The list over the composer (`render_slash_help`) shows the driver's own commands (`DriverView::commands`, from `initialize`) or the folder's catalog, `BUILTIN_COMMANDS` until one is known. It follows the caret (`driver::slash_token_at`: a "/" at the start or after a space, and the name characters around the caret). Inside a sentence it offers skills only.
 - `/compact`, `/model`, `/clear` act by themselves; `/code-review` is a skill, a prompt for the model, often named inside a sentence. The catalog cannot tell them apart (`builtin` covers bundled skills too). The 2.1.288 binary can: each command declares `type` `local`, `local-jsx` or `prompt`, and `driver::LOCAL_COMMANDS` is the first two.
 - `Workbench::slash_pick` (↩ or a click) follows the rule above; anything it does not run goes into the text at the caret with a space after (`slash_insert`). ⌘↩ on a message that is only a command sends it as that command, a skill with its arguments included.
-- Every command named wears the accent: in the composer by ranges on the textarea (`Workbench::mark_slash`, on every change, through the vendored toolkit's `set_marks`), in a sent prompt as inline code (`driver::mark_commands`, which leaves code spans and fenced blocks alone). A token counts when `driver::slash_tokens` finds it as a word of its own (`/usr/bin` and `a/b` are not) and its name acts alone or is in the folder's catalog (`Hub::knows_command`, cache only; the catalog is read when a Claude session of that folder is opened).
+- Every command named wears the accent: in the composer by ranges on its editor (`Workbench::mark_slash`, on every change, through `Editor::set_marks`), in a sent prompt as inline code (`driver::mark_commands`, which leaves code spans and fenced blocks alone). A token counts when `driver::slash_tokens` finds it as a word of its own (`/usr/bin` and `a/b` are not) and its name acts alone or is in the folder's catalog (`Hub::knows_command`, cache only; the catalog is read when a Claude session of that folder is opened).
 
 ## Shell commands
 

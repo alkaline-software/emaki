@@ -82,9 +82,11 @@ EMAKI_SHOT=/tmp/shot.png EMAKI_OPEN=<id> ./target/debug/Emaki  # write a picture
 
 `EMAKI_GO` steps run five seconds apart, separated by ";". `EMAKI_SHOT` writes the picture after `EMAKI_SHOT_AFTER` seconds (5) and quits, so set that past the last step. The picture is taken from inside (`sys::shoot_window`): a process may capture its own window without Screen Recording access, which the terminal running the probe often lacks. Crop a capture with PIL to read a detail.
 
-`EMAKI_KEYS=send` is ⌘↩, `blur` takes the focus off everything, and `astray` puts it on an element no frame holds, as a thing closed leaves it (`EMAKI_FOCUS_DEBUG=1` prints where it is at every draw, and whether the native keyboard is at the window's own view; `EMAKI_GO=web:keys` gives it to the page in the web view as a click there does, and `EMAKI_KEYS_STAY=1` stops the window taking it back): `EMAKI_KEYS=tabs,blur,closetab,tabs` shows what ⌘W does then.
+`EMAKI_KEYS` names `up`, `down`, `tab`, `esc` and `back` are pressed as the keys themselves, through the bindings of whatever has the keyboard: the composer's editor and a toolkit field name their actions apart. `EMAKI_KEYS=send` is ⌘↩, `blur` takes the focus off everything, and `astray` puts it on an element no frame holds, as a thing closed leaves it (`EMAKI_FOCUS_DEBUG=1` prints where it is at every draw, and whether the native keyboard is at the window's own view; `EMAKI_GO=web:keys` gives it to the page in the web view as a click there does, and `EMAKI_KEYS_STAY=1` stops the window taking it back): `EMAKI_KEYS=tabs,blur,closetab,tabs` shows what ⌘W does then.
 
 `EMAKI_GO` step `file:caret:<byte>` puts the caret in the file's editor there and `file:dump` prints its text and selection, so a key pressed in it (`press:`) can be read back. `press:cmd-k+cmd-u` presses keys one after another in one step, as a chord's are: steps are five seconds apart and gpui waits about a second for a chord's next key.
+
+A markdown file written in as it reads: `clickat:` puts the caret, `holdat:` drags, `doc:type:<words>` types as the keyboard does (`_` for a space, `\n` for a line end), `press:` presses keys, and `doc:dump` prints what the editor holds, its selection, whether it has the keyboard, and the file's editor's text. `EMAKI_PIECE_DEBUG=1` prints each piece's height as it is measured.
 
 `EMAKI_GO` steps `treeall` (⌘A in the files tree) and `treeband:<y>:<y2>` (a rectangle dragged down it, in points from the tree's top); `file:menu` with the editor showing is a right click on its first line's word.
 

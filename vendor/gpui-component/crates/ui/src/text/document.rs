@@ -184,11 +184,13 @@ impl ParsedDocument {
     ) -> impl IntoElement {
         let Some(list_state) = list_state else {
             let blocks_len = self.blocks.len();
+            // A run that reaches the last block has no gap under it.
+            let run_last = node_cx.edit.as_ref().is_some_and(|slot| self.blocks.last().is_some_and(|b| slot.run_part(b.span()).is_some()));
             return div()
                 .id("document")
                 .children(self.blocks.iter().enumerate().map(move |(ix, node)| {
-                    let is_last = ix + 1 == blocks_len;
-                    node.render_block(
+                    let is_last = ix + 1 == blocks_len || (run_last && node_cx.edit.as_ref().is_some_and(|slot| slot.run_part(node.span()) == Some(true)));
+                    node.render_top(
                         NodeRenderOptions {
                             ix,
                             is_last,
@@ -217,9 +219,10 @@ impl ParsedDocument {
                 let node_cx = node_cx.clone();
                 let blocks = blocks.clone();
                 move |ix, window, cx| {
-                    let is_last = ix + 1 == blocks.len();
+                    let run_last = node_cx.edit.as_ref().is_some_and(|slot| blocks.last().is_some_and(|b| slot.run_part(b.span()).is_some()) && slot.run_part(blocks[ix].span()) == Some(true));
+                    let is_last = ix + 1 == blocks.len() || run_last;
                     blocks[ix]
-                        .render_block(
+                        .render_top(
                             NodeRenderOptions {
                                 ix,
                                 is_last,

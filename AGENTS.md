@@ -60,8 +60,8 @@ Each is here because breaking it loses data or reintroduces a bug that was alrea
 - **Every input the window owns sits in a focus wrapper, and the focused element must be one the page draws,** or key bindings go nowhere. (`docs/window.md`)
 - **Every word the window shows goes through `i18n::t`** (or `tf`, `count`, `phrase` for a constant) and is in `crates/emaki-app/locales/words.json` in every language; `cargo test -p emaki-app` fails otherwise. An agent's, git's or the system's own words are not ours and stay as they are, and so do the AI era's terms (model, agent, token, prompt, context, mode, effort…) in every language. (`docs/window.md`, Languages)
 - **No panic may leave a task, a callback or a draw.** A panic on the main thread aborts the app, and so does one in a task of gpui's, which runs through `extern "C"`. A third party's parser or reader (markdown, calamine, Parquet, vt100, LaTeX and Typst) runs under `catch_unwind`; the markdown view does so itself (the vendored `parse_content`). A lock another thread may poison is taken past its poison. Never slice a string at a byte offset not known to be a character's start. (`docs/conversation.md`, `docs/platform.md`)
-- **A field's keys are the toolkit's, never a field's own.** Every place words are typed is the toolkit's `Input`, and what a key does in one (up to the start and down to the end of one line, ⇧ with either to select there) is fixed in `vendor/gpui-component`, where every field now and later has it. Do not handle a caret key in one field. (`docs/window.md`)
-- **The composer is plain text.** Live markdown in it was tried three ways and dropped. (`docs/composer.md`)
+- **A field's keys are the toolkit's, never a field's own.** Every place words are typed but the composer is the toolkit's `Input`, and what a key does in one (up to the start and down to the end of one line, ⇧ with either to select there) is fixed in `vendor/gpui-component`, where every field now and later has it. Do not handle a caret key in one field. (`docs/window.md`)
+- **The composer is Onyx's live-preview editor** (`live/`), the one place words are typed that is not the toolkit's field: its keys are its own, and what it sends is what was typed. (`docs/composer.md`)
 - **One copy of gpui.** The pin is in `Cargo.lock`, not a `rev` of our own. Changes to the toolkit go in `vendor/gpui-component/`, marked and listed in its `UPSTREAM.md`. (`docs/platform.md`)
 - **A picture is drawn through the cache of the place that shows it** (`pictures::Kept`: `pictures::through`, or an `image_cache` of one around a markdown view), never handed to gpui as a path or as bytes: gpui keeps every picture it decodes, and its copy on the GPU, until the app quits. (`docs/performance.md`)
 - **A child process is started with `emaki_core::process::command`, never `Command::new`,** or on Windows each one opens a console window. (`docs/platform.md`)
@@ -80,12 +80,12 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | You are about to touch | Read first |
 |---|---|
 | `emaki-app/src/transcript.rs`; the conversation's list, find, or reload in `workbench.rs`; `emaki-core/src/find.rs` | `docs/conversation.md` |
-| The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, the notice and limits row in `workbench.rs`; `a11y.rs`; `pictures.rs`; `emaki-core/src/files.rs`, `check.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
+| The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, the notice and limits row in `workbench.rs`; `live/`, `composer_md.rs`; `a11y.rs`; `pictures.rs`; `emaki-core/src/files.rs`, `check.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
 | The pills, pickers, mode/model/effort notices; `emaki-core/src/options.rs`; `mode_*`, `effort_*`, `model_*`, `options_from` in `driver.rs` | `docs/modes.md` |
 | The tray and the toggles (`workbench/tray.rs`), the working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `shell_marks.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
-| `emaki-app/src/panels.rs`, `branches.rs`, `spelling.rs`, `sublime.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `quarto.rs`, `math.rs`, `latex.rs`, `typst_doc.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs`; the vendored `text/format/quarto.rs` and `text/math.rs` | `docs/panels.md` |
+| `emaki-app/src/panels.rs`, `panels/doc_edit.rs`, `branches.rs`, `spelling.rs`, `sublime.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `doc_edit.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `quarto.rs`, `math.rs`, `latex.rs`, `typst_doc.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs`; the vendored `text/format/quarto.rs` and `text/math.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs`; `i18n.rs`, `locales/words.json`, any word the window shows | `docs/window.md` |
 | Anything a person sees, new or changed: a control, a color, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
@@ -132,6 +132,7 @@ crates/emaki-core/        everything without a window
   src/math.rs                a formula set by Typst for the file's pane: LaTeX's math by way of MiTeX, Typst's as it is
   src/memory.rs              the process's own footprint, and the report written to the logs when it grows past what Emaki needs
   src/latex.rs src/typst_doc.rs  a LaTeX or Typst document written as the Quarto markdown the file's pane reads
+  src/doc_edit.rs            a markdown file written in where it reads: the way between its text and the text it reads as, its YAML header's lines
   src/fsops.rs               what the files tree does to the disk, as moves to take back and do again; what is removed is held, not thrown away
   src/indent.rs              where a new line starts in the file's editor, by language, and what one step of indent is
   src/pairs.rs               the pairs the file's editor closes as an open is typed and puts around a selection, by language
@@ -153,6 +154,9 @@ crates/emaki-app/         the window
   src/workbench/tray.rs      around the composer: the tray over it, a held message and the decisions, and the toggles under it, the pages, what runs in the background, the note
   src/transcript.rs          drawing rounds, tool cards, thoughts, subagents
   src/panels.rs              the files panel at a conversation's left, the folder's files as a tree, and the outline in its drawer at the conversation's left, an entry a round; the conversation's margins and their seams
+  src/panels/doc_edit.rs     a markdown or Quarto file written in as it reads: the whole file one editor, the composer's, what it does not draw drawn by the reading view over its lines
+  src/live/                  the composer's editor, Onyx's live preview: the text drawn as it reads while it is typed, marks hidden unless the caret touches them; field.rs, the names the composer knows it by
+  src/composer_md.rs         the marks ⌘U and ⇧⌘X put around what is selected in the composer
   src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions
   src/branches.rs            the list of branches and its remote: fetching, making a branch on its sheet, publishing one, the sign-in sheet
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets

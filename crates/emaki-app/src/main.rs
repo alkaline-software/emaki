@@ -11,6 +11,7 @@ mod agents_page;
 mod ambient;
 mod sublime;
 mod assets;
+mod composer_md;
 mod branches;
 mod csd;
 mod fetch;
@@ -22,6 +23,7 @@ mod html_web;
 mod word;
 mod hub;
 mod i18n;
+mod live;
 mod look;
 mod panels;
 mod pictures;
@@ -71,6 +73,11 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-s", SaveFile, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-g", FindPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-enter", Send, Some(COMPOSER_CONTEXT)),
+        // Markdown's marks around what is selected in the composer, as a
+        // word processor's keys have them.
+        // ⌘B and ⌘I are the editor's own (`live::key_bindings`).
+        KeyBinding::new("secondary-u", workbench::ComposerUnderline, Some(COMPOSER_CONTEXT)),
+        KeyBinding::new("secondary-shift-x", workbench::ComposerStrike, Some(COMPOSER_CONTEXT)),
         // Outside the composer too, for the new-session page with nothing
         // typed (`send_pressed`). A field of its own keeps its own ⌘↩.
         KeyBinding::new("secondary-enter", Send, Some(KEY_CONTEXT)),
@@ -392,6 +399,8 @@ fn main() {
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
 
         cx.bind_keys(key_bindings());
+        // The composer's editor (`live/`), under its own context.
+        cx.bind_keys(live::key_bindings());
         word::bind_keys(cx);
         cx.set_menus(app_menus());
 

@@ -92,6 +92,10 @@ pub struct TextViewState {
     pub(crate) find: Option<super::TextFind>,
     /// Emaki: where its headings are painted (`find.rs`).
     pub(crate) headings: Option<super::HeadingSpots>,
+    /// Emaki: the caller's element in a block's place, and what a press
+    /// on a block is handed to (`edit.rs`).
+    pub(crate) edit: Option<super::EditSlot>,
+    pub(crate) unit_click: Option<Arc<super::UnitClickFn>>,
     select_all: bool,
     pub(super) auto_scroll: AutoScroll,
     pub(super) selection_adapter: TextViewSelectionAdapter,
@@ -171,6 +175,8 @@ impl TextViewState {
             selected_text_override: None,
             find: None,
             headings: None,
+            edit: None,
+            unit_click: None,
             select_all: false,
             selectable: false,
             selection_format: SelectionFormat::default(),
@@ -248,6 +254,19 @@ impl TextViewState {
         }
         self.scrollable = scrollable;
         cx.notify();
+    }
+
+    /// The blocks a caret can stand in, in the text's order, by where
+    /// each is in the text last parsed (`edit.rs`). (Emaki addition.)
+    pub fn units(&self) -> Vec<super::EditUnit> {
+        super::edit::units_of(&self.parsed_content.document.blocks)
+    }
+
+    /// Whether what is drawn is the text last set: a long text is parsed
+    /// off the window's thread and shown when that is done. (Emaki
+    /// addition.)
+    pub fn is_parsed(&self) -> bool {
+        self.parsed_content.document.source.as_ref() == self.text.as_str()
     }
 
     /// Set the text content.
@@ -577,6 +596,8 @@ impl Render for TextViewState {
         node_cx.link_click_handler = self.link_click_handler.clone();
         node_cx.markdown_extensions = self.markdown_extensions.clone();
         node_cx.style = self.text_view_style.clone();
+        node_cx.edit = self.edit.clone();
+        node_cx.unit_click = self.unit_click.clone();
 
         v_flex()
             .size_full()

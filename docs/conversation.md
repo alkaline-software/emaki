@@ -106,7 +106,7 @@ A tool call, a run or a thought opens over a moment (`docs/window.md`, Motion), 
 A prompt is typed as plain text (the composer is plain text) and a reply is read in the agent's terminal too, where markdown is not drawn. So the conversation reads GFM less what text sets off by accident (`chat_parse_options`, given to the toolkit's view through its `parse_options_with`):
 
 - No setext headings. A line of `-` or `=` under a line is a line of its own: a person splitting a list with a dash turned the lines above into headings. `---` after text is a rule, as a model writing it means.
-- No indented code. Four spaces in is text; code is fenced.
+- Lines four spaces in are code, as markdown has it and as the composer and a file as it reads show them: in the mono face, their indent kept, on no plate (the vendored `CodeBlock::indented`). Taken for text once, a reply's indented paths read as prose and a star in one turned the rest italic.
 - No raw HTML. `<Input>` in a sentence was parsed as a tag and drawn as nothing.
 - One tilde is a tilde. "~30% … ~40%" struck the words between; strikethrough takes two.
 

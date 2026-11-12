@@ -22,7 +22,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants as _};
-use gpui_component::input::{Input, InputEvent, InputState, OutdentInline, Textarea, TextareaState};
+use gpui_component::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Disableable as _, Placement, Sizable as _};
 
@@ -48,7 +48,7 @@ mod settings;
 mod tray;
 pub use settings::SETTINGS_CONTEXT;
 
-actions!(emaki, [ReopenTab, ToggleRaw, ToggleChanges, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
+actions!(emaki, [ReopenTab, ToggleRaw, ToggleChanges, ToggleSearch, Refresh, NewSession, NewSessionHere, ChooseFolder, NewBranch, GoAgents, GoSessions, ToggleSidebar, ToggleFiles, ToggleOutline, ToggleShell, ToggleAgent, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, Escape, Send, ComposerUnderline, ComposerStrike, CloseTab, OpenSettings, FindInPage, FindNext, FindPrev, SaveFile, TermTab, TermBackTab, TermClear, TermNewTab]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 pub const COMPOSER_CONTEXT: &str = "Composer";
@@ -1495,7 +1495,7 @@ pub struct Workbench {
     load_task: Option<Task<()>>,
     /// The message being written: plain text, on purpose. Markdown in it
     /// renders once sent, like any prompt.
-    pub composer: Entity<TextareaState>,
+    pub composer: Entity<crate::live::Editor>,
     /// Where each segment of a settings control sat on the last draw,
     /// relative to its track, by `control-key`, so the raised plate can
     /// slide from the old choice to the new one. See `segmented`.
@@ -2492,6 +2492,11 @@ pub struct Workbench {
     /// it held when the editor was made, and whether the editor shows
     /// line numbers and the language's colors.
     pub(crate) file_editor: Option<crate::panels::FileEditor>,
+    /// A markdown file written in as it reads, the whole file one editor
+    /// (`panels/doc_edit.rs`).
+    pub(crate) doc_canvas: Option<crate::panels::DocCanvas>,
+    /// Words a probe types in it, or `\0dump`.
+    pub(crate) pending_doc: Option<String>,
     /// The editors of files not showing now, kept whole: what was typed
     /// in them and not saved, and their undo histories. Newest last.
     pub(crate) file_parked: Vec<crate::panels::FileEditor>,
@@ -3830,7 +3835,7 @@ impl Workbench {
             }
         };
 
-        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS).searchable(true));
+        let composer = cx.new(crate::live::Editor::new);
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let find_input = cx.new(|cx| InputState::new(window, cx));
 
@@ -4004,22 +4009,22 @@ impl Workbench {
         .detach();
         // ⌘↩ never gets here: the composer wrapper captures it and sends
         // (see `render_composer`), so what arrives is a bare or shifted ↩.
-        cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::Change = ev {
+        cx.subscribe_in(&composer, window, |this, _, ev: &crate::live::EditorEvent, window, cx| match ev {
+            crate::live::EditorEvent::Changed => {
                 this.slash_sel = 0;
                 this.slash_closed = false;
                 this.writing_changed(window, cx);
                 this.mark_slash(cx);
                 this.warm_terminal(cx);
             }
-            if let InputEvent::PressEnter { secondary: false, shift } = ev {
-                // A bare ↩ on an empty composer answers the oldest
-                // permission card, ⇧↩ turns it down; with words typed
-                // they stay what they are, a new line.
-                this.answer_pending_by_key(!*shift, window, cx);
-            }
+            // A right click: the corrections of a marked word, else the
+            // field's own choices.
+            crate::live::EditorEvent::Menu(at, _) => this.composer_menu(*at, cx),
+            _ => {}
         })
         .detach();
+        // The caret moved, or blinked: the composer is drawn again.
+        cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         // A table's cell: ↩ keeps what was typed and goes to the cell
         // under it, as a spreadsheet does.
         let table_input = cx.new(|cx| InputState::new(window, cx));
@@ -4135,8 +4140,15 @@ impl Workbench {
                         "text" => {
                             let _ = this.update(cx, |w, cx| eprintln!("emaki: composer {:?}", w.composer.read(cx).value()));
                         }
-                        t if t.starts_with("key:") => composer.update(cx, |s, cx| s.insert(t["key:".len()..].to_string(), window, cx)),
-                        "back" => window.dispatch_action(Box::new(gpui_component::input::Backspace), cx),
+                        t if t.starts_with("key:") => composer.update(cx, |s, cx| s.put(t["key:".len()..].to_string(), window, cx)),
+                        "back" => {
+                            // As the key itself, through the bindings of whatever has the
+                            // keyboard: the composer's editor and a toolkit field name
+                            // their actions apart.
+                            if let Ok(key) = gpui::Keystroke::parse("backspace") {
+                                window.dispatch_keystroke(key, cx);
+                            }
+                        }
                         // What an input method composes, marked through the
                         // composer's own handler, and where it is told to
                         // put its candidates at once, as AppKit asks before
@@ -4190,10 +4202,8 @@ impl Workbench {
                         // the first line.
                         t if t.starts_with("rightclick") => {
                             let x = t.strip_prefix("rightclick:").and_then(|v| v.parse::<f32>().ok()).unwrap_or(30.);
-                            composer.update(cx, |s, cx| {
-                                let at = s.input_bounds().origin + point(px(x), px(10.));
-                                s.secondary_click_at(at, window, cx);
-                            });
+                            let at = composer.read(cx).input_bounds().origin + point(px(x), px(10.));
+                            let _ = this.update(cx, |w, cx| w.composer_menu(at, cx));
                         }
                         // ⌘W, from wherever the keyboard is; `focus:shell`
                         // puts it in the terminal panel first. `tabs`
@@ -4220,10 +4230,38 @@ impl Workbench {
                         "caret" => {
                             let _ = this.update(cx, |w, cx| eprintln!("emaki: caret {} of {}", w.rename_input.read(cx).cursor(), w.rename_input.read(cx).value().len()));
                         }
-                        "up" => window.dispatch_action(Box::new(gpui_component::input::MoveUp), cx),
-                        "down" => window.dispatch_action(Box::new(gpui_component::input::MoveDown), cx),
-                        "tab" => window.dispatch_action(Box::new(gpui_component::input::IndentInline), cx),
-                        "esc" => window.dispatch_action(Box::new(gpui_component::input::Escape), cx),
+                        "up" => {
+                            // As the key itself, through the bindings of whatever has the
+                            // keyboard: the composer's editor and a toolkit field name
+                            // their actions apart.
+                            if let Ok(key) = gpui::Keystroke::parse("up") {
+                                window.dispatch_keystroke(key, cx);
+                            }
+                        }
+                        "down" => {
+                            // As the key itself, through the bindings of whatever has the
+                            // keyboard: the composer's editor and a toolkit field name
+                            // their actions apart.
+                            if let Ok(key) = gpui::Keystroke::parse("down") {
+                                window.dispatch_keystroke(key, cx);
+                            }
+                        }
+                        "tab" => {
+                            // As the key itself, through the bindings of whatever has the
+                            // keyboard: the composer's editor and a toolkit field name
+                            // their actions apart.
+                            if let Ok(key) = gpui::Keystroke::parse("tab") {
+                                window.dispatch_keystroke(key, cx);
+                            }
+                        }
+                        "esc" => {
+                            // As the key itself, through the bindings of whatever has the
+                            // keyboard: the composer's editor and a toolkit field name
+                            // their actions apart.
+                            if let Ok(key) = gpui::Keystroke::parse("escape") {
+                                window.dispatch_keystroke(key, cx);
+                            }
+                        }
                         "shift-up" => window.dispatch_action(Box::new(gpui_base::actions::SelectUp), cx),
                         "shift-down" => window.dispatch_action(Box::new(gpui_base::actions::SelectDown), cx),
                         // A keystroke through the bindings, from whatever
@@ -4754,6 +4792,8 @@ impl Workbench {
             fold_file: false,
             file_raw,
             file_editor: None,
+            doc_canvas: None,
+            pending_doc: None,
             file_parked: Vec::new(),
             file_ask: None,
             file_ask_serial: 0,
@@ -9291,7 +9331,7 @@ impl Workbench {
     fn render_composer_hint(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Not over the find card the composer's ⌘F opens at its top.
         let composer = self.composer.read(cx);
-        if !composer.value().is_empty() || composer.search_session().open {
+        if !composer.value().is_empty() {
             return None;
         }
         let ink = cx.theme().muted_foreground;
@@ -9316,6 +9356,8 @@ impl Workbench {
                 .items_center()
                 .gap_x(px(8.))
                 .text_color(ink)
+                // In the face the words typed over it will be in.
+                .when_some(crate::fonts::chat_family(&self.cfg.app.chat_font, cx), |d, family| d.faced(family, cx))
                 // A suggested prompt is in italics: words offered, not
                 // yet the person's.
                 .child(div().min_w_0().when(accept, |d| d.italic()).child(words))
@@ -16653,6 +16695,9 @@ impl Workbench {
             let to = state.read(cx).focus_handle(cx);
             window.focus(&to, cx);
         }
+        if let Some(words) = self.pending_doc.take() {
+            self.doc_probe_type(&words, window, cx);
+        }
         if let Some(step) = self.pending_cell.take() {
             self.table_probe(&step, window, cx);
         }
@@ -18432,8 +18477,11 @@ impl Workbench {
     /// the composer, as a menu's first choices. The grammar is not
     /// explained.
     fn corrections(&self, at: Point<Pixels>, cx: &App) -> Vec<(&'static str, MenuDo)> {
+        // A right click has put the caret on the word, or left the
+        // selection it was inside.
+        let _ = at;
         let state = self.composer.read(cx);
-        let offset = state.offset_at(at);
+        let offset = state.selected_range().start;
         if self.issues_for.as_str() != state.value().as_ref() {
             return Vec::new();
         }
@@ -18577,8 +18625,84 @@ impl Workbench {
             }
         }
         marks.sort_by_key(|m| m.range.start);
-        self.composer.update(cx, |s, cx| s.set_marks(marks, cx));
+        self.composer.update(cx, |s, cx| s.set_marks(marks.into_iter().map(|m| (m.range, m.style)).collect(), cx));
         self.want_files(cx);
+    }
+
+    /// The composer's menu, at a right click: what could stand in place
+    /// of a marked word, else Cut, Copy, Paste and Select All.
+    pub(crate) fn composer_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let (selection, focus) = {
+            let state = self.composer.read(cx);
+            (!state.selected_range().is_empty(), state.focus_handle(cx))
+        };
+        let mut items = self.corrections(at, cx);
+        if items.is_empty() {
+            if selection {
+                items.push((phrase("Cut"), MenuDo::Edit(EditDo::Cut, focus.clone())));
+                items.push((phrase("Copy"), MenuDo::Edit(EditDo::Copy, focus.clone())));
+            }
+            if cx.read_from_clipboard().is_some() {
+                items.push((phrase("Paste"), MenuDo::Edit(EditDo::Paste, focus.clone())));
+            }
+            if !items.is_empty() {
+                items.push(("", MenuDo::Rule));
+            }
+            items.push((phrase("Select All"), MenuDo::Edit(EditDo::SelectAll, focus)));
+        }
+        self.open_menu(at, items, cx);
+    }
+
+    /// The composer's editor as the settings have it: its faces and
+    /// sizes, and whether it reads its markdown. Called at every draw.
+    fn composer_look(&self, composer_px: f32, composer_line: f32, cx: &mut Context<Self>) {
+        let theme = cx.theme();
+        let mut look = crate::live::Look::of(theme);
+        if let Some(family) = crate::fonts::chat_family(&self.cfg.app.chat_font, cx) {
+            look.text_fallbacks = Some(crate::fonts::cjk_fallbacks(&family, cx.global::<crate::fonts::ChatFonts>()));
+            look.text_family = family;
+        }
+        look.mono_family = theme.mono_font_family.clone();
+        // A block of code is set into the card: the page's ground, a
+        // shade under the composer's.
+        look.colors.plate = theme.background;
+        look.text_px = composer_px;
+        look.line_px = composer_line;
+        // Strong words as the conversation sets them.
+        look.strong = FontWeight::SEMIBOLD;
+        look.mono_px = (composer_px * 0.9).round();
+        let plain = !self.cfg.app.live_markdown;
+        self.composer.update(cx, |s, cx| {
+            if *s.look() != look {
+                s.set_look(look, cx);
+            }
+            s.set_plain(plain, cx);
+        });
+    }
+
+    /// ⌘U and ⇧⌘X in the composer: markdown's marks around what is
+    /// selected, or off it (`composer_md::toggle`), one step of undo. ⌘B
+    /// and ⌘I are the editor's own.
+    pub(crate) fn composer_wrap(&mut self, open: &str, close: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (text, selected) = {
+            let s = self.composer.read(cx);
+            (s.value().to_string(), s.selected_range())
+        };
+        let (new, selection) = crate::composer_md::toggle(&text, selected, open, close);
+        // The stretch that differs and no more, so the rest keeps its
+        // place in the field's history.
+        let head = text.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+        let head = (0..=head).rev().find(|n| text.is_char_boundary(*n) && new.is_char_boundary(*n)).unwrap_or(0);
+        let most = text.len().min(new.len()) - head;
+        let tail = text.bytes().rev().zip(new.bytes().rev()).take(most).take_while(|(a, b)| a == b).count();
+        let tail = (0..=tail).rev().find(|n| text.is_char_boundary(text.len() - n) && new.is_char_boundary(new.len() - n)).unwrap_or(0);
+        let with = new[head..new.len() - tail].to_string();
+        self.composer.update(cx, |s, cx| {
+            s.replace_bytes(head..text.len() - tail, &with, selection.end, window, cx);
+            s.set_selected_range(selection, cx);
+        });
+        self.mark_slash(cx);
+        cx.notify();
     }
 
     /// The list that opens over the composer while a message is a slash
@@ -18788,6 +18912,9 @@ impl Workbench {
 
         let composer_px = self.cfg.app.text_sizes().composer;
         let composer_line = (composer_px * 10. / 7.).round();
+        self.composer_look(composer_px, composer_line, cx);
+        let composer_scroll = self.composer.read(cx).scroll.clone();
+        self.inner_scroller(&composer_scroll, Inner::Held);
         let attachments = self.attachments.clone();
         // What each chip's thumbnail is drawn from, when it is a picture
         // that can be drawn (`pictures::picture_source`).
@@ -18911,6 +19038,8 @@ impl Workbench {
                     .id("composer")
                     .key_context(COMPOSER_CONTEXT)
                     .on_action(cx.listener(|this, _: &Send, window, cx| this.send_pressed(window, cx)))
+                    .on_action(cx.listener(|this, _: &ComposerUnderline, window, cx| this.composer_wrap("<u>", "</u>", window, cx)))
+                    .on_action(cx.listener(|this, _: &ComposerStrike, window, cx| this.composer_wrap("~~", "~~", window, cx)))
                     .capture_action(cx.listener(|this, _: &gpui_component::input::Paste, _, cx| {
                         if this.paste_attachments(cx) {
                             cx.stop_propagation();
@@ -18918,7 +19047,7 @@ impl Workbench {
                     }))
                     // ⇧Tab cycles the permission mode, as in Claude Code's
                     // terminal; the textarea would otherwise outdent.
-                    .capture_action(cx.listener(|this, _: &OutdentInline, _, cx| {
+                    .capture_action(cx.listener(|this, _: &crate::live::Outdent, _, cx| {
                         this.cycle_mode(cx);
                         cx.stop_propagation();
                     }))
@@ -18930,49 +19059,59 @@ impl Workbench {
                     // break wherever the caret stood in a sent message.
                     // Any other ↩, ⇧↩ always, reaches the textarea and is
                     // a new line.
-                    .capture_action(cx.listener(|this, a: &gpui_component::input::Enter, window, cx| {
-                        if a.secondary {
-                            this.send_pressed(window, cx);
+                    .capture_action(cx.listener(|this, _: &crate::live::ToggleTask, window, cx| {
+                        this.send_pressed(window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .capture_action(cx.listener(|this, _: &crate::live::Enter, window, cx| {
+                        if this.slash_key(SlashKey::Run, window, cx) {
                             cx.stop_propagation();
-                        } else if this.slash_key(SlashKey::Run, window, cx) {
-                            cx.stop_propagation();
-                        } else if !a.shift && this.cfg.app.send_key == "enter" {
+                        } else if this.cfg.app.send_key == "enter" {
                             this.send_message(window, cx);
                             cx.stop_propagation();
+                        } else {
+                            // A bare ↩ on an empty composer answers the
+                            // oldest permission card, ⇧↩ turns it down;
+                            // with words typed they stay a new line.
+                            this.answer_pending_by_key(true, window, cx);
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &crate::live::NewLine, window, cx| {
+                        if this.slash_key(SlashKey::Run, window, cx) {
+                            cx.stop_propagation();
+                        } else {
+                            this.answer_pending_by_key(false, window, cx);
                         }
                     }))
                     // While the list of slash commands is open, the arrows,
                     // Tab and Escape are its keys, not the textarea's.
-                    .capture_action(cx.listener(|this, _: &gpui_component::input::MoveUp, window, cx| {
+                    .capture_action(cx.listener(|this, _: &crate::live::Up, window, cx| {
                         if this.slash_key(SlashKey::Up, window, cx) {
                             cx.stop_propagation();
                         }
                     }))
-                    .capture_action(cx.listener(|this, _: &gpui_component::input::MoveDown, window, cx| {
+                    .capture_action(cx.listener(|this, _: &crate::live::Down, window, cx| {
                         if this.slash_key(SlashKey::Down, window, cx) {
                             cx.stop_propagation();
                         }
                     }))
-                    .capture_action(cx.listener(|this, _: &gpui_component::input::IndentInline, window, cx| {
+                    .capture_action(cx.listener(|this, _: &crate::live::Tab, window, cx| {
                         if this.slash_key(SlashKey::Complete, window, cx) || this.accept_suggestion(window, cx) {
                             cx.stop_propagation();
                         }
                     }))
-                    .capture_action(cx.listener(|this, _: &gpui_component::input::MoveRight, window, cx| {
+                    .capture_action(cx.listener(|this, _: &crate::live::Right, window, cx| {
                         if this.accept_suggestion(window, cx) {
                             cx.stop_propagation();
                         }
                     }))
-                    .capture_action(cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
+                    .capture_action(cx.listener(|this, _: &crate::live::Escape, window, cx| {
                         // The composer's find card open, the key is the
                         // card's, with the keyboard in the card or in the
                         // text: it closes it and goes no further. Then the
                         // slash list, then anything else open, then the
                         // running turn: the textarea would keep the key to
                         // itself otherwise.
-                        if this.composer.read(cx).search_session().open {
-                            return;
-                        }
                         if this.slash_key(SlashKey::Close, window, cx) {
                             cx.stop_propagation();
                         } else if this.pick.is_some() || this.dialog_seen.is_some() || this.lightbox.is_some() || this.search_open || this.find_open || this.term_open.is_some() {
@@ -18995,7 +19134,11 @@ impl Workbench {
                     .text_size(px(composer_px))
                     .line_height(px(composer_line))
                     .relative()
-                    .child(Textarea::new(&self.composer).appearance(false).bordered(false).text_size(px(composer_px)).line_height(px(composer_line)).on_secondary_click(self.input_menu(&self.composer, true, cx)))
+                    // The editor is as tall as its words: its room grows
+                    // with them between the fewest rows and the most, and
+                    // scrolls past that. Set in from the edges as the
+                    // toolkit's field set its words, where the hint is.
+                    .child(div().id("composer-room").w_full().min_h(px(composer_line * COMPOSER_MIN_ROWS as f32 + 15.)).max_h(px(composer_line * COMPOSER_MAX_ROWS as f32 + 15.)).overflow_y_scroll().track_scroll(&composer_scroll).px(px(10.5)).py(px(7.5)).cursor_text().child(self.composer.clone()))
                     .children(self.render_composer_hint(cx)),
             )
             .child(

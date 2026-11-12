@@ -27,6 +27,9 @@ use gpui_component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable a
 use emaki_core::git;
 use emaki_core::outline::{self, Kind};
 
+mod doc_edit;
+pub(crate) use doc_edit::DocCanvas;
+
 use crate::format::clock;
 use crate::i18n::{count, t, tf};
 use crate::workbench::{choice_pill, float_shadow, Column, Press, swallow_click, MenuDo, Notice, Page, Workbench};
@@ -813,6 +816,8 @@ struct DocShown {
     /// find bar is open.
     find: Option<(String, bool, usize)>,
     size: f32,
+    /// The conversation's face, which a file as it reads is set in too.
+    face: Option<SharedString>,
     pad: (f32, f32),
     look: (bool, Hsla, Hsla, Hsla),
 }
@@ -833,6 +838,7 @@ impl Render for FileDoc {
         let (band, rest) = match emaki_core::files::front_matter(&self.text) {
             Some((fields, rest)) => {
                 let band = div()
+                    .id("doc-header")
                     .mx(px(-pad_x))
                     .mt(px(-pad_y))
                     .mb(px(pad_y))
@@ -848,7 +854,7 @@ impl Render for FileDoc {
             None => (None, self.text.clone()),
         };
         let find = shown.find.is_some().then(|| self.find.clone());
-        let view = crate::transcript::md_view_file(text_state, rest, shown.quarto, find, Some(self.spots.clone()), self.kept.clone(), cx);
+        let view = crate::transcript::md_view_file(text_state, rest, shown.quarto, find, Some(self.spots.clone()), self.kept.clone(), None, None, cx);
         let height = self.height.clone();
         // It comes in as the pane's other contents do, over `FILE_ANIM`.
         let t = (self.fade.1.elapsed().as_secs_f32() / FILE_ANIM.as_secs_f32()).min(1.);
@@ -860,7 +866,7 @@ impl Render for FileDoc {
             .relative()
             .opacity(t)
             .children(band)
-            .child(div().text_size(px(shown.size)).line_height(relative(1.6)).child(view))
+            .child(div().text_size(px(shown.size)).line_height(relative(1.6)).when_some(shown.face.clone(), |d, face| crate::fonts::Faced::faced(d, face, cx)).child(view))
             .child(
                 canvas(
                     move |bounds, window, _| {
@@ -3785,6 +3791,7 @@ impl Workbench {
 
     /// The pane goes in motion, nothing asked: closed, or its file gone.
     fn shut_file_view(&mut self, cx: &mut Context<Self>) {
+        self.doc_canvas = None;
         if let Some(v) = self.file_view.take() {
             // The conversation has its room back at once, and the pane
             // goes from the width it has beside it.
@@ -3914,6 +3921,10 @@ impl Workbench {
     pub(crate) fn file_unselect(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.file_view.is_none() || !self.file_focus.contains_focused(window, cx) {
             return false;
+        }
+        // The file being written in as it reads is left.
+        if self.doc_leave(window, cx) {
+            return true;
         }
         if let Some(state) = self.file_editor.as_ref().map(|ed| ed.state.clone()).filter(|state| !state.read(cx).selected_range().is_empty()) {
             state.update(cx, |s, cx| {
@@ -4232,6 +4243,10 @@ impl Workbench {
     pub(crate) fn sync_file_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_file_editor_only(window, cx);
         self.sync_file_marks(cx);
+        // The file written in as it reads, kept as its editor has it.
+        if self.doc_canvas_now(window, cx).is_none() && !self.doc_editable() {
+            self.doc_canvas = None;
+        }
     }
 
     fn sync_file_editor_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4546,6 +4561,10 @@ impl Workbench {
             // A LaTeX or Typst file is its own words, not the markdown it
             // reads as.
             FileBody::Markdown(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), if written_as(&v.path).is_some() { emaki_core::render_md::lang_for_path(&v.path.to_string_lossy()) } else { "markdown" }),
+            // Markdown the pane holds whole has its editor as it reads
+            // too: what is written in a block there is written in the
+            // editor's text (`doc_edit.rs`), as a table's cell is.
+            FileBody::Markdown(text) if v.source.is_some() && written_as(&v.path).is_none() && text.len() <= doc_edit::DOC_MOST => (v.source.clone()?, "markdown"),
             FileBody::Html(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), "html"),
             FileBody::Notebook(_) if self.file_raw => (v.source.clone()?, "json"),
             // A table has its editor whichever way it shows: a cell
@@ -7065,7 +7084,9 @@ impl Workbench {
         // As it reads, the structure is the read text's: a Quarto file
         // reads with its includes pasted in, more headings than it has
         // as written, and the view's headings are counted in that order.
-        let editing = self.file_editor.as_ref().filter(|ed| ed.path == v.path && self.file_raw);
+        // Written in as it reads, its lines are the editor's lines too.
+        let canvas = self.doc_canvas.as_ref().is_some_and(|c| c.path == v.path) && self.doc_editable();
+        let editing = self.file_editor.as_ref().filter(|ed| ed.path == v.path && (self.file_raw || canvas));
         let text = match editing {
             Some(ed) => ed.state.read(cx).value().to_string(),
             None => read.clone(),
@@ -7138,11 +7159,15 @@ impl Workbench {
                     return Some(*ix);
                 }
             }
+            let top = self.file_view_scroll.bounds().top() + px(24.);
+            // Written in as it reads: where the editor draws each line.
+            if let Some(editor) = self.doc_canvas.as_ref().filter(|_| self.doc_editable()).map(|c| c.editor.read(cx)) {
+                return heads.iter().rposition(|h| editor.line_top(h.line).is_some_and(|y| y <= top));
+            }
             let spots = self.file_heads_spots.spots();
             if spots.len() != heads.len() {
                 return None;
             }
-            let top = self.file_view_scroll.bounds().top() + px(24.);
             spots.iter().rposition(|(_, b)| b.top() <= top)
         }
     }
@@ -7196,7 +7221,13 @@ impl Workbench {
     /// way down, when it is out of view; the heading is lit either way.
     fn file_head_glide(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(path) = self.file_view.as_ref().map(|v| v.path.clone()) else { return };
-        if let Some((_, b)) = self.file_heads_spots.spots().get(ix) {
+        let canvas = self.doc_canvas.as_ref().filter(|_| self.doc_editable()).and_then(|c| {
+            let head = self.file_heads.as_ref()?.1.get(ix)?;
+            let y = c.editor.read(cx).line_top(head.line)?;
+            Some(Bounds::new(point(px(0.), y), size(px(1.), px(1.))))
+        });
+        if let Some(b) = canvas.or_else(|| self.file_heads_spots.spots().get(ix).map(|(_, b)| *b)) {
+            let b = &b;
             let (view, at) = (self.file_view_scroll.bounds(), self.file_view_scroll.offset());
             if b.top() < view.top() || b.bottom() > view.bottom() {
                 let to = (at.y - (b.top() - view.top() - view.size.height / 3.)).clamp(-self.file_view_scroll.max_offset().y, px(0.));
@@ -9351,12 +9382,19 @@ impl Workbench {
         let body: AnyElement = match &v.body {
             // Code, and markdown as it is written, are the editor's.
             FileBody::Markdown(_) if self.file_raw => div().into_any_element(),
+            // Written in as it reads: the whole file one editor
+            // (`doc_edit.rs`).
+            FileBody::Markdown(_) if !leaving && self.doc_editable() => match self.doc_canvas.as_ref().filter(|c| c.path == v.path) {
+                Some(c) => div().w_full().child(c.editor.clone()).into_any_element(),
+                None => div().into_any_element(),
+            },
             FileBody::Code(..) => div().into_any_element(),
             FileBody::Markdown(text) => {
                 let shown = DocShown {
                     quarto: reads_as_quarto(&v.path),
                     find: self.text_find_open.then(|| (self.text_find.query(), self.text_find.case_sensitive(), self.text_find.current())),
                     size: self.cfg.app.text_sizes().preview,
+                    face: crate::fonts::chat_family(&self.cfg.app.chat_font, cx),
                     pad: (pad_x, pad_y),
                     look: (theme.mode.is_dark(), theme.primary, theme.background, theme.foreground),
                 };
@@ -9908,6 +9946,9 @@ impl Workbench {
         let scroller = v_flex().id("file-body").flex_1().min_h_0().px(px(pad_x)).py(px(pad_y)).track_scroll(&self.file_view_scroll).when(!pdf && !leaving, |d| {
             // A PDF's pages and a table's cells have menus of their own.
             d.on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, window, cx| this.file_body_menu(e.position, window, cx)))
+                // A press under the file's last line puts the caret at its
+                // end (`doc_edit.rs`).
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, window, cx| this.doc_pane_pressed(e.position, window, cx)))
         });
         v_flex()
             .id("file-pane")
@@ -9922,7 +9963,13 @@ impl Workbench {
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 this.pdf_key(e, cx);
                 this.table_key(e, window, cx);
+                // ⌘A with the keyboard in the pane: the whole file as it
+                // reads, selected to write over (`doc_edit.rs`).
+                if e.keystroke.key == "a" && e.keystroke.modifiers.secondary() && !e.keystroke.modifiers.shift && this.file_focus.is_focused(window) && this.doc_select_all(window, cx) {
+                    cx.stop_propagation();
+                }
             }))
+
             // A table's heads stay put: they are drawn where the scroll is.
             .when(grid, |d| d.on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.pdf_mouse_move(e, cx)))
@@ -11121,6 +11168,10 @@ impl Workbench {
             "file:ask:discard" => self.pending_answer = Some(FileAnswer::Discard),
             "file:ask:cancel" => self.pending_answer = Some(FileAnswer::Cancel),
             "quit" => self.quit(cx),
+            "doc:dump" => self.pending_doc = Some("\0dump".into()),
+            // Words typed in the block being written in as the file
+            // reads (`_` for a space, `\n` for a line end).
+            t if t.starts_with("doc:type:") => self.pending_doc = Some(t["doc:type:".len()..].replace('_', " ").replace("\\n", "\n")),
             "file:raw" => self.set_file_raw(true, cx),
             "file:read" => self.set_file_raw(false, cx),
             // In the PDF showing: select everything, or glyphs from and

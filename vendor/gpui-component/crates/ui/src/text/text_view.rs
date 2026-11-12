@@ -79,6 +79,9 @@ pub struct TextView {
     /// Emaki: the views kept registered while drawn from a cache
     /// (`KeptViews`).
     kept: Option<super::KeptViews>,
+    /// Emaki: a block written in where it stands (`edit.rs`).
+    edit: Option<super::EditSlot>,
+    unit_click: Option<Arc<super::UnitClickFn>>,
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -123,6 +126,8 @@ impl TextView {
             find: None,
             headings: None,
             kept: None,
+            edit: None,
+            unit_click: None,
         }
     }
 
@@ -144,6 +149,8 @@ impl TextView {
             find: None,
             headings: None,
             kept: None,
+            edit: None,
+            unit_click: None,
         }
     }
 
@@ -165,6 +172,8 @@ impl TextView {
             find: None,
             headings: None,
             kept: None,
+            edit: None,
+            unit_click: None,
         }
     }
 
@@ -200,6 +209,20 @@ impl TextView {
 
     pub fn kept(mut self, kept: Option<super::KeptViews>) -> Self {
         self.kept = kept;
+        self
+    }
+
+    /// Emaki: the caller's element where a block stands, or after it
+    /// (`EditSlot`).
+    pub fn edit_slot(mut self, slot: Option<super::EditSlot>) -> Self {
+        self.edit = slot;
+        self
+    }
+
+    /// Emaki: a press on a block, with no drag, is handed to `f`
+    /// (`UnitClick`).
+    pub fn on_unit_click(mut self, f: Option<Arc<super::UnitClickFn>>) -> Self {
+        self.unit_click = f;
         self
     }
 
@@ -381,6 +404,8 @@ impl Element for TextView {
             state.scrollable = self.scrollable;
             state.find = self.find.clone();
             state.headings = self.headings.clone();
+            state.edit = self.edit.clone();
+            state.unit_click = self.unit_click.clone();
             if state.text_view_style != self.text_view_style {
                 state.selection_revision = state.selection_revision.wrapping_add(1);
             }

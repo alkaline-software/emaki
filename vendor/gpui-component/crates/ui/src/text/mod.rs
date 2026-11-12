@@ -1,4 +1,5 @@
 mod document;
+mod edit;
 mod find;
 mod format;
 mod inline;
@@ -18,7 +19,8 @@ mod window_selection;
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
 pub use find::{HeadingSpots, KeptViews, TextFind};
 pub use inline::right_clicked_link;
-pub use node::LinkMark;
+pub use edit::{EditSlot, EditUnit, UnitClick, UnitClickFn, UnitKind};
+pub use node::{LinkMark, Span};
 pub use markdown_ext::*;
 pub use math::{MathFace, MathPicture, MathSetFn};
 pub use state::*;

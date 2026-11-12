@@ -41,6 +41,10 @@ uuid = { version = "1", features = ["v4"] }
 # The parser behind the toolkit's text view, at the same version, so a
 # text can be tried before the view gets it (see `md_view`).
 markdown = "1.0.0"
+# The live-preview editor (`live/`): markdown read with every span's place in the text, a caret that steps by grapheme, and a code block's text as the highlighter takes it. Each at the version the lock already has.
+pulldown-cmark = { version = "0.13", default-features = false }
+unicode-segmentation = "1"
+ropey = "2.0.0-beta.1"
 # Open-with and the person's name, without shelling out to macOS commands.
 opener = "0.7"
 trash = "5"

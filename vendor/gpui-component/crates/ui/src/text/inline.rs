@@ -789,6 +789,7 @@ impl Element for Inline {
                 let hitbox = hitbox.clone();
                 let text_view_state = UiGlobalState::global(cx).text_view_state().cloned();
                 let link_click_handler = self.link_click_handler.clone();
+                let words = self.text.clone();
 
                 move |event: &MouseUpEvent, phase, window, cx| {
                     if !phase.bubble() || !hitbox.is_hovered(window) {
@@ -799,6 +800,14 @@ impl Element for Inline {
                         .is_some_and(|state| state.read(cx).has_selection(cx))
                     {
                         return;
+                    }
+
+                    // Emaki: which of its words the pointer was let go
+                    // over, for the block's own press (`edit.rs`).
+                    if event.button == MouseButton::Left {
+                        if let Ok(index) = text_layout.index_for_position(event.position) {
+                            super::edit::note_words_pressed(event.position, words.clone(), index);
+                        }
                     }
 
                     if let Some(link) =
