@@ -2,6 +2,19 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.5.3
+
+1. **Rendered editor**: A markdown or Quarto file is written in as it reads, its bold, code and tables drawn as you type and their marks shown only where the caret is, with ⇧⌘V to the raw editor.
+2. **Live composer**: The composer draws markdown as you type, with a setting to turn it off, and shows slash commands, @ files and ! commands in monospace.
+3. **Code**: ⇧⌘C turns words into code and code back into words, as in Slack, in the composer and in both editors.
+4. **Custom fonts**: Any font on your computer can be the chat, CJK or monospace font, down to one of its weights, and a CJK font is named in its own language and in English.
+5. **Inline code**: Code among words is a little smaller and lighter with more room around it, and a block of code follows the editor's text size.
+6. **Usage limits**: When Claude Code says a usage limit is reached, its warning stands over the composer.
+7. **Moving pictures**: GIFs and animated WebPs play a frame at a time, so a large one no longer takes gigabytes of memory.
+8. **Speed**: An open session no longer redraws the window while nothing moves, and typing in a long markdown file lays out only what changed.
+9. **Questions**: A question's choice with a preview is taken in one click, and its first choice is no longer selected by mistake.
+10. **Fixes**: The working line shows during /compact, a selection stays in the pane it began in, a deleted file's preview closes, symlinks are marked in the file tree, and the memory report is gone now that memory holds steady.
+
 ## v0.5.2
 
 1. **Memory**: Pictures are let go when what shows them closes (a tab, the lightbox, a file, the composer's chips), and thumbnails are decoded small, so Emaki no longer grows by gigabytes over a day.
