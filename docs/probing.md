@@ -90,6 +90,8 @@ A markdown file written in as it reads: `clickat:` puts the caret, `holdat:` dra
 
 `EMAKI_GO` steps `treeall` (⌘A in the files tree) and `treeband:<y>:<y2>` (a rectangle dragged down it, in points from the tree's top); `file:menu` with the editor showing is a right click on its first line's word.
 
+`EMAKI_GO` step `warn:<title>|<rest>` puts a warning under the prompt as if Claude Code had (`_` for a space), and `warn:` with nothing takes it away: the tray's warning line.
+
 `EMAKI_LANG=<code>` (`zh-Hans`, `zh-Hant`, `ja`, `ko`, `fr`, `de`, `es`, `en`) draws the window in that language whatever is chosen, and changes nothing that is saved. `EMAKI_SETTINGS_SHOTS` with it shoots every section in that language.
 
 `EMAKI_NO_AGENTS=1` shows the new-session page as a machine with no agent on it has it.

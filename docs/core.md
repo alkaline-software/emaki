@@ -130,18 +130,9 @@ Tried and dropped: a tail-first reader. The largest transcript on the machine th
 - The hub owns one `Explainer` and asks it the moment a `Permission` event arrives, so the card has the answer while the person decides. A tool card's *Explain* button asks with `force`. Scope `all` also asks for the tail of the session showing on each live reload, never on a first open.
 - Answers come back as `HubEvent::Explained` into `Workbench::explanations`, an overlay by call id that the next load makes redundant.
 
-## Memory reports
-
-A leak that grew to 14 GB on one Mac while typing (issue 8) could not be reproduced on any other, and the person had nothing to send: what grew has to be measured where it grew. So the window reads its own footprint on its one-second clock (`memory::footprint`: `proc_pid_rusage` on a Mac, the number Activity Monitor shows; the resident set on Linux; nothing on Windows, which writes no report) and, at `FIRST_REPORT` and at each doubling after it (`report_due`), writes `~/.emaki/logs/memory-<time>.txt` off the main thread (`write_report`). Two reports of one run show what grew between them; the newest twenty are kept.
-
-- A report holds the app's version, the footprint, what the window holds in counts (`Workbench::memory_held`, `Hub::held`: tabs, each conversation's rounds and items, transcript rows, pictures, each place's pictures as drawn and their decoded size, file lists, drafts, drivers, terminals) and no words of the person's, then the system's view: `sw_vers`, the machine and its memory, the displays and GPU, and `footprint` and `vmmap --summary` of the process. Both tools read a notarized, hardened Emaki run by the same user.
-- Each report puts a line in the tray (`memory_line`, `docs/live-turn.md`): the size first, so it survives a narrow row, Reveal in Finder and Close.
-- Counts taken from the hub are taken a lock a statement: the locks in one `format!`'s arguments are all held to its end, and `terminals` with `peers` stands against `reap_terminals`.
-
 ## Probing
 
 - `emaki-core remote` lists the remote computers; `remote add <[user@]host[:port]> [--password <pw>]` adds one as Settings does, `remote link <id> [--secs <n>]` copies its sessions and follows them, printing how the link stands, and `drive ssh://<remote>/<path> <words>` runs a turn there.
 - `emaki-core bench [<id>...]` times read, build and render for a transcript (the five largest by default).
 - `EMAKI_TIMING=1` makes the app print load and hand-over time per open.
 - `emaki-core explain <command>` makes one real model call from a terminal. It asks as a Claude Code session would; `EMAKI_HELPER=codex` asks as a Codex one.
-- `EMAKI_MEMORY_REPORT_MB=<n>` writes the first memory report at that many megabytes, so a probe copy writes one at once.

@@ -1619,13 +1619,6 @@ pub struct Workbench {
     reload_wanted: bool,
     /// The rows of the session showing, kept between its reads.
     live_rows: Option<(String, emaki_core::build::LiveRows)>,
-    /// The last footprint a memory report was written at, 0 for none
-    /// (`watch_memory`).
-    memory_reported: u64,
-    /// The footprint and the file of the last memory report written,
-    /// and whether its line stands in the tray (`memory_line`).
-    pub(super) memory_report: Option<(u64, PathBuf)>,
-    pub(super) memory_said: bool,
     /// The width "Sign in" was last drawn at, beside a saved computer's
     /// agent, for its pill to grow by (`remote_row`).
     pub(super) sign_word_w: Rc<std::cell::Cell<f32>>,
@@ -1820,6 +1813,8 @@ pub struct Workbench {
     /// (`HubEvent::Held`), and what the tray's line last said of it.
     held: HashMap<String, emaki_core::driver::Held>,
     held_kept: std::cell::RefCell<Option<emaki_core::driver::Held>>,
+    /// What the tray's warning line last said, kept while it goes.
+    warning_kept: std::cell::RefCell<Option<emaki_core::driver::ScreenWarning>>,
     /// What Claude Code has last put up beside the prompt of each
     /// session, read off its screen (`read_notes`), and what the person
     /// has put away.
@@ -3896,7 +3891,6 @@ impl Workbench {
                         cx.notify();
                     }
                     this.tick_files(cx);
-                    this.watch_memory(cx);
                     // The status line's files once a minute, which is the
                     // countdown's own resolution; a session's load reads
                     // them too, and that is when they change.
@@ -4023,8 +4017,6 @@ impl Workbench {
             _ => {}
         })
         .detach();
-        // The caret moved, or blinked: the composer is drawn again.
-        cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         // A table's cell: ↩ keeps what was typed and goes to the cell
         // under it, as a spreadsheet does.
         let table_input = cx.new(|cx| InputState::new(window, cx));
@@ -4490,9 +4482,6 @@ impl Workbench {
             renamed: HashMap::new(),
             reload_wanted: false,
             live_rows: None,
-            memory_reported: 0,
-            memory_report: None,
-            memory_said: false,
             sign_word_w: Rc::new(std::cell::Cell::new(0.)),
             file_held: None,
             connect_first: None,
@@ -4571,6 +4560,7 @@ impl Workbench {
             monitors_open: None,
             held: HashMap::new(),
             held_kept: Default::default(),
+            warning_kept: Default::default(),
             notes: HashMap::new(),
             notes_reading: false,
             notes_kept: Default::default(),
@@ -6923,6 +6913,11 @@ impl Workbench {
                 let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
                 let out = self.selected.as_ref().and_then(|k| self.outgoing.get(k)).map(|o| (o.delivered, o.error.clone()));
                 eprintln!("held {:?} outgoing {:?}", self.held.get(&sid), out);
+            }
+            Some(t) if t.starts_with("warn:") => {
+                let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
+                self.warning_probe(sid, &t["warn:".len()..]);
+                cx.notify();
             }
             Some(t) if t.starts_with("note:") => {
                 let sid = self.selected_ref().map(|r| r.session_id.clone()).unwrap_or_default();
@@ -16649,7 +16644,7 @@ impl Workbench {
             }
         }
         let mut lines: Vec<tray::Line> = self.held_line(&r, cx).into_iter().collect();
-        lines.extend(self.memory_line(cx));
+        lines.extend(self.warning_line(&r, cx));
         // The decision line says what is asked; the terminal's own
         // screen on its card has no choices to stand here, and when the
         // reader has left it behind, a line of its own goes to it.
@@ -18321,66 +18316,6 @@ impl Workbench {
         self.issues.clear();
         self.mark_slash(cx);
         self.check_soon(cx);
-    }
-
-    /// Emaki's own footprint, on the clock: past `memory::first_report`
-    /// and at each doubling after it, a report of what the system and
-    /// the window say it holds is written to the logs, off the main
-    /// thread, and a line in the tray says so (`memory_line`). A leak one
-    /// machine had and no other could reproduce left nothing to read.
-    fn watch_memory(&mut self, cx: &mut Context<Self>) {
-        use emaki_core::memory;
-        let Some(now) = memory::footprint() else { return };
-        let first = memory::first_report();
-        let Some(step) = memory::report_due(now, self.memory_reported, first) else { return };
-        self.memory_reported = step;
-        let held = self.memory_held(cx);
-        cx.spawn(async move |this, cx| {
-            let written = cx.background_spawn(async move { memory::write_report(now, &held) }).await;
-            let _ = this.update(cx, |this, cx| match written {
-                Ok(path) => {
-                    this.memory_report = Some((now, path));
-                    this.memory_said = true;
-                    cx.notify();
-                }
-                Err(e) => eprintln!("emaki: could not write the memory report: {e}"),
-            });
-        })
-        .detach();
-    }
-
-    /// What the window holds, in counts and no words of the person's,
-    /// for the memory report.
-    fn memory_held(&self, cx: &App) -> String {
-        let pictures = |kept: Option<&Entity<crate::pictures::Kept>>| {
-            let (n, bytes) = kept.map(|k| k.read(cx).held()).unwrap_or_default();
-            format!("{n} pictures drawn ({} MB)", bytes >> 20)
-        };
-        let conversation = |d: &Detail| {
-            let items: usize = d.session.rounds.iter().map(|r| r.items.len()).sum();
-            format!("{} rounds, {} items, {} thumbnails, {} picture sizes, {}", d.session.rounds.len(), items, d.thumbs.len(), d.sizes.len(), pictures(d.pictures.as_ref()))
-        };
-        let mut out = String::new();
-        out.push_str(&format!("tabs: {}\n", self.tabs.len()));
-        if let Some(d) = &self.detail {
-            out.push_str(&format!("conversation showing: {}\n", conversation(d)));
-        }
-        for d in self.stashed.values() {
-            out.push_str(&format!("conversation put away: {}\n", conversation(d)));
-        }
-        if let Some((_, rows)) = &self.live_rows {
-            out.push_str(&format!("transcript rows held: {}\n", rows.len()));
-        }
-        let entries: usize = self.files.values().map(|(_, list)| list.len()).sum();
-        out.push_str(&format!("\"@\" file lists: {} folders, {} entries\n", self.files.len(), entries));
-        out.push_str(&format!("drafts: {}\n", self.drafts.len()));
-        out.push_str(&format!("composer chips: {}\n", pictures(Some(&self.composer_pictures))));
-        out.push_str(&format!("lightbox: {}\n", pictures(self.lightbox_pictures.as_ref())));
-        out.push_str(&format!("file pane: {}\n", pictures(Some(&self.file_pictures))));
-        out.push_str(&format!("changes: {}\n", pictures(self.changes_pictures.as_ref())));
-        out.push_str(&format!("composer: {} bytes, {} writing marks\n", self.composer.read(cx).value().len(), self.issues.len()));
-        out.push_str(&self.hub.held());
-        out
     }
 
     /// Checks the composer's text once the typing has paused. English is

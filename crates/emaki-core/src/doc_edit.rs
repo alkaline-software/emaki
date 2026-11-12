@@ -75,9 +75,12 @@ impl Map {
     }
 
     fn find(&self, at: usize, end: bool, key: impl Fn(&Run) -> usize, other: impl Fn(&Run) -> usize) -> Option<usize> {
-        let inside = |r: &&Run| key(r) <= at && at < key(r) + r.len;
-        let closes = |r: &&Run| at == key(r) + r.len;
-        let run = if end { self.runs.iter().find(closes).or_else(|| self.runs.iter().find(inside)) } else { self.runs.iter().find(inside).or_else(|| self.runs.iter().find(closes)) }?;
+        // The runs stand in order on both sides, so the one a byte is in,
+        // and the one it closes, are found by halving: a rendered file
+        // asks this of every piece it has, at every key.
+        let inside = || self.runs.get(self.runs.partition_point(|r| key(r) + r.len <= at)).filter(|r| key(r) <= at && at < key(r) + r.len);
+        let closes = || self.runs.get(self.runs.partition_point(|r| key(r) + r.len < at)).filter(|r| at == key(r) + r.len);
+        let run = if end { closes().or_else(inside) } else { inside().or_else(closes) }?;
         Some(other(run) + (at - key(run)))
     }
 
@@ -236,6 +239,28 @@ mod tests {
         // The line holding the picture is found whole, by its ends.
         let line = shown.find("![alt]").unwrap()..shown.find(" tail").unwrap() + 5;
         assert_eq!(&source[m.range_to_source(line).unwrap()], "![alt](a.png) tail");
+    }
+
+    #[test]
+    fn every_byte_is_found_where_a_walk_through_the_runs_finds_it() {
+        let source = "one\n\n![a](a.png) tail\n\nmid\n\n![b](b.png)\nx ![c](c.png) y\n\n{{< include z.qmd >}}\n\nlast\n";
+        let shown = "one\n\n![a](file:///p/a.png) tail\n\nmid\n\n![b](file:///p/b.png)\nx ![c](file:///p/c.png) y\n\npasted\nwords\n\nlast\n";
+        let m = Map::new(source, shown);
+        assert!(m.runs.len() > 4);
+        let walk = |at: usize, end: bool, key: &dyn Fn(&Run) -> usize, other: &dyn Fn(&Run) -> usize| {
+            let inside = |r: &&Run| key(r) <= at && at < key(r) + r.len;
+            let closes = |r: &&Run| at == key(r) + r.len;
+            let run = if end { m.runs.iter().find(closes).or_else(|| m.runs.iter().find(inside)) } else { m.runs.iter().find(inside).or_else(|| m.runs.iter().find(closes)) };
+            run.map(|r| other(r) + (at - key(r)))
+        };
+        for end in [false, true] {
+            for at in 0..=shown.len() {
+                assert_eq!(m.to_source(at, end), walk(at, end, &|r| r.shown, &|r| r.source), "shown {at} {end}");
+            }
+            for at in 0..=source.len() {
+                assert_eq!(m.to_shown(at, end), walk(at, end, &|r| r.source, &|r| r.shown), "source {at} {end}");
+            }
+        }
     }
 
     #[test]

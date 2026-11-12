@@ -918,6 +918,70 @@ pub fn notes_on_screen(text: &str) -> Vec<ScreenNote> {
     notes
 }
 
+/// A warning Claude Code puts under its prompt, over its status line:
+/// "⚠ Usage limit reached · wrapping up · limit resets 11:40pm ·
+/// clau.de/wrap-up · /upgrade to keep using Claude Code" (2.1.322), the
+/// first stretch in its color and the rest gray, wrapped over as many
+/// lines as it needs. It stays there while it holds, in the footer, where
+/// nothing else of the window reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenWarning {
+    /// What it says, in its color: "Usage limit reached · wrapping up".
+    pub title: String,
+    /// The color of that, `0xRRGGBB`, when the screen was read with its
+    /// colors.
+    pub color: Option<u32>,
+    /// The rest, as written: "limit resets 11:40pm · clau.de/wrap-up · …".
+    pub detail: String,
+}
+
+/// The warning under the prompt (`ScreenWarning`): the first line under
+/// its lower rule that begins with "⚠", and each line it wrapped onto, a
+/// line whose first word would not have fit on the one before. The
+/// status line under it (ours, `scripts/statusline.sh`, "Context …") and
+/// the mode's line are not it. None when there is none.
+pub fn warning_on_screen(text: &str) -> Option<ScreenWarning> {
+    let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let plain: Vec<String> = lines.iter().map(|l| strip_sgr(l)).collect();
+    let below = (0..plain.len()).rev().find(|i| is_rule(&plain[*i]))?;
+    let right = plain[below].trim_end().chars().count();
+    let first = (below + 1..plain.len()).find(|i| plain[*i].trim_start().starts_with('⚠'))?;
+    let mut spans = sgr_spans(lines[first]);
+    let mut end = plain[first].trim_end().chars().count();
+    for ix in first + 1..plain.len() {
+        let words = plain[ix].trim();
+        let next = words.split_whitespace().next().unwrap_or("").chars().count();
+        if words.is_empty() || words.starts_with('⚠') || words.starts_with("Context") || end + 1 + next + 3 <= right {
+            break;
+        }
+        spans.push((" ".to_string(), None));
+        spans.extend(sgr_spans(lines[ix]));
+        end = plain[ix].trim_end().chars().count();
+    }
+    // The mark and the space after it go; the first stretch in a color
+    // of its own is the title, up to the first "·" written in another.
+    let whole: String = spans.iter().map(|(t, _)| t.as_str()).collect();
+    let whole = whole.trim().trim_start_matches('⚠').trim_start();
+    let color = spans.iter().find(|(t, _)| !t.trim().is_empty() && t.trim() != "⚠").and_then(|(_, c)| *c);
+    let mut title = String::new();
+    let mut started = false;
+    for (t, c) in &spans {
+        let t = if started { t.as_str() } else { t.trim_start().trim_start_matches('⚠').trim_start() };
+        if t.is_empty() {
+            continue;
+        }
+        if started && *c != color {
+            break;
+        }
+        started = true;
+        title.push_str(t);
+    }
+    let title = title.trim().trim_end_matches('·').trim().to_string();
+    let title = if color.is_none() || title.is_empty() { whole.split(" · ").next().unwrap_or(whole).trim().to_string() } else { title };
+    let detail = whole.strip_prefix(title.as_str()).unwrap_or("").trim().trim_start_matches('·').trim().split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(ScreenWarning { title, color, detail })
+}
+
 /// Whether Claude Code's prompt is in its shell mode: "!" where "❯" is,
 /// and what is typed there runs as a command, not a message.
 pub fn shell_on_screen(text: &str) -> bool {

@@ -37,5 +37,5 @@ pub(crate) use editor::{
     SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab, TableFacts, ToggleTask, Up, WordLeft, WordRight, LIVE_CONTEXT,
 };
 #[allow(unused_imports)]
-pub(crate) use markdown::{Align, Prose};
+pub(crate) use markdown::{code_around, Align, Prose};
 pub(crate) use rhythm::Heading;

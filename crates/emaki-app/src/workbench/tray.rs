@@ -54,6 +54,9 @@ pub(super) struct Line {
 pub(super) struct Notes {
     said: Option<(emaki_core::driver::ScreenNote, f64)>,
     read: bool,
+    /// The warning under the prompt, while Claude Code shows it
+    /// (`warning_on_screen`): a usage limit reached.
+    warning: Option<emaki_core::driver::ScreenWarning>,
 }
 
 /// What the decision line answers.
@@ -186,36 +189,6 @@ impl Workbench {
         Some(Line { key, on, moving, row: row.into_any_element(), free: false })
     }
 
-    /// Emaki holds far more memory than it should, and a report of it
-    /// is written (`watch_memory`): the way to the file, for the person
-    /// to send, until they put the line away.
-    pub(super) fn memory_line(&self, cx: &mut Context<Self>) -> Option<Line> {
-        let key = "line-memory".to_string();
-        let on = self.memory_said;
-        let moving = self.presence(&key, on, cx);
-        if !on && moving.is_none() {
-            return None;
-        }
-        let (size, path) = self.memory_report.clone()?;
-        let theme = cx.theme().clone();
-        let reveal = tray_pill("memory-reveal", "icons/folder-open.svg", t(crate::sys::REVEAL_LABEL), Press::Primary, !on, &theme).when(on, |b| {
-            b.on_click(cx.listener(move |_, _, window, cx| {
-                swallow_click(window, cx);
-                crate::sys::reveal_path(&path);
-            }))
-        });
-        let close = tray_pill("memory-close", "icons/close.svg", t("Close"), Press::Quiet, !on, &theme).when(on, |b| {
-            b.on_click(cx.listener(|this, _, window, cx| {
-                swallow_click(window, cx);
-                this.memory_said = false;
-                cx.notify();
-            }))
-        });
-        let mark = Icon::default().path("icons/triangle-alert.svg").with_size(px(14.)).text_color(theme.warning);
-        let row = tray_row("memory-row", mark, tf("{size} of memory in use", &[("size", &human_size(size))]), t("a report for its developers is saved"), None, vec![reveal.into_any_element(), close.into_any_element()], &theme);
-        Some(Line { key, on, moving, row: row.into_any_element(), free: false })
-    }
-
     /// Claude Code's own notes for the session showing, off its screen.
     /// Only a hidden terminal of ours has a screen to read. One read at
     /// a time, off the main thread.
@@ -227,12 +200,17 @@ impl Workbench {
         }
         self.notes_reading = true;
         cx.spawn(async move |this, cx| {
-            let seen = cx.background_spawn(async move { crate::sys::terminal_styled(pid).map(|t| emaki_core::driver::notes_on_screen(&t)).unwrap_or_default() }).await;
+            let seen = cx.background_spawn(async move { crate::sys::terminal_styled(pid).map(|t| (emaki_core::driver::notes_on_screen(&t), emaki_core::driver::warning_on_screen(&t))) }).await;
             let _ = this.update(cx, |this, cx| {
                 this.notes_reading = false;
+                let (seen, warning) = seen.unwrap_or_default();
                 let now = this.now;
                 let gone = this.notes_gone.clone();
                 let notes = this.notes.entry(sid.clone()).or_default();
+                if notes.warning != warning {
+                    notes.warning = warning;
+                    cx.notify();
+                }
                 let before = notes.said.as_ref().map(|n| n.0.text.clone());
                 if let Some(note) = seen.into_iter().rfind(|n| !gone.contains(&n.text)) {
                     notes.read &= before.as_deref() == Some(note.text.as_str());
@@ -255,7 +233,39 @@ impl Workbench {
     /// the space that a probe's value cannot hold).
     pub(super) fn note_probe(&mut self, sid: String, text: &str, now: f64) {
         let note = emaki_core::driver::ScreenNote { text: text.replace('_', " "), color: Some(0xFFC107) };
-        self.notes.insert(sid, Notes { said: Some((note, now + 600.)), read: false });
+        self.notes.insert(sid, Notes { said: Some((note, now + 600.)), read: false, warning: None });
+    }
+
+    /// A warning under the prompt as if it had been read, for a probe
+    /// (`warn:`, `_` for a space, the title and the rest parted by `|`).
+    pub(super) fn warning_probe(&mut self, sid: String, text: &str) {
+        let text = text.replace('_', " ");
+        let (title, detail) = text.split_once('|').unwrap_or((text.as_str(), ""));
+        let warning = (!title.is_empty()).then(|| emaki_core::driver::ScreenWarning { title: title.to_string(), color: Some(0xFFC107), detail: detail.to_string() });
+        self.notes.entry(sid).or_default().warning = warning;
+    }
+
+    /// A warning Claude Code puts under its prompt, a usage limit reached,
+    /// in its words and its color, for as long as it shows it there: the
+    /// terminal's footer is not drawn in the rendered layout, so it would
+    /// be seen nowhere else.
+    pub(super) fn warning_line(&self, r: &SessionRef, cx: &mut Context<Self>) -> Option<Line> {
+        let key = format!("line-warning-{}", r.session_id);
+        let live = self.notes.get(&r.session_id).and_then(|n| n.warning.clone());
+        let on = live.is_some();
+        if let Some(w) = live {
+            *self.warning_kept.borrow_mut() = Some(w);
+        }
+        let moving = self.presence(&key, on, cx);
+        if !on && moving.is_none() {
+            return None;
+        }
+        let w = self.warning_kept.borrow().clone()?;
+        let theme = cx.theme().clone();
+        let ink = if w.color.is_some() { screen_ink(w.color, &theme) } else { theme.warning };
+        let mark = Icon::default().path("icons/triangle-alert.svg").with_size(px(14.)).text_color(ink);
+        let row = tray_row("warning-row", mark, div().text_color(ink).child(w.title), w.detail, None, Vec::new(), &theme);
+        Some(Line { key, on, moving, row: row.into_any_element(), free: false })
     }
 
     /// Opens or shuts the note's card, which reads the note.
@@ -274,7 +284,7 @@ impl Workbench {
     /// sideways, what stands beside it moving over, and being on or off
     /// is in the accent, over a moment. `press` is what it does.
     #[allow(clippy::too_many_arguments)]
-    fn foot_toggle(&self, name: &str, r: &SessionRef, there: bool, open: bool, icon: &'static str, n: usize, ink: Option<Hsla>, dot: Option<(Hsla, f32)>, words: String, press: impl Fn(&mut Self) + 'static, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn foot_toggle(&self, name: &str, r: &SessionRef, there: bool, open: bool, icon: &'static str, n: usize, ink: Option<Hsla>, dot: Option<(Hsla, Option<f32>)>, words: String, press: impl Fn(&mut Self) + 'static, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = format!("toggle-{name}-{}", r.session_id);
         let moving = self.presence(&key, there, cx);
         if !there && moving.is_none() {
@@ -291,6 +301,9 @@ impl Workbench {
             .flex_shrink_0()
             .child(Icon::default().path(icon).with_size(px(14.)))
             .when_some(dot, |d, (color, strength)| {
+                // A strength of none breathes, on the window's clock, and
+                // asks for it only while the toggle is drawn.
+                let strength = strength.unwrap_or_else(|| crate::ambient::pulse(0.35, 1., crate::ambient::phase(Duration::from_millis(1400))));
                 let spot = div().size(px(5.)).rounded_full().bg(color).opacity(strength);
                 d.child(div().absolute().top(px(-2.)).right(px(-2.)).size(px(7.)).rounded_full().bg(theme.background).flex().items_center().justify_center().child(spot))
             });
@@ -364,7 +377,6 @@ impl Workbench {
         }, cx));
 
         let running = self.shells_running(&r, session);
-        let breath = crate::ambient::pulse(0.35, 1., crate::ambient::phase(Duration::from_millis(1400)));
         for (kind, icon) in [(TaskKind::Agents, "icons/bot.svg"), (TaskKind::Monitors, "icons/eye.svg"), (TaskKind::Commands, "icons/terminal.svg")] {
             let list: Vec<_> = running.iter().filter(|sh| task_of(sh) == kind).cloned().collect();
             if !list.is_empty() {
@@ -377,7 +389,7 @@ impl Workbench {
                 TaskKind::Monitors => count(n, "{n} background monitor", "{n} background monitors"),
             };
             let id = sid.clone();
-            toggles.extend(self.foot_toggle(kind.word(), &r, n > 0, self.task_open(kind).as_deref() == Some(sid.as_str()), icon, n, None, Some((theme.blue, breath)), words, move |this| {
+            toggles.extend(self.foot_toggle(kind.word(), &r, n > 0, self.task_open(kind).as_deref() == Some(sid.as_str()), icon, n, None, Some((theme.blue, None)), words, move |this| {
                 this.task_toggle(kind, &id);
                 if this.task_open(kind).is_some() {
                     this.cards_show();
@@ -392,7 +404,7 @@ impl Workbench {
         }
         let ink = note.as_ref().filter(|_| !notes.read).map(|n| screen_ink(n.color, &theme));
         let id = sid.clone();
-        toggles.extend(self.foot_toggle("notes", &r, note.is_some(), self.notes_open.as_deref() == Some(sid.as_str()), "icons/bell.svg", 1, ink, ink.map(|c| (c, 1.)), count(1, "{n} notice", "{n} notices"), move |this| this.notes_toggle(&id), cx));
+        toggles.extend(self.foot_toggle("notes", &r, note.is_some(), self.notes_open.as_deref() == Some(sid.as_str()), "icons/bell.svg", 1, ink, ink.map(|c| (c, Some(1.))), count(1, "{n} notice", "{n} notices"), move |this| this.notes_toggle(&id), cx));
 
         (!toggles.is_empty()).then(|| h_flex().flex_shrink_0().mr(px(TOGGLES_END)).items_center().children(toggles).into_any_element())
     }

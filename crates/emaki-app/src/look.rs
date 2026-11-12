@@ -197,6 +197,7 @@ pub fn install(accent_key: &str, mono: &str, cx: &mut App) {
     let a = accent(accent_key);
     INSTALLED.store(ACCENTS.iter().position(|x| std::ptr::eq(x, a)).unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
     let code = crate::fonts::term_family(mono, cx);
+    crate::fonts::cut_mono(&code, cx);
     let theme = Theme::global_mut(cx);
     for mut cfg in set.themes {
         paint(&mut cfg, a);

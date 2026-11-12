@@ -65,9 +65,15 @@ impl Workbench {
             return None;
         }
         let path = self.file_view.as_ref()?.path.clone();
-        let source = self.file_editor.as_ref()?.state.read(cx).value().to_string();
+        let state = self.file_editor.as_ref()?.state.clone();
+        // The file's editor read whole only when its text is not what the
+        // canvas holds: this runs at every frame the pane is drawn, and a
+        // copy of the file at each was a quarter of a megabyte.
+        let fresh = self.doc_canvas.as_ref().is_none_or(|c| c.path != path);
+        let changed = fresh || self.doc_canvas.as_ref().is_some_and(|c| !same_text(state.read(cx).text(), &c.held));
+        let source = if changed { state.read(cx).value().to_string() } else { String::new() };
         let look = self.doc_look(cx);
-        if self.doc_canvas.as_ref().is_none_or(|c| c.path != path) {
+        if fresh {
             let editor = cx.new(live::Editor::new);
             let scroll = self.file_view_scroll.clone();
             editor.update(cx, |e, cx| {
@@ -84,7 +90,7 @@ impl Workbench {
             self.doc_canvas = Some(DocCanvas { path, editor, held: source.clone(), states: HashMap::new(), kept: KeptViews::default(), made: None, _subs: subs });
         }
         let canvas = self.doc_canvas.as_mut()?;
-        if canvas.held != source {
+        if changed && canvas.held != source {
             canvas.held = source.clone();
             canvas.editor.update(cx, |e, cx| e.replace_text_quietly(&source, cx));
         }
@@ -189,9 +195,18 @@ impl Workbench {
         let Some(canvas) = self.doc_canvas.as_mut() else { return };
         let kept = canvas.kept.clone();
         let mut pieces = Vec::new();
-        let mut used = Vec::new();
+        let mut used = std::collections::HashSet::new();
+        // The lines before each piece, counted on from the one before it:
+        // from the file's start each time, a long file with many pieces
+        // took a tenth of a second a key.
+        let (mut counted, mut lines_before) = (0, 0);
         for range in piece_ranges(&source, quarto.is_some()) {
-            let first = source[..range.start].matches('\n').count();
+            if range.start < counted {
+                (counted, lines_before) = (0, 0);
+            }
+            lines_before += source.as_bytes()[counted..range.start].iter().filter(|b| **b == b'\n').count();
+            counted = range.start;
+            let first = lines_before;
             let body = source[range.clone()].trim_end_matches('\n');
             let last = first + body.matches('\n').count();
             let is_header = header.as_ref() == Some(&range);
@@ -205,7 +220,7 @@ impl Workbench {
                 (&words, is_header, look_key).hash(&mut h);
                 h.finish()
             };
-            used.push(key);
+            used.insert(key);
             let state = canvas.states.entry(key).or_insert_with(|| cx.new(|cx| TextViewState::markdown(&words, cx))).clone();
             let (kept, face) = (kept.clone(), face.clone());
             let draw: Rc<dyn Fn(&mut Window, &mut App) -> AnyElement> = if is_header {
@@ -319,6 +334,18 @@ impl Workbench {
             editor.update(cx, |s, cx| gpui::EntityInputHandler::replace_text_in_range(s, None, words, window, cx));
         }
     }
+}
+
+/// Whether a rope holds `text`, read in its own pieces, with nothing
+/// copied.
+fn same_text(rope: &ropey::Rope, text: &str) -> bool {
+    let mut at = 0;
+    rope.len() == text.len()
+        && rope.chunks().all(|c| {
+            let same = text.as_bytes().get(at..at + c.len()) == Some(c.as_bytes());
+            at += c.len();
+            same
+        })
 }
 
 /// The blocks of a markdown text the editor does not draw, which the

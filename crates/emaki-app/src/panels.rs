@@ -1792,6 +1792,12 @@ fn pictures_from(text: &str, dir: &Path, root: Option<&Path>) -> String {
         (Some(rest), Some(root)) => format!("file://{}", root.join(rest).display()),
         _ => format!("file://{}", dir.join(url).display()),
     };
+    // Only a picture's address or an `<img>`'s `src` is changed: a text
+    // with neither is not read through the parser, a whole file's at every
+    // key in the rendered editor.
+    if !text.contains("![") && !text.as_bytes().windows(4).any(|w| w.eq_ignore_ascii_case(b"<img")) {
+        return text.to_string();
+    }
     // The parser panics on some inputs (the vendored `parse_content`).
     let opts = markdown::ParseOptions::gfm();
     let Ok(Ok(tree)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| markdown::to_mdast(text, &opts))) else { return text.to_string() };
@@ -10326,14 +10332,16 @@ impl Workbench {
         let asking = self.overview_asking.contains(key);
         let shown = kept.as_ref().is_some_and(|o| !o.hidden);
         let stale = kept.as_ref().is_some_and(|o| o.covered < done);
-        let breathe = crate::ambient::pulse(0.35, 1.0, crate::ambient::phase(Duration::from_millis(1100)));
+        // Asked of the clock only where something breathes, or the window
+        // would be drawn at the clock's rate while the outline is open.
+        let breathe = || crate::ambient::pulse(0.35, 1.0, crate::ambient::phase(Duration::from_millis(1100)));
         // The summary's card: a shade lighter than the drawer, as a card
         // inside a card is on the website.
         let ground = if theme.mode.is_dark() { theme.sidebar.blend(theme.foreground.opacity(0.05)) } else { theme.sidebar.blend(theme.background.opacity(0.6)) };
         let mut parts: Vec<AnyElement> = Vec::new();
         if let Some(f) = self.fold_state((OVERVIEW_FOLD, h, 0), kept.is_none() && asking, cx) {
             let bar = |w: f32| div().h(px(8.)).w(relative(w)).rounded_full().bg(theme.muted_foreground.opacity(0.22));
-            let bars = v_flex().py(px(12.)).gap(px(7.)).child(bar(0.94)).child(bar(0.88)).child(bar(0.52)).opacity(breathe);
+            let bars = v_flex().py(px(12.)).gap(px(7.)).child(bar(0.94)).child(bar(0.88)).child(bar(0.52)).opacity(breathe());
             parts.push(self.fold_wrap(f, 0., bars.into_any_element(), cx));
         }
         if let Some(f) = self.fold_state((OVERVIEW_FOLD, h, 1), shown, cx) {
@@ -10354,7 +10362,7 @@ impl Workbench {
                 .my(px(8.))
                 .text_size(px(12.5))
                 .text_color(theme.foreground)
-                .when(asking, |d| d.opacity(breathe))
+                .when(asking, |d| d.opacity(breathe()))
                 .child(
                     div()
                         .id(SharedString::from(format!("overview-words-{h}")))

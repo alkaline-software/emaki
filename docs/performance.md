@@ -13,6 +13,8 @@ About keeping Emaki fast and light: how an optimization pass is done, the rules 
 - **A picture belongs to the place that shows it.** gpui keeps every picture it decodes from a path or from bytes (`ImageSource::Resource`, `ImageSource::Image`), and its copy on the GPU, for as long as the app runs, and a day of pasted screenshots looked at held 2.4 GB. So each place that shows pictures has a `pictures::Kept` (a conversation's `Detail::pictures`, the composer's, the lightbox's, the file pane's, the comparison's), and a picture is drawn through it (`pictures::through`, or an `image_cache` of it around a markdown view, which catches the pictures it shows). When the place goes, its `Kept` goes, and every picture in it is let go with `drop_image`, its GPU copy too; one made from bytes goes as soon as nothing else holds those bytes (`Kept::sweep`), so a PDF's pages drawn again at a new width leave no copies behind. A thumbnail is decoded no larger than `THUMB_PX` on its longer side, twice the largest box one is drawn in: handed the whole picture, the GPU kept all of it and drew it jagged. `remove_asset` is not a way to let a picture go: it frees the decoded copy and leaves the GPU's.
 - **A picture that moves is played a frame at a time.** gpui decodes every frame of a GIF or an animated WebP before it draws one, and keeps on the GPU each frame it has drawn: a GIF of 360 frames of 1600 × 840, 750 KB on disk, held 1.8 GB decoded and as much again on the GPU. Through a `Kept`, a thread of the picture's own decodes its frames in turn, the next two ahead (`pictures::play`); one frame is held and drawn, and the one before goes from the GPU as the next comes in (`pictures::advance`). A GIF's frames are laid on its canvas where each frame covers (`GifFrames`), not built again whole, which the image crate's reader does at every frame, and a thumbnail of a moving picture is kept and worked out again only over what a frame changed (`Small`). The window draws the picture again when a frame's time is up, through the clock's view when the workbench draws it (`pictures::Clock`), so the views it keeps are not drawn with it; it stands still in a window in the background and with less motion asked for, as gpui's own do.
 - **An image cache stands over what is inside it in every phase.** gpui's `image_cache` element was over its children's layout and paint and not their prepaint, where a markdown view measures its pictures, so each picture there was read a second time through gpui's own cache, decoded whole and kept until the app quit (`vendor/gpui/UPSTREAM.md`).
+- **A layout asked for again is answered from what it was.** gpui's layout asks an element's size several times a frame, and once with no width while it measures what the element would take. The live editor keeps the key of all its layout reads (`Reader::inputs_key`: its reading of the text, the selection, the look, the width, the marks, issues and pieces) and returns at once when that key is unchanged; asked with no width, it answers with its last layout's size, never a layout at a stand-in width. Under an edit, a line's row is kept by a key of what the row is made from, in the line's own bytes, never the whole text's offsets, which shifted every row under a letter typed; and a row, a code block's colors or a table's grid is found by its key where lines came or went above it.
+- **A caret blinks only in the window in front**, as the toolkit's fields do: behind another app's it is not drawn, and it does not draw the window twice a second.
 - **Work leaves the main thread** (reading files, git, ssh, a model's answer), and a clock runs only while it has something to move (`docs/window.md`, Frames).
 
 ## A pass
@@ -29,6 +31,33 @@ About keeping Emaki fast and light: how an optimization pass is done, the rules 
 ## Log
 
 Newest first. Each entry: the version and date, the commit range covered, what was looked at, what was found and done with numbers, and what was left for later.
+
+### v0.5.3, 2026-11-12
+
+Covers `8196125..` the commit that adds this entry: the live composer, the rendered editor, custom fonts with their styles, and the smaller cut for code among words. A debug build, a probe copy on a scratch project in `/private/tmp` (`docs/probing.md`), a session open and a markdown file of 240 KB (837 lines, one picture and two `<img>` tags) in the rendered editor, the window behind the terminal; counts from a stopwatch taken out when done. The live editor's and the rendered editor's parts were read for this pass by two reviewers, whose list the checks below went by.
+
+| | Before | This pass |
+|---|---|---|
+| Window drawn, a session open, nothing moving | about 20 a second | one in five seconds |
+| The file's layout, each draw | asked 16 times; three of them the whole file again (5 to 9 ms each) | asked 16 times, each a check of one key (0.1 ms) |
+| The file's layout, a letter typed at its top, or a line added | about 1 ms a call, 16 calls a frame | 0.35 to 3 ms, once |
+| The smaller monospace cuts, at launch | 21 faces, 8.7 ms, 4.2 MB kept (release) | the family in use, 1.4 ms |
+
+Found and fixed:
+- The toggles under the composer asked the window's clock for its phase at every draw, for a dot drawn only while something runs; so did the outline's summary. Every open session kept the clock going (`docs/window.md`, Frames). This predates the range.
+- gpui's layout measured the live editor with no width, and the editor laid the whole text out at 600 points and again at its own width, three times a frame. Now that question is answered from the last layout, and a layout whose reads are unchanged is not done (Rules).
+- A line's key hashed its spans, marks and issues by the whole text's offsets, so a letter typed made every line under it new: 1,577 of 4,052 lines in a reviewer's count. Keys are by the line's bytes; when lines come or go, rows, code colors and table grids are found by key. Whether the selection touches a span summed every line before it, at every span of every line; it is one addition now.
+- The caret's blink drew the window twice a second behind another app's, and the workbench redrew whenever the composer did, throwing the conversation's list and the sidebar out of their kept views at each blink. The blink stops in the background; the composer redraws by itself.
+- The rendered editor copied the whole file at every frame to see whether it had changed; it compares in place now. Each key counted the lines before each block from the file's start (quadratic in the blocks), found each block's place by a walk through the runs, and kept its blocks' keys in a list; it counts on, halves, and keeps a set. The picture paths are read through the markdown parser only in a file that has a picture or an `<img>`.
+- The inline cuts were made for all 21 monospace faces at launch, on the main thread; now for the family `look::install` sets, once.
+
+Measured and left as they are: the custom font list built again at each frame of its slide (29 µs for 285 families), and the system's families read again (125 ms off the main thread) only when the list opens after the settings window comes back to the front.
+
+Left for later:
+- A key in the rendered editor still costs 14 to 22 ms (debug) in a file with a picture: `pictures_from` parses the whole file with the `markdown` crate. Move it off the main thread, or to pulldown-cmark's offsets with a test that the edits are the same.
+- A Quarto file reads its includes, `_quarto.yml`, `_variables.yml` and its bibliography from disk at every key (`quarto::expand`): keep them by path, looked at again on the watcher's word.
+- The rendered editor is drawn afresh at every frame, not as a kept view as the reading view was, and the hidden raw editor's text is copied at each frame to sync its marks (`file_writing_sync`), as the structure's heads are hashed (`file_heads_now`).
+- A change of width lays out every line again (a pane opening, a resize), and `piece_h` keeps a height for every key a piece has had.
 
 ### v0.5.3, 2026-11-10
 

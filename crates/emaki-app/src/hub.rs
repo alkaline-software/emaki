@@ -1266,19 +1266,6 @@ impl Hub {
         self.lost.lock().unwrap().remove(session_id)
     }
 
-    /// What the hub holds, in counts, for the memory report.
-    pub fn held(&self) -> String {
-        // A count a statement: a lock taken in the arguments of one
-        // `format!` is held to its end, and `terminals` with `peers`
-        // stands against `reap_terminals`.
-        let drivers = self.drivers.lock().unwrap().len();
-        let terminals = self.terminals.lock().unwrap().len();
-        let attached = self.attached.lock().unwrap().len();
-        let live = emaki_core::pty::live_count();
-        let peers = self.peers.lock().unwrap().len();
-        format!("drivers: {drivers}\nhidden terminals: {terminals}\njoined terminals: {attached}\nterminals alive in all: {live}\nregistry records: {peers}\n")
-    }
-
     /// Whether the hidden terminal is how sessions run here.
     pub fn hidden_terminals(&self) -> bool {
         self.cfg.read().unwrap().driver.hidden_terminal

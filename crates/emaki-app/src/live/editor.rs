@@ -40,7 +40,7 @@ pub(crate) use cells::{CellAt, Scope, TableFacts};
 
 actions!(
     live,
-    [Enter, NewLine, Tab, Outdent, Backspace, Delete, DeleteWordBack, DeleteLineBack, Left, Right, Up, Down, SelectLeft, SelectRight, SelectUp, SelectDown, WordLeft, WordRight, SelectWordLeft, SelectWordRight, LineStart, LineEnd, SelectLineStart, SelectLineEnd, DocStart, DocEnd, SelectDocStart, SelectDocEnd, PageUp, PageDown, Bold, Italic, ToggleTask, Escape]
+    [Enter, NewLine, Tab, Outdent, Backspace, Delete, DeleteWordBack, DeleteLineBack, Left, Right, Up, Down, SelectLeft, SelectRight, SelectUp, SelectDown, WordLeft, WordRight, SelectWordLeft, SelectWordRight, LineStart, LineEnd, SelectLineStart, SelectLineEnd, DocStart, DocEnd, SelectDocStart, SelectDocEnd, PageUp, PageDown, Bold, Italic, Code, ToggleTask, Escape]
 );
 
 /// The key context of the editor's element.
@@ -92,6 +92,7 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("pagedown", PageDown, c),
         KeyBinding::new("secondary-b", Bold, c),
         KeyBinding::new("secondary-i", Italic, c),
+        KeyBinding::new("secondary-shift-c", Code, c),
         KeyBinding::new("secondary-enter", ToggleTask, c),
         KeyBinding::new("escape", Escape, c),
         KeyBinding::new("secondary-a", input::SelectAll, c),
@@ -360,6 +361,9 @@ pub(crate) struct Editor {
     blink_at: Instant,
     blinking: bool,
     focused: bool,
+    /// The window is behind another app's: the caret is not drawn and
+    /// does not blink, as a field's does not.
+    away: bool,
     /// The window's word when the keyboard comes and goes, asked for at
     /// the first drawing, where there is a window to ask.
     focus_subs: Option<(Subscription, Subscription)>,
@@ -529,6 +533,7 @@ impl Editor {
             blink_at: Instant::now(),
             blinking: false,
             focused: false,
+            away: false,
             focus_subs: None,
             drag: None,
             pressed_link: None,
@@ -566,6 +571,7 @@ impl Editor {
             marks: &self.marks,
             hold: self.hold.as_ref(),
             pieces: &self.shut,
+            version: self.version,
         }
     }
 
@@ -1273,7 +1279,7 @@ impl Editor {
                 let go_on = this
                     .update(cx, |e, cx| {
                         cx.notify();
-                        e.focused && e.mode != Mode::Reading
+                        e.focused && !e.away && e.mode != Mode::Reading
                     })
                     .unwrap_or(false);
                 if !go_on {
@@ -1286,7 +1292,7 @@ impl Editor {
     }
 
     fn caret_shown(&self) -> bool {
-        self.revealing() && ((self.blink_at.elapsed().as_millis() / BLINK.as_millis()) % 2 == 0)
+        !self.away && self.revealing() && ((self.blink_at.elapsed().as_millis() / BLINK.as_millis()) % 2 == 0)
     }
 
     // -- edits --------------------------------------------------------------
@@ -1667,6 +1673,11 @@ impl Editor {
 
     fn italic(&mut self, _: &Italic, _: &mut Window, cx: &mut Context<Self>) {
         self.toggle_wrap("*", SpanKind::Em, cx);
+    }
+
+    /// ⇧⌘C, as Slack has it: words made code, and code made words again.
+    fn code(&mut self, _: &Code, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_wrap("`", SpanKind::Code, cx);
     }
 
     /// ⌘↩: a task's box ticked or cleared; a bullet made a task; a plain
@@ -2275,6 +2286,7 @@ impl Render for Editor {
             .on_action(cx.listener(|this, _: &PageDown, _, cx| this.page(true, cx)))
             .on_action(cx.listener(Self::bold))
             .on_action(cx.listener(Self::italic))
+            .on_action(cx.listener(Self::code))
             .on_action(cx.listener(Self::toggle_task))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy))
@@ -2557,7 +2569,16 @@ impl Element for EditorElement {
         // caret begins to blink as the keyboard arrives.
         self.editor.update(cx, |e, cx| {
             let now = e.focus.is_focused(window);
+            // The window coming back to the front: the caret shows and
+            // blinks again. Behind another app's it stops, so the window
+            // is not drawn twice a second for it there.
+            let away = !window.is_window_active();
+            let back = e.away && !away;
+            e.away = away;
             e.set_focused(now, false, cx);
+            if back && e.focused {
+                e.kick_blink(cx);
+            }
         });
         let mut style = Style::default();
         style.size.width = relative(1.).into();
@@ -2568,6 +2589,16 @@ impl Element for EditorElement {
                 AvailableSpace::Definite(w) => Some(w),
                 _ => None,
             });
+            // Asked with no width (the layout measuring what the editor
+            // would take, before it gives it a width): the last layout's
+            // answer. Laid out at a stand-in width, a long file was laid out
+            // whole at it and again at its own, several times a frame.
+            if width.is_none() {
+                let c = editor.read(cx).cache.borrow();
+                if !c.entries.is_empty() {
+                    return size(px(c.width), px(c.total.max(1.)));
+                }
+            }
             let width = f32::from(width.unwrap_or(px(600.))).max(80.);
             let total = editor.update(cx, |e, _| {
                 e.relayout(width, window);

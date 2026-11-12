@@ -326,6 +326,8 @@ pub(crate) struct Cache {
     pub entries: Vec<Entry>,
     pub tops: Vec<f32>,
     pub total: f32,
+    /// The key of what the last layout read (`Reader::inputs_key`).
+    pub read: Option<u64>,
     /// Each code block's colors, by its first line: the key of the text
     /// they were read from, and a list a line of (bytes, ink).
     pub code_colors: HashMap<usize, (u64, Vec<Vec<(Range<usize>, Hsla)>>)>,
@@ -387,6 +389,9 @@ pub(crate) struct Reader<'a> {
     /// The lines the view around draws, shut: first, last, and the
     /// height of what is drawn (Emaki, `editor::Piece`).
     pub pieces: &'a [(usize, usize, f32)],
+    /// The editor's count of its readings of the text (`Editor::version`):
+    /// each new text, or a new way of reading it, has a new one.
+    pub version: u64,
 }
 
 impl<'a> Reader<'a> {
@@ -397,7 +402,11 @@ impl<'a> Reader<'a> {
 
     fn touches(&self, r: &Range<usize>, inclusive: bool) -> bool {
         let Some((a, b)) = self.sel else { return false };
-        let (ga, gb) = (self.doc.offset_of(a), self.doc.offset_of(b));
+        // By the reading's line starts: summing the lines before each end,
+        // at every span of every line, cost a long file milliseconds a
+        // layout.
+        let at = |p: Pos| self.analysis.line_starts.get(p.line).map_or_else(|| self.doc.offset_of(p), |s| s + p.col);
+        let (ga, gb) = (at(a), at(b));
         if inclusive { ga <= r.end && gb >= r.start } else { ga < r.end && gb > r.start }
     }
 
@@ -489,16 +498,46 @@ impl<'a> Reader<'a> {
         h.finish()
     }
 
+    /// What a layout reads, as one key: the text's reading, the
+    /// selection, the look and the width, and what the host lays over the
+    /// text (marks, issues, pieces, a table's columns held in a drag).
+    fn inputs_key(&self, look_key: u64, width: f32) -> u64 {
+        let mut h = DefaultHasher::new();
+        (self.version, self.doc.revision, look_key, width.to_bits(), self.sel, self.quiet).hash(&mut h);
+        for i in self.issues {
+            (&i.range, i.kind == Kind::Spelling).hash(&mut h);
+        }
+        self.marks.hash(&mut h);
+        for (first, last, tall) in self.pieces {
+            (first, last, tall.to_bits()).hash(&mut h);
+        }
+        self.hold.map(|(first, cols)| (first, cols.iter().map(|c| c.to_bits()).collect::<Vec<_>>())).hash(&mut h);
+        h.finish()
+    }
+
     /// The whole text laid out at `width`, line by line, each only when
     /// its key changed. The tops and the total follow.
     pub fn lay_out_note(&self, cache: &mut Cache, width: f32, window: &mut Window) {
         let look_key = self.look_key();
         let n = self.doc.line_count();
+        // Nothing a layout reads has changed: the layout stands. It is
+        // asked for at every frame the editor is drawn, and more than once
+        // in one.
+        let read = self.inputs_key(look_key, width);
+        if cache.read == Some(read) {
+            return;
+        }
+
+        cache.read = Some(read);
         if cache.width != width || cache.look_key != look_key {
             cache.entries.clear();
             cache.width = width;
             cache.look_key = look_key;
         }
+        // Lines come or go: a line's row is found by its key where the
+        // line now stands elsewhere, so what is under an edit is not laid
+        // out again.
+        let moved: HashMap<u64, (f32, Rc<Row>)> = if cache.entries.len() != n { cache.entries.iter().map(|e| (e.key, (e.height, e.row.clone()))).collect() } else { HashMap::new() };
         cache.entries.truncate(n);
         self.color_code(cache);
         self.make_grids(&mut cache.grids, width, window);
@@ -526,17 +565,25 @@ impl<'a> Reader<'a> {
             revealed.hash(&mut h);
             (line == 0).hash(&mut h);
             (line > 0 && matches!(self.analysis.lines[line - 1].kind, LineKind::Heading(_))).hash(&mut h);
+            // Ranges by the line's own bytes, as the row is made from them:
+            // by the whole text's, a letter typed changed the key of every
+            // line under it.
+            let start = self.analysis.line_starts[line];
+            let local = |r: &Range<usize>| r.start.saturating_sub(start).min(text.len())..r.end.saturating_sub(start).min(text.len());
             for i in self.issues_on(line) {
-                i.range.hash(&mut h);
+                local(&i.range).hash(&mut h);
                 (i.kind == Kind::Spelling).hash(&mut h);
                 (self.quiet == Some(i.range.end)).hash(&mut h);
             }
             for (r, style) in self.marks_on(line) {
-                r.hash(&mut h);
+                local(r).hash(&mut h);
                 style.hash(&mut h);
             }
             for &ix in &self.analysis.line_spans[line] {
-                self.analysis.spans[ix].range.hash(&mut h);
+                let s = &self.analysis.spans[ix];
+                for r in [&s.range, &s.open, &s.close] {
+                    local(r).hash(&mut h);
+                }
             }
             if let LineKind::TableFirst(t) | LineKind::TableRow(t) = info.kind {
                 let first = self.analysis.tables[t].first;
@@ -544,7 +591,15 @@ impl<'a> Reader<'a> {
             }
             let key = h.finish();
             let fresh = cache.entries.get(line).is_none_or(|e| e.key != key);
-            if fresh {
+            let found = if fresh { moved.get(&key) } else { None };
+            if let Some((height, row)) = found {
+                let entry = Entry { key, height: *height, row: row.clone() };
+                if line < cache.entries.len() {
+                    cache.entries[line] = entry;
+                } else {
+                    cache.entries.push(entry);
+                }
+            } else if fresh {
                 let row = match piece {
                     // A piece's first line holds its height; the rest none.
                     Some((true, tall)) => Row::Pad { lang: None, h: tall },
@@ -579,11 +634,12 @@ impl<'a> Reader<'a> {
     /// and runs where a panic is caught.
     fn color_code(&self, cache: &mut Cache) {
         use gpui_component::highlighter::SyntaxHighlighter;
-        let firsts: Vec<usize> = self.analysis.code_blocks.iter().map(|b| b.first).collect();
-        cache.code_colors.retain(|first, _| firsts.contains(first));
+        // Each block's colors carried to where it stands now, found by its
+        // first line or, where lines came or went above it, by its text's
+        // key; read again only where its text changed.
+        let mut was = std::mem::take(&mut cache.code_colors);
         for b in &self.analysis.code_blocks {
             if b.lang.is_empty() {
-                cache.code_colors.remove(&b.first);
                 continue;
             }
             let last = if b.closed { b.last.saturating_sub(1) } else { b.last };
@@ -594,7 +650,12 @@ impl<'a> Reader<'a> {
             code.hash(&mut h);
             (std::sync::Arc::as_ptr(&self.look.syntax) as usize).hash(&mut h);
             let key = h.finish();
-            if cache.code_colors.get(&b.first).is_some_and(|(k, _)| *k == key) {
+            let kept = match was.get(&b.first) {
+                Some((k, _)) if *k == key => was.remove(&b.first),
+                _ => was.iter().find(|(_, (k, _))| *k == key).map(|(f, _)| *f).and_then(|f| was.remove(&f)),
+            };
+            if let Some(kept) = kept {
+                cache.code_colors.insert(b.first, kept);
                 continue;
             }
             let syntax = self.look.syntax.clone();
@@ -1068,10 +1129,13 @@ impl<'a> Reader<'a> {
     /// room left is shared by what the rest ask, as a browser sets a
     /// table, so a word is broken only where the room gives out.
     fn make_grids(&self, grids: &mut HashMap<usize, (u64, Rc<Grid>)>, width: f32, window: &mut Window) {
-        grids.retain(|first, _| self.analysis.tables.iter().any(|t| t.first == *first));
+        // As the code's colors: carried by first line or by key.
+        let mut was = std::mem::take(grids);
         for t in &self.analysis.tables {
             let mut h = DefaultHasher::new();
             width.to_bits().hash(&mut h);
+            // Where it stands in its line, which its room goes by.
+            self.inset_of(&self.analysis.lines[t.first]).to_bits().hash(&mut h);
             self.look.text_family.hash(&mut h);
             self.look.text_px.to_bits().hash(&mut h);
             t.rows.hash(&mut h);
@@ -1079,7 +1143,12 @@ impl<'a> Reader<'a> {
             let held = self.hold.filter(|(first, _)| *first == t.first);
             held.iter().flat_map(|(_, c)| c).for_each(|c| c.to_bits().hash(&mut h));
             let key = h.finish();
-            if grids.get(&t.first).is_some_and(|(k, _)| *k == key) {
+            let kept = match was.get(&t.first) {
+                Some((k, _)) if *k == key => was.remove(&t.first),
+                _ => was.iter().find(|(_, (k, _))| *k == key).map(|(f, _)| *f).and_then(|f| was.remove(&f)),
+            };
+            if let Some(kept) = kept {
+                grids.insert(t.first, kept);
                 continue;
             }
             let room = (width - self.inset_of(&self.analysis.lines[t.first])).max(80.);
@@ -1322,7 +1391,7 @@ mod tests {
         let doc = Doc::from_text(text);
         let analysis = markdown::analyze(text);
         let look = Look::default();
-        let reader = Reader { doc: &doc, analysis: &analysis, look: &look, rhythm: Rhythm::of(&look), mode: Default::default(), sel: sel.map(|(a, b)| (Pos::new(0, a), Pos::new(0, b))), issues: &[], quiet: None, marks: &[], hold: None, pieces: &[] };
+        let reader = Reader { doc: &doc, analysis: &analysis, look: &look, rhythm: Rhythm::of(&look), mode: Default::default(), sel: sel.map(|(a, b)| (Pos::new(0, a), Pos::new(0, b))), issues: &[], quiet: None, marks: &[], hold: None, pieces: &[], version: 0 };
         markdown::Shown::new(doc.line(0), &reader.hidden_on(0)).text
     }
 

@@ -46,7 +46,7 @@ Whatever comes up for the person to read or answer while a session runs is a car
 One card over the composer that holds what waits on the person, a line each (`workbench/tray.rs`, `render_tray`). It is there only while something does, and most of the time nothing does. Top to bottom:
 
 1. A message that cannot get to the prompt (`held_line`).
-2. A memory report written because Emaki holds far more than it should (`memory_line`, `docs/core.md`, Memory reports), until it is put away.
+2. A warning Claude Code puts under its prompt, a usage limit reached, in its words and its color, for as long as it shows it (`warning_line`, `driver::warning_on_screen`). That footer is not drawn in the rendered layout, and the warning was seen nowhere: it is read with the notices beside the prompt (`read_notes`), the line it wrapped onto taken with it.
 3. The terminal's card left behind, with the way back to it.
 4. What the agent waits for the person to decide (`decision_line`).
 

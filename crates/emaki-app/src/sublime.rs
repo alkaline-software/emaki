@@ -61,6 +61,7 @@ actions!(
         Fold,
         Unfold,
         UnfoldAll,
+        ToggleCode,
     ]
 );
 
@@ -71,6 +72,9 @@ pub(crate) const CONTEXT: &str = "FileEditor > Input";
 /// most are Settings, Shortcuts' (`shortcuts::EDITOR`), bound there.
 pub fn bindings() -> Vec<KeyBinding> {
     let c = Some(CONTEXT);
+    // Not Sublime's: Slack's, as the composer and the rendered editor
+    // have it, in a markdown file.
+    let code = KeyBinding::new("secondary-shift-c", ToggleCode, c);
     #[cfg(target_os = "macos")]
     let keys = vec![
         KeyBinding::new("cmd-g", FindNext, c),
@@ -128,6 +132,8 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-k ctrl-backspace", DeleteToBeginningOfLine, c),
         KeyBinding::new("ctrl-shift-backspace", DeleteToBeginningOfLine, c),
     ];
+    let mut keys = keys;
+    keys.push(code);
     keys
 }
 
@@ -359,6 +365,52 @@ pub(crate) fn block_comment(text: &str, sel: Range<usize>, (open, close): (&str,
     let with = format!("{open} {inner} {close}");
     let len = with.len();
     Edit { range: range.clone(), with, select: range.start..range.start + len }
+}
+
+/// Whether a file is markdown, where backticks make code.
+fn markdown_file(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["md", "markdown", "qmd", "rmd"].contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// ⇧⌘C in a markdown file, as the composer and the rendered editor do it
+/// (`live::Editor::toggle_wrap`): the code the caret or the selection is
+/// in made words again; what is selected made code, or the caret's word;
+/// on nothing, an empty pair to type into, and in one, the pair taken
+/// away. Code is what the editor reads as code (`live::code_around`).
+pub(crate) fn toggle_code(text: &str, sel: Range<usize>) -> Option<Edit> {
+    let (a, b) = (sel.start.min(text.len()), sel.end.min(text.len()));
+    if let Some((open, close)) = crate::live::code_around(text, a, b) {
+        let shift = |p: usize| {
+            if p <= open.start {
+                p
+            } else if p < open.end {
+                open.start
+            } else if p <= close.start {
+                p - open.len()
+            } else if p < close.end {
+                close.start - open.len()
+            } else {
+                p - open.len() - close.len()
+            }
+        };
+        return Some(Edit { range: open.start..close.end, with: text[open.end..close.start].to_string(), select: shift(a)..shift(b) });
+    }
+    if a != b {
+        let picked = &text[a..b];
+        let (ta, tb) = (a + picked.len() - picked.trim_start().len(), b - (picked.len() - picked.trim_end().len()));
+        if ta >= tb {
+            return None;
+        }
+        return Some(Edit { range: ta..tb, with: format!("`{}`", &text[ta..tb]), select: ta + 1..tb + 1 });
+    }
+    let word = word_at(text, a);
+    if word.start < word.end {
+        return Some(Edit { range: word.clone(), with: format!("`{}`", &text[word]), select: a + 1..a + 1 });
+    }
+    if text[..a].ends_with('`') && text[a..].starts_with('`') {
+        return Some(Edit { range: a - 1..a + 1, with: String::new(), select: a - 1..a - 1 });
+    }
+    Some(Edit { range: a..a, with: "``".to_string(), select: a + 1..a + 1 })
 }
 
 /// ⌘K ⌘U and ⌘K ⌘L: what is selected, or the caret's word, in capitals or
@@ -653,6 +705,11 @@ impl Workbench {
                 }
             }))
             .on_action(cx.listener(|this, _: &UpperCase, window, cx| this.sublime_edit(|t, s| change_case(t, s, true), window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCode, window, cx| {
+                if this.file_editor.as_ref().is_some_and(|ed| markdown_file(&ed.path)) {
+                    this.sublime_edit(toggle_code, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &LowerCase, window, cx| this.sublime_edit(|t, s| change_case(t, s, false), window, cx)))
             .on_action(cx.listener(|this, _: &JumpToBracket, _, cx| this.sublime_select(|t, s| jump_to_bracket(t, s.start).map(|at| at..at), cx)))
             .on_action(cx.listener(|this, _: &ExpandToBrackets, _, cx| this.sublime_select(expand_to_brackets, cx)))
@@ -790,6 +847,33 @@ impl Workbench {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text and selection after ⇧⌘C.
+    fn coded(text: &str, sel: Range<usize>) -> (String, Range<usize>) {
+        let e = toggle_code(text, sel).expect("an edit");
+        let mut out = text.to_string();
+        out.replace_range(e.range, &e.with);
+        (out, e.select)
+    }
+
+    #[test]
+    fn words_become_code_and_code_words_again() {
+        // What is selected, its spaces left out.
+        assert_eq!(coded("a word here", 2..6), ("a `word` here".into(), 3..7));
+        assert_eq!(coded("a word here", 1..7), ("a `word` here".into(), 3..7));
+        // The code the caret is in, or the selection, made words.
+        assert_eq!(coded("a `word` here", 5..5), ("a word here".into(), 4..4));
+        assert_eq!(coded("a `word` here", 3..7), ("a word here".into(), 2..6));
+        assert_eq!(coded("a `word` here", 2..8), ("a word here".into(), 2..6));
+        assert_eq!(coded("x ``a`b`` y", 5..5), ("x a`b y".into(), 3..3));
+        // The caret's word.
+        assert_eq!(coded("say hi", 5..5), ("say `hi`".into(), 6..6));
+        // Nothing there: a pair to type into, and in one, none.
+        assert_eq!(coded("a  b", 2..2), ("a `` b".into(), 3..3));
+        assert_eq!(coded("a `` b", 3..3), ("a  b".into(), 2..2));
+        // A code block is not a code span.
+        assert_eq!(coded("```\nlet x\n```", 8..8).0, "```\nlet `x`\n```");
+    }
 
     fn apply(text: &str, e: &Edit) -> String {
         format!("{}{}{}", &text[..e.range.start], e.with, &text[e.range.end..])

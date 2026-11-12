@@ -252,19 +252,6 @@ impl Kept {
         self.held.is_empty()
     }
 
-    /// How many pictures are held, and the bytes they take decoded.
-    pub fn held(&self) -> (usize, usize) {
-        let bytes = self
-            .held
-            .values()
-            .map(|h| match &h.item {
-                ImageCacheItem::Loaded(Ok(image)) => (0..image.frame_count()).filter_map(|i| image.as_bytes(i)).map(|b| b.len()).sum(),
-                _ => 0,
-            })
-            .sum();
-        (self.held.len(), bytes)
-    }
-
     fn get(&mut self, key: (u64, u32), bytes: Option<Weak<gpui::Image>>, start: impl FnOnce(&mut App) -> (Task<Result<Arc<RenderImage>, ImageCacheError>>, Option<mpsc::Receiver<Arc<RenderImage>>>), window: &mut Window, cx: &mut App) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         if let Some(held) = self.held.get_mut(&key) {
             // The same bytes read again (a file reloaded unchanged) are

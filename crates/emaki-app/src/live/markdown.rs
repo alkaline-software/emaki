@@ -225,6 +225,12 @@ impl Analysis {
 /// The text read whole. The parser is a third party's and what is made
 /// of its places slices the text by them, so the reading runs where a
 /// panic is caught: a text that cannot be read is shown as plain lines.
+/// The code span `a..b` stands in, as the editor reads `text`: its opening
+/// backticks and its closing ones, the innermost where one holds another.
+pub(crate) fn code_around(text: &str, a: usize, b: usize) -> Option<(Range<usize>, Range<usize>)> {
+    analyze(text).spans.into_iter().filter(|s| s.kind == SpanKind::Code && s.range.start <= a && b <= s.range.end).min_by_key(|s| s.range.len()).map(|s| (s.open, s.close))
+}
+
 pub fn analyze(text: &str) -> Analysis {
     std::panic::catch_unwind(|| read(text)).unwrap_or_else(|_| plain(text))
 }

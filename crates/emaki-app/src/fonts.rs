@@ -411,9 +411,9 @@ const INLINE_SUFFIX: &str = " Inline";
 /// the one in use, or that one where no cut of it could be made.
 pub fn inline_mono_family(cx: &App) -> SharedString {
     use gpui_component::ActiveTheme as _;
-    let family = cx.theme().mono_font_family.clone();
-    let cut = format!("{family}{INLINE_SUFFIX}");
-    if cx.global::<ChatFonts>().inline.iter().any(|name| *name == cut) { cut.into() } else { family }
+    let family = &cx.theme().mono_font_family;
+    let cut = cx.global::<ChatFonts>().inline.iter().find(|name| name.strip_suffix(INLINE_SUFFIX) == Some(family.as_ref()));
+    cut.unwrap_or(family).clone()
 }
 
 fn u16_at(data: &[u8], at: usize) -> Option<u16> {
@@ -679,7 +679,7 @@ pub struct ChatFonts {
     pub display: String,
     /// The smaller cuts of the monospace faces that were made
     /// (`inline_cut`), by family.
-    pub inline: Vec<String>,
+    pub inline: Vec<SharedString>,
     /// The CJK face chosen, by its key in `CJK` or `custom`.
     pub cjk: String,
     /// The faces of the system's chosen, their styles found.
@@ -705,17 +705,10 @@ pub fn install(chat: &str, cjk: &str, mut custom: Custom, cx: &mut App) {
         register_with_system(face);
     }
     emaki_core::math::use_font(MATH_FACE);
-    // The smaller cut of each monospace face, for code among words: the
-    // built-in ones, and the system's own where that is one of the
-    // choices, read from the system and never carried.
-    let system = if cfg!(target_os = "macos") { std::fs::read("/System/Library/Fonts/Monaco.ttf").ok() } else { None };
-    let cuts: Vec<std::borrow::Cow<'static, [u8]>> = MONO_FACES.iter().copied().chain(system.as_deref().map(|font| ("Monaco", font))).filter_map(|(family, font)| inline_cut(font, INLINE_SCALE, &format!("{family}{INLINE_SUFFIX}"))).map(std::borrow::Cow::Owned).collect();
-    let _ = cx.text_system().add_fonts(cuts);
     let names = cx.text_system().all_font_names();
     if let Some(name) = names.iter().find(|n| n.replace(' ', "") == "NewComputerModernMath") {
         let _ = MATH_FAMILY.set(name.clone().into());
     }
-    let inline = names.iter().filter(|name| name.ends_with(INLINE_SUFFIX)).cloned().collect();
     // `EMAKI_WORDMARK=<family>` draws the name in that face, for a look
     // at the one Windows and Linux get.
     let asked = std::env::var("EMAKI_WORDMARK").ok();
@@ -723,9 +716,7 @@ pub fn install(chat: &str, cjk: &str, mut custom: Custom, cx: &mut App) {
     let kanji = KANJI_FACES.iter().find(|f| names.iter().any(|n| n == *f)).map(|f| f.to_string());
     custom.resolve(cx);
     let display = chat_name(chat, &custom);
-    let mono = custom.mono_family().to_string();
-    cx.set_global(ChatFonts { wordmark, kanji, display, inline, cjk: cjk.to_string(), custom });
-    cut_custom_mono(&mono, cx);
+    cx.set_global(ChatFonts { wordmark, kanji, display, inline: Vec::new(), cjk: cjk.to_string(), custom });
 }
 
 /// The family TsangerJinKai is installed under, among `names`, for a
@@ -747,17 +738,12 @@ pub fn set_chat(chat: &str, cx: &mut App) {
 }
 
 /// A face of the system's chosen for a custom place, or a style of one;
-/// titles follow the chat font, and a monospace face gets its smaller cut
-/// for code among words where one can be made.
+/// titles follow the chat font.
 pub fn set_custom(mut custom: Custom, chat: &str, cx: &mut App) {
     custom.resolve(cx);
-    let mono = (cx.global::<ChatFonts>().custom.mono_family() != custom.mono_family()).then(|| custom.mono_family().to_string());
     let fonts = cx.global_mut::<ChatFonts>();
     fonts.display = chat_name(chat, &custom);
     fonts.custom = custom;
-    if let Some(mono) = mono {
-        cut_custom_mono(&mono, cx);
-    }
 }
 
 /// The family one style of a system's family is drawn as, so that style
@@ -870,19 +856,27 @@ fn register_with_system(bytes: &'static [u8]) {
 #[cfg(not(target_os = "macos"))]
 fn register_with_system(_: &'static [u8]) {}
 
-/// The smaller cut of a monospace face of the system's (`inline_cut`),
-/// from its file, once: a face whose file is not a TrueType font read
-/// whole (a collection, a CFF face) has none, and code among words is set
-/// in the face itself at the words' size.
-fn cut_custom_mono(family: &str, cx: &mut App) {
+/// The smaller cut of the monospace family in use (`inline_cut`), for
+/// code among words, made once and only for the family the window sets
+/// code in (`look::install`): every face of a carried family, or a face of
+/// the system's from its file. A face whose file is not a TrueType font
+/// read whole (a collection, a CFF face) has none, and code among words is
+/// set in the face itself at the words' size.
+pub fn cut_mono(family: &str, cx: &mut App) {
     let name = format!("{family}{INLINE_SUFFIX}");
-    if family.is_empty() || cx.global::<ChatFonts>().inline.contains(&name) {
+    if family.is_empty() || cx.global::<ChatFonts>().inline.iter().any(|n| n.as_ref() == name) {
         return;
     }
-    let made = MADE.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(f, _)| f == family).map(|(_, bytes)| bytes.to_vec());
-    let Some(cut) = made.or_else(|| system_font_file(family)).and_then(|bytes| inline_cut(&bytes, INLINE_SCALE, &name)) else { return };
-    if cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(cut)]).is_ok() && cx.text_system().all_font_names().contains(&name) {
-        cx.global_mut::<ChatFonts>().inline.push(name);
+    let carried: Vec<std::borrow::Cow<'static, [u8]>> = MONO_FACES.iter().filter(|(f, _)| *f == family).filter_map(|(_, font)| inline_cut(font, INLINE_SCALE, &name)).map(std::borrow::Cow::Owned).collect();
+    let cuts = if carried.is_empty() {
+        let made = MADE.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(f, _)| f == family).map(|(_, bytes)| bytes.to_vec());
+        let Some(cut) = made.or_else(|| system_font_file(family)).and_then(|bytes| inline_cut(&bytes, INLINE_SCALE, &name)) else { return };
+        vec![std::borrow::Cow::Owned(cut)]
+    } else {
+        carried
+    };
+    if cx.text_system().add_fonts(cuts).is_ok() && cx.text_system().all_font_names().contains(&name) {
+        cx.global_mut::<ChatFonts>().inline.push(name.into());
     }
 }
 
@@ -1267,3 +1261,4 @@ mod tests {
         assert_eq!(native_of(table(CJK_FACES[0], b"name")), None);
     }
 }
+

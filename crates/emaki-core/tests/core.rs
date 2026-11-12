@@ -4908,6 +4908,30 @@ fn claude_codes_own_notes_are_told_from_the_conversation() {
 }
 
 #[test]
+fn a_warning_under_the_prompt_is_read_whole() {
+    use emaki_core::driver::warning_on_screen;
+    let rule = "─".repeat(96);
+    let (yellow, gray, reset) = ("\x1b[38;2;255;193;7m", "\x1b[38;2;153;153;153m", "\x1b[0m");
+    // Wrapped at the width, as Claude Code 2.1.322 drew it, with the
+    // status line and the mode's line under it.
+    let screen = format!(
+        "· Cooking… (8m 28s · ↓ 20.4k tokens)\n{rule}\n❯ \n{rule}\n  {yellow}⚠ Usage limit reached · wrapping up{reset}{gray} · limit resets 11:40pm · clau.de/wrap-up · /upgrade to{reset}\n  {gray}keep using Claude Code{reset}\n  Context 64% | 5h: 99% (1m) | 7d: 23% (5d0h)\n  ▸▸ auto mode on (shift+tab to cycle) · ← 2 agents\n"
+    );
+    let w = warning_on_screen(&screen).expect("the warning");
+    assert_eq!(w.title, "Usage limit reached · wrapping up");
+    assert_eq!(w.color, Some(0xFFC107));
+    assert_eq!(w.detail, "limit resets 11:40pm · clau.de/wrap-up · /upgrade to keep using Claude Code");
+    // Read without colors, it is told at its first "·".
+    let plain = format!("{rule}\n❯ \n{rule}\n  ⚠ Usage limit reached · limit resets 11:40pm\n  Context 64% | 5h: 99% (1m)\n");
+    let w = warning_on_screen(&plain).unwrap();
+    assert_eq!((w.title.as_str(), w.detail.as_str()), ("Usage limit reached", "limit resets 11:40pm"));
+    // None where the footer has none, and a "⚠" over the prompt is the
+    // conversation's.
+    assert_eq!(warning_on_screen(&format!("{rule}\n❯ \n{rule}\n  Context 64% | 5h: 40% (3h)\n")), None);
+    assert_eq!(warning_on_screen(&format!("● ⚠ careful here\n{rule}\n❯ \n{rule}\n  Context 64%\n")), None);
+}
+
+#[test]
 fn a_confirmed_move_is_where_a_gone_folder_is_now() {
     let (_home, _g) = isolated();
     let root = tempfile::tempdir().unwrap();
@@ -5060,28 +5084,6 @@ fn a_remote_session_is_listed_under_its_computer_and_never_archived_here() {
     assert!(find().is_none());
     emaki_core::remote::add("mac-mini.local", "me", 0, "").unwrap();
     assert!(find().is_some());
-}
-
-/// A memory report lands in the logs with what the app said it holds and
-/// the system's view of the process, and only the newest twenty stay.
-#[test]
-fn a_memory_report_is_written_to_the_logs() {
-    let (_home, _g) = isolated();
-    let logs = emaki_core::paths::logs_dir();
-    std::fs::create_dir_all(&logs).unwrap();
-    for n in 0..25 {
-        std::fs::write(logs.join(format!("memory-20200101-0000{n:02}.txt")), "old").unwrap();
-    }
-    let path = emaki_core::memory::write_report(3 << 30, "tabs: 2\n").unwrap();
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(path.starts_with(&logs));
-    assert!(text.contains("Footprint: 3072 MB"), "{text}");
-    assert!(text.contains("== What Emaki holds ==\ntabs: 2"), "{text}");
-    #[cfg(target_os = "macos")]
-    assert!(text.contains("== Regions ==") && text.contains("MALLOC"), "{text}");
-    let left = std::fs::read_dir(&logs).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("memory-")).count();
-    assert_eq!(left, 20);
-    assert!(path.exists());
 }
 
 /// A file another program moves, or whose folder it renames, is found

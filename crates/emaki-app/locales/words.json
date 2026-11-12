@@ -1718,15 +1718,6 @@
     "de": "Emaki {latest} ist verfügbar. Aktualisiere in den Einstellungen (⌘,).",
     "es": "Emaki {latest} está disponible. Actualiza desde Ajustes (⌘,)."
   },
-  "{size} of memory in use": {
-    "zh-Hans": "已使用 {size} 内存",
-    "zh-Hant": "已使用 {size} 記憶體",
-    "ja": "{size} のメモリを使用中",
-    "ko": "메모리 {size} 사용 중",
-    "fr": "{size} de mémoire utilisés",
-    "de": "{size} Arbeitsspeicher belegt",
-    "es": "{size} de memoria en uso"
-  },
   "Empty Trash": {
     "zh-Hans": "清倒废纸篓",
     "zh-Hant": "清空垃圾桶",
@@ -5875,15 +5866,6 @@
     "fr": "impossible de conserver l’image collée : {e}",
     "de": "eingesetztes Bild konnte nicht gesichert werden: {e}",
     "es": "no se ha podido guardar la imagen pegada: {e}"
-  },
-  "a report for its developers is saved": {
-    "zh-Hans": "已保存一份给开发者的报告",
-    "zh-Hant": "已儲存一份給開發者的報告",
-    "ja": "開発者向けのレポートを保存しました",
-    "ko": "개발자용 보고서를 저장했습니다",
-    "fr": "un rapport pour ses développeurs est enregistré",
-    "de": "ein Bericht für die Entwickler ist gespeichert",
-    "es": "se ha guardado un informe para sus desarrolladores"
   },
   "could not keep the word: {e}": {
     "zh-Hans": "无法保存该单词：{e}",

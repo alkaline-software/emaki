@@ -25,7 +25,6 @@ pub mod json;
 pub mod latex;
 pub mod limits;
 pub mod math;
-pub mod memory;
 pub mod model;
 pub mod moves;
 pub mod office;
