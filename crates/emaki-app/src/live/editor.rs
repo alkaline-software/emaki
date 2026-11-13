@@ -1233,6 +1233,10 @@ impl Editor {
     /// The runs of a Typst or LaTeX document's own code, to be drawn
     /// folded (`dialect::folds`).
     pub fn folds(&self) -> Vec<super::dialect::Fold> {
+        // Markdown with no raw block of either has none.
+        if self.dialect.is_none() && !self.analysis.code_blocks.iter().any(|b| b.markup.is_some()) {
+            return Vec::new();
+        }
         super::dialect::folds(&self.doc.text(), &self.analysis)
     }
 

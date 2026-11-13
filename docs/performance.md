@@ -4,6 +4,7 @@ About keeping Emaki fast and light: how an optimization pass is done, the rules 
 
 ## Rules
 
+- **A pass follows every round of changes.** Once a set of updates is in, a pass looks at them before the next set begins, since what is new is where waste comes in. Its measure is the computer's work: as fast as it can be, and nothing computed, copied, read or woken for that is not used.
 - **A pass has three aims:** the best speed; the least use of the computer (CPU, memory, power, wakeups, disk, network, processes); and nothing the app does lost. The third is never traded for the other two: a change that saves time and changes what a person sees or can do is not made.
 - **Measured before and after.** A stopwatch in a copy or a throwaway test, taken out when done, timing the real call the same way twice. The first guess is often wrong. The numbers go in the log.
 - **Incremental.** A pass starts from the log's last entry and looks only at what changed since the commit that entry names (`git diff <commit>..`), plus anything an entry left for later. A product with no log gets a pass over everything. A pass that is not logged did not happen as far as the next one knows.
@@ -14,6 +15,8 @@ About keeping Emaki fast and light: how an optimization pass is done, the rules 
 - **A picture that moves is played a frame at a time.** gpui decodes every frame of a GIF or an animated WebP before it draws one, and keeps on the GPU each frame it has drawn: a GIF of 360 frames of 1600 × 840, 750 KB on disk, held 1.8 GB decoded and as much again on the GPU. Through a `Kept`, a thread of the picture's own decodes its frames in turn, the next two ahead (`pictures::play`); one frame is held and drawn, and the one before goes from the GPU as the next comes in (`pictures::advance`). A GIF's frames are laid on its canvas where each frame covers (`GifFrames`), not built again whole, which the image crate's reader does at every frame, and a thumbnail of a moving picture is kept and worked out again only over what a frame changed (`Small`). The window draws the picture again when a frame's time is up, through the clock's view when the workbench draws it (`pictures::Clock`), so the views it keeps are not drawn with it; it stands still in a window in the background and with less motion asked for, as gpui's own do.
 - **An image cache stands over what is inside it in every phase.** gpui's `image_cache` element was over its children's layout and paint and not their prepaint, where a markdown view measures its pictures, so each picture there was read a second time through gpui's own cache, decoded whole and kept until the app quit (`vendor/gpui/UPSTREAM.md`).
 - **A layout asked for again is answered from what it was.** gpui's layout asks an element's size several times a frame, and once with no width while it measures what the element would take. The live editor keeps the key of all its layout reads (`Reader::inputs_key`: its reading of the text, the selection, the look, the width, the marks, issues and pieces) and returns at once when that key is unchanged; asked with no width, it answers with its last layout's size, never a layout at a stand-in width. Under an edit, a line's row is kept by a key of what the row is made from, in the line's own bytes, never the whole text's offsets, which shifted every row under a letter typed; and a row, a code block's colors or a table's grid is found by its key where lines came or went above it.
+- **Work whose result is thrown away is not done.** A branch that returns early returns before the work only the other branch uses: a LaTeX or Typst file's pieces are its folds, so it is not written as markdown and diffed against its text at every key to be dropped.
+- **What runs at every draw compares in place or by a count, never by a copy.** The composer's sync asks its count of readings (`version`) first; the file's spelling sync compares the field's text where it stands.
 - **A caret blinks only in the window in front**, as the toolkit's fields do: behind another app's it is not drawn, and it does not draw the window twice a second.
 - **Work leaves the main thread** (reading files, git, ssh, a model's answer), and a clock runs only while it has something to move (`docs/window.md`, Frames).
 
@@ -31,6 +34,24 @@ About keeping Emaki fast and light: how an optimization pass is done, the rules 
 ## Log
 
 Newest first. Each entry: the version and date, the commit range covered, what was looked at, what was found and done with numbers, and what was left for later.
+
+### v0.5.4, 2026-11-13
+
+Covers `c781dcb..` the commit that adds this entry: links and carets in the live editor, the folders held at the top of the tree, blank lines, and LaTeX and Typst read lightly in the rendered editor with their code folded. Counts from a stopwatch in a throwaway test (debug), the second of two runs, on a Typst file of 900 lines and a text of 240 KB, taken out when done; a probe copy on a scratch project in `/private/tmp` (`docs/probing.md`) checked a `.typ` file typed in, a markdown file's spelling marks and blank lines, and the composer's marks for text set from outside.
+
+| | Before | This pass |
+|---|---|---|
+| A key in a `.typ` file of 900 lines, the pane's pieces | 9.2 ms: written as markdown (5.2 ms) and diffed against the text (4.0 ms), then dropped, and the folds (0.2 ms) | the folds, 0.2 ms |
+| A markdown file with no raw block of Typst or LaTeX, a key | the whole text copied and walked for folds | nothing |
+| The file's spelling sync, each draw, 240 KB open | two copies of the text, 33 µs | one walk in place, 15 µs |
+| The composer's spelling sync, each draw | its text joined and copied | a count compared |
+| Blank lines' heights, a run of k | k² looks | k |
+
+Measured and left as they are: the folders held at the top of the tree walk the rows at most five times a draw of the files panel; the reading of a LaTeX or Typst file at a key, 0.25 ms for 900 lines, and of markdown, 0.7 ms.
+
+Left for later:
+- From the last pass, still open: the picture paths of a markdown file parsed at every key (`pictures_from`); a Quarto file's includes read from disk at every key (`quarto::expand`); the rendered editor drawn afresh at every frame, and the structure's heads hashed (`file_heads_now`); a change of width laying every line out again, and `piece_h` keeping a height for every key a piece has had.
+- The file's spelling sync still walks the whole text at each draw while it is unchanged: a count of changes from the field would make it one comparison.
 
 ### v0.5.3, 2026-11-12
 

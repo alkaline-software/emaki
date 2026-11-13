@@ -192,17 +192,12 @@ impl Workbench {
         if canvas.made == Some(made) {
             return;
         }
-        let source = editor.read(cx).text();
         let path = canvas.path.clone();
-        let shown = match edited_body(&path, &source) {
-            FileBody::Markdown(shown) => shown,
-            _ => source.clone(),
-        };
-        let map = Map::new(&source, &shown);
-        let header = header_whole(&source);
         // A LaTeX or Typst file, and a raw block of either: the runs of
         // the document's own code folded, drawn as one quiet row, as the
-        // room they make, or as the picture they place.
+        // room they make, or as the picture they place. A LaTeX or Typst
+        // file has no other pieces, so it is not written as markdown and
+        // laid against its text here.
         let folds = editor.read(cx).folds();
         let fold_pieces = self.fold_pieces(&path, folds, look_key, cx);
         if written_as(&path).is_some() {
@@ -213,6 +208,13 @@ impl Workbench {
             editor.update(cx, |e, cx| e.set_pieces(fold_pieces, cx));
             return;
         }
+        let source = editor.read(cx).text();
+        let shown = match edited_body(&path, &source) {
+            FileBody::Markdown(shown) => shown,
+            _ => source.clone(),
+        };
+        let map = Map::new(&source, &shown);
+        let header = header_whole(&source);
         let Some(canvas) = self.doc_canvas.as_mut() else { return };
         let kept = canvas.kept.clone();
         let mut pieces = Vec::new();

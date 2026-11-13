@@ -420,19 +420,21 @@ impl<'a> Reader<'a> {
     /// caret stands on the last, so the caret's line is a whole one and
     /// the run as tall as before.
     pub fn blank_room(&self, line: usize) -> bool {
+        // Asked of every blank line: only the run's first walks the run.
         let blank = |l: usize| self.analysis.lines.get(l).is_some_and(|i| matches!(i.kind, LineKind::Blank));
-        let (mut first, mut last) = (line, line);
-        while first > 0 && blank(first - 1) {
-            first -= 1;
+        let caret = self.sel.filter(|(a, b)| a == b).map(|(a, _)| a.line);
+        let above = line > 0 && blank(line - 1);
+        if !blank(line + 1) {
+            return !(above && caret == Some(line));
         }
+        if above {
+            return false;
+        }
+        let mut last = line + 1;
         while blank(last + 1) {
             last += 1;
         }
-        if first == last {
-            return true;
-        }
-        let caret = self.sel.filter(|(a, b)| a == b).map(|(a, _)| a.line);
-        line == if caret == Some(last) { first } else { last }
+        caret == Some(last)
     }
 
     /// The marks hidden on a line, in the line's bytes, by the mode and
@@ -1431,6 +1433,24 @@ mod tests {
         let look = Look::default();
         let reader = Reader { doc: &doc, analysis: &analysis, look: &look, rhythm: Rhythm::of(&look), mode: Default::default(), sel: sel.map(|(a, b)| (Pos::new(0, a), Pos::new(0, b))), issues: &[], quiet: None, marks: &[], hold: None, pieces: &[], version: 0 };
         markdown::Shown::new(doc.line(0), &reader.hidden_on(0)).text
+    }
+
+    #[test]
+    fn one_blank_line_of_a_run_is_the_room() {
+        // Lines 1 to 3 are one run, 5 a run of one.
+        let text = "a\n\n\n\nb\n\nc";
+        let doc = Doc::from_text(text);
+        let analysis = markdown::analyze(text);
+        let look = Look::default();
+        let room = |caret: Option<usize>| -> Vec<usize> {
+            let reader = Reader { doc: &doc, analysis: &analysis, look: &look, rhythm: Rhythm::of(&look), mode: Default::default(), sel: caret.map(|l| (Pos::new(l, 0), Pos::new(l, 0))), issues: &[], quiet: None, marks: &[], hold: None, pieces: &[], version: 0 };
+            (0..doc.line_count()).filter(|&l| analysis.lines[l].kind == markdown::LineKind::Blank && reader.blank_room(l)).collect()
+        };
+        assert_eq!(room(None), vec![3, 5]);
+        assert_eq!(room(Some(2)), vec![3, 5]);
+        // The caret on the run's last: the room is its first.
+        assert_eq!(room(Some(3)), vec![1, 5]);
+        assert_eq!(room(Some(5)), vec![3, 5]);
     }
 
     #[test]

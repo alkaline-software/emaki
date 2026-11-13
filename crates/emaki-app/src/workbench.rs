@@ -1931,6 +1931,9 @@ pub struct Workbench {
     /// The composer's text as of the last look, to tell one keystroke
     /// from a paste or a draft coming back.
     last_text: String,
+    /// The composer's count of readings at the last look (`writing_sync`),
+    /// so a draw where it has not changed does not copy its text.
+    last_read: u64,
     /// Where a character was just deleted: a letter typed there again
     /// is the person's choice of case.
     cap_skip: Option<usize>,
@@ -4621,6 +4624,7 @@ impl Workbench {
             check_serial: 0,
             check_at_caret: true,
             last_text: String::new(),
+            last_read: 0,
             cap_skip: None,
             cap_refused: None,
             learned: emaki_core::check::learned(),
@@ -18320,6 +18324,11 @@ impl Workbench {
     /// back, a message sent, a prompt handed back): what was marked was
     /// another text's.
     fn writing_sync(&mut self, cx: &mut Context<Self>) {
+        let read = self.composer.read(cx).version();
+        if read == self.last_read {
+            return;
+        }
+        self.last_read = read;
         let text = self.composer.read(cx).value();
         if self.last_text.as_str() == text.as_ref() {
             return;

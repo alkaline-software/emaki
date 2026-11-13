@@ -52,10 +52,12 @@ impl Workbench {
             return;
         }
         let Some(ed) = self.file_editor.as_mut() else { return };
-        let now = ed.state.read(cx).value().to_string();
-        if ed.issues_for == now {
+        // Compared where it stands, as this runs at every draw: a copy of
+        // the file here was two, at each frame of a scroll.
+        if *ed.state.read(cx).text() == ed.issues_for {
             return;
         }
+        let now = ed.state.read(cx).value().to_string();
         // This text has no marks until its check answers. Left as the old
         // text's, every draw till then began the check again and dropped
         // the one waiting: a window that drew on (a GIF, a turn at work)
