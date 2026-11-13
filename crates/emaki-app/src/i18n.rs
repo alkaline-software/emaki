@@ -297,6 +297,7 @@ mod tests {
             include_str!("workbench/settings.rs"),
             include_str!("workbench/tray.rs"),
             include_str!("panels.rs"),
+            include_str!("panels/doc_edit.rs"),
             include_str!("transcript.rs"),
             include_str!("agents_page.rs"),
             include_str!("branches.rs"),

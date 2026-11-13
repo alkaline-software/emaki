@@ -1958,12 +1958,12 @@ fn body_of(path: &Path, mut bytes: Vec<u8>) -> (FileBody, Option<Arc<str>>) {
 /// A document written in another language that the pane reads as Quarto
 /// does, once it is written as Quarto's markdown.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Written {
+pub(crate) enum Written {
     Latex,
     Typst,
 }
 
-fn written_as(path: &Path) -> Option<Written> {
+pub(crate) fn written_as(path: &Path) -> Option<Written> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "tex" | "latex" | "ltx" => Some(Written::Latex),
         "typ" => Some(Written::Typst),
@@ -4607,7 +4607,7 @@ impl Workbench {
             // Markdown the pane holds whole has its editor as it reads
             // too: what is written in a block there is written in the
             // editor's text (`doc_edit.rs`), as a table's cell is.
-            FileBody::Markdown(text) if v.source.is_some() && written_as(&v.path).is_none() && text.len() <= doc_edit::DOC_MOST => (v.source.clone()?, "markdown"),
+            FileBody::Markdown(text) if v.source.is_some() && text.len() <= doc_edit::DOC_MOST => (v.source.clone()?, if written_as(&v.path).is_some() { emaki_core::render_md::lang_for_path(&v.path.to_string_lossy()) } else { "markdown" }),
             FileBody::Html(text) if self.file_raw => (v.source.clone().unwrap_or_else(|| text.as_str().into()), "html"),
             FileBody::Notebook(_) if self.file_raw => (v.source.clone()?, "json"),
             // A table has its editor whichever way it shows: a cell

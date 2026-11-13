@@ -349,6 +349,9 @@ pub(crate) struct Editor {
     /// Lines of dashes at the top are a YAML header: a markdown file's,
     /// which a message does not have (Emaki).
     header: bool,
+    /// The language the text is written in when it is not markdown: a
+    /// `.typ` or `.tex` file read as its own markup (`dialect.rs`).
+    dialect: Option<super::dialect::Dialect>,
     look: Look,
     focus: FocusHandle,
     /// Counts the text's readings (`reanalyze`), for `version`.
@@ -530,6 +533,7 @@ impl Editor {
             mode: Mode::Live,
             plain: false,
             header: false,
+            dialect: None,
             look: Look::default(),
             focus: cx.focus_handle(),
             version: 0,
@@ -1113,6 +1117,14 @@ impl Editor {
         }
         self.focused = now;
         if now {
+            // The keyboard back with the caret in a piece: it opens again,
+            // as it was when the keyboard left (Emaki).
+            if self.sel.is_caret() {
+                let line = self.sel.head.line;
+                if let Some(first) = self.pieces.iter().find(|p| p.first <= line && line <= p.last).map(|p| p.first) {
+                    self.open_piece = Some(first);
+                }
+            }
             self.kick_blink(cx);
             cx.emit(EditorEvent::Focused);
         } else {
@@ -1218,6 +1230,22 @@ impl Editor {
         }
     }
 
+    /// The runs of a Typst or LaTeX document's own code, to be drawn
+    /// folded (`dialect::folds`).
+    pub fn folds(&self) -> Vec<super::dialect::Fold> {
+        super::dialect::folds(&self.doc.text(), &self.analysis)
+    }
+
+    /// The language the text is read in: markdown, or Typst's or LaTeX's
+    /// markup.
+    pub fn set_dialect(&mut self, dialect: Option<super::dialect::Dialect>, cx: &mut Context<Self>) {
+        if self.dialect != dialect {
+            self.dialect = dialect;
+            self.reanalyze();
+            cx.notify();
+        }
+    }
+
     /// Whether lines of dashes at the top are read as a YAML header.
     pub fn set_header(&mut self, header: bool, cx: &mut Context<Self>) {
         if self.header != header {
@@ -1229,7 +1257,11 @@ impl Editor {
 
     fn reanalyze(&mut self) {
         let text = self.doc.text();
-        self.analysis = if self.plain { markdown::plain(&text) } else { markdown::analyze_with(&text, self.header) };
+        self.analysis = match (self.plain, self.dialect) {
+            (true, _) => markdown::plain(&text),
+            (false, Some(d)) => super::dialect::analyze(&text, d),
+            (false, None) => markdown::analyze_with(&text, self.header),
+        };
         self.version += 1;
     }
 
@@ -1637,6 +1669,14 @@ impl Editor {
         if self.locked() {
             return;
         }
+        // In Typst or LaTeX, that language's marks.
+        let (open, close) = match self.dialect {
+            Some(d) => match d.wrap(&kind) {
+                Some(marks) => marks,
+                None => return,
+            },
+            None => (open, close),
+        };
         let (a, b) = self.sel.range();
         let (ga, gb) = (self.doc.offset_of(a), self.doc.offset_of(b));
         let read;
@@ -1961,6 +2001,11 @@ impl Editor {
         let n = self.doc.line_count();
         self.pieces.retain(|p| p.first <= p.last && p.last < n);
         let head = self.sel.head;
+        // Esc, or the keyboard gone elsewhere: the file reads whole, the
+        // piece the caret was in shut (Emaki).
+        if !self.focused {
+            self.open_piece = None;
+        }
         if let Some(f) = self.open_piece {
             let inside = self.pieces.iter().any(|p| p.first == f && p.first <= head.line && head.line <= p.last);
             if !inside {
@@ -3018,7 +3063,7 @@ impl Editor {
             pointer: self.pointer,
             inks: self.look.colors,
             cache: self.cache.clone(),
-            blocks: self.analysis.code_blocks.iter().filter_map(|b| Some((b.first, b.last, reader.base_inset(self.analysis.lines.get(b.first)?)))).collect(),
+            blocks: self.analysis.code_blocks.iter().filter(|b| b.markup.is_none()).filter_map(|b| Some((b.first, b.last, reader.base_inset(self.analysis.lines.get(b.first)?)))).collect(),
             tables: self.analysis.tables.iter().map(|t| (t.first, t.last)).collect(),
             sel: self.sel,
             marked: self.marked,

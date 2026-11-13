@@ -21,6 +21,7 @@
 //! written in as it reads).
 #![allow(dead_code)]
 
+mod dialect;
 mod editor;
 mod field;
 mod html;
@@ -38,4 +39,5 @@ pub(crate) use editor::{
 };
 #[allow(unused_imports)]
 pub(crate) use markdown::{code_around, Align, Prose};
+pub(crate) use dialect::{Dialect, Fold, FoldKind};
 pub(crate) use rhythm::Heading;

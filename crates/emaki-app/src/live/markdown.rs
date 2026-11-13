@@ -40,6 +40,9 @@ pub enum LineKind {
     /// Any other line of a table, drawn as part of the first.
     TableRow(usize),
     Html,
+    /// A line of a document's own code in Typst or LaTeX (`dialect.rs`):
+    /// `#set`, a preamble, `\begin`, a comment. As it is written, quiet.
+    Source,
 }
 
 /// A list item's mark on its first line, replaced by a widget: a disc, a
@@ -88,6 +91,9 @@ pub enum SpanKind {
     Color(Option<Rgb>, Option<Rgb>),
     /// `<br>`: the words after it stand on a line of their own.
     Break,
+    /// Code among words in Typst or LaTeX (`#h(4pt)`, `\cite{x}`): as it
+    /// is written, quiet, in the mono face; nothing of it hides.
+    Source,
     /// A tag with no look of its own, or left unpaired; a comment; a
     /// backslash before a mark. Each is hidden and nothing else.
     Quiet,
@@ -169,6 +175,9 @@ pub struct CodeBlock {
     pub lang: String,
     /// Whether the closing fence is there; without it the block runs to the end.
     pub closed: bool,
+    /// A raw block of Typst or LaTeX in a Quarto document, read as its
+    /// markup (`dialect.rs`) and drawn as it reads, with no plate.
+    pub markup: Option<super::dialect::Dialect>,
 }
 
 /// A list as the parser found it: whether it is numbered, and the first
@@ -298,7 +307,7 @@ fn read(text: &str, header: bool) -> Analysis {
         let bare = matches!(ev, Event::Text(_))
             && links.is_empty()
             && !tags.iter().any(|(_, style, _)| matches!(style, Style::Link(_)))
-            && !matches!(lines[line_of(r.start)].kind, LineKind::Code | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::Html | LineKind::FrontMatter | LineKind::FrontMatterEdge);
+            && !matches!(lines[line_of(r.start)].kind, LineKind::Code | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::Html | LineKind::Source | LineKind::FrontMatter | LineKind::FrontMatterEdge);
         match words.as_mut() {
             Some(run) if bare && run.end == r.start => run.end = r.end,
             _ => {
@@ -397,7 +406,13 @@ fn read(text: &str, header: bool) -> Analysis {
                         if closed {
                             lines[last].kind = LineKind::FenceClose;
                         }
-                        a.code_blocks.push(CodeBlock { first, last, lang: lang.trim().to_string(), closed });
+                        let markup = super::dialect::Dialect::of_raw(&lang);
+                        if markup.is_some() {
+                            for l in first + 1..body_end.min(n) {
+                                lines[l].kind = LineKind::Text;
+                            }
+                        }
+                        a.code_blocks.push(CodeBlock { first, last, lang: lang.trim().to_string(), closed, markup });
                     }
                     CodeBlockKind::Indented => {
                         for l in first..=last {
@@ -554,6 +569,22 @@ fn read(text: &str, header: bool) -> Analysis {
     }
     // `16*0.9 … 15*0.9` is two products, not words in italics.
     a.spans.retain(|s| !times_signs(text, s));
+    // A raw block of Typst or LaTeX, read as its markup.
+    for b in a.code_blocks.iter().filter(|b| b.markup.is_some()) {
+        let body_last = if b.closed { b.last } else { b.last + 1 }.min(n);
+        if b.first + 1 >= body_last {
+            continue;
+        }
+        let from = line_starts[b.first + 1];
+        let to = line_starts.get(body_last).map_or(text.len(), |e| e - 1).max(from);
+        let (read, spans) = super::dialect::read(&text[from..to], b.markup.unwrap_or(super::dialect::Dialect::Typst));
+        for (k, info) in read.into_iter().enumerate() {
+            if let Some(line) = lines.get_mut(b.first + 1 + k).filter(|_| b.first + 1 + k < body_last) {
+                *line = LineInfo { quote_depth: line.quote_depth, ..info };
+            }
+        }
+        a.spans.extend(spans.into_iter().map(|s| Span { range: s.range.start + from..s.range.end + from, open: s.open.start + from..s.open.end + from, close: s.close.start + from..s.close.end + from, kind: s.kind }));
+    }
 
     // A quote's marks on each of its lines, by the depth the parser gave it.
     for (i, info) in lines.iter_mut().enumerate() {
@@ -581,6 +612,21 @@ fn read(text: &str, header: bool) -> Analysis {
         }
     }
 
+    a.lines = lines;
+    index_spans(&mut a);
+    a
+}
+
+/// The spans put in order, the outer before the inner, and each line's
+/// list of those that touch it.
+pub(crate) fn index_spans(a: &mut Analysis) {
+    let n = a.line_starts.len();
+    let line_starts = &a.line_starts;
+    let line_of = |offset: usize| match line_starts.binary_search(&offset) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+    let last_line_of = |r: &Range<usize>| if r.end > r.start { line_of(r.end - 1) } else { line_of(r.start) };
     a.spans.sort_by(|x, y| x.range.start.cmp(&y.range.start).then(y.range.end.cmp(&x.range.end)));
     a.line_spans = vec![Vec::new(); n];
     for (ix, s) in a.spans.iter().enumerate() {
@@ -590,8 +636,6 @@ fn read(text: &str, header: bool) -> Analysis {
             a.line_spans[l].push(ix);
         }
     }
-    a.lines = lines;
-    a
 }
 
 /// Whether an emphasis is made of `*`s that stand between two digits, at
@@ -711,7 +755,7 @@ pub fn prose(text: &str, a: &Analysis) -> (String, Vec<Prose>) {
     let line_range = |i: usize| a.line_starts[i]..a.line_starts.get(i + 1).map_or(text.len(), |e| e - 1);
     for s in &a.spans {
         match &s.kind {
-            SpanKind::Code | SpanKind::Math | SpanKind::Footnote | SpanKind::Image(_) | SpanKind::Quiet | SpanKind::Break => blank(&mut mask, s.range.clone()),
+            SpanKind::Code | SpanKind::Math | SpanKind::Footnote | SpanKind::Image(_) | SpanKind::Quiet | SpanKind::Break | SpanKind::Source => blank(&mut mask, s.range.clone()),
             _ => {
                 blank(&mut mask, s.open.clone());
                 blank(&mut mask, s.close.clone());
@@ -726,7 +770,7 @@ pub fn prose(text: &str, a: &Analysis) -> (String, Vec<Prose>) {
         if let Some(m) = &info.list {
             blank(&mut mask, from..from + m.marker.end);
         }
-        if matches!(info.kind, LineKind::Code | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::FrontMatter | LineKind::FrontMatterEdge | LineKind::Html | LineKind::Rule | LineKind::SetextUnderline) {
+        if matches!(info.kind, LineKind::Code | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::FrontMatter | LineKind::FrontMatterEdge | LineKind::Html | LineKind::Source | LineKind::Rule | LineKind::SetextUnderline) {
             blank(&mut mask, line_range(i));
         }
     }
@@ -996,7 +1040,7 @@ mod tests {
         assert_eq!(kinds[12], &LineKind::FenceOpen("rust".into()));
         assert_eq!(kinds[13], &LineKind::Code);
         assert_eq!(kinds[14], &LineKind::FenceClose);
-        assert_eq!(a.code_blocks[0], CodeBlock { first: 12, last: 14, lang: "rust".into(), closed: true });
+        assert_eq!(a.code_blocks[0], CodeBlock { first: 12, last: 14, lang: "rust".into(), closed: true, markup: None });
         assert_eq!(kinds[16], &LineKind::TableFirst(0));
         assert_eq!(kinds[17], &LineKind::TableRow(0));
         assert_eq!(kinds[18], &LineKind::TableRow(0));
@@ -1084,6 +1128,19 @@ mod tests {
         assert_eq!(links("[words](https://a.com)"), vec![("[words](https://a.com)".into(), "https://a.com".into())]);
         assert!(links("`https://a.com` and\n\n```\nhttps://b.com\n```").is_empty());
         assert!(links("xhttps://a.com and www. and https://").is_empty());
+    }
+
+    #[test]
+    fn a_raw_block_of_typst_reads_as_its_markup() {
+        let text = "Words.\n\n```{=typst}\n// a comment\n#v(6pt)\nYours *sincerely*,\n```\n";
+        let a = analyze(text);
+        assert_eq!(a.code_blocks[0].markup, Some(super::super::dialect::Dialect::Typst));
+        assert_eq!(a.lines[3].kind, LineKind::Source);
+        assert_eq!(a.lines[4].kind, LineKind::Source);
+        assert_eq!(a.lines[5].kind, LineKind::Text);
+        let strong = a.line_spans[5].iter().map(|&i| &a.spans[i]).find(|s| s.kind == SpanKind::Strong).unwrap();
+        assert_eq!(&text[strong.inner()], "sincerely");
+        assert_eq!(a.lines[2].kind, LineKind::FenceOpen("{=typst}".into()));
     }
 
     #[test]

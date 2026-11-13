@@ -53,7 +53,7 @@ impl Workbench {
     /// rendered: its rendered side is the rendered editor.
     pub(crate) fn doc_writable(&self) -> bool {
         self.file_view.as_ref().is_some_and(|v| {
-            matches!(&v.body, FileBody::Markdown(text) if text.len() <= DOC_MOST) && v.source.is_some() && written_as(&v.path).is_none() && self.file_editor.as_ref().is_some_and(|ed| ed.path == v.path && ed.saved.is_some())
+            matches!(&v.body, FileBody::Markdown(text) if text.len() <= DOC_MOST) && v.source.is_some() && self.file_editor.as_ref().is_some_and(|ed| ed.path == v.path && ed.saved.is_some())
         })
     }
 
@@ -78,7 +78,14 @@ impl Workbench {
             let scroll = self.file_view_scroll.clone();
             editor.update(cx, |e, cx| {
                 e.set_look(look.clone(), cx);
-                e.set_header(true, cx);
+                // A LaTeX or Typst file reads as its own markup; markdown
+                // as markdown, its YAML header a header.
+                let dialect = written_as(&path).map(|w| match w {
+                    Written::Latex => live::Dialect::Latex,
+                    Written::Typst => live::Dialect::Typst,
+                });
+                e.set_dialect(dialect, cx);
+                e.set_header(dialect.is_none(), cx);
                 e.set_text(&source, cx);
                 e.scroll = scroll;
             });
@@ -193,6 +200,19 @@ impl Workbench {
         };
         let map = Map::new(&source, &shown);
         let header = header_whole(&source);
+        // A LaTeX or Typst file, and a raw block of either: the runs of
+        // the document's own code folded, drawn as one quiet row, as the
+        // room they make, or as the picture they place.
+        let folds = editor.read(cx).folds();
+        let fold_pieces = self.fold_pieces(&path, folds, look_key, cx);
+        if written_as(&path).is_some() {
+            if let Some(canvas) = self.doc_canvas.as_mut() {
+                canvas.states.retain(|k, _| fold_pieces.iter().any(|p| p.key == *k));
+                canvas.made = Some(made);
+            }
+            editor.update(cx, |e, cx| e.set_pieces(fold_pieces, cx));
+            return;
+        }
         let Some(canvas) = self.doc_canvas.as_mut() else { return };
         let kept = canvas.kept.clone();
         let mut pieces = Vec::new();
@@ -251,9 +271,72 @@ impl Workbench {
             let out = if is_header { (pad.0, pad.0, pad.1) } else { (0., 0., 0.) };
             pieces.push(live::Piece { first, last, key, out, draw });
         }
+        used.extend(fold_pieces.iter().map(|p| p.key));
+        pieces.extend(fold_pieces);
+        pieces.sort_by_key(|p| p.first);
         canvas.states.retain(|k, _| used.contains(k));
         canvas.made = Some(made);
         editor.update(cx, |e, cx| e.set_pieces(pieces, cx));
+    }
+
+    /// The folds of a document's own code as pieces (`live::Fold`): a run
+    /// of code one quiet row, its icon, its first words worth reading and
+    /// how many lines it holds; vertical spacing the room it makes; a
+    /// picture's call the picture, drawn as a markdown picture is.
+    fn fold_pieces(&mut self, path: &Path, folds: Vec<live::Fold>, look_key: u64, cx: &mut Context<Self>) -> Vec<live::Piece> {
+        let size = self.cfg.app.text_sizes().preview;
+        let quarto = reads_as_quarto(path);
+        let icon = match written_as(path) {
+            Some(Written::Latex) => "icons/lang/latex.svg",
+            _ => "icons/lang/typst.svg",
+        };
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let Some(canvas) = self.doc_canvas.as_mut() else { return Vec::new() };
+        let kept = canvas.kept.clone();
+        let mut out = Vec::new();
+        for fold in folds {
+            let key = {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (format!("{:?}", fold.kind), fold.last - fold.first, look_key).hash(&mut h);
+                h.finish()
+            };
+            let lines = fold.last - fold.first + 1;
+            let draw: Rc<dyn Fn(&mut Window, &mut App) -> AnyElement> = match fold.kind {
+                live::FoldKind::Code { summary } => Rc::new(move |_, cx| {
+                    let theme = cx.theme();
+                    div()
+                        .w_full()
+                        .py(px(3.))
+                        .flex()
+                        .child(
+                            h_flex()
+                                .max_w_full()
+                                .min_w_0()
+                                .gap(px(7.))
+                                .px(px(9.))
+                                .py(px(3.))
+                                .rounded(px(7.))
+                                .bg(theme.muted.opacity(0.55))
+                                .text_size(px(crate::fonts::code_px(size)))
+                                .text_color(theme.muted_foreground)
+                                .child(svg().path(icon).size(px(12.)).flex_shrink_0().text_color(theme.muted_foreground))
+                                .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).child(summary.clone()))
+                                .child(div().flex_shrink_0().opacity(0.8).child(count(lines, "{n} line", "{n} lines"))),
+                        )
+                        .into_any_element()
+                }),
+                live::FoldKind::Space(h) => Rc::new(move |_, _| div().w_full().h(px(h)).into_any_element()),
+                live::FoldKind::Picture { path: pic, width } => {
+                    let at = dir.join(&pic);
+                    let words = format!("![](<{}>){}", at.display(), width.map(|w| format!("{{width={w}}}")).unwrap_or_default());
+                    let state = canvas.states.entry(key).or_insert_with(|| cx.new(|cx| TextViewState::markdown(&words, cx))).clone();
+                    let kept = kept.clone();
+                    Rc::new(move |_, cx| div().w_full().text_size(px(size)).child(crate::transcript::md_view_piece(state.clone(), words.clone(), quarto, kept.clone(), crate::fonts::code_px(size), cx)).into_any_element())
+                }
+            };
+            out.push(live::Piece { first: fold.first, last: fold.last, key, out: (0., 0., 0.), draw });
+        }
+        out
     }
 
     /// A right click in the file: Cut and Copy for what is selected,

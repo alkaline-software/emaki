@@ -10051,5 +10051,23 @@
     "fr": "Lecture des polices…",
     "de": "Schriften werden gelesen…",
     "es": "Leyendo fuentes…"
+  },
+  "{n} line": {
+    "zh-Hans": "{n} 行",
+    "zh-Hant": "{n} 行",
+    "ja": "{n} 行",
+    "ko": "{n}줄",
+    "fr": "{n} ligne",
+    "de": "{n} Zeile",
+    "es": "{n} línea"
+  },
+  "{n} lines": {
+    "zh-Hans": "{n} 行",
+    "zh-Hant": "{n} 行",
+    "ja": "{n} 行",
+    "ko": "{n}줄",
+    "fr": "{n} lignes",
+    "de": "{n} Zeilen",
+    "es": "{n} líneas"
   }
 }

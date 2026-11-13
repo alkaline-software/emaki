@@ -665,7 +665,7 @@ impl<'a> Reader<'a> {
         // key; read again only where its text changed.
         let mut was = std::mem::take(&mut cache.code_colors);
         for b in &self.analysis.code_blocks {
-            if b.lang.is_empty() {
+            if b.lang.is_empty() || b.markup.is_some() {
                 continue;
             }
             let last = if b.closed { b.last.saturating_sub(1) } else { b.last };
@@ -811,6 +811,10 @@ impl<'a> Reader<'a> {
                     if let Some(w) = wash {
                         st.chip = Some(ink_of(*w).opacity(0.5));
                     }
+                }),
+                SpanKind::Source => paint(&mut styles, local(&s.range), &|st| {
+                    st.mono = true;
+                    st.color = muted;
                 }),
                 SpanKind::Break | SpanKind::Quiet => paint(&mut styles, local(&s.range), &|st| {
                     st.mono = true;
@@ -1078,12 +1082,12 @@ impl<'a> Reader<'a> {
                 let weight = if *level == 1 { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
                 (size, weight, line_h, if line == 0 { 0. } else { above })
             }
-            LineKind::Code | LineKind::FrontMatter | LineKind::FrontMatterEdge | LineKind::Html | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::TableFirst(_) | LineKind::TableRow(_) => (self.look.mono_px, FontWeight::NORMAL, rhythm.code_line, 0.),
+            LineKind::Code | LineKind::FrontMatter | LineKind::FrontMatterEdge | LineKind::Html | LineKind::Source | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::TableFirst(_) | LineKind::TableRow(_) => (self.look.mono_px, FontWeight::NORMAL, rhythm.code_line, 0.),
             _ => (px_text, FontWeight::NORMAL, rhythm.line, 0.),
         };
         // A block of HTML shows as it is written, as code does.
-        let mono_line = matches!(info.kind, LineKind::Code | LineKind::FrontMatter | LineKind::FrontMatterEdge | LineKind::Html | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::TableFirst(_) | LineKind::TableRow(_));
-        let muted_line = matches!(info.kind, LineKind::FrontMatter | LineKind::FrontMatterEdge | LineKind::Html | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::SetextUnderline);
+        let mono_line = matches!(info.kind, LineKind::Code | LineKind::FrontMatter | LineKind::FrontMatterEdge | LineKind::Html | LineKind::Source | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::TableFirst(_) | LineKind::TableRow(_));
+        let muted_line = matches!(info.kind, LineKind::FrontMatter | LineKind::FrontMatterEdge | LineKind::Html | LineKind::Source | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::SetextUnderline);
         let (styles, links) = self.styled(line, base_weight, mono_line, muted_line, colors);
 
         let inset = self.inset_of(info);
@@ -1107,8 +1111,11 @@ impl<'a> Reader<'a> {
             let x_mark = inset - LIST_INDENT * 0.5;
             match m.kind {
                 ListKind::Bullet => widgets.push(Widget::Bullet { x: x_mark, y: top_pad + line_h / 2., r: (px_text * 0.17).max(2.5) }),
-                ListKind::Ordered(_) => {
-                    let number = text.get(m.marker.start..m.marker.end).unwrap_or("").trim_end().to_string();
+                ListKind::Ordered(n) => {
+                    // Typst's `+` and LaTeX's `\item` are numbered by their
+                    // place, as written.
+                    let written = text.get(m.marker.start..m.marker.end).unwrap_or("").trim();
+                    let number = if written.starts_with(|c: char| c.is_ascii_digit()) { written.to_string() } else { format!("{n}.") };
                     let run = TextRun { len: number.len(), font: self.font(&self.look.text_family, FontWeight::NORMAL, false), color: muted, background_color: None, underline: None, strikethrough: None };
                     let shaped = window.text_system().shape_line(number.into(), px(px_text), &[run], None);
                     let x = inset - 6. - f32::from(shaped.width());
@@ -1363,6 +1370,7 @@ impl HashKey for LineKind {
             LineKind::TableFirst(t) => (10u8, t).hash(h),
             LineKind::TableRow(t) => (11u8, t).hash(h),
             LineKind::Html => 12u8.hash(h),
+            LineKind::Source => 13u8.hash(h),
         }
     }
 }
