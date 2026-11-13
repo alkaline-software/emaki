@@ -74,6 +74,34 @@ fn push_merged(
     paragraph.push(node);
 }
 
+/// Whether an emphasis `node` opens or closes with `marks` stars standing
+/// between two digits: `16*0.9 … 15*0.9` is two products, not words in
+/// italics. A letter on both sides still makes emphasis, as Chinese words
+/// around bold ones have no spaces between them. (Emaki addition.)
+fn times_signs(node: &mdast::Node, marks: usize, cx: &NodeContext) -> bool {
+    let (Some(source), Some(pos)) = (cx.source.as_deref(), node.position()) else {
+        return false;
+    };
+    let bytes = source.as_bytes();
+    let (start, end) = (pos.start.offset, pos.end.offset);
+    if end < start + 2 * marks || end > bytes.len() {
+        return false;
+    }
+    let digit = |i: Option<usize>| i.and_then(|i| bytes.get(i)).is_some_and(u8::is_ascii_digit);
+    let stars = |from: usize| bytes[from..from + marks].iter().all(|b| *b == b'*');
+    (stars(start) && digit(start.checked_sub(1)) && digit(Some(start + marks)))
+        || (stars(end - marks) && digit((end - marks).checked_sub(1)) && digit(Some(end)))
+}
+
+/// An emphasis read as its words with its marks around them, as written.
+/// (Emaki addition.)
+fn as_written(paragraph: &mut Paragraph, children: &[mdast::Node], marks: &str, cx: &mut NodeContext) -> String {
+    paragraph.push_str(marks);
+    let inner = merge_children_with_mark(paragraph, children, TextMark::default(), cx);
+    paragraph.push_str(marks);
+    format!("{marks}{inner}{marks}")
+}
+
 /// Parse `children` and apply `mark` across each emitted text run.
 ///
 /// Nested child marks are kept and shifted to match the combined text for the
@@ -240,6 +268,14 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
         Node::Text(val) => {
             text = val.value.clone();
             paragraph.push_str(&val.value)
+        }
+        // Stars between digits are times signs: `16*0.9` stays as
+        // written. (Emaki addition.)
+        Node::Emphasis(val) if times_signs(node, 1, cx) => {
+            text = as_written(paragraph, &val.children, "*", cx);
+        }
+        Node::Strong(val) if times_signs(node, 2, cx) => {
+            text = as_written(paragraph, &val.children, "**", cx);
         }
         Node::Emphasis(val) => {
             text = merge_children_with_mark(

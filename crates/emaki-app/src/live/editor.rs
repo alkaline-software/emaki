@@ -318,9 +318,9 @@ const CARET_W: f32 = 1.5;
 /// has that the editor does not draw: a picture, a formula, a callout,
 /// the YAML header's band). The first line's row is as tall as what is
 /// drawn, measured once at a width and kept; the others have none. A
-/// press selects it whole and a drag takes it whole, so it stays drawn;
-/// a double click or ↩ on it opens it, and its lines show as written
-/// until the caret leaves them.
+/// press on it, or a caret moved into it, opens it: its lines show as
+/// written, the caret where the press was, until the caret leaves them.
+/// A drag that reaches it takes it whole, so it stays drawn.
 #[derive(Clone)]
 pub(crate) struct Piece {
     pub first: usize,
@@ -346,6 +346,9 @@ pub(crate) struct Editor {
     analysis: Analysis,
     mode: Mode,
     plain: bool,
+    /// Lines of dashes at the top are a YAML header: a markdown file's,
+    /// which a message does not have (Emaki).
+    header: bool,
     look: Look,
     focus: FocusHandle,
     /// Counts the text's readings (`reanalyze`), for `version`.
@@ -373,6 +376,9 @@ pub(crate) struct Editor {
     /// A link pressed as the text reads, followed at the release unless
     /// the press became a selection, so a selection can begin on a link.
     pressed_link: Option<Target>,
+    /// A shut piece just opened by a press or an arrow, and the point the
+    /// caret goes to once its lines are laid out as written (Emaki).
+    reach: Option<(usize, f32, f32, f32)>,
     want_scroll: bool,
     /// The column ↑ and ↓ keep to, in pixels from the words' left.
     preferred_x: Option<f32>,
@@ -523,6 +529,7 @@ impl Editor {
             analysis: markdown::analyze(""),
             mode: Mode::Live,
             plain: false,
+            header: false,
             look: Look::default(),
             focus: cx.focus_handle(),
             version: 0,
@@ -537,6 +544,7 @@ impl Editor {
             focus_subs: None,
             drag: None,
             pressed_link: None,
+            reach: None,
             want_scroll: false,
             preferred_x: None,
             origin: Point::default(),
@@ -1126,6 +1134,19 @@ impl Editor {
         Some(MenuLink { url, words, raw })
     }
 
+    /// Whether the caret or the selection is in the link at a point of
+    /// the page: it is being written, so a press there puts the caret, and
+    /// ⌘ and a press follow it.
+    fn writing_link(&self, x: f32, y: f32) -> bool {
+        let Some(p) = self.pos_at(x, y, &self.cache.borrow()) else { return false };
+        let at = self.doc.offset_of(p);
+        let (a, b) = self.sel.range();
+        let (ga, gb) = (self.doc.offset_of(a), self.doc.offset_of(b));
+        self.analysis.line_spans.get(p.line).is_some_and(|spans| {
+            spans.iter().map(|&ix| &self.analysis.spans[ix]).any(|s| matches!(s.kind, SpanKind::Link(_)) && s.range.start <= at && at <= s.range.end && ga <= s.range.end && gb >= s.range.start)
+        })
+    }
+
     /// A right click off a link: a press inside the selection leaves it,
     /// one on a word selects the word, as a Mac's text does, and one on
     /// nothing puts the caret there, for a paste.
@@ -1197,9 +1218,18 @@ impl Editor {
         }
     }
 
+    /// Whether lines of dashes at the top are read as a YAML header.
+    pub fn set_header(&mut self, header: bool, cx: &mut Context<Self>) {
+        if self.header != header {
+            self.header = header;
+            self.reanalyze();
+            cx.notify();
+        }
+    }
+
     fn reanalyze(&mut self) {
         let text = self.doc.text();
-        self.analysis = if self.plain { markdown::plain(&text) } else { markdown::analyze(&text) };
+        self.analysis = if self.plain { markdown::plain(&text) } else { markdown::analyze_with(&text, self.header) };
         self.version += 1;
     }
 
@@ -1451,10 +1481,12 @@ impl Editor {
             return;
         }
         let text = self.doc.line(at.line);
-        // Right after a list marker with nothing typed yet: the marker goes.
+        // Right after a list marker with nothing typed yet, or where an
+        // item's words begin with the marker drawn in the margin: the
+        // marker goes, and not a character of it no one sees.
         if let Some(item) = list_line(text) {
             let marker_end = item.indent.len() + item.marker.len();
-            if at.col == marker_end && item.body.is_empty() {
+            if at.col == marker_end && (item.body.is_empty() || self.floor(at.line) == marker_end) {
                 self.replace_range(Pos::new(at.line, item.indent.len()), Pos::new(at.line, marker_end), "", cx);
                 self.doc.end_step();
                 return;
@@ -1595,17 +1627,26 @@ impl Editor {
         cx.notify();
     }
 
-    /// ⌘B and ⌘I: a span of the kind around or under the caret is
-    /// unwrapped; a selection is wrapped; a caret on a word wraps the
-    /// word; a caret on nothing opens an empty pair to type into, and in
-    /// such a pair closes it again.
-    fn toggle_wrap(&mut self, marker: &str, kind: SpanKind, cx: &mut Context<Self>) {
+    /// ⌘B, ⌘I, ⇧⌘C, ⌘U and ⇧⌘X: a span of the kind around or under the
+    /// caret is unwrapped; a selection is wrapped; a caret on a word wraps
+    /// the word; a caret on nothing opens an empty pair to type into, and
+    /// in such a pair closes it again. The spans are the markdown's
+    /// whether or not it is drawn as it reads, so a key pressed again
+    /// takes off what it put on, with live markdown off too.
+    fn toggle_wrap(&mut self, open: &str, close: &str, kind: SpanKind, cx: &mut Context<Self>) {
         if self.locked() {
             return;
         }
         let (a, b) = self.sel.range();
         let (ga, gb) = (self.doc.offset_of(a), self.doc.offset_of(b));
-        let around = self.analysis.spans.iter().filter(|s| s.kind == kind && s.range.start <= ga && gb <= s.range.end).min_by_key(|s| s.range.len()).cloned();
+        let read;
+        let spans = if self.plain {
+            read = markdown::analyze(&self.doc.text()).spans;
+            &read
+        } else {
+            &self.analysis.spans
+        };
+        let around = spans.iter().filter(|s| s.kind == kind && s.range.start <= ga && gb <= s.range.end).min_by_key(|s| s.range.len()).cloned();
         if let Some(s) = around {
             let (open, close) = (self.doc.pos_of(s.open.start), self.doc.pos_of(s.close.start));
             let (open_end, close_end) = (self.doc.pos_of(s.open.end), self.doc.pos_of(s.close.end));
@@ -1637,9 +1678,9 @@ impl Editor {
                 return;
             }
             let before = self.sel;
-            self.doc.replace_many(vec![(ta, ta, marker.to_string()), (tb, tb, marker.to_string())], before, before);
-            let inner_a = Pos::new(ta.line, ta.col + marker.len());
-            let inner_b = if tb.line == ta.line { Pos::new(tb.line, tb.col + marker.len()) } else { tb };
+            self.doc.replace_many(vec![(ta, ta, open.to_string()), (tb, tb, close.to_string())], before, before);
+            let inner_a = Pos::new(ta.line, ta.col + open.len());
+            let inner_b = if tb.line == ta.line { Pos::new(tb.line, tb.col + open.len()) } else { tb };
             self.sel = Sel { anchor: inner_a, head: inner_b };
             self.after_edit(cx);
             return;
@@ -1648,36 +1689,46 @@ impl Editor {
         if word.start < word.end {
             let (wa, wb) = (Pos::new(a.line, word.start), Pos::new(a.line, word.end));
             let before = self.sel;
-            let caret = Pos::new(a.line, a.col + marker.len());
-            self.doc.replace_many(vec![(wa, wa, marker.to_string()), (wb, wb, marker.to_string())], before, Sel::caret(caret));
+            let caret = Pos::new(a.line, a.col + open.len());
+            self.doc.replace_many(vec![(wa, wa, open.to_string()), (wb, wb, close.to_string())], before, Sel::caret(caret));
             self.sel = Sel::caret(caret);
             self.after_edit(cx);
             return;
         }
         let line = self.doc.line(a.line);
-        if line[..a.col].ends_with(marker) && line[a.col..].starts_with(marker) {
-            let from = Pos::new(a.line, a.col - marker.len());
-            let to = Pos::new(a.line, a.col + marker.len());
+        if line[..a.col].ends_with(open) && line[a.col..].starts_with(close) {
+            let from = Pos::new(a.line, a.col - open.len());
+            let to = Pos::new(a.line, a.col + close.len());
             self.replace_range(from, to, "", cx);
             return;
         }
-        let caret = Pos::new(a.line, a.col + marker.len());
-        self.doc.replace(a, a, &format!("{marker}{marker}"), self.sel);
+        let caret = Pos::new(a.line, a.col + open.len());
+        self.doc.replace(a, a, &format!("{open}{close}"), self.sel);
         self.sel = Sel::caret(caret);
         self.after_edit(cx);
     }
 
     fn bold(&mut self, _: &Bold, _: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_wrap("**", SpanKind::Strong, cx);
+        self.toggle_wrap("**", "**", SpanKind::Strong, cx);
     }
 
     fn italic(&mut self, _: &Italic, _: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_wrap("*", SpanKind::Em, cx);
+        self.toggle_wrap("*", "*", SpanKind::Em, cx);
     }
 
     /// ⇧⌘C, as Slack has it: words made code, and code made words again.
     fn code(&mut self, _: &Code, _: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_wrap("`", SpanKind::Code, cx);
+        self.toggle_wrap("`", "`", SpanKind::Code, cx);
+    }
+
+    /// ⌘U: words underlined with `<u>`, or underlined no more.
+    pub fn underline(&mut self, cx: &mut Context<Self>) {
+        self.toggle_wrap("<u>", "</u>", SpanKind::Underline, cx);
+    }
+
+    /// ⇧⌘X: words struck through with `~~`, or struck no more.
+    pub fn strike(&mut self, cx: &mut Context<Self>) {
+        self.toggle_wrap("~~", "~~", SpanKind::Strike, cx);
     }
 
     /// ⌘↩: a task's box ticked or cleared; a bullet made a task; a plain
@@ -1742,6 +1793,13 @@ impl Editor {
 
     fn move_to(&mut self, p: Pos, select: bool, cx: &mut Context<Self>) {
         let p = self.settled(self.doc.clamp(p), select);
+        // A piece the caret is moved into opens, as a press opens it
+        // (Emaki); a caret the text was set with leaves it shut.
+        if !select {
+            if let Some(first) = self.shut_piece_at(p.line).map(|piece| piece.first) {
+                self.open_piece = Some(first);
+            }
+        }
         self.sel = if select { Sel { anchor: self.sel.anchor, head: p } } else { Sel::caret(p) };
         self.after_move(cx);
     }
@@ -1758,26 +1816,36 @@ impl Editor {
         self.move_to(p, select, cx);
     }
 
+    /// ⌥←: a list's marker is not a word, so from where an item's words
+    /// begin it is the line before.
     fn word_left(&mut self, select: bool, cx: &mut Context<Self>) {
-        let p = self.doc.word_left(self.sel.head);
+        let at = self.sel.head;
+        let floor = self.floor(at.line);
+        let p = if at.col <= floor {
+            self.doc.word_left(Pos::new(at.line, 0))
+        } else {
+            let q = self.doc.word_left(at);
+            if q.line == at.line && q.col < floor { Pos::new(at.line, floor) } else { q }
+        };
         self.preferred_x = None;
         self.move_to(p, select, cx);
     }
 
     fn word_right(&mut self, select: bool, cx: &mut Context<Self>) {
-        let p = self.doc.word_right(self.sel.head);
+        let p = self.past_marker(self.doc.word_right(self.past_marker(self.sel.head)));
         self.preferred_x = None;
         self.move_to(p, select, cx);
     }
 
     /// Home: the start of the words, before the line's marks; pressed
-    /// there, the line's very start.
+    /// there, the line's very start, unless that is inside a list's
+    /// marker, which never shows.
     fn line_start(&mut self, select: bool, cx: &mut Context<Self>) {
         let at = self.sel.head;
         let text = self.doc.line(at.line);
         let (_, qs) = quote_line(text).unwrap_or((0, 0));
         let content = list_line(&text[qs..]).map_or(qs, |i| qs + i.indent.len() + i.marker.len());
-        let p = if at.col > content { content } else { 0 };
+        let p = if at.col > content || self.floor(at.line) > 0 { content } else { 0 };
         if let Some(cell) = self.cell_of(at) {
             let (from, _) = self.cell_span(cell);
             self.preferred_x = None;
@@ -1820,6 +1888,14 @@ impl Editor {
                 next = step(l);
             }
             match next.map(|line| (line, cache.tops.get(line), cache.entries.get(line))) {
+                // A shut piece: it opens, the caret at its top going down,
+                // at its foot going up, under the column it came from.
+                Some((line, Some(top), Some(entry))) if !select && self.shut.iter().any(|(f, _, _)| *f == line) => {
+                    let y = if down { top + 1. } else { top + entry.height - 1. };
+                    drop(cache);
+                    self.open_piece_toward(line, x, y.max(0.), cx);
+                    return;
+                }
                 Some((_, Some(top), Some(entry))) => {
                     let y = if down { top + 1. } else { top + entry.height - 1. };
                     self.pos_at(x, y.max(0.), &cache)
@@ -1897,9 +1973,6 @@ impl Editor {
         for (a, b) in shut {
             let (anchor, head) = (self.sel.anchor, self.sel.head);
             if self.sel.is_caret() {
-                if inside(head, (a, b)) {
-                    self.sel = Sel { anchor: a, head: b };
-                }
                 continue;
             }
             let anchor = if inside(anchor, (a, b)) { if head >= anchor { a } else { b } } else { anchor };
@@ -1973,6 +2046,56 @@ impl Editor {
         self.sel = Sel::caret(Pos::new(first, 0));
         self.want_scroll = true;
         cx.notify();
+    }
+
+    /// A shut piece opened by a press or an arrow at a point of the page:
+    /// the caret goes where that point falls once its lines are laid out
+    /// as written (`take_reach`), so nothing scrolls and the place pressed
+    /// is the place written in.
+    fn open_piece_toward(&mut self, first: usize, x: f32, y: f32, cx: &mut Context<Self>) {
+        // How far down the drawing the point is, for a line as far down
+        // the lines as written.
+        let down = {
+            let cache = self.cache.borrow();
+            let top = cache.tops.get(first).copied().unwrap_or(0.);
+            let h = self.shut.iter().find(|(f, _, _)| *f == first).map_or(1., |(_, _, h)| *h).max(1.);
+            ((y - top) / h).clamp(0., 0.999)
+        };
+        self.open_piece = Some(first);
+        self.sel = Sel::caret(Pos::new(first, 0));
+        self.reach = Some((first, x, y, down));
+        self.preferred_x = Some(x);
+        cx.notify();
+    }
+
+    /// The caret put where a piece just opened was pressed, its lines now
+    /// laid out. One line (a paragraph with a formula) takes the point
+    /// itself, its words where they were. More take the line as far down
+    /// the lines as the point was down the drawing, leaving out a fence
+    /// line, which the drawing does not show (a callout's `:::`, a
+    /// header's `---`), and the place along it under the point.
+    fn take_reach(&mut self) {
+        let Some((first, x, y, down)) = self.reach.take() else { return };
+        let Some(last) = self.pieces.iter().find(|p| p.first == first).map(|p| p.last) else { return };
+        let fence = |l: usize| {
+            let t = self.doc.line(l).trim_start();
+            t.starts_with(":::") || t.starts_with("---") || t.starts_with("```") || t.starts_with("~~~")
+        };
+        let (a, b) = if last > first + 1 && fence(first) && fence(last) { (first + 1, last - 1) } else { (first, last) };
+        let line = (a + (down * (b - a + 1) as f32) as usize).min(b);
+        let p = {
+            let cache = self.cache.borrow();
+            let (Some(top), Some(entry)) = (cache.tops.get(line).copied(), cache.entries.get(line)) else { return };
+            let y = if a == b { y.clamp(top, top + (entry.height - 1.).max(0.)) } else { top + 1. };
+            self.pos_at(x, y, &cache)
+        };
+        let Some(p) = p else { return };
+        let p = if p.line == line { p } else { Pos::new(line, 0) };
+        let p = self.past_marker(p);
+        self.sel = Sel::caret(p);
+        if let Some((grain, _, _)) = self.drag {
+            self.drag = Some((grain, p, p));
+        }
     }
 
     // -- places on the page -------------------------------------------------
@@ -2435,7 +2558,13 @@ fn paint_row(row: &Row, ox: f32, oy: f32, height: f32, full_w: Pixels, line: usi
     let inks = &info.inks;
     match row {
         Row::Text(r) => paint_text(r, ox, oy, height, line, info, window, cx),
-        Row::Pad { lang, .. } => {
+        Row::Pad { lang, blank, .. } => {
+            // A blank line in the selection, its end taken: a strip as
+            // wide as the one past a line of words, its whole height.
+            let (sa, sb) = info.sel.range();
+            if *blank && sa != sb && sa.line <= line && line < sb.line {
+                window.paint_quad(fill(Bounds::new(point(px(ox), px(oy)), size(px(6.), px(height))), inks.selection));
+            }
             if let Some((l, icon, color)) = lang {
                 // The mark sits in the plate's corner as far from its top as
                 // from its right, measured to what shows: the icon's top and
@@ -2616,6 +2745,7 @@ impl Element for EditorElement {
         let moved = self.editor.update(cx, |e, _| {
             e.origin = bounds.origin;
             e.painted = true;
+            e.take_reach();
             e.want_scroll && e.scroll_to_caret(bounds, window)
         });
         // The scroller read its offset before its child was laid out, so a
@@ -2729,18 +2859,20 @@ impl Element for EditorElement {
                         e.toggle_task_on(line, cx);
                         e.doc.end_step();
                     }
-                    Some(Hit::Link(target)) if !reading && (ev.modifiers.secondary() || ev.click_count == 1) => e.follow(target, cx),
+                    Some(Hit::Link(target)) if !reading && (ev.modifiers.secondary() || (ev.click_count == 1 && !e.writing_link(x, y))) => e.follow(target, cx),
                     hit => {
                         e.pressed_link = match hit {
                             Some(Hit::Link(target)) if reading && (ev.modifiers.secondary() || ev.click_count == 1) => Some(target),
                             _ => None,
                         };
                         let Some(p) = e.pos_at(x, y, &e.cache.borrow()) else { return };
-                        // A double click on a piece opens it (Emaki).
-                        if ev.click_count == 2 {
+                        // A press on a piece opens it, the caret where the
+                        // press was (Emaki); ⇧ and a press take it whole.
+                        if !ev.modifiers.shift {
                             if let Some(first) = e.shut_piece_at(p.line).map(|piece| piece.first) {
-                                e.open_piece_at(first, cx);
-                                e.drag = None;
+                                e.open_piece_toward(first, x, y, cx);
+                                e.drag = Some((Grain::Char, e.sel.head, e.sel.head));
+                                e.kick_blink(cx);
                                 return;
                             }
                         }
@@ -2804,7 +2936,7 @@ impl Element for EditorElement {
                         Some(cells::Control::Edge(_)) => CursorStyle::ResizeColumn,
                         Some(_) => CursorStyle::PointingHand,
                         None => match e.hit(x, y) {
-                            Some(Hit::Link(_)) if inside => CursorStyle::PointingHand,
+                            Some(Hit::Link(_)) if inside && (e.mode == Mode::Reading || ev.modifiers.secondary() || !e.writing_link(x, y)) => CursorStyle::PointingHand,
                             Some(Hit::Task(_)) if inside && !e.read_only => CursorStyle::PointingHand,
                             _ => CursorStyle::IBeam,
                         },
@@ -2829,7 +2961,9 @@ impl Element for EditorElement {
                     // A line half out of sight takes a press on its half in
                     // sight. It is brought in here, not at the press, so
                     // the words do not move under a drag about to begin.
-                    if e.drag.take().is_some() {
+                    // A piece a press opened puts the caret where the
+                    // press was, in sight already.
+                    if e.drag.take().is_some() && e.reach.is_none() {
                         e.want_scroll = true;
                         cx.notify();
                     }
@@ -2949,7 +3083,11 @@ impl Editor {
         // before it, which may be a hidden mark. The word is what shows.
         let p = if grain == Grain::Word { self.past_hidden(p) } else { p };
         match grain {
-            Grain::Char => (p, p),
+            // Not inside a list's marker, which shows nothing to stand in.
+            Grain::Char => {
+                let p = self.past_marker(p);
+                (p, p)
+            }
             Grain::Word => {
                 let w = self.doc.word_at(p);
                 if w.start == w.end {

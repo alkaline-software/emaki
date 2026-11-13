@@ -312,6 +312,43 @@ enum Row {
     Edit(usize, bool),
 }
 
+/// The folders held at the top of the tree (`render_files_panel`), as
+/// VS Code's explorer holds them: each the folder that the row under its
+/// place stands in, one a depth, from the top. Each is the row's index
+/// and its top in the scroller's room; the last stands higher once its
+/// folder's rows run out above it, pushed up by the next. Every row is
+/// one height, so the rows are found by number. A third of the room at
+/// most, five folders deep at most.
+fn tree_sticky(rows: &[Row], scrolled: f32, room: f32) -> Vec<(usize, f32)> {
+    let h = f32::from(TREE_ROW_H);
+    let breath = crate::look::ROW_BREATH;
+    let depth_of = |r: &Row| match r {
+        Row::Node(_, d, _) | Row::More(_, d) | Row::Edit(d, _) => *d,
+    };
+    let open_folder = |r: &Row| matches!(r, Row::Node(n, _, true) if n.dir);
+    let most = ((room / h / 3.).floor().max(0.) as usize).min(5);
+    let mut out = Vec::new();
+    for d in 0..most {
+        let at = scrolled + d as f32 * h - breath;
+        if at <= 0. {
+            break;
+        }
+        let i = (at / h) as usize;
+        let Some(row) = rows.get(i) else { break };
+        let folder = if depth_of(row) > d { (0..i).rev().find(|&j| depth_of(&rows[j]) == d) } else { Some(i).filter(|_| depth_of(row) == d && rows.get(i + 1).is_some_and(|r| depth_of(r) > d)) };
+        let Some(a) = folder.filter(|&a| open_folder(&rows[a])) else { break };
+        // Where its last row ends, in the room.
+        let end = (a + 1..rows.len()).find(|&j| depth_of(&rows[j]) <= d).unwrap_or(rows.len());
+        let foot = breath + end as f32 * h - scrolled;
+        let y = (d as f32 * h).min(foot - h);
+        out.push((a, y));
+        if y < d as f32 * h - 0.5 {
+            break;
+        }
+    }
+    out
+}
+
 /// A row of the tree as it was last drawn: its path, what it showed
 /// (none for the row a name is typed in), its depth, and whether it
 /// was an open folder.
@@ -6721,6 +6758,70 @@ impl Workbench {
         // Which rows are lit, known before any is drawn: rows lit one
         // under another are one block, round at its two ends alone.
         let lit: Vec<bool> = rows.iter().map(|row| matches!(row, Row::Node(node, _, _) if picked.as_ref() == Some(&node.path) || marked.contains(&node.path))).collect();
+        // The folders the rows at the top stand in, held at the top while
+        // what they hold scrolls under them, as VS Code's explorer holds
+        // them; the last pushed up by the folder after it.
+        let sticky = if exists { tree_sticky(&rows, f32::from(-self.files_scroll.offset().y), f32::from(self.files_scroll.bounds().size.height)) } else { Vec::new() };
+        let sticky = (!sticky.is_empty()).then(|| {
+            let ground = crate::look::files_ground(&theme);
+            let last = sticky.len() - 1;
+            let mut held = div().absolute().top_0().left_0().right_0();
+            for (n, (ix, y)) in sticky.into_iter().enumerate() {
+                let Some(Row::Node(node, depth, _)) = rows.get(ix) else { continue };
+                let ink = status.as_ref().and_then(|st| st.mark(&node.path, true)).map(|m| git_color(m.state, dark)).unwrap_or(theme.foreground);
+                // A click brings the folder's own row to where it is held.
+                let to = -px(crate::look::ROW_BREATH + ix as f32 * f32::from(TREE_ROW_H) - n as f32 * f32::from(TREE_ROW_H)).max(px(0.));
+                let menu = node.clone();
+                held = held.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(y))
+                        .h(TREE_ROW_H)
+                        .bg(ground)
+                        // The rows under it take no press, and a wheel
+                        // still scrolls them.
+                        .block_mouse_except_scroll()
+                        .when(n == last, |d| d.border_b_1().border_color(theme.border))
+                        .child(
+                            h_flex()
+                                .id(("tree-held", ix))
+                                .mx(px(6.))
+                                .h(TREE_ROW_H)
+                                .pl(pad(*depth))
+                                .pr(px(8.))
+                                .gap(px(5.))
+                                .items_center()
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .relative()
+                                .group("tree-held")
+                                .child(crate::look::row_plate(6., (false, false)).group_hover("tree-held", |s| s.bg(row_hover(&theme, dark))))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    swallow_click(window, cx);
+                                    window.focus(&this.tree_focus, cx);
+                                    let from = this.files_scroll.offset().y;
+                                    this.file_glide_to(from, to, |this, y, _| this.files_scroll.set_offset(point(px(0.), y)), cx);
+                                }))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.tree.marked.clear();
+                                        this.tree.picked = Some(menu.path.clone());
+                                        this.file_menu(Some(&menu), ev.position, cx)
+                                    }),
+                                )
+                                .child(div().w(px(10.)).flex_shrink_0().flex().justify_center().child(chevron(true)))
+                                .child(tree_icon(node, true, &theme))
+                                .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(ink).child(node.name.clone())),
+                        ),
+                );
+            }
+            held.into_any_element()
+        });
         for (ix, row) in rows.into_iter().enumerate() {
             match row {
                 Row::Edit(depth, dir) => {
@@ -6978,6 +7079,7 @@ impl Workbench {
                         }))
                         .child(list),
                 )
+                .children(sticky)
                 .children(drop_words)
                 // The rectangle, over the rows, cut to the panel.
                 .children(self.tree_band.filter(|_| self.tree_band_live).map(|(a, b)| {
@@ -11362,5 +11464,42 @@ mod diff_selection_tests {
         let ranges: Vec<_> = out.iter().map(|(r, _)| r.clone()).collect();
         assert_eq!(ranges, vec![2..4, 4..9, 9..10]);
         assert_eq!(out[1].1.background_color, Some(Hsla::blue()));
+    }
+}
+
+#[cfg(test)]
+mod sticky_tests {
+    use super::{tree_sticky, Node, Row, TREE_ROW_H};
+    use std::path::PathBuf;
+
+    fn row(name: &str, depth: usize, dir: bool, open: bool) -> Row {
+        Row::Node(Node { path: PathBuf::from(name), name: name.into(), dir, link: false }, depth, open)
+    }
+
+    #[test]
+    fn the_folders_above_are_held_and_the_last_is_pushed_up() {
+        // jobs / industry / ten files, then zz with ten notes.
+        let mut rows = vec![row("jobs", 0, true, true), row("industry", 1, true, true)];
+        rows.extend((0..10).map(|i| row(&format!("f{i}"), 2, false, false)));
+        rows.push(row("zz", 0, true, true));
+        rows.extend((0..10).map(|i| row(&format!("n{i}"), 1, false, false)));
+        let h = f32::from(TREE_ROW_H);
+        let b = crate::look::ROW_BREATH;
+        // At the top, nothing is held.
+        assert!(tree_sticky(&rows, 0., 600.).is_empty());
+        // Three rows down: jobs and industry, in their places.
+        assert_eq!(tree_sticky(&rows, b + 3. * h, 600.), vec![(0, 0.), (1, h)]);
+        // industry's rows run out under the second place: it rises.
+        let s = tree_sticky(&rows, b + 10. * h + 10., 600.);
+        assert_eq!(s[0], (0, 0.));
+        assert_eq!(s[1].0, 1);
+        assert!(s[1].1 < h && s[1].1 > 0.);
+        // jobs's rows run out under the first place: zz pushes it up.
+        let s = tree_sticky(&rows, b + 11. * h + 10., 600.);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].0, 0);
+        assert!(s[0].1 < 0.);
+        // Then zz is held.
+        assert_eq!(tree_sticky(&rows, b + 13. * h, 600.), vec![(12, 0.)]);
     }
 }

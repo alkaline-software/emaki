@@ -182,7 +182,20 @@ impl Editor {
     }
 
     pub(super) fn settled(&self, p: Pos, select: bool) -> Pos {
-        if select { self.held_to(self.sel.anchor, p) } else { self.into_cell(p) }
+        if select { self.held_to(self.sel.anchor, p) } else { self.past_marker(self.into_cell(p)) }
+    }
+
+    /// Where the words of a line begin for the caret: past a list's
+    /// marker, which is drawn in the margin and never as it is written,
+    /// so a place inside it would show the caret where it was. 0 on any
+    /// other line, and with the text read as plain lines.
+    pub(super) fn floor(&self, line: usize) -> usize {
+        self.analysis.lines.get(line).and_then(|info| info.list.as_ref()).map_or(0, |m| m.marker.end.min(self.doc.line(line).len()))
+    }
+
+    /// A place moved past the list's marker it stands in.
+    pub(super) fn past_marker(&self, p: Pos) -> Pos {
+        Pos::new(p.line, p.col.max(self.floor(p.line)))
     }
 
     pub(super) fn settled_sel(&self) -> Sel {
@@ -208,6 +221,11 @@ impl Editor {
                 };
             }
         }
+        // From where a list item's words begin, the end of the line
+        // before: the marker is not stepped through.
+        if p.col <= self.floor(p.line) && p.col > 0 {
+            return if p.line > 0 { Pos::new(p.line - 1, self.doc.line(p.line - 1).len()) } else { p };
+        }
         let q = self.doc.prev_grapheme(p);
         match self.break_at(q) {
             Some((a, b)) if a < q.col && q.col < b => Pos::new(q.line, a),
@@ -231,7 +249,7 @@ impl Editor {
                 };
             }
         }
-        let q = self.doc.next_grapheme(p);
+        let q = self.past_marker(self.doc.next_grapheme(p));
         match self.break_at(q) {
             Some((a, b)) if a < q.col && q.col < b => Pos::new(q.line, b),
             _ => q,

@@ -4,8 +4,9 @@
 //!
 //! All the vertical measures come from `Rhythm`, and from `rhythm.rs`
 //! behind it. A row's height goes by its kind and how its words wrap,
-//! never by what its neighbors are, so a word typed on a blank line moves
-//! nothing, and a line stands at the same height in both modes.
+//! not by what its neighbors hold, so a word typed on a blank line moves
+//! nothing, and a line stands at the same height in both modes. A blank
+//! line is the one exception, by the blank lines beside it (`blank_room`).
 //!
 //! From Onyx's `layout.rs`. A picture, a file in a frame, a card and a
 //! block of HTML as it reads are not laid out here: each shows as the
@@ -294,7 +295,8 @@ pub(crate) enum Row {
     /// Room with nothing to draw, a line's or a fence's, which holds its
     /// height whether what stands there shows or not. On a hidden opening
     /// fence, the language's mark: its name shaped, its icon and color.
-    Pad { lang: Option<(ShapedLine, &'static str, Hsla)>, h: f32 },
+    /// `blank`: a blank line, which a selection across it marks.
+    Pad { lang: Option<(ShapedLine, &'static str, Hsla)>, h: f32, blank: bool },
     /// A line drawn as part of another, of no height.
     Hidden,
     Rule { inset: f32, line_h: f32 },
@@ -408,6 +410,29 @@ impl<'a> Reader<'a> {
         let at = |p: Pos| self.analysis.line_starts.get(p.line).map_or_else(|| self.doc.offset_of(p), |s| s + p.col);
         let (ga, gb) = (at(a), at(b));
         if inclusive { ga <= r.end && gb >= r.start } else { ga < r.end && gb > r.start }
+    }
+
+    /// Whether a blank line is the room between two blocks, the short
+    /// height the view around sets them apart by. Of a run of blank lines
+    /// one is, and the others are lines of their own, as tall as a line of
+    /// words: a line made with ↩ is one at once, and a word typed on it
+    /// moves nothing. The room is the run's last, or its first while the
+    /// caret stands on the last, so the caret's line is a whole one and
+    /// the run as tall as before.
+    pub fn blank_room(&self, line: usize) -> bool {
+        let blank = |l: usize| self.analysis.lines.get(l).is_some_and(|i| matches!(i.kind, LineKind::Blank));
+        let (mut first, mut last) = (line, line);
+        while first > 0 && blank(first - 1) {
+            first -= 1;
+        }
+        while blank(last + 1) {
+            last += 1;
+        }
+        if first == last {
+            return true;
+        }
+        let caret = self.sel.filter(|(a, b)| a == b).map(|(a, _)| a.line);
+        line == if caret == Some(last) { first } else { last }
     }
 
     /// The marks hidden on a line, in the line's bytes, by the mode and
@@ -565,6 +590,7 @@ impl<'a> Reader<'a> {
             revealed.hash(&mut h);
             (line == 0).hash(&mut h);
             (line > 0 && matches!(self.analysis.lines[line - 1].kind, LineKind::Heading(_))).hash(&mut h);
+            (matches!(info.kind, LineKind::Blank) && self.blank_room(line)).hash(&mut h);
             // Ranges by the line's own bytes, as the row is made from them:
             // by the whole text's, a letter typed changed the key of every
             // line under it.
@@ -602,7 +628,7 @@ impl<'a> Reader<'a> {
             } else if fresh {
                 let row = match piece {
                     // A piece's first line holds its height; the rest none.
-                    Some((true, tall)) => Row::Pad { lang: None, h: tall },
+                    Some((true, tall)) => Row::Pad { lang: None, h: tall, blank: false },
                     Some((false, _)) => Row::Hidden,
                     None => self.lay_out(line, &hidden, &colors, revealed, width, &cache.grids, window),
                 };
@@ -1015,11 +1041,15 @@ impl<'a> Reader<'a> {
             return self.table_row(table, row, grid.clone(), hidden, width, window);
         }
         // A blank line as the view around sets blocks apart, one height
-        // whether the caret or the selection is on it or not, so a drag
-        // over it moves nothing.
+        // whether the selection is on it or not, so a drag over it moves
+        // nothing. The others of a run of them are lines of their own, as
+        // tall as a line of words (`blank_room`).
         if let (LineKind::Blank, Some((heading, other))) = (&info.kind, self.look.blank) {
+            if !self.blank_room(line) {
+                return Row::Pad { lang: None, h: rhythm.line, blank: true };
+            }
             let after_heading = line > 0 && matches!(self.analysis.lines[line - 1].kind, LineKind::Heading(_));
-            return Row::Pad { lang: None, h: if after_heading { heading } else { other } };
+            return Row::Pad { lang: None, h: if after_heading { heading } else { other }, blank: true };
         }
         if !revealed {
             match &info.kind {
@@ -1033,10 +1063,10 @@ impl<'a> Reader<'a> {
                         let line = window.text_system().shape_line(SharedString::from(mark.name.clone()), px(super::editor::MARK_PX), &[run], None);
                         (line, mark.icon, gpui::rgb(mark.rgb).into())
                     });
-                    return Row::Pad { lang, h: rhythm.code_line };
+                    return Row::Pad { lang, h: rhythm.code_line, blank: false };
                 }
-                LineKind::FenceClose => return Row::Pad { lang: None, h: rhythm.code_line },
-                LineKind::SetextUnderline => return Row::Pad { lang: None, h: rhythm.line },
+                LineKind::FenceClose => return Row::Pad { lang: None, h: rhythm.code_line, blank: false },
+                LineKind::SetextUnderline => return Row::Pad { lang: None, h: rhythm.line, blank: false },
                 LineKind::Rule => return Row::Rule { inset: self.inset_of(info), line_h: rhythm.line },
                 _ => {}
             }

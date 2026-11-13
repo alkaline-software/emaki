@@ -4014,6 +4014,7 @@ impl Workbench {
             // A right click: the corrections of a marked word, else the
             // field's own choices.
             crate::live::EditorEvent::Menu(at, _) => this.composer_menu(*at, cx),
+            crate::live::EditorEvent::OpenLink(url) => this.open_link(url, window, cx),
             _ => {}
         })
         .detach();
@@ -6690,6 +6691,18 @@ impl Workbench {
                         });
                     });
                 }
+            }
+            // A picture of the main window as it is now, the run going on.
+            Some(t) if t.starts_with("winshot:") => {
+                let path = PathBuf::from(&t["winshot:".len()..]);
+                let Some(handle) = cx.active_window().or_else(|| cx.windows().into_iter().next()) else { return };
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, _| {
+                        if let Err(e) = crate::sys::shoot_window(window, &path) {
+                            eprintln!("emaki: winshot: {e}");
+                        }
+                    });
+                });
             }
             Some(t) if t.starts_with("remotecode:") => {
                 self.remote_code_probe = Some(t["remotecode:".len()..].to_string());
@@ -18621,31 +18634,6 @@ impl Workbench {
         });
     }
 
-    /// ⌘U and ⇧⌘X in the composer: markdown's marks around what is
-    /// selected, or off it (`composer_md::toggle`), one step of undo. ⌘B
-    /// and ⌘I are the editor's own.
-    pub(crate) fn composer_wrap(&mut self, open: &str, close: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let (text, selected) = {
-            let s = self.composer.read(cx);
-            (s.value().to_string(), s.selected_range())
-        };
-        let (new, selection) = crate::composer_md::toggle(&text, selected, open, close);
-        // The stretch that differs and no more, so the rest keeps its
-        // place in the field's history.
-        let head = text.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
-        let head = (0..=head).rev().find(|n| text.is_char_boundary(*n) && new.is_char_boundary(*n)).unwrap_or(0);
-        let most = text.len().min(new.len()) - head;
-        let tail = text.bytes().rev().zip(new.bytes().rev()).take(most).take_while(|(a, b)| a == b).count();
-        let tail = (0..=tail).rev().find(|n| text.is_char_boundary(text.len() - n) && new.is_char_boundary(new.len() - n)).unwrap_or(0);
-        let with = new[head..new.len() - tail].to_string();
-        self.composer.update(cx, |s, cx| {
-            s.replace_bytes(head..text.len() - tail, &with, selection.end, window, cx);
-            s.set_selected_range(selection, cx);
-        });
-        self.mark_slash(cx);
-        cx.notify();
-    }
-
     /// The list that opens over the composer while a message is a slash
     /// command being typed: the commands the session knows, filtered by
     /// what is typed so far. Each row is the name and its arguments in one
@@ -18979,8 +18967,8 @@ impl Workbench {
                     .id("composer")
                     .key_context(COMPOSER_CONTEXT)
                     .on_action(cx.listener(|this, _: &Send, window, cx| this.send_pressed(window, cx)))
-                    .on_action(cx.listener(|this, _: &ComposerUnderline, window, cx| this.composer_wrap("<u>", "</u>", window, cx)))
-                    .on_action(cx.listener(|this, _: &ComposerStrike, window, cx| this.composer_wrap("~~", "~~", window, cx)))
+                    .on_action(cx.listener(|this, _: &ComposerUnderline, _, cx| this.composer.update(cx, |e, cx| e.underline(cx))))
+                    .on_action(cx.listener(|this, _: &ComposerStrike, _, cx| this.composer.update(cx, |e, cx| e.strike(cx))))
                     .capture_action(cx.listener(|this, _: &gpui_component::input::Paste, _, cx| {
                         if this.paste_attachments(cx) {
                             cx.stop_propagation();

@@ -78,6 +78,7 @@ impl Workbench {
             let scroll = self.file_view_scroll.clone();
             editor.update(cx, |e, cx| {
                 e.set_look(look.clone(), cx);
+                e.set_header(true, cx);
                 e.set_text(&source, cx);
                 e.scroll = scroll;
             });
@@ -416,7 +417,9 @@ pub(crate) fn piece_ranges(source: &str, quarto: bool) -> Vec<Range<usize>> {
                 if level == 0 {
                     let own = match &tag {
                         Tag::HtmlBlock | Tag::FootnoteDefinition(_) => true,
-                        Tag::CodeBlock(CodeBlockKind::Fenced(lang)) => quarto && lang.trim_start().starts_with('{'),
+                        // A chunk and a raw block are code the editor sets
+                        // as written; raw HTML is drawn as the page it is.
+                        Tag::CodeBlock(CodeBlockKind::Fenced(lang)) => quarto && lang.trim().replace(' ', "").eq_ignore_ascii_case("{=html}"),
                         Tag::CodeBlock(_) | Tag::Table(_) => false,
                         _ => foreign(&source[range.clone()]),
                     };
@@ -478,8 +481,8 @@ mod tests {
 
     #[test]
     fn quarto_has_more_than_markdown() {
-        let text = "Cost $5 and $x^2$.\n\n```{r}\nx\n```\n\nSee @fig-a.\n\nMail me@home.\n";
+        let text = "Cost $5 and $x^2$.\n\n```{r}\nx\n```\n\n```{=typst}\n#v(6pt)\n```\n\n```{=html}\n<b>x</b>\n```\n\nSee @fig-a.\n\nMail me@home.\n";
         assert!(pieces(text, false).is_empty());
-        assert_eq!(pieces(text, true), vec!["Cost $5 and $x^2$.", "```{r}\nx\n```", "See @fig-a."]);
+        assert_eq!(pieces(text, true), vec!["Cost $5 and $x^2$.", "```{=html}\n<b>x</b>\n```", "See @fig-a."]);
     }
 }

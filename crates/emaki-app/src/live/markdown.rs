@@ -232,7 +232,13 @@ pub(crate) fn code_around(text: &str, a: usize, b: usize) -> Option<(Range<usize
 }
 
 pub fn analyze(text: &str) -> Analysis {
-    std::panic::catch_unwind(|| read(text)).unwrap_or_else(|_| plain(text))
+    analyze_with(text, false)
+}
+
+/// `analyze`, with `header` reading lines of dashes at the very top as a
+/// YAML header, as a markdown file has one; a message has none.
+pub fn analyze_with(text: &str, header: bool) -> Analysis {
+    std::panic::catch_unwind(|| read(text, header)).unwrap_or_else(|_| plain(text))
 }
 
 /// Every line as words or as blank, with nothing else known of it.
@@ -247,7 +253,7 @@ pub(crate) fn plain(text: &str) -> Analysis {
     Analysis { lines, line_spans: vec![Vec::new(); n], line_starts, ..Default::default() }
 }
 
-fn read(text: &str) -> Analysis {
+fn read(text: &str, header: bool) -> Analysis {
     let line_starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
     let n = line_starts.len();
     let line_text = |i: usize| -> &str {
@@ -266,6 +272,9 @@ fn read(text: &str) -> Analysis {
 
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_MATH | Options::ENABLE_FOOTNOTES);
+    if header {
+        opts.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
+    }
     let events = Parser::new_ext(text, opts).into_offset_iter();
 
     // The lists open around the parser's place, as indices into `a.lists`.
@@ -281,8 +290,24 @@ fn read(text: &str) -> Analysis {
     let mut item_line: Option<usize> = None;
     // Tags among the words waiting for their closing one.
     let mut tags: Vec<(String, Style, Range<usize>)> = Vec::new();
+    // The run of words the parser has handed over in pieces, outside any
+    // link and any code, read for addresses written bare once it ends.
+    let mut words: Option<Range<usize>> = None;
 
     for (ev, r) in events {
+        let bare = matches!(ev, Event::Text(_))
+            && links.is_empty()
+            && !tags.iter().any(|(_, style, _)| matches!(style, Style::Link(_)))
+            && !matches!(lines[line_of(r.start)].kind, LineKind::Code | LineKind::FenceOpen(_) | LineKind::FenceClose | LineKind::Html | LineKind::FrontMatter | LineKind::FrontMatterEdge);
+        match words.as_mut() {
+            Some(run) if bare && run.end == r.start => run.end = r.end,
+            _ => {
+                if let Some(run) = words.take() {
+                    a.spans.extend(bare_links(text, run));
+                }
+                words = bare.then(|| r.clone());
+            }
+        }
         match ev {
             Event::Start(Tag::Heading { level, .. }) => {
                 let line = line_of(r.start);
@@ -524,6 +549,11 @@ fn read(text: &str) -> Analysis {
             }
         }
     }
+    if let Some(run) = words.take() {
+        a.spans.extend(bare_links(text, run));
+    }
+    // `16*0.9 … 15*0.9` is two products, not words in italics.
+    a.spans.retain(|s| !times_signs(text, s));
 
     // A quote's marks on each of its lines, by the depth the parser gave it.
     for (i, info) in lines.iter_mut().enumerate() {
@@ -562,6 +592,62 @@ fn read(text: &str) -> Analysis {
     }
     a.lines = lines;
     a
+}
+
+/// Whether an emphasis is made of `*`s that stand between two digits, at
+/// its opening or its closing: `16*0.9` is a product, so its stars stay
+/// as they are written. Markdown reads them as marks, since a `*` may
+/// open emphasis inside a word; a letter on both sides still may, as
+/// Chinese words around bold ones have no spaces between them.
+fn times_signs(text: &str, s: &Span) -> bool {
+    let digit = |b: Option<&u8>| b.is_some_and(u8::is_ascii_digit);
+    matches!(s.kind, SpanKind::Em | SpanKind::Strong)
+        && [&s.open, &s.close].into_iter().any(|m| {
+            !m.is_empty() && text.as_bytes().get(m.clone()).is_some_and(|b| b.iter().all(|c| *c == b'*')) && digit(m.start.checked_sub(1).and_then(|i| text.as_bytes().get(i))) && digit(text.as_bytes().get(m.end))
+        })
+}
+
+/// The addresses written bare in a run of words, as GitHub reads them
+/// (`https://…`, `http://…`, `www.…`): each a link with no marks, which
+/// pulldown-cmark does not find. One starts a word or follows `*`, `_`,
+/// `~` or `(`, and runs to a space or a `<`; the punctuation that ends a
+/// sentence is not part of it, nor a `)` it does not open.
+fn bare_links(text: &str, run: Range<usize>) -> Vec<Span> {
+    let s = &text[run.clone()];
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < s.len() {
+        let rest = &s[at..];
+        let lead = s[..at].chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '('));
+        let scheme = ["https://", "http://", "www."].into_iter().find(|p| rest.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p)));
+        let Some(scheme) = scheme.filter(|_| lead) else {
+            at += rest.chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        let mut end = rest.find(|c: char| c.is_whitespace() || c == '<').unwrap_or(rest.len());
+        loop {
+            let url = &rest[..end];
+            let Some(last) = url.chars().next_back() else { break };
+            let unopened = last == ')' && url.matches(')').count() > url.matches('(').count();
+            if matches!(last, '?' | '!' | '.' | ',' | ':' | ';' | '*' | '_' | '~' | '\'' | '"') || unopened {
+                end -= last.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let url = &rest[..end];
+        // Something past the scheme, and a domain with a dot after `www.`.
+        if url.len() > scheme.len() && (scheme != "www." || url[scheme.len()..].contains('.')) {
+            let from = run.start + at;
+            let to = from + end;
+            let dest = if scheme == "www." { format!("http://{url}") } else { url.to_string() };
+            out.push(Span { range: from..to, kind: SpanKind::Link(dest), open: from..from, close: to..to });
+            at += end;
+        } else {
+            at += scheme.len();
+        }
+    }
+    out
 }
 
 /// Where `==words==` stands in a run of text: each from its opening pair
@@ -974,6 +1060,39 @@ mod tests {
         let outer = &a.spans[0];
         assert_eq!(&text[outer.range.clone()], "***both***");
         assert_eq!(a.line_spans[0].len(), 4);
+    }
+
+    #[test]
+    fn an_address_written_bare_is_a_link() {
+        let links = |text: &str| -> Vec<(String, String)> {
+            analyze(text).spans.into_iter().filter_map(|s| match s.kind {
+                SpanKind::Link(url) => Some((text[s.range].to_string(), url)),
+                _ => None,
+            }).collect()
+        };
+        let url = "https://au.linkedin.com/jobs/view/ai-engineering-lead-at-mcmillan-shakespeare-mmsg-4483253805";
+        assert_eq!(links(&format!("- **Link:** {url}")), vec![(url.to_string(), url.to_string())]);
+        // Its words are its own: nothing hides, and the caret steps through.
+        let a = analyze(&format!("see {url} now"));
+        let s = a.spans.iter().find(|s| matches!(s.kind, SpanKind::Link(_))).unwrap();
+        assert!(s.open.is_empty() && s.close.is_empty() && s.inner() == s.range);
+        // Underscores the parser hands over in pieces.
+        assert_eq!(links("at https://a.com/x_y_z."), vec![("https://a.com/x_y_z".into(), "https://a.com/x_y_z".into())]);
+        assert_eq!(links("(see https://en.wikipedia.org/wiki/Rust_(language))"), vec![("https://en.wikipedia.org/wiki/Rust_(language)".into(), "https://en.wikipedia.org/wiki/Rust_(language)".into())]);
+        assert_eq!(links("go to www.example.com, then"), vec![("www.example.com".into(), "http://www.example.com".into())]);
+        // A link written as one, code, and a word that only holds one are not.
+        assert_eq!(links("[words](https://a.com)"), vec![("[words](https://a.com)".into(), "https://a.com".into())]);
+        assert!(links("`https://a.com` and\n\n```\nhttps://b.com\n```").is_empty());
+        assert!(links("xhttps://a.com and www. and https://").is_empty());
+    }
+
+    #[test]
+    fn a_star_between_digits_is_a_times_sign() {
+        let styled = |text: &str| analyze(text).spans.iter().filter(|s| matches!(s.kind, SpanKind::Em | SpanKind::Strong)).count();
+        assert_eq!(styled("so 16*0.9=14.4, and 15*0.9=13.5 here"), 0);
+        assert_eq!(styled("2**3 and 4**2"), 0);
+        assert_eq!(styled("an *italic* word, x*y*z and **bold**"), 3);
+        assert_eq!(styled("这是**重点**内容"), 1);
     }
 
     #[test]

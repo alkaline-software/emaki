@@ -11,7 +11,6 @@ mod agents_page;
 mod ambient;
 mod sublime;
 mod assets;
-mod composer_md;
 mod branches;
 mod csd;
 mod fetch;

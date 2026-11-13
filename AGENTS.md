@@ -80,7 +80,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | You are about to touch | Read first |
 |---|---|
 | `emaki-app/src/transcript.rs`; the conversation's list, find, or reload in `workbench.rs`; `emaki-core/src/find.rs` | `docs/conversation.md` |
-| The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, the notice and limits row in `workbench.rs`; `live/`, `composer_md.rs`; `a11y.rs`; `pictures.rs`; `emaki-core/src/files.rs`, `check.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
+| The composer, its attachments, the slash and "@" list, drafts, spelling and capitals, the notice and limits row in `workbench.rs`; `live/`; `a11y.rs`; `pictures.rs`; `emaki-core/src/files.rs`, `check.rs`, `limits.rs`, `statusline.rs`; `scripts/statusline.sh` | `docs/composer.md`; the slash list's keys are in `docs/channels.md` |
 | The pills, pickers, mode/model/effort notices; `emaki-core/src/options.rs`; `mode_*`, `effort_*`, `model_*`, `options_from` in `driver.rs` | `docs/modes.md` |
 | The tray and the toggles (`workbench/tray.rs`), the working row, Stop, `restore_prompt`, question, dialog, permission and background-command cards; the screen readers in `driver.rs` (`*_on_screen`) | `docs/live-turn.md` |
 | `emaki-core/src/driver.rs`, `codex.rs`, `pty.rs`, `shell_marks.rs`, `peer.rs`, `terminal.rs`; `emaki-app/src/hub.rs`, `sys.rs`; `reply_via_for`, `via_terminal`, the terminal card and button in `workbench.rs` | `docs/channels.md` |
@@ -155,7 +155,6 @@ crates/emaki-app/         the window
   src/panels.rs              the files panel at a conversation's left, the folder's files as a tree, and the outline in its drawer at the conversation's left, an entry a round; the conversation's margins and their seams
   src/panels/doc_edit.rs     a markdown or Quarto file written in as it reads: the whole file one editor, the composer's, what it does not draw drawn by the reading view over its lines
   src/live/                  the composer's editor, Onyx's live preview: the text drawn as it reads while it is typed, marks hidden unless the caret touches them; field.rs, the names the composer knows it by
-  src/composer_md.rs         the marks ⌘U and ⇧⌘X put around what is selected in the composer
   src/agents_page.rs         the agents page: a card an agent, and inside one its set-up steps and sessions
   src/branches.rs            the list of branches and its remote: fetching, making a branch on its sheet, publishing one, the sign-in sheet
   src/file_icons.rs          the tree's icons: Catppuccin's, and which a name gets

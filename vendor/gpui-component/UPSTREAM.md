@@ -364,6 +364,8 @@ upstream revision finds them.
 
 77. `crates/ui/src/text/edit.rs` (`EditSlot::run`, `run_part`; `UnitClick::press`), `node.rs` (`BlockNode::render_top`; the block's press: a `press` on the button going down, then the click, and a text cursor), `document.rs` (`render_root` draws `render_top`): the caller's element in the place of a run of blocks of the top level, and a press a drag may follow (74). Since a markdown file written in as it reads became one editor (`docs/panels.md`), the app gives no view a slot or a press handler, so 74 and 77 draw nothing of their own; they can be taken out with the next update.
 
+78. `crates/ui/src/text/format/markdown.rs` (`times_signs`, `as_written`; `Node::Emphasis`, `Node::Strong`): an emphasis whose opening or closing stars stand between two digits (`16*0.9 … 15*0.9`) is its words with the stars as written, not italic or bold. The composer's editor reads them the same way (`live/markdown.rs`).
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply
