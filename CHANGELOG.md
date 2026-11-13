@@ -2,6 +2,17 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.5.4
+
+1. **Typst and LaTeX**: A `.typ` or `.tex` file, and a Quarto file's Typst or LaTeX blocks, read in the rendered editor as markdown does, their code folded into a quiet row that opens on a click and folds back with Esc.
+2. **Links**: Links in the rendered editor and the composer open on a click again, addresses written out bare included.
+3. **Style keys**: ⌘B, ⌘I, ⌘U, ⇧⌘X and ⇧⌘C take off what they put on with live markdown off too, and use Typst's or LaTeX's own marks in those files.
+4. **Single click**: A click on a formula, a callout or the header of a markdown file puts the caret where you clicked, with nothing selected and no scrolling.
+5. **Carets**: The arrow keys, ⌥ with them and Home step past a list's markers as the layout draws them.
+6. **Blank lines**: A new blank line is a whole line tall, and a selection marks blank lines as it marks words.
+7. **Sticky folders**: The files tree holds the folders you are scrolling through at its top, as VS Code does.
+8. **Fixes**: Stars between digits, as in 16*0.9, are no longer read as italics, and typing in a Typst or LaTeX file does far less work.
+
 ## v0.5.3
 
 1. **Rendered editor**: A markdown or Quarto file is written in as it reads, its bold, code and tables drawn as you type and their marks shown only where the caret is, with ⇧⌘V to the raw editor.
